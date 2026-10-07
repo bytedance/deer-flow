@@ -1770,7 +1770,7 @@ def test_restricted_destroy_stops_pair_and_removes_both_networks(monkeypatch):
         )
     )
 
-    assert stopped == ["sandbox-container-id", proxy_name]
+    assert stopped == [proxy_name, "sandbox-container-id"]
     assert ["docker", "rm", "-f", proxy_name] in commands
     assert ["docker", "network", "rm", network_name] in commands
     assert ["docker", "network", "rm", egress_network_name] in commands
@@ -1779,12 +1779,13 @@ def test_restricted_destroy_stops_pair_and_removes_both_networks(monkeypatch):
 def test_open_mode_replacement_destroy_removes_restricted_sidecar_and_networks(monkeypatch):
     backend = _backend_for_inspect_tests()
     stopped: list[str] = []
-    cleaned: list[tuple[str, bool]] = []
+    cleaned: list[tuple[str, bool, bool]] = []
     monkeypatch.setattr(backend, "_stop_container", stopped.append)
+    monkeypatch.setattr(backend, "_remove_restricted_proxy", lambda sandbox_id: cleaned.append((sandbox_id, False, True)))
     monkeypatch.setattr(
         backend,
         "_cleanup_restricted_resources",
-        lambda sandbox_id, *, stop_sandbox=True: cleaned.append((sandbox_id, stop_sandbox)),
+        lambda sandbox_id, *, stop_sandbox=True, remove_proxy=True: cleaned.append((sandbox_id, stop_sandbox, remove_proxy)),
     )
 
     backend.destroy(
@@ -1797,7 +1798,7 @@ def test_open_mode_replacement_destroy_removes_restricted_sidecar_and_networks(m
     )
 
     assert stopped == ["sandbox-old-restricted"]
-    assert cleaned == [("old-restricted", False)]
+    assert cleaned == [("old-restricted", False, True), ("old-restricted", False, False)]
 
 
 def test_deny_pending_network_policy_events_uses_atomic_proxy_command(monkeypatch):
@@ -1818,6 +1819,7 @@ def test_deny_pending_network_policy_events_uses_atomic_proxy_command(monkeypatc
 def test_is_container_running_false_on_apple_container_not_found(monkeypatch):
     """Apple Container's generic "not found" is trusted when it names the container."""
     backend = _backend_for_inspect_tests()
+    backend._runtime = "container"
 
     def fake_run(cmd, **kwargs):
         return SimpleNamespace(stdout="", stderr='Error: not found: "sandbox-apple"', returncode=1)
@@ -1840,6 +1842,642 @@ def test_is_container_running_raises_on_unrelated_not_found_error(monkeypatch):
         backend._is_container_running("sandbox-busy")
 
 
+@pytest.mark.parametrize("runtime", ["docker", "container"])
+def test_absence_does_not_treat_stopped_container_as_missing(monkeypatch, runtime):
+    backend = _backend_for_inspect_tests()
+    backend._runtime = runtime
+    name = "sandbox-stopped"
+    entry = {"Name": f"/{name}", "Id": "stopped-generation", "State": {"Running": False}} if runtime == "docker" else {"configuration": {"id": name}, "status": "stopped"}
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(stdout=json.dumps([entry]), stderr="", returncode=0))
+    assert backend.is_absent("stopped") is False
+
+
+@pytest.mark.parametrize("runtime", ["docker", "container"])
+def test_absence_requires_runtime_confirmation(monkeypatch, runtime):
+    backend = _backend_for_inspect_tests()
+    backend._runtime = runtime
+    name = f"{backend._container_prefix}-missing"
+    error = f"Error: No such container: {name}" if runtime == "docker" else f'Error: not found: "{name}"'
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(stdout="", stderr=error, returncode=1))
+    assert backend.is_absent("missing") is True
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(stdout="", stderr="daemon unavailable", returncode=1))
+    with pytest.raises(RuntimeError):
+        backend.is_absent("missing")
+
+
+@pytest.mark.parametrize("operation", ["is_absent", "_is_container_running", "_stop_container"])
+@pytest.mark.parametrize(
+    "error",
+    [
+        'Failed to initialize: unable to resolve docker endpoint: context "deerflow-container-review-missing": context not found: open /synthetic-home/.docker/contexts/meta/context/meta.json: no such file or directory',
+        'unable to resolve docker endpoint: context "sandbox-missing": context not found',
+        "Error: container runtime not found while inspecting sandbox-missing",
+        "OCI runtime failed for container sandbox-missing: executable file not found in $PATH",
+        "Error: No such object: sandbox-other",
+        "Error response from daemon: No such container: sandbox-missing-extra",
+    ],
+)
+def test_runtime_absence_rejects_errors_not_about_the_requested_container(monkeypatch, operation, error):
+    backend = _backend_for_inspect_tests()
+
+    def failed(cmd, **kwargs):
+        if kwargs.get("check"):
+            raise subprocess.CalledProcessError(1, cmd, stderr=error)
+        return SimpleNamespace(stdout="", stderr=error, returncode=1)
+
+    monkeypatch.setattr("subprocess.run", failed)
+    target = "missing" if operation == "is_absent" else "sandbox-missing"
+    with pytest.raises((RuntimeError, subprocess.CalledProcessError)):
+        getattr(backend, operation)(target)
+
+
+@pytest.mark.parametrize("operation", ["is_absent", "_is_container_running", "_stop_container"])
+@pytest.mark.parametrize(
+    ("runtime", "error"),
+    [
+        ("docker", "Error: No such object: sandbox-missing"),
+        ("docker", "Error response from daemon: No such container: sandbox-missing"),
+        # ArgumentParser prefers ContainerizationError.errorDescription, so
+        # ContainerInspect's missing-resource message has no type or quotes.
+        ("container", "Error: container not found: sandbox-missing"),
+        ("container", 'Error: notFound: "container not found: sandbox-missing"'),
+        ("container", 'Error: not found: "sandbox-missing"'),
+    ],
+)
+def test_runtime_absence_accepts_exact_missing_container_responses(monkeypatch, operation, runtime, error):
+    backend = _backend_for_inspect_tests()
+    backend._runtime = runtime
+
+    def missing(cmd, **kwargs):
+        if kwargs.get("check"):
+            raise subprocess.CalledProcessError(1, cmd, stderr=error)
+        return SimpleNamespace(stdout="[]", stderr=error, returncode=1)
+
+    monkeypatch.setattr("subprocess.run", missing)
+    target = "missing" if operation == "is_absent" else "sandbox-missing"
+    result = getattr(backend, operation)(target)
+    assert result is (True if operation == "is_absent" else False if operation == "_is_container_running" else None)
+
+
+@pytest.mark.parametrize("state", ["created", "exited", "running", "dead"])
+def test_inspect_runtime_observes_docker_generation_without_health_or_port(monkeypatch, state):
+    backend = _backend_for_inspect_tests()
+    commands = []
+    entry = {"Id": "immutable-docker-generation", "Name": "/sandbox-existing", "Created": "2026-04-08T01:22:50Z", "State": {"Status": state, "Running": state == "running"}}
+
+    def inspect(cmd, **kwargs):
+        commands.append(cmd)
+        assert 0 < kwargs["timeout"] <= 15
+        return SimpleNamespace(stdout=json.dumps([entry]), stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", inspect)
+    monkeypatch.setattr(backend, "_is_container_running", lambda *_args: pytest.fail("runtime inspection must not require running"))
+    monkeypatch.setattr(backend, "_get_container_port", lambda *_args: pytest.fail("runtime inspection must not require a port"))
+    monkeypatch.setattr(local_backend_module, "wait_for_sandbox_ready", lambda *_args, **_kwargs: pytest.fail("runtime inspection must not require health"))
+
+    info = backend.inspect_runtime("existing")
+
+    assert info is not None
+    assert info.sandbox_id == "existing"
+    assert info.container_name == "sandbox-existing"
+    assert info.container_id == "immutable-docker-generation"
+    assert info.created_at == 1775611370.0
+    assert commands == [["docker", "inspect", "sandbox-existing"]]
+
+
+def test_inspect_runtime_keeps_apple_resource_with_unknown_generation(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    backend._runtime = "container"
+    # ManagedContainer serializes configuration.id, which is the user-selected
+    # logical name rather than an immutable generation; it cannot fence teardown.
+    entry = {"id": "sandbox-existing", "configuration": {"id": "sandbox-existing"}, "status": {"state": "stopped"}}
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(stdout=json.dumps([entry]), stderr="", returncode=0))
+
+    info = backend.inspect_runtime("existing")
+
+    assert info is not None
+    assert info.container_name == "sandbox-existing"
+    assert info.container_id is None
+    assert backend.is_absent("existing") is False
+
+
+@pytest.mark.parametrize("stopped", [False, True])
+def test_destroy_retry_releases_port_recovered_from_runtime_metadata(monkeypatch, stopped):
+    from deerflow.utils.network import PortAllocator
+
+    backend = _backend_for_inspect_tests()
+    allocator = PortAllocator()
+    monkeypatch.setattr(allocator, "_is_port_available", lambda port: port not in allocator._reserved_ports)
+    port = allocator.allocate(18080, max_range=1)
+    monkeypatch.setattr(local_backend_module, "release_port", allocator.release)
+    entry = {
+        "Id": "retained-generation",
+        "Name": "/sandbox-existing",
+        "NetworkSettings": {"Ports": {"8080/tcp": None if stopped else [{"HostPort": str(port)}]}},
+        "HostConfig": {"PortBindings": {"8080/tcp": [{"HostPort": str(port)}]}},
+    }
+    failed = True
+
+    def runtime(cmd, **kwargs):
+        nonlocal failed
+        if "inspect" in cmd:
+            return SimpleNamespace(stdout=json.dumps([entry]), stderr="", returncode=0)
+        if failed:
+            failed = False
+            raise subprocess.CalledProcessError(1, cmd, stderr="daemon denied stop")
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", runtime)
+    original = SandboxInfo("existing", f"http://localhost:{port}", container_id="retained-generation")
+    with pytest.raises(subprocess.CalledProcessError):
+        backend.destroy(original)
+    with pytest.raises(RuntimeError, match="No available port"):
+        allocator.allocate(18080, max_range=1)
+
+    recovered = backend.inspect_runtime("existing")
+    assert recovered is not None
+    backend.destroy(recovered)
+    assert allocator.allocate(18080, max_range=1) == port
+
+
+@pytest.mark.parametrize("proxy_missing", [False, True])
+@pytest.mark.parametrize("persisted_mode", ["allowlist", "isolated"])
+def test_inspect_runtime_recovers_restricted_proxy_port_without_losing_main_identity(monkeypatch, proxy_missing, persisted_mode):
+    backend = _backend_for_inspect_tests()
+    proxy_name, _ = backend._resource_names("existing")
+    entry = {"Id": "main-generation", "Name": "/sandbox-existing", "Config": {"Labels": {"deerflow.network_mode": persisted_mode}}}
+    proxy = {"Id": "proxy-generation", "Name": f"/{proxy_name}", "HostConfig": {"PortBindings": {"8080/tcp": [{"HostPort": "18080"}]}}}
+
+    def runtime(cmd, **kwargs):
+        if cmd[-1] == proxy_name:
+            return SimpleNamespace(stdout="[]" if proxy_missing else json.dumps([proxy]), stderr=f"Error: No such object: {proxy_name}" if proxy_missing else "", returncode=1 if proxy_missing else 0)
+        return SimpleNamespace(stdout=json.dumps([entry]), stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", runtime)
+    info = backend.inspect_runtime("existing")
+    assert info is not None
+    assert info.container_id == "main-generation"
+    assert info.sandbox_url == ("" if proxy_missing else "http://localhost:18080")
+
+
+def test_inspect_runtime_propagates_unknown_proxy_port_probe(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    proxy_name, _ = backend._resource_names("existing")
+    entry = {"Id": "main-generation", "Name": "/sandbox-existing", "Config": {"Labels": {"deerflow.network_mode": "allowlist"}}}
+
+    def runtime(cmd, **kwargs):
+        if cmd[-1] == proxy_name:
+            return SimpleNamespace(stdout="", stderr="daemon unavailable", returncode=1)
+        return SimpleNamespace(stdout=json.dumps([entry]), stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", runtime)
+    with pytest.raises(RuntimeError, match="daemon unavailable"):
+        backend.inspect_runtime("existing")
+
+
+def test_inspect_runtime_retains_direct_binding_during_network_mode_transition(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    backend._network_mode = "allowlist"
+    proxy_name, _ = backend._resource_names("existing")
+    entry = {"Id": "legacy-generation", "Name": "/sandbox-existing", "HostConfig": {"PortBindings": {"8080/tcp": [{"HostPort": "18080"}]}}}
+
+    def runtime(cmd, **kwargs):
+        if cmd[-1] == proxy_name:
+            return SimpleNamespace(stdout="[]", stderr=f"Error: No such object: {proxy_name}", returncode=1)
+        return SimpleNamespace(stdout=json.dumps([entry]), stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", runtime)
+    assert backend.inspect_runtime("existing").sandbox_url == "http://localhost:18080"
+
+
+def test_inspect_runtime_does_not_inherit_another_generations_pending_port(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    backend._pending_cleanup_ports["old-generation"] = ("existing", 18080)
+    entry = {"Id": "replacement-generation", "Name": "/sandbox-existing"}
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(stdout=json.dumps([entry]), stderr="", returncode=0))
+    info = backend.inspect_runtime("existing")
+    assert info.container_id == "replacement-generation"
+    assert info.sandbox_url == ""
+    assert backend._pending_cleanup_ports == {"old-generation": ("existing", 18080)}
+
+
+def test_destroy_releases_port_after_both_containers_are_removed_despite_network_timeout(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    backend._network_mode = "allowlist"
+    released = []
+    monkeypatch.setattr(local_backend_module, "release_port", released.append)
+    proxy_name, _ = backend._resource_names("existing")
+    stopped = []
+    monkeypatch.setattr(backend, "_stop_container", stopped.append)
+
+    def runtime(cmd, **kwargs):
+        if cmd[:3] == ["docker", "network", "rm"]:
+            raise subprocess.TimeoutExpired(cmd, 15)
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", runtime)
+    info = SandboxInfo("existing", "http://localhost:18080", container_name="sandbox-existing", container_id="main-generation")
+    with pytest.raises(subprocess.TimeoutExpired):
+        backend.destroy(info)
+    assert stopped == [proxy_name, "main-generation"]
+    assert released == [18080]
+    assert backend._pending_cleanup_ports == {}
+
+
+def test_confirmed_absent_teardown_releases_a_timed_out_but_removed_generations_port_once(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from deerflow.utils.network import PortAllocator
+
+    backend = _backend_for_inspect_tests()
+    allocator = PortAllocator()
+    monkeypatch.setattr(allocator, "_is_port_available", lambda port: port not in allocator._reserved_ports)
+    port = allocator.allocate(18080, max_range=1)
+    other_port = allocator.allocate(18081, max_range=1)
+    released = []
+    removed = False
+
+    def release(port):
+        released.append(port)
+        allocator.release(port)
+
+    def runtime(cmd, **kwargs):
+        nonlocal removed
+        if "stop" in cmd:
+            if cmd[-1].startswith("deer-flow-netproxy-"):
+                raise subprocess.CalledProcessError(1, cmd, stderr=f"Error: No such container: {cmd[-1]}")
+            if cmd[-1] == "removed-generation":
+                removed = True
+            raise subprocess.TimeoutExpired(cmd, 120)
+        if cmd[:3] in [["docker", "rm", "-f"], ["docker", "network", "rm"]]:
+            return SimpleNamespace(stdout="", stderr="", returncode=0)
+        assert removed
+        return SimpleNamespace(stdout="[]", stderr="Error: No such object: sandbox-existing", returncode=1)
+
+    monkeypatch.setattr("subprocess.run", runtime)
+    monkeypatch.setattr(local_backend_module, "release_port", release)
+    for sandbox_id, generation, reserved_port in [("other", "other-generation", other_port), ("existing", "removed-generation", port)]:
+        with pytest.raises(subprocess.TimeoutExpired):
+            backend.destroy(SandboxInfo(sandbox_id, f"http://localhost:{reserved_port}", container_id=generation))
+
+    assert backend.inspect_runtime("existing") is None
+    assert backend.is_absent("existing") is True
+    assert released == []  # Metadata and presence reads never mutate reservations.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(backend.complete_absent_teardown, ["existing", "existing"]))
+    assert released == [port]
+    assert allocator.allocate(18080, max_range=1) == port
+    with pytest.raises(RuntimeError, match="No available port"):
+        allocator.allocate(18081, max_range=1)
+    backend.complete_absent_teardown("existing")
+    assert released == [port]
+
+
+@pytest.mark.parametrize("restarted", [False, True])
+def test_absent_teardown_removes_leftover_networks_and_allows_restricted_creation(monkeypatch, restarted):
+    backend = _restricted_backend()
+    restarted_backend = _restricted_backend() if restarted else None
+    proxy_name, network_name = backend._resource_names("existing")
+    networks = {network_name, backend._egress_network_name("existing")}
+    released = []
+    monkeypatch.setattr(local_backend_module, "release_port", released.append)
+
+    def runtime(cmd, **kwargs):
+        if "stop" in cmd:
+            if cmd[-1] == "old-generation":
+                raise subprocess.TimeoutExpired(cmd, 120)
+            raise subprocess.CalledProcessError(1, cmd, stderr=f"Error: No such container: {cmd[-1]}")
+        if cmd[:3] == ["docker", "rm", "-f"]:
+            return SimpleNamespace(stdout="", stderr=f"Error: No such container: {proxy_name}", returncode=1)
+        if cmd[:3] == ["docker", "network", "rm"]:
+            networks.discard(cmd[-1])
+            return SimpleNamespace(stdout=cmd[-1], stderr="", returncode=0)
+        if cmd[:3] == ["docker", "network", "inspect"]:
+            if cmd[-1] in networks:
+                return SimpleNamespace(stdout=json.dumps([{"Driver": "bridge", "Internal": True}]), stderr="", returncode=0)
+            return SimpleNamespace(stdout="[]", stderr=f"Error response from daemon: network {cmd[-1]} not found", returncode=1)
+        assert cmd[:2] == ["docker", "inspect"]
+        return SimpleNamespace(stdout="[]", stderr="\n".join(f"Error: No such container: {name}" for name in cmd[2:]), returncode=1)
+
+    monkeypatch.setattr("subprocess.run", runtime)
+    with pytest.raises(subprocess.TimeoutExpired):
+        backend.destroy(SandboxInfo("existing", "http://localhost:18080", container_id="old-generation"))
+    assert backend.is_absent("existing") is True
+    assert backend._restricted_resources_status("existing") == "mismatch"
+    if restarted:
+        backend = restarted_backend
+        assert backend._pending_cleanup_ports == {}
+    backend.complete_absent_teardown("existing")
+    assert backend._restricted_resources_status("existing") == "missing"
+    assert released == ([] if restarted else [18080])
+    monkeypatch.setattr(backend, "_create_internal_network", lambda *_args: None)
+    monkeypatch.setattr(backend, "_create_egress_network", lambda *_args: None)
+    monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args: None)
+    monkeypatch.setattr(backend, "_start_container", lambda *_args, **_kwargs: "replacement-generation")
+    assert backend._start_restricted_sandbox("existing", "sandbox-existing", 18080, None, config_mount_exclusion_root=None, relay_token="token") == "replacement-generation"
+
+
+@pytest.mark.parametrize("error_kind", ["context", "wrong-target", "active-endpoint", "empty"])
+def test_absent_teardown_preserves_pending_port_on_unknown_network_cleanup_error(monkeypatch, error_kind):
+    backend = _restricted_backend()
+    backend._pending_cleanup_ports["old-generation"] = ("existing", 18080)
+    proxy_name, network_name = backend._resource_names("existing")
+    errors = {
+        "context": f'context "{network_name}": context not found',
+        "wrong-target": f"Error response from daemon: network {network_name}-extra not found",
+        "active-endpoint": f"Error response from daemon: network {network_name} has active endpoints",
+        "empty": "",
+    }
+    released = []
+    monkeypatch.setattr(local_backend_module, "release_port", released.append)
+    monkeypatch.setattr(backend, "_stop_container", lambda *_args: None)
+
+    def runtime(cmd, **kwargs):
+        if cmd == ["docker", "rm", "-f", proxy_name]:
+            return SimpleNamespace(stdout="", stderr="", returncode=0)
+        return SimpleNamespace(stdout="", stderr=errors[error_kind], returncode=1)
+
+    monkeypatch.setattr("subprocess.run", runtime)
+    with pytest.raises(RuntimeError):
+        backend.complete_absent_teardown("existing")
+    assert released == []
+    assert backend._pending_cleanup_ports == {"old-generation": ("existing", 18080)}
+
+
+def test_absent_teardown_accepts_only_exact_missing_networks(monkeypatch):
+    backend = _restricted_backend()
+    backend._pending_cleanup_ports["old-generation"] = ("existing", 18080)
+    released = []
+    monkeypatch.setattr(local_backend_module, "release_port", released.append)
+    monkeypatch.setattr(backend, "_stop_container", lambda *_args: None)
+    commands = []
+
+    def runtime(cmd, **kwargs):
+        commands.append(cmd)
+        if cmd[:3] == ["docker", "rm", "-f"]:
+            return SimpleNamespace(stdout="", stderr=f"Error: No such container: {cmd[-1]}", returncode=1)
+        return SimpleNamespace(stdout="", stderr=f"Error response from daemon: network {cmd[-1]} not found", returncode=1)
+
+    monkeypatch.setattr("subprocess.run", runtime)
+    backend.complete_absent_teardown("existing")
+    assert released == [18080]
+    assert backend._pending_cleanup_ports == {}
+    assert ["docker", "network", "rm", backend._resource_names("existing")[1]] in commands
+    assert ["docker", "network", "rm", backend._egress_network_name("existing")] in commands
+
+
+def test_apple_absent_teardown_releases_own_unknown_generation_port_after_timeout(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    backend._runtime = "container"
+    released = []
+    monkeypatch.setattr(local_backend_module, "release_port", released.append)
+
+    def runtime(cmd, **kwargs):
+        if "stop" in cmd:
+            raise subprocess.TimeoutExpired(cmd, 120)
+        assert cmd[:2] == ["container", "inspect"]
+        return SimpleNamespace(stdout="[]", stderr="Error: container not found: sandbox-existing", returncode=1)
+
+    monkeypatch.setattr("subprocess.run", runtime)
+    with pytest.raises(subprocess.TimeoutExpired):
+        backend.destroy(SandboxInfo("other", "http://localhost:18081", container_name="sandbox-other"))
+    with pytest.raises(subprocess.TimeoutExpired):
+        backend.destroy(SandboxInfo("existing", "http://localhost:18080", container_name="sandbox-existing"))
+    assert backend.inspect_runtime("existing") is None
+    assert backend.is_absent("existing") is True
+    assert released == []
+    backend.complete_absent_teardown("existing")
+    backend.complete_absent_teardown("existing")
+    assert released == [18080]
+    backend.complete_absent_teardown("other")
+    assert released == [18080, 18081]
+
+
+def test_apple_present_unknown_generation_does_not_inherit_pending_port(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    backend._runtime = "container"
+    released = []
+    monkeypatch.setattr(local_backend_module, "release_port", released.append)
+
+    def runtime(cmd, **kwargs):
+        if "stop" in cmd:
+            raise subprocess.TimeoutExpired(cmd, 120)
+        entry = {"configuration": {"id": "sandbox-existing"}, "status": "running"}
+        return SimpleNamespace(stdout=json.dumps([entry]), stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", runtime)
+    with pytest.raises(subprocess.TimeoutExpired):
+        backend.destroy(SandboxInfo("existing", "http://localhost:18080", container_name="sandbox-existing"))
+    info = backend.inspect_runtime("existing")
+    assert info is not None
+    assert info.container_id is None
+    assert info.sandbox_url == ""
+    assert backend.is_absent("existing") is False
+    assert released == []
+
+
+@pytest.mark.parametrize("runtime", ["container", "docker"])
+def test_successful_unknown_generation_retry_does_not_release_a_reused_port_again(monkeypatch, runtime):
+    from deerflow.utils.network import PortAllocator
+
+    backend = _backend_for_inspect_tests()
+    backend._runtime = runtime
+    allocator = PortAllocator()
+    monkeypatch.setattr(allocator, "_is_port_available", lambda port: port not in allocator._reserved_ports)
+    port = allocator.allocate(18080, max_range=1)
+    failed = False
+    released = []
+
+    def release(port):
+        released.append(port)
+        allocator.release(port)
+
+    def stop(_target):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise subprocess.TimeoutExpired("stop", 120)
+
+    monkeypatch.setattr(backend, "_stop_container", stop)
+    monkeypatch.setattr(local_backend_module, "release_port", release)
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(stdout="", stderr="", returncode=0))
+    original = SandboxInfo("existing", f"http://localhost:{port}", container_name="sandbox-existing")
+    with pytest.raises(subprocess.TimeoutExpired):
+        backend.destroy(original)
+    # Old Docker metadata can learn its immutable generation on a retry.
+    if runtime == "docker":
+        original.container_id = "learned-generation"
+    backend.destroy(original)
+    assert allocator.allocate(18080, max_range=1) == port
+    backend.complete_absent_teardown("existing")
+    assert released == [port]
+    with pytest.raises(RuntimeError, match="No available port"):
+        allocator.allocate(18080, max_range=1)
+
+
+def test_absent_teardown_deduplicates_a_legacy_reservation_that_later_learns_its_generation(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    released = []
+    monkeypatch.setattr(local_backend_module, "release_port", released.append)
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(stdout="", stderr="", returncode=0))
+
+    def timeout(_target):
+        raise subprocess.TimeoutExpired("stop", 120)
+
+    monkeypatch.setattr(backend, "_stop_container", timeout)
+    info = SandboxInfo("existing", "http://localhost:18080", container_name="sandbox-existing")
+    with pytest.raises(subprocess.TimeoutExpired):
+        backend.destroy(info)
+    info.container_id = "learned-generation"
+    with pytest.raises(subprocess.TimeoutExpired):
+        backend.destroy(info)
+    monkeypatch.setattr(backend, "_stop_container", lambda *_args: None)
+    backend.complete_absent_teardown("existing")
+    backend.complete_absent_teardown("existing")
+    assert released == [18080]
+
+
+@pytest.mark.parametrize("failed_stage", ["proxy-stop", "proxy-remove", "main-stop"])
+def test_restricted_partial_destroy_keeps_a_retryable_main_and_releases_port_once(monkeypatch, failed_stage):
+    from deerflow.utils.network import PortAllocator
+
+    backend = _backend_for_inspect_tests()
+    backend._network_mode = "allowlist"
+    allocator = PortAllocator()
+    monkeypatch.setattr(allocator, "_is_port_available", lambda port: port not in allocator._reserved_ports)
+    port = allocator.allocate(18080, max_range=1)
+    released = []
+
+    def release(port):
+        released.append(port)
+        allocator.release(port)
+
+    monkeypatch.setattr(local_backend_module, "release_port", release)
+    proxy_name, _ = backend._resource_names("existing")
+    main = {"Id": "main-generation", "Name": "/sandbox-existing", "Config": {"Labels": {"deerflow.network_mode": "allowlist"}}}
+    proxy = {"Id": "proxy-generation", "Name": f"/{proxy_name}", "HostConfig": {"PortBindings": {"8080/tcp": [{"HostPort": str(port)}]}}}
+    removed = set()
+    failed = False
+
+    def runtime(cmd, **kwargs):
+        nonlocal failed
+        target = cmd[-1]
+        if "inspect" in cmd:
+            if target in removed:
+                return SimpleNamespace(stdout="[]", stderr=f"Error: No such object: {target}", returncode=1)
+            return SimpleNamespace(stdout=json.dumps([proxy if target == proxy_name else main]), stderr="", returncode=0)
+        stage = "proxy-remove" if cmd[:3] == ["docker", "rm", "-f"] else "proxy-stop" if "stop" in cmd and target == proxy_name else "main-stop" if "stop" in cmd else None
+        if stage == failed_stage and not failed:
+            failed = True
+            if kwargs.get("check"):
+                raise subprocess.CalledProcessError(1, cmd, stderr="daemon denied teardown")
+            return SimpleNamespace(stdout="", stderr="daemon denied teardown", returncode=1)
+        if stage == "main-stop":
+            removed.add("sandbox-existing")
+        elif stage == "proxy-remove":
+            removed.add(proxy_name)
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", runtime)
+    original = SandboxInfo("existing", f"http://localhost:{port}", container_name="sandbox-existing", container_id="main-generation")
+    with pytest.raises((RuntimeError, subprocess.CalledProcessError)):
+        backend.destroy(original)
+    assert backend.is_absent("existing") is False
+    assert released == []
+    with pytest.raises(RuntimeError, match="No available port"):
+        allocator.allocate(18080, max_range=1)
+    recovered = backend.inspect_runtime("existing")
+    assert recovered is not None
+    backend.destroy(recovered)
+    assert allocator.allocate(18080, max_range=1) == port
+    assert released == [port]
+
+
+def test_apple_list_does_not_mark_unsupported_runtime_metadata_for_replacement(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    backend._runtime = "container"
+    entry = {"configuration": {"id": "sandbox-existing"}, "status": "running"}
+
+    def runtime(cmd, **kwargs):
+        return SimpleNamespace(stdout="sandbox-existing\n" if "ps" in cmd else json.dumps([entry]), stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", runtime)
+    assert backend.list_running() == []
+    assert backend.inspect_runtime("existing") is not None
+
+
+def test_apple_batch_preserves_legacy_docker_shaped_metadata(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    backend._runtime = "container"
+    entry = {"Name": "/sandbox-existing", "NetworkSettings": {"Ports": {"8080/tcp": [{"HostPort": "18080"}]}}}
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(stdout=json.dumps([entry]), stderr="", returncode=0))
+    assert backend._batch_inspect(["sandbox-existing"], strict=True)["sandbox-existing"].host_port == 18080
+
+
+@pytest.mark.parametrize("runtime", ["docker", "container"])
+def test_inspect_runtime_only_returns_none_for_authoritative_absence(monkeypatch, runtime):
+    backend = _backend_for_inspect_tests()
+    backend._runtime = runtime
+    error = "Error: No such object: sandbox-missing" if runtime == "docker" else "Error: container not found: sandbox-missing"
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(stdout="[]", stderr=error, returncode=1))
+
+    assert backend.inspect_runtime("missing") is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "",
+        "[]",
+        "{}",
+        "not JSON",
+        json.dumps([{"Name": "/sandbox-other", "Id": "generation"}]),
+        json.dumps([{"Name": "/sandbox-existing"}]),
+        json.dumps([{"Name": "/sandbox-existing", "Id": 42}]),
+        json.dumps([{"Name": "/sandbox-existing", "Id": "generation"}, {"Name": "/sandbox-existing", "Id": "other-generation"}]),
+    ],
+)
+def test_inspect_runtime_fails_closed_on_incomplete_or_invalid_docker_response(monkeypatch, payload):
+    backend = _backend_for_inspect_tests()
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(stdout=payload, stderr="", returncode=0))
+
+    with pytest.raises(RuntimeError):
+        backend.inspect_runtime("existing")
+    with pytest.raises(RuntimeError):
+        backend.is_absent("existing")
+
+
+@pytest.mark.parametrize("failure", [OSError("runtime unavailable"), subprocess.TimeoutExpired("inspect", 5)])
+def test_inspect_runtime_propagates_runtime_failures(monkeypatch, failure):
+    backend = _backend_for_inspect_tests()
+
+    def failed(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr("subprocess.run", failed)
+    with pytest.raises(RuntimeError):
+        backend.inspect_runtime("existing")
+
+
+def test_batch_inspect_keeps_present_generations_with_exact_partial_absence(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    entry = {"Name": "/sandbox-existing", "Id": "immutable-generation"}
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(stdout=json.dumps([entry]), stderr="Error: No such object: sandbox-missing", returncode=1))
+
+    inspections = backend._batch_inspect(["sandbox-existing", "sandbox-missing"], strict=True)
+
+    assert list(inspections) == ["sandbox-existing"]
+    assert inspections["sandbox-existing"].container_id == "immutable-generation"
+
+
+def test_batch_inspect_does_not_accept_absence_of_an_unrequested_resource(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(stdout="[]", stderr="Error: No such object: sandbox-other", returncode=1))
+
+    with pytest.raises(RuntimeError):
+        backend._batch_inspect(["sandbox-existing"], strict=True)
+
+
 def test_stop_container_passes_a_timeout(monkeypatch):
     """An unbounded `stop` can outlive the teardown lease that guards it.
 
@@ -1860,6 +2498,43 @@ def test_stop_container_passes_a_timeout(monkeypatch):
     backend._stop_container("sandbox-slow")
 
     assert seen.get("timeout") == backend._STOP_TIMEOUT_SECONDS
+
+
+def test_failed_stop_is_not_reported_as_destroyed(monkeypatch):
+    backend = _backend_for_inspect_tests()
+
+    def denied(cmd, **_kwargs):
+        raise subprocess.CalledProcessError(1, cmd, stderr="daemon denied stop")
+
+    monkeypatch.setattr("subprocess.run", denied)
+    with pytest.raises(subprocess.CalledProcessError):
+        backend.destroy(SandboxInfo("sandbox", "http://localhost:18080", container_id="generation"))
+
+
+def test_docker_discovery_preserves_runtime_generation(monkeypatch):
+    import json
+
+    import requests
+
+    backend = _backend_for_inspect_tests()
+    payload = [
+        {
+            "Id": "docker-generation",
+            "Name": "/sandbox-existing",
+            "Config": {"Image": "sandbox:latest", "Labels": {"deerflow.role": "sandbox", "deerflow.sandbox_id": "existing", "deerflow.network_mode": "open"}},
+            "NetworkSettings": {"Ports": {"8080/tcp": [{"HostPort": "18080"}]}},
+        }
+    ]
+
+    def runtime(cmd, **_kwargs):
+        return SimpleNamespace(returncode=0, stdout="true" if "-f" in cmd else json.dumps(payload), stderr="")
+
+    monkeypatch.setattr("subprocess.run", runtime)
+    monkeypatch.setattr(requests.Session, "get", lambda *_args, **_kwargs: SimpleNamespace(status_code=200))
+
+    info = backend.discover("existing")
+    assert info is not None
+    assert info.container_id == "docker-generation"
 
 
 def test_stop_container_propagates_a_timeout_instead_of_reporting_success(monkeypatch):

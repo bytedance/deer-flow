@@ -948,18 +948,17 @@ class TestShellSessionCreationOwnership:
         self,
         sandbox,
     ):
-        sandbox._default_shell_corrupted = True
         create_session = MagicMock(side_effect=httpx.ConnectError("connection refused"))
         cleanup_session = MagicMock()
 
         sandbox._client.shell.create_session = create_session
         sandbox._client.shell.cleanup_session = cleanup_session
 
-        assert sandbox.execute_command("first").startswith("Error:")
+        assert sandbox.execute_command_in_scope("first", scope_id="create-failure").startswith("Error:")
         assert sandbox.requires_container_recycle is False
         cleanup_session.assert_not_called()
 
-        sandbox.execute_command("second")
+        sandbox.execute_command_in_scope("second", scope_id="create-failure")
         assert create_session.call_count == 2
 
     def test_shell_client_error_is_definite_and_does_not_quarantine(
@@ -968,7 +967,6 @@ class TestShellSessionCreationOwnership:
     ):
         from agent_sandbox.core.api_error import ApiError
 
-        sandbox._default_shell_corrupted = True
         sandbox._client.shell.create_session = MagicMock(
             side_effect=ApiError(
                 status_code=400,
@@ -977,7 +975,7 @@ class TestShellSessionCreationOwnership:
         )
         sandbox._client.shell.cleanup_session = MagicMock()
 
-        assert sandbox.execute_command("bad").startswith("Error:")
+        assert sandbox.execute_command_in_scope("bad", scope_id="create-failure").startswith("Error:")
         assert sandbox.requires_container_recycle is False
         sandbox._client.shell.cleanup_session.assert_not_called()
 

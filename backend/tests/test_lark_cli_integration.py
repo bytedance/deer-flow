@@ -17,6 +17,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
@@ -693,6 +694,7 @@ def test_status_explicitly_reports_remote_runtime_probe_state(monkeypatch, tmp_p
 def _reset_broker_mode_cache() -> None:
     if hasattr(lark_cli.sandbox_lark_broker_active, "_cache"):
         del lark_cli.sandbox_lark_broker_active._cache
+    lark_cli._LARK_BROKER_MODE_PROBES.clear()
 
 
 def test_sandbox_lark_broker_active_uses_tight_hot_path_timeout(monkeypatch, tmp_path) -> None:
@@ -757,6 +759,253 @@ def test_sandbox_lark_broker_active_false_without_remote_provisioner(monkeypatch
         assert lark_cli.sandbox_lark_broker_active(config) is False
     finally:
         _reset_broker_mode_cache()
+
+
+def test_sandbox_lark_broker_active_recovers_after_failed_probe(monkeypatch, tmp_path) -> None:
+    """A recovered provisioner must be usable before the disabled-mode TTL ends."""
+    _reset_broker_mode_cache()
+    config = _config(tmp_path / "skills")
+    config.sandbox = SimpleNamespace(
+        use="deerflow.community.aio_sandbox:AioSandboxProvider",
+        provisioner_url="http://provisioner:8002",
+    )
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(lark_cli, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    response = MagicMock()
+    response.__enter__.return_value = response
+    response.read.return_value = json.dumps({"lark_cli_init_image": True, "lark_cli_broker_image": True}).encode("utf-8")
+    urlopen = MagicMock(side_effect=[TimeoutError("capability response timed out"), response])
+    monkeypatch.setattr(lark_cli.urllib.request, "urlopen", urlopen)
+
+    try:
+        # Cold-start unknown may be reported as unavailable or raised; neither
+        # outcome may suppress the later successful capability response.
+        try:
+            lark_cli.sandbox_lark_broker_active(config)
+        except RuntimeError:
+            pass
+        assert urlopen.call_count == 1
+
+        clock.now += lark_cli.LARK_BROKER_MODE_NEGATIVE_TTL_SECONDS - 1
+        recovered = lark_cli.sandbox_lark_broker_active(config)
+
+        assert recovered is True, "a failed probe must not hide a recovered broker behind the disabled-mode TTL"
+        assert urlopen.call_count == 2
+    finally:
+        _reset_broker_mode_cache()
+
+
+def test_sandbox_lark_broker_active_preserves_confirmed_mode_through_probe_failure(monkeypatch, tmp_path) -> None:
+    """Refresh failure must not downgrade broker mode or prevent its recovery."""
+    _reset_broker_mode_cache()
+    config = _config(tmp_path / "skills")
+    config.sandbox = SimpleNamespace(
+        use="deerflow.community.aio_sandbox:AioSandboxProvider",
+        provisioner_url="http://provisioner:8002",
+    )
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(lark_cli, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    response = MagicMock()
+    response.__enter__.return_value = response
+    response.read.return_value = json.dumps({"lark_cli_init_image": True, "lark_cli_broker_image": True}).encode("utf-8")
+    urlopen = MagicMock(side_effect=[response, TimeoutError("capability response timed out"), response])
+    monkeypatch.setattr(lark_cli.urllib.request, "urlopen", urlopen)
+
+    try:
+        assert lark_cli.sandbox_lark_broker_active(config) is True
+        clock.now += lark_cli.LARK_BROKER_MODE_TTL_SECONDS + 1
+        during_failure = lark_cli.sandbox_lark_broker_active(config)
+        assert urlopen.call_count == 2
+
+        clock.now += lark_cli.LARK_BROKER_MODE_NEGATIVE_TTL_SECONDS - 1
+        after_recovery = lark_cli.sandbox_lark_broker_active(config)
+
+        assert (during_failure, after_recovery) == (True, True), "a transient failure must not change the credential isolation mode"
+        assert urlopen.call_count == 3
+    finally:
+        _reset_broker_mode_cache()
+
+
+@pytest.mark.parametrize("payload", [None, {}, {"lark_cli_broker_image": "false"}])
+def test_unknown_broker_capability_cannot_authorize_credential_mounts(monkeypatch, tmp_path, payload):
+    _reset_broker_mode_cache()
+    config = _config(tmp_path / "skills")
+    config.sandbox = SimpleNamespace(use="deerflow.community.aio_sandbox:AioSandboxProvider", provisioner_url="http://provisioner:8002")
+    monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", lambda *_args, **_kwargs: payload)
+    try:
+        with pytest.raises(RuntimeError, match="capabilit"):
+            lark_cli.sandbox_lark_broker_active(config)
+    finally:
+        _reset_broker_mode_cache()
+
+
+def test_broker_capability_cache_is_scoped_to_provisioner(monkeypatch, tmp_path):
+    _reset_broker_mode_cache()
+    config = _config(tmp_path / "skills")
+    config.sandbox = SimpleNamespace(use="deerflow.community.aio_sandbox:AioSandboxProvider", provisioner_url="http://old-provisioner:8002")
+    probe = MagicMock(side_effect=[{"lark_cli_broker_image": False}, {"lark_cli_broker_image": True}])
+    monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", probe)
+    try:
+        assert lark_cli.sandbox_lark_broker_active(config) is False
+        config.sandbox.provisioner_url = "http://new-provisioner:8002"
+        assert lark_cli.sandbox_lark_broker_active(config) is True
+        assert probe.call_count == 2
+    finally:
+        _reset_broker_mode_cache()
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_broker_capability_refreshes_a_conflicting_observation(monkeypatch, confirmed):
+    config = SimpleNamespace(sandbox=SimpleNamespace(use="aio_sandbox", provisioner_url="http://provisioner:8002"))
+    monkeypatch.setattr(lark_cli.sandbox_lark_broker_active, "_cache", {}, raising=False)
+    probe = MagicMock(side_effect=[{"lark_cli_broker_image": confirmed}, {"lark_cli_broker_image": not confirmed}])
+    monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", probe)
+
+    assert lark_cli.sandbox_lark_broker_active(config) is confirmed
+    assert lark_cli.sandbox_lark_broker_active(config, observed_mode=not confirmed) is not confirmed
+    assert probe.call_count == 2
+
+
+def test_failed_broker_refresh_backs_off_without_extending_confirmation(monkeypatch):
+    config = SimpleNamespace(sandbox=SimpleNamespace(use="aio_sandbox", provisioner_url="http://provisioner:8002"))
+    monkeypatch.setattr(lark_cli.sandbox_lark_broker_active, "_cache", {}, raising=False)
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(lark_cli, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    probe = MagicMock(side_effect=[{"lark_cli_broker_image": True}, None, {"lark_cli_broker_image": False}])
+    monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", probe)
+
+    assert lark_cli.sandbox_lark_broker_active(config) is True
+    clock.now += lark_cli.LARK_BROKER_MODE_TTL_SECONDS + 1
+    assert lark_cli.sandbox_lark_broker_active(config) is True
+    assert lark_cli.sandbox_lark_broker_active(config) is True
+    assert probe.call_count == 2
+    clock.now += lark_cli.LARK_BROKER_MODE_PROBE_RETRY_SECONDS + 1
+    assert lark_cli.sandbox_lark_broker_active(config) is False
+    assert probe.call_count == 3
+
+
+def test_failed_conflicting_probe_cannot_reuse_a_cached_negative(monkeypatch):
+    config = SimpleNamespace(sandbox=SimpleNamespace(use="aio_sandbox", provisioner_url="http://provisioner:8002"))
+    monkeypatch.setattr(lark_cli.sandbox_lark_broker_active, "_cache", {}, raising=False)
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(lark_cli, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    probe = MagicMock(side_effect=[{"lark_cli_broker_image": False}, None, {"lark_cli_broker_image": True}])
+    monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", probe)
+
+    assert lark_cli.sandbox_lark_broker_active(config) is False
+    with pytest.raises(RuntimeError, match="unknown"):
+        lark_cli.sandbox_lark_broker_active(config, observed_mode=True)
+    with pytest.raises(RuntimeError, match="unknown"):
+        lark_cli.sandbox_lark_broker_active(config)
+    assert probe.call_count == 2
+    clock.now += lark_cli.LARK_BROKER_MODE_PROBE_RETRY_SECONDS + 1
+    assert lark_cli.sandbox_lark_broker_active(config) is True
+
+
+@pytest.mark.parametrize("previous_broker", [None, True])
+def test_concurrent_failed_broker_probes_share_one_observation(monkeypatch, previous_broker):
+    config = SimpleNamespace(sandbox=SimpleNamespace(use="aio_sandbox", provisioner_url="http://provisioner:8002"))
+    monkeypatch.setattr(lark_cli.sandbox_lark_broker_active, "_cache", {}, raising=False)
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(lark_cli, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    if previous_broker:
+        monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", lambda *_args, **_kwargs: {"lark_cli_broker_image": True})
+        assert lark_cli.sandbox_lark_broker_active(config) is True
+        clock.now += lark_cli.LARK_BROKER_MODE_TTL_SECONDS + 1
+    entered = threading.Event()
+    release = threading.Event()
+    waiter_looked_up = threading.Event()
+    worker = threading.local()
+    lock = threading.Lock()
+
+    class ObservedLock:
+        def __enter__(self):
+            lock.acquire()
+
+        def __exit__(self, *_args):
+            lock.release()
+            if getattr(worker, "waiter", False):
+                waiter_looked_up.set()
+
+    def probe(*_args, **_kwargs):
+        entered.set()
+        assert release.wait(5)
+        return None
+
+    def invoke(*, waiter=False):
+        worker.waiter = waiter
+        try:
+            return lark_cli.sandbox_lark_broker_active(config)
+        except RuntimeError as exc:
+            assert "unknown" in str(exc)
+            return None
+
+    monkeypatch.setattr(lark_cli, "_LARK_BROKER_MODE_CACHE_LOCK", ObservedLock())
+    probe_mock = MagicMock(side_effect=probe)
+    monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", probe_mock)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(invoke)
+        try:
+            assert entered.wait(3)
+            second = pool.submit(invoke, waiter=True)
+            assert waiter_looked_up.wait(3), "network I/O blocked the cache lookup"
+        finally:
+            release.set()
+        assert first.result(timeout=3) is previous_broker
+        assert second.result(timeout=3) is previous_broker
+    assert probe_mock.call_count == 1
+
+
+def test_slow_broker_probe_does_not_block_another_endpoint_cache(monkeypatch):
+    config = SimpleNamespace(sandbox=SimpleNamespace(use="aio_sandbox", provisioner_url="http://slow-provisioner:8002"))
+    other = SimpleNamespace(sandbox=SimpleNamespace(use="aio_sandbox", provisioner_url="http://other-provisioner:8002"))
+    monkeypatch.setattr(lark_cli.sandbox_lark_broker_active, "_cache", {}, raising=False)
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(lark_cli, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", MagicMock(side_effect=[{"lark_cli_broker_image": True}, {"lark_cli_broker_image": False}]))
+    assert lark_cli.sandbox_lark_broker_active(config) is True
+    assert lark_cli.sandbox_lark_broker_active(other) is False
+    clock.now += lark_cli.LARK_BROKER_MODE_TTL_SECONDS + 1
+    entered = threading.Event()
+    release = threading.Event()
+
+    def probe(*_args, **_kwargs):
+        entered.set()
+        assert release.wait(5)
+        return None
+
+    monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", probe)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        pending = pool.submit(lark_cli.sandbox_lark_broker_active, config)
+        try:
+            assert entered.wait(3)
+            cached = pool.submit(lark_cli.sandbox_lark_broker_active, other)
+            assert cached.result(timeout=3) is False
+        finally:
+            release.set()
+        assert pending.result(timeout=3) is True
+
+
+def test_lark_cli_env_from_runtime_refuses_unverified_broker_mode():
+    runtime = SimpleNamespace(context={"user_id": "alice"})
+    sandbox = SimpleNamespace(lark_cli_broker=None)
+
+    with pytest.raises(RuntimeError, match="unverified"):
+        _lark_cli_env_from_runtime(runtime, "lark-cli auth status", sandbox_paths=True, sandbox=sandbox)
+
+
+@pytest.mark.parametrize("broker", [False, True])
+def test_lark_command_overlay_uses_actual_sandbox_mode(monkeypatch, broker):
+    runtime = SimpleNamespace(context={"user_id": "alice"})
+    sandbox = SimpleNamespace(lark_cli_broker=broker)
+    probe = MagicMock(side_effect=AssertionError("execution must use the sandbox's mode"))
+    monkeypatch.setattr(lark_cli, "sandbox_lark_broker_active", probe)
+
+    env = _lark_cli_env_from_runtime(runtime, "lark-cli auth status", sandbox_paths=True, sandbox=sandbox)
+
+    assert ("DEERFLOW_LARK_BROKER_URL" in env) is broker
+    assert ("LARKSUITE_CLI_CONFIG_DIR" in env) is not broker
+    probe.assert_not_called()
 
 
 def test_install_lark_integration_is_idempotent_across_reinstalls(monkeypatch, tmp_path):
@@ -2179,8 +2428,9 @@ def test_lark_cli_json_rehardens_auth_files_written_by_cli(monkeypatch, tmp_path
 
 def test_lark_cli_env_from_runtime_uses_container_paths_for_sandbox_lark_commands():
     runtime = SimpleNamespace(context={"user_id": "alice"})
+    sandbox = SimpleNamespace(lark_cli_broker=False)
 
-    env = _lark_cli_env_from_runtime(runtime, "/usr/bin/lark-cli auth status", sandbox_paths=True)
+    env = _lark_cli_env_from_runtime(runtime, "/usr/bin/lark-cli auth status", sandbox_paths=True, sandbox=sandbox)
 
     assert env is not None
     assert env["LARKSUITE_CLI_CONFIG_DIR"] == lark_cli.LARK_CLI_SANDBOX_CONFIG_DIR

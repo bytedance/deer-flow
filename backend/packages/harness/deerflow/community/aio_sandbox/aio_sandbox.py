@@ -75,6 +75,7 @@ class AioSandbox(Sandbox):
         home_dir: str | None = None,
         request_headers: dict[str, str] | None = None,
         default_command_timeout: float | None = None,
+        lark_cli_broker: bool | None = False,
     ):
         """Initialize the AIO sandbox.
 
@@ -88,6 +89,7 @@ class AioSandbox(Sandbox):
                 when a command does not provide an explicit timeout.
         """
         super().__init__(id)
+        self.lark_cli_broker = lark_cli_broker
         if default_command_timeout is None:
             self._default_command_timeout = self._DEFAULT_HARD_TIMEOUT
         else:
@@ -319,7 +321,9 @@ class AioSandbox(Sandbox):
         with self._session_creation_state_lock:
             shell = self._shell_session_creation_state
             bash = self._bash_session_creation_state
-            return bool(shell.pending or shell.ambiguous or bash.pending or bash.ambiguous)
+            # The implicit shell cannot be cleaned up by a known session id.
+            # Its fence must outlive this client, including release/reclaim.
+            return bool(self._default_shell_corrupted or shell.pending or shell.ambiguous or bash.pending or bash.ambiguous)
 
     def _create_shell_session(self, client) -> str:
         session_id = str(uuid.uuid4())
