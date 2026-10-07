@@ -881,7 +881,12 @@ def _configure_task_tools_for_server(
     return configured
 
 
-async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, personal_user_id: str | None = None) -> list[BaseTool]:
+async def get_mcp_tools(
+    extensions_config: ExtensionsConfig | None = None,
+    *,
+    personal_user_id: str | None = None,
+    session_pool: MCPSessionPool | None = None,
+) -> list[BaseTool]:
     """Get all tools from enabled MCP servers.
 
     Tools using stdio transport are wrapped with persistent-session logic so
@@ -893,6 +898,10 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
         extensions_config: Optional pre-loaded extensions config. Callers that
             must prove which config revision produced these tools pass the exact
             instance they snapshotted; ``None`` loads the latest config from disk.
+        session_pool: Optional session pool captured by the caller. Cache
+            initializers pass the exact pool their generation owns so a
+            superseded claim cannot install bindings into a replacement pool;
+            ``None`` resolves the current singleton.
 
     Returns:
         List of LangChain tools from all enabled MCP servers.
@@ -933,7 +942,9 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
     # Capture the exact pool and stdio binding before the first discovery await.
     # A later reset/reconcile can supersede this capability, but a stale wrapper
     # can never silently pair its old connection with a replacement pool/epoch.
-    pool = get_session_pool()
+    pool = session_pool
+    if pool is None:
+        pool = get_session_pool()
     ownership_domain: MCPPoolDomain = "personal" if personal_user_id is not None else "deployment"
     server_bindings: dict[str, ServerBinding] = {}
     for server_name, server_connection in servers_config.items():
