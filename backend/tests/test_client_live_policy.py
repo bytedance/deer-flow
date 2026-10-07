@@ -19,6 +19,47 @@ REPRESENTATIVE_LIVE_NODE_IDS = (
 )
 
 
+# A Python child on Windows cannot boot from a scrubbed environment: without
+# SystemRoot, `import asyncio` dies with WinError 10106 (winsock provider init),
+# and tempfile cannot resolve a usable directory without TEMP/TMP/USERPROFILE.
+# These base system variables carry no credentials, so passing them through
+# keeps the isolation contract (no API keys, no real .env) intact while letting
+# the child start at all. POSIX behavior is unchanged.
+_WINDOWS_BASE_ENV_VARS = (
+    "SystemRoot",
+    "windir",
+    "COMSPEC",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+)
+
+
+def _child_pytest_env(*, opt_in: bool, ci: bool) -> dict[str, str]:
+    """Build the minimal pytest child env without inheriting the real one."""
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUTF8": "1",
+        "PYTHONPATH": os.pathsep.join(
+            [
+                str(BACKEND_ROOT),
+                str(BACKEND_ROOT / "packages" / "harness"),
+            ]
+        ),
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+    }
+    if opt_in:
+        env[LIVE_OPT_IN] = "1"
+    if ci:
+        env["CI"] = "1"
+    if os.name == "nt":
+        env.update({name: os.environ[name] for name in _WINDOWS_BASE_ENV_VARS if name in os.environ})
+    return env
+
+
 def _collect_live_tests(
     tmp_path: Path,
     *,
@@ -37,23 +78,7 @@ def _collect_live_tests(
     if config_exists:
         (temp_repo / "config.yaml").write_text("models: []\n", encoding="utf-8")
 
-    env = {
-        "PATH": os.environ.get("PATH", ""),
-        "PYTHONDONTWRITEBYTECODE": "1",
-        "PYTHONIOENCODING": "utf-8",
-        "PYTHONUTF8": "1",
-        "PYTHONPATH": os.pathsep.join(
-            [
-                str(BACKEND_ROOT),
-                str(BACKEND_ROOT / "packages" / "harness"),
-            ]
-        ),
-        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
-    }
-    if opt_in:
-        env[LIVE_OPT_IN] = "1"
-    if ci:
-        env["CI"] = "1"
+    env = _child_pytest_env(opt_in=opt_in, ci=ci)
 
     return subprocess.run(
         [
@@ -122,6 +147,37 @@ def test_opt_in_without_config_reports_missing_config(tmp_path: Path) -> None:
     result = _collect_live_tests(tmp_path, config_exists=False, opt_in=True, ci=False)
 
     _assert_collection_skipped(result, "No config.yaml found")
+
+
+_BASE_ENV_KEYS = frozenset(
+    {
+        "PATH",
+        "PYTHONDONTWRITEBYTECODE",
+        "PYTHONIOENCODING",
+        "PYTHONUTF8",
+        "PYTHONPATH",
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
+    }
+)
+
+
+def test_child_env_stays_isolated_but_bootable_on_windows() -> None:
+    """The scrubbed child env must not starve the Windows interpreter.
+
+    A child spawned with only the pytest-relevant variables fails on Windows
+    during `import asyncio` (WinError 10106, missing SystemRoot) and cannot
+    resolve a temp directory, so the live-policy tests below spuriously fail.
+    """
+    env = _child_pytest_env(opt_in=True, ci=True)
+
+    extra = set(env) - _BASE_ENV_KEYS - {LIVE_OPT_IN, "CI"}
+    if os.name == "nt":
+        # Only base system variables may pass through — never credentials.
+        assert extra <= set(_WINDOWS_BASE_ENV_VARS)
+        assert "SystemRoot" in extra
+        assert "TEMP" in extra or "TMP" in extra
+    else:
+        assert not extra
 
 
 def test_make_targets_keep_default_tests_offline_and_support_live_opt_in() -> None:
