@@ -3,12 +3,12 @@
 import asyncio
 import os
 import uuid
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pytest
 import sqlalchemy as sa
 from alembic import command
 from sqlalchemy.ext.asyncio import create_async_engine
+from support.postgres import asyncpg_test_url
 
 from deerflow.persistence import bootstrap
 from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
@@ -23,11 +23,8 @@ async def test_upgrade_downgrade_and_reupgrade_preserve_report(tmp_path, backend
         uri = os.environ.get("TEST_POSTGRES_URI")
         if not uri:
             pytest.skip("requires TEST_POSTGRES_URI (real Postgres batch evidence migration)")
-        parts = urlsplit(uri)
-        scheme = "postgresql+asyncpg" if parts.scheme in {"postgres", "postgresql"} else parts.scheme
-        query = urlencode([(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True) if key not in {"sslmode", "channel_binding"}])
         schema = f"batch_evidence_{uuid.uuid4().hex}"
-        engine = create_async_engine(urlunsplit(parts._replace(scheme=scheme, query=query)), connect_args=build_asyncpg_connect_args(schema))
+        engine = create_async_engine(asyncpg_test_url(uri), connect_args=build_asyncpg_connect_args(schema))
     else:
         engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'batch.db'}")
     cfg = bootstrap._get_alembic_config(engine, postgres_schema=schema or "")
@@ -72,3 +69,43 @@ async def test_upgrade_downgrade_and_reupgrade_preserve_report(tmp_path, backend
             async with engine.begin() as conn:
                 await conn.execute(sa.text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
         await engine.dispose()
+
+
+class _StopBeforeDatabase(Exception):
+    """End a connection-contract probe before acquiring database resources."""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sslmode", [None, "disable", "allow", "prefer", "require", "verify-ca", "verify-full"])
+async def test_postgres_migration_setup_preserves_tls_policy(monkeypatch, tmp_path, sslmode):
+    uri = "postgresql://user:password@localhost:5432/test?target_session_attrs=read-write&channel_binding=prefer"
+    if sslmode is not None:
+        uri += f"&sslmode={sslmode}"
+    monkeypatch.setenv("TEST_POSTGRES_URI", uri)
+
+    def capture_engine(url, **kwargs):
+        parsed = sa.engine.make_url(url)
+        _args, connect_options = parsed.get_dialect()().create_connect_args(parsed)
+        assert connect_options["target_session_attrs"] == "read-write"
+        assert "sslmode" not in connect_options and "channel_binding" not in connect_options
+        if sslmode is None:
+            assert "ssl" not in connect_options
+        else:
+            assert connect_options.get("ssl") == sslmode
+        raise _StopBeforeDatabase
+
+    monkeypatch.setitem(globals(), "create_async_engine", capture_engine)
+    with pytest.raises(_StopBeforeDatabase):
+        await test_upgrade_downgrade_and_reupgrade_preserve_report(tmp_path, "postgres")
+
+
+@pytest.mark.asyncio
+async def test_postgres_migration_setup_rejects_conflicting_tls_policy(monkeypatch, tmp_path):
+    monkeypatch.setenv("TEST_POSTGRES_URI", "postgresql://user:password@localhost:5432/test?ssl=require&sslmode=disable")
+
+    def reject_engine_creation(*args, **kwargs):
+        pytest.fail("Conflicting TLS options must be rejected before engine creation")
+
+    monkeypatch.setitem(globals(), "create_async_engine", reject_engine_creation)
+    with pytest.raises(ValueError, match="Conflicting ssl and sslmode"):
+        await test_upgrade_downgrade_and_reupgrade_preserve_report(tmp_path, "postgres")
