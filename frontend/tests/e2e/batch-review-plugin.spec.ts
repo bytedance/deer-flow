@@ -234,6 +234,8 @@ test("browser code boundaries, malformed/legacy evidence and read-error recovery
     if (url.pathname.endsWith("/actions/result") && response.ok()) {
       const saved = await response.json();
       if (codeExample) {
+        saved.acceptance_criteria = ["file_exists:report.md"];
+        saved.acceptance_verdict = { all_hold: false };
         const id = saved.evidence.sources[0].id;
         const cite = `[citation:1](#knowledge-${id})`;
         saved.result = `~~~\n${cite}\n~~~\n\`\`${cite}\`\`\n    ${cite}\n\t${cite}\n\`a\n    b\n${cite}\nc\`\n\\\\\`${cite}\`\n> ~~~\n> ${cite}\n> ~~~\n${cite}\n\`\`\`\n${cite}`;
@@ -272,6 +274,12 @@ test("browser code boundaries, malformed/legacy evidence and read-error recovery
   codeExample = true;
   await page.getByRole("button", { name: "Refresh selected result" }).click();
   await expect(page.getByTestId("batch-saved-report")).toContainText("~~~");
+  await expect(
+    page.getByRole("region", { name: "Saved result" }),
+  ).toContainText("Execution: succeeded");
+  await expect(
+    page.getByRole("region", { name: "Saved result" }),
+  ).toContainText("Acceptance: Not fully verified");
   // Only the single real citation outside all code regions becomes an action.
   await expect(
     page.getByRole("button", { name: "citation:1", exact: true }),

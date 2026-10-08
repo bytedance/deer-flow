@@ -45,7 +45,8 @@ deterministic verdict, not a claim of model quality or human approval.
 ## Limits and recovery
 
 - Up to 20 recent batches per conversation and 50 compact items per page. Load
-  more explicitly; complete reports are fetched only when selected.
+  more explicitly; complete reports are fetched only when selected. A selected
+  view exposes up to 100 captured sources; other citations remain unavailable.
 - A selected result is one public row projection with its own revision. Refresh
   replaces report and evidence together, closes the old source dialog and
   cancels obsolete selection requests. Switching account/thread or leaving the
