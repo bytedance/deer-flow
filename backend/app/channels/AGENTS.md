@@ -5,7 +5,7 @@ Bridges external messaging platforms (Feishu, Slack, Telegram, Discord, DingTalk
 WeChat `_read_outbound_bytes` reads cap+1 off-loop; overflow returns `None` before encryption/upload; caps <=0 are unlimited.
 Cursor writes drain before cancellation; token expiry drains cursor/auth clearing under `_auth_lock`.
 
-**Architecture**: Channels communicate with Gateway through the `langgraph-sdk` HTTP client (same as the frontend), ensuring threads are created and managed server-side. The internal SDK client injects process-local internal auth plus a matching CSRF cookie/header pair so Gateway accepts state-changing thread/run requests from channel workers without relying on browser session cookies.
+**Architecture**: Channels use `langgraph-sdk` HTTP to reach Gateway; Gateway owns thread lifecycle. The internal client adds process-local auth and matching CSRF cookie/header for state-changing requests, without browser cookies.
 
 **Components**:
 - `message_bus.py` - Async pub/sub hub (`InboundMessage` → queue → dispatcher; `OutboundMessage` → callbacks → channels)
