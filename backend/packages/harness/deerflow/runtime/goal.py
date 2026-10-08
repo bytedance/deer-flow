@@ -26,6 +26,7 @@ import deerflow.utils.llm_text as llm_text
 from deerflow.agents.goal_state import GoalBlocker, GoalEvaluation, GoalOutcomeState, GoalState
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.interaction_policy import RunInteractionPolicy
+from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.models import create_chat_model
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.tracing import inject_langfuse_metadata
@@ -651,13 +652,23 @@ def compute_no_progress_count(goal: GoalState, evaluation: GoalEvaluation, *, ev
     return 0
 
 
-def make_goal_continuation_message(goal: GoalState, evaluation: GoalEvaluation) -> HumanMessage:
-    """Build the hidden user message that asks the agent to keep working."""
+def make_goal_continuation_message(goal: GoalState, evaluation: GoalEvaluation, *, pii_redaction: PiiRedactionConfig | None = None) -> HumanMessage:
+    """Build the hidden user message that asks the agent to keep working.
+
+    PiiRedactionMiddleware skips this framework message, so with
+    ``pii_redaction`` enabled the objective, the reason and the evidence
+    summary are redacted here. The thread keeps the redacted message, which
+    the UI hides. A redaction error propagates; the caller must not send the
+    raw text instead.
+    """
+    from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
+
+    objective, reason, evidence_summary = (redact_text(text, pii_redaction) for text in (goal["objective"], evaluation["reason"], evaluation.get("evidence_summary") or ""))
     content = (
         "<goal_continuation>\n"
-        f"Active goal: {goal['objective']}\n"
-        f"Evaluator result: not satisfied. Blocker: {evaluation['blocker']}. Reason: {evaluation['reason'] or 'No reason provided.'}\n"
-        f"Visible evidence: {evaluation.get('evidence_summary') or 'No evidence summary provided.'}\n"
+        f"Active goal: {objective}\n"
+        f"Evaluator result: not satisfied. Blocker: {evaluation['blocker']}. Reason: {reason or 'No reason provided.'}\n"
+        f"Visible evidence: {evidence_summary or 'No evidence summary provided.'}\n"
         "Continue working toward the active goal. Use the available tools and conversation context. "
         "Do not ask the user to continue unless you are genuinely blocked.\n"
         "</goal_continuation>"

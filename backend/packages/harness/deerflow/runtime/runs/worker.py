@@ -2485,6 +2485,23 @@ async def _prepare_goal_continuation_input(
         await _persist(goal, evaluation, no_progress_count, stand_down_reason=stand_down_reason)
         return None
 
+    # Built before the continuation is counted: the message is redacted under the run's
+    # pii_redaction, and a redaction error fails the check as an evaluator redaction error
+    # does, so the raw objective and reason are never sent and the budget is not spent.
+    try:
+        continuation_message = make_goal_continuation_message(goal, evaluation, pii_redaction=getattr(app_config, "pii_redaction", None))
+    except Exception as exc:
+        logger.warning("Could not redact the goal continuation for thread %s after run %s", thread_id, run_id, exc_info=True)
+        # Only the exception type is stored: the error message could quote the text.
+        evaluation = GoalEvaluation(
+            satisfied=False,
+            blocker="run_failed",
+            reason=f"The goal continuation could not be redacted ({type(exc).__name__}).",
+            evidence_summary="",
+        )
+        await _persist(goal, evaluation, compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature), stand_down_reason="evaluator_failed")
+        return None
+
     next_count = int(goal.get("continuation_count", 0)) + 1
     updated_goal = await _persist(goal, evaluation, no_progress_count, continuation_count=next_count)
     if updated_goal is None:
@@ -2523,7 +2540,7 @@ async def _prepare_goal_continuation_input(
         updated_goal.get("continuation_count", next_count),
         updated_goal.get("max_continuations", 0),
     )
-    return {"messages": [make_goal_continuation_message(updated_goal, evaluation)]}
+    return {"messages": [continuation_message]}
 
 
 def _is_edit_replay_run(record: RunRecord) -> bool:

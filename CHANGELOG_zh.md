@@ -3298,6 +3298,13 @@
   `read_file` 读取 `SKILL.md` 时会打上 `skill_context_denied` 标记，持久上
   下文、技能 allowed-tools 与自主密钥绑定都不会激活被拒绝的技能。([#4541])
 
+- **目标：** 开启 `pii_redaction` 后，隐藏的 `/goal` 续跑消息现在也会被脱敏。
+  `PiiRedactionMiddleware` 不处理这条框架消息，因此每次续跑都会把目标原文以及评估器的
+  理由和证据摘要原样发给 agent 的模型，并留在线程里供之后的模型调用读取。现在先对这些
+  内容脱敏，再拼成消息；线程保存脱敏后的消息（界面不显示），目标状态仍保留原文。
+  脱敏出错时这次检查按失败处理（`evaluator_failed`），不计入续跑次数，也不会发送原文。
+  关闭脱敏时消息逐字节不变。([#PR])
+
 - **Lark：** 可选的 Lark broker 子命令拒绝列表
   （`DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS`）不再能被以独立 token 传入的选项
   值绕过。此前匹配只去掉以 `-` 开头的 token 并从头比较剩余部分，因此

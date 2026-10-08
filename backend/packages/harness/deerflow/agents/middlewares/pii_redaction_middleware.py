@@ -34,6 +34,9 @@ Scope model (mirrors the structural guardrails):
 * The memory-enqueue path is covered by the follow-up slice (#5577):
   ``redact_queued_messages`` (memory middleware) applies the same configured
   policy to the extraction payloads queued for the memory backend.
+* The hidden ``/goal`` continuation is a framework message this middleware
+  skips, so ``make_goal_continuation_message`` (``runtime/goal.py``) redacts
+  its objective, reason and evidence summary before the message is stored.
 * The compaction and durable-context seams run outside ``wrap_model_call``;
   :func:`redact_text` is the shared entry point they call, wired from
   SummarizationMiddleware (compaction input) and DurableContextMiddleware
