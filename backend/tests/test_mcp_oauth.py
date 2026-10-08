@@ -88,6 +88,19 @@ def test_oauth_token_manager_fetches_and_caches_token(monkeypatch):
     assert post_calls[0]["data"]["grant_type"] == "client_credentials"
 
 
+@pytest.fixture
+def oauth_now(monkeypatch):
+    now = datetime(2026, 1, 1, 12, 0, 0, 123456, tzinfo=UTC)
+
+    class _FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz):
+            return now
+
+    monkeypatch.setattr("deerflow.mcp.oauth.datetime", _FixedDatetime)
+    return now
+
+
 @pytest.mark.parametrize(
     "expires_in",
     [
@@ -96,16 +109,16 @@ def test_oauth_token_manager_fetches_and_caches_token(monkeypatch):
         float("nan"),
         1e30,
         10**30,
+        pytest.param(86_400_000_000_000, id="rounded-timedelta-limit"),
+        pytest.param(10**12, id="datetime-overflow"),
         "not-a-number",
     ],
 )
-def test_unusable_expires_in_falls_back_to_the_default_lifetime(monkeypatch, expires_in):
+def test_unusable_expires_in_falls_back_to_the_default_lifetime(monkeypatch, oauth_now, expires_in):
     """A malformed ``expires_in`` must not abort the token fetch.
 
-    ``json.loads`` accepts ``Infinity``/``NaN`` and ``timedelta`` raises
-    ``OverflowError`` above 999_999_999 days, so a token endpoint returning any
-    of these used to escape ``_fetch_token`` and fail the server's OAuth
-    connection outright instead of falling back to the one-hour default.
+    Cover conversion, ``timedelta`` construction and ``datetime`` addition:
+    each can reject a lifetime that the token endpoint returns.
     """
     post_calls: list[dict[str, Any]] = []
 
@@ -142,13 +155,30 @@ def test_unusable_expires_in_falls_back_to_the_default_lifetime(monkeypatch, exp
     )
     manager = OAuthTokenManager.from_extensions_config(config)
 
-    before = datetime.now(UTC)
     header = asyncio.run(manager.get_authorization_header("secure-http"))
 
     assert header == "Bearer token-123"
     token = manager._states["secure-http"].token
     assert token is not None
-    assert timedelta(minutes=59) < token.expires_at - before < timedelta(minutes=61)
+    assert token.expires_at == oauth_now + timedelta(hours=1)
+
+
+@pytest.mark.parametrize("offset", [-1, 0, 1], ids=["below-limit", "at-limit", "above-limit"])
+def test_expires_in_at_datetime_limit(monkeypatch, oauth_now, offset):
+    # Integer division preserves the last whole second that can be added,
+    # without the rounding in timedelta.total_seconds().
+    ceiling = (datetime.max.replace(tzinfo=UTC) - oauth_now) // timedelta(seconds=1)
+    expires_in = ceiling + offset
+    _token_endpoint_returns(monkeypatch, {"access_token": "token-123", "expires_in": expires_in})
+    manager = OAuthTokenManager.from_extensions_config(_oauth_server_config())
+
+    header = asyncio.run(manager.get_authorization_header("secure-http"))
+
+    assert header == "Bearer token-123"
+    token = manager._states["secure-http"].token
+    assert token is not None
+    expected_lifetime = 3600 if offset > 0 else expires_in
+    assert token.expires_at == oauth_now + timedelta(seconds=expected_lifetime)
 
 
 def test_oauth_extra_token_params_cannot_override_grant_type(monkeypatch):
