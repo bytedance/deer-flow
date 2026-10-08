@@ -449,7 +449,8 @@ def test_user_repository_lists_registered_user_ids(tmp_path, second_created_delt
             repo = SQLiteUserRepository(get_session_factory())
             assert await repo.list_user_ids() == []
             created_at = datetime(2026, 1, 1, tzinfo=UTC)
-            # Reverse UUID order relative to insertion order so both sort keys matter.
+            # Reverse stored UUID string order relative to insertion order so both sort keys matter.
+            # The ID tie-break is lexical; canonical UUID strings preserve UUID integer order.
             await repo.create_user(User(id=UUID(int=2), email="first@test.com", password_hash="hash", created_at=created_at))
             await repo.create_user(User(id=UUID(int=1), email="second@test.com", password_hash="hash", created_at=created_at + second_created_delta))
 

@@ -25,12 +25,14 @@ through offline HTTP transports. Keep its directly imported `anthropic` SDK in
 the backend `dev` dependency group rather than relying on `langchain-anthropic`
 to supply it transitively.
 
-## Router auth fixtures
+## User repository ordering
 
 `test_auth.py` pins `list_user_ids()` ordering with fixed UTC timestamps and UUIDs.
-Cover both creation-time precedence and the ID tie-break for equal timestamps
-through the real SQLite repository; do not assume wall-clock calls are distinct
-or weaken the result to an unordered comparison.
+Cover both creation-time precedence and the lexical stored-ID tie-break for
+equal timestamps through the real SQLite repository; do not assume wall-clock
+calls are distinct or weaken the result to an unordered comparison.
+
+## Router auth fixtures
 
 For owner-scoped route assertions, pass a stable `user_factory` and
 `bind_current_user=True` to `make_authed_test_app`. The default stub stamps
