@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 56
+config_version: 57
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -933,6 +933,7 @@ tools:
   #   group: web
   #   use: deerflow.community.serper.tools:web_search_tool
   #   max_results: 5   # capped at 10 by the Serper provider
+  #   # base_url: https://google.serper.dev  # Overrides SERPER_BASE_URL; omit /search
   #   include_domains: []  # Optional domain-only lists, at most 10 entries each
   #   exclude_domains: []  # Exclusion wins; see backend/docs/CONFIGURATION.md
   #   # api_key: $SERPER_API_KEY  # Optional explicit env-var reference
@@ -1275,6 +1276,7 @@ tools:
   #   group: web
   #   use: deerflow.community.serper.tools:image_search_tool
   #   max_results: 5   # capped at 10 by the Serper provider
+  #   # base_url: https://google.serper.dev  # Overrides SERPER_BASE_URL; omit /images
   #   # api_key: $SERPER_API_KEY  # Optional explicit env-var reference
 
   # Image search tool (uses Brave Image Search API, requires BRAVE_SEARCH_API_KEY)
@@ -2198,6 +2200,11 @@ summarization:
 # DeerMem-private fields live under ``backend_config`` (NOT at the memory: top level):
 #   storage_path        - Data root. Empty = deer-flow base_dir (factory injects absolute
 #                         runtime_home). Absolute path = that root. Relative = CWD-relative.
+#   retrieval_index_path - Directory of the derived SQLite FTS5 retrieval index. Empty =
+#                         {storage_path}/.retrieval. Relative = below storage_path. Absolute =
+#                         as-is. Point it at instance-local disk when several Gateway
+#                         instances share storage_path (SQLite WAL is unsupported on network
+#                         filesystems; peers would rebuild or delete each other's index).
 #   model               - LLM config for memory extraction: {provider, model, api_key, base_url,
 #                         temperature}. Omit all fields = no extraction (non-LLM ops still work).
 #   debounce_seconds    - Debounce wait before processing queued updates (default: 30)
@@ -2350,6 +2357,7 @@ memory:
     manifest_filename: memory.json # user-global JSON: version/revision/time + user/history only; no facts or fact index
     file_lock_timeout_seconds: 10 # per-scope cross-process advisory lock timeout (single-machine local filesystem)
     retrieval_adapter: fts5     # fts5 (default), empty to disable, or a dotted RetrievalPort factory(config)
+    retrieval_index_path: ""    # empty = {storage_path}/.retrieval; relative = below storage_path; absolute as-is. Rebuildable derived data: keep it instance-local when Gateway instances share storage_path (the Helm chart uses an emptyDir)
     debounce_seconds: 30 # Wait time before processing queued updates
     # Backpressure cap on pending items. 0 = unlimited. At the cap, new
     # non-signal updates are rejected (QueueFull); signal updates are always

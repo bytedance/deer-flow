@@ -586,6 +586,8 @@ Notes:
 - `GET /health/ready` pings the Redis stream bridge on every probe and answers 503 (`stream_bridge: unreachable`) while Redis is down, so the orchestrator drains that instance instead of routing it runs it cannot publish or stream; the memory bridge reports `not_configured`. When `sandbox.provisioner_url` is set, the body also carries the provisioner's `/health` verdict (`provisioner: ok|unreachable`), which never changes the status code because every instance shares one provisioner. That probe follows the sandbox clients' proxy policy: loopback, private, link-local and cluster-local provisioner addresses bypass `HTTP_PROXY`, external hosts keep the environment's proxy settings.
 - The declaration also drives the `agent_storage.backend: file` divergence warning, the inbound webhook dedupe warning, the `auth.local.throttle_storage: memory` warning, and the WeChat QR-login guard, which otherwise only look at the worker count.
 - Login lockouts are shared through the database: `auth.local.throttle_storage` (startup-only) defaults to `auto`, which keeps the per-IP failed-login counters for `POST /api/v1/auth/login/local` in the `login_throttle` table whenever `database.backend` is `sqlite` or `postgres`, so every instance enforces one `max_login_attempts` limit per client IP and a lockout on one instance holds on all of them. `memory` keeps the historical per-process counter (N instances give an attacker N × `max_login_attempts` guesses; a declared multi-instance deployment logs a warning), and `db` forces the table (it falls back to memory with a warning when the database backend is `memory`, and refuses to start when the configured database's engine is unavailable; `auto` falls back with a warning in that case). `max_login_attempts` and `lockout_seconds` stay live-read.
+- The declaration also drives the `agent_storage.backend: file` divergence warning, the inbound webhook dedupe warning, and the WeChat QR-login guard, which otherwise only look at the worker count.
+- With the default DeerMem backend, the declaration also warns when the derived SQLite retrieval index sits inside the shared `storage_path` (the default `{storage_path}/.retrieval`). Set `memory.backend_config.retrieval_index_path` to an instance-local directory (relative values resolve against `storage_path`): SQLite WAL is unsupported on network filesystems, and the index is rebuilt from the Markdown facts at startup and re-synced per user scope after a peer writes.
 - Restart-required: the gate runs once at startup. Restart all Gateway instances together after changing it.
 
 ### Agent Storage
@@ -728,6 +730,52 @@ Serper `web_search` also accepts the optional model argument
 `{"query": "Python releases", "time_range": "week"}` sends `tbs: "qdr:w"`
 to Serper. Omitting `time_range` or passing `null` omits the recency constraint from the
 search request. This option does not change Serper `image_search`.
+
+#### Serper endpoints
+
+To use a Serper-compatible provider for web and image search, set
+`SERPER_BASE_URL` to its base URL without `/search` or `/images`, and set
+`SERPER_API_KEY` to that provider's key. The default base URL is
+`https://google.serper.dev`.
+
+Each Serper tool can override the environment independently in `config.yaml`:
+
+```yaml
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.serper.tools:web_search_tool
+    base_url: https://proxy.example/api
+    api_key: $SEARCH_PROVIDER_API_KEY
+  - name: image_search
+    group: web
+    use: deerflow.community.serper.tools:image_search_tool
+    base_url: https://images.example/api
+    api_key: $IMAGE_PROVIDER_API_KEY
+```
+
+A non-empty string `base_url` in the requested tool's entry takes precedence
+over `SERPER_BASE_URL`. Missing, non-string or whitespace-only tool values fall
+back to the environment. An unset, empty or whitespace-only environment value
+keeps the default endpoint. Leading/trailing whitespace and trailing slashes
+are removed before appending `/search` or `/images`. A tool's `api_key` similarly
+overrides `SERPER_API_KEY`; neither tool inherits the other's endpoint or key.
+Both settings are read from the same captured tool configuration, so a hot
+reload cannot pair the old provider's endpoint with the new provider's key.
+
+Overrides must be absolute `http://` or `https://` URLs with a host and valid
+port. Query strings and fragments (including empty `?`/`#` markers) are rejected
+before HTTP. Invalid overrides return a configuration error naming
+`base_url`/`SERPER_BASE_URL` without exposing the configured value; they do not
+fall back to another host.
+
+These are operator-controlled settings, not model-supplied arguments. Choose a
+trusted provider: the key is sent to the configured host in the `X-API-KEY`
+header, never in a query parameter. Endpoint configuration does not change the
+existing validation of returned image URLs or web source filters. The endpoint
+is resolved once before transport so it can remain constant across retry attempts.
+Override debug diagnostics show the effective endpoint without URL credentials,
+query or fragment; result-URL guards do not restrict the operator's API host.
 
 #### Serper source filters
 
@@ -1414,11 +1462,12 @@ models:
 - `TAVILY_API_KEY` - Tavily search API key
 - `BRAVE_SEARCH_API_KEY` - Brave Search API key for `web_search` and `image_search`
 - `SERPER_API_KEY` - Serper (Google Search/Images API) key for `web_search` and `image_search`
+- `SERPER_BASE_URL` - Optional operator-controlled Serper-compatible base URL for both tools; each tool's `base_url` takes precedence. The provider key is sent to the configured host in `X-API-KEY`, never a query parameter. See [Serper endpoints](#serper-endpoints).
 - `SERPLY_API_KEY` - [Serply](https://serply.io) key for `web_search` (Google Search, plus Google News and Google Scholar via `vertical`)
 - `GROUNDROUTE_API_KEY` - GroundRoute meta-search API key for `web_search` and `web_fetch` (routes across Serper, Brave, Exa, Tavily, Firecrawl, Perplexity with gain-share pricing)
 - `SOFYA_API_KEY` - [Sofya](https://sofya.co) key for `web_search` and `web_fetch`
 - `UNBROWSE_API_KEY` - [Unbrowse](https://unbrowse.ai) key for `web_fetch`
-- `BROWSERLESS_TOKEN` - Browserless Cloud token for `web_capture` (optional for self-hosted Browserless)
+- `BROWSERLESS_TOKEN` - Browserless token for `web_fetch` (Browserless provider) and `web_capture`, sent as the `token` query parameter (required by Browserless Cloud and by a self-hosted instance started with `TOKEN`)
 - `DEER_FLOW_PROJECT_ROOT` - Project root for relative runtime paths
 - `DEER_FLOW_CONFIG_PATH` - Custom config file path
 - `DEER_FLOW_EXTENSIONS_CONFIG_PATH` - Custom extensions config file path
