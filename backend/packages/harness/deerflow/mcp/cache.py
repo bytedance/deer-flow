@@ -828,6 +828,7 @@ def get_cached_mcp_tools() -> list[BaseTool]:
     """
     while True:
         retired_pool = None
+        waiting_generation = None
         with _init_condition:
             plan = _plan_mcp_reconciliation_locked()
             if plan is not None:
@@ -837,15 +838,26 @@ def get_cached_mcp_tools() -> list[BaseTool]:
                     logger.info("MCP cache is stale, resetting for re-initialization...")
                 retired_pool = _apply_mcp_reconciliation_locked(plan)
 
+            # Applying a plan always clears the published cache, so this return
+            # cannot skip a retirement produced above.
             if _cache_initialized:
                 return _mcp_tools_cache or []
 
             if _initializing_generation is not None:
-                _init_condition.wait_for(lambda: _initializing_generation is None or _cache_initialized)
-                continue
+                waiting_generation = _initializing_generation
 
+        # Deliver the retirement before every wait/retry path. `reset_session_pool()`
+        # only fences and unlinks the pool, so waiting for another initializer here
+        # would otherwise strand the retired pool's owners without a close signal.
         if retired_pool is not None:
             retired_pool.close_all_sync()
+
+        if waiting_generation is not None:
+            # Re-acquire the condition before waiting so the predicate cannot miss
+            # a wakeup, and wait on the exact generation that was observed.
+            with _init_condition:
+                _init_condition.wait_for(lambda: _cache_initialized or _initializing_generation != waiting_generation)
+            continue
 
         logger.info("MCP tools not initialized, performing lazy initialization...")
         # Only ``get_event_loop()`` may fall back to ``asyncio.run``: a

@@ -207,6 +207,7 @@ def _install_discovery(
     before_bindings=None,
     after_bindings=None,
     fail_after_bindings: bool = False,
+    create_sessions: bool = True,
     hooks: dict | None = None,
 ):
     """Replace ``tools.get_mcp_tools`` with a deterministic stand-in.
@@ -238,6 +239,8 @@ def _install_discovery(
             await after_bindings(servers, pool, bindings)
         if fail_after_bindings:
             raise RuntimeError("discovery failed after binding install")
+        if not create_sessions:
+            return []
         sessions = {}
         for name, binding in bindings.items():
             sessions[name] = await pool.get_session(name, "u:t", servers[name], binding=binding)
@@ -1899,3 +1902,83 @@ async def test_rejected_revision_still_tears_down_the_pool_a_shared_reset_retire
     published = await cache_module.initialize_mcp_tools()
     assert [tool.name for tool in published] == ["A"]
     assert cache_module._cache_initialized is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trigger", ["interceptor", "shared_reset"])
+async def test_reader_waiting_for_discovery_still_cleans_a_retired_pool(reconciler, monkeypatch, tmp_path, trigger):
+    """A reader that waits for discovery must still clean up the pool it retired.
+
+    While a discovery is in flight, a synchronous ``get_cached_mcp_tools()`` reader
+    can observe an interceptor change or a new shared-reset generation and apply a
+    full reconciliation. Its wait/retry branch must not skip the retired pool's
+    teardown: ``reset_session_pool()`` only fences and unlinks the singleton, so the
+    owners only exit once ``close_all_sync()`` runs.
+    """
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    log = _session_log()
+    _record_sessions(monkeypatch, log)
+    servers = {"A": _stdio("cmd-A1")}
+    _write_config(cfg, servers)
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    # A persistent session established before discovery starts.
+    connection = build_servers_config(ExtensionsConfig.model_validate({"mcpServers": servers}))["A"]
+    binding = pool.ensure_binding("A", normalized_connection_fingerprint(connection), domain="deployment")
+    await pool.get_session("A", "task:1", connection, binding=binding)
+    assert log["created"]["cmd-A1"] == 1
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _park(active_servers, active_pool, bindings):
+        entered.set()
+        await release.wait()
+
+    # No sessions from this stub, so the exit log only counts the pre-discovery owner.
+    _install_discovery(monkeypatch, after_bindings=_park, create_sessions=False)
+    claim = asyncio.create_task(cache_module.initialize_mcp_tools())
+    await asyncio.wait_for(entered.wait(), 1)
+
+    if trigger == "interceptor":
+        _write_config(cfg, servers, interceptors=["pkg.trigger:build"])
+    else:
+        _write_remote_marker(cfg, "reset-while-discovery-in-flight")
+
+    applied = threading.Event()
+    real_reset = session_pool_module.reset_session_pool
+
+    def _record_reset():
+        retired = real_reset()
+        applied.set()
+        return retired
+
+    monkeypatch.setattr(session_pool_module, "reset_session_pool", _record_reset)
+
+    outcome: dict = {}
+
+    def _run_reader():
+        outcome["tools"] = cache_module.get_cached_mcp_tools()
+
+    reader = threading.Thread(target=_run_reader)
+    reader.start()
+    assert applied.wait(timeout=5), "the reader never retired the pool"
+    release.set()
+    assert await asyncio.wait_for(claim, 5) == []
+    reader.join(timeout=10)
+    assert not reader.is_alive(), "the cache reader did not settle"
+
+    # Fencing alone is not the assertion: the retired pool's owner must have exited.
+    assert pool._retired is True
+    assert session_pool_module.get_session_pool() is not pool
+    await _wait_until(
+        lambda: log["exited"].get("cmd-A1") == 1,
+        message="the retired pool's owner must be torn down even when the reader waits",
+    )
+    assert log["exit_started"]["cmd-A1"] == 1
+    assert log["exited"]["cmd-A1"] == 1
+    assert pool._entries == {}
+    assert pool._inflight == {}
+    assert outcome.get("tools") == []
