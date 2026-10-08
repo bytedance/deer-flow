@@ -12,7 +12,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langgraph.checkpoint.base import empty_checkpoint, uuid6
 from langgraph.checkpoint.memory import InMemorySaver
 
-from deerflow.runtime import RunStatus
+from deerflow.runtime import DisconnectMode, RunRecord, RunStatus
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 
@@ -181,7 +181,7 @@ class FakeEventStore:
     def __init__(self, rows):
         self.rows = rows
 
-    async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None):
+    async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None, user_id=None):
         return self.rows[-limit:]
 
 
@@ -352,7 +352,11 @@ def test_run_wait_readers_preserve_terminal_error_without_checkpoint() -> None:
 
     thread_result, stateless_result = asyncio.run(_scenario())
 
-    expected = {"status": "error", "error": "run failed before checkpoint"}
+    expected = {
+        "status": "error",
+        "error": "run failed before checkpoint",
+        "__error__": {"error": "RunError", "message": "run failed before checkpoint"},
+    }
     assert thread_result == expected
     assert stateless_result == expected
 
@@ -400,7 +404,12 @@ def test_run_wait_readers_preserve_terminal_error_when_accessor_builder_fails(ro
 
     result = asyncio.run(_scenario())
 
-    assert result == {"status": "error", "error": "run failed before checkpoint"}
+    expected = {
+        "status": "error",
+        "error": "run failed before checkpoint",
+        "__error__": {"error": "RunError", "message": "run failed before checkpoint"},
+    }
+    assert result == expected
 
 
 def test_prepare_regenerate_payload_returns_clean_input_and_base_checkpoint():
@@ -1532,18 +1541,28 @@ def test_prepare_regenerate_payload_rejects_non_latest_assistant():
     assert exc.value.detail == "Only the latest assistant message can be regenerated"
 
 
-def test_prepare_regenerate_payload_falls_back_to_matching_run_when_events_are_missing():
+@pytest.mark.parametrize(
+    ("content", "summary"),
+    [
+        ("answer", "answer"),
+        ("<think>Reasoning.</think>answer", "<think>Reasoning.</think>answer"),
+        ("<think>Reasoning.</think>answer", "answer"),
+        ("<think>" + "r" * 2400 + "</think>" + "a" * 2500, "a" * 2000),
+    ],
+    ids=["plain", "legacy-summary", "visible-summary", "long-reasoning"],
+)
+def test_prepare_regenerate_payload_falls_back_to_matching_run_when_events_are_missing(content, summary):
     from app.gateway.routers.thread_runs import _prepare_regenerate_payload
 
     human = HumanMessage(id="human-1", content="question")
-    ai = AIMessage(id="ai-1", content="answer")
+    ai = AIMessage(id="ai-1", content=content)
     base = _checkpoint("ckpt-base", [])
     after_human = _checkpoint("ckpt-human", [human])
     latest = _checkpoint("ckpt-ai", [human, ai])
     checkpointer = FakeCheckpointer([latest, after_human, base])
     run_manager = FakeRunManager(
         [
-            SimpleNamespace(run_id="run-latest", status=RunStatus.success, last_ai_message="answer"),
+            RunRecord(run_id="run-latest", thread_id="thread-1", assistant_id="lead_agent", status=RunStatus.success, on_disconnect=DisconnectMode.continue_, last_ai_message=summary),
             SimpleNamespace(run_id="run-older", status=RunStatus.error, last_ai_message="answer"),
         ]
     )

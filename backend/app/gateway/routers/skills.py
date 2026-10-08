@@ -280,7 +280,10 @@ async def _parse_skill_archive_form(request: Request) -> FormData:
 
 async def _install_skill_archive(archive_path: Path, config: AppConfig) -> SkillInstallResponse:
     async def _persist_install() -> SkillInstallResponse:
-        result = await _get_user_skill_storage(config).ainstall_skill_from_archive(archive_path)
+        # A cold user-scoped storage resolves the project root and builds
+        # absolute paths on construction: blocking filesystem IO.
+        storage = await asyncio.to_thread(_get_user_skill_storage, config)
+        result = await storage.ainstall_skill_from_archive(archive_path)
         # The install and its prompt-cache refresh settle as one drained unit:
         # a cancelled caller must not leave the freshly installed skill absent
         # from (or a stale one still present in) the skills prompt cache.
@@ -573,14 +576,23 @@ async def update_custom_skill(skill_name: str, body: CustomSkillUpdateRequest, r
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
-        storage = _get_user_skill_storage(config)
-        storage.ensure_custom_skill_is_editable(skill_name)
-        storage.validate_skill_markdown_content(skill_name, body.content)
+
+        def _check_editable_content() -> SkillStorage:
+            # Worker thread: storage construction, the editability probes, and
+            # the frontmatter validation (which round-trips the draft through a
+            # temporary directory) are blocking filesystem IO — the same rule
+            # rollback_custom_skill applies before its scan.
+            storage = _get_user_skill_storage(config)
+            storage.ensure_custom_skill_is_editable(skill_name)
+            storage.validate_skill_markdown_content(skill_name, body.content)
+            return storage
+
+        storage = await asyncio.to_thread(_check_editable_content)
         static_findings = await _scan_static_skill_markdown_or_raise(skill_name, body.content, app_config=config)
         scan = await scan_skill_content(body.content, executable=False, location=f"{skill_name}/{SKILL_MD_FILE}", app_config=config, static_findings=static_findings)
         if scan.decision == "block":
             raise HTTPException(status_code=400, detail=f"Security scan blocked the edit: {scan.reason}")
-        prev_content = storage.read_custom_skill(skill_name)
+        prev_content = await asyncio.to_thread(storage.read_custom_skill, skill_name)
 
         async def _persist_edit() -> None:
             # The write and its history entry must settle together, and the
@@ -620,7 +632,9 @@ async def delete_custom_skill(skill_name: str, request: Request, config: AppConf
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
-        storage = _get_user_skill_storage(config)
+        # A cold user-scoped storage resolves the project root and builds
+        # absolute paths on construction: blocking filesystem IO.
+        storage = await asyncio.to_thread(_get_user_skill_storage, config)
 
         async def _persist_delete() -> None:
             # Same cancellation contract as the edit and rollback tails: the
@@ -834,13 +848,14 @@ def _write_extensions_skill_state(
     "/skills/{skill_name}",
     response_model=SkillResponse,
     summary="Update Skill",
-    description="Update a skill's enabled status by modifying the extensions_config.json file.",
+    description=("Update a skill's enabled status (admin only). Public skills persist to the shared extensions_config.json; custom/legacy skills persist to per-user storage when available, otherwise to the shared configuration."),
 )
 async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Request, config: AppConfig = Depends(get_config)) -> SkillResponse:
-    # Enabling/disabling a skill writes the shared extensions_config.json and
-    # refreshes the system prompt for every tenant, so it is a global mutation
-    # (there is no per-user skill state). Guard it as admin-only like the other
-    # global config writes, matching the MCP router.
+    # Keep skill toggles admin-only, including user-scoped custom/legacy skills.
+    # Public state uses shared extensions_config.json; custom/legacy state uses
+    # per-user storage when available, falling back to shared config otherwise.
+    # Public toggles clear all users' caches; custom/legacy refresh only the caller,
+    # even in the shared-config fallback (other users' cached state may be stale).
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
@@ -889,8 +904,9 @@ async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Reque
 
             # PUBLIC skill enabled state lives in the global extensions_config.json
             # and affects every user, so the prompt cache for ALL users must be
-            # invalidated. CUSTOM/LEGACY skill state is per-user so only that
-            # user's cache needs to be dropped. The state write and its cache
+            # invalidated. CUSTOM/LEGACY drops only the caller's cache, including the
+            # non-user-scoped fallback above, where other users' entries may stay stale.
+            # The state write and its cache
             # invalidation settle as one drained unit: a cancelled caller must
             # not leave the prompt cache serving the previous enablement.
             if skill.category == SkillCategory.PUBLIC:

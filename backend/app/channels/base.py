@@ -39,6 +39,10 @@ class ChannelUnavailable(Exception):
     """
 
 
+class ChannelStopTimeout(RuntimeError):
+    """A channel still owns a live provider worker after bounded teardown."""
+
+
 @dataclass(eq=False, slots=True)
 class _ThreadsafeSubmission:
     coroutine: Coroutine[Any, Any, Any]
@@ -117,13 +121,29 @@ class Channel(ABC):
         platform identity (e.g. the ``external_account_id`` recorded by the
         bind flow). Used by the notification delivery worker to deliver
         scheduled-task outcomes. Channels without proactive push support keep
-        the default, which raises so the delivery outbox records a failure
-        instead of silently dropping the notification.
+        the default, which raises so a stray delivery is recorded as a failure
+        instead of being silently dropped.
 
         Connectivity preconditions should raise :class:`ChannelUnavailable`
         (not a generic ``RuntimeError``) so the outbox can park the row without
         consuming its retry budget. Platform rejections of a well-formed send
         remain ordinary exceptions that count as attempts.
+
+        The scheduler never imports channel classes: it reads the static
+        ``proactive_notifications`` flag in ``app/channels/capabilities.py``,
+        and providers without it get no outbox rows at all. To add proactive
+        push to a provider:
+
+        1. override this method and return only after the platform ACKs the send;
+        2. raise :class:`ChannelUnavailable` for transient transport failures
+           (not connected, socket closed, timeout); any other exception counts
+           against the retry budget;
+        3. set ``proactive_notifications`` to ``True`` for that provider in
+           ``CHANNEL_CAPABILITIES`` (a test fails while the flag and this
+           override disagree).
+
+        The outbox, deduplication, retries, localized text and the Settings
+        label are shared and need no provider code.
         """
         if not self.is_running:
             raise ChannelUnavailable(f"channel '{self.name}' is not running")
@@ -195,13 +215,42 @@ class Channel(ABC):
         reservation: InboundReservation | None = None,
     ) -> bool:
         """Submit provider-thread work while retaining its real asyncio Task."""
+        return (
+            self._submit_threadsafe_coroutine_future(
+                coroutine,
+                loop,
+                name=name,
+                msg_id=msg_id,
+                reservation=reservation,
+            )
+            is not None
+        )
+
+    def _submit_threadsafe_coroutine_future(
+        self,
+        coroutine: Coroutine[Any, Any, T],
+        loop: asyncio.AbstractEventLoop | None,
+        *,
+        name: str,
+        msg_id: Any,
+        reservation: InboundReservation | None = None,
+    ) -> Future[T] | None:
+        """Like ``_submit_threadsafe_coroutine``, returning the completion future.
+
+        ``None`` means the work was refused (and the reservation released).
+        The future settles on every path: the task's result or exception, or
+        cancellation when ``_close_and_drain_threadsafe_futures`` stops the
+        work before or while it runs. Await it from another loop through
+        ``asyncio.shield(asyncio.wrap_future(...))`` so cancelling the waiter
+        never cancels the shared future the finalizer still has to settle.
+        """
 
         with self._threadsafe_submissions_lock:
             if not self._threadsafe_submission_intake_open or loop is None or not loop.is_running():
                 coroutine.close()
                 if reservation is not None:
                     reservation.release()
-                return False
+                return None
 
             submission = _ThreadsafeSubmission(
                 coroutine=coroutine,
@@ -219,8 +268,8 @@ class Channel(ABC):
                 coroutine.close()
                 if reservation is not None:
                     reservation.release()
-                return False
-        return True
+                return None
+        return submission.completion
 
     def _start_threadsafe_submission(self, submission: _ThreadsafeSubmission) -> None:
         """Create the owned Task on its event loop or finish a pre-start cancel."""

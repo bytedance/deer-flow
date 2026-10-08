@@ -28,7 +28,7 @@ _refresh_compose_cmd() {
 }
 _refresh_compose_cmd
 
-# docker-compose-dev.yaml marks its env_file entries optional with the long-form
+# Both compose files mark their env_file entries optional with the long-form
 # `- path: ... / required: false` syntax, understood by Compose v2.24.0 and up.
 # Older clients abort while parsing the file, before any preflight below can run.
 COMPOSE_MIN_VERSION="2.24.0"

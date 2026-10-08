@@ -4,6 +4,7 @@ import {
   CheckIcon,
   FileIcon,
   MessagesSquareIcon,
+  PuzzleIcon,
   SparklesIcon,
   UploadIcon,
   XIcon,
@@ -19,6 +20,12 @@ import {
 } from "react";
 
 import type { ConversationReference } from "@/core/conversation-references";
+import type { ExtensionMention } from "@/core/extensions/contracts";
+import {
+  extensionMentionId,
+  MAX_EXTENSION_MENTIONS,
+} from "@/core/extensions/mentions";
+import { useExtensionMentions } from "@/core/extensions/use-mentions";
 import { useI18n } from "@/core/i18n/hooks";
 import { useInfiniteProjectDocuments } from "@/core/projects/hooks";
 import type { ProjectDocument } from "@/core/projects/types";
@@ -34,6 +41,7 @@ export type MentionSelection =
   | { kind: "skill"; skill: Skill }
   | { kind: "file"; document: ProjectDocument }
   | { kind: "conversation"; reference: ConversationReference }
+  | { kind: "extension"; reference: ExtensionMention }
   | { kind: "upload" };
 export type MentionPickerHandle = {
   onKeyDown: (event: KeyboardEvent<HTMLElement>) => void;
@@ -58,6 +66,7 @@ export function MentionPicker({
   capability,
   onActiveOptionChange,
   selectedSkills,
+  selectedExtensions = [],
   references,
   threadId,
   projectId,
@@ -83,6 +92,7 @@ export function MentionPicker({
   };
   onActiveOptionChange?: (id: string | undefined) => void;
   selectedSkills?: string[];
+  selectedExtensions?: string[];
   references: ConversationReference[];
   threadId: string;
   projectId?: string | null;
@@ -94,6 +104,7 @@ export function MentionPicker({
 }) {
   const { t } = useI18n();
   const labels = t.inputBox;
+  const untitled = t.pages.untitled;
   const documents = useInfiniteProjectDocuments(projectId ?? "", {
     enabled: !!projectId,
   });
@@ -105,6 +116,10 @@ export function MentionPicker({
   const rootRef = useRef<HTMLDivElement>(null);
   const compositionEndedAt = useRef(-Infinity);
   const filter = (searchInput ? search : query).toLocaleLowerCase();
+  const extensions = useExtensionMentions(
+    searchInput ? search : query,
+    threadId,
+  );
   const options = useMemo(() => {
     const result: Option[] = skills
       .filter((skill) => skill.enabled)
@@ -142,12 +157,12 @@ export function MentionPicker({
         );
         result.push({
           id: `conversation:${thread.thread_id}`,
-          label: titleOfThread(thread),
+          label: titleOfThread(thread, untitled),
           selection: {
             kind: "conversation",
             reference: {
               threadId: thread.thread_id,
-              title: titleOfThread(thread),
+              title: titleOfThread(thread, untitled),
               agentName: agentNameOfThread(thread),
             },
           },
@@ -161,6 +176,19 @@ export function MentionPicker({
         .toLocaleLowerCase()
         .includes(filter),
     );
+    for (const item of extensions.items) {
+      const id = extensionMentionId(item);
+      filtered.push({
+        id: `extension:${id}`,
+        label: item.label,
+        description: item.description,
+        selection: { kind: "extension", reference: item },
+        selected: selectedExtensions.includes(id),
+        disabled:
+          !selectedExtensions.includes(id) &&
+          new Set(selectedExtensions).size >= MAX_EXTENSION_MENTIONS,
+      });
+    }
     filtered.push({
       id: "upload",
       label: labels.mentionUpload,
@@ -168,6 +196,8 @@ export function MentionPicker({
     });
     return filtered;
   }, [
+    extensions.items,
+    selectedExtensions,
     skills,
     selectedSkills,
     documents.data,
@@ -178,6 +208,7 @@ export function MentionPicker({
     references,
     filter,
     labels,
+    untitled,
   ]);
   const available = options.filter((option) => !option.disabled);
   const active =
@@ -230,11 +261,13 @@ export function MentionPicker({
         ?.scrollIntoView?.({ block: "nearest" });
   }, [activeOptionId]);
   const loading =
+    extensions.loading ||
     skillsLoading ||
     capability.isLoading ||
     (!!projectId && documents.isPending) ||
     (capability.enabled && conversations.isPending);
   const failed =
+    extensions.failed ||
     !!capability.error ||
     !!skillsError ||
     (!!projectId && documents.isError) ||
@@ -247,6 +280,7 @@ export function MentionPicker({
       title: labels.mentionConversations,
       Icon: MessagesSquareIcon,
     },
+    { kind: "extension", title: labels.mentionExtensions, Icon: PuzzleIcon },
     { kind: "upload", title: "", Icon: UploadIcon },
   ] as const;
   return (
@@ -364,6 +398,7 @@ export function MentionPicker({
           <button
             type="button"
             onClick={() => {
+              if (extensions.failed) extensions.retry();
               if (capability.error) void capability.refetch?.();
               if (skillsError) void onRetrySkills?.();
               if (projectId && documents.isError) void documents.refetch();

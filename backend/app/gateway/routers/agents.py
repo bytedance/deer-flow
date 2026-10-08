@@ -3,14 +3,14 @@
 import asyncio
 import logging
 import re
-from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException, Request, Response
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.gateway.authz import require_permission
+from app.gateway.persistent_writes import run_drained_write
 from deerflow.agents.memory.manager import get_memory_manager
 from deerflow.config.agents_api_config import get_agents_api_config
 from deerflow.config.agents_config import (
@@ -27,42 +27,9 @@ from deerflow.config.paths import get_paths
 from deerflow.knowledge_scope import KnowledgeScope, canonicalize_knowledge_scope
 from deerflow.persistence.agents import AgentDeleteOutcome, AgentExistsError, get_agent_store
 from deerflow.runtime.user_context import get_effective_user_id
-from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["agents"])
-
-
-async def _drained_write[**P, T](
-    action: str,
-    func: Callable[P, T],
-    expected_errors: tuple[type[Exception], ...] = (),
-    /,
-    *args: P.args,
-    **kwargs: P.kwargs,
-) -> T:
-    """Run a persistent write off the event loop and drain it across cancellation.
-
-    A client that disconnects mid-request cancels the handler task: a bare
-    ``asyncio.to_thread`` either cancels a still-queued worker — the write
-    silently never happens — or detaches from a running one, dropping its
-    failure because the handler's ``except`` never runs. ``await_drained``
-    lets the worker finish first; expected domain errors re-raise unlogged
-    (the caller maps them to a 4xx while still connected), anything else is
-    logged with the exception type only — the text can carry user content.
-    """
-
-    def _logged() -> T:
-        try:
-            return func(*args, **kwargs)
-        except expected_errors:
-            raise
-        except Exception as exc:
-            # Non-cancelled failures are logged again by the outer route handler.
-            logger.error("%s failed (%s)", action, type(exc).__name__)
-            raise
-
-    return await await_drained(asyncio.to_thread(_logged))
 
 
 AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
@@ -132,6 +99,30 @@ class AgentUpdateRequest(BaseModel):
     thinking_enabled: bool | None = Field(default=None, description="Updated per-agent thinking-mode default")
     reasoning_effort: ReasoningEffort | None = Field(default=None, description="Updated per-agent reasoning-effort default")
     soul: str | None = Field(default=None, description="Updated SOUL.md content")
+
+
+class AgentPackageAgent(AgentCreateRequest):
+    """Portable, user-authored portion of a custom agent definition.
+
+    Deliberately excludes ``github`` because its installation binding belongs
+    to the target deployment. Runtime memory, conversations, credentials, and
+    other user state are not part of ``AgentConfig`` and are never read while
+    building this document.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    memory_enabled: bool = Field(default=True, description="Whether the imported agent may use memory")
+
+
+class AgentPackage(BaseModel):
+    """Versioned interchange document for one custom agent."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    format: Literal["deerflow.custom-agent"]
+    version: Literal[1]
+    agent: AgentPackageAgent
 
 
 def _validate_agent_name(name: str) -> None:
@@ -252,6 +243,43 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
     )
 
 
+def _build_agent_config(body: AgentCreateRequest, normalized_name: str, *, memory_enabled: bool = True) -> dict:
+    """Build the persisted config shared by ordinary creation and import."""
+    config_data: dict = {"name": normalized_name}
+    if body.display_name:
+        config_data["display_name"] = body.display_name
+    if body.description:
+        config_data["description"] = body.description
+    if body.tool_groups is not None:
+        config_data["tool_groups"] = body.tool_groups
+    if body.knowledge_scope is not None:
+        config_data["knowledge_scope"] = canonicalize_knowledge_scope(body.knowledge_scope)
+    if body.mcp_plugins is not None:
+        config_data["mcp_plugins"] = body.mcp_plugins
+    if body.skills is not None:
+        config_data["skills"] = body.skills
+    if body.allowed_subagents is not None:
+        config_data["allowed_subagents"] = body.allowed_subagents
+    if not memory_enabled:
+        config_data["memory_enabled"] = False
+    _apply_model_behavior(config_data, body)
+    return config_data
+
+
+async def _persist_new_agent(body: AgentCreateRequest, normalized_name: str, user_id: str, *, memory_enabled: bool = True) -> AgentResponse:
+    """Atomically create and reload one user-scoped agent."""
+    config_data = _build_agent_config(body, normalized_name, memory_enabled=memory_enabled)
+
+    def _create_agent() -> AgentResponse:
+        store = get_agent_store()
+        store.create(normalized_name, config_data, body.soul, user_id=user_id)
+        logger.info("Created agent '%s'", normalized_name)
+        agent_cfg = load_agent_config(normalized_name, user_id=user_id)
+        return _agent_config_to_response(agent_cfg, include_soul=True, user_id=user_id)
+
+    return await run_drained_write("Create agent", _create_agent, (AgentExistsError,))
+
+
 @router.get(
     "/agents",
     response_model=AgentsListResponse,
@@ -314,6 +342,88 @@ async def check_agent_name(name: str, request: Request) -> dict:
 
     exists = await asyncio.to_thread(_exists)
     return {"available": not exists, "name": normalized}
+
+
+@router.post(
+    "/agents/import",
+    response_model=AgentResponse,
+    status_code=201,
+    summary="Import Custom Agent",
+    description="Create a user-scoped custom agent from a versioned DeerFlow agent package without importing runtime state.",
+)
+@require_permission("agents", "write")
+async def import_agent_package(body: AgentPackage, request: Request, name: str | None = None) -> AgentResponse:
+    """Import a portable definition, optionally under a different name."""
+    _require_agents_api_enabled()
+    target_name = name or body.agent.name
+    _validate_agent_name(target_name)
+    _validate_model_exists(body.agent.model)
+    normalized_name = _normalize_agent_name(target_name)
+    user_id = get_effective_user_id()
+
+    try:
+        return await _persist_new_agent(
+            body.agent,
+            normalized_name,
+            user_id,
+            memory_enabled=body.agent.memory_enabled,
+        )
+    except AgentExistsError:
+        raise HTTPException(status_code=409, detail=f"Agent '{normalized_name}' already exists")
+    except Exception as e:
+        logger.error("Failed to import agent '%s' (%s)", normalized_name, type(e).__name__, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to import agent")
+
+
+@router.get(
+    "/agents/{name}/export",
+    response_model=AgentPackage,
+    response_model_exclude_none=True,
+    summary="Export Custom Agent",
+    description="Export a versioned custom-agent definition and SOUL without memory, conversations, credentials, or deployment bindings.",
+)
+@require_permission("agents", "read")
+async def export_agent_package(name: str, request: Request, response: Response) -> AgentPackage:
+    """Export the portable portion of a caller-owned custom agent."""
+    _require_agents_api_enabled()
+    _validate_agent_name(name)
+    normalized_name = _normalize_agent_name(name)
+    user_id = get_effective_user_id()
+
+    def _export() -> AgentPackage:
+        agent_cfg = load_agent_config(normalized_name, user_id=user_id)
+        soul = load_agent_soul(normalized_name, user_id=user_id) or ""
+        return AgentPackage(
+            format="deerflow.custom-agent",
+            version=1,
+            agent=AgentPackageAgent(
+                name=agent_cfg.name,
+                display_name=agent_cfg.display_name,
+                description=agent_cfg.description,
+                model=agent_cfg.model,
+                tool_groups=agent_cfg.tool_groups,
+                mcp_plugins=agent_cfg.mcp_plugins,
+                knowledge_scope=agent_cfg.knowledge_scope,
+                skills=agent_cfg.skills,
+                allowed_subagents=agent_cfg.allowed_subagents,
+                model_settings=agent_cfg.model_settings,
+                thinking_enabled=agent_cfg.thinking_enabled,
+                reasoning_effort=agent_cfg.reasoning_effort,
+                memory_enabled=agent_cfg.memory_enabled,
+                soul=soul,
+            ),
+        )
+
+    try:
+        package = await asyncio.to_thread(_export)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Agent '{normalized_name}' not found")
+    except Exception as e:
+        logger.error("Failed to export agent '%s' (%s)", normalized_name, type(e).__name__, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to export agent")
+
+    response.headers["Content-Disposition"] = f'attachment; filename="{normalized_name}.deerflow-agent.json"'
+    return package
 
 
 @router.get(
@@ -381,37 +491,8 @@ async def create_agent_endpoint(body: AgentCreateRequest, request: Request) -> A
     normalized_name = _normalize_agent_name(body.name)
     user_id = get_effective_user_id()
 
-    # Config document — only the fields the caller set, matching the historical
-    # writer (an omitted field stays absent rather than being materialized).
-    config_data: dict = {"name": normalized_name}
-    if body.display_name:
-        config_data["display_name"] = body.display_name
-    if body.description:
-        config_data["description"] = body.description
-    if body.tool_groups is not None:
-        config_data["tool_groups"] = body.tool_groups
-    if body.knowledge_scope is not None:
-        config_data["knowledge_scope"] = canonicalize_knowledge_scope(body.knowledge_scope)
-    if body.mcp_plugins is not None:
-        config_data["mcp_plugins"] = body.mcp_plugins
-    if body.skills is not None:
-        config_data["skills"] = body.skills
-    if body.allowed_subagents is not None:
-        config_data["allowed_subagents"] = body.allowed_subagents
-    # model / model_settings / thinking_enabled / reasoning_effort (issue #4336).
-    _apply_model_behavior(config_data, body)
-
-    def _create_agent() -> AgentResponse:
-        # Worker thread: existence checks + persistence (file IO or a DB round
-        # trip) must stay off the event loop.
-        store = get_agent_store()
-        store.create(normalized_name, config_data, body.soul, user_id=user_id)
-        logger.info("Created agent '%s'", normalized_name)
-        agent_cfg = load_agent_config(normalized_name, user_id=user_id)
-        return _agent_config_to_response(agent_cfg, include_soul=True, user_id=user_id)
-
     try:
-        return await _drained_write("Create agent", _create_agent, (AgentExistsError,))
+        return await _persist_new_agent(body, normalized_name, user_id)
     except AgentExistsError:
         raise HTTPException(status_code=409, detail=f"Agent '{normalized_name}' already exists")
     except Exception as e:
@@ -536,7 +617,7 @@ async def update_agent(name: str, body: AgentUpdateRequest, request: Request) ->
             def _update_agent() -> None:
                 get_agent_store().update(name, updated, body.soul, user_id=user_id)
 
-            await _drained_write("Update agent", _update_agent)
+            await run_drained_write("Update agent", _update_agent)
 
         logger.info(f"Updated agent '{name}'")
 
@@ -635,7 +716,7 @@ async def update_user_profile(body: UserProfileUpdateRequest, request: Request) 
         return user_md_path
 
     try:
-        user_md_path = await _drained_write("Update user profile", _write_profile)
+        user_md_path = await run_drained_write("Update user profile", _write_profile)
         logger.info(f"Updated USER.md at {user_md_path}")
         return UserProfileResponse(content=body.content or None)
     except Exception as e:
@@ -668,7 +749,7 @@ async def delete_agent(name: str, request: Request) -> None:
     try:
         # Off the event loop: resolve store + cancel → delete → cancel-on-success
         # (get_agent_store / memory manager do blocking config and FS I/O).
-        outcome = await _drained_write("Delete agent", _delete_agent_with_memory_cancel, (), name, user_id)
+        outcome = await run_drained_write("Delete agent", _delete_agent_with_memory_cancel, (), name, user_id)
     except Exception as e:
         logger.error(f"Failed to delete agent '{name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to delete agent: {str(e)}")

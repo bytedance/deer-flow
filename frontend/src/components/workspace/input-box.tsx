@@ -78,6 +78,10 @@ import {
   buildConversationReferenceMetadata,
   type ConversationReference,
 } from "@/core/conversation-references";
+import {
+  extensionMentionId,
+  MAX_EXTENSION_MENTIONS,
+} from "@/core/extensions/mentions";
 import { useConversationReferencesCapability } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 import { polishInputDraft } from "@/core/input-polish/api";
@@ -97,7 +101,10 @@ import {
   supportsThinking as modelSupportsThinking,
 } from "@/core/models/reasoning";
 import { attachProjectDocument } from "@/core/projects/api";
-import { useStagedProjectAttachments } from "@/core/projects/composer-attach";
+import {
+  retireProjectAttachments,
+  useStagedProjectAttachments,
+} from "@/core/projects/composer-attach";
 import {
   buildReferenceMessageMetadata,
   type SidecarContext,
@@ -114,6 +121,7 @@ import {
   getSessionComposerDraftStorage,
   readComposerDraft,
   resolveComposerDraft,
+  retireSentComposerDraft,
   type ComposerDraft,
   writeComposerDraft,
 } from "@/core/threads/composer-draft";
@@ -169,6 +177,7 @@ import {
   type SlashCommandSuggestion,
 } from "./input-box-helpers";
 import {
+  extensionMentionMetadata,
   inlineReferences,
   reconcileConversationReferences,
   MAX_EXPLICIT_SKILLS,
@@ -179,6 +188,7 @@ import {
   referenceCaret,
   focusReferenceAt,
   renderReferenceEditor,
+  selectReferenceForDeletion,
 } from "./mentions/inline-references";
 import {
   MentionPicker,
@@ -519,6 +529,9 @@ export function InputBox({
   const projectReferenceCache = useRef(
     new Map<string, (typeof projectAttachments)[number]>(),
   );
+  const conversationReferenceCache = useRef(
+    new Map<string, ConversationReference>(),
+  );
   useLayoutEffect(() => {
     projectReferenceCache.current.clear();
     setInlineEditorActive(false);
@@ -532,6 +545,10 @@ export function InputBox({
         );
     }
   }, [projectAttachments]);
+  useLayoutEffect(() => {
+    for (const reference of conversationReferences)
+      conversationReferenceCache.current.set(reference.threadId, reference);
+  }, [conversationReferences]);
   const inlineCompositionEndedAt = useRef(-Infinity);
   const goalRequestStateRef = useRef(createGoalRequestState());
   const compactRequestStateRef = useRef(createGoalRequestState());
@@ -571,6 +588,10 @@ export function InputBox({
   } | null>(null);
   const draftSaveTimerRef = useRef<number | null>(null);
   const draftSaveGenerationRef = useRef(0);
+  // Bumped whenever the composer stops showing a conversation (switch or
+  // unmount). A send's onSent can arrive after an attachment upload, when
+  // the composer that sent it shows another conversation or is gone.
+  const composerLifetimeRef = useRef(0);
 
   const [followups, setFollowups] = useState<string[]>([]);
   const { data: suggestionsConfig } = useSuggestionsConfig();
@@ -896,9 +917,10 @@ export function InputBox({
   }, [cancelDraftSaveTimer]);
   const scheduleDraftSave = useCallback(
     (draft: ComposerDraft, key = draftKey) => {
-      // An accepted attachment send keeps its text visible until upload finishes.
-      // Reference cleanup can rerun this effect meanwhile; do not resurrect the
-      // accepted snapshot. Actual input edits release it, even for identical text.
+      // An accepted attachment send keeps its text visible until its submit
+      // resolves. Reference cleanup can rerun this effect meanwhile; do not
+      // resurrect the accepted snapshot. Actual input edits release it, even
+      // for identical text.
       const accepted = acceptedDraftRef.current;
       if (
         accepted?.key === key &&
@@ -1002,9 +1024,11 @@ export function InputBox({
   }, [thread.messages]);
 
   useLayoutEffect(() => {
+    composerLifetimeRef.current += 1;
     promptHistoryIndexRef.current = null;
     promptHistoryDraftRef.current = "";
     setTextInput("");
+    conversationReferenceCache.current.clear();
     setConversationReferences([]);
     setMentionQuery(null);
     setMentionButtonOpen(false);
@@ -1019,6 +1043,7 @@ export function InputBox({
     latestDraftRef.current = null;
     invalidateDraftSaveTimer();
     return () => {
+      composerLifetimeRef.current += 1;
       mentionEpoch.current += 1;
       flushLatestDraft(draftKey);
     };
@@ -1415,12 +1440,13 @@ export function InputBox({
           ),
         );
       }
-      const activeConversations = reconcileConversationReferences(
+      const reconciledDraft = reconcileConversationReferences(
         textInput.value,
         conversationReferences,
         conversationCapability,
         threadId,
-      ).references;
+      );
+      const activeConversations = reconciledDraft.references;
       const referenceIds = activeConversations.map(
         (reference) => reference.threadId,
       );
@@ -1454,12 +1480,27 @@ export function InputBox({
         toast.warning(t.inputBox.mentionMultipleSkills);
         return Promise.reject(new Error("Too many skill references."));
       }
+      const extensionMetadata = extensionMentionMetadata(textInput.value);
+      if (
+        (extensionMetadata.extension_mentions?.length ?? 0) >
+        MAX_EXTENSION_MENTIONS
+      ) {
+        toast.warning(t.inputBox.mentionExtensionsLimit);
+        return Promise.reject(new Error("Too many extension mentions"));
+      }
       pendingDraftSubmissionRef.current = {
         key: draftKey,
         text: textInput.value,
         skillName: null,
       };
+      // What this send carries, so a late onSent retires only that.
+      const sendingLifetime = composerLifetimeRef.current;
+      const sentDraftTexts = [textInput.value, reconciledDraft.text];
+      const sentAttachmentPaths = new Set(
+        projectAttachments.map((attachment) => attachment.virtual_path),
+      );
       const additionalKwargs = {
+        ...extensionMetadata,
         ...(skillReferences.length
           ? { skill_references: skillReferences }
           : {}),
@@ -1483,9 +1524,23 @@ export function InputBox({
         ...(referenceIds.length
           ? { conversationReferences: referenceIds }
           : {}),
-        // Clear one-time state only once the send genuinely proceeds. If the
-        // send is dropped by the in-flight guard, `onSent` never fires.
+        // Clear one-time state only once the send is genuinely dispatched.
+        // `onSent` never fires for a dropped send or a failed attachment
+        // upload, so a retry keeps its quotes, references and staged files.
         onSent: () => {
+          if (composerLifetimeRef.current !== sendingLifetime) {
+            // The upload finished after the composer moved to another
+            // conversation or unmounted. Leave live state alone and retire
+            // only what this send persisted, keeping anything a later
+            // composer saved or staged since.
+            retireSentComposerDraft(
+              getSessionComposerDraftStorage(),
+              draftKey,
+              sentDraftTexts,
+            );
+            retireProjectAttachments(threadId, projectAttachments);
+            return;
+          }
           setMentionQuery(null);
           setMentionButtonOpen(false);
           if (pendingDraftSubmissionRef.current?.key === draftKey) {
@@ -1501,7 +1556,11 @@ export function InputBox({
           }
           sidecar?.clearConversationQuotes(quoteIds);
           setConversationReferences([]);
-          setProjectAttachments([]);
+          setProjectAttachments((previous) =>
+            previous.filter(
+              (attachment) => !sentAttachmentPaths.has(attachment.virtual_path),
+            ),
+          );
         },
       };
       const submit = () => onSubmit?.(message, submitOptions);
@@ -1542,6 +1601,7 @@ export function InputBox({
       sidecar,
       t.inputBox.suggestionPlaceholderRequired,
       t.inputBox.mentionMultipleSkills,
+      t.inputBox.mentionExtensionsLimit,
       conversationCapability,
       threadId,
       uploadLimits,
@@ -1836,7 +1896,9 @@ export function InputBox({
           ? selection.skill.name
           : selection.kind === "conversation"
             ? selection.reference.threadId
-            : null;
+            : selection.kind === "extension"
+              ? extensionMentionId(selection.reference)
+              : null;
       const selected =
         selectionId &&
         inlineReferences(originalText).some(
@@ -1873,6 +1935,12 @@ export function InputBox({
           "conversation",
           selection.reference.threadId,
           selection.reference.title,
+        );
+      if (selection.kind === "extension")
+        token = referenceToken(
+          "extension",
+          extensionMentionId(selection.reference),
+          selection.reference.label,
         );
       if (selection.kind === "file")
         token = referenceToken(
@@ -2530,15 +2598,17 @@ export function InputBox({
       promptHistoryDraftRef.current = "";
       const nextText = readReferenceEditor(element);
       const refs = inlineReferences(nextText);
-      setConversationReferences(
-        (previous) =>
-          reconcileConversationReferences(
-            nextText,
-            previous,
-            conversationCapability,
-            threadId,
-          ).references,
-      );
+      setConversationReferences((previous) => {
+        const known = new Map(conversationReferenceCache.current);
+        for (const reference of previous)
+          known.set(reference.threadId, reference);
+        return reconcileConversationReferences(
+          nextText,
+          [...known.values()],
+          conversationCapability,
+          threadId,
+        ).references;
+      });
       setProjectAttachments((previous) => {
         const ids = new Set(
           refs.filter((ref) => ref.kind === "file").map((ref) => ref.id),
@@ -2635,6 +2705,16 @@ export function InputBox({
       // over Enter-to-submit. Skip it mid-composition, where Enter belongs to
       // the IME candidate rather than the list.
       if (!isIMEComposing(event, inlineSkillComposingRef.current)) {
+        if (
+          !composerLocked &&
+          !event.altKey &&
+          !event.ctrlKey &&
+          !event.metaKey &&
+          !event.shiftKey &&
+          (event.key === "Backspace" || event.key === "Delete") &&
+          selectReferenceForDeletion(event.currentTarget, event.key)
+        )
+          return;
         if (showMentions) mentionPickerRef.current?.onKeyDown(event);
         if (event.defaultPrevented) return;
         handleCommandSuggestionKeyDown(event);
@@ -2666,6 +2746,7 @@ export function InputBox({
       event.currentTarget.closest("form")?.requestSubmit();
     },
     [
+      composerLocked,
       showMentions,
       handlePromptHistoryKeyDown,
       handleCommandSuggestionKeyDown,
@@ -2856,6 +2937,9 @@ export function InputBox({
           style={{ maxHeight: mentionPlacement.maxHeight }}
         >
           <MentionPicker
+            selectedExtensions={inlineReferences(textInput.value)
+              .filter((ref) => ref.kind === "extension")
+              .map((ref) => ref.id)}
             ref={mentionPickerRef}
             listId={mentionListId}
             query={mentionQuery?.query ?? ""}

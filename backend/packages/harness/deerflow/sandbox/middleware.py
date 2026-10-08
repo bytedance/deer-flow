@@ -32,6 +32,7 @@ from deerflow.sandbox.lease import (
 )
 from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.sandbox_provider import get_initialized_sandbox_provider
+from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 
@@ -223,7 +224,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         if owner_id is not None:
             await get_sandbox_lease_manager(provider).release_async(owner_id)
             return
-        await asyncio.to_thread(provider.release, sandbox_id)
+        await await_drained(asyncio.to_thread(provider.release, sandbox_id))
 
     @override
     def before_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:

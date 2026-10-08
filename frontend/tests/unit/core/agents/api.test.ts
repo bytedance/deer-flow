@@ -29,6 +29,8 @@ rs.mock("@/core/config", () => ({
 import {
   AgentsApiDisabledError,
   checkAgentName,
+  exportAgentPackage,
+  importAgentPackage,
   updateAgent,
 } from "@/core/agents/api";
 import { fetch as fetcher } from "@/core/api/fetcher";
@@ -202,6 +204,144 @@ describe("updateAgent", () => {
     const [, init] = mockedFetch.mock.calls[0]!;
     expect(JSON.parse(init?.body as string)).toEqual({
       allowed_subagents: null,
+    });
+  });
+});
+
+describe("agent portability", () => {
+  const agentPackage = {
+    format: "deerflow.custom-agent" as const,
+    version: 1 as const,
+    agent: {
+      name: "research-lead",
+      description: "Coordinates research",
+      model: "agent-model",
+      tool_groups: ["web"],
+      skills: ["literature-review"],
+      allowed_subagents: ["researcher"],
+      soul: "Delegate and synthesize.",
+    },
+  };
+
+  test("exports the versioned package", async () => {
+    mockedFetch.mockResolvedValueOnce(jsonResponse(200, agentPackage));
+
+    await expect(exportAgentPackage("research lead/unsafe")).resolves.toEqual(
+      agentPackage,
+    );
+    expect(mockedFetch).toHaveBeenCalledWith(
+      "/api/agents/research%20lead%2Funsafe/export",
+    );
+  });
+
+  test("imports the exact package with an optional target name", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(201, { ...agentPackage.agent, name: "research-copy" }),
+    );
+
+    await importAgentPackage(agentPackage, "research-copy");
+
+    const [url, init] = mockedFetch.mock.calls[0]!;
+    expect(url).toBe("/api/agents/import?name=research-copy");
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(init?.body as string)).toEqual(agentPackage);
+  });
+
+  test("surfaces explicit import conflicts from the backend", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(409, { detail: "Agent 'research-lead' already exists" }),
+    );
+
+    await expect(importAgentPackage(agentPackage)).rejects.toThrow(
+      "Agent 'research-lead' already exists",
+    );
+  });
+
+  test.each([
+    {
+      detail: [
+        {
+          type: "string_pattern_mismatch",
+          loc: ["body", "agent", "name"],
+          msg: "String should match pattern '^[A-Za-z0-9-]+$'",
+          input: "research lead",
+        },
+      ],
+      message: "String should match pattern '^[A-Za-z0-9-]+$'",
+    },
+    {
+      detail: [
+        {
+          type: "literal_error",
+          loc: ["body", "format"],
+          msg: "Input should be 'deerflow.custom-agent'",
+          input: "old-format",
+        },
+        {
+          type: "extra_forbidden",
+          loc: ["body", "agent", "github"],
+          msg: "Extra inputs are not permitted",
+          input: {},
+        },
+      ],
+      message:
+        "Input should be 'deerflow.custom-agent'; Extra inputs are not permitted",
+    },
+  ])(
+    "surfaces package validation messages: $message",
+    async ({ detail, message }) => {
+      mockedFetch.mockResolvedValueOnce(jsonResponse(422, { detail }));
+
+      await expect(importAgentPackage(agentPackage)).rejects.toMatchObject({
+        message,
+      });
+    },
+  );
+
+  test("keeps readable validation messages when some entries are malformed", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(422, {
+        detail: [null, { msg: 42 }, { msg: " " }, { msg: "Field required" }],
+      }),
+    );
+
+    await expect(importAgentPackage(agentPackage)).rejects.toMatchObject({
+      message: "Field required",
+    });
+  });
+
+  test.each([
+    null,
+    { detail: { unexpected: "value" } },
+    { detail: [] },
+    { detail: [null, { msg: 42 }] },
+    { detail: " " },
+  ])(
+    "falls back when an import error has no usable detail: %j",
+    async (body) => {
+      mockedFetch.mockResolvedValueOnce(
+        new Response(JSON.stringify(body), {
+          status: 503,
+          statusText: "Service Unavailable",
+        }),
+      );
+
+      await expect(importAgentPackage(agentPackage)).rejects.toMatchObject({
+        message: "Failed to import agent: Service Unavailable",
+      });
+    },
+  );
+
+  test("falls back when an import error body is not JSON", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      new Response("<html>Bad Gateway</html>", {
+        status: 502,
+        statusText: "Bad Gateway",
+      }),
+    );
+
+    await expect(importAgentPackage(agentPackage)).rejects.toMatchObject({
+      message: "Failed to import agent: Bad Gateway",
     });
   });
 });

@@ -481,7 +481,10 @@ count and never emulate it by repeatedly calling `task`.
   implies that all items become live or run at once.
 - Use `batch_status` for compact progress and `cancel_batch` for cancellation.
 - Do not wait for or paste all item results into this run. The Web UI and results
-  export API own progress and result inspection.
+  export API own bulk inspection. When the owner explicitly asks to inspect or
+  synthesize stored results, use `read_batch_result` for selected items in this
+  thread. Follow its bounded continuation/revision contract; never poll for
+  completion or equate execution success with acceptance.
 """
     return f"""<subagent_system>
 ## Subagent Routing: Delegate Only for Clear Net Benefit
@@ -709,7 +712,10 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
   - Call `present_files` for the image before referencing it.
   - Use "```mermaid" for Mermaid diagrams.
 - Multi-task: Better utilize parallel tool calling to call multiple tools at one time for better performance
-- Language Consistency: Keep using the same language as user's
+- Language Consistency: Write everything the user reads in the language of the user's latest message: short notes before tool calls, progress updates,
+  the final answer, and text you store for later such as task titles, scheduled instructions and notes. In a run without a user message, such as a
+  scheduled run, use the language the user wrote the task instructions in; host-added English lines such as the stop rule or notes wrapper do not change it.
+  Keep code, commands, file paths and quoted source text unchanged.
 - Always Respond: Your thinking is internal. You MUST always provide a visible response to the user after thinking.
 </critical_reminders>
 """
@@ -1012,6 +1018,7 @@ def _build_memory_tool_section(*, app_config: AppConfig | None = None, memory_en
     return """<memory_tool_system>
 Memory is running in tool mode. When present, the injected <memory> block contains only global user and history summaries; agent facts are not injected automatically. Use the memory tools to keep durable user memory accurate:
 - Call `memory_search` whenever prior preferences, constraints, corrections, or durable context may be relevant. Do not assume an absent fact does not exist until you have searched with an appropriate query.
+- Call `memory_get` to read a specific fact when you already know its ID from a memory search or addition.
 - Call `memory_add` only for stable facts useful in future sessions: explicit user preferences, corrections, personal/work context, or durable project context.
 - Call `memory_update` when an existing fact is outdated or imprecise; prefer updating over adding a near-duplicate.
 - Call `memory_delete` only when a fact is clearly wrong or no longer relevant.

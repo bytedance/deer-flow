@@ -53,6 +53,7 @@ from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provi
 from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.tools.types import Runtime
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.host_paths import windows_incompatible_segment
 
 logger = logging.getLogger(__name__)
@@ -1606,7 +1607,7 @@ async def _rollback_failed_sandbox_lookup_async(
         if owner_id is not None:
             await get_sandbox_lease_manager(provider).release_async(owner_id)
         else:
-            await asyncio.to_thread(provider.release, sandbox_id)
+            await await_drained(asyncio.to_thread(provider.release, sandbox_id))
     except Exception:
         logger.warning(
             "Failed to roll back sandbox after async post-acquire lookup failure: %s",
@@ -2984,6 +2985,27 @@ async def _write_file_tool_async(
 write_file_tool.coroutine = _write_file_tool_async
 
 
+def _to_crlf(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\n", "\r\n")
+
+
+def _match_line_endings(content: str, old_str: str, new_str: str) -> tuple[str, str]:
+    """Spell ``old_str`` and ``new_str`` with the CRLF line endings ``content`` uses.
+
+    Full reads return line endings as stored, but the model tends to write
+    ``\\n`` (and ranged reads join lines with ``\\n``), so a multi-line
+    ``old_str`` would never match a CRLF file and inserted lines would be LF.
+    A CRLF-only file takes both strings in CRLF; a mixed file does so only
+    when the LF spelling is absent and the CRLF one is present.
+    """
+    if "\r\n" not in content:
+        return old_str, new_str
+    crlf_old = _to_crlf(old_str)
+    if content.count("\r\n") == content.count("\n") or (old_str not in content and crlf_old in content):
+        return crlf_old, _to_crlf(new_str)
+    return old_str, new_str
+
+
 @tool("str_replace", parse_docstring=True)
 def str_replace_tool(
     runtime: Runtime,
@@ -3022,6 +3044,7 @@ def str_replace_tool(
                 # A no-op edit. str.replace("", new_str) would insert new_str at
                 # every character boundary, so this cannot fall through.
                 return "OK"
+            old_str, new_str = _match_line_endings(content, old_str, new_str)
             if not content or old_str not in content:
                 return f"Error: String to replace not found in file: {requested_path}"
             if replace_all:

@@ -53,6 +53,14 @@ Fetch 51 rows to display 50 plus a next-page sentinel; never append pages. Only
 page zero polls or refreshes on focus/reconnect. Task switches reset to page zero,
 and consumed AbortSignals cancel obsolete reads. Live offsets are not snapshots;
 explicit mutations or navigation may observe newly inserted runs.
+Run status `unmet` identifies a finished occurrence whose scheduled goal was not satisfied; keep it distinct from execution failure.
+`core/scheduled-tasks/goal-outcome.ts` maps goal verdicts and host reason codes for run history; show known codes as localized labels; unknown codes, raw run errors and the evaluator's reason stay behind the run row's Details. Check-failure codes are "unchecked", not a miss. `contracts/scheduled_goal_notes_contract.json` pins the host strings it and `run-error.ts` match.
+Scheduled-task views read state through the pure `core/scheduled-tasks` helpers (`status.ts`, `actions.ts`, `format.ts`, `describeTaskSchedule`, `errors.ts`) so list, detail and chat card agree. "Is a run active?" is `status === "running"` or `active_run_status` (a recurring task stays `enabled` while it runs). Default views show no IDs, ISO times, cron strings or enum names; errors localize by `detail.code` (`contracts/scheduled_task_errors_contract.json`) with raw text only behind Details. `tests/e2e/utils/readable.ts` and `tests/unit/helpers/readable.ts` assert this.
+The tasks page (`app/workspace/scheduled-tasks/page.tsx`) only composes `components/workspace/scheduled-tasks/*`: list with status tabs, detail (Runs / Stops when / goal / Does / notes / History), outcome notice, create/edit/duplicate dialog (PATCH sends only changed fields, `null` clears) and the renew dialog that a `limits_exhausted` Resume opens. `?task_id=` selects a task; `?thread_id=` scopes the list to one chat.
+In chat, a `schedule_task` result becomes an `assistant:scheduled-task` group (`core/scheduled-tasks/tool-result.ts`, last card per task per turn; not a turn boundary) rendered by `ScheduledTaskCard`, which polls the task only while on screen. A human message with `additional_kwargs.deerflow_scheduled_origin` stays a `human` group with `scheduledOrigin`: `ScheduledRunPrompt` renders the origin's user-language parts, never the launched text, and it is not editable.
+Server-created threads: `core/threads/origin.ts` reads `metadata.deerflow_origin` (`contracts/thread_origin_contract.json`), then `channel_source`, then a legacy `scheduled_task_id`; provider names come from `threads.origin.providers`. `core/threads/activity.ts` polls `/api/thread-activity` (mount `useThreadActivity` once; unmounting resets its cursor; first poll only seeds; invalidate lists only on server-origin threads, truncation or a higher `read_version`) and `useMarkThreadRead` posts reads. `core/scheduled-tasks/events.ts` loads a chat's lifecycle events, not gated on its task list; `placeTaskEvents` puts each at the end of its `after_run_id` turn. The UI language is saved as the `locale` preference once per session and on each switch, only when the Gateway's preferences include `locale`.
+Thread rows (sidebar, `/workspace/chats`) show `ThreadOriginIcon` and, if `unread === true` and not the open thread, `ThreadUnreadDot` with `threads.unreadLabel` as row label. `WorkspaceSidebar` mounts `useThreadActivity`. Chat pages call `useMarkOpenThreadRead` once metadata loads (marks read on load, on an unread flip, on tab visible, and via its callback from `onFinish`).
+Chat pages pass `useThreadScheduledTaskEvents` data to `MessageList` (`scheduledTaskEvents`; the custom-agent page also passes its agent for the run link), which renders `ScheduledTaskEventLine` through `VirtualMessageList.renderAfterGroup` at the `placeTaskEvents` position, inside the group's measured row. Lines are history: never gated on the task list. Channel provider cards (Settings and the sidebar list) render `ChannelScheduledUpdates` from `proactive_notifications`, and nothing when the field is absent.
 
 ## Architecture
 
@@ -100,6 +108,12 @@ Custom Agent `display_name` is an optional Unicode UI label, edited in
 keep `name` for React identity, URLs, requests, and runtime `agent_name`.
 The 100-code-point budget uses `[...value.trim()].length`, matching Pydantic;
 do not use HTML `maxLength`, which counts UTF-16 code units instead.
+
+Custom Agent portability uses the versioned `deerflow.custom-agent` JSON
+document through `core/agents/api.ts`. Keep file parsing client-side only for
+previewing the proposed local name; the Gateway is authoritative for schema,
+name, model, and conflict validation. Export downloads must never synthesize
+runtime state from browser caches.
 
 - **Imports**: Enforced ordering (builtin → external → internal → parent → sibling), alphabetized, newlines between groups. Use inline type imports: `import { type Foo }`.
 - **Unused variables**: Prefix with `_`.
@@ -193,6 +207,12 @@ lists from the server instead of inserting those snapshots into either view.
 ### Delimited artifact preview
 
 CSV/TSV previews share `artifact-table-preview.tsx` between the panel and standalone viewer. Papa Parse runs only inside `delimited-preview.worker.ts`; `use-delimited-preview.ts` bounds input before transfer, cancels stale work, and enforces a five-second timeout. The parser detects the first record separator outside quoted fields and passes it explicitly to Papa Parse, so embedded newlines in an incomplete quoted field cannot corrupt newline detection. It retains at most 202 logical records and 50 columns, discarding an incomplete final record from truncated input. UI pagination displays at most 200 data rows in pages of 50. Keep the table mounted but inactive when switching to source so header/pagination state survives; changing file identity resets it. Pending `write_file` content stays in source mode until success.
+
+For a truncated sample whose first separator is LF or CRLF, strip a terminal CR
+before parsing so a split CRLF separator cannot make a quoted final field
+invalidate the whole preview, including LF-first files with later CRLF records.
+The terminal record remains incomplete and is discarded; complete CR-only files
+and malformed quotes retain their existing behavior.
 
 Custom skill export is admin-only and disabled in static demos. The lazy
 `skill-export-dialog.tsx` must abort requests and ignore stale callbacks on close
@@ -297,8 +317,14 @@ Both honor the backend base and prefixes; transport and cache semantics are docu
 Conversation action factories, shapes and availability callbacks are guarded per plugin;
 only validated value snapshots reach the toolbar/sidebar render paths.
 `PluginNavigation` and the dynamic workspace extension route consume page declarations;
-Capability Center details only show metadata and status. Conversation action slots augment
-normal/custom-agent toolbars and sidebar menus without replacing native export or notification.
+Capability Center defaults to the repository examples in `core/extensions/catalog.ts`,
+merged by explicit namespace with runtime descriptors. Catalog-only entries are discovery
+metadata, never module-loader inputs or proof of installation. Backend-only examples may
+have no plugin descriptor; keep their runtime status unasserted. Details link to package
+installation instructions. Keep the catalog aligned with `examples/deerflow-extension-*`.
+Agent teams uses `community.agent-teams`; merge its installed descriptor into the
+localized catalog entry without asserting runtime status for a catalog-only row.
+Conversation action slots augment normal/custom-agent toolbars and sidebar menus without replacing native export or notification.
 Plugin views use mount/dispose and abort signals; Shadow DOM is CSS isolation, not a sandbox.
 Descriptors are user-keyed page snapshots, refreshed manually. Backend calls bind the plugin's
 namespace, action allowlist and expected viewer identity. See `docs/full-stack-plugins.md`.

@@ -19,7 +19,7 @@ from app.gateway.browser_capability import ensure_browser_runtime_available
 from app.gateway.config import get_gateway_config
 from app.gateway.csrf_middleware import CORS_EXPOSED_HEADERS, CSRFMiddleware, get_configured_cors_origins
 from app.gateway.deps import langgraph_runtime
-from app.gateway.health import READINESS_CHECKPOINTER_CONFIG_ATTR, readiness_payload
+from app.gateway.health import READINESS_CHECKPOINTER_CONFIG_ATTR, READINESS_PROVISIONER_URL_ATTR, readiness_payload
 from app.gateway.routers import (
     agents,
     artifacts,
@@ -51,6 +51,7 @@ from app.gateway.routers import (
     subagent_batches,
     subagents,
     suggestions,
+    thread_activity,
     thread_runs,
     threads,
     trash,
@@ -393,6 +394,49 @@ async def _shutdown_startup_trash_sweep(app: FastAPI) -> None:
         logger.exception("Startup trash sweep failed during shutdown")
 
 
+async def _shutdown_scheduled_task_service(app: FastAPI) -> None:
+    """Bound scheduler stop so a stuck poll cannot block Gateway exit.
+
+    ``asyncio.wait_for`` cancels the ``stop()`` coroutine at the deadline.
+    If the scheduler is already stuck inside an iteration, its owned poll task
+    may remain pending until event-loop teardown; this helper bounds Gateway
+    shutdown latency rather than promising completion of stuck scheduler work.
+    """
+    service = getattr(app.state, "scheduled_task_service", None)
+    if service is None:
+        return
+    try:
+        await asyncio.wait_for(service.stop(), timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS)
+    except TimeoutError:
+        logger.warning(
+            "Scheduled task service shutdown exceeded %.1fs; proceeding with worker exit.",
+            _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        logger.exception("Failed to stop scheduled task service")
+
+
+async def _shutdown_subagent_batch_service(app: FastAPI) -> None:
+    """Bound durable subagent batch stop so Gateway exit cannot hang forever."""
+    service = getattr(app.state, "subagent_batch_service", None)
+    if service is None:
+        return
+    app.state.subagent_batches_available = False
+    try:
+        await asyncio.wait_for(service.stop(), timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS)
+    except TimeoutError:
+        logger.warning(
+            "Subagent batch service shutdown exceeded %.1fs; proceeding with worker exit.",
+            _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        logger.exception("Failed to stop subagent batch service")
+    finally:
+        from deerflow.subagents.batch_runtime import set_subagent_batch_submitter
+
+        set_subagent_batch_submitter(None)
+
+
 def _scheduled_task_notification_repos(startup_config: AppConfig):
     """Return ``(connection_repo, notification_repo)`` for the scheduled-run outbox (issue #4254).
 
@@ -456,6 +500,8 @@ async def _start_scheduled_task_notification_delivery(app: FastAPI, startup_conf
             # connection repository is present whenever the outbox one is.
             resolve_connections=connection_repo.list_connections,
             poll_interval_seconds=startup_config.scheduler.poll_interval_seconds,
+            # Language of notices whose owner has no UI language preference.
+            default_locale=startup_config.channel_connections.notification_locale,
         )
         await worker.start()
     except Exception:
@@ -638,6 +684,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     poll_interval_seconds=startup_config.scheduler.poll_interval_seconds,
                     lease_seconds=startup_config.scheduler.lease_seconds,
                     max_concurrent_runs=startup_config.scheduler.max_concurrent_runs,
+                    max_concurrent_runs_per_user=startup_config.scheduler.max_concurrent_runs_per_user,
                     queue_timeout_seconds=startup_config.scheduler.queue_timeout_seconds,
                     multi_instance=startup_config.scheduler.multi_instance,
                     run_lease_grace_seconds=startup_config.run_ownership.grace_seconds,
@@ -806,11 +853,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.exception("Failed to stop channel service")
 
-        if getattr(app.state, "scheduled_task_service", None) is not None:
-            try:
-                await app.state.scheduled_task_service.stop()
-            except Exception:
-                logger.exception("Failed to stop scheduled task service")
+        await _shutdown_scheduled_task_service(app)
 
         if getattr(app.state, "mcp_task_service", None) is not None:
             app.state.mcp_tasks_available = False
@@ -826,16 +869,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         set_mcp_task_config_snapshot(None)
 
-        if getattr(app.state, "subagent_batch_service", None) is not None:
-            app.state.subagent_batches_available = False
-            try:
-                await app.state.subagent_batch_service.stop()
-            except Exception:
-                logger.exception("Failed to stop subagent batch service")
-            finally:
-                from deerflow.subagents.batch_runtime import set_subagent_batch_submitter
-
-                set_subagent_batch_submitter(None)
+        await _shutdown_subagent_batch_service(app)
 
         # Browser sessions have their own bounded teardown. MCP sessions close
         # after the runtime drains runs, since those runs may still call tools.
@@ -1080,6 +1114,14 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     setattr(app.state, RUN_EVIDENCE_READER_RESOLVER_KEY, _resolve_extension_run_evidence_reader)
 
+    from deerflow_extension_api.agent_runs import AGENT_RUNS_RESOLVER_KEY
+
+    def _resolve_extension_agent_runs(request):
+        host = getattr(app.state, "agent_runs_host", None)
+        return host.bind(request) if host is not None else None
+
+    setattr(app.state, AGENT_RUNS_RESOLVER_KEY, _resolve_extension_agent_runs)
+
     # CSRF: Double Submit Cookie pattern for state-changing requests
     app.add_middleware(CSRFMiddleware)
 
@@ -1158,6 +1200,13 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # Console API (cross-thread observability) is mounted at /api/console
     app.include_router(console.router)
 
+    # Admin user management (list + role assignment; RFC #4063 / #3462 gap 2).
+    # Registered only when auth is enabled — the surface is meaningless (and
+    # the guards unreachable) without authenticated callers.
+    from app.gateway.routers import admin_users
+
+    app.include_router(admin_users.router)
+
     # MCP API is mounted at /api/mcp
     app.include_router(capabilities.router)
     app.include_router(mcp.router)
@@ -1190,6 +1239,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Thread cleanup API is mounted at /api/threads/{thread_id}
     app.include_router(threads.router)
+
+    # Per-user activity feed (own prefix, so /api/threads/{thread_id} never captures it)
+    app.include_router(thread_activity.router)
 
     # Scheduled tasks API is mounted at /api/scheduled-tasks
     app.include_router(scheduled_tasks.router)
@@ -1267,19 +1319,26 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     @app.get("/health/ready", tags=["health"])
     async def readiness_check(request: Request, response: Response) -> dict[str, str]:
-        """Readiness endpoint: 200 when the persistence backends are reachable.
+        """Readiness endpoint: 200 when the backends behind agent runs are reachable.
 
-        Probes the ORM engine behind ``database:`` and the effective LangGraph
+        Probes the ORM engine behind ``database:``, the effective LangGraph
         checkpointer/Store backend (legacy ``checkpointer:`` section, otherwise
-        derived from ``database:``) concurrently beneath one bounded deadline.
-        The checkpointer config comes from the startup snapshot recorded by
-        ``langgraph_runtime`` (never hot-reloaded config), so orchestrators can
-        gate on the gateway actually being ready rather than merely alive.
-        Returns 503 with ``status: degraded`` when either probe fails or the
-        startup backend cannot be resolved.
+        derived from ``database:``) and the stream bridge's Redis backend
+        concurrently beneath one bounded deadline, and reports the sandbox
+        provisioner's own ``/health`` without gating on it. Targets come from
+        the startup snapshot recorded by ``langgraph_runtime`` (never
+        hot-reloaded config), so orchestrators can gate on the gateway actually
+        being ready rather than merely alive. Returns 503 with
+        ``status: degraded`` when a gating probe fails or a startup target
+        cannot be resolved; the provisioner verdict is informational because
+        every replica shares one provisioner.
         """
-        checkpointer_config = getattr(request.app.state, READINESS_CHECKPOINTER_CONFIG_ATTR, None)
-        status_code, payload = await readiness_payload(checkpointer_config)
+        state = request.app.state
+        status_code, payload = await readiness_payload(
+            getattr(state, READINESS_CHECKPOINTER_CONFIG_ATTR, None),
+            stream_bridge=getattr(state, "stream_bridge", None),
+            provisioner_url=getattr(state, READINESS_PROVISIONER_URL_ATTR, None),
+        )
         response.status_code = status_code
         return payload
 

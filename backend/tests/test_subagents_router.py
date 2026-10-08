@@ -59,12 +59,12 @@ async def test_managed_subagent_writes_route_through_mutation_drain(monkeypatch,
     store = Store()
     calls: list[tuple[object, tuple[object, ...]]] = []
 
-    async def drained(func, /, *args, **kwargs):
+    async def drained(action, func, expected_errors=(), /, *args, **kwargs):
         calls.append((func, args))
         return func(*args, **kwargs)
 
     monkeypatch.setattr(router, "get_managed_subagent_store", lambda *_: store)
-    monkeypatch.setattr(router, "_run_store_mutation", drained)
+    monkeypatch.setattr(router, "run_drained_write", drained)
 
     if operation == "create":
         await router.create_managed_subagent(

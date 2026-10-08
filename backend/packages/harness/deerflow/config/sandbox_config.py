@@ -2,7 +2,9 @@ import ipaddress
 import math
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+
+from deerflow.config._boolean_guards import reject_boolean
 
 SandboxOwnershipType = Literal["memory", "redis"]
 SandboxOverflowPolicy = Literal["wait", "reject", "burst"]
@@ -39,10 +41,8 @@ class SandboxNetworkConfig(BaseModel):
 
     @field_validator("temporary_grant_ttl", mode="before")
     @classmethod
-    def _reject_boolean_temporary_grant_ttl(cls, value: object) -> object:
-        if isinstance(value, bool):
-            raise ValueError("must be an integer, not a boolean")
-        return value
+    def _reject_boolean_temporary_grant_ttl(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")
 
     proxy_image: str = Field(
         default="ghcr.io/bytedance/deer-flow-sandbox-network-proxy:latest",
@@ -123,10 +123,8 @@ class SandboxOwnershipConfig(BaseModel):
 
     @field_validator("renewal_interval_seconds", "ttl_multiplier", mode="before")
     @classmethod
-    def _reject_boolean_ownership_settings(cls, value: object) -> object:
-        if isinstance(value, bool):
-            raise ValueError("must be a number, not a boolean")
-        return value
+    def _reject_boolean_ownership_settings(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="a number")
 
     key_prefix: str = Field(
         default="deerflow:sandbox:owner",
@@ -267,10 +265,8 @@ class SandboxConfig(BaseModel):
         mode="before",
     )
     @classmethod
-    def _reject_boolean_numeric_settings(cls, value: object) -> object:
-        if isinstance(value, bool):
-            raise ValueError("must be a number, not a boolean")
-        return value
+    def _reject_boolean_numeric_settings(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="a number")
 
     health_check_skip_seconds: float | None = Field(
         default=None,
