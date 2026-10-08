@@ -804,7 +804,6 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
-<<<<<<< HEAD
 - **auth:** Login lockouts are now counted once per client IP across every
   Gateway replica. `POST /api/v1/auth/login/local` kept its failed-login
   counter in a per-process dict, so with N replicas behind one load balancer an
@@ -828,7 +827,6 @@ This release closes that milestone with **439 merged pull requests**.
   keeps `memory` logs a startup warning. Status codes and messages of the
   login endpoint are unchanged; `max_login_attempts` and `lockout_seconds`
   stay live-read. ([#6501])
-=======
 - **skills:** Skill changes made through one Gateway replica now reach the
   skill list in every other replica's system prompt. `SkillStorage` rescans
   disk on every call, but the prompt layer caches the enabled-skills list and
@@ -847,7 +845,6 @@ This release closes that milestone with **439 merged pull requests**.
   operators no longer need to call it on every Pod or worker separately. The
   MCP cache reset's marker now shares the same `deerflow.config.shared_reset_marker`
   helper. ([#6495])
->>>>>>> 4bab280250b36293aecf31888b72f7e689136abf
 - **persistence:** `scripts/migrate_user_isolation.py` now moves each legacy
   thread to the user who owns it. It looked for thread owners in
   `{base_dir}/deer-flow.db`, a file DeerFlow never creates (the database is
@@ -9246,8 +9243,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6448]: https://github.com/bytedance/deer-flow/pull/6448
 [#6450]: https://github.com/bytedance/deer-flow/pull/6450
 [#6481]: https://github.com/bytedance/deer-flow/pull/6481
-<<<<<<< HEAD
-[#6501]: https://github.com/bytedance/deer-flow/pull/6501
-=======
 [#6495]: https://github.com/bytedance/deer-flow/pull/6495
->>>>>>> 4bab280250b36293aecf31888b72f7e689136abf
+[#6501]: https://github.com/bytedance/deer-flow/pull/6501
