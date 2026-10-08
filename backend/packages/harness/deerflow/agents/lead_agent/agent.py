@@ -576,9 +576,12 @@ def build_middlewares(
         runtime_middleware_kwargs["deferred_setup"] = deferred_setup
     middlewares = build_lead_runtime_middlewares(**runtime_middleware_kwargs)
     if subagent_descriptions:
+        from deerflow.subagents.builtins import BUILTIN_SUBAGENTS
         from deerflow.subagents.catalog_context import SubagentCatalogMiddleware
 
-        middlewares.append(SubagentCatalogMiddleware(subagent_descriptions))
+        custom_descriptions = {name: description for name, description in subagent_descriptions.items() if name not in BUILTIN_SUBAGENTS}
+        if custom_descriptions:
+            middlewares.append(SubagentCatalogMiddleware(custom_descriptions))
 
     # Always inject current date (and optionally memory) as <system-reminder> into the
     # first HumanMessage to keep the system prompt fully static for prefix-cache reuse.

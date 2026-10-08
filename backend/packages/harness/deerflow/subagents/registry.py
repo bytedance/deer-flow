@@ -49,7 +49,6 @@ def _build_custom_subagent_config(name: str, *, app_config: Any | None = None) -
         disallowed_tools=custom.disallowed_tools,
         skills=custom.skills,
         model=custom.model,
-        model_settings=custom.model_settings,
         max_turns=custom.max_turns,
         timeout_seconds=custom.timeout_seconds,
     )
