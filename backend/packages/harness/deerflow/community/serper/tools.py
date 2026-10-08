@@ -264,10 +264,18 @@ def _serper_post(endpoint: str, api_key: str, query: str, max_results: int, *, t
         payload["tbs"] = _SERPER_TBS_BY_TIME_RANGE[time_range]
 
     try:
+        # Resolve once before transport setup so retries can reuse this endpoint.
+        base_url = (os.getenv("SERPER_BASE_URL") or "").strip()
+        if base_url:
+            endpoint = base_url.rstrip("/") + "/" + endpoint.rsplit("/", 1)[-1]
+            parsed_endpoint = urlparse(endpoint)
+            logger.debug(
+                "Serper endpoint from SERPER_BASE_URL: %s://%s%s",
+                parsed_endpoint.scheme,
+                parsed_endpoint.netloc.rsplit("@", 1)[-1],
+                parsed_endpoint.path,
+            )
         with httpx.Client(timeout=30) as client:
-            base_url = os.getenv("SERPER_BASE_URL")
-            if base_url:
-                endpoint = base_url.rstrip("/") + "/" + endpoint.rsplit("/", 1)[-1]
             response = client.post(endpoint, headers=headers, json=payload)
         response.raise_for_status()
         data = response.json()

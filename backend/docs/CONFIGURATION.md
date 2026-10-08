@@ -1408,6 +1408,7 @@ models:
 - `TAVILY_API_KEY` - Tavily search API key
 - `BRAVE_SEARCH_API_KEY` - Brave Search API key for `web_search` and `image_search`
 - `SERPER_API_KEY` - Serper (Google Search/Images API) key for `web_search` and `image_search`
+- `SERPER_BASE_URL` - Optional shared Serper-compatible API base URL for `web_search` and `image_search` (default: `https://google.serper.dev`)
 - `SERPLY_API_KEY` - [Serply](https://serply.io) key for `web_search` (Google Search, plus Google News and Google Scholar via `vertical`)
 - `GROUNDROUTE_API_KEY` - GroundRoute meta-search API key for `web_search` and `web_fetch` (routes across Serper, Brave, Exa, Tavily, Firecrawl, Perplexity with gain-share pricing)
 - `SOFYA_API_KEY` - [Sofya](https://sofya.co) key for `web_search` and `web_fetch`
@@ -1419,6 +1420,21 @@ models:
 - `DEER_FLOW_HOME` - Runtime state directory (defaults to `.deer-flow` under the project root)
 - `DEER_FLOW_SKILLS_PATH` - Skills directory when `skills.path` is omitted
 - `GATEWAY_ENABLE_DOCS` - Set to `false` to disable Swagger UI (`/docs`), ReDoc (`/redoc`), and OpenAPI schema (`/openapi.json`) endpoints (default: `true`)
+
+`SERPER_BASE_URL` is an operator-controlled environment setting shared by both
+Serper tools; it is not a model-facing argument or a per-tool `config.yaml` field.
+Use a trusted HTTP(S) base URL without the `/search` or `/images` suffix. Leading
+and trailing whitespace and trailing slashes are removed; unset, empty, or
+whitespace-only values keep the default Google endpoints. Each request resolves
+the endpoint once before opening the HTTP client. An override emits a debug
+diagnostic with its effective endpoint, omitting URL credentials, query, and
+fragment.
+
+Each tool's `api_key` from `config.yaml`, or the fallback `SERPER_API_KEY`, is sent
+in the `X-API-KEY` header to the selected host; DeerFlow does not add the key to
+query parameters. Model search input cannot select that host. Existing public
+image-URL checks and web domain filters still apply to returned results; they
+do not validate or restrict the operator-configured API endpoint.
 
 ## Backend dotenv selection
 

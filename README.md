@@ -1388,6 +1388,13 @@ global URL-access policy. The model arguments and image search are unchanged.
 See [Serper configuration](backend/docs/CONFIGURATION.md#serper-source-filters)
 for validation and query-length limits.
 
+Serper web and image search can share a trusted compatible API endpoint through
+the operator-set `SERPER_BASE_URL` environment variable. Supply a base URL without
+`/search` or `/images`; blank values retain the Google defaults. Each tool sends
+its configured API key in the `X-API-KEY` header to that host. See
+[environment variables](backend/docs/CONFIGURATION.md#environment-variables)
+for normalization and credential handling.
+
 When using Tavily for `web_fetch`, extracted pages without a title use their URL
 as the heading; their content remains available to the agent.
 Chat tool-step titles accept leading blank lines and up to three spaces before
