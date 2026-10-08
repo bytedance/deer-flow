@@ -108,6 +108,15 @@ class TestNormalizeFilename:
         with pytest.raises(ValueError, match="reserved Windows device name"):
             normalize_filename(filename)
 
+    @pytest.mark.parametrize("filename", ["NUL .txt", "con  .log", "COM1 .txt", "lpt²  .md", "CONIN$ .txt", "conout$  .log"])
+    def test_rejects_windows_device_names_with_spaces_before_extension(self, filename):
+        with pytest.raises(ValueError, match="reserved Windows device name"):
+            normalize_filename(filename)
+
+    @pytest.mark.parametrize("filename", ["report .txt", "NULnotes .txt", "COM¹notes .txt", "NUL\u00a0.txt"])
+    def test_preserves_spaces_in_ordinary_filename_stems(self, filename):
+        assert normalize_filename(filename) == filename
+
     @pytest.mark.parametrize("filename", ["CONIN", "CONOUT", "CONIN$notes.txt", "CONOUT$notes.log"])
     def test_allows_names_resembling_console_devices(self, filename):
         assert normalize_filename(filename) == filename

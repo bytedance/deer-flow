@@ -2124,6 +2124,9 @@ failing the upload; hidden staging files are left for the startup sweep.
 Uploads, new skill support files, and new local sandbox paths reject Windows
 reserved device names on every platform, including `COM¹`, `LPT²`, the console
 aliases `CONIN$` and `CONOUT$`, and names with extensions such as `com³.txt`.
+ASCII spaces before the extension do not make a device name portable:
+`NUL .txt` and `COM1  .log` are rejected too. Ordinary names such as
+`report .txt` are preserved unchanged.
 Rename these files before creating or uploading them so the same file tree
 remains usable on Windows.
 
