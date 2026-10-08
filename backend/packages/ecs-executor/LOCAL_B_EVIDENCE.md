@@ -95,3 +95,11 @@ gate results remain for root coordination; no overall completion is claimed.
 The fresh PostgreSQL test container was removed in the verification runner’s
 `finally` block; the execution containers were already absent before test cleanup.
 No other containers/images were modified.
+
+Root repository-wide gates in the dedicated locked environment subsequently
+finished successfully: genuine `make test` exit 0, four shards totaling
+26,761 passed and 411 skipped (slowest shard 303.55 seconds); genuine
+`make test-blocking-io` exit 0, 229 passed in 20.19 seconds.
+This is inherited repository coverage, not a newly added case matrix.
+Task 2 implementation is saved in local commit `ddf85787`; no remote push or
+cloud deployment occurred. Shared scheduling, C and C→B→C remain later tasks.

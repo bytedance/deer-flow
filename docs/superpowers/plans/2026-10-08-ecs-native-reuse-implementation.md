@@ -28,10 +28,10 @@ Files: create backend/packages/ecs-executor/ecs_executor/scope.py and intercepto
 
 Files: ecs_executor/mcp_server.py, job_store.py, jobs.py, worker.py; backend/tests/test_ecs_executor_b_main.py; examples/ecs-native/extensions_config.example.json.
 
-- [ ] Bind native user_auth owner to signed submit claims; discovery credentials authorize discovery only. Store owner/thread/incarnation/run with opaque job ID. Do not require native local tracking IDs or direct mcp_tasks table access.
-- [ ] Expose submit/status/cancel structuredContent using the ordinary-tools contract. Native McpTaskService remains unchanged. Pending physical cancellation returns retryable MCP error until terminal STOP proof, never false cancelled.
-- [ ] Implement durable queued execution and profile-authorized Docker CPU/memory/network/user limits, output acceptance and restart reconciliation. Port useful old worker/STOP components after checking their dependencies, avoiding old staged-tracking handshake.
-- [ ] Drive a real local Docker job through ordinary task tracking, including result artifact; then check cancellation and one restart. Add cases only for observed risks. Persist submission idempotency and indeterminate outcomes before allowing retry.
+- [x] Bind native user_auth owner to signed submit claims; discovery credentials authorize discovery only. Store owner/thread/incarnation/run with opaque job ID. Do not require native local tracking IDs or direct mcp_tasks table access.
+- [x] Expose submit/status/cancel structuredContent using the ordinary-tools contract. Native McpTaskService remains unchanged. Pending physical cancellation returns retryable MCP error until terminal STOP proof, never false cancelled.
+- [x] Implement durable queued execution and profile-authorized Docker CPU/memory/network/user limits, output acceptance and restart reconciliation. Port useful old worker/STOP components after checking their dependencies, avoiding old staged-tracking handshake.
+- [x] Drive a real local Docker job through ordinary task tracking, including result artifact; then check cancellation and one restart. Add cases only for observed risks. Persist submission idempotency and indeterminate outcomes before allowing retry.
 
 ## Task 3: Shared ECS scheduling and outbound transport
 
