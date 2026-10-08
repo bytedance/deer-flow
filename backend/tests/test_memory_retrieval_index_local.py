@@ -13,6 +13,7 @@ without rebuilding a scope this process wrote itself.
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -23,7 +24,7 @@ import pytest
 from deerflow.agents.memory.backends.deermem.deer_mem import DeerMem
 from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
 from deerflow.agents.memory.backends.deermem.deermem.core.retrieval import FTS5RetrievalAdapter, create_fts5_retrieval
-from deerflow.agents.memory.backends.deermem.deermem.core.storage import FileMemoryStorage, create_empty_memory
+from deerflow.agents.memory.backends.deermem.deermem.core.storage import FileMemoryStorage, MemoryStorageCorruption, create_empty_memory
 
 INDEX_FILENAME = "memory-fts5.sqlite3"
 SCOPE = {"userId": "alice", "agentName": "agent-a"}
@@ -467,5 +468,60 @@ def test_rebuild_publication_stays_ordered_with_row_replacement(tmp_path: Path) 
     finally:
         hold.allow_install.set()
         adapter.release()
+        pod_a.close()
+        pod_b.close()
+
+
+def test_full_rebuild_reads_each_manifest_once(tmp_path: Path) -> None:
+    """Every agent bucket of a user shares one memory.json; the startup scan must not re-read it per bucket."""
+    pod = _instance(tmp_path / "home", tmp_path / "index-a")
+    try:
+        for agent in ("agent-a", "agent-b", "agent-c"):
+            pod.upsert_fact(_fact(f"{agent}-fact", f"fact for {agent}"), user_id="alice", agent_name=agent)
+        pod.upsert_fact(_fact("bob-fact", "fact for bob"), user_id="bob", agent_name="agent-a")
+
+        with patch.object(pod, "_load_memory_file", wraps=pod._load_memory_file) as manifest_reads:
+            result = pod.rebuild_index()
+
+        assert result == {"supported": True, "indexed": 4, "failed": 0}
+        read_paths = sorted({call.args[0] for call in manifest_reads.call_args_list})
+        assert read_paths == [pod._get_memory_file_path(user_id="alice"), pod._get_memory_file_path(user_id="bob")]
+        assert manifest_reads.call_count == 2, "one manifest read per user, not per agent bucket"
+        for agent in ("agent-a", "agent-b", "agent-c"):
+            assert _ids(pod.search_facts(f"{agent}", scopes=[{"userId": "alice", "agentName": agent}])) == [f"{agent}-fact"]
+    finally:
+        pod.close()
+
+
+@pytest.mark.parametrize("failure", [OSError("stale NFS handle"), MemoryStorageCorruption("malformed memory.json")])
+def test_manifest_read_failure_during_the_freshness_compare_serves_the_local_index(tmp_path: Path, caplog: pytest.LogCaptureFixture, failure: Exception) -> None:
+    """The Pod-local index exists to decouple search from the shared volume.
+
+    A transient read error or a corrupt manifest during the per-search compare
+    must log and serve the current index, leave the recorded signature alone
+    (no dirty mark: a rebuild would hit the same read), and let the next search
+    compare normally.
+    """
+    storage_root = tmp_path / "home"
+    pod_a = _instance(storage_root, tmp_path / "index-a")
+    pod_b = _instance(storage_root, tmp_path / "index-b")
+    key = ("alice", "agent-a")
+    try:
+        pod_a.upsert_fact(_fact("one", "alpha indexed locally"), user_id="alice", agent_name="agent-a")
+        assert pod_a.rebuild_index()["failed"] == 0
+        synced_before = pod_a._retrieval_synced_signatures[key]
+
+        with patch.object(pod_a, "_load_memory_file", side_effect=failure), patch.object(pod_a, "rebuild_index", wraps=pod_a.rebuild_index) as rebuild, caplog.at_level(logging.WARNING):
+            assert _ids(pod_a.search_facts("alpha", scopes=[SCOPE])) == ["one"]
+
+        assert rebuild.call_count == 0
+        warnings = [record for record in caplog.records if record.levelno == logging.WARNING and "agent-a" in record.getMessage()]
+        assert warnings, "the skipped compare must be visible to operators"
+        assert pod_a._retrieval_synced_signatures[key] == synced_before
+        assert key not in pod_a._retrieval_dirty_scopes
+
+        pod_b.upsert_fact(_fact("two", "beta written on pod b"), user_id="alice", agent_name="agent-a")
+        assert _ids(pod_a.search_facts("beta", scopes=[SCOPE])) == ["two"]  # the compare works again and re-syncs
+    finally:
         pod_a.close()
         pod_b.close()

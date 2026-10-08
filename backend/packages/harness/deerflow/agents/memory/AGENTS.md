@@ -219,7 +219,8 @@ Search then uses canonical substring matching until rebuild succeeds.
 Cross-process freshness: `rebuild_index` records each agent scope's manifest
 signature `(mtime_ns, size, revision)` before reading that scope's complete
 fact list (never a `list_facts` page); `search_facts` rebuilds a scope whose
-live signature differs (a peer wrote the user's memory). A commit that produced
+live signature differs (a peer wrote the user's memory), and a manifest read
+failure during that compare logs and serves the local index. A commit that produced
 a new revision advances the recorded signatures of that user's scopes that were
 in sync at the pre-commit revision read under the user lock; a no-op commit
 advances nothing. Own writes therefore never rebuild while an interleaved peer

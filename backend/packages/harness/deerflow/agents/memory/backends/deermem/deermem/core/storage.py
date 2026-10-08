@@ -1899,7 +1899,18 @@ class FileMemoryStorage(MemoryStorage):
                     continue
                 # Another process wrote this user's memory since this process last
                 # indexed the scope: the live manifest signature no longer matches.
-                if synced[key] != self._scope_signature(self._get_memory_file_path(agent_name, user_id=user_id), agent_name):
+                try:
+                    live_signature = self._scope_signature(self._get_memory_file_path(agent_name, user_id=user_id), agent_name)
+                except (OSError, ValueError, MemoryStorageCorruption) as exc:
+                    # The local index exists to decouple search from the shared
+                    # volume: a transient read error or a corrupt manifest must not
+                    # fail a search the index can answer. Serve it as is and keep the
+                    # recorded signature so the next search compares again; a dirty
+                    # mark would send the rebuild into the same failing read.
+                    logger.warning("Memory retrieval freshness check skipped for user %r agent %r; serving the local index: %s", user_id, agent_name, exc)
+                    logger.debug("Memory retrieval freshness check failure", exc_info=exc)
+                    continue
+                if synced[key] != live_signature:
                     dirty.add(key)
             if dirty:
                 dirty_scopes = [{"userId": user_id, "agentName": agent_name} for user_id, agent_name in dirty]
@@ -1946,16 +1957,18 @@ class FileMemoryStorage(MemoryStorage):
         if scopes is None:
             root = Path(self._config.storage_path) if self._config.storage_path else memory_file_path(self._config).parent
             candidates = root.glob("**/facts/**/*.md")
-            manifest_signatures: dict[tuple[Path, str], tuple[Any, ...]] = {}
+            # One signature per manifest: every agent bucket of a user shares its
+            # memory.json, and _scope_signature reads only that file.
+            manifest_signatures: dict[Path, tuple[Any, ...]] = {}
             for path in candidates:
                 try:
                     relative_parts = path.relative_to(root).parts
-                    manifest_key: tuple[Path, str] | None = None
+                    manifest_path: Path | None = None
                     if "agents" in relative_parts[:-1]:
                         agents_index = relative_parts.index("agents")
-                        manifest_key = (root.joinpath(*relative_parts[:agents_index]) / self._config.manifest_filename, relative_parts[agents_index + 1])
-                        if manifest_key not in manifest_signatures:
-                            manifest_signatures[manifest_key] = self._scope_signature(*manifest_key)
+                        manifest_path = root.joinpath(*relative_parts[:agents_index]) / self._config.manifest_filename
+                        if manifest_path not in manifest_signatures:
+                            manifest_signatures[manifest_path] = self._scope_signature(manifest_path, relative_parts[agents_index + 1])
                     fact = _parse_listed_fact(path)
                     if fact is None:
                         continue
@@ -1970,8 +1983,8 @@ class FileMemoryStorage(MemoryStorage):
                         raise MemoryStorageCorruption(f"Fact user scope does not match directory for {path}")
                     validate_agent_name(expected_agent)
                     self._validate_loaded_fact(fact, path, user_id=original_user, agent_name=expected_agent)
-                    if manifest_key is not None:
-                        synced_signatures.setdefault(self._cache_key(expected_agent, user_id=original_user), manifest_signatures[manifest_key])
+                    if manifest_path is not None:
+                        synced_signatures.setdefault(self._cache_key(expected_agent, user_id=original_user), manifest_signatures[manifest_path])
                     records.append((fact, _scope_dict(original_user, expected_agent), str(path)))
                 except Exception:
                     logger.exception("Failed to rebuild retrieval index for %s", path)
