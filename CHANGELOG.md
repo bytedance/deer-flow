@@ -804,6 +804,15 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **scheduler:** "Run once now" on a one-time task before its run time no longer
+  cancels the scheduled run. The trial launched as the task's own run: the task
+  was marked `running`, and the trial's outcome then finished it (`completed`,
+  `failed` or `cancelled`), so the poller, which claims only `enabled` tasks,
+  never ran it at `run_at`, although `next_run_at` still showed that time. A
+  trial launched before the run time now leaves the task's status and
+  `next_run_at` unchanged, like a trial on a recurring task; its outcome is kept
+  on the trial's run row. A trial after the run time has passed still counts as
+  the task's run.
 - **skills:** A `/skill-name` activation now survives a retried model call. The
   activation was marked as done before the model was called, so when the call
   failed (rate limit, overload, timeout) or came back empty and was retried, the

@@ -18,6 +18,18 @@ def can_project(task: ScheduledTaskRow, occurrence: ScheduledTaskRunRow) -> bool
     return occurrence.occurrence_seq == task.last_occurrence_seq
 
 
+def once_run_still_scheduled(task: ScheduledTaskRow, occurrence: ScheduledTaskRunRow) -> bool:
+    """Whether a ``once`` task's own run is still ahead of this trial.
+
+    A manual trigger is a trial ("Run once now"): launched before the run
+    time it must not consume that run, so the parent keeps its status rather
+    than taking the once outcome. ``next_run_at`` holds the run time only
+    while it was still ahead at the trial's launch; the launch write (or the
+    projection repairing it) clears it otherwise.
+    """
+    return occurrence.trigger == "manual" and task.next_run_at is not None
+
+
 def account_launch(task: ScheduledTaskRow, occurrence: ScheduledTaskRunRow, run_id: str) -> bool:
     """Count a proven launch once, in the same transaction as its marker.
 
