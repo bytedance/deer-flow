@@ -28,10 +28,10 @@ Checkpointer storage runs in one of two channel modes, selected by `checkpoint_c
 
 **Thread message cursors:** `list_messages` applies both exclusive bounds before `limit`, paging forward whenever `after_seq` is supplied.
 
-**Human-input capture** (`runtime/journal.py`): track capture separately from
-the optional display summary. Image-only input has no text but must still stop
-the batch scan and later model calls from appending another human-input event.
-`tests/test_run_journal.py` covers callback and full/delta graph paths.
+**Journal capture**: Image-only input stops batch scans and later human-event
+capture despite an empty summary. AI summaries strip leading think sections
+before the 2000-character cap, preserving events, literal answer tags, and
+prior useful summaries. Tests: `test_run_journal*.py` (callbacks, full/delta).
 
 **Per-call LLM telemetry** (`runtime/journal.py`): `RunJournal` adds observation-only keys
 to `llm.ai.response` metadata and to `llm.error` metadata (previously empty): `langchain_run_id`,
@@ -172,6 +172,8 @@ a pre-admission miss can become an exact hit.
 - `agents/thread_state.py` — `ThreadState`/`DeltaThreadState`, `delta_messages_field` / `DELTA_MESSAGES_FIELD` (`DeltaChannel` at the configured `snapshot_frequency`, default 10), schema adaptation helpers
 - `runtime/context_compaction.py` — compaction via accessor + mutation graph (reference consumer). Runs stamp their effective agent into server-owned checkpoint metadata; manual compaction uses that binding—not request `agent_name`—for memory policy and bucket. Missing/invalid legacy bindings and unreadable agent configs fail closed by skipping the optional flush while compaction may continue with the default model; a missing pre-binding checkpoint emits a warning so the skipped write is observable.
 - `runtime/checkpoint_cache/` + `runtime/checkpointer/cached_saver.py` — delta-mode checkpoint history cache; checkpoint state reads MUST go through `CheckpointStateAccessor`, and the checkpointer may be a `CachedHistorySaver` wrapper — never rely on concrete saver types
+- `runtime/checkpointer/thread_spans.py` — thread enumeration for `DeerFlowClient.list_threads`, ordered by `checkpoint_id` (goal writes keep the old `ts`). SQLite/Postgres savers (unwrapped from `CachedHistorySaver`) use the primary-key index; any other saver walks `list(None)`. Saver type selects speed, never correctness
+- `runtime/goal.py` `_call_checkpointer_method` — tries the async saver method and falls back to the sync one only on `NotImplementedError`: every saver defines the async methods, but the sync TUI/embedded `SqliteSaver`/`PostgresSaver` (also behind `CachedHistorySaver`) raise from them. Sync writes stay in `await_drained`
 - Tests: `tests/test_checkpoint_mode.py` (freeze/detect/gate), `tests/test_checkpoint_state.py` (accessor/mutation graph), `tests/test_delta_channel_checkpointers.py` (saver parity), `tests/test_threads_checkpoint_mode.py`, `tests/test_gateway_checkpoint_mode.py` (dual-mode e2e parity), `tests/test_context_compaction.py` (mutation-graph write, no scheduling), `tests/test_run_worker_rollback.py`, `tests/test_cached_history_saver.py` + `tests/test_cached_history_saver_integration.py` (history cache)
 
 **Checkpoint benchmarks:** Paired full/delta cases and production-shaped runs are documented in `backend/docs/runtime-guidance-details.md`.

@@ -757,57 +757,51 @@ class DeerFlowClient:
             pass
         return {"goal": None}
 
-    def list_threads(self, limit: int = 10) -> dict:
+    def list_threads(self, limit: int = 10, *, sort_by: Literal["created_at", "updated_at"] = "created_at") -> dict:
         """List the recent N threads.
+
+        ``limit`` counts threads, not checkpoints, and only each returned
+        thread's first and latest checkpoints are loaded (see
+        :mod:`deerflow.runtime.checkpointer.thread_spans`).
 
         Args:
             limit: Maximum number of threads to return. Default is 10.
+            sort_by: ``"created_at"`` (default) orders by each thread's first
+                checkpoint, ``"updated_at"`` by its latest. Both follow
+                checkpoint write order, which the reported ``ts`` values can
+                lag: a goal write keeps the previous checkpoint's ``ts``.
 
         Returns:
             Dict with "thread_list" key containing list of thread info dicts,
-            sorted by thread creation time descending.
+            newest first by ``sort_by``.
         """
+        from deerflow.runtime.checkpointer.thread_spans import list_thread_spans
+
+        if sort_by not in ("created_at", "updated_at"):
+            raise ValueError(f"sort_by must be 'created_at' or 'updated_at', got {sort_by!r}")
         checkpointer = self._get_thread_checkpointer()
+        spans = list_thread_spans(checkpointer, order_by="first" if sort_by == "created_at" else "latest", limit=limit)
 
-        thread_info_map = {}
+        def _checkpoint(thread_id: str, checkpoint_id: str):
+            return checkpointer.get_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": "", "checkpoint_id": checkpoint_id}})
 
-        for cp in checkpointer.list(config=None, limit=limit):
-            cfg = cp.config.get("configurable", {})
-            thread_id = cfg.get("thread_id")
-            if not thread_id:
+        threads = []
+        for span in spans:
+            latest = _checkpoint(span.thread_id, span.latest_checkpoint_id)
+            if latest is None:
                 continue
-
-            ts = cp.checkpoint.get("ts")
-            checkpoint_id = cfg.get("checkpoint_id")
-
-            if thread_id not in thread_info_map:
-                channel_values = cp.checkpoint.get("channel_values", {})
-                thread_info_map[thread_id] = {
-                    "thread_id": thread_id,
-                    "created_at": ts,
-                    "updated_at": ts,
-                    "latest_checkpoint_id": checkpoint_id,
-                    "title": channel_values.get("title"),
+            first = latest if span.first_checkpoint_id == span.latest_checkpoint_id else _checkpoint(span.thread_id, span.first_checkpoint_id)
+            threads.append(
+                {
+                    "thread_id": span.thread_id,
+                    "created_at": first.checkpoint.get("ts") if first is not None else None,
+                    "updated_at": latest.checkpoint.get("ts"),
+                    "latest_checkpoint_id": span.latest_checkpoint_id,
+                    "title": latest.checkpoint.get("channel_values", {}).get("title"),
                 }
-            else:
-                # Explicitly compare timestamps to ensure accuracy when iterating over unordered namespaces.
-                # Treat None as "missing" and only compare when existing values are non-None.
-                if ts is not None:
-                    current_created = thread_info_map[thread_id]["created_at"]
-                    if current_created is None or ts < current_created:
-                        thread_info_map[thread_id]["created_at"] = ts
+            )
 
-                    current_updated = thread_info_map[thread_id]["updated_at"]
-                    if current_updated is None or ts > current_updated:
-                        thread_info_map[thread_id]["updated_at"] = ts
-                        thread_info_map[thread_id]["latest_checkpoint_id"] = checkpoint_id
-                        channel_values = cp.checkpoint.get("channel_values", {})
-                        thread_info_map[thread_id]["title"] = channel_values.get("title")
-
-        threads = list(thread_info_map.values())
-        threads.sort(key=lambda x: x.get("created_at") or "", reverse=True)
-
-        return {"thread_list": threads[:limit]}
+        return {"thread_list": threads}
 
     def get_thread(self, thread_id: str) -> dict:
         """Get the complete materialized checkpoint history for a thread."""

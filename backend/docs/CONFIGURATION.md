@@ -296,7 +296,8 @@ avoid that ambiguity. Numeric conversion failures and unsafe Python-literal
 containers retain the entire original argument rather than rewriting it.
 
 The same behavior applies to synchronous generation, asynchronous generation,
-and tool-enabled simulated streaming. Native tool-call arguments remain unchanged.
+tool-enabled simulated streaming, and native no-tool streaming (which carries the
+fence state across chunks). Native tool-call arguments remain unchanged.
 No additional configuration is required.
 
 #### Gemini via Google's OpenAI-compatible endpoint
@@ -580,6 +581,7 @@ Notes:
 - `GATEWAY_WORKERS` / `WEB_CONCURRENCY` only count the uvicorn workers of one process tree. A Kubernetes Deployment with `replicas > 1` runs one worker per Pod, so every Pod reports a single worker and the multi-worker startup gate stays inert — while each Pod's startup orphan reconciliation still writes the other Pods' lease-less runs off as crashed on every rolling update.
 - Set `multi_instance: true` (or export `DEER_FLOW_MULTI_INSTANCE=1`, which lets deploy tooling such as a Helm chart set it from its replica count) on every instance that shares one database. Startup then enforces the same prerequisites as `GATEWAY_WORKERS > 1`: `database.backend: postgres`, `run_events.backend: db`, `run_ownership.heartbeat_enabled: true`, and a Redis stream bridge (`stream_bridge.type: redis` or `DEER_FLOW_STREAM_BRIDGE_REDIS_URL`). It refuses an explicit `sandbox.ownership.type: memory`, process-local browser tools, and `scheduler.enabled: true` without `scheduler.multi_instance: true`.
 - `DEER_FLOW_MULTI_INSTANCE` treats blank, `0`, `false`, `no` and `off` as "not declared"; any other value declares a multi-instance deployment, so a typo fails closed.
+- `GET /health/ready` pings the Redis stream bridge on every probe and answers 503 (`stream_bridge: unreachable`) while Redis is down, so the orchestrator drains that instance instead of routing it runs it cannot publish or stream; the memory bridge reports `not_configured`. When `sandbox.provisioner_url` is set, the body also carries the provisioner's `/health` verdict (`provisioner: ok|unreachable`), which never changes the status code because every instance shares one provisioner. That probe follows the sandbox clients' proxy policy: loopback, private, link-local and cluster-local provisioner addresses bypass `HTTP_PROXY`, external hosts keep the environment's proxy settings.
 - The declaration also drives the `agent_storage.backend: file` divergence warning, the inbound webhook dedupe warning, and the WeChat QR-login guard, which otherwise only look at the worker count.
 - Restart-required: the gate runs once at startup. Restart all Gateway instances together after changing it.
 
@@ -601,9 +603,19 @@ agent_storage:
 
 Migrating an existing install from `file` to `db`:
 
+Run from the repository root using the backend's `uv` environment. The importer
+depends on the installed workspace packages; using a system `python` without
+an activated backend environment can fail with `ModuleNotFoundError: deerflow`.
+Complete the [backend installation](../../CONTRIBUTING.md#option-2-local-development)
+first, including the `postgres` extra when applicable. Use the same exported
+configuration and runtime selectors as the running Gateway, such as
+`DEER_FLOW_CONFIG_PATH` and `DEER_FLOW_HOME`. `--project backend` selects the
+environment without changing the working directory, so relative paths keep
+their meaning; `--no-sync` preserves installed extras.
+
 ```bash
-python backend/scripts/migrate_agents_to_db.py            # copy on-disk agents into the db
-python backend/scripts/migrate_agents_to_db.py --dry-run  # preview without writing
+uv run --no-sync --project backend python backend/scripts/migrate_agents_to_db.py --dry-run  # preview without writing
+uv run --no-sync --project backend python backend/scripts/migrate_agents_to_db.py            # copy on-disk agents into the db
 ```
 
 The importer is idempotent (already-present agents are skipped) and leaves the source files untouched, so reverting `agent_storage.backend` to `file` is a clean rollback. Agent *memory* (`memory.json`) is unaffected by this switch.
@@ -1395,6 +1407,7 @@ models:
 - `DEEPSEEK_API_KEY` - DeepSeek API key
 - `MIMO_API_KEY` - Xiaomi MiMo API key
 - `NOVITA_API_KEY` - Novita API key (OpenAI-compatible endpoint)
+- `OPPER_API_KEY` - Opper API key (OpenAI-compatible endpoint)
 - `TAVILY_API_KEY` - Tavily search API key
 - `BRAVE_SEARCH_API_KEY` - Brave Search API key for `web_search` and `image_search`
 - `SERPER_API_KEY` - Serper (Google Search/Images API) key for `web_search` and `image_search`

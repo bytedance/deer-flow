@@ -25,6 +25,7 @@ from deerflow.mcp.session_pool import (
     MCPSessionPool,
     call_pooled_session_tool,
     get_session_pool,
+    normalized_connection_fingerprint,
 )
 from deerflow.mcp.tasks.runtime import get_mcp_task_oauth_token_manager
 from deerflow.mcp.user_config import PersonalMcpConfigSnapshot, load_user_mcp_config_if_changed
@@ -195,15 +196,36 @@ class McpTaskToolCaller:
         )
 
         if transport == "stdio":
+            pool = get_session_pool()
+            binding = None
+            if isinstance(pool, MCPSessionPool):
+                # Resolve the opaque binding from the base connection before
+                # per-call workspace cwd/TMP variables are added. Direct unit
+                # tests may inject a lightweight fake pool; the production
+                # singleton always takes the binding-aware path.
+                binding = pool.ensure_binding(
+                    server_name,
+                    normalized_connection_fingerprint(connection),
+                    domain=connection_scope,
+                )
             connection = await asyncio.to_thread(
                 _prepare_stdio_connection,
                 connection,
                 user_id=user_id,
                 thread_id=thread_id,
             )
-            pool = get_session_pool()
             session_init_timeout = server_config.session_init_timeout
-            session_request = pool.get_session(server_name, scope_key, connection) if connection_scope == "deployment" else pool.get_session(server_name, scope_key, connection, domain=connection_scope)
+            if binding is not None:
+                session_request = pool.get_session(
+                    server_name,
+                    scope_key,
+                    connection,
+                    binding=binding,
+                )
+            elif connection_scope == "deployment":
+                session_request = pool.get_session(server_name, scope_key, connection)
+            else:
+                session_request = pool.get_session(server_name, scope_key, connection, domain=connection_scope)
             if session_init_timeout is not None:
                 try:
                     session = await asyncio.wait_for(

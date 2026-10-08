@@ -1179,4 +1179,4 @@ class TestMainConfigResolution:
         else:
             assert exit_code == 1
             assert "✗ config.yaml found" in output
-            assert "~/cfg.yaml" in output
+            assert str(Path("~/cfg.yaml")) in output

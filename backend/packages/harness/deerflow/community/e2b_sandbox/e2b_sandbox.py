@@ -7,7 +7,7 @@ import shlex
 import threading
 from typing import TYPE_CHECKING
 
-from e2b import FileNotFoundException
+from e2b import CommandExitException, FileNotFoundException
 from e2b_code_interpreter import Sandbox as E2BClientSandbox
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
@@ -165,7 +165,13 @@ class E2BSandbox(Sandbox):
                     kwargs["envs"] = env
                 if timeout is not None:
                     kwargs["timeout"] = timeout
-                result = client.commands.run(command, **kwargs)
+                try:
+                    result = client.commands.run(command, **kwargs)
+                except CommandExitException as exc:
+                    # The SDK raises on a nonzero exit instead of returning a
+                    # result. The exception is itself a ``CommandResult``, so
+                    # format it like one to keep stdout and the exit marker.
+                    result = exc
                 stdout = getattr(result, "stdout", "") or ""
                 stderr = getattr(result, "stderr", "") or ""
                 exit_code = getattr(result, "exit_code", 0)
@@ -347,6 +353,12 @@ class E2BSandbox(Sandbox):
                 raise RuntimeError("sandbox client has been closed")
             try:
                 result = client.commands.run(remote_list_dir_command(resolved, max_depth))
+            except CommandExitException as exc:
+                # The listing script exits nonzero on reachable outcomes (missing
+                # root: 1; head truncating a large listing: SIGPIPE 141). The SDK
+                # raises for those, but the exception carries stdout, whose
+                # status marker the parser trusts over the exit code.
+                result = exc
             except Exception as e:
                 logger.error("Failed to list_dir %s in e2b sandbox: %s", resolved, e)
                 raise OSError(f"Failed to list_dir {resolved} in e2b sandbox: {e}") from e

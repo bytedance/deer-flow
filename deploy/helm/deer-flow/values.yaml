@@ -399,8 +399,10 @@ config: |
 
   # Custom agents and managed subagents default to per-Pod files under the
   # home volume. Switch to the shared database when running more than one
-  # replica (import existing files once with
-  # `python backend/scripts/migrate_agents_to_db.py`):
+  # replica. From the repository root, use the installed backend environment
+  # and the Gateway's runtime/configuration selectors to preview the import:
+  # `uv run --no-sync --project backend python backend/scripts/migrate_agents_to_db.py --dry-run`
+  # Remove --dry-run after reviewing the preview to perform the import:
   # agent_storage:
   #   backend: db
 

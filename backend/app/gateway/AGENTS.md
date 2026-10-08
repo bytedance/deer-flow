@@ -44,12 +44,12 @@ locations and keeps `merge_run_context_overrides` clear. Admission and
 predicate.
 
 FastAPI listens on port 8001. `GET /health` is liveness; `GET /health/ready`
-concurrently probes the ORM engine and effective LangGraph checkpointer/Store
-under one deadline and a strict connection-opening gate. It reads the startup
-config snapshot: legacy `checkpointer:` if set, else `database:`. Unreachable or
-unresolved backends return 503; process-local backends such as `memory` report
-`not_configured`. `GATEWAY_ENABLE_DOCS=false` disables `/docs`, `/redoc`, and
-`/openapi.json`.
+concurrently probes the ORM engine, the checkpointer/Store and the stream
+bridge backend (`StreamBridge.ping()`) under one deadline and per-kind gates,
+from startup snapshots. Unreachable or unresolved gating backends return 503;
+`memory` reports `not_configured`; the provisioner `/health` verdict is
+report-only. See `health.py`. `GATEWAY_ENABLE_DOCS=false` disables `/docs`,
+`/redoc`, and `/openapi.json`.
 
 `build_run_config()` resolves the default LangGraph super-step budget from the
 hot-reloaded top-level `recursion_limit` setting. A valid request-level value

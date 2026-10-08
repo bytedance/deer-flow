@@ -131,8 +131,10 @@ _SECRET_TOKEN_PATTERNS = tuple(
     for pattern in (
         r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b",
         r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b",
+        r"\bgithub_pat_[A-Za-z0-9_]{20,}\b",
         r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b",
-        r"\bsk-[A-Za-z0-9]{20,}\b",
+        r"\bsk-[A-Za-z0-9_-]{20,}\b",
+        r"\bAIza[0-9A-Za-z_-]{35}\b",
     )
 )
 _SENSITIVE_PATH_RE = re.compile(r"(~/.ssh|/etc/passwd|/etc/shadow|/var/run/docker\.sock|docker\.sock|169\.254\.169\.254)")
@@ -365,10 +367,14 @@ def _scan_secrets(rel_path: str, text: str) -> list[SecurityFinding]:
         findings.append(_finding_from_match("secret-private-key", rel_path, text, private_key))
 
     for pattern in _SECRET_TOKEN_PATTERNS:
-        match = pattern.search(text)
-        if match and not _looks_like_placeholder(match.group(0)):
+        for match in pattern.finditer(text):
+            if _looks_like_placeholder(match.group(0)):
+                continue
             findings.append(_finding_from_match("secret-cloud-token", rel_path, text, match))
             break
+        else:
+            continue
+        break
 
     if _is_python_path(rel_path, text):
         findings.extend(_scan_python_secret_assignments(rel_path, text))
@@ -1357,7 +1363,7 @@ def _is_python_path(rel_path: str, text: str) -> bool:
 
 def _is_shell_path(rel_path: str, text: str) -> bool:
     suffix = PurePosixPath(rel_path).suffix.lower()
-    return suffix in {".sh", ".bash"} or text.startswith("#!") and any(shell in text.splitlines()[0].lower() for shell in ("sh", "bash", "zsh"))
+    return suffix in {".sh", ".bash", ".zsh"} or text.startswith("#!") and any(shell in text.splitlines()[0].lower() for shell in ("sh", "bash", "zsh"))
 
 
 def _looks_like_placeholder(value: str) -> bool:
