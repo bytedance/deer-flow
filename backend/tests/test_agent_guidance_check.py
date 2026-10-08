@@ -47,6 +47,7 @@ EXPECTED_GUIDANCE_PATHS = {
     "frontend/src/AGENTS.md",
     "scripts/AGENTS.md",
     "examples/deerflow-extension-agent-teams/AGENTS.md",
+    "examples/deerflow-extension-batch-review/AGENTS.md",
 }
 
 
