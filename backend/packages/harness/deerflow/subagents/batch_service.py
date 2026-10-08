@@ -42,6 +42,10 @@ def _usage(records: list[dict[str, Any]] | None) -> dict[str, int] | None:
 class SubagentBatchService:
     """Lease, execute, and recover durable native-subagent batch items."""
 
+    # Also used by focused shutdown tests constructing an instance via __new__.
+    _stopping: bool = False
+    _stop_drains: int = 0
+
     def __init__(
         self,
         *,
@@ -99,18 +103,24 @@ class SubagentBatchService:
         for task in tasks:
             task.cancel()
 
-        if poller is not None:
-            await asyncio.gather(poller, return_exceptions=True)
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        self._executions.clear()
-        self._execution_ids.clear()
-        self._item_batches.clear()
-        if self._poller is poller:
-            self._poller = None
-        self._stop_drains -= 1
-        if self._stop_drains == 0:
-            self._stopping = False
+        completed = False
+        try:
+            if poller is not None:
+                await asyncio.gather(poller, return_exceptions=True)
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            self._executions.clear()
+            self._execution_ids.clear()
+            self._item_batches.clear()
+            if self._poller is poller:
+                self._poller = None
+            completed = True
+        finally:
+            # A cancelled caller cannot leave a phantom drain count. Keep
+            # start fenced until a subsequent successful stop retries cleanup.
+            self._stop_drains -= 1
+            if completed and self._stop_drains == 0:
+                self._stopping = False
 
     async def _run(self) -> None:
         while not self._stop.is_set():
