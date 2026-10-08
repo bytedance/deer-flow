@@ -816,6 +816,19 @@ This release closes that milestone with **439 merged pull requests**.
   sandbox as reaped. `list_dir` on e2b handles the same exception, so a missing
   directory raises `FileNotFoundError` and a listing truncated at 500 entries
   (SIGPIPE 141) is returned instead of failing with `OSError`. ([#6441])
+- **uploads:** The Gateway's startup sweep of orphaned `.upload-*.part` staging
+  files now skips files younger than 24 hours. The sweep removed every staging
+  file it found, which was right for one Gateway but not for several replicas
+  sharing a home volume: a replica starting during a rolling update deleted the
+  staging file of an upload another replica was still writing, and that upload
+  then failed at its atomic commit. Chunk writes refresh the staging file's
+  mtime, so an upload in flight stays younger than the guard; a crash leftover
+  is collected by the first startup more than 24 hours later, the same guard
+  project-document staging already uses. A staging file that already shares
+  its inode with the published upload (a crash between the atomic link and the
+  staged-name removal) is still reclaimed on the next startup at any age, so
+  that destination does not fail the multi-link safety check on its next
+  replacement. ([#6445])
 - **gateway:** `GET /health/ready` now reports unready while the Redis stream
   bridge is unreachable. The bridge's Redis client connects lazily and nothing
   pinged it, so a gateway whose Redis was down started, answered `200 ready` to
@@ -849,6 +862,13 @@ This release closes that milestone with **439 merged pull requests**.
   follows checkpoint write order, so a goal-only write counts as activity. A new
   `sort_by="updated_at"` option lets `--continue` keep resuming the most
   recently active thread; the default order stays newest created first. ([#6426])
+- **client:** Goals now work in the TUI and embedded `DeerFlowClient` on the
+  SQLite and Postgres checkpointers. Their synchronous savers define the async
+  checkpoint methods but raise `NotImplementedError` from them, and the goal
+  helpers used any async method that existed, so `/goal` printed "Could not set
+  goal." and `get_goal`/`set_goal`/`clear_goal` raised. The goal helpers now
+  fall back to the synchronous methods for those savers. The web UI was not
+  affected. ([#6448])
 - **frontend:** A failed side-chat send no longer clears the composer. The side
   chat's submit handler showed the error toast and then resolved, which the
   composer treats as success, so the typed text and attachments were lost when
@@ -9157,4 +9177,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6412]: https://github.com/bytedance/deer-flow/pull/6412
 [#6426]: https://github.com/bytedance/deer-flow/pull/6426
 [#6441]: https://github.com/bytedance/deer-flow/pull/6441
+[#6445]: https://github.com/bytedance/deer-flow/pull/6445
 [#6447]: https://github.com/bytedance/deer-flow/pull/6447
+[#6448]: https://github.com/bytedance/deer-flow/pull/6448
