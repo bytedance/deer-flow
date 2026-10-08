@@ -753,6 +753,14 @@ back to the environment. An unset, empty or whitespace-only environment value
 keeps the default endpoint. Leading/trailing whitespace and trailing slashes
 are removed before appending `/search` or `/images`. A tool's `api_key` similarly
 overrides `SERPER_API_KEY`; neither tool inherits the other's endpoint or key.
+Both settings are read from the same captured tool configuration, so a hot
+reload cannot pair the old provider's endpoint with the new provider's key.
+
+Overrides must be absolute `http://` or `https://` URLs with a host and valid
+port. Query strings and fragments (including empty `?`/`#` markers) are rejected
+before HTTP. Invalid overrides return a configuration error naming
+`base_url`/`SERPER_BASE_URL` without exposing the configured value; they do not
+fall back to another host.
 
 These are operator-controlled settings, not model-supplied arguments. Choose a
 trusted provider: the key is sent to the configured host in the `X-API-KEY`

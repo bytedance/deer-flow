@@ -1382,9 +1382,11 @@ empty list is forwarded and imposes no restriction of that kind. See the
 
 Serper web and image search can use another Serper-compatible provider through
 `SERPER_BASE_URL` and that provider's `SERPER_API_KEY`. Each tool can instead set
-its own `base_url` and `api_key` in `config.yaml`. Use a base URL without `/search`
-or `/images`; blank environment values keep Serper's default unless a tool
-overrides them. See
+its own `base_url` and `api_key` in `config.yaml`; each request reads them from
+one configuration snapshot. Use an absolute HTTP(S) base URL with a host,
+without `/search`, `/images`, a query string or a fragment. Invalid overrides
+return a configuration error before HTTP; blank environment values keep
+Serper's default unless a tool overrides them. See
 [Serper endpoints](backend/docs/CONFIGURATION.md#serper-endpoints) for precedence
 and how the provider receives the API key.
 

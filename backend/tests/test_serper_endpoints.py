@@ -23,7 +23,7 @@ def serper(monkeypatch):
     post = client.return_value.__enter__.return_value.post
     post.return_value = response
     monkeypatch.setattr(tools.httpx, "Client", client)
-    return SimpleNamespace(configs=configs, post=post)
+    return SimpleNamespace(configs=configs, post=post, client=client)
 
 
 def assert_search(serper, tool_name, endpoint):
@@ -72,3 +72,59 @@ def test_environment_endpoint_without_tool_config(serper, monkeypatch, tool_name
 def test_endpoint_is_operator_configuration_only():
     assert set(tools.web_search_tool.args_schema.model_json_schema()["properties"]) == {"query", "max_results", "time_range"}
     assert set(tools.image_search_tool.args_schema.model_json_schema()["properties"]) == {"query", "max_results"}
+
+
+@pytest.mark.parametrize("tool_name,route", [("web_search", "search"), ("image_search", "images")])
+@pytest.mark.parametrize("has_tool_config", [True, False], ids=["tool-config", "environment-only"])
+def test_endpoint_and_key_use_one_config_snapshot(serper, monkeypatch, tool_name, route, has_tool_config):
+    serper.configs[tool_name]["base_url"] = "https://first.example/api"
+    monkeypatch.setenv("SERPER_BASE_URL", "https://first.example/api")
+    monkeypatch.setenv("SERPER_API_KEY", serper.configs[tool_name]["api_key"])
+    initial_tool = SimpleNamespace(model_extra=serper.configs[tool_name]) if has_tool_config else None
+    first = SimpleNamespace(get_tool_config=MagicMock(return_value=initial_tool))
+    reloaded = SimpleNamespace(get_tool_config=MagicMock(return_value=SimpleNamespace(model_extra={"api_key": "other-provider-secret", "base_url": "https://second.example/api"})))
+    get_config = MagicMock(side_effect=[first, reloaded])
+    monkeypatch.setattr(tools, "get_app_config", get_config)
+
+    assert_search(serper, tool_name, f"https://first.example/api/{route}")
+
+    get_config.assert_called_once_with()
+    first.get_tool_config.assert_called_once_with(tool_name)
+    reloaded.get_tool_config.assert_not_called()
+
+
+@pytest.mark.parametrize("tool_name", ["web_search", "image_search"])
+@pytest.mark.parametrize("source", ["tool-config", "environment"])
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "///",
+        "ftp://proxy.example",
+        "https:///missing-host",
+        "https://:8443",
+        "https://proxy.example/api?token=URL_SECRET",
+        "https://proxy.example/api#URL_SECRET",
+        pytest.param("https://proxy.example/api?", id="empty-query"),
+        pytest.param("https://proxy.example/api#", id="empty-fragment"),
+        "https://[invalid/",
+        "https://proxy.example:invalid/api",
+    ],
+)
+def test_invalid_base_url_fails_before_transport_without_exposing_value(serper, monkeypatch, caplog, tool_name, source, base_url):
+    if source == "tool-config":
+        serper.configs[tool_name]["base_url"] = base_url
+        # Invalid explicit overrides must not send the key to a fallback host.
+        monkeypatch.setenv("SERPER_BASE_URL", "https://fallback.example")
+    else:
+        monkeypatch.setenv("SERPER_BASE_URL", base_url)
+    search_tool = tools.web_search_tool if tool_name == "web_search" else tools.image_search_tool
+
+    result = json.loads(search_tool.invoke({"query": " test "}))
+
+    assert "base_url" in result["error"]
+    assert "SERPER_BASE_URL" in result["error"]
+    assert result["query"] == "test"
+    assert "URL_SECRET" not in json.dumps(result)
+    assert "URL_SECRET" not in caplog.text
+    serper.client.assert_not_called()
+    serper.post.assert_not_called()

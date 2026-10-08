@@ -14,8 +14,12 @@ This is source selection, not a fetch policy or factuality check.
 
 Resolve endpoints once in `_serper_post`, before transport setup: a usable
 per-tool `base_url` takes precedence over `SERPER_BASE_URL`, then the existing
-Serper endpoint. Strip surrounding whitespace and trailing slashes. Keep the
-requested tool's endpoint/key paired; settings stay operator-only. Send keys
+Serper endpoint. Strip surrounding whitespace and trailing slashes. Require an
+absolute HTTP(S) URL with a host and valid port; reject query/fragment markers,
+including empty ones, before HTTP without echoing configured values.
+Read each tool's config once and pass captured extras to key resolution,
+including an empty mapping when config is absent, to keep endpoint/key paired
+through hot reload. Settings stay operator-only. Send keys
 only via `X-API-KEY`, and preserve result URL validation and model arguments.
 Future retries must reuse the resolved endpoint across attempts. Debug endpoint
 diagnostics omit URL credentials, query and fragment; result-URL guards do not
