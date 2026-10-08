@@ -1,5 +1,14 @@
 ### Configuration System
 
+`Paths.user_projects_dir()` uses `extended_length_path()` on native Windows.
+All document paths, including staging and retention walks, inherit the same
+extended drive/UNC namespace even when the root itself is short. Persisted
+`stored_relpath` values and Docker mount paths retain their existing spelling.
+`project_document_path()` still resolves symlinks and checks confinement using
+the same namespace for both the user projects root and the document path.
+Do not prefix only paths already exceeding MAX_PATH: appended filenames and
+derived companions can cross the limit later.
+
 Operator prompt overlays: `lead_prompt_overlay` on AppConfig and
 `subagents.agents.<name>.prompt_overlay` accept literal `prepend`/`append` strings.
 The per-assembly snapshot owns these settings; no run-context override exists.

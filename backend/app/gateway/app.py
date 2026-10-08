@@ -416,6 +416,27 @@ async def _shutdown_scheduled_task_service(app: FastAPI) -> None:
         logger.exception("Failed to stop scheduled task service")
 
 
+async def _shutdown_subagent_batch_service(app: FastAPI) -> None:
+    """Bound durable subagent batch stop so Gateway exit cannot hang forever."""
+    service = getattr(app.state, "subagent_batch_service", None)
+    if service is None:
+        return
+    app.state.subagent_batches_available = False
+    try:
+        await asyncio.wait_for(service.stop(), timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS)
+    except TimeoutError:
+        logger.warning(
+            "Subagent batch service shutdown exceeded %.1fs; proceeding with worker exit.",
+            _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        logger.exception("Failed to stop subagent batch service")
+    finally:
+        from deerflow.subagents.batch_runtime import set_subagent_batch_submitter
+
+        set_subagent_batch_submitter(None)
+
+
 def _scheduled_task_notification_repos(startup_config: AppConfig):
     """Return ``(connection_repo, notification_repo)`` for the scheduled-run outbox (issue #4254).
 
@@ -848,16 +869,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         set_mcp_task_config_snapshot(None)
 
-        if getattr(app.state, "subagent_batch_service", None) is not None:
-            app.state.subagent_batches_available = False
-            try:
-                await app.state.subagent_batch_service.stop()
-            except Exception:
-                logger.exception("Failed to stop subagent batch service")
-            finally:
-                from deerflow.subagents.batch_runtime import set_subagent_batch_submitter
-
-                set_subagent_batch_submitter(None)
+        await _shutdown_subagent_batch_service(app)
 
         # Browser sessions have their own bounded teardown. MCP sessions close
         # after the runtime drains runs, since those runs may still call tools.

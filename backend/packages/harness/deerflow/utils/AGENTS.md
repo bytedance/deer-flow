@@ -43,6 +43,11 @@ Tool and agent assembly re-enters `get_available_tools()` and may block on MCP d
 
 ### Uploaded Document Summaries
 
+Outlines skip root-level HTML comment blocks (`<!--` with up to three leading
+spaces through the first `-->` line). Comment contents cannot open code fences;
+comment markers inside fenced code cannot open comment blocks. Keep line numbers
+and limits unchanged. Coverage: `tests/test_file_outline_html_comments.py`.
+
 `file_outline.py` reads outlines and fallback previews as `utf-8-sig` so an
 optional leading UTF-8 BOM cannot hide a first-line heading or code fence, or
 occupy a preview line. Preserve physical line numbers, embedded U+FEFF
@@ -76,6 +81,13 @@ upload ingestion owns a temporary source that it removes in `finally`. Coverage
 lives in `tests/test_file_conversion_cancellation.py`.
 
 ### Host Path Portability
+
+`host_paths.extended_length_path()` provides lexical Windows filesystem
+spelling (absolute `\\?\` drive paths or `\\?\UNC\` shares); it is a no-op
+on POSIX. It does not replace symlink resolution or confinement checks and
+must not be used for persisted relative paths or Docker mount sources.
+Existing extended (`\\?\`) and device (`\\.\`, including named pipes)
+namespaces pass through unchanged before normalization.
 
 `host_paths.py` rejects Windows device names for host-visible creation paths on
 every platform, including the `COM`/`LPT` aliases with superscript ¹, ² and ³.

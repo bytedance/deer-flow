@@ -2,6 +2,10 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+Upload case-collision coverage uses separate HTTP requests and preserves both
+reported payloads. Observe real filename-claim inputs to pin the disk seed;
+case-insensitive hosts can otherwise mask a missing seed through link retries.
+
 Channel reload cancellation regressions must assert the worker returned the
 stale snapshot before checking that newer runtime config survived. Completion
 alone cannot prove the race: loader exceptions are caught and return `None`.
@@ -62,6 +66,13 @@ Never start or stop a stack from these tests.
 through offline HTTP transports. Keep its directly imported `anthropic` SDK in
 the backend `dev` dependency group rather than relying on `langchain-anthropic`
 to supply it transitively.
+
+## User repository ordering
+
+`test_auth.py` pins `list_user_ids()` ordering with fixed UTC timestamps and UUIDs.
+Cover both creation-time precedence and the lexical stored-ID tie-break for
+equal timestamps through the real SQLite repository; do not assume wall-clock
+calls are distinct or weaken the result to an unordered comparison.
 
 ## Router auth fixtures
 

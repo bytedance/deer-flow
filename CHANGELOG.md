@@ -804,6 +804,17 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **persistence:** `scripts/migrate_user_isolation.py` now moves each legacy
+  thread to the user who owns it. It looked for thread owners in
+  `{base_dir}/deer-flow.db`, a file DeerFlow never creates (the database is
+  `{sqlite_dir}/deerflow.db`, or PostgreSQL), so the owner list was always empty
+  and every legacy thread was moved to `users/default/`. Owners now come from the
+  `threads_meta` table of the database configured in `config.yaml`. If legacy
+  threads exist but that table cannot be read, the script stops before moving
+  anything; `--allow-missing-thread-owners` assigns every legacy thread to
+  `default` instead, for installs that never recorded thread owners. Installs
+  that already ran the old script can recover their threads with the steps in
+  `docker/provisioner/README.md`. ([#6450])
 - **sandbox:** A failed command in the e2b sandbox now keeps its output and exit
   code. The e2b SDK raises `CommandExitException` on a nonzero exit instead of
   returning a result, so `E2BSandbox.execute_command` returned
@@ -9180,3 +9191,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6445]: https://github.com/bytedance/deer-flow/pull/6445
 [#6447]: https://github.com/bytedance/deer-flow/pull/6447
 [#6448]: https://github.com/bytedance/deer-flow/pull/6448
+[#6450]: https://github.com/bytedance/deer-flow/pull/6450
