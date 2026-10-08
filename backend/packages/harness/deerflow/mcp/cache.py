@@ -300,6 +300,7 @@ async def initialize_mcp_tools() -> list[BaseTool]:
         await asyncio.to_thread(_wait_for_initialization, waiting_generation)
 
     from deerflow.config.extensions_config import ExtensionsConfig
+    from deerflow.mcp.session_pool import StaleMCPBindingError, get_session_pool
     from deerflow.mcp.tools import get_mcp_tools
 
     loaded_tools = None
@@ -329,7 +330,35 @@ async def initialize_mcp_tools() -> list[BaseTool]:
             raise RuntimeError("Extensions config could not be loaded for MCP tool discovery") from None
         loaded_snapshot = _effective_mcp_config_snapshot(loaded_config)
         loaded_reset_signature = _current_cache_reset_marker_signature(_resolve_config_path())
-        loaded_tools = await get_mcp_tools(extensions_config=loaded_config)
+        # Claim the exact pool this generation owns under the same lock the
+        # reset path takes, so verify-generation + capture-pool is one atomic
+        # ownership handoff. A superseded initializer must never resolve the
+        # singleton after the reset: that would install its stale fingerprint
+        # into the replacement pool the successor initializer runs on.
+        with _init_condition:
+            if _cache_generation != claim_generation:
+                logger.info("MCP cache was reset before tool discovery; discarding superseded initialization")
+                return []
+
+            claimed_pool = get_session_pool()
+
+        try:
+            loaded_tools = await get_mcp_tools(
+                extensions_config=loaded_config,
+                session_pool=claimed_pool,
+            )
+        except StaleMCPBindingError:
+            # The pool this claim owns was retired while discovery was running.
+            # That is the same cache race as a generation change, so keep the
+            # existing "discard stale initialization" semantics; a stale binding
+            # on a pool this claim still owns stays a real error.
+            with _init_condition:
+                superseded = _cache_generation != claim_generation
+
+            if superseded:
+                logger.info("MCP cache was reset during binding installation; discarding superseded initialization")
+                return []
+            raise
         post_path, post_sig = _current_config_state()
         post_reset_signature = _current_cache_reset_marker_signature(post_path)
         if post_path is not None and post_sig is not None:

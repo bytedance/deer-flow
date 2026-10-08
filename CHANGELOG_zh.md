@@ -694,6 +694,14 @@
 
 ### 修复
 
+- **沙箱：** e2b 沙箱中失败的命令现在会保留输出和退出码。e2b SDK 在退出码非零时抛出
+  `CommandExitException`，而不是返回结果，因此 `E2BSandbox.execute_command` 返回的是
+  `Error: Command exited with code N and error: ...`：stdout 被丢弃，`Exit Code: N`
+  标记从未追加，`_bash_evidence_status` 退回到报告 `success` 的 `deerflow_tool_meta`，
+  失败的 `pytest` 可能满足 `tests_passed` 验收条件。该异常本身带有命令的 stdout、stderr
+  与退出码，现在会按返回结果的方式格式化。stderr 中恰好包含 "sandbox not found" 的失败命令
+  也不再把沙箱标记为已回收。e2b 的 `list_dir` 也会处理同一异常：目录不存在时抛出
+  `FileNotFoundError`，超过 500 条被截断（SIGPIPE 141）的列表会正常返回，不再以 `OSError` 失败。([#6441])
 - **前端：** 附件上传失败后重试发送时，现在会保留原先附带的上下文。输入框此前在发送开始时（附件上传之前）就清除了
   引用、对话引用、已暂存的项目文件和已保存的草稿，因此上传失败后文字和文件虽仍在，重试发送却缺少这些上下文。
   现在这些一次性状态只在发送真正派发（上传完成）后才清除；若上传完成时用户已切换对话或离开页面，只清除该次发送
@@ -703,6 +711,10 @@
   最近一两个线程，较早线程的标题无法解析。现在 SQLite 和 Postgres 通过检查点索引列出线程，每个返回的线程只加载首个和最新
   检查点；Gateway 分支也会列出，排序按检查点写入顺序，因此仅写入目标也算作活动。新增的 `sort_by="updated_at"` 选项让
   `--continue` 继续恢复最近活跃的线程；默认顺序仍为按创建时间从新到旧。([#6426])
+- **客户端：** TUI 和内嵌 `DeerFlowClient` 在 SQLite 和 Postgres 检查点后端上现在可以正常使用目标（goal）。这两种
+  同步检查点保存器定义了异步方法，但调用时会抛出 `NotImplementedError`，而目标读写只要异步方法存在就会调用它，因此
+  `/goal` 只会显示 "Could not set goal."，`get_goal`/`set_goal`/`clear_goal` 则直接抛出异常。现在目标读写在这类保存器上
+  会改用同步方法。Web UI 不受影响。([#6448])
 - **前端：** 侧边对话发送失败时不再清空输入框。侧边对话的提交处理在弹出错误提示后仍以成功返回，输入框据此视为成功，
   因此在创建侧边对话或上传附件失败时，已输入的文字和附件都会丢失；发往新侧边对话的第一条消息也会在排队时（实际发送前）
   就被清空。现在提交处理会在提示后抛出错误，排队的首条发送也以其自身结果完成提交，因此草稿会保留以便重试，只有消息
@@ -7502,3 +7514,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6407]: https://github.com/bytedance/deer-flow/pull/6407
 [#6412]: https://github.com/bytedance/deer-flow/pull/6412
 [#6426]: https://github.com/bytedance/deer-flow/pull/6426
+[#6441]: https://github.com/bytedance/deer-flow/pull/6441
+[#6448]: https://github.com/bytedance/deer-flow/pull/6448

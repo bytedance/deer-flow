@@ -84,31 +84,37 @@ class NotificationDeliveryWorker:
         self._default_locale = default_locale
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
+        self._lifecycle_lock = asyncio.Lock()
 
     async def start(self) -> None:
-        if self._task is not None:
-            return
-        self._stop.clear()
-        self._task = asyncio.create_task(self._run_loop())
+        async with self._lifecycle_lock:
+            if self._task is not None:
+                return
+            self._stop.clear()
+            self._task = asyncio.create_task(self._run_loop())
 
     async def stop(self) -> None:
-        if self._task is None:
-            return
-        self._stop.set()
-        task = self._task
-        self._task = None
-        try:
-            await asyncio.wait_for(task, timeout=self._stop_timeout_seconds)
-        except TimeoutError:
-            logger.warning(
-                "Notification delivery worker stop exceeded %.1fs; cancelling in-flight poll",
-                self._stop_timeout_seconds,
-            )
-            task.cancel()
+        async with self._lifecycle_lock:
+            task = self._task
+            if task is None:
+                return
+            self._stop.set()
             try:
-                await task
-            except asyncio.CancelledError:
-                pass
+                try:
+                    await asyncio.wait_for(task, timeout=self._stop_timeout_seconds)
+                except TimeoutError:
+                    logger.warning(
+                        "Notification delivery worker stop exceeded %.1fs; cancelling in-flight poll",
+                        self._stop_timeout_seconds,
+                    )
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+            finally:
+                if self._task is task:
+                    self._task = None
 
     async def run_once(self, *, now: datetime) -> None:
         await self._recover_stale_sending(now)
