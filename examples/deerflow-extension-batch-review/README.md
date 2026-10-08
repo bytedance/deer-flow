@@ -42,6 +42,12 @@ Execution and acceptance are shown separately. No criteria means acceptance
 was not requested. Missing verdict means unchecked. `all_hold` is the stored
 deterministic verdict, not a claim of model quality or human approval.
 
+Browser examples below use synthetic research data from the real plugin-router
+fixture, with mocked LangGraph responses and loopback test authentication.
+
+![Conversation action entry](screenshots/conversation-entry.png)
+![Saved report and captured source dialog](screenshots/saved-report-and-evidence.png)
+
 ## Limits and recovery
 
 - Up to 20 recent batches per conversation and 50 compact items per page. Load
