@@ -17,7 +17,9 @@ from deerflow.persistence import bootstrap
 from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 
 REVISION = "0032_activity_and_task_events"
-CURRENT_HEAD = "0033_batch_result_artifact"
+NEXT = "0033_batch_result_artifact"
+AFTER_NEXT = "0034_run_event_seq_watermark"
+CURRENT_HEAD = "0035_login_throttle"
 PREVIOUS = "0031_scheduled_streak_boundary"
 TABLES = {"thread_read_markers", "thread_read_versions", "scheduled_task_events"}
 INDEXES = {
@@ -32,7 +34,9 @@ async def test_0032_remains_in_the_single_migration_chain():
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
     assert script.get_heads() == [CURRENT_HEAD]
     assert script.get_revision(REVISION).down_revision == PREVIOUS
-    assert script.get_revision(CURRENT_HEAD).down_revision == REVISION
+    assert script.get_revision(NEXT).down_revision == REVISION
+    assert script.get_revision(AFTER_NEXT).down_revision == NEXT
+    assert script.get_revision(CURRENT_HEAD).down_revision == AFTER_NEXT
     # alembic_version.version_num is VARCHAR(32).
     assert len(REVISION) <= 32
 

@@ -11,7 +11,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
-from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project
+from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project, once_run_still_scheduled
 from deerflow.scheduler.schedules import next_run_at
 from deerflow.utils.time import coerce_iso
 
@@ -168,10 +168,12 @@ async def finalize_occurrence(
     # A once task's result remains meaningful: an unmet once task failed.
     # Limits and agent stop apply to the recurring schedule lifecycle.
     if task.schedule_type == "once":
-        task.status = ONCE_TASK_STATUS_BY_RUN_STATUS[status]
-        # A cancel or a skip (``cancelled``) stays silent, like interrupted runs.
-        if status in _ONCE_OUTCOME_STATUSES:
-            events += ("task_finished",)
+        # A trial ahead of the run time leaves the task as it was.
+        if not once_run_still_scheduled(task, occurrence):
+            task.status = ONCE_TASK_STATUS_BY_RUN_STATUS[status]
+            # A cancel or a skip (``cancelled``) stays silent, like interrupted runs.
+            if status in _ONCE_OUTCOME_STATUSES:
+                events += ("task_finished",)
     elif await end_condition_reached(session, task, now=finished_at):
         task.status = "completed"
         task.next_run_at = None
