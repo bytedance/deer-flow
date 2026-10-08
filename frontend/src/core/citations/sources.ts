@@ -110,12 +110,56 @@ export function maskCitationCode(markdown: string): string {
 // Anchored: a backtick run further into a line is inline code, not an opener.
 // A list marker only opens a container when whitespace follows it, so `-```md`
 // is paragraph text rather than a fence opener.
-const FENCE_LINE_RE =
-  /^((?:(?:[ \t]*>)|(?:[-+*]|\d{1,9}[.)])[ \t]|[ \t])*)(`{3,}|~{3,})/;
+//
+// The container prefix is scanned, not matched. A space can be read either as
+// padding of the marker it precedes or as a step of its own, so an alternation
+// over `>`, list markers and spaces describes the same prefix many ways: a line
+// of repeated markers with no fence after it makes the engine try them all,
+// which is exponential in the marker count and never finishes for the thousands
+// of markers one deep-quote message carries. This loop visits each position
+// once, and skipping padding before a marker loses nothing because a fence
+// marker is never a space.
+const CONTAINER_QUOTE_RE = />/y;
+const CONTAINER_LIST_RE = /(?:[-+*]|\d{1,9}[.)])[ \t]/y;
+const FENCE_OPEN_MARKER_RE = /(`{3,}|~{3,})/y;
+
+type FenceOpener = { prefix: string; marker: string; consumed: number };
+
+function fenceOpener(line: string): FenceOpener | null {
+  let index = 0;
+  for (;;) {
+    while (line[index] === " " || line[index] === "\t") {
+      index += 1;
+    }
+    CONTAINER_QUOTE_RE.lastIndex = index;
+    if (CONTAINER_QUOTE_RE.test(line)) {
+      index += 1;
+      continue;
+    }
+    CONTAINER_LIST_RE.lastIndex = index;
+    if (CONTAINER_LIST_RE.test(line)) {
+      index = CONTAINER_LIST_RE.lastIndex;
+      continue;
+    }
+    break;
+  }
+  FENCE_OPEN_MARKER_RE.lastIndex = index;
+  const marker = FENCE_OPEN_MARKER_RE.exec(line)?.[0];
+  if (marker === undefined) {
+    return null;
+  }
+  return {
+    prefix: line.slice(0, index),
+    marker,
+    consumed: index + marker.length,
+  };
+}
+
 const BLOCKQUOTE_PREFIX_RE = /^(?:[ \t]*>)+/;
 const LIST_ITEM_RE = /^(?:[-+*]|\d{1,9}[.)])[ \t]+/;
+
 // A closing fence is indentation and a marker and nothing else, so it cannot
-// reuse FENCE_LINE_RE: that pattern also accepts list markers, which are plain
+// reuse `fenceOpener`: that scan also accepts list markers, which are plain
 // content once a fence is open.
 const FENCE_CLOSER_RE = /^([ \t]*)(`{3,}|~{3,})/;
 
@@ -234,8 +278,8 @@ function closingFence(line: string): { marker: string; column: number } | null {
 // What follows a fence marker on its line. Two CommonMark rules live there: a
 // closing fence is bare, and a backtick fence's info string carries no backtick.
 // Both are what the scanner in core/messages/utils.ts already enforces.
-function fenceTail(line: string, match: RegExpExecArray): string {
-  return line.slice(match[0].length);
+function fenceTail(line: string, opener: FenceOpener): string {
+  return line.slice(opener.consumed);
 }
 
 type OpenFence = { quoteDepth: number; column: number };
@@ -292,7 +336,7 @@ function maskFencedCodeBlocks(markdown: string): string {
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i]!;
     const position = linePosition(line);
-    const opener = FENCE_LINE_RE.exec(line);
+    const opener = fenceOpener(line);
     if (pendingQuoteExit) {
       if (position.quoteDepth === 0 && position.body === "") {
         continue;
@@ -405,14 +449,14 @@ function maskFencedCodeBlocks(markdown: string): string {
     // The opener gets the same three-column budget as the closer: four columns
     // past the container's content column is an indented code block, so a marker
     // there cannot open a fence and everything after it keeps rendering.
-    const openerMarker = opener?.[2];
+    const openerMarker = opener?.marker;
     const containerColumn = items[items.length - 1] ?? 0;
     // `BLOCKQUOTE_PREFIX_RE` only matches from the start of a line, so a quote
     // opened behind a list marker - `- > ```md` - reads as depth zero even
     // though its fence really is quoted. The opener's own prefix is the truth
     // there: each `>` in it is a container the fence sits inside, and a line
     // that drops all of them has left the quote rather than reached free text.
-    const prefixQuoteDepth = (opener?.[1] ?? "").split(">").length - 1;
+    const prefixQuoteDepth = (opener?.prefix ?? "").split(">").length - 1;
     // A backtick fence's info string cannot hold a backtick, so ` ```md `x` `
     // is paragraph text with an inline span rather than an opener; opening a
     // fence there would blank a citation the reader can actually click. Tilde

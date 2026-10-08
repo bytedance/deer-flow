@@ -773,6 +773,49 @@ describe("extractCitationSources", () => {
   });
 });
 
+describe("scans a deeply repeated blockquote chain in one pass", () => {
+  // tests/e2e/user-message-plain-text.spec.ts renders an AI message whose whole
+  // body is one line of thousands of `>` markers, and the citation pass runs on
+  // that text before the renderer does. Reading the containers a fence marker
+  // may sit behind has to reach each position once: an alternation that can take
+  // a space either as a step of its own or as the padding of the next marker
+  // describes the same prefix many ways, so a line carrying no fence leaves the
+  // engine to enumerate them all. Measured against the pattern this file guards,
+  // one check costs about a second at 26 markers and roughly doubles for each
+  // marker added, so a three-thousand-marker line never returns. The budget sits
+  // two orders of magnitude above what a single pass takes, which pins the growth
+  // rather than the machine.
+  const shapes: Array<[string, string]> = [
+    ["> ".repeat(26) + "deep", "26-level quote"],
+    ["- " + "> ".repeat(26) + "deep-list", "26-level quote behind a list"],
+    ["> ".repeat(3000) + "deep", "3000-level quote"],
+    ["- " + "> ".repeat(3000) + "deep-list", "3000-level quote behind a list"],
+  ];
+
+  for (const [markdown, label] of shapes) {
+    it(`masks nothing in the ${label} shape within one pass of the line`, () => {
+      const started = performance.now();
+      const sources = extractCitationSources(markdown);
+
+      expect(sources).toEqual([]);
+      expect(performance.now() - started).toBeLessThan(500);
+    });
+  }
+
+  it("still reaches a citation that follows a deep quote chain", () => {
+    // Skipping the scan would keep every case above green, so the same shape is
+    // checked with real work to find after it.
+    const markdown = [
+      "> ".repeat(26) + "deep",
+      "[citation:Deep](https://example.com/deep)",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/deep",
+    ]);
+  });
+});
+
 describe("formatCitationMarkdownReference", () => {
   it("formats a source as a reusable markdown reference", () => {
     const [source] = extractCitationSources(
