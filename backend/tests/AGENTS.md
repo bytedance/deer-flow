@@ -2,6 +2,10 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+Upload case-collision coverage uses separate HTTP requests and preserves both
+reported payloads. Observe real filename-claim inputs to pin the disk seed;
+case-insensitive hosts can otherwise mask a missing seed through link retries.
+
 Channel reload cancellation regressions must assert the worker returned the
 stale snapshot before checking that newer runtime config survived. Completion
 alone cannot prove the race: loader exceptions are caught and return `None`.

@@ -16,6 +16,7 @@ from fastapi import HTTPException, UploadFile
 from fastapi.testclient import TestClient
 
 from app.gateway import upload_ingestion
+from app.gateway.auth.models import User
 from app.gateway.deps import get_config
 from app.gateway.routers import uploads
 from deerflow.sandbox.lease import get_sandbox_lease_manager
@@ -139,6 +140,46 @@ def test_upload_files_auto_renames_duplicate_form_filenames(tmp_path):
     assert result.files[1].original_filename == "data.txt"
     assert (thread_uploads_dir / "data.txt").read_bytes() == b"first"
     assert (thread_uploads_dir / "data_1.txt").read_bytes() == b"second"
+
+
+def test_upload_files_deduplicates_case_variants_across_requests(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir()
+    user = User(email="upload-test@example.com")
+    app = make_authed_test_app(user_factory=lambda: user, bind_current_user=True)
+    app.include_router(uploads.router)
+    app.dependency_overrides[get_config] = lambda: SimpleNamespace()
+
+    claims = []
+    real_claim = uploads.claim_unique_filename
+
+    def capture_claim(name, seen):
+        claims.append((name, set(seen)))
+        return real_claim(name, seen)
+
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()),
+        patch.object(uploads, "claim_unique_filename", side_effect=capture_claim),
+        TestClient(app) as client,
+    ):
+        first = client.post("/api/threads/thread-local/uploads", files={"files": ("Report.txt", b"first")})
+        assert first.status_code == 200
+        assert first.json()["success"] is True
+        assert [entry["filename"] for entry in first.json()["files"]] == ["Report.txt"]
+
+        second = client.post("/api/threads/thread-local/uploads", files={"files": ("report.txt", b"second")})
+
+    assert second.status_code == 200
+    assert second.json()["success"] is True
+    assert [entry["filename"] for entry in second.json()["files"]] == ["report_1.txt"]
+    assert second.json()["files"][0]["original_filename"] == "report.txt"
+    assert (thread_uploads_dir / first.json()["files"][0]["filename"]).read_bytes() == b"first"
+    assert (thread_uploads_dir / second.json()["files"][0]["filename"]).read_bytes() == b"second"
+    assert {path.name for path in thread_uploads_dir.iterdir()} == {"Report.txt", "report_1.txt"}
+    # On case-insensitive hosts the link retry can hide a missing disk seed.
+    # Observe the real claim inputs so this invariant is checked on every host.
+    assert claims == [("Report.txt", set()), ("report.txt", {"Report.txt"})]
 
 
 def test_upload_files_deduplicates_max_length_filenames_without_failing_the_batch(tmp_path):
