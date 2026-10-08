@@ -246,7 +246,7 @@ def _safe_public_url(value: object) -> str:
     return url if ip.is_global else ""
 
 
-def _serper_post(endpoint: str, api_key: str, query: str, max_results: int, *, time_range: SearchTimeRange | None = None) -> tuple[dict | None, str | None]:
+def _serper_post(endpoint: str, api_key: str, query: str, max_results: int, *, time_range: SearchTimeRange | None = None, base_url: str | None = None) -> tuple[dict | None, str | None]:
     """Send a POST request to a Serper endpoint.
 
     ``query`` is expected to already be normalized via :func:`_clean_query`.
@@ -265,12 +265,14 @@ def _serper_post(endpoint: str, api_key: str, query: str, max_results: int, *, t
 
     try:
         # Resolve once before transport setup so retries can reuse this endpoint.
-        base_url = (os.getenv("SERPER_BASE_URL") or "").strip()
+        if not isinstance(base_url, str) or not base_url.strip():
+            base_url = os.getenv("SERPER_BASE_URL") or ""
+        base_url = base_url.strip()
         if base_url:
             endpoint = base_url.rstrip("/") + "/" + endpoint.rsplit("/", 1)[-1]
             parsed_endpoint = urlparse(endpoint)
             logger.debug(
-                "Serper endpoint from SERPER_BASE_URL: %s://%s%s",
+                "Serper endpoint from base_url/SERPER_BASE_URL: %s://%s%s",
                 parsed_endpoint.scheme,
                 parsed_endpoint.netloc.rsplit("@", 1)[-1],
                 parsed_endpoint.path,
@@ -323,7 +325,8 @@ def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRang
     if not api_key:
         return _missing_key_error(query, "web_search")
 
-    data, error_json = _serper_post(_SERPER_SEARCH_ENDPOINT, api_key, search_query, max_results, time_range=time_range)
+    base_url = config.model_extra.get("base_url") if config is not None else None
+    data, error_json = _serper_post(_SERPER_SEARCH_ENDPOINT, api_key, search_query, max_results, time_range=time_range, base_url=base_url)
     if error_json is not None:
         error = json.loads(error_json)
         error["query"] = query
@@ -378,7 +381,8 @@ def image_search_tool(query: str, max_results: int = 5) -> str:
     if not api_key:
         return _missing_key_error(query, "image_search")
 
-    data, error_json = _serper_post(_SERPER_IMAGES_ENDPOINT, api_key, query, max_results)
+    base_url = config.model_extra.get("base_url") if config is not None else None
+    data, error_json = _serper_post(_SERPER_IMAGES_ENDPOINT, api_key, query, max_results, base_url=base_url)
     if error_json is not None:
         return error_json
 

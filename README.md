@@ -1380,6 +1380,14 @@ These are deployment settings; the model still supplies only `query` and optiona
 empty list is forwarded and imposes no restriction of that kind. See the
 [tool configuration example](backend/docs/CONFIGURATION.md#tools).
 
+Serper web and image search can use another Serper-compatible provider through
+`SERPER_BASE_URL` and that provider's `SERPER_API_KEY`. Each tool can instead set
+its own `base_url` and `api_key` in `config.yaml`. Use a base URL without `/search`
+or `/images`; blank environment values keep Serper's default unless a tool
+overrides them. See
+[Serper endpoints](backend/docs/CONFIGURATION.md#serper-endpoints) for precedence
+and how the provider receives the API key.
+
 Serper `web_search` supports deployment-level `include_domains` and
 `exclude_domains` too. It checks returned URL hosts (including subdomains), with
 exclusion taking precedence. Filters can return fewer results, including zero;
@@ -1387,13 +1395,6 @@ there are no refill requests. This selects sources, not factual accuracy or a
 global URL-access policy. The model arguments and image search are unchanged.
 See [Serper configuration](backend/docs/CONFIGURATION.md#serper-source-filters)
 for validation and query-length limits.
-
-Serper web and image search can share a trusted compatible API endpoint through
-the operator-set `SERPER_BASE_URL` environment variable. Supply a base URL without
-`/search` or `/images`; blank values retain the Google defaults. Each tool sends
-its configured API key in the `X-API-KEY` header to that host. See
-[environment variables](backend/docs/CONFIGURATION.md#environment-variables)
-for normalization and credential handling.
 
 When using Tavily for `web_fetch`, extracted pages without a title use their URL
 as the heading; their content remains available to the agent.
