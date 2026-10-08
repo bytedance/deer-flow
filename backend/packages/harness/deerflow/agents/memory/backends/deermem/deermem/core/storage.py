@@ -592,6 +592,11 @@ class FileMemoryStorage(MemoryStorage):
         # its facts before that commit and has recorded its own signature.
         self._retrieval_index_generation = 0
         self._retrieval_scope_generations: dict[tuple[str | None, str | None], int] = {}
+        # Serializes a rebuild's row replacement with its signature publication
+        # (see rebuild_index): the adapter lock ends when the install returns, so
+        # two overlapping refreshes of one scope could otherwise install in one
+        # order and publish in the other.
+        self._retrieval_publish_lock = threading.Lock()
 
     def close(self) -> None:
         """Release the retrieval adapter owned by this storage instance."""
@@ -2017,32 +2022,49 @@ class FileMemoryStorage(MemoryStorage):
                     for key in requested_keys:
                         self._retrieval_synced_signatures.pop(key, None)
 
-        bulk_rebuild = getattr(self._retrieval, "rebuild", None)
-        if callable(bulk_rebuild):
-            try:
-                bulk_rebuild(records, scopes=scopes)
-                indexed = len(records)
-                mark_synced()
-            except Exception:
-                logger.exception("Failed to atomically rebuild retrieval index")
-                failed += len(records) or 1
-                forget_synced()
-                return {"supported": True, "indexed": indexed, "failed": failed, "fatal": True}
-        else:
-            clear = getattr(self._retrieval, "clear", None)
-            if callable(clear):
-                clear(scopes=scopes)
-            for fact, scope, path in records:
+        # Row replacement and signature publication form one unit under
+        # _retrieval_publish_lock. The adapter lock ends when the install
+        # returns, so two overlapping refreshes of one scope could otherwise
+        # install in one order and publish in the other, and the later (live)
+        # signature would certify the earlier refresh's stale rows. Serialized,
+        # whichever installs last also publishes last, and a stale captured
+        # signature published last is caught by the next search's compare.
+        # Fact reading above stays outside the lock so a slow read never blocks
+        # refreshes of other scopes. The startup full rebuild holds it for its
+        # single bulk install; scoped refreshes wait for that, which is fine
+        # because before warm-up completes a search would be rebuilding its
+        # scope anyway. Lock order: callers hold no storage lock here
+        # (search_facts releases _cache_lock first; reload() leaves its
+        # scope/file-lock block before rebuilding; DeerMem's warm-up lock is an
+        # outer RLock that nothing inside acquires), and only the adapter's own
+        # lock and _cache_lock are taken inside, both leaf locks.
+        with self._retrieval_publish_lock:
+            bulk_rebuild = getattr(self._retrieval, "rebuild", None)
+            if callable(bulk_rebuild):
                 try:
-                    self.notify_fact_upsert(fact, path=path)
-                    indexed += 1
+                    bulk_rebuild(records, scopes=scopes)
+                    indexed = len(records)
+                    mark_synced()
                 except Exception:
-                    logger.exception("Failed to rebuild retrieval index for fact %s", fact.get("id"))
-                    failed += 1
-            if failed == 0:
-                mark_synced()
+                    logger.exception("Failed to atomically rebuild retrieval index")
+                    failed += len(records) or 1
+                    forget_synced()
+                    return {"supported": True, "indexed": indexed, "failed": failed, "fatal": True}
             else:
-                forget_synced()
+                clear = getattr(self._retrieval, "clear", None)
+                if callable(clear):
+                    clear(scopes=scopes)
+                for fact, scope, path in records:
+                    try:
+                        self.notify_fact_upsert(fact, path=path)
+                        indexed += 1
+                    except Exception:
+                        logger.exception("Failed to rebuild retrieval index for fact %s", fact.get("id"))
+                        failed += 1
+                if failed == 0:
+                    mark_synced()
+                else:
+                    forget_synced()
         return {"supported": True, "indexed": indexed, "failed": failed}
 
     def retrieval_status(self) -> dict[str, Any]:

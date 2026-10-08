@@ -280,36 +280,66 @@ def test_scoped_resync_indexes_every_fact_of_a_large_scope(tmp_path: Path) -> No
 class _PausableAdapter:
     """FTS5 adapter whose next bulk install and every remove can be held at a chosen point.
 
-    With ``pause_next_install`` armed, ``rebuild`` signals ``at_install`` and
-    waits for ``allow_install`` before performing the real install (one call;
-    later rebuilds run unpaused). ``remove`` performs the real removal, signals
-    ``removed`` and waits for ``allow_promote`` before returning, which holds
-    the owning write after its adapter notification and before its signature
-    promotion.
+    With ``pause_after_next_install`` armed, ``rebuild`` performs the real
+    install, signals ``installed`` and waits for ``allow_publish`` before
+    returning, which holds the owning rebuild between its row replacement and
+    its signature publication (one call; later rebuilds run unpaused).
+    ``remove`` performs the real removal, signals ``removed`` and waits for
+    ``allow_promote`` before returning, which holds the owning write after its
+    adapter notification and before its signature promotion.
     """
 
     def __init__(self, inner: FTS5RetrievalAdapter) -> None:
         self._inner = inner
-        self.pause_next_install = False
-        self.at_install = threading.Event()
-        self.allow_install = threading.Event()
+        self.pause_after_next_install = False
+        self.installed = threading.Event()
+        self.allow_publish = threading.Event()
         self.removed = threading.Event()
         self.allow_promote = threading.Event()
 
     def rebuild(self, records, *, scopes):
-        if self.pause_next_install:
-            self.pause_next_install = False
-            self.at_install.set()
-            assert self.allow_install.wait(10), "test orchestration stalled before the index install"
-        return self._inner.rebuild(records, scopes=scopes)
+        self._inner.rebuild(records, scopes=scopes)
+        if self.pause_after_next_install:
+            self.pause_after_next_install = False
+            self.installed.set()
+            assert self.allow_publish.wait(10), "test orchestration stalled before the signature publication"
 
     def remove(self, fact_id, *, scope):
         self._inner.remove(fact_id, scope=scope)
         self.removed.set()
         assert self.allow_promote.wait(10), "test orchestration stalled before the signature promotion"
 
+    def release(self) -> None:
+        self.allow_publish.set()
+        self.allow_promote.set()
+
     def __getattr__(self, name: str):
         return getattr(self._inner, name)
+
+
+class _ReadHold:
+    """Hold one scoped refresh after it has read the scope's facts and before it installs them.
+
+    The scoped ``rebuild_index`` captures the manifest signature, reads the
+    facts through ``load()`` and only then replaces the index rows, so holding
+    here models a refresh that carries a snapshot taken before later writes.
+    """
+
+    def __init__(self, storage: FileMemoryStorage) -> None:
+        self.at_read = threading.Event()
+        self.allow_install = threading.Event()
+        self.armed = True
+        real_load = storage.load
+
+        def load(*args, **kwargs):
+            document = real_load(*args, **kwargs)
+            if self.armed:
+                self.armed = False
+                self.at_read.set()
+                assert self.allow_install.wait(10), "test orchestration stalled before the index install"
+            return document
+
+        storage.load = load  # type: ignore[method-assign]
 
 
 def _run(target: Callable[[], object], errors: list[BaseException]) -> threading.Thread:
@@ -330,7 +360,8 @@ def _join(thread: threading.Thread, errors: list[BaseException]) -> None:
     assert errors == []
 
 
-def _racing_pods(tmp_path: Path) -> tuple[FileMemoryStorage, _PausableAdapter, FileMemoryStorage]:
+def _racing_pods(tmp_path: Path) -> tuple[FileMemoryStorage, _PausableAdapter, FileMemoryStorage, _ReadHold]:
+    """Warmed Pod A with a pausable index, peer Pod B, and A's next scoped refresh held after its fact read."""
     storage_root = tmp_path / "home"
     (tmp_path / "index-a").mkdir()
     adapter = _PausableAdapter(FTS5RetrievalAdapter(tmp_path / "index-a" / INDEX_FILENAME))
@@ -341,8 +372,7 @@ def _racing_pods(tmp_path: Path) -> tuple[FileMemoryStorage, _PausableAdapter, F
     summaries = create_empty_memory()
     summaries["user"]["workContext"]["summary"] = "peer summary refresh"
     assert pod_b.save(summaries, user_id="alice")  # r+1 on the shared manifest: A's next search re-syncs
-    adapter.pause_next_install = True
-    return pod_a, adapter, pod_b
+    return pod_a, adapter, pod_b, _ReadHold(pod_a)
 
 
 def test_promotion_is_fenced_against_a_refresh_that_installs_in_between(tmp_path: Path) -> None:
@@ -353,16 +383,16 @@ def test_promotion_is_fenced_against_a_refresh_that_installs_in_between(tmp_path
     signature afterwards would declare that stale index in sync with the live
     manifest and keep returning f2 until the next manifest change.
     """
-    pod_a, adapter, pod_b = _racing_pods(tmp_path)
+    pod_a, adapter, pod_b, hold = _racing_pods(tmp_path)
     errors: list[BaseException] = []
     try:
         refresh = _run(lambda: pod_a.search_facts("alpha", scopes=[SCOPE]), errors)
-        assert adapter.at_install.wait(10)  # refresh holds f1/f2 read at r+1, not yet installed
+        assert hold.at_read.wait(10)  # refresh holds f1/f2 read at r+1, not yet installed
 
         deletion = _run(lambda: pod_a.delete_fact("f2", user_id="alice", agent_name="agent-a"), errors)
         assert adapter.removed.wait(10)  # r+2 committed, index row removed, promotion pending
 
-        adapter.allow_install.set()  # stale install resurrects f2 and records the r+1 signature
+        hold.allow_install.set()  # stale install resurrects f2 and records the r+1 signature
         _join(refresh, errors)
         adapter.allow_promote.set()  # the deletion must not stamp that index as r+2
         _join(deletion, errors)
@@ -370,8 +400,8 @@ def test_promotion_is_fenced_against_a_refresh_that_installs_in_between(tmp_path
         assert pod_a.search_facts("beta", scopes=[SCOPE]) == []
         assert _ids(pod_a.search_facts("alpha", scopes=[SCOPE])) == ["f1"]
     finally:
-        adapter.allow_install.set()
-        adapter.allow_promote.set()
+        hold.allow_install.set()
+        adapter.release()
         pod_a.close()
         pod_b.close()
 
@@ -382,24 +412,60 @@ def test_stale_refresh_installing_after_a_promotion_is_caught_by_the_next_search
     The stale refresh records the r+1 signature it captured, so the next search
     sees it differ from the live r+2 manifest and rebuilds the scope.
     """
-    pod_a, adapter, pod_b = _racing_pods(tmp_path)
+    pod_a, adapter, pod_b, hold = _racing_pods(tmp_path)
     errors: list[BaseException] = []
     try:
         stale_refresh = _run(lambda: pod_a.search_facts("alpha", scopes=[SCOPE]), errors)
-        assert adapter.at_install.wait(10)
+        assert hold.at_read.wait(10)
         assert pod_a.rebuild_index([SCOPE])["failed"] == 0  # a second, unpaused refresh syncs the scope at r+1
 
         adapter.allow_promote.set()
         pod_a.delete_fact("f2", user_id="alice", agent_name="agent-a")  # r+2: removes the row and promotes r+1 -> r+2
         assert pod_a.search_facts("beta", scopes=[SCOPE]) == []
 
-        adapter.allow_install.set()  # the stale install resurrects f2 under its own r+1 signature
+        hold.allow_install.set()  # the stale install resurrects f2 under its own r+1 signature
         _join(stale_refresh, errors)
 
         assert pod_a.search_facts("beta", scopes=[SCOPE]) == []
         assert _ids(pod_a.search_facts("alpha", scopes=[SCOPE])) == ["f1"]
     finally:
-        adapter.allow_install.set()
-        adapter.allow_promote.set()
+        hold.allow_install.set()
+        adapter.release()
+        pod_a.close()
+        pod_b.close()
+
+
+def test_rebuild_publication_stays_ordered_with_row_replacement(tmp_path: Path) -> None:
+    """Reviewer interleaving: two refreshes install in one order and would publish in the other.
+
+    R1 captures r+1 with f1/f2 and is held before installing. A peer deletes f2
+    (r+2). R2 captures r+2, installs f1 only and is held before publishing. R1
+    then installs its stale f1/f2 and publishes r+1; R2 publishes r+2 last.
+    Without serializing install+publish, R2's live-matching signature certifies
+    R1's stale rows and the deleted f2 is returned until the manifest changes.
+    """
+    pod_a, adapter, pod_b, hold = _racing_pods(tmp_path)
+    errors: list[BaseException] = []
+    try:
+        first = _run(lambda: pod_a.search_facts("alpha", scopes=[SCOPE]), errors)
+        assert hold.at_read.wait(10)  # R1 holds f1/f2 read at r+1
+
+        pod_b.delete_fact("f2", user_id="alice", agent_name="agent-a")  # r+2
+
+        adapter.pause_after_next_install = True
+        second = _run(lambda: pod_a.search_facts("alpha", scopes=[SCOPE]), errors)
+        assert adapter.installed.wait(10)  # R2 installed f1 at r+2, publication pending
+
+        hold.allow_install.set()  # R1 proceeds: with install+publish serialized it waits for R2; unfixed, it installs f1/f2 and publishes r+1 now
+        first.join(1.5)
+        adapter.allow_publish.set()  # R2 publishes r+2
+        _join(second, errors)
+        _join(first, errors)
+
+        assert pod_a.search_facts("beta", scopes=[SCOPE]) == []
+        assert _ids(pod_a.search_facts("alpha", scopes=[SCOPE])) == ["f1"]
+    finally:
+        hold.allow_install.set()
+        adapter.release()
         pod_a.close()
         pod_b.close()
