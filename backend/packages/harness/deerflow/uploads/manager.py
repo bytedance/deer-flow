@@ -480,7 +480,16 @@ def list_files_in_dir(directory: Path) -> dict:
                 continue
             if not entry.is_file(follow_symlinks=False):
                 continue
-            st = entry.stat(follow_symlinks=False)
+            try:
+                st = entry.stat(follow_symlinks=False)
+            except OSError as exc:
+                # The entry can vanish between the scandir sweep and this stat
+                # (another worker deleting an upload, the staging sweep, ...).
+                # Same policy as the chmod path above: skip expected races,
+                # surface operational errors like EACCES.
+                if exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+                    continue
+                raise
             files.append(
                 {
                     "filename": entry.name,

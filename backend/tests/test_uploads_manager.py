@@ -378,6 +378,41 @@ class TestCopyUploadFileNoSymlink:
 # ---------------------------------------------------------------------------
 
 
+class _VanishingDirEntry:
+    """DirEntry stand-in whose stat() raises, simulating a file removed mid-scan."""
+
+    def __init__(self, real, error):
+        self._real = real
+        self._error = error
+
+    @property
+    def name(self):
+        return self._real.name
+
+    @property
+    def path(self):
+        return self._real.path
+
+    def is_file(self, follow_symlinks=False):
+        return True
+
+    def stat(self, follow_symlinks=False):
+        raise self._error
+
+
+class _StaticScandir:
+    """Context manager mimicking os.scandir over a fixed entry list."""
+
+    def __init__(self, entries):
+        self._entries = entries
+
+    def __enter__(self):
+        return iter(self._entries)
+
+    def __exit__(self, *exc_info):
+        return False
+
+
 class TestListFilesInDir:
     def test_empty_dir(self, tmp_path):
         result = list_files_in_dir(tmp_path)
@@ -415,6 +450,32 @@ class TestListFilesInDir:
 
         assert result["count"] == 4
         assert [f["filename"] for f in result["files"]] == [".env", ".upload-note.txt", "draft.part", "visible.txt"]
+
+    def test_skips_entries_vanishing_mid_scan(self, tmp_path, monkeypatch):
+        (tmp_path / "kept.txt").write_text("kept")
+        (tmp_path / "gone.txt").write_text("gone")
+        with os.scandir(tmp_path) as it:
+            real_entries = {e.name: e for e in it}
+        vanished = _VanishingDirEntry(
+            real_entries["gone.txt"],
+            FileNotFoundError(errno.ENOENT, "No such file or directory", str(tmp_path / "gone.txt")),
+        )
+        monkeypatch.setattr(os, "scandir", lambda path: _StaticScandir([real_entries["kept.txt"], vanished]))
+
+        result = list_files_in_dir(tmp_path)
+
+        assert result["count"] == 1
+        assert result["files"][0]["filename"] == "kept.txt"
+
+    def test_stat_permission_error_still_propagates(self, tmp_path, monkeypatch):
+        (tmp_path / "locked.txt").write_text("locked")
+        with os.scandir(tmp_path) as it:
+            real_entry = next(iter(it))
+        locked = _VanishingDirEntry(real_entry, PermissionError(errno.EACCES, "Permission denied", str(tmp_path / "locked.txt")))
+        monkeypatch.setattr(os, "scandir", lambda path: _StaticScandir([locked]))
+
+        with pytest.raises(PermissionError):
+            list_files_in_dir(tmp_path)
 
 
 # ---------------------------------------------------------------------------
