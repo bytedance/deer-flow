@@ -2727,7 +2727,12 @@ class RunManager:
             # below.
             inflight = [record for record in self._runs.values() if record.task is not None and not record.task.done() and not record.ownership_lost]
             for record in inflight:
-                record.abort_action = "interrupt"
+                # Preserve a cancellation action this worker already observed (a
+                # durable rollback in particular); only default to an interrupt
+                # when nothing has been decided locally. The worker's terminal CAS
+                # is still the arbiter, so this is defence in depth, not the fix.
+                if record.abort_action is None:
+                    record.abort_action = "interrupt"
                 record.abort_event.set()
                 record.task.cancel()  # type: ignore[union-attr]  # filtered above
                 # Status is decided AFTER the drain (below), not here: a run that

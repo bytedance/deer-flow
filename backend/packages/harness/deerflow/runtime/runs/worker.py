@@ -1962,30 +1962,30 @@ async def run_agent(
                     # let lease recovery rewrite it as an error with a synthetic
                     # zero receipt.
                     if record.abort_event.is_set() and scheduled_goal is not None:
-                        # A cancel may arrive while scheduled cleanup was
-                        # awaiting its saver. The local status may still be
-                        # staged success; apply the accepted action, including
-                        # rollback, before committing any terminal outcome.
-                        await _finish_cancellation(record.abort_action, restore_checkpoint=not checkpoint_rollback_completed)
-                        await run_manager.persist_current_status(run_id)
-                    else:
-                        # Always consult the durable cancel before persisting the
-                        # staged status: an accepted cancellation must beat a
-                        # locally staged success, and only
-                        # ``set_status_if_not_cancelled`` performs that CAS. A run
-                        # whose ``abort_event`` is set from a heartbeat-observed
-                        # cancel still carries the staged status here, so persisting
-                        # it verbatim could commit a cancelled run as success.
-                        cancel_action = await run_manager.set_status_if_not_cancelled(
-                            run_id,
-                            record.status,
-                            error=record.error,
-                            stop_reason=record.stop_reason,
-                            goal_verdict=record.goal_verdict,
+                        # Resolve the local terminal FIRST so the status handed to
+                        # the CAS is the cancelled one: a staged ``success`` must
+                        # never be what we arbitrate, and a provisional shutdown
+                        # ``interrupt`` must not skip applying the action the store
+                        # actually accepted. No durable write happens here.
+                        await _finish_cancellation(
+                            record.abort_action,
+                            restore_checkpoint=not checkpoint_rollback_completed,
                         )
-                        if cancel_action is not None:
-                            await _finish_cancellation(cancel_action)
-                            await run_manager.persist_current_status(run_id)
+                    # Then let the durable cancel arbitrate the terminal commit.
+                    # ``persist_current_status`` is never used to bypass the CAS: a
+                    # durable rollback the heartbeat has not yet delivered (or one
+                    # shutdown provisionally mislabelled ``interrupt``) must still
+                    # win, and an accepted interrupt must beat a staged success.
+                    cancel_action = await run_manager.set_status_if_not_cancelled(
+                        run_id,
+                        record.status,
+                        error=record.error,
+                        stop_reason=record.stop_reason,
+                        goal_verdict=record.goal_verdict,
+                    )
+                    if cancel_action is not None:
+                        await _finish_cancellation(cancel_action)
+                        await run_manager.persist_current_status(run_id)
                 except Exception:
                     logger.warning("Failed to persist terminal status for run %s after delivery receipt attempts", run_id, exc_info=True)
             # The deferred commit has been attempted. A failed write is left to

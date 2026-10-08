@@ -22,7 +22,7 @@ from deerflow.persistence.base import Base
 from deerflow.persistence.postgres_schema import build_asyncpg_connect_args, dsn_with_search_path
 from deerflow.persistence.run.sql import RunRepository
 from deerflow.runtime.runs import worker
-from deerflow.runtime.runs.manager import ConflictError, RunManager
+from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.store.base import LeaseRenewal
 
@@ -415,3 +415,178 @@ async def test_detached_precheck_commit_race_preserves_worker_hook_and_stream_en
     assert record.status.value == status
     completed.assert_awaited_once_with(record)
     bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+async def _wait_for_flag(event: asyncio.Event, *, timeout: float = 5.0) -> None:
+    """Yield until an observable flag flips (deterministic, no fixed sleeps)."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not event.is_set():
+        if loop.time() >= deadline:
+            raise AssertionError("timed out waiting for the expected state change")
+        await asyncio.sleep(0)
+
+
+async def _run_scheduled_goal_blocked_in_cleanup(database_runtime, monkeypatch, mode, *, on_entered):
+    """Start a scheduled-goal run that parks inside its goal cleanup.
+
+    Returns the pieces a shutdown test needs. ``on_entered`` runs once the
+    worker is parked mid-cleanup, before the write is released.
+    """
+    store, checkpointer = database_runtime
+    manager = RunManager(
+        store=store,
+        worker_id="owner",
+        run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True, lease_seconds=30, grace_seconds=0),
+    )
+    metadata = {"scheduled_task_id": "task", "scheduled_task_run_id": "occurrence", "scheduled_goal_objective": "Report"}
+    record = await manager.create_or_reject("result", user_id="alice", metadata=metadata)
+    entered, release = asyncio.Event(), asyncio.Event()
+    restore_calls: list[str] = []
+    publish_calls: list[str] = []
+    original_rollback = worker._rollback_to_pre_run_checkpoint
+    original_publish = worker._publish_restored_checkpoint_values
+    original_write = worker.write_thread_goal
+
+    async def blocking_write(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await original_write(*args, **kwargs)
+
+    async def counting_rollback(*args, **kwargs):
+        restore_calls.append(kwargs["run_id"])
+        return await original_rollback(*args, **kwargs)
+
+    async def counting_publish(*args, **kwargs):
+        publish_calls.append(kwargs["run_id"])
+        return await original_publish(*args, **kwargs)
+
+    async def evaluate(*args, **kwargs):
+        return {"satisfied": True, "blocker": "none", "reason": "Verified", "relied_on_assumption": False}
+
+    monkeypatch.setattr(worker, "write_thread_goal", blocking_write)
+    monkeypatch.setattr(worker, "_rollback_to_pre_run_checkpoint", counting_rollback)
+    monkeypatch.setattr(worker, "_publish_restored_checkpoint_values", counting_publish)
+    monkeypatch.setattr(worker, "evaluate_goal_completion", evaluate)
+    monkeypatch.setattr(worker, "create_goal_evaluator_model", lambda **kwargs: object())
+    compiled = _graph(checkpointer, mode, "Cancelled scheduled answer")
+    bridge = _bridge()
+    record.task = asyncio.create_task(
+        worker.run_agent(
+            bridge,
+            manager,
+            record,
+            ctx=worker.RunContext(
+                checkpointer=checkpointer,
+                checkpoint_channel_mode=mode,
+                scheduled_task_runtime={"task_id": "task", "occurrence_id": "occurrence", "user_id": "alice", "goal_objective": "Report"},
+            ),
+            agent_factory=lambda config: compiled,
+            graph_input={"messages": [HumanMessage(content="Report")]},
+            config={"configurable": {"thread_id": "result"}, "context": {"non_interactive": True}},
+        )
+    )
+    await asyncio.wait_for(entered.wait(), timeout=10)
+    await on_entered(manager, record, store)
+    release.set()
+    return manager, record, store, bridge, release, restore_calls, publish_calls
+
+
+async def _shutdown_and_settle(manager, record, *, timeout: float = 5.0) -> None:
+    shutdown = asyncio.create_task(manager.shutdown(timeout=timeout))
+    await _wait_for_flag(record.abort_event)
+    await asyncio.wait_for(shutdown, timeout=timeout + 5)
+    await asyncio.gather(record.task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["full", "delta"])
+async def test_shutdown_preserves_remote_rollback_accepted_before_observation(database_runtime, monkeypatch, mode):
+    """An accepted remote rollback must not be downgraded to interrupted on shutdown.
+
+    A peer/remote writer accepts ``rollback`` and this worker has not observed it
+    when process shutdown begins. Shutdown's provisional ``interrupt`` must not
+    win: the terminal commit is arbitrated by the durable cancel CAS, the
+    checkpoint is restored exactly once, and the run must not be left as a plain
+    ``interrupted`` success-substitute.
+    """
+
+    async def on_entered(manager, record, store):
+        # Remote rollback accepted; this worker has not observed it yet.
+        assert await store.request_cancel(record.run_id, action="rollback") == "rollback"
+        assert not record.abort_event.is_set()
+
+    manager, record, store, bridge, release, restore_calls, publish_calls = await _run_scheduled_goal_blocked_in_cleanup(database_runtime, monkeypatch, mode, on_entered=on_entered)
+    try:
+        await _shutdown_and_settle(manager, record)
+        row = await store.get(record.run_id, user_id="alice")
+        assert row["status"] == "error", row
+        assert row["error"] == "Rolled back by user"
+        # The checkpoint is restored exactly once (this is the scheduled-goal
+        # rollback path, not the edit-replay values-publish path).
+        assert restore_calls == [record.run_id]
+        bridge.publish_end.assert_awaited_once_with(record.run_id)
+    finally:
+        release.set()
+        await asyncio.gather(record.task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["full", "delta"])
+async def test_shutdown_keeps_locally_observed_rollback(database_runtime, monkeypatch, mode):
+    """A rollback already observed locally must survive shutdown.
+
+    The owning worker observes the rollback (via its local cancel path) before
+    shutdown. Shutdown must not downgrade the decided action to ``interrupt``,
+    and the checkpoint must be restored exactly once.
+    """
+
+    async def on_entered(manager, record, store):
+        outcome = await manager.cancel(record.run_id, action="rollback")
+        assert outcome is CancelOutcome.cancelled
+        assert record.abort_action == "rollback"
+        assert record.abort_event.is_set()
+
+    manager, record, store, bridge, release, restore_calls, publish_calls = await _run_scheduled_goal_blocked_in_cleanup(database_runtime, monkeypatch, mode, on_entered=on_entered)
+    try:
+        await _shutdown_and_settle(manager, record)
+        row = await store.get(record.run_id, user_id="alice")
+        assert record.abort_action == "rollback", "shutdown must not downgrade an observed rollback"
+        assert row["status"] == "error", row
+        assert row["error"] == "Rolled back by user"
+        # The checkpoint is restored exactly once (this is the scheduled-goal
+        # rollback path, not the edit-replay values-publish path).
+        assert restore_calls == [record.run_id]
+        bridge.publish_end.assert_awaited_once_with(record.run_id)
+    finally:
+        release.set()
+        await asyncio.gather(record.task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["full", "delta"])
+async def test_shutdown_without_durable_cancel_does_not_commit_staged_success(database_runtime, monkeypatch, mode):
+    """A bare shutdown interrupt must not commit the staged success.
+
+    With no durable cancel, shutdown interrupts a scheduled-goal run whose
+    terminal status is only staged. The worker must first resolve the local
+    terminal to ``interrupted`` and then let the CAS commit it; committing the
+    earlier staged ``success`` would be wrong.
+    """
+
+    async def on_entered(manager, record, store):
+        # No durable cancel is recorded: the durable row is still running.
+        row = await store.get(record.run_id, user_id="alice")
+        assert row["status"] == "running"
+        assert row.get("cancel_action") is None
+
+    manager, record, store, bridge, release, restore_calls, publish_calls = await _run_scheduled_goal_blocked_in_cleanup(database_runtime, monkeypatch, mode, on_entered=on_entered)
+    try:
+        await _shutdown_and_settle(manager, record)
+        row = await store.get(record.run_id, user_id="alice")
+        assert row["status"] == "interrupted", row
+        assert restore_calls == []
+        bridge.publish_end.assert_awaited_once_with(record.run_id)
+    finally:
+        release.set()
+        await asyncio.gather(record.task, return_exceptions=True)
