@@ -611,8 +611,15 @@ class ScheduledTaskRepository:
             row.last_thread_id = last_thread_id
             if should_increment_run_count:
                 row.run_count += 1
-            row.lease_owner = None
-            row.lease_expires_at = None
+            if occurrence is None:
+                row.lease_owner = None
+                row.lease_expires_at = None
+            # else: a launch write never owns the parent lease. Scheduled
+            # admission released the due-task claim with the queue insert and a
+            # manual trial never took one, so a lease here is a newer claim
+            # (e.g. the poller claiming a once task an early trial left due,
+            # before this late write); clearing it would make that claim's
+            # admission fail as stale and strand the task in "running".
             row.updated_at = datetime.now(UTC)
             await session.commit()
             return True
