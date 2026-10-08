@@ -219,22 +219,27 @@ def get_available_tools(
     # models configured without max_tokens.
     max_tokens = _extract_max_tokens(chat_model if chat_model is not None else model_config)
     if max_tokens is not None:
-        safe_chars = int(max_tokens * 3 * 0.7)
-        budget_note = (
-            f"\n\nPER-RESPONSE BUDGET: your output limit is {max_tokens} tokens "
-            f"(≈{safe_chars} chars). Single non-append writes above this will be truncated. "
-            "For larger documents, write the first section now, "
-            "then use append=True for subsequent sections."
-        )
-        loaded_tools = [
-            _clone_tool_with_description(
-                tool,
-                f"{getattr(tool, 'description', '') or ''}{budget_note}",
+        try:
+            safe_chars = int(max_tokens * 3 * 0.7)
+        except OverflowError:
+            # Even finite caps can be too large for this optional estimate.
+            pass
+        else:
+            budget_note = (
+                f"\n\nPER-RESPONSE BUDGET: your output limit is {max_tokens} tokens "
+                f"(≈{safe_chars} chars). Single non-append writes above this will be truncated. "
+                "For larger documents, write the first section now, "
+                "then use append=True for subsequent sections."
             )
-            if tool.name == "write_file" and hasattr(tool, "description") and "PER-RESPONSE BUDGET:" not in (getattr(tool, "description", "") or "")
-            else tool
-            for tool in loaded_tools
-        ]
+            loaded_tools = [
+                _clone_tool_with_description(
+                    tool,
+                    f"{getattr(tool, 'description', '') or ''}{budget_note}",
+                )
+                if tool.name == "write_file" and hasattr(tool, "description") and "PER-RESPONSE BUDGET:" not in (getattr(tool, "description", "") or "")
+                else tool
+                for tool in loaded_tools
+            ]
 
     # Get cached MCP tools if enabled
     # NOTE: We use ExtensionsConfig.from_file() instead of config.extensions

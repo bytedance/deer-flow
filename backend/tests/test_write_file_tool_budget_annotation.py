@@ -116,10 +116,20 @@ def test_get_available_tools_with_model_config_lacking_max_tokens():
     assert "PER-RESPONSE BUDGET:" not in write_tool.description
 
 
-@pytest.mark.parametrize("yaml_max_tokens", [".inf", "-.inf", ".nan"])
+@pytest.mark.parametrize(
+    "yaml_max_tokens",
+    [
+        ".inf",
+        "-.inf",
+        ".nan",
+        pytest.param("1.0e+308", id="huge-finite-float"),
+        pytest.param("1" + "0" * 400, id="huge-integer"),
+        pytest.param('"' + "1" + "0" * 400 + '"', id="huge-integer-string"),
+    ],
+)
 @pytest.mark.parametrize("use_chat_model", [False, True], ids=["profile", "constructed-model"])
-def test_get_available_tools_omits_non_finite_budget(yaml_max_tokens, use_chat_model):
-    """YAML non-finite caps must not abort assembly or produce a budget hint."""
+def test_get_available_tools_omits_unusable_budget(yaml_max_tokens, use_chat_model):
+    """Non-finite or overflowing caps must not abort assembly or produce a hint."""
     baseline_desc = write_file_tool.description
     max_tokens = yaml.safe_load(f"max_tokens: {yaml_max_tokens}")["max_tokens"]
     model = ModelConfig(name="budget-model", model="m", use="u", max_tokens=4096 if use_chat_model else max_tokens)

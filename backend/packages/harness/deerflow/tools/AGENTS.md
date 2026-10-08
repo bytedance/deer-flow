@@ -24,7 +24,9 @@ the same host reader serves; keep reading guidance separate from permission enfo
 Lead and bootstrap assembly pass the constructed `chat_model` to tool assembly.
 The cloned `write_file` budget hint uses that instance's effective `max_tokens`,
 including custom-agent and thinking-mode overrides; an absent or unusable cap
-(including non-finite values) omits the hint without aborting tool assembly.
+(including non-finite values or caps that overflow the character estimate)
+omits the hint without aborting tool assembly. Guard estimate arithmetic as
+well as integer conversion; a huge finite cap can pass the latter.
 Only standalone tool discovery without a model falls back to the base profile.
 
 `get_available_tools(groups, include_mcp, model_name, subagent_enabled)` assembles:
