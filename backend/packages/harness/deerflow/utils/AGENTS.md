@@ -82,6 +82,13 @@ lives in `tests/test_file_conversion_cancellation.py`.
 
 ### Host Path Portability
 
+`host_paths.extended_length_path()` provides lexical Windows filesystem
+spelling (absolute `\\?\` drive paths or `\\?\UNC\` shares); it is a no-op
+on POSIX. It does not replace symlink resolution or confinement checks and
+must not be used for persisted relative paths or Docker mount sources.
+Existing extended (`\\?\`) and device (`\\.\`, including named pipes)
+namespaces pass through unchanged before normalization.
+
 `host_paths.py` rejects Windows device names for host-visible creation paths on
 every platform, including the `COM`/`LPT` aliases with superscript ¹, ² and ³.
 The console aliases `CONIN$` and `CONOUT$` are reserved too; match them
