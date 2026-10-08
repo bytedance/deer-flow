@@ -44,12 +44,13 @@ import deerflow.mcp.cache as cache_module
 from deerflow.config.extensions_config import ExtensionsConfig, atomic_write_extensions_config
 from deerflow.config.file_signature import get_config_signature
 from deerflow.mcp import session_pool as session_pool_module
-from deerflow.mcp.client import build_servers_config
+from deerflow.mcp.client import build_server_params, build_servers_config
 from deerflow.mcp.session_pool import (
     MCPSessionPool,
     StaleMCPBindingError,
     normalized_connection_fingerprint,
 )
+from deerflow.mcp.tasks.runtime import McpTaskConfigurationError, set_mcp_task_config_snapshot
 
 _MISSING = object()
 
@@ -124,10 +125,13 @@ def reconciler():
     cache_module._initializing_generation = None
     cache_module._cache_generation = 0
     session_pool_module.reset_session_pool()
+    # A task server's frozen snapshot is process-global.
+    set_mcp_task_config_snapshot(None)
 
     try:
         yield
     finally:
+        set_mcp_task_config_snapshot(None)
         session_pool_module.reset_session_pool()
         for name, value in saved.items():
             if value is _MISSING:
@@ -280,6 +284,33 @@ async def _initialize(monkeypatch, cfg: Path, servers: dict, log: dict, **kwargs
     _install_discovery(monkeypatch, hooks=hooks)
     tools = await cache_module.initialize_mcp_tools()
     return tools
+
+
+def _task_toolset() -> dict:
+    return {
+        "name": "jobs",
+        "submit_tool": "submit_job",
+        "status_tool": "job_status",
+        "cancel_tool": "cancel_job",
+    }
+
+
+def _task_server(command: str = "cmd-A1", **extra) -> dict:
+    """A stdio server whose durable task contract freezes its connection."""
+    return _stdio(command, task_toolsets=[_task_toolset()], **extra)
+
+
+def _freeze_task_snapshot(servers: dict, *, interceptors: list | str | None = None) -> None:
+    payload: dict = {"mcpServers": servers}
+    if interceptors is not None:
+        payload["mcpInterceptors"] = interceptors
+    set_mcp_task_config_snapshot(ExtensionsConfig.model_validate(payload))
+
+
+def _startup_connection(servers: dict, name: str):
+    config = ExtensionsConfig.model_validate({"mcpServers": servers})
+    connection = build_server_params(name, config.mcp_servers[name])
+    return connection, normalized_connection_fingerprint(connection)
 
 
 def _fingerprint(servers: dict, name: str) -> str:
@@ -1699,3 +1730,115 @@ async def test_first_claim_atomically_tombstones_a_concurrently_retained_server(
     assert pool._bindings[("personal", "A")] is personal_binding
     assert _entry(pool, "A", domain="personal")[0] is personal_session
     assert log["exited"].get("cmd-personal-A") is None
+
+
+@pytest.mark.asyncio
+async def test_rejected_hot_change_keeps_background_task_callers_working(reconciler, monkeypatch, tmp_path):
+    """A rejected hot reload must not fence the durable callers that still use it.
+
+    Durable background calls resolve their connection from the configuration
+    frozen at Gateway startup, so the moment a newer revision's binding epoch is
+    installed every status/cancel call fails closed with ``StaleMCPBindingError``
+    — even though the same revision is correctly rejected for hot reload. The
+    rejection must therefore land *before* the epoch is installed.
+    """
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    log = _session_log()
+    startup = {"A": _task_server("cmd-A1")}
+    _freeze_task_snapshot(startup)
+    await _initialize(monkeypatch, cfg, startup, log)
+
+    startup_connection, startup_fingerprint = _startup_connection(startup, "A")
+
+    _write_config(cfg, {"A": _task_server("cmd-A2")})
+    assert cache_module.refresh_mcp_cache_if_active() is True
+
+    # The rejected revision never became the applied baseline...
+    assert cache_module._applied_mcp_revision is None
+    # ...so the background caller rebinds from its frozen startup configuration
+    # instead of being fenced by an epoch it can never satisfy.
+    active_pool = session_pool_module.get_session_pool()
+    binding = active_pool.ensure_binding("A", startup_fingerprint, domain="deployment")
+    session = await active_pool.get_session("A", "task:1", startup_connection, binding=binding)
+    assert session is not None
+
+
+@pytest.mark.asyncio
+async def test_rejected_revision_installs_no_epoch_and_no_tombstone(reconciler, monkeypatch, tmp_path):
+    """A claim must not touch the pool for a revision the frozen snapshot rejects.
+
+    Covers both shapes of rejection: a changed connection (which would install a
+    new epoch) and a disabled server (which would install a tombstone).
+    """
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    log = _session_log()
+    _record_sessions(monkeypatch, log)
+    startup = {"A": _task_server("cmd-A1")}
+    _freeze_task_snapshot(startup)
+    startup_connection, startup_fingerprint = _startup_connection(startup, "A")
+
+    durable = pool.ensure_binding("A", startup_fingerprint, domain="deployment")
+    await pool.get_session("A", "task:1", startup_connection, binding=durable)
+
+    revisions = (
+        {"A": _task_server("cmd-A2")},
+        {"A": {**_task_server("cmd-A1"), "enabled": False}},
+    )
+    for revised in revisions:
+        _write_config(cfg, revised)
+        monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+        _install_discovery(monkeypatch)
+
+        with pytest.raises(McpTaskConfigurationError):
+            await cache_module.initialize_mcp_tools()
+
+        assert _binding(pool, "A") is durable
+        assert _binding(pool, "A").fingerprint == startup_fingerprint
+        assert cache_module._applied_mcp_revision is None
+        assert cache_module._initializing_generation is None
+        assert session_pool_module.get_session_pool() is pool
+
+    # The frozen caller's session was never retired by a rejected revision, and
+    # no rejected revision was published.
+    assert log["exited"].get("cmd-A1") is None
+    assert cache_module._cache_initialized is False
+    assert cache_module._mcp_tools_cache is None
+
+    # A corrected configuration recovers on the next attempt without a restart.
+    _write_config(cfg, startup)
+    published = await cache_module.initialize_mcp_tools()
+    assert [tool.name for tool in published] == ["A"]
+    assert cache_module._cache_initialized is True
+    assert _binding(pool, "A") is durable
+    assert session_pool_module.get_session_pool() is pool
+
+
+@pytest.mark.asyncio
+async def test_unrelated_server_change_stays_selective_while_a_task_server_is_frozen(reconciler, monkeypatch, tmp_path):
+    """Freezing one task server must not disable selective reconciliation for others."""
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    log = _session_log()
+    startup = {"A": _task_server("cmd-A1"), "B": _stdio("cmd-B1")}
+    _freeze_task_snapshot(startup)
+    await _initialize(monkeypatch, cfg, startup, log)
+
+    binding_a = _binding(pool, "A")
+    binding_b = _binding(pool, "B")
+    session_a, _loop, owner_a, _close = _entry(pool, "A")
+
+    _write_config(cfg, {**startup, "B": _stdio("cmd-B2")})
+    assert cache_module.refresh_mcp_cache_if_active() is True
+
+    assert session_pool_module.get_session_pool() is pool
+    assert _binding(pool, "A") is binding_a
+    assert _entry(pool, "A")[0] is session_a
+    assert _entry(pool, "A")[2] is owner_a
+    assert _binding(pool, "B") is not binding_b
+    assert _binding(pool, "B").fingerprint == _fingerprint({"B": _stdio("cmd-B2")}, "B")
+    assert log["exited"].get("cmd-A1") is None

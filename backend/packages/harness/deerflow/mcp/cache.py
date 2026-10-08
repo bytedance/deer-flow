@@ -325,12 +325,36 @@ def _read_stable_mcp_snapshot(config_path: Path, expected_signature: _ConfigSign
 def _read_stable_mcp_revision(
     config_path: Path,
     expected_signature: _ConfigSignature,
-) -> _AppliedMcpRevision | None:
-    """Return the applied-reconciliation revision of a stable revision."""
+) -> tuple[object, _AppliedMcpRevision] | None:
+    """Return the parsed config and reconciliation revision of a stable revision.
+
+    The caller needs the parsed instance (not just the derived fingerprint map)
+    to ask the frozen durable-task snapshot whether this revision may be applied.
+    """
     config = _load_stable_mcp_config(config_path, expected_signature)
     if config is None:
         return None
-    return _mcp_revision_from_config(config)
+    return config, _mcp_revision_from_config(config)
+
+
+def _frozen_task_snapshot_rejects(config):
+    """Return the rejection a frozen durable-task snapshot raises for ``config``.
+
+    Durable background calls resolve their connection from the configuration
+    frozen at Gateway startup, so installing a newer revision's binding epoch
+    fences every status/cancel call with ``StaleMCPBindingError`` even though hot
+    reload of that server is correctly rejected. Both decisions that install an
+    epoch must therefore consult this first — the reconciliation planner falls
+    back to the conservative full reset, and a discovery claim fails exactly as
+    ``get_mcp_tools()`` would, without touching the pool.
+    """
+    from deerflow.mcp.tasks.runtime import McpTaskConfigurationError, validate_mcp_task_config_snapshot
+
+    try:
+        validate_mcp_task_config_snapshot(config)
+    except McpTaskConfigurationError as rejection:
+        return rejection
+    return None
 
 
 def _deployment_binding_delta(
@@ -460,10 +484,11 @@ def _plan_mcp_reconciliation_locked() -> _McpReconciliation | None:
     if current_path != _config_path:
         logger.info("MCP config path changed (%s -> %s); re-checking the effective MCP configuration", _config_path, current_path)
 
-    revision = _read_stable_mcp_revision(current_path, current_signature)
-    if revision is None:
+    loaded = _read_stable_mcp_revision(current_path, current_signature)
+    if loaded is None:
         logger.info("Extensions config could not be read as a stable MCP revision; treating the MCP cache as stale")
         return _McpReconciliation(_RECONCILE_FULL)
+    candidate_config, revision = loaded
 
     applied = _applied_mcp_revision
     if applied is not None and revision.effective_snapshot == applied.effective_snapshot:
@@ -472,6 +497,18 @@ def _plan_mcp_reconciliation_locked() -> _McpReconciliation | None:
         return None
 
     if applied is not None and revision.interceptors == applied.interceptors:
+        rejection = _frozen_task_snapshot_rejects(candidate_config)
+        if rejection is not None:
+            # Installing this revision's epochs would strand the durable callers
+            # that still run against the frozen startup configuration, so keep
+            # the conservative fallback: replace the pool (where those callers
+            # rebind from the configuration they were started with) and never
+            # install the rejected epoch.
+            logger.info(
+                "MCP configuration revision is rejected by the frozen durable-task snapshot (%s); resetting instead of installing binding epochs",
+                type(rejection).__name__,
+            )
+            return _McpReconciliation(_RECONCILE_FULL)
         return _McpReconciliation(
             _RECONCILE_SELECTIVE,
             revision=revision,
@@ -659,12 +696,27 @@ async def initialize_mcp_tools() -> list[BaseTool]:
             # from this revision can still be retired. An unbuildable revision
             # clears the baseline instead, keeping the next change conservative
             # rather than diffing against state we cannot trust.
+            # Record the marker this claim observed before anything can fail
+            # below: if it differed, the reset above already retired the state
+            # that generation required, so it must not be re-applied on retry.
+            _cache_reset_marker_signature = loaded_reset_signature
             previous_revision = _applied_mcp_revision
             loaded_revision = _derived_applied_revision(loaded_config)
-            if loaded_revision is not None:
+            if loaded_revision is None:
+                _applied_mcp_revision = None
+            else:
+                rejection = _frozen_task_snapshot_rejects(loaded_config)
+                if rejection is not None:
+                    # Fail exactly as get_mcp_tools() would, but before any epoch
+                    # is installed, so the durable callers that still use the
+                    # frozen startup configuration keep working.
+                    logger.warning(
+                        "MCP configuration revision is rejected by the frozen durable-task snapshot (%s); no binding epoch installed",
+                        type(rejection).__name__,
+                    )
+                    raise rejection
                 _install_claimed_revision_locked(claimed_pool, loaded_revision, previous=previous_revision)
-            _applied_mcp_revision = loaded_revision
-            _cache_reset_marker_signature = loaded_reset_signature
+                _applied_mcp_revision = loaded_revision
 
         if retired_before_claim is not None:
             # Blocking teardown of the retired pool stays outside every lock.
