@@ -1065,3 +1065,62 @@ def test_missing_dotenv_keeps_support_bundle_available(tmp_path, monkeypatch, so
     assert summary["found"] is True
     assert dict(os.environ) == original
     assert "private-value" not in json.dumps(summary)
+
+
+@pytest.mark.parametrize("invocation_dir", [".", "backend"])
+@pytest.mark.parametrize(
+    ("setup", "value"),
+    [
+        ("", "$PWD/backend/.deer-flow"),
+        ("", '"$PWD/backend/.deer-flow"'),
+        ("", '"${PWD}/backend/.deer-flow"'),
+        ("", "'$PWD/backend/.deer-flow'"),
+        ("", "'${PWD}/backend/.deer-flow'"),
+        ("", r'"\$PWD/backend/.deer-flow"'),
+        ('RUNTIME_DATA="$PWD/runtime-data"\n', '"$RUNTIME_DATA"'),
+        ('RUNTIME_DATA="$PWD/old"\nRUNTIME_DATA="$PWD/new"\n', '"${RUNTIME_DATA}"'),
+        ('RUNTIME_DATA="$PWD/first"\nRUNTIME_DATA="$RUNTIME_DATA/second"\n', '"$RUNTIME_DATA"'),
+        ("", '"${RUNTIME_DATA:-runtime-data}"'),
+    ],
+)
+def test_dotenv_variable_paths_match_launcher(tmp_path, monkeypatch, invocation_dir, setup, value):
+    project = tmp_path / "checkout"
+    (project / "backend").mkdir(parents=True)
+    monkeypatch.setenv("PWD", str(tmp_path / "other-cwd"))
+    monkeypatch.setenv("RUNTIME_DATA", "")
+    (project / ".env").write_text(setup + f"DEER_FLOW_HOME={value}\nPRIVATE_KEY=private-value\n", encoding="utf-8")
+    home = _local_launcher_home(project)
+    outputs = home / "users" / "alice" / "threads" / "variables" / "user-data" / "outputs"
+    outputs.mkdir(parents=True)
+    (outputs / "report.txt").write_text("private contents", encoding="utf-8")
+    monkeypatch.chdir(project / invocation_dir)
+    original = dict(os.environ)
+
+    summary = support_bundle.collect_thread_summary(project, "variables")
+
+    assert summary["found"] is True
+    assert summary["outputs"][0]["path"] == "report.txt"
+    assert dict(os.environ) == original
+    assert "private-value" not in json.dumps(summary)
+    assert "private contents" not in json.dumps(summary)
+
+
+def test_dotenv_shell_variable_project_root_is_resolved(tmp_path, monkeypatch):
+    project = tmp_path / "checkout"
+    project.mkdir()
+    (project / ".env").write_text('DEER_FLOW_PROJECT_ROOT="$PWD/standalone"\n', encoding="utf-8")
+    home = project / "standalone" / ".deer-flow"
+    (home / "threads" / "variables" / "user-data").mkdir(parents=True)
+    monkeypatch.setenv("PWD", str(tmp_path / "other-cwd"))
+
+    assert support_bundle.collect_thread_summary(project, "variables")["found"] is True
+
+
+def test_dotenv_path_lookup_does_not_execute_shell_commands(tmp_path):
+    marker = tmp_path / "shell-executed"
+    (tmp_path / ".env").write_text(f'DEER_FLOW_HOME="$(touch {marker.as_posix()})"\n', encoding="utf-8")
+
+    summary = support_bundle.collect_thread_summary(tmp_path, "variables")
+
+    assert summary["found"] is False
+    assert not marker.exists()

@@ -262,6 +262,19 @@ def _validate_thread_id(thread_id: str) -> None:
         raise ValueError(f"Invalid thread_id: {thread_id!r}")
 
 
+def _expand_launcher_variables(value: str, environment: dict[str, str]) -> str:
+    """Expand simple shell references in one pass, without executing shell syntax."""
+
+    def replace(match: re.Match[str]) -> str:
+        if match[0].startswith("\\"):
+            return match[0][1:]
+        name = match[1] or match[3]
+        resolved = environment.get(name, "")
+        return match[2] if match[2] is not None and not resolved else resolved
+
+    return re.sub(r"\\?\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}|([A-Za-z_][A-Za-z0-9_]*))", replace, value)
+
+
 def _thread_data_roots(project_root: Path) -> list[tuple[Path, str]]:
     """Resolve launcher-relative runtime paths without exporting .env secrets."""
     env_file = project_root / ".env"
@@ -269,18 +282,28 @@ def _thread_data_roots(project_root: Path) -> list[tuple[Path, str]]:
     values = {name: os.environ.get(name) for name in names}
     if env_file.is_file():
         try:
-            from dotenv import dotenv_values
             from dotenv.parser import parse_stream
         except ImportError:
             # Diagnostics must still work in an incomplete backend environment.
             pass
         else:
+            # serve.sh changes to the checkout before sourcing .env. Keep its
+            # assignment order in a private mapping; never export parsed secrets.
+            environment = {**os.environ, "PWD": str(project_root.resolve())}
             with env_file.open(encoding="utf-8-sig") as stream:
-                unquoted = {binding.key for binding in parse_stream(stream) if binding.key and binding.original.string.split("=", 1)[-1].lstrip()[:1] not in ("'", '"')}
-            for name, value in dotenv_values(env_file, encoding="utf-8-sig").items():
-                if name in names and value is not None:
-                    # serve.sh sources .env over inherited exports, even empty ones.
-                    values[name] = os.path.expanduser(value) if name in unquoted else value
+                for binding in parse_stream(stream):
+                    if not binding.key or binding.value is None or binding.error:
+                        continue
+                    quote = binding.original.string.split("=", 1)[-1].lstrip()[:1]
+                    value = binding.value
+                    if quote != "'":
+                        if quote != '"':
+                            value = os.path.expanduser(value)
+                        value = _expand_launcher_variables(value, environment)
+                    environment[binding.key] = value
+                    if binding.key in names:
+                        # Even an empty .env assignment overrides inherited exports.
+                        values[binding.key] = value
     home = values["DEER_FLOW_HOME"]
     runtime_project = values["DEER_FLOW_PROJECT_ROOT"]
     if home:

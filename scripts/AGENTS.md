@@ -5,6 +5,10 @@ values from the checkout like the local launcher. Read root `.env` path settings
 without exporting secrets; dotenv overrides shell exports, including empty values.
 Expand unquoted leading tildes, preserving quoted literals. If python-dotenv is
 unavailable, retain shell/legacy lookup so troubleshooting remains usable.
+Resolve `$NAME`, `${NAME}` and `${NAME:-literal}` in unquoted/double-quoted
+values using a private environment with checkout `PWD` and earlier dotenv
+assignments. Single-quoted values and escaped dollars stay literal. Parse the
+file without sourcing it or executing command substitutions.
 When home is unset and `DEER_FLOW_PROJECT_ROOT` is configured, search the launcher's
 `backend/.deer-flow` first, then the standalone harness project root. Scan both
 legacy threads and user-scoped threads in that root. With no override, retain

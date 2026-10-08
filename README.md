@@ -187,7 +187,9 @@ For MindIE XML tool calls, see the
    emitting UTF-8 even on non-UTF-8 hosts and escaping unencodable characters.
    Thread manifests follow the local launcher's runtime paths: checkout `.env`
    values override shell exports, and a project-root override alone still uses
-   `backend/.deer-flow` first. For standalone Gateway launches using `backend/.env`
+   `backend/.deer-flow` first. Simple variable references such as
+   `DEER_FLOW_HOME="$PWD/backend/.deer-flow"` use the checkout as `PWD`;
+   single-quoted references remain literal. For standalone Gateway launches using `backend/.env`
    or `DEER_FLOW_ENV_FILE`, export the effective `DEER_FLOW_HOME` when collecting
    the bundle and ensure the checkout `.env` does not override it.
    Doctor's internal tool probes also decode UTF-8 with replacement for invalid
