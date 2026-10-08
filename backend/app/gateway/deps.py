@@ -22,6 +22,7 @@ import logging
 import os
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from fastapi import FastAPI, HTTPException, Request
@@ -256,6 +257,48 @@ def _validate_agent_storage(config: AppConfig) -> None:
             "across workers/nodes. Set agent_storage.backend='db' to share them.",
             signal[0],
         )
+
+
+def _validate_memory_retrieval_index(config: AppConfig) -> None:
+    """Warn when a declared multi-instance deployment keeps DeerMem's retrieval index on the shared memory volume.
+
+    DeerMem's derived FTS5 index is one SQLite database in WAL mode. When
+    ``storage_path`` sits on the home volume several Gateway instances share,
+    the default ``{storage_path}/.retrieval`` makes every instance open that
+    same file over a network filesystem (where SQLite documents WAL as
+    unsupported), empty and refill it under its peers at startup, and delete
+    it from under them on corruption recovery. The index is rebuildable, so
+    each instance should keep its own copy on local disk through
+    ``memory.backend_config.retrieval_index_path``. Only the explicit
+    declaration counts: uvicorn workers of one process tree share local disk,
+    where a shared WAL index is supported. Mirrors ``_validate_agent_storage``:
+    a warning, not a refusal, because memory still works, only slower.
+    """
+    declaration = multi_instance_declaration(config)
+    if declaration is None:
+        return
+    memory = getattr(config, "memory", None)
+    if memory is None or not getattr(memory, "enabled", False) or getattr(memory, "manager_class", "deermem") != "deermem":
+        return
+    backend_config = dict(getattr(memory, "backend_config", None) or {})
+    if backend_config.get("retrieval_adapter", "fts5") != "fts5":
+        return  # disabled, or a custom RetrievalPort factory that owns its own storage
+    from deerflow.agents.memory.backends.deermem.deermem.core.paths import retrieval_index_directory
+    from deerflow.agents.memory.manager import resolve_deermem_storage_path
+
+    storage_path = resolve_deermem_storage_path(backend_config)
+    index_dir = retrieval_index_directory(storage_path, backend_config.get("retrieval_index_path"))
+    if index_dir is None or not Path(index_dir).resolve().is_relative_to(Path(storage_path).resolve()):
+        return
+    logger.warning(
+        "%s but the DeerMem retrieval index at %s is inside memory storage_path %s: every Gateway instance opens the same "
+        "SQLite WAL index over the shared memory volume, rebuilds it under its peers at startup and deletes it from under them "
+        "on corruption recovery. Set memory.backend_config.retrieval_index_path to an instance-local directory (the Helm chart "
+        "mounts an emptyDir at /var/lib/deerflow/memory-index).",
+        declaration.knob,
+        index_dir,
+        storage_path,
+    )
 
 
 async def _drain_inflight_runs(run_manager: RunManager) -> None:
@@ -526,6 +569,9 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
     # Reject agent_storage.backend='db' on a non-durable database, and warn on
     # node-divergent file storage under multi-worker Postgres.
     _validate_agent_storage(startup_config)
+    # Warn when a declared multi-instance deployment shares DeerMem's SQLite
+    # retrieval index across instances through the memory volume.
+    _validate_memory_retrieval_index(startup_config)
 
     async with AsyncExitStack() as stack:
         # Lifecycle and system-model hooks can originate on isolated subagent
