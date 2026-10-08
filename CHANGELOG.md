@@ -850,6 +850,13 @@ This release closes that milestone with **439 merged pull requests**.
   follows checkpoint write order, so a goal-only write counts as activity. A new
   `sort_by="updated_at"` option lets `--continue` keep resuming the most
   recently active thread; the default order stays newest created first. ([#6426])
+- **client:** Goals now work in the TUI and embedded `DeerFlowClient` on the
+  SQLite and Postgres checkpointers. Their synchronous savers define the async
+  checkpoint methods but raise `NotImplementedError` from them, and the goal
+  helpers used any async method that existed, so `/goal` printed "Could not set
+  goal." and `get_goal`/`set_goal`/`clear_goal` raised. The goal helpers now
+  fall back to the synchronous methods for those savers. The web UI was not
+  affected. ([#6448])
 - **frontend:** A failed side-chat send no longer clears the composer. The side
   chat's submit handler showed the error toast and then resolved, which the
   composer treats as success, so the typed text and attachments were lost when
@@ -9159,3 +9166,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6426]: https://github.com/bytedance/deer-flow/pull/6426
 [#6445]: https://github.com/bytedance/deer-flow/pull/6445
 [#6447]: https://github.com/bytedance/deer-flow/pull/6447
+[#6448]: https://github.com/bytedance/deer-flow/pull/6448
