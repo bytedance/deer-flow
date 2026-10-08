@@ -823,7 +823,7 @@ This release closes that milestone with **439 merged pull requests**.
   the index inside `storage_path` logs a startup warning. The Helm chart mounts
   a Pod-local `emptyDir` at `/var/lib/deerflow/memory-index`, points the key at
   it, and drops the legacy `memory.storage_path: memory.json` line that the
-  Gateway discarded with a warning at every start. `config_version` is now 56.
+  Gateway discarded with a warning at every start. `config_version` is now 56. ([#6494])
 - **persistence:** `scripts/migrate_user_isolation.py` now moves each legacy
   thread to the user who owns it. It looked for thread owners in
   `{base_dir}/deer-flow.db`, a file DeerFlow never creates (the database is
@@ -9212,3 +9212,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6447]: https://github.com/bytedance/deer-flow/pull/6447
 [#6448]: https://github.com/bytedance/deer-flow/pull/6448
 [#6450]: https://github.com/bytedance/deer-flow/pull/6450
+[#6494]: https://github.com/bytedance/deer-flow/pull/6494
