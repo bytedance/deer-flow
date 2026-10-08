@@ -580,3 +580,43 @@ async def test_gateway_registers_driver_for_personal_only_task_toolsets(personal
             submitted = app.state.mcp_task_service.submit.await_args.kwargs
             assert submitted["driver_name"] == ORDINARY_MCP_TASK_DRIVER
             assert submitted["request"].driver_data["connection_scope"] == "personal"
+
+
+@pytest.mark.asyncio
+async def test_unreachable_personal_task_server_keeps_other_personal_tools(personal_client):
+    from langchain_core.tools import StructuredTool
+
+    from deerflow.config.extensions_config import atomic_write_extensions_config
+    from deerflow.mcp.user_tools import _load
+
+    toolset = {"name": "reports", "submit_tool": "submit_report", "status_tool": "status_report", "cancel_tool": "cancel_report"}
+    atomic_write_extensions_config(
+        user_mcp_config_path("alice"),
+        {
+            "mcpServers": {
+                "notes": {"type": "http", "url": "https://notes.example.com/mcp"},
+                "reports": {"type": "http", "url": "https://reports.example.com/mcp", "task_toolsets": [toolset]},
+            }
+        },
+    )
+
+    class FakeClient:
+        def __init__(self, servers, *, tool_interceptors, **_kwargs):
+            self.servers = servers
+            self.tool_interceptors = tool_interceptors
+            self.callbacks = None
+
+        async def get_tools(self, *, server_name):
+            if "reports" in self.servers[server_name]["url"]:
+                raise ConnectionError("reports is down")
+            return [StructuredTool.from_function(lambda: "ok", name=f"{server_name}_search", description="search")]
+
+    with (
+        patch("deerflow.mcp.tasks.runtime.is_mcp_task_runtime_available", return_value=True),
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient", FakeClient),
+    ):
+        personal = load_user_mcp_config("alice")
+        tools = await _load("alice", personal)
+
+    notes_name = next(name for name, server in personal.mcp_servers.items() if server.url == "https://notes.example.com/mcp")
+    assert [tool.name for tool in tools] == [f"{notes_name}_search"]

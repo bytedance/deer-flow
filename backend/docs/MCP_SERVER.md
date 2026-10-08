@@ -396,6 +396,13 @@ the task alive and recognize its ID after DeerFlow reconnects. A stdio server
 must therefore persist its own tasks; multi-instance deployments should
 normally use an independently running HTTP/SSE service.
 
+A task-enabled server that fails or times out during tool discovery is skipped
+like any other MCP server: its submit tool is absent, other servers keep their
+tools, and the server returns on the next MCP tool reload (an MCP configuration
+change or a Gateway restart). A server that answers discovery without one of
+its configured raw tools is a configuration error instead: no MCP tools load
+until the names match.
+
 For deployment-level HTTP/SSE servers with `task_toolsets`, discovery, ordinary
 tool calls, and background submit/status/cancel calls share the cached access
 token, rotated refresh token, and refresh lock for one Gateway process lifetime.
