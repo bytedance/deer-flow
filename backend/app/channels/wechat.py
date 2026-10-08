@@ -23,6 +23,7 @@ import httpx
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
+from app.channels.allowed_users import parse_allowed_users
 from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
@@ -71,6 +72,16 @@ def _build_wechat_uin() -> str:
 
 def _md5_hex(content: bytes) -> str:
     return hashlib.md5(content).hexdigest()
+
+
+def _read_outbound_bytes(path: Path, max_bytes: int) -> bytes | None:
+    """Return the payload, or ``None`` if it exceeds a positive cap; preserve read errors."""
+    # Own both the extra-byte read and rejection so no caller can send a truncated prefix.
+    with path.open("rb") as stream:
+        content = stream.read(max_bytes + 1 if max_bytes > 0 else -1)
+    if max_bytes > 0 and len(content) > max_bytes:
+        return None
+    return content
 
 
 def _encrypted_size_for_aes_128_ecb(plaintext_size: int) -> int:
@@ -158,6 +169,41 @@ def _detect_image_extension_and_mime(content: bytes) -> tuple[str, str] | None:
     return None
 
 
+def _parse_wechat_user_id(entry: Any) -> str | None:
+    """A valid iLink user ID from a string or numeric scalar, else ``None``.
+
+    A finite integer-valued float uses its integer text, so YAML ``12345.0``
+    matches the sender ``12345``. Fractional and non-finite floats are not IDs.
+    A numeric string is kept as written: ``"12345.0"`` does not become ``12345``.
+    """
+    if isinstance(entry, bool):
+        # bool is an int subclass: reject booleans before the numeric branch.
+        return None
+    if isinstance(entry, float):
+        if not math.isfinite(entry) or not entry.is_integer():
+            return None
+        entry = int(entry)
+    if isinstance(entry, int):
+        return str(entry)
+    if isinstance(entry, str):
+        text = entry.strip()
+        return text or None
+    return None
+
+
+def _parse_allowed_users(allowed_users: Any) -> frozenset[str] | None:
+    """Parse iLink IDs without splitting a scalar string into multiple IDs."""
+    if isinstance(allowed_users, str) and ("," in allowed_users or any(char.isspace() for char in allowed_users.strip())):
+        logger.warning("[WeChat] allowed_users is a scalar string containing separators; treating it as one literal user ID. Use a YAML list for multiple IDs")
+    return parse_allowed_users(
+        allowed_users,
+        parse_user_id=_parse_wechat_user_id,
+        logger=logger,
+        channel_name="WeChat",
+        expected_id="a valid iLink user ID",
+    )
+
+
 class WechatChannel(Channel):
     """WeChat iLink bot channel using long-polling.
 
@@ -165,7 +211,9 @@ class WechatChannel(Channel):
         - ``bot_token``: iLink bot token used for authenticated API calls.
         - ``qrcode_login_enabled``: (optional) Allow first-time QR bootstrap when ``bot_token`` is missing.
         - ``base_url``: (optional) iLink API base URL.
-        - ``allowed_users``: (optional) List of allowed iLink user IDs. Empty = allow all.
+        - ``allowed_users``: (optional) List of allowed iLink user IDs, or a single
+          ID. Empty = allow all; a configured value with no valid ID denies everyone.
+          Integer-valued numbers are stored as integer text. A mapping is not a list of IDs.
         - ``allowed_media_hosts``: (optional) Extra host suffixes inbound media URLs may
           be downloaded from, in addition to the platform CDN defaults. Default: ``qq.com``.
         - ``polling_timeout``: (optional) Long-poll timeout in seconds. Default: 35.
@@ -275,7 +323,7 @@ class WechatChannel(Channel):
         self._max_outbound_file_bytes = self._coerce_int(config.get("max_outbound_file_bytes"), self.DEFAULT_MAX_OUTBOUND_FILE_BYTES)
         self._allowed_file_extensions = self._coerce_str_set(config.get("allowed_file_extensions"), self.DEFAULT_ALLOWED_FILE_EXTENSIONS)
         self._allowed_media_hosts = self._coerce_host_suffixes(config.get("allowed_media_hosts"))
-        self._allowed_users: set[str] = {str(uid).strip() for uid in config.get("allowed_users", []) if str(uid).strip()}
+        self._allowed_users: frozenset[str] | None = _parse_allowed_users(config.get("allowed_users"))
         self._bot_token = str(config.get("bot_token") or "").strip()
         self._ilink_bot_id = str(config.get("ilink_bot_id") or "").strip() or None
         self._auth_state: dict[str, Any] = {}
@@ -415,9 +463,13 @@ class WechatChannel(Channel):
             return False
 
         try:
-            plaintext = await asyncio.to_thread(attachment.actual_path.read_bytes)
+            plaintext = await asyncio.to_thread(_read_outbound_bytes, attachment.actual_path, self._max_outbound_image_bytes)
         except OSError:
             logger.exception("[WeChat] failed to read outbound image %s", attachment.actual_path)
+            return False
+
+        if plaintext is None:
+            logger.warning("[WeChat] outbound image exceeds %d bytes read limit, skipping: %s", self._max_outbound_image_bytes, attachment.filename)
             return False
 
         aes_key = secrets.token_bytes(16)
@@ -505,9 +557,13 @@ class WechatChannel(Channel):
             return False
 
         try:
-            plaintext = await asyncio.to_thread(attachment.actual_path.read_bytes)
+            plaintext = await asyncio.to_thread(_read_outbound_bytes, attachment.actual_path, self._max_outbound_file_bytes)
         except OSError:
             logger.exception("[WeChat] failed to read outbound file %s", attachment.actual_path)
+            return False
+
+        if plaintext is None:
+            logger.warning("[WeChat] outbound file exceeds %d bytes read limit, skipping: %s", self._max_outbound_file_bytes, attachment.filename)
             return False
 
         aes_key = secrets.token_bytes(16)
@@ -596,12 +652,7 @@ class WechatChannel(Channel):
                 if ret not in (0, None):
                     errcode = data.get("errcode")
                     if errcode == -14:
-                        self._bot_token = ""
-                        self._get_updates_buf = ""
-                        await asyncio.to_thread(self._save_state)
-                        await asyncio.to_thread(self._save_auth_state, status="expired", bot_token="")
-                        logger.error("[WeChat] bot token expired; scan again or update bot_token and restart the channel")
-                        self._running = False
+                        await await_drained(self._persist_expired_auth())
                         break
                     logger.warning(
                         "[WeChat] getupdates returned ret=%s errcode=%s errmsg=%s",
@@ -637,12 +688,22 @@ class WechatChannel(Channel):
                 next_buf = data.get("get_updates_buf")
                 if isinstance(next_buf, str) and next_buf != self._get_updates_buf:
                     self._get_updates_buf = next_buf
-                    await asyncio.to_thread(self._save_state)
+                    await await_drained(asyncio.to_thread(self._save_state))
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("[WeChat] polling loop failed")
                 await asyncio.sleep(self._retry_delay)
+
+    async def _persist_expired_auth(self) -> None:
+        """Persist both expiry writes under the auth lock; the poller drains this whole operation."""
+        async with self._auth_lock:
+            self._bot_token = ""
+            self._get_updates_buf = ""
+            await asyncio.to_thread(self._save_state)
+            await self._save_auth_state_drained(status="expired", bot_token="")
+            logger.error("[WeChat] bot token expired; scan again or update bot_token and restart the channel")
+            self._running = False
 
     async def _handle_update(self, raw_message: Any) -> None:
         if not isinstance(raw_message, dict):
@@ -787,7 +848,7 @@ class WechatChannel(Channel):
         qrcode: str | None = None,
         qrcode_img_content: str | None = None,
     ) -> dict[str, Any]:
-        """Persist QR auth state before propagating caller cancellation.
+        """Persist auth state before propagating caller cancellation.
 
         The write is a small local state-file update and is intentionally drained
         while _auth_lock is held so cancellation cannot expose an in-memory
@@ -904,7 +965,7 @@ class WechatChannel(Channel):
         return self._context_tokens_by_chat.get(msg.chat_id)
 
     def _check_user(self, user_id: str) -> bool:
-        if not self._allowed_users:
+        if self._allowed_users is None:
             return True
         return user_id in self._allowed_users
 

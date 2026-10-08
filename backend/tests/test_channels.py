@@ -497,6 +497,7 @@ class TestChannelBase:
         from app.channels.feishu import FeishuChannel
         from app.channels.github import GitHubChannel
         from app.channels.manager import CHANNEL_CAPABILITIES
+        from app.channels.qq import QQChannel
         from app.channels.slack import SlackChannel
         from app.channels.telegram import TelegramChannel
         from app.channels.wechat import WechatChannel
@@ -509,6 +510,7 @@ class TestChannelBase:
             "discord": DiscordChannel(bus=bus, config={}).supports_streaming,
             "feishu": FeishuChannel(bus=bus, config={}).supports_streaming,
             "github": GitHubChannel(bus=bus, config={}).supports_streaming,
+            "qq": QQChannel(bus=bus, config={}).supports_streaming,
             "slack": SlackChannel(bus=bus, config={}).supports_streaming,
             "telegram": TelegramChannel(bus=bus, config={}).supports_streaming,
             "wechat": WechatChannel(bus=bus, config={}).supports_streaming,
@@ -1196,6 +1198,59 @@ class TestChannelManager:
             assert outbound_received[0].text == "Hello from agent!"
 
         _run(go())
+
+    def test_run_input_message_has_a_unique_id(self):
+        """Each run's human message carries its own id.
+
+        The Gateway stores run input as sent, while ``add_messages`` gives an
+        id-less message a fresh uuid in the checkpoint. A web client that
+        reconnects to a running channel thread rebuilds the input from both
+        copies and can only match them by id.
+        """
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            await manager.start()
+            for text in ("first", "second"):
+                await bus.publish_inbound(InboundMessage(channel_name="test", chat_id="chat1", user_id="user1", text=text))
+            await _wait_for(lambda: len(outbound_received) >= 2)
+            await manager.stop()
+
+            ids = [call.kwargs["input"]["messages"][0].get("id") for call in mock_client.runs.wait.call_args_list]
+            assert len(ids) == 2
+            assert all(isinstance(message_id, str) and message_id for message_id in ids)
+            assert ids[0] != ids[1]
+
+        _run(go())
+
+    def test_run_input_message_id_matches_its_checkpoint_copy(self):
+        """The id a channel sends survives run admission into both copies."""
+        from langgraph.graph.message import add_messages
+
+        from app.channels.manager import _human_input_message
+        from app.gateway.services import _canonical_run_record_input, normalize_input
+
+        raw_input = {"messages": [_human_input_message("hello", original_content="/skill hello")]}
+        graph_input = normalize_input(raw_input, trusted_internal=True)
+
+        record = _canonical_run_record_input(raw_input, graph_input)
+        checkpoint_messages = add_messages([], graph_input["messages"])
+
+        assert record["messages"][0]["id"] == checkpoint_messages[0].id == raw_input["messages"][0]["id"]
 
     def test_worker_pool_dedupes_stable_provider_message_id(self, tmp_path):
         from app.channels.manager import ChannelManager
@@ -1947,7 +2002,7 @@ class TestChannelManager:
 
             history_by_checkpoint: dict[tuple[str, str], list[str]] = {}
 
-            async def _runs_wait(thread_id, assistant_id, *, input, config, context, multitask_strategy=None):
+            async def _runs_wait(thread_id, assistant_id, *, input, config, context, multitask_strategy=None, metadata=None):
                 del assistant_id, context  # unused in this test, kept for signature parity
 
                 checkpoint_ns = config.get("configurable", {}).get("checkpoint_ns")
@@ -4810,7 +4865,9 @@ class TestGithubFollowupBuffer:
             await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
 
             mock_client.runs.create.assert_called_once()
-            drained_text = mock_client.runs.create.call_args[1]["input"]["messages"][0]["content"]
+            drained_message = mock_client.runs.create.call_args[1]["input"]["messages"][0]
+            drained_text = drained_message["content"]
+            assert isinstance(drained_message.get("id"), str) and drained_message["id"]
             for i in range(FOLLOWUP_DRAIN_BATCH_SIZE):
                 assert f"comment {i}" in drained_text
             for i in range(FOLLOWUP_DRAIN_BATCH_SIZE, 15):
@@ -8760,6 +8817,186 @@ class TestChannelService:
         assert stopped  # old channel was stopped
         assert not started  # _start_channel was NOT called
 
+    def test_concurrent_restart_channel_serializes(self):
+        """Concurrent restart_channel calls serialize per channel rather than racing stop/start."""
+        from app.channels.service import ChannelService
+
+        service = ChannelService(channels_config={"telegram": {"enabled": True, "token": "test"}})
+        service._running = True
+
+        class FakeChannel:
+            def __init__(self):
+                self.is_running = True
+                self.stop_count = 0
+
+            async def stop(self):
+                self.stop_count += 1
+                self.is_running = False
+
+        current_instance = FakeChannel()
+        service._channels["telegram"] = current_instance
+
+        starts = 0
+        active_starts = 0
+        max_concurrent_starts = 0
+
+        async def mock_start(name, config):
+            nonlocal starts, active_starts, max_concurrent_starts
+            active_starts += 1
+            max_concurrent_starts = max(max_concurrent_starts, active_starts)
+            await asyncio.sleep(0.02)
+            service._channels[name] = FakeChannel()
+            active_starts -= 1
+            starts += 1
+            return True
+
+        service._start_channel = mock_start
+
+        async def go():
+            results = await asyncio.gather(
+                service.restart_channel("telegram", reload_config=False),
+                service.restart_channel("telegram", reload_config=False),
+            )
+            assert all(results)
+
+        _run(go())
+
+        assert max_concurrent_starts == 1
+        assert starts == 2
+
+    def test_concurrent_ensure_channel_ready_and_restart(self):
+        """ensure_channel_ready and restart_channel serialize without collision."""
+        from app.channels.service import ChannelService
+
+        service = ChannelService(channels_config={"telegram": {"enabled": True, "token": "test"}})
+        service._running = True
+
+        class FakeChannel:
+            def __init__(self):
+                self.is_running = True
+
+            async def stop(self):
+                # Suspend in stop to yield control to concurrent coroutines
+                await asyncio.sleep(0.02)
+                self.is_running = False
+
+        service._channels["telegram"] = FakeChannel()
+
+        starts = 0
+        active_starts = 0
+        max_concurrent_starts = 0
+
+        async def mock_start(name, config):
+            nonlocal starts, active_starts, max_concurrent_starts
+            active_starts += 1
+            max_concurrent_starts = max(max_concurrent_starts, active_starts)
+            await asyncio.sleep(0.03)
+            service._channels[name] = FakeChannel()
+            active_starts -= 1
+            starts += 1
+            return True
+
+        service._start_channel = mock_start
+
+        async def go():
+            # restart_channel suspends in stop(), so ensure_channel_ready must wait on
+            # _channel_lock rather than observing is_running=False and racing _start_channel.
+            results = await asyncio.gather(
+                service.restart_channel("telegram", reload_config=False),
+                service.ensure_channel_ready("telegram"),
+            )
+            assert all(results)
+
+        _run(go())
+
+        assert max_concurrent_starts == 1
+        assert starts == 1
+
+    def test_concurrent_remove_and_ensure_channel_ready(self):
+        """remove_channel and ensure_channel_ready serialize cleanly without zombie respawns."""
+        from app.channels.service import ChannelService
+
+        service = ChannelService(channels_config={"telegram": {"enabled": True, "token": "test"}})
+        service._running = True
+
+        class FakeChannel:
+            def __init__(self):
+                self.is_running = True
+
+            async def stop(self):
+                await asyncio.sleep(0.02)
+                self.is_running = False
+
+        service._channels["telegram"] = FakeChannel()
+
+        starts = 0
+
+        async def mock_start(name, config):
+            nonlocal starts
+            starts += 1
+            await asyncio.sleep(0.02)
+            service._channels[name] = FakeChannel()
+            return True
+
+        service._start_channel = mock_start
+
+        async def go():
+            # Pass config to ensure_channel_ready (the router pattern) while remove_channel is in flight.
+            results = await asyncio.gather(
+                service.remove_channel("telegram"),
+                service.ensure_channel_ready("telegram", config={"enabled": True, "token": "test"}),
+            )
+            return results
+
+        results = _run(go())
+        # remove_channel succeeds; ensure_channel_ready serialized after it returns False
+        # because the channel was removed and the stale pre-wait config snapshot is discarded.
+        assert results == [True, False]
+        assert starts == 0
+        assert "telegram" not in service._channels
+        assert "telegram" not in service._config
+
+    def test_concurrent_configure_and_ensure_channel_ready_keeps_authoritative_config(self):
+        """ensure_channel_ready does not overwrite authoritative credentials from configure_channel."""
+        from app.channels.service import ChannelService
+
+        service = ChannelService(channels_config={"telegram": {"enabled": True, "token": "old"}})
+        service._running = True
+
+        class FakeChannel:
+            def __init__(self):
+                self.is_running = True
+
+            async def stop(self):
+                await asyncio.sleep(0.01)
+                self.is_running = False
+
+        service._channels["telegram"] = FakeChannel()
+
+        started_configs = []
+
+        async def mock_start(name, config):
+            started_configs.append(dict(config))
+            await asyncio.sleep(0.02)
+            service._channels[name] = FakeChannel()
+            return True
+
+        service._start_channel = mock_start
+
+        async def go():
+            # configure_channel applies new credentials. A concurrent readiness check
+            # carrying a stale snapshot must not revert self._config to "stale".
+            results = await asyncio.gather(
+                service.configure_channel("telegram", {"enabled": True, "token": "new"}),
+                service.ensure_channel_ready("telegram", config={"enabled": True, "token": "stale"}),
+            )
+            return results
+
+        results = _run(go())
+        assert results == [True, True]
+        assert service._config["telegram"]["token"] == "new"
+        assert all(c["token"] == "new" for c in started_configs)
+
 
 # ---------------------------------------------------------------------------
 # Slack send retry tests
@@ -9241,7 +9478,10 @@ class TestTelegramAllowedUsers:
 
         return TelegramChannel(bus=MessageBus(), config={"bot_token": "test-token", **config_extra})
 
-    @pytest.mark.parametrize("config_extra", [{}, {"allowed_users": None}, {"allowed_users": []}, {"allowed_users": " "}])
+    @pytest.mark.parametrize(
+        "config_extra",
+        [{}, {"allowed_users": None}, {"allowed_users": []}, {"allowed_users": ()}, {"allowed_users": set()}, {"allowed_users": frozenset()}, {"allowed_users": " "}],
+    )
     def test_unset_or_empty_allowlist_allows_everyone_without_warning(self, config_extra, caplog):
         with caplog.at_level(logging.WARNING, logger="app.channels.telegram"):
             ch = self._channel(config_extra)
@@ -9251,7 +9491,7 @@ class TestTelegramAllowedUsers:
 
     @pytest.mark.parametrize(
         "allowed_users",
-        [[123456, 7], ["123456", " 7 "], (123456, 7), {123456, 7}],
+        [[123456, 7], ["123456", " 7 "], (123456, 7), {123456, 7}, frozenset({123456, 7})],
     )
     def test_numeric_ids_are_allowed_and_others_denied(self, allowed_users):
         ch = self._channel({"allowed_users": allowed_users})
@@ -9278,6 +9518,15 @@ class TestTelegramAllowedUsers:
         assert repr(bad_entry) in caplog.text
         # 0 and -5 are numeric, so the hint has to say what they are missing.
         assert "positive numeric" in caplog.text
+
+    def test_frozen_allowlist_drops_invalid_entries_without_blocking_valid_ids(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="app.channels.telegram"):
+            ch = self._channel({"allowed_users": frozenset({123456, "@alice"})})
+
+        assert ch._check_user(123456)
+        assert not ch._check_user(42)
+        assert "'@alice'" in caplog.text
+        assert not any(record.levelno == logging.ERROR for record in caplog.records)
 
     @pytest.mark.parametrize(
         "allowed_users",

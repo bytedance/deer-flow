@@ -22,15 +22,15 @@ READ_FILE_TRUNCATION_PREFIX = "... [truncated:"
 def count_file_lines(content: str) -> int:
     """Count file lines as LocalSandbox and read_file's truncation marker see them.
 
-    Uses ``count("\\n") + (1 if not endswith("\\n") else 0)`` — matching Python's
-    text-mode line iteration used by ``LocalSandbox.read_file`` and the formula in
+    Uses ``count("\\n") + (1 if not endswith("\\n") else 0)`` — matching the
+    ``newline="\\n"`` line iteration used by ``LocalSandbox.read_file`` and the formula in
     ``_truncate_read_file_output``.  This ensures the line count shown in the gate
     block message agrees with the ``start_line``/``end_line`` values the model can
     pass back to ``read_file``.
 
     Unlike ``splitlines()``, this function does not treat ``\\f``, ``\\v``, ``\\x85``,
     ``\\u2028``, or ``\\u2029`` as line separators — consistent with LocalSandbox's
-    text-mode iteration where those characters are just regular content.
+    line iteration where those characters are just regular content.
     """
     if not content:
         return 0

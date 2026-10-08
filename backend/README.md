@@ -130,6 +130,10 @@ to the last returned sequence to page forward through a bounded history range.
 
 FastAPI application providing REST endpoints for frontend integration:
 
+Integer metadata filters match exact JSON integers, including signed-64-bit
+boundaries. Stored integers outside that range are ignored rather than rounded
+to a boundary (SQLite) or causing the search to fail (PostgreSQL).
+
 | Route | Purpose |
 |-------|---------|
 | `GET /api/models` | List available LLM models |
@@ -517,8 +521,11 @@ the only execution path, which keeps operational mistakes off the table. See
 ### Testing
 
 ```bash
-# Default offline backend suite (live external-API and blocking-I/O tests are excluded)
+# Default offline backend suite (four parallel shards; excludes live and blocking-I/O tests)
 make test
+
+# Run the same shards sequentially
+make test TEST_JOBS=1
 
 # Strict blocking-I/O suite
 make test-blocking-io

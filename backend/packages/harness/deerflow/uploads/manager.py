@@ -9,6 +9,8 @@ import logging
 import os
 import shutil
 import stat
+import time
+from datetime import timedelta
 from pathlib import Path
 from urllib.parse import quote
 
@@ -30,6 +32,9 @@ logger = logging.getLogger(__name__)
 
 UPLOAD_STAGING_PREFIX = ".upload-"
 UPLOAD_STAGING_SUFFIX = ".part"
+# Staging files younger than this are treated as in flight by the startup sweep.
+# Mirrors the project-document ``.staging`` orphan guard (``projects/trash.py``).
+UPLOAD_STAGING_MIN_AGE = timedelta(hours=24)
 
 _MAX_FILENAME_BYTES = 255
 
@@ -91,7 +96,7 @@ def _fit_utf8_bytes(text: str, budget: int) -> str:
 
 
 def claim_unique_filename(name: str, seen: set[str]) -> str:
-    """Generate a unique filename by appending ``_N`` suffix on collision.
+    """Generate a case-insensitively unique filename by appending ``_N`` on collision.
 
     Automatically adds the returned name to *seen* so callers don't need to.
 
@@ -107,9 +112,10 @@ def claim_unique_filename(name: str, seen: set[str]) -> str:
         seen: Set of filenames already claimed (mutated in place).
 
     Returns:
-        A filename not present in *seen* (already added to *seen*).
+        A filename not present in *seen* even ignoring case (already added to *seen*).
     """
-    if name not in seen:
+    claimed = {existing.casefold() for existing in seen}
+    if name.casefold() not in claimed:
         seen.add(name)
         return name
     stem, suffix = Path(name).stem, Path(name).suffix
@@ -123,7 +129,7 @@ def claim_unique_filename(name: str, seen: set[str]) -> str:
             candidate = _fit_utf8_bytes(stem + suffix, _MAX_FILENAME_BYTES - len(tag.encode("utf-8"))) + tag
         else:
             candidate = f"{_fit_utf8_bytes(stem, budget)}{tag}{suffix}"
-        if candidate not in seen:
+        if candidate.casefold() not in claimed:
             break
         counter += 1
     seen.add(candidate)
@@ -181,9 +187,35 @@ def _iter_upload_dirs(base_dir: Path):
     yield from base_dir.glob("users/*/threads/*/user-data/uploads")
 
 
-def cleanup_stale_upload_staging_files(base_dir: Path | str | None = None) -> int:
-    """Remove orphaned Gateway upload staging files left by a hard crash."""
+def _staging_entry_stat(entry: os.DirEntry[str]) -> os.stat_result:
+    # ``os.lstat`` rather than ``entry.stat``: on Windows a ``DirEntry`` stat leaves
+    # ``st_nlink`` at zero, and the published-alias rule in the sweep depends on it.
+    return os.lstat(entry.path)
+
+
+def cleanup_stale_upload_staging_files(base_dir: Path | str | None = None, *, min_age: timedelta = UPLOAD_STAGING_MIN_AGE) -> int:
+    """Remove orphaned Gateway upload staging files left by a hard crash.
+
+    A lone ``.upload-*.part`` (``st_nlink == 1``) is removed only once its mtime
+    is older than *min_age*. The uploads directories may live on a volume
+    shared by several Gateway replicas, so at startup such a file can belong to
+    an upload another replica is still writing; each chunk write refreshes its
+    mtime, which keeps it younger than the guard until it is committed or
+    abandoned.
+
+    A staging name with ``st_nlink > 1`` is removed at any age: the commit's
+    ``os.link`` already published those bytes under their final name, so the
+    staged name is only an alias left behind by a crash (or a deferred removal
+    that never ran). Keeping it would make that destination fail the
+    multi-link safety check on the next replacement upload (embedded
+    ``DeerFlowClient.upload_files`` goes through ``copy_upload_file_no_symlink``).
+    Removing the alias cannot affect an upload in flight: a staged part gains
+    its second link only through its own commit.
+
+    A file that cannot be stat'ed is kept, never removed on a guess.
+    """
     root = Path(base_dir) if base_dir is not None else get_paths().base_dir
+    cutoff = time.time() - min_age.total_seconds()
     removed = 0
     for uploads_dir in _iter_upload_dirs(root):
         if not uploads_dir.is_dir():
@@ -193,6 +225,15 @@ def cleanup_stale_upload_staging_files(base_dir: Path | str | None = None) -> in
                 for entry in entries:
                     if not is_upload_staging_file(entry.name) or not entry.is_file(follow_symlinks=False):
                         continue
+                    try:
+                        st = _staging_entry_stat(entry)
+                    except FileNotFoundError:
+                        continue
+                    except OSError:
+                        logger.warning("Could not stat upload staging file %s; keeping it", entry.path, exc_info=True)
+                        continue
+                    if st.st_nlink <= 1 and st.st_mtime >= cutoff:
+                        continue  # a lone, young part may still be in flight on another replica
                     try:
                         os.unlink(entry.path)
                         removed += 1

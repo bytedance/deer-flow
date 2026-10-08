@@ -511,6 +511,22 @@ def test_validate_local_tool_path_rejects_new_superscript_device_names(name: str
     validate_local_tool_path(path, _THREAD_DATA, read_only=True)
 
 
+@pytest.mark.parametrize("name", ["CONIN$", "conout$", "CONIN$.txt", "CONOUT$.log"])
+def test_validate_local_tool_path_rejects_new_console_device_names(name: str) -> None:
+    path = f"{VIRTUAL_PATH_PREFIX}/workspace/{name}"
+    with pytest.raises(PermissionError, match="Access denied"):
+        validate_local_tool_path(path, _THREAD_DATA, read_only=False)
+    validate_local_tool_path(path, _THREAD_DATA, read_only=True)
+
+
+@pytest.mark.parametrize("name", ["NUL .txt", "con  .log", "COM1 .txt", "lpt²  .md", "CONIN$ .txt", "conout$  .log"])
+def test_validate_local_tool_path_rejects_new_padded_device_names(name: str) -> None:
+    path = f"{VIRTUAL_PATH_PREFIX}/workspace/{name}"
+    with pytest.raises(PermissionError, match="Access denied"):
+        validate_local_tool_path(path, _THREAD_DATA, read_only=False)
+    validate_local_tool_path(path, _THREAD_DATA, read_only=True)
+
+
 def test_validate_local_tool_path_rejects_traversal_in_user_data() -> None:
     """Path traversal via .. in user-data paths must be rejected."""
     with pytest.raises(PermissionError, match="path traversal"):

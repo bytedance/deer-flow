@@ -9,7 +9,7 @@ A terminal-native UI over the embedded harness, exposed as the `deerflow` consol
 - `message_format.py` / `command_registry.py` / `input_history.py` / `render.py` / `theme.py` — pure helpers (tool summaries, slash registry + `resolve()`, ↑/↓ history, Rich renderers). The command registry must exclude every shared `RESERVED_SLASH_SKILL_NAMES` entry that the agent runtime rejects from both its picker and resolver; the `context` skill is the exception for ordinary task text, while the exact composer-only `/context compact` alias remains unavailable as a skill activation.
 - `app.py` — Textual `App`. Runs `DeerFlowClient.stream()` (sync) on a worker thread and marshals actions to the UI thread via `call_from_thread`. Slash palette with `/goal` management + model/thread modal pickers; routes idle display-only `/clear` through `ClearRows` without replacing the active thread, and blocks state-resetting local commands like `/new` and `/clear` with the standard "Still working" message during an active run; priority key bindings gated by `check_action` so they never steal keys from overlays or the composer. Application-level PageUp/PageDown bindings scroll the transcript while preserving composer focus; streaming follows output only while the transcript remains at the bottom.
 - `widgets/composer.py` — the composer, a Textual `TextArea`: bracketed multiline pastes retain their line breaks and indentation, `Enter` submits the whole document unchanged (only an all-whitespace document counts as empty), and Up/Down move inside it before falling back to input history at the first/last visual row (soft-wrapped rows count, so a long wrapped prompt is navigable).
-- `session.py` / `persistence.py` — builds the client + checkpointer and the `ThreadMetaWriter`.
+- `session.py` / `persistence.py` — builds the client + checkpointer and the `ThreadMetaWriter`. The thread picker and `--resume <title>` read `DeerFlowClient.list_threads()`, where `limit` counts threads (newest created first); `--continue` passes `sort_by="updated_at"` to resume the most recently active thread.
 
 **Web UI visibility**: the Web UI lists threads from the `threads_meta` SQL table (user-scoped), not the checkpointer. `persistence.py` writes a `threads_meta` row under the default user (`"default"`) into the same DB the Gateway reads — via the harness-only `deerflow.persistence.engine.init_engine_from_config()` — so TUI sessions appear in the Web UI sidebar **without** running the Gateway. Best-effort: a no-op on the `memory` backend. All DB work runs on one long-lived background event loop (a SQLAlchemy async engine is bound to its creating loop).
 
@@ -18,10 +18,22 @@ and when applying the picker callback, which may outlive the idle state in which
 it opened. Keep the current thread and transcript unchanged when rejecting a
 switch. Report invalid resume references as error rows without relaxing the
 canonical thread-id validation or terminating the app.
-Worker actions must carry their originating thread id into the UI callback.
-Check it against the displayed thread on delivery, not just before scheduling:
-an interrupt/switch can race with the worker's cancellation check. Drop actions
-for another thread before they reach the reducer or change streaming state.
+Reserve the run identity and busy state when accepting input, before its worker
+starts. Each run owns its cancellation flag; a later send must not reset it.
+If worker creation fails, cancel and clear that reserved run, restore idle state,
+and show a retryable error. Do not cancel a previously completed run's title write.
+Worker callbacks check both run identity and thread id on UI delivery, rejecting
+cancelled, completed, or superseded runs before updating the reducer. Keep the
+completed run's state available for its worker's title persistence check. An
+uncancelled, normally completed run still writes its title to its original
+thread after the UI moves on; keep that write off the UI thread. This does not
+order completed title writes, roll back a write already in progress, or force
+stop synchronous backend work.
+An interrupted worker keeps streaming until its next event, so a long tool step
+still checkpoints. Until that worker returns (`_Run.started`/`stopped`, set by the
+worker itself; Textual reports a cancelled thread worker finished at once), reject
+sends on its thread: whichever run checkpoints last would drop the other turn.
+Other threads stay usable; a worker cancelled before it started holds nothing.
 
 `InputHistory.down()` returns `None` when history navigation is inactive; the
 app must then leave the composer untouched, including its cursor and undo state.

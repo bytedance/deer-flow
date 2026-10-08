@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from typing import Any
+from unittest.mock import patch
 
 from deerflow_extension_api import (
     EXTENSION_TASK_STORE_KEY,
@@ -25,6 +26,9 @@ from deerflow_extension_example import install
 
 
 class FakeRegistry:
+    def plugin(self, contribution: Any) -> bool:
+        return False
+
     def __init__(self) -> None:
         self.middleware_contributors: list[Any] = []
         self.task_lifecycle_contributors: list[Any] = []
@@ -158,7 +162,8 @@ def test_registered_contributions_publish_one_shared_stats_snapshot() -> None:
             after_stop.status_code,
         )
 
-    before_start, status_code, body, after_stop = asyncio.run(exercise_contributions())
+    with patch("deerflow_extension_example.plugin.monotonic_ns", side_effect=[0, 10_000_000]):
+        before_start, status_code, body, after_stop = asyncio.run(exercise_contributions())
 
     assert before_start == 503
     assert status_code == 200
@@ -169,5 +174,8 @@ def test_registered_contributions_publish_one_shared_stats_snapshot() -> None:
         "host_policy": {"max_subagents_per_run": 6},
         "tasks": {"completed": 1},
         "tool_calls": 1,
+        "tool_outcomes": {"returned": 1, "raised": 0, "cancelled": 0},
+        "tool_duration_samples": 1,
+        "tool_duration_total_ms": 10.0,
         "system_model_calls": {"title": {"calls": 1, "errors": 1}},
     }

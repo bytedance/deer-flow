@@ -42,7 +42,7 @@ def _normalize_todos(value: Any) -> list[Todo]:
 
         if content is not None:
             todo["content"] = content
-        if status in {"pending", "in_progress", "completed"}:
+        if isinstance(status, str) and status in {"pending", "in_progress", "completed"}:
             todo["status"] = status
 
         normalized.append(todo)

@@ -25,9 +25,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import posixpath
+import re
 import shlex
 import tempfile
 import uuid
@@ -80,6 +82,15 @@ _MAX_TOOL_OUTPUT_BLOB_BYTES = 64 * 1024 * 1024
 # even when the operator disabled the ordinary disk-unavailable fallback.
 _DURABLE_FAILURE_FALLBACK_MAX_CHARS = 30_000
 
+# Mirrors ``sandbox.tools._BASH_EXIT_MARKER_TAIL_RE`` (pinned by a test). The
+# subagent executor reads the exit status only from the end of a bash result
+# (trailing ``Exit Code: N``, or whole-output ``Command exited with code N``),
+# so a budget rewrite must keep the marker last or a failed command is harvested
+# as success. Restricted to the same names ``executor._BASH_EVIDENCE_TOOL_NAMES``
+# uses; other tools may print the phrase as ordinary text.
+_BASH_EXIT_MARKER_TAIL_RE = re.compile(r"(?:\nExit Code: -?\d+|\n?Command exited with code -?\d+)\s*$")
+_EXIT_MARKER_TOOL_NAMES = frozenset({"bash", "bash_tool"})
+
 
 class _BudgetedContent(NamedTuple):
     replacement: str
@@ -96,27 +107,41 @@ def _default_config() -> ToolOutputConfig:
 # ---------------------------------------------------------------------------
 
 
-def _message_text(content: Any) -> str | None:
-    """Extract a plain-text representation from a ToolMessage content field.
+def _split_budgetable_content(content: Any) -> tuple[str | None, list[Any]]:
+    """Render text/JSON for budgeting, retaining other blocks for the provider.
 
-    Returns ``None`` for non-string / multimodal content so the caller
-    can skip budget enforcement (images, structured blocks, etc.).
+    JSON blocks count even when mixed with media. Legacy text/image results
+    without JSON keep their existing pass-through behavior.
     """
     if isinstance(content, str):
-        return content
-    if content is None:
-        return None
+        return content, []
     if isinstance(content, list):
         pieces: list[str] = []
+        retained: list[Any] = []
+        has_json = False
         for part in content:
             if isinstance(part, str):
                 pieces.append(part)
+            elif isinstance(part, dict) and part.get("type") == "json" and "json" in part:
+                # Keep this serialization in sync with mindie_provider._fix_messages.
+                has_json = True
+                try:
+                    pieces.append(json.dumps(part["json"], ensure_ascii=False))
+                except (TypeError, ValueError):
+                    pieces.append(str(part["json"]))
             elif isinstance(part, dict) and isinstance(part.get("text"), str):
                 pieces.append(part["text"])
             else:
-                return None
-        return "\n".join(pieces) if pieces else None
-    return None
+                retained.append(part)
+        if retained and not has_json:
+            return None, retained
+        return ("\n".join(pieces) if pieces else None), retained
+    return None, []
+
+
+def _message_text(content: Any) -> str | None:
+    """Return the text/JSON representation eligible for output budgeting."""
+    return _split_budgetable_content(content)[0]
 
 
 def _snap_to_line_boundary(text: str, pos: int) -> int:
@@ -173,16 +198,7 @@ def _sanitize_tool_name(name: str) -> str:
     return safe or "unknown"
 
 
-def _sanitize_tool_call_id(tool_call_id: str) -> str:
-    """Make a tool call id safe to use inside a filename.
-
-    The id reaches us from the model/provider, so it gets the same treatment as
-    a tool name: no separators and no traversal components.
-    """
-    return _sanitize_tool_name(tool_call_id)
-
-
-def _build_externalized_filename(*, tool_name: str, tool_call_id: str) -> str:
+def _build_externalized_filename(*, tool_name: str, tool_call_id: str, content: str) -> str:
     """Build the on-disk filename for an externalized tool output.
 
     Shared by the host-disk and sandbox externalization paths so both
@@ -190,11 +206,15 @@ def _build_externalized_filename(*, tool_name: str, tool_call_id: str) -> str:
     """
     safe_name = _sanitize_tool_name(tool_name)
     ext = _EXT_MAP.get(tool_name, "txt")
-    # Derived from the call id so the host-disk and sandbox paths agree on one
-    # name for a given call, and so externalizing the same output twice is
-    # idempotent instead of leaving two files behind.
-    safe_id = _sanitize_tool_call_id(tool_call_id)
-    return f"{safe_name}-{safe_id}.{ext}"
+    # Hash the raw ID and content so missing IDs, sanitization collisions and
+    # oversized IDs cannot overwrite distinct output. Frame the ID length to
+    # keep the boundary unambiguous, including when either value contains NUL.
+    call_id_bytes = tool_call_id.encode("utf-8")
+    digest = hashlib.sha256()
+    digest.update(len(call_id_bytes).to_bytes(8, "big"))
+    digest.update(call_id_bytes)
+    digest.update(content.encode("utf-8"))
+    return f"{safe_name}-{digest.hexdigest()}.{ext}"
 
 
 def _externalize(
@@ -214,25 +234,26 @@ def _externalize(
     except OSError:
         return None
 
-    filename = _build_externalized_filename(tool_name=tool_name, tool_call_id=tool_call_id)
-    filepath = os.path.join(storage_dir, filename)
-
-    if not os.path.abspath(filepath).startswith(os.path.abspath(storage_dir)):
-        return None
-
     # Each writer owns a unique sibling temp file, so concurrent calls cannot
     # truncate or clean up each other's pending output. Publish only after close
     # (also required on Windows), keeping the final filename deterministic.
     tmp_path = None
     try:
+        filename = _build_externalized_filename(tool_name=tool_name, tool_call_id=tool_call_id, content=content)
+        filepath = os.path.join(storage_dir, filename)
+        if not os.path.abspath(filepath).startswith(os.path.abspath(storage_dir)):
+            return None
+
         candidate_path = os.path.join(storage_dir, f".tool-output-{uuid.uuid4().hex}.tmp")
         # Exclusive creation keeps per-writer ownership while honoring umask,
         # unlike NamedTemporaryFile's fixed 0600 mode on mounted outputs.
-        with open(candidate_path, "x", encoding="utf-8") as f:
+        # newline="" keeps the bytes equal to the stamped blob ref; Windows
+        # text mode would write CRLF and restore would discard the file.
+        with open(candidate_path, "x", encoding="utf-8", newline="") as f:
             tmp_path = candidate_path
             f.write(content)
         os.replace(tmp_path, filepath)
-    except OSError:
+    except (OSError, UnicodeEncodeError):
         if tmp_path is not None:
             try:
                 os.unlink(tmp_path)
@@ -299,10 +320,12 @@ def _externalize_to_sandbox(
     """
     if os.path.isabs(storage_subdir) or ".." in storage_subdir:
         return None
-    filename = _build_externalized_filename(tool_name=tool_name, tool_call_id=tool_call_id)
-    virtual_dir = f"{_VIRTUAL_OUTPUTS_BASE}/{storage_subdir}"
-    virtual_path = f"{virtual_dir}/{filename}"
     try:
+        # Hashing encodes provider text too; keep encoding errors within the
+        # same failure boundary as sandbox writes so callers can truncate.
+        filename = _build_externalized_filename(tool_name=tool_name, tool_call_id=tool_call_id, content=content)
+        virtual_dir = f"{_VIRTUAL_OUTPUTS_BASE}/{storage_subdir}"
+        virtual_path = f"{virtual_dir}/{filename}"
         # AIO sandbox write_file does NOT create parent directories, so create
         # them explicitly before writing. execute_command returns its stdout
         # verbatim (including an "Error: ..." string on failure) rather than
@@ -339,6 +362,32 @@ def _externalize_to_sandbox(
 # ---------------------------------------------------------------------------
 
 
+def _canonical_exit_marker(content: str) -> str | None:
+    """Return the trailing bash exit marker as a single line, or ``None``."""
+    match = _BASH_EXIT_MARKER_TAIL_RE.search(content)
+    if match is None:
+        return None
+    return match.group(0).strip()
+
+
+def _keep_exit_marker_last(original: str, rewritten: str, *, tool_name: str) -> str:
+    """Re-append the original trailing exit marker after a budget rewrite.
+
+    Preview construction always ends with an Access footer, so the harvest
+    regex (``Exit Code: N`` anchored at the end) would otherwise miss the
+    status and fall back to ``deerflow_tool_meta``'s success. Restricted to
+    bash-family tools; other tools' text is left alone.
+    """
+    if tool_name not in _EXIT_MARKER_TOOL_NAMES:
+        return rewritten
+    marker = _canonical_exit_marker(original)
+    if marker is None:
+        return rewritten
+    if rewritten.rstrip().endswith(marker):
+        return rewritten
+    return f"{rewritten.rstrip()}\n{marker}"
+
+
 def _build_preview(
     content: str,
     *,
@@ -348,13 +397,14 @@ def _build_preview(
     tail_chars: int,
 ) -> str:
     """Build a typed synopsis preview with a file reference for externalized output."""
-    return render_tool_output_preview(
+    preview = render_tool_output_preview(
         content,
         tool_name=tool_name,
         virtual_path=virtual_path,
         head_chars=head_chars,
         tail_chars=tail_chars,
     )
+    return _keep_exit_marker_last(content, preview, tool_name=tool_name)
 
 
 def _build_fallback(
@@ -368,26 +418,45 @@ def _build_fallback(
     """Build a head+tail truncation when disk persistence is unavailable.
 
     The returned string is guaranteed to be no longer than *max_chars*.
+    A trailing bash exit marker (``Exit Code: N`` / ``Command exited with
+    code N``) is reserved from the budget the way sandbox truncation does,
+    so harvest can still recover the shell status. Only when *max_chars*
+    is smaller than the marker line (including its leading newline) does
+    the marker drop.
     """
     total = len(content)
     if max_chars <= 0 or total <= max_chars:
         return content
 
+    preserved = ""
+    body = content
+    if tool_name in _EXIT_MARKER_TOOL_NAMES:
+        match = _BASH_EXIT_MARKER_TAIL_RE.search(content)
+        if match is not None:
+            line = f"\n{match.group(0).strip()}"
+            if len(line) <= max_chars:
+                body = content[: match.start()]
+                preserved = line
+                max_chars -= len(preserved)
+                if len(body) <= max_chars:
+                    return body + preserved
+                total = len(body)
+
     marker_template = "\n\n[... {n} chars omitted from {tn} output. Persistent storage unavailable. Consider narrowing the query or using more specific parameters.]\n\n"
     marker_overhead = len(marker_template.format(n=total, tn=tool_name))
 
     if marker_overhead >= max_chars:
-        return content[:max_chars]
+        return body[:max_chars] + preserved
 
     budget = max_chars - marker_overhead
     effective_head = min(head_chars, budget)
     effective_tail = min(tail_chars, max(0, budget - effective_head))
 
-    head_end = _snap_to_line_boundary(content, min(effective_head, total))
-    tail_start = _snap_start_to_line_boundary(content, max(head_end, total - effective_tail))
+    head_end = _snap_to_line_boundary(body, min(effective_head, total))
+    tail_start = _snap_start_to_line_boundary(body, max(head_end, total - effective_tail))
 
-    head = content[:head_end]
-    tail = content[tail_start:] if tail_start < total else ""
+    head = body[:head_end]
+    tail = body[tail_start:] if tail_start < total else ""
     omitted = total - len(head) - len(tail)
 
     marker = marker_template.format(n=omitted, tn=tool_name)
@@ -395,7 +464,7 @@ def _build_fallback(
     parts = [head, marker]
     if tail:
         parts.append(tail)
-    return "".join(parts)
+    return "".join(parts) + preserved
 
 
 # ---------------------------------------------------------------------------
@@ -520,7 +589,12 @@ def _budget_content(
 
         if host_outputs_path is not None:
             blob_store = get_blob_store_if_enabled()
-            blob_bytes = content.encode("utf-8") if blob_store is not None else None
+            try:
+                blob_bytes = content.encode("utf-8") if blob_store is not None else None
+            except UnicodeEncodeError:
+                blob_bytes = None
+                durable_fallback_required = True
+                logger.warning("Tool output cannot be encoded as UTF-8 for durable blob externalization")
             if blob_bytes is not None and len(blob_bytes) > _MAX_TOOL_OUTPUT_BLOB_BYTES:
                 durable_fallback_required = True
                 logger.warning(
@@ -528,7 +602,7 @@ def _budget_content(
                     len(blob_bytes),
                     _MAX_TOOL_OUTPUT_BLOB_BYTES,
                 )
-            else:
+            elif not durable_fallback_required:
                 virtual_path = _externalize(
                     content,
                     tool_name=tool_name,
@@ -628,7 +702,7 @@ def _patch_tool_message(
     if tool_name in config.exempt_tools:
         return msg
 
-    text = _message_text(msg.content)
+    text, retained_blocks = _split_budgetable_content(msg.content)
     if text is None:
         return msg
 
@@ -654,7 +728,7 @@ def _patch_tool_message(
         transform_kind = budgeted.transform_kind
     else:
         return msg
-    update["content"] = replacement
+    update["content"] = [{"type": "text", "text": replacement}, *retained_blocks] if retained_blocks else replacement
     if getattr(msg, "response_metadata", None):
         update["response_metadata"] = dict(msg.response_metadata)
     new_kwargs = dict(getattr(msg, "additional_kwargs", None) or {})

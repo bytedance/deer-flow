@@ -43,6 +43,10 @@ case rather than reviving a record whose package declaration may already be gone
 cancellation skips the recovery sync entirely — the declarations are already restored and
 the next locked startup sync reconciles the environment, whereas blocking an interrupt on a
 full dependency resolve invites a second interrupt that escapes the handler mid-transaction.
+File snapshots capture the original permission bits alongside the bytes; rollback applies
+that mode to a temporary file before atomically replacing the destination, including when
+restoring `config.yaml` after a failed removal. A failed write, chmod, or replace leaves the
+current destination untouched and removes the temporary file.
 Package mutation is deferred from environment mutation: after `uv add/remove`
 updates the declaration and lock, one `uv sync --locked --all-packages` preserves the same
 config-/environment-detected optional extras as normal startup. All three uv calls pin the

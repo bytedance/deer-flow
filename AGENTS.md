@@ -12,11 +12,10 @@ This **monorepo orientation layer** maps the repo. For module details, read its 
 
 ## What is DeerFlow
 
-DeerFlow is a LangGraph-based AI super-agent system with a full-stack architecture. The
-backend runs a "super agent" with sandboxed execution, persistent memory, subagent
-delegation, and extensible tools (built-in, MCP, community), all per-thread isolated. The
-frontend is a Next.js chat UI. External IM platforms (Feishu, Slack, Telegram, Discord,
-DingTalk) bridge into the same agent through the Gateway.
+DeerFlow pairs a LangGraph super agent with a Next.js chat UI. The backend provides
+sandboxed execution, persistent memory, subagents, and extensible built-in, MCP,
+and community tools, isolated per thread. Feishu, Slack, Telegram, Discord, and
+DingTalk connect through the Gateway.
 
 ## Service Topology
 
@@ -70,17 +69,16 @@ deer-flow/
 └── docs/                           # Cross-cutting docs, plans, and design notes
 ```
 
-Third-party extensions are loaded from a top-level `plugins:` list in `config.yaml`
-(operator-controlled on purpose — that list causes code to be imported, so it is deliberately
-kept out of the API-writable `extensions_config.json`). Packaged extensions can contribute
-middleware, lifecycle observers, Gateway services, FastAPI HTTP routers, and experimental
-full-stack plugins. Manage them with `deerflow extensions install/upgrade/list/enable/disable/remove` or the root
-`make extension-*` wrappers. Every mutation requires a Gateway restart, and both build
-hooks and extension code execute with Gateway privileges, so only trusted operator sources
-belong in this path. The manager transaction, accepted source forms, lock discipline, and
-contribution contract live in
-[the extensions guide](backend/packages/harness/deerflow/extensions/AGENTS.md); the user manual
-is `frontend/src/content/{en,zh}/harness/extensions/`.
+Third-party extensions load from operator-controlled `config.yaml -> plugins:`.
+This imports code, so the list stays outside API-writable `extensions_config.json`.
+Extensions contribute middleware, lifecycle observers, Gateway services, FastAPI
+routers, and experimental full-stack plugins. Use
+`deerflow extensions install/upgrade/list/enable/disable/remove` or root
+`make extension-*` wrappers. Restart Gateway after every mutation. Build hooks
+and extension code run with Gateway privileges; use only trusted operator sources.
+Transactions, accepted source forms, locking, and contribution contracts:
+[extensions guide](backend/packages/harness/deerflow/extensions/AGENTS.md).
+User manual: `frontend/src/content/{en,zh}/harness/extensions/`.
 
 **Extension-first evaluation** — before implementing a feature by editing core code,
 evaluate whether it can ship as a packaged extension through the contribution points
@@ -158,7 +156,7 @@ Run `make help` for the full list.
 ```bash
 # Backend (see backend/AGENTS.md for the full set)
 cd backend && make dev        # Gateway API with reload (port 8001)
-cd backend && make test       # Default backend suite; excludes live and blocking-I/O tests
+cd backend && make test       # Four parallel shards; excludes live and blocking-I/O tests
 cd backend && make test-blocking-io  # Strict blocking-I/O suite
 cd backend && make lint       # ruff check
 cd backend && make format     # ruff format
@@ -214,7 +212,7 @@ cd frontend && pnpm rstest run <pattern>     # e.g. pnpm rstest run my-component
 - Frontend work → **[frontend/AGENTS.md](frontend/AGENTS.md)**
 - Setup & install → **[Install.md](Install.md)**, **[CONTRIBUTING.md](CONTRIBUTING.md)**
 - Project overview & usage → **[README.md](README.md)** (translations: `README_zh.md`,
-  `README_ja.md`, `README_fr.md`, `README_ru.md`)
+  `README_ja.md`, `README_fr.md`, `README_ru.md`, `README_pt.md`)
 - Security policy → **[SECURITY.md](SECURITY.md)**
 - Changes → **[CHANGELOG.md](CHANGELOG.md)**
 - Cutting a release → **[RELEASING.md](RELEASING.md)**

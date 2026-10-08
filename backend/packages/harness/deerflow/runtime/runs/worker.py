@@ -913,6 +913,9 @@ async def run_agent(
     run_events_config = ctx.run_events_config
     thread_store = ctx.thread_store
     terminal_status_kwargs = {"persist": False} if event_store is not None else {}
+    # Staged terminal statuses commit only after receipt and duration writes;
+    # keep the still-active durable row's lease renewed until then.
+    record.terminal_commit_pending = event_store is not None
 
     run_id = record.run_id
     thread_id = record.thread_id
@@ -1498,6 +1501,8 @@ async def run_agent(
                 return
             final_goal_verdict = dict(evaluation)
             final_goal_verdict["relied_on_assumption"] = bool(evaluation.get("relied_on_assumption", False)) if evaluation["satisfied"] else False
+            # Hidden goal turns this run took; the task page shows the count.
+            final_goal_verdict["continuations"] = int(evaluated_goal.get("continuation_count", 0))
             if stand_down_reason:
                 final_goal_verdict["stand_down_reason"] = stand_down_reason
                 if stand_down_reason.startswith("thread_changed"):
@@ -1773,6 +1778,9 @@ async def run_agent(
                             await run_manager.persist_current_status(run_id)
                 except Exception:
                     logger.warning("Failed to persist terminal status for run %s after delivery receipt attempts", run_id, exc_info=True)
+            # The deferred commit has been attempted. A failed write is left to
+            # completion fallback or lease recovery, as before.
+            record.terminal_commit_pending = False
 
             if not record.ownership_lost and journal is not None and persist_completion:
                 try:

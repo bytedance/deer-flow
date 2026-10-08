@@ -1,7 +1,8 @@
 """Outbox delivery worker for scheduled-task IM notifications (issue #4254).
 
-The completion hook (``ScheduledTaskService._enqueue_run_notifications``)
-only writes durable outbox rows; this worker owns the actual IM send.
+The scheduler's finalization observer (``ScheduledTaskService._on_finalization``)
+writes durable outbox rows in the transaction that records each outcome; this
+worker owns the actual IM send. Notice text lives in ``notification_text``.
 Execution state and delivery state stay separated: the worker moves outbox
 rows through ``pending -> sending -> sent|failed`` and never touches run or
 task rows. Retries with backoff live in the repository (``mark_failed``);
@@ -13,12 +14,15 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.channels.base import ChannelUnavailable
+from app.channels.capabilities import supports_proactive_notifications
+from app.scheduler.notification_text import DEFAULT_NOTIFICATION_LOCALE, redact_egress_text, render_notification_text, wants_result_summary
+
+__all__ = ["NotificationDeliveryWorker", "redact_egress_text", "render_notification_text"]
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +31,10 @@ logger = logging.getLogger(__name__)
 # are both accepted (``ChannelService.get_channel`` is sync).
 ChannelResolver = Callable[[str], Any]
 
-# Resolves the run's final answer for a completed run, keyed
-# ``(run_id, owner_user_id)``, or None when no summary is available. Sync or
-# async callables are both accepted; failures fall back to the skeleton text.
+# Resolves the run's final reply, keyed ``(run_id, owner_user_id)``, or None
+# when no reply is available. The renderer reduces it to the tasks page's
+# one-line run summary. Sync or async callables are both accepted; failures
+# send the notice without a result line.
 SummaryResolver = Callable[[str, str | None], Any]
 
 # Lists an owner's channel connections (``ChannelConnectionRepository
@@ -37,9 +42,6 @@ SummaryResolver = Callable[[str, str | None], Any]
 # and ``status``. Sync or async callables are both accepted. The worker uses
 # it to confirm, at send time, that the delivery's target is still bound.
 ConnectionResolver = Callable[[str], Any]
-
-_ERROR_TEXT_LIMIT = 500
-_SUMMARY_TEXT_LIMIT = 1000
 
 # A claimed row stuck in "sending" longer than this is considered orphaned
 # (process died between claim and the final status write) and flipped back
@@ -51,80 +53,6 @@ _STALE_SENDING_TIMEOUT_SECONDS = 600
 # front of external IM I/O, so an unbounded join would stall the whole
 # lifespan shutdown path the channel-service bound was added to protect.
 _STOP_TIMEOUT_SECONDS = 5.0
-
-
-def _truncate(text: str, *, limit: int = _ERROR_TEXT_LIMIT) -> str:
-    return text if len(text) <= limit else text[: limit - 1] + "\u2026"
-
-
-_EGRESS_REDACTION = "[redacted]"
-# Best-effort scrub before run content leaves for a third-party IM platform.
-# Patterns mirror the high-confidence secret detectors in skillscan.
-_EGRESS_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(
-        r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
-        re.DOTALL,
-    ),
-    re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
-    re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"),
-    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b"),
-    re.compile(r"\bsk-[A-Za-z0-9]{20,}\b"),
-    re.compile(r"(?im)\b(token|password|passwd|api[_-]?key|secret|credential)s?\b\s*[:=]\s*[\"']?([^\"'\s#]+)"),
-)
-
-
-def redact_egress_text(text: str) -> str:
-    """Scrub likely secrets from text before it is pushed to external IM."""
-    if not text:
-        return text
-    redacted = text
-    for pattern in _EGRESS_SECRET_PATTERNS:
-        if pattern.groups:
-            redacted = pattern.sub(lambda match: f"{match.group(1)}={_EGRESS_REDACTION}", redacted)
-        else:
-            redacted = pattern.sub(_EGRESS_REDACTION, redacted)
-    return redacted
-
-
-def render_notification_text(delivery: dict[str, Any]) -> str:
-    """Render a bounded markdown summary of the run outcome for IM push."""
-    payload = delivery.get("payload") or {}
-    event = delivery.get("event") or ""
-    task_label = payload.get("task_title") or payload.get("task_id") or delivery.get("task_id")
-    if event in {"run_unmet", "task_paused"}:
-        label = "Scheduled task goal was not met" if event == "run_unmet" else "Scheduled task automatically paused"
-        lines = [f"**{label}**", f"Task: `{task_label}`"]
-        # These are host-defined result codes, never model/provider error text.
-        reason = payload.get("reason_code")
-        blockers = {"missing_evidence", "needs_user_input", "run_failed", "external_wait", "goal_not_met_yet"}
-        allowed = (
-            blockers
-            | {f"blocked:{blocker}" for blocker in blockers}
-            | {"no_verdict", "consecutive_unmet", "evaluator_failed", "max_continuations_reached", "no_progress_detected", "token_capped", "no_durable_end_of_turn", "thread_changed_after_evaluation", "thread_changed_before_continuation"}
-        )
-        lines.append(f"Reason: `{reason if isinstance(reason, str) and reason in allowed else 'unknown'}`")
-        lines.append("See the DeerFlow workspace for the result and next steps.")
-    elif event == "run_failed":
-        lines = ["**Scheduled task failed**", f"Task: `{task_label}`"]
-        # Do not forward raw error text to external IM: scheduled runs can
-        # surface hostnames, paths, and token fragments in tracebacks. Users
-        # can open the workspace for the full detail.
-        lines.append("See the DeerFlow workspace for error details.")
-    else:
-        heading = "Scheduled task completed"
-        if payload.get("relied_on_assumption") is True:
-            heading += " — met, relying on stated assumptions"
-        lines = [f"**{heading}**", f"Task: `{task_label}`"]
-        # The result summary belongs to a successful outcome only: on failed
-        # runs a partial answer would be misleading, so the error line above
-        # stays the sole detail.
-        summary = payload.get("result_summary")
-        if isinstance(summary, str) and summary.strip():
-            safe_summary = redact_egress_text(summary.strip())
-            lines.append(f"Result: {_truncate(safe_summary, limit=_SUMMARY_TEXT_LIMIT)}")
-    if delivery.get("run_id"):
-        lines.append(f"Run: `{delivery['run_id']}`")
-    return "\n".join(lines)
 
 
 class NotificationDeliveryWorker:
@@ -141,6 +69,7 @@ class NotificationDeliveryWorker:
         resolve_connections: ConnectionResolver | None = None,
         stale_sending_timeout_seconds: int = _STALE_SENDING_TIMEOUT_SECONDS,
         stop_timeout_seconds: float = _STOP_TIMEOUT_SECONDS,
+        default_locale: str = DEFAULT_NOTIFICATION_LOCALE,
     ) -> None:
         self._delivery_repo = delivery_repo
         self._resolve_channel = resolve_channel
@@ -150,33 +79,42 @@ class NotificationDeliveryWorker:
         self._batch_size = batch_size
         self._stale_sending_timeout_seconds = stale_sending_timeout_seconds
         self._stop_timeout_seconds = stop_timeout_seconds
+        # ``channel_connections.notification_locale``: the language of rows
+        # whose owner has no UI language preference (and of legacy rows).
+        self._default_locale = default_locale
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
+        self._lifecycle_lock = asyncio.Lock()
 
     async def start(self) -> None:
-        if self._task is not None:
-            return
-        self._stop.clear()
-        self._task = asyncio.create_task(self._run_loop())
+        async with self._lifecycle_lock:
+            if self._task is not None:
+                return
+            self._stop.clear()
+            self._task = asyncio.create_task(self._run_loop())
 
     async def stop(self) -> None:
-        if self._task is None:
-            return
-        self._stop.set()
-        task = self._task
-        self._task = None
-        try:
-            await asyncio.wait_for(task, timeout=self._stop_timeout_seconds)
-        except TimeoutError:
-            logger.warning(
-                "Notification delivery worker stop exceeded %.1fs; cancelling in-flight poll",
-                self._stop_timeout_seconds,
-            )
-            task.cancel()
+        async with self._lifecycle_lock:
+            task = self._task
+            if task is None:
+                return
+            self._stop.set()
             try:
-                await task
-            except asyncio.CancelledError:
-                pass
+                try:
+                    await asyncio.wait_for(task, timeout=self._stop_timeout_seconds)
+                except TimeoutError:
+                    logger.warning(
+                        "Notification delivery worker stop exceeded %.1fs; cancelling in-flight poll",
+                        self._stop_timeout_seconds,
+                    )
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+            finally:
+                if self._task is task:
+                    self._task = None
 
     async def run_once(self, *, now: datetime) -> None:
         await self._recover_stale_sending(now)
@@ -210,11 +148,11 @@ class NotificationDeliveryWorker:
             logger.warning("Failed to reset stale sending rows; retrying next poll", exc_info=True)
 
     async def _resolve_summary(self, delivery: dict[str, Any]) -> str | None:
-        """Best-effort lookup of the run's final answer at delivery time.
+        """Best-effort lookup of the run's final reply at delivery time.
 
         Read at delivery time, not enqueue time, so retried deliveries see
-        the freshest value and the outbox payload stays skeleton-only. Any
-        failure degrades to the skeleton notification instead of blocking it.
+        the freshest value and the outbox payload stays small. Any failure
+        sends the notice without its result line instead of blocking it.
         """
         if self._resolve_run_summary is None:
             return None
@@ -281,6 +219,17 @@ class NotificationDeliveryWorker:
     async def _deliver(self, delivery: dict[str, Any]) -> None:
         delivery_id = delivery["id"]
         provider = delivery.get("provider") or ""
+        if not supports_proactive_notifications(provider):
+            # The scheduler enqueues only for providers with proactive push;
+            # a row for any other provider predates that rule. It can never
+            # be sent, so it ends now instead of using up its retries.
+            await self._delivery_repo.mark_failed(
+                delivery_id,
+                claim_token=delivery.get("claim_token"),
+                error="provider does not support proactive notifications",
+                terminal=True,
+            )
+            return
         if self._resolve_connections is not None:
             # Re-check the binding at delivery time, before anything else: a
             # target the owner has disconnected since enqueue must never
@@ -314,7 +263,7 @@ class NotificationDeliveryWorker:
             await self._delivery_repo.mark_failed(delivery_id, claim_token=delivery.get("claim_token"), error=f"channel '{provider}' is not running", count_attempt=False)
             return
         enriched = delivery
-        if delivery.get("event") == "run_completed":
+        if wants_result_summary(delivery):
             summary = await self._resolve_summary(delivery)
             if summary is not None:
                 # Copy before enriching: the claimed row must not be mutated
@@ -324,7 +273,7 @@ class NotificationDeliveryWorker:
         try:
             await channel.send_notification(
                 target=delivery.get("target") or "",
-                text_markdown=render_notification_text(enriched),
+                text_markdown=render_notification_text(enriched, default_locale=self._default_locale),
             )
         except ChannelUnavailable as exc:
             await self._delivery_repo.mark_failed(delivery_id, claim_token=delivery.get("claim_token"), error=str(exc), count_attempt=False)

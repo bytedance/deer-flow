@@ -6,10 +6,15 @@ how many system blocks, message content blocks, or tool definitions are present,
 and that it never writes into blocks the caller still owns.
 """
 
+import asyncio
+import copy
+import json
 from unittest import mock
 
+import anthropic
+import httpx
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from deerflow.models.claude_provider import ClaudeChatModel
 
@@ -345,3 +350,103 @@ def test_strip_cache_control_copies_instead_of_popping():
     assert _count_cache_control(payload) == 0
     assert payload["messages"][0] == {"role": "user", "content": [_native_image()]}
     assert all("cache_control" in item for item in (system_block, image, tool, message))
+
+
+def _thinking_block(block_type: str) -> dict:
+    if block_type == "thinking":
+        return {"type": "thinking", "thinking": "Check the report before answering.", "signature": "test-signature"}
+    return {"type": "redacted_thinking", "data": "test-redacted-data"}
+
+
+@pytest.mark.parametrize("block_type", ["thinking", "redacted_thinking"])
+@pytest.mark.parametrize("thinking_last", [False, True])
+@pytest.mark.parametrize("stale_marker", [False, True])
+def test_thinking_blocks_do_not_consume_cache_breakpoints(model, block_type, thinking_last, stale_marker):
+    thinking = _thinking_block(block_type)
+    if stale_marker:
+        thinking["cache_control"] = {"type": "ephemeral"}
+    text = {"type": "text", "text": "Report ready."}
+    payload = {
+        "system": [{"type": "text", "text": "System one"}, {"type": "text", "text": "System two"}],
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "Prepare the report."}]},
+            {"role": "assistant", "content": [text, thinking] if thinking_last else [thinking, text]},
+            {"role": "user", "content": [{"type": "text", "text": "Save it."}]},
+        ],
+        "tools": [{"name": "save_report"}],
+    }
+    original = copy.deepcopy(payload)
+
+    model._apply_prompt_caching(payload)
+
+    assistant = payload["messages"][1]["content"]
+    assert next(block for block in assistant if block["type"] == block_type) == _thinking_block(block_type)
+    assert _count_cache_control(payload) == 4
+    assert all("cache_control" not in block for block in payload["system"])
+    assert payload["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert next(block for block in assistant if block["type"] == "text")["cache_control"] == {"type": "ephemeral"}
+    assert payload["messages"][2]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert payload["tools"][0]["cache_control"] == {"type": "ephemeral"}
+    assert original["messages"][1]["content"][1 if thinking_last else 0] == thinking
+    assert original["messages"][1]["content"][0 if thinking_last else 1] == text
+
+
+@pytest.mark.parametrize("block_type", ["thinking", "redacted_thinking"])
+@pytest.mark.parametrize("invocation", ["invoke", "ainvoke"])
+@pytest.mark.parametrize("enable_prompt_caching", [True, False])
+def test_thinking_tool_followup_uses_valid_cache_breakpoints(block_type, invocation, enable_prompt_caching):
+    history = [
+        SystemMessage(content="Check report status."),
+        HumanMessage(content="Is report.md ready?"),
+        AIMessage(content=[_thinking_block(block_type), {"type": "tool_use", "id": "call-report", "name": "read_report", "input": {"name": "report.md"}}]),
+        ToolMessage(content="Report ready.", tool_call_id="call-report"),
+    ]
+    original = [message.model_dump() for message in history]
+    requests = []
+
+    def handle_request(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        blocks = [block for message in payload["messages"] if isinstance(message["content"], list) for block in message["content"]]
+        if any(block["type"] in ("thinking", "redacted_thinking") and "cache_control" in block for block in blocks):
+            return httpx.Response(400, json={"type": "error", "error": {"type": "invalid_request_error", "message": "Thinking blocks cannot have cache_control."}})
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg-report",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-4-6",
+                "content": [{"type": "text", "text": "Report ready."}],
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 20, "output_tokens": 3},
+            },
+        )
+
+    m = ClaudeChatModel(model="claude-sonnet-4-6", anthropic_api_key="sk-ant-fake", max_tokens=4096, thinking={"type": "enabled", "budget_tokens": 1024}, enable_prompt_caching=enable_prompt_caching, max_retries=0, retry_max_attempts=1)
+    caller = m.bind_tools([{"name": "read_report", "description": "Read report status.", "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}}])
+    transport = httpx.MockTransport(handle_request)
+    if invocation == "invoke":
+        with anthropic.Anthropic(api_key="sk-ant-fake", max_retries=0, http_client=httpx.Client(transport=transport)) as client:
+            m._client = client
+            result = caller.invoke(history)
+    else:
+
+        async def run():
+            async with anthropic.AsyncAnthropic(api_key="sk-ant-fake", max_retries=0, http_client=httpx.AsyncClient(transport=transport)) as client:
+                m._async_client = client
+                return await caller.ainvoke(history)
+
+        result = asyncio.run(run())
+
+    assert result.content == "Report ready."
+    assert result.usage_metadata == {"input_tokens": 20, "output_tokens": 3, "total_tokens": 23, "input_token_details": {}}
+    assert len(requests) == 1
+    payload = requests[0]
+    assert _count_cache_control(payload) == (4 if enable_prompt_caching else 0)
+    assistant = next(message for message in payload["messages"] if message["role"] == "assistant")
+    assert assistant["content"][0] == _thinking_block(block_type)
+    assert assistant["content"][1]["type"] == "tool_use"
+    assert payload["messages"][-1]["content"][0]["tool_use_id"] == "call-report"
+    assert [message.model_dump() for message in history] == original
