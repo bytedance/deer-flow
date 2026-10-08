@@ -37,6 +37,11 @@ gateway:
   # while channels are enabled), the WeChat QR login, and browser tools.
   # Multi-node clusters also need `persistence.home.accessMode: ReadWriteMany`,
   # and `agent_storage.backend: db` keeps custom agents visible on every Pod.
+  # Memory stays on that shared volume, but DeerMem's SQLite retrieval index is
+  # Pod-local (`memory.backend_config.retrieval_index_path` in `config`, on an
+  # emptyDir at /var/lib/deerflow/memory-index); keep that line when you
+  # override `config`, or the Gateway warns at startup and every Pod shares one
+  # WAL database over the network filesystem.
   # Scheduler multi_instance recovery is safe only when its config
   # prerequisites are met; max_concurrent_runs is shared across Pods then.
   replicas: 1
@@ -324,7 +329,7 @@ ingress:
 # -- DeerFlow config.yaml content. Secrets MUST stay as $VAR references — never
 #    inline literal secret values here. The default enables provisioner sandbox.
 config: |
-  config_version: 55
+  config_version: 56
   log_level: info
   recursion_limit: 100
   max_recursion_limit: 1000
@@ -406,8 +411,16 @@ config: |
   # agent_storage:
   #   backend: db
 
+  # Canonical memory (users/{uid}/memory.json plus fact Markdown) lives at the
+  # default root on the home volume. The derived SQLite FTS5 retrieval index is
+  # rebuildable and must not be shared between Pods: SQLite WAL is unsupported
+  # on network filesystems, every Pod start would rebuild the shared index
+  # under its peers, and one Pod's corruption recovery would delete files the
+  # others hold open. gateway-deployment.yaml mounts an emptyDir at this path;
+  # a Pod re-syncs a user's index on its next search after a peer writes.
   memory:
-    storage_path: memory.json
+    backend_config:
+      retrieval_index_path: /var/lib/deerflow/memory-index
 
   verification:
     receipts_enabled: true
