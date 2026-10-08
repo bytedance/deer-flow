@@ -95,3 +95,47 @@ async def test_channel_cannot_publish_after_stop_finishes_during_prestart_io(
     resume_io.set()
     assert await asyncio.wait_for(start_task, timeout=1) is False
     assert service._channels == {}
+
+@pytest.mark.asyncio
+async def test_channel_start_finishing_after_service_stop_is_drained(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ChannelService(channels_config={"fake": {"enabled": True}})
+    service._running = True
+    start_entered = asyncio.Event()
+    release_start = asyncio.Event()
+    started = []
+
+    class LateChannel(_FakeChannel):
+        async def start(self) -> None:
+            start_entered.set()
+            await release_start.wait()
+            self.is_running = True
+            service.bus.subscribe_outbound(self.on_outbound)
+            started.append(self)
+
+        async def on_outbound(self, _message: object) -> None:
+            pass
+
+        async def stop(self) -> None:
+            service.bus.unsubscribe_outbound(self.on_outbound)
+            self.is_running = False
+
+    async def manager_stop() -> None:
+        pass
+
+    monkeypatch.setattr(service.manager, "stop", manager_stop)
+    monkeypatch.setitem(channel_service._CHANNEL_REGISTRY, "fake", "tests.fake:LateChannel")
+    monkeypatch.setattr(reflection, "resolve_class", lambda *_args, **_kwargs: LateChannel)
+
+    start_task = asyncio.create_task(service._start_channel("fake", {"enabled": True}))
+    await asyncio.wait_for(start_entered.wait(), timeout=1)
+    await service.stop()
+    assert service._channels == {}
+    release_start.set()
+
+    assert await asyncio.wait_for(start_task, timeout=1) is False
+    assert len(started) == 1
+    assert started[0].is_running is False
+    assert service._channels == {}
+    assert service.bus._outbound_listeners == []
