@@ -812,7 +812,9 @@ This release closes that milestone with **439 merged pull requests**.
   trial launched before the run time now leaves the task's status and
   `next_run_at` unchanged, like a trial on a recurring task; its outcome is kept
   on the trial's run row. A trial after the run time has passed still counts as
-  the task's run. ([#6512])
+  the task's run. A trial whose launch bookkeeping lands after the poller has
+  claimed the now-due task no longer clears that claim's lease, which made the
+  claim's admission fail and left the task `running` with nothing scheduled. ([#6512])
 - **auth:** Login lockouts are now counted once per client IP across every
   Gateway replica. `POST /api/v1/auth/login/local` kept its failed-login
   counter in a per-process dict, so with N replicas behind one load balancer an

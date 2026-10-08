@@ -171,6 +171,83 @@ async def test_completion_before_launch_bookkeeping_keeps_the_once_run_scheduled
 
 
 @pytest.mark.asyncio
+async def test_late_trial_bookkeeping_keeps_a_newer_due_task_claim(repos):
+    """The trial finishes, the poller claims the now-due task, then the trial's launch write lands.
+
+    The poller's claim holds the parent's dispatch lease until its admission
+    inserts the scheduled occurrence. The late trial write passes
+    ``can_project`` (no new occurrence sequence yet), and used to clear that
+    lease: admission then rejected the poller as stale, leaving the task
+    ``running`` with no lease and no occurrence, which only stuck-once
+    recovery would later finalize from the trial's outcome.
+    """
+    tasks, runs = repos
+    now = datetime.now(UTC).replace(microsecond=0)
+    run_at = now + timedelta(days=1)
+    poll_at = run_at + timedelta(minutes=1)
+    service = None
+    claimed = []
+    scheduled_launches = []
+
+    async def launch_run(**kwargs):
+        if kwargs["metadata"]["scheduled_trigger"] == "scheduled":
+            scheduled_launches.append(kwargs)
+            return {"run_id": "run-scheduled", "thread_id": kwargs["thread_id"]}
+        await service.handle_run_completion(_record(kwargs, "run-trial", RunStatus.success))
+        claimed.extend(await tasks.claim_due_tasks(now=poll_at, lease_owner=service._lease_owner, lease_seconds=30, limit=10))
+        return {"run_id": "run-trial", "thread_id": kwargs["thread_id"]}
+
+    service = _service(tasks, runs, launch_run)
+    task = await _create_once_task(tasks, run_at=run_at)
+
+    assert (await service.dispatch_task(task, now=now, trigger="manual"))["outcome"] == "launched"
+    assert [row["id"] for row in claimed] == [TASK_ID]
+    parent = await tasks.get(TASK_ID, user_id=OWNER)
+    assert (parent["status"], parent["lease_owner"]) == ("running", service._lease_owner)
+
+    result = await service.dispatch_task(claimed[0], now=poll_at, trigger="scheduled")
+
+    assert (result["outcome"], result["run_id"]) == ("launched", "run-scheduled")
+    assert len(scheduled_launches) == 1
+    assert (await tasks.get(TASK_ID, user_id=OWNER))["status"] == "running"  # the scheduled run, not a stuck claim
+
+
+@pytest.mark.asyncio
+async def test_failure_before_admission_still_releases_the_pollers_own_claim(repos):
+    """The other half of the lease rule: a write with no occurrence row is the claimer's own.
+
+    A legacy thread id that fails validation is recorded before any occurrence
+    exists, by the poller that holds the claim; that write must release it.
+    """
+    tasks, runs = repos
+    now = datetime.now(UTC).replace(microsecond=0)
+
+    async def launch_run(**_kwargs):
+        raise AssertionError("an invalid thread id must not launch")
+
+    service = _service(tasks, runs, launch_run)
+    await tasks.create(
+        task_id=TASK_ID,
+        user_id=OWNER,
+        thread_id="thread.with.dot",
+        context_mode="reuse_thread",
+        assistant_id=None,
+        title="Release check",
+        prompt="Check the release checklist.",
+        schedule_type="once",
+        schedule_spec={"run_at": (now - timedelta(minutes=1)).isoformat()},
+        timezone="UTC",
+        next_run_at=now - timedelta(minutes=1),
+    )
+    (claimed,) = await tasks.claim_due_tasks(now=now, lease_owner=service._lease_owner, lease_seconds=30, limit=10)
+
+    assert (await service.dispatch_task(claimed, now=now, trigger="scheduled"))["outcome"] == "failed"
+
+    after = await tasks.get(TASK_ID, user_id=OWNER)
+    assert (after["status"], after["lease_owner"], after["lease_expires_at"]) == ("failed", None, None)
+
+
+@pytest.mark.asyncio
 async def test_recovered_trial_launch_keeps_the_once_task_enabled(repos):
     """Launch-claim recovery that finds the trial's live run must not mark the task running."""
     tasks, runs = repos
