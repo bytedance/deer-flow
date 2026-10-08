@@ -728,6 +728,52 @@ Serper `web_search` also accepts the optional model argument
 to Serper. Omitting `time_range` or passing `null` omits the recency constraint from the
 search request. This option does not change Serper `image_search`.
 
+#### Serper endpoints
+
+To use a Serper-compatible provider for web and image search, set
+`SERPER_BASE_URL` to its base URL without `/search` or `/images`, and set
+`SERPER_API_KEY` to that provider's key. The default base URL is
+`https://google.serper.dev`.
+
+Each Serper tool can override the environment independently in `config.yaml`:
+
+```yaml
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.serper.tools:web_search_tool
+    base_url: https://proxy.example/api
+    api_key: $SEARCH_PROVIDER_API_KEY
+  - name: image_search
+    group: web
+    use: deerflow.community.serper.tools:image_search_tool
+    base_url: https://images.example/api
+    api_key: $IMAGE_PROVIDER_API_KEY
+```
+
+A non-empty string `base_url` in the requested tool's entry takes precedence
+over `SERPER_BASE_URL`. Missing, non-string or whitespace-only tool values fall
+back to the environment. An unset, empty or whitespace-only environment value
+keeps the default endpoint. Leading/trailing whitespace and trailing slashes
+are removed before appending `/search` or `/images`. A tool's `api_key` similarly
+overrides `SERPER_API_KEY`; neither tool inherits the other's endpoint or key.
+Both settings are read from the same captured tool configuration, so a hot
+reload cannot pair the old provider's endpoint with the new provider's key.
+
+Overrides must be absolute `http://` or `https://` URLs with a host and valid
+port. Query strings and fragments (including empty `?`/`#` markers) are rejected
+before HTTP. Invalid overrides return a configuration error naming
+`base_url`/`SERPER_BASE_URL` without exposing the configured value; they do not
+fall back to another host.
+
+These are operator-controlled settings, not model-supplied arguments. Choose a
+trusted provider: the key is sent to the configured host in the `X-API-KEY`
+header, never in a query parameter. Endpoint configuration does not change the
+existing validation of returned image URLs or web source filters. The endpoint
+is resolved once before transport so it can remain constant across retry attempts.
+Override debug diagnostics show the effective endpoint without URL credentials,
+query or fragment; result-URL guards do not restrict the operator's API host.
+
 #### Serper source filters
 
 ```yaml
@@ -1413,6 +1459,7 @@ models:
 - `TAVILY_API_KEY` - Tavily search API key
 - `BRAVE_SEARCH_API_KEY` - Brave Search API key for `web_search` and `image_search`
 - `SERPER_API_KEY` - Serper (Google Search/Images API) key for `web_search` and `image_search`
+- `SERPER_BASE_URL` - Optional operator-controlled Serper-compatible base URL for both tools; each tool's `base_url` takes precedence. The provider key is sent to the configured host in `X-API-KEY`, never a query parameter. See [Serper endpoints](#serper-endpoints).
 - `SERPLY_API_KEY` - [Serply](https://serply.io) key for `web_search` (Google Search, plus Google News and Google Scholar via `vertical`)
 - `GROUNDROUTE_API_KEY` - GroundRoute meta-search API key for `web_search` and `web_fetch` (routes across Serper, Brave, Exa, Tavily, Firecrawl, Perplexity with gain-share pricing)
 - `SOFYA_API_KEY` - [Sofya](https://sofya.co) key for `web_search` and `web_fetch`

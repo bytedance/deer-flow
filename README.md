@@ -1419,6 +1419,16 @@ These are deployment settings; the model still supplies only `query` and optiona
 empty list is forwarded and imposes no restriction of that kind. See the
 [tool configuration example](backend/docs/CONFIGURATION.md#tools).
 
+Serper web and image search can use another Serper-compatible provider through
+`SERPER_BASE_URL` and that provider's `SERPER_API_KEY`. Each tool can instead set
+its own `base_url` and `api_key` in `config.yaml`; each request reads them from
+one configuration snapshot. Use an absolute HTTP(S) base URL with a host,
+without `/search`, `/images`, a query string or a fragment. Invalid overrides
+return a configuration error before HTTP; blank environment values keep
+Serper's default unless a tool overrides them. See
+[Serper endpoints](backend/docs/CONFIGURATION.md#serper-endpoints) for precedence
+and how the provider receives the API key.
+
 Serper `web_search` supports deployment-level `include_domains` and
 `exclude_domains` too. It checks returned URL hosts (including subdomains), with
 exclusion taking precedence. Filters can return fewer results, including zero;
