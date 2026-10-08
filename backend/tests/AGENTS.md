@@ -2,6 +2,85 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+Upload case-collision coverage uses separate HTTP requests and preserves both
+reported payloads. Observe real filename-claim inputs to pin the disk seed;
+case-insensitive hosts can otherwise mask a missing seed through link retries.
+
+Channel reload cancellation regressions must assert the worker returned the
+stale snapshot before checking that newer runtime config survived. Completion
+alone cannot prove the race: loader exceptions are caught and return `None`.
+
+Browser egress session-close tests retain the real listener and its sockets,
+verify a SOCKS handshake, then check listener shutdown, closed socket descriptors
+and EOF on the established client. A new connection to the old port is not a
+reliable ownership assertion on hosts with loopback forwarding or port reuse.
+Keep ownership assertions inside the teardown-protected block; always drain
+the client writer and close the saved proxy during teardown.
+
+Read-before-write hash fixtures pin `newline=""` when writing LF/CRLF test
+content, so native Windows cannot translate the bytes before the real read.
+
+Browser-asset confinement tests use `support.symlinks.symlink_or_skip` for real
+file and directory symlinks. Keep missing-file, duplicate-key, and size-limit
+checks separate so they still run when the host cannot create symlinks.
+
+`blocking_io/test_web_tool_url_validation.py` resolves a synthetic `.invalid`
+hostname to loopback by patching `_socket.getaddrinfo`, below the real
+`socket.getaddrinfo` wrapper. Do not replace that wrapper or the production URL
+guard: the strict gate must still reject on-loop resolution. Assert each tool
+path reaches the native fixture so an unresolved-host rejection cannot mask it.
+The IPv4 fixture accepts only `AF_UNSPEC` and `AF_INET`; unsupported families
+must fail rather than receive a fabricated IPv4 answer.
+
+The local sandbox's UTF-8 subprocess guard inspects each text-mode call with
+`ast`, checking both `encoding` and `errors`; module-wide literal counts can
+hide unpinned calls behind unrelated settings.
+
+## PostgreSQL batch fixtures
+
+Batch fixtures use `support.postgres.asyncpg_test_url` to map libpq `sslmode`
+to asyncpg `ssl` and remove unsupported `channel_binding` before constructing
+database config. Preserve TLS modes, credentials and other query options;
+reject conflicting `ssl`/`sslmode` values. CI uses `?sslmode=disable`; validate
+that URI shape against a real test database, not only a parameter-free local
+URI. Reuse the normalized config for reopening and teardown, and drop only the
+fixture's UUID schema. This is test-only handling; production connection and
+TLS policy are unchanged.
+
+The 0033 batch-evidence migration fixture uses the same adapter. Its connection
+contract probes execute the actual migration test setup through SQLAlchemy's
+dialect argument conversion, stopping before database acquisition; the real
+SQLite/PostgreSQL cases still exercise upgrade, downgrade and re-upgrade.
+
+## Real Compose tests
+
+`support/compose.py` probes `docker compose version --short` and requires Compose
+2.24+ for optional `env_file` syntax. Skip missing, old or unreadable clients with
+an actionable reason; cover version detection offline in `test_support_compose.py`.
+Real rendering and production entry-point tests use only read-only Compose calls.
+Never start or stop a stack from these tests.
+
+## Claude provider tests
+
+`test_claude_provider_prompt_caching.py` exercises real Anthropic SDK serialization
+through offline HTTP transports. Keep its directly imported `anthropic` SDK in
+the backend `dev` dependency group rather than relying on `langchain-anthropic`
+to supply it transitively.
+
+## User repository ordering
+
+`test_auth.py` pins `list_user_ids()` ordering with fixed UTC timestamps and UUIDs.
+Cover both creation-time precedence and the lexical stored-ID tie-break for
+equal timestamps through the real SQLite repository; do not assume wall-clock
+calls are distinct or weaken the result to an unordered comparison.
+
+## Router auth fixtures
+
+For owner-scoped route assertions, pass a stable `user_factory` and
+`bind_current_user=True` to `make_authed_test_app`. The default stub stamps
+request state but leaves the ambient user context unchanged; the opt-in binding
+uses the stub user during the request and restores the previous context after it.
+
 ## Lark CLI blocking-I/O fixtures
 
 `blocking_io/test_integrations_router.py` uses a real local CLI stub: a `.cmd`
@@ -54,6 +133,12 @@ the old operation starts does not catch SQLite SELECT/ORM-flush races. Keep the
 old completion timestamp within its original lease so expiry cannot mask a
 missing token fence; always drain paused tasks and restore session patches.
 
+## Project document cache
+
+`test_project_document_char_cache.py` pauses real file-IO workers between cache
+lookup and promotion to exercise concurrent eviction. Keep cache metadata
+operations atomic, and verify that a full scan does not hold the cache lock.
+
 ## Executor starvation tests
 
 `test_executor_starvation.py` covers the deterministic starvation semantics from RFC #4560:
@@ -103,3 +188,21 @@ assignment. Use offline transports. Detection is not behavioral defense; do not 
 the final model input from an isolated hook test. `test_jev_screening_policy.py` uses
 the host descriptor builder to pin policy identity; hash endpoint/prompt text and
 never project credential values.
+
+## Deploy home permission tests
+
+`test_deploy_home_writability.py` covers the production deploy permission
+preflight. It runs the complete script with a recording Docker stub and
+isolated runtime paths. Permission cases remove directory write bits or secret
+file read bits and restore them during teardown; they skip on Windows, as root,
+or when the filesystem does not enforce those bits. Cover both persisted
+secrets, shell/Compose dotenv overrides, readable read-only secrets, and teardown
+without secret exports. `down` must not probe, read, or generate secrets.
+Writable-directory cases remain portable.
+
+## Workspace text cache
+
+`test_scanner_text_cache_atomic.py` verifies complete publication and preservation
+of an existing entry on failure. A cleanup failure must preserve the original
+publish exception, including interruption. Import the scanner during fixture
+setup, after the autouse fixtures initialize runtime, to avoid the package cycle.

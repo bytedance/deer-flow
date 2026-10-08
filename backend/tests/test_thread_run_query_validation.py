@@ -86,6 +86,7 @@ def test_read_endpoints_accept_positive_limits_and_hit_store():
         limit=2,
         before_seq=None,
         after_seq=None,
+        user_id=None,
     )
     app.state.run_event_store.list_events.assert_awaited_once_with(
         "thread-1",
@@ -94,6 +95,7 @@ def test_read_endpoints_accept_positive_limits_and_hit_store():
         task_id=None,
         limit=1,
         after_seq=None,
+        user_id=None,
     )
 
 

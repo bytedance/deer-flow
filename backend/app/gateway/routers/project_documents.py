@@ -380,9 +380,9 @@ async def attach_project_document_to_thread(
             await service.open()
             file_info = await service.ingest_chunks(read_file_chunks(staged_path, chunk_size=UPLOAD_CHUNK_SIZE), display_name=row["name"])
         except UnsafeFilenameError as exc:
-            # Shelf names always normalize, so this cannot fire — fail closed.
+            # Legacy shelf rows may predate current upload-name validation.
             await service.cleanup_written()
-            raise HTTPException(status_code=500, detail=f"Failed to upload {row['name']}: {exc}")
+            raise HTTPException(status_code=400, detail=f"Cannot attach {row['name']}: {exc}. Download it, rename it, and upload it directly to the thread.")
         except UnsafeUploadDestinationError as exc:
             await service.cleanup_written()
             raise HTTPException(status_code=500, detail=f"Failed to upload {row['name']}: {exc}")

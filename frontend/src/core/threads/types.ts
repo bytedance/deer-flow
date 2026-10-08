@@ -65,6 +65,12 @@ export interface AgentThreadContext extends Record<string, unknown> {
 
 export interface AgentThread extends Thread<AgentThreadState> {
   context?: AgentThreadContext;
+  /**
+   * Thread search only: a server-originated run of the viewer (schedule, IM,
+   * GitHub, extension) changed since the viewer last opened the thread.
+   * `null`/absent when unknown (another endpoint, or no SQL read state).
+   */
+  unread?: boolean | null;
 }
 
 export interface RunMessage {

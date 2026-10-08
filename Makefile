@@ -20,6 +20,8 @@ else
 endif
 
 FRONTEND_PNPM = $(PYTHON) ../scripts/pnpm.py
+# What `make clean` deletes; shared by its help line and deletion notice.
+RUNTIME_DATA_CONTENTS = database, users, threads, uploads, memory, secrets
 
 help:
 	@echo "DeerFlow Development Commands:"
@@ -46,7 +48,7 @@ help:
 	@echo "  make start-daemon    - Start prod services in background (daemon mode)"
 	@echo "  make nginx           - Start nginx alone in the foreground (local dev config)"
 	@echo "  make stop            - Stop all running services"
-	@echo "  make clean           - Clean up processes and temporary files"
+	@echo "  make clean           - Stop local services and DELETE local runtime data (backend/.deer-flow: $(RUNTIME_DATA_CONTENTS)) and logs"
 	@echo ""
 	@echo "Docker Production Commands:"
 	@echo "  make up              - Build and start production Docker services (localhost:2026)"
@@ -172,9 +174,12 @@ nginx:
 stop:
 	@$(RUN_SHELL_SCRIPT) ./scripts/serve.sh --stop
 
-# Clean up
-clean: stop
-	@echo "Cleaning up..."
+# Clean up: deletes local runtime data, not just temporary files. The guard
+# runs before stop, which would otherwise stop a running stack's sandboxes.
+clean:
+	@$(RUN_SHELL_SCRIPT) ./scripts/check-data-not-in-use.sh
+	@$(MAKE) --no-print-directory stop
+	@echo "Deleting local runtime data in backend/.deer-flow ($(RUNTIME_DATA_CONTENTS)) and logs/*.log..."
 	@-rm -rf backend/.deer-flow 2>/dev/null || true
 	@-rm -rf logs/*.log 2>/dev/null || true
 	@echo "✓ Cleanup complete"

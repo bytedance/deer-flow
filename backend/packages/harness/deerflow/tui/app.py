@@ -9,13 +9,15 @@ thread via ``call_from_thread`` and folded into the reducer.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass, field
 from functools import partial
+from threading import Event
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Input, Label, OptionList, Static
+from textual.widgets import Label, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
 from deerflow.runtime.goal import parse_goal_command
@@ -39,6 +41,23 @@ from .widgets.composer import ComposerInput
 
 _HELP_KEYS = "Keys:  Enter send · PgUp/PgDn scroll transcript · Ctrl+C interrupt or quit · Ctrl+L redraw · / commands · Esc close overlay"
 _HELP_TEXT = f"{format_command_help()}\n{_HELP_KEYS}"
+
+
+@dataclass(eq=False)
+class _Run:
+    """Delivery and cancellation state owned by one worker run."""
+
+    thread_id: str
+    cancelled: Event = field(default_factory=Event)
+    finished: bool = False
+    # Set by the worker thread itself. Textual marks a cancelled thread worker
+    # finished at once, while the synchronous agent stream keeps running.
+    started: Event = field(default_factory=Event)
+    stopped: Event = field(default_factory=Event)
+
+    def worker_running(self) -> bool:
+        """Whether this run's worker may still write to its thread."""
+        return self.started.is_set() and not self.stopped.is_set()
 
 
 _TRANSPARENT_CSS = """
@@ -128,6 +147,9 @@ class DeerFlowTUI(App):
     #composer:focus {{
         border: round {THEME.primary};
     }}
+    #composer.multiline {{
+        height: 5;
+    }}
     SelectScreen {{
         align: center middle;
     }}
@@ -187,7 +209,8 @@ class DeerFlowTUI(App):
         self._skills = 0
         self._spinner_idx = 0
         self._streaming = False
-        self._cancelled = False
+        self._run: _Run | None = None
+        self._interrupted_runs: list[_Run] = []
         self._skills_meta: list[dict] = []
         self._model_override: str | None = None
         self._palette_open = False
@@ -205,14 +228,19 @@ class DeerFlowTUI(App):
             yield Static(id="transcript")
         yield Static(id="status")
         yield Static(id="palette")
-        yield ComposerInput(placeholder="Message DeerFlow…   ( / for commands )", id="composer")
+        yield ComposerInput(
+            placeholder="Message DeerFlow…   ( / for commands )",
+            id="composer",
+            compact=True,
+            highlight_cursor_line=False,
+        )
 
     def on_mount(self) -> None:
         self._load_session_info()
         self._refresh_all()
         self.set_interval(0.1, self._tick_spinner)
         self.set_interval(0.06, self._flush_transcript)  # coalesce streaming re-renders
-        self.query_one("#composer", Input).focus()
+        self.query_one("#composer", ComposerInput).focus()
         if self.plan and getattr(self.plan, "message", None):
             self._send_to_agent(self.plan.message)
 
@@ -238,18 +266,24 @@ class DeerFlowTUI(App):
 
     # ----- input --------------------------------------------------------- #
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        text = event.value.strip()
+    def on_composer_input_submitted(self, event: ComposerInput.Submitted) -> None:
+        # Send pasted documents unchanged (leading indentation, trailing newlines);
+        # only slash commands are trimmed so they still resolve as commands.
+        stripped = event.value.strip()
+        text = stripped if stripped.startswith("/") else event.value
         event.input.value = ""
         self._close_palette()
-        if not text:
+        if not stripped:
             return
         self._history.add(text)
         self._handle_submit(text)
 
-    def on_input_changed(self, event: Input.Changed) -> None:
-        value = event.value
-        if value.startswith("/") and " " not in value:
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        if not isinstance(event.text_area, ComposerInput):
+            return
+        value = event.text_area.value
+        event.text_area.set_class("\n" in value, "multiline")
+        if value.startswith("/") and " " not in value and "\n" not in value:
             from .command_registry import build_registry, filter_commands
 
             items = filter_commands(build_registry(self._skills_meta), value[1:])
@@ -277,8 +311,15 @@ class DeerFlowTUI(App):
             # intercept its keys; let the overlay handle them natively.
             if len(self.screen_stack) > 1:
                 return None
-            # History navigation, transcript paging, Tab, and Esc are always
-            # consumed. Enter falls through to the Input when the palette is
+            # Within a multiline paste, Up/Down belong to TextArea until the
+            # cursor reaches the first/last document line. At those boundaries
+            # they fall back to shell-style input history.
+            if not self._palette_open and action in {"nav_up", "nav_down"}:
+                composer = self.query_one("#composer", ComposerInput)
+                if (action == "nav_up" and composer.can_move_up) or (action == "nav_down" and composer.can_move_down):
+                    return None
+            # History navigation, transcript paging, Tab, and Esc are otherwise
+            # consumed. Enter falls through to the composer when the palette is
             # closed so it submits normally.
             if action in {
                 "nav_up",
@@ -296,16 +337,22 @@ class DeerFlowTUI(App):
         if self._palette_open:
             self.action_palette_up()
         else:
-            self._history_move(self._history.up(self.query_one("#composer", Input).value))
+            value = self._history.up(self.query_one("#composer", ComposerInput).value)
+            if value is not None:
+                self._history_move(value)
 
     def action_nav_down(self) -> None:
         if self._palette_open:
             self.action_palette_down()
         else:
-            self._history_move(self._history.down())
+            value = self._history.down()
+            if value is not None:
+                self._history_move(value)
 
     def _history_move(self, value: str) -> None:
-        composer = self.query_one("#composer", Input)
+        composer = self.query_one("#composer", ComposerInput)
+        if composer.value == value:
+            return
         composer.value = value
         composer.cursor_position = len(value)
 
@@ -364,14 +411,14 @@ class DeerFlowTUI(App):
             self._fill_from_palette()
             return
         self._close_palette()
-        self.query_one("#composer", Input).value = ""
+        self.query_one("#composer", ComposerInput).value = ""
         self._handle_submit(f"/{item.name}")
 
     def _fill_from_palette(self) -> None:
         item = self._current_palette_item()
         if item is None:
             return
-        composer = self.query_one("#composer", Input)
+        composer = self.query_one("#composer", ComposerInput)
         composer.value = f"/{item.name} "
         composer.cursor_position = len(composer.value)
         self._close_palette()
@@ -468,6 +515,9 @@ class DeerFlowTUI(App):
         self.push_screen(SelectScreen("Select model", options), on_choice)
 
     def _open_thread_switcher(self) -> None:
+        if self._streaming:
+            self._dispatch_still_working()
+            return
         try:
             threads = self.session.recent_threads(limit=20)
         except Exception:  # noqa: BLE001
@@ -491,13 +541,24 @@ class DeerFlowTUI(App):
 
     def _resume_thread(self, ref: str) -> None:
         """/resume [id-or-title]: switch to a thread, or open the picker if blank."""
+        if self._streaming:
+            self._dispatch_still_working()
+            return
         ref = ref.strip()
         if not ref:
             self._open_thread_switcher()
             return
-        self._switch_to_thread(self.session.resolve_ref(ref))
+        try:
+            thread_id = self.session.resolve_ref(ref)
+        except ValueError as exc:
+            self._dispatch(SystemMessage(str(exc), tone="error"))
+            return
+        self._switch_to_thread(thread_id)
 
     def _switch_to_thread(self, thread_id: str) -> None:
+        if self._streaming:
+            self._dispatch_still_working()
+            return
         self._conv_thread_id = thread_id
         self.state = initial_state()
         self._dispatch(SystemMessage(f"Resumed thread {thread_id[:8]}."))
@@ -601,18 +662,46 @@ class DeerFlowTUI(App):
         if self._streaming:
             self._dispatch_still_working()
             return
+        # An interrupted worker cannot be killed: it stops at its next stream
+        # event, so a long tool call keeps running and then checkpoints. A new
+        # run on the same thread would race it, and whichever checkpoint lands
+        # last becomes the thread's state, dropping the other turn.
+        self._interrupted_runs = [run for run in self._interrupted_runs if run.worker_running()]
+        if any(run.thread_id == self._conv_thread_id for run in self._interrupted_runs):
+            self._dispatch(SystemMessage("The interrupted run is still stopping on this thread. Send again once it finishes, or use /new or /resume to continue elsewhere.", tone="info"))
+            return
         if self._conv_thread_id is None:
             self._conv_thread_id = str(uuid.uuid4())
-        self._cancelled = False
+        run = _Run(self._conv_thread_id)
+        self._run = run
+        self._streaming = True
         self._dispatch(UserSubmitted(text))
-        self.run_worker(
-            partial(self._stream_worker, text, self._conv_thread_id),
-            thread=True,
-            exclusive=True,
-            group="agent",
-        )
+        try:
+            self.run_worker(
+                partial(self._stream_worker, text, run),
+                thread=True,
+                exclusive=True,
+                group="agent",
+            )
+        except Exception:  # noqa: BLE001 - worker creation must release the busy reservation
+            run.cancelled.set()
+            self._run = None
+            self._streaming = False
+            self._dispatch(SystemMessage("Could not start the run. Please try again.", tone="error"))
 
-    def _stream_worker(self, text: str, thread_id: str) -> None:
+    def _stream_worker(self, text: str, run: _Run) -> None:
+        # Mark the start before checking cancellation: an interrupt either
+        # stops this worker here or sees it started and waits for it.
+        run.started.set()
+        try:
+            self._stream_run(text, run)
+        finally:
+            run.stopped.set()
+
+    def _stream_run(self, text: str, run: _Run) -> None:
+        if run.cancelled.is_set():
+            return
+        thread_id = run.thread_id
         kwargs: dict = {}
         if self._model_override:
             kwargs["model_name"] = self._model_override
@@ -626,16 +715,27 @@ class DeerFlowTUI(App):
 
         latest_title: str | None = None
         for action in stream_actions(self.session.client, text, thread_id=thread_id, **kwargs):
-            if self._cancelled:
+            if run.cancelled.is_set():
+                break
+            if not self.call_from_thread(self._on_stream_action, run, action):
                 break
             if isinstance(action, ThreadTitle):
                 latest_title = action.title
-            self.call_from_thread(self._on_action, action)
 
         # Only persist a title for a run that completed normally — an interrupted
         # run may only have emitted the title middleware's first, truncated guess.
-        if writer is not None and latest_title and not self._cancelled:
+        if writer is not None and latest_title and run.finished and not run.cancelled.is_set():
             writer.set_title(thread_id, latest_title)
+
+    def _on_stream_action(self, run: _Run, action) -> bool:
+        # Cancellation and a new send can occur after the worker's check,
+        # including when both runs belong to the same conversation.
+        if self._run is not run or run.thread_id != self._conv_thread_id or run.cancelled.is_set() or run.finished:
+            return False
+        if isinstance(action, RunEnded):
+            run.finished = True
+        self._on_action(action)
+        return True
 
     def _on_action(self, action) -> None:
         self.state = reduce(self.state, action)
@@ -672,7 +772,9 @@ class DeerFlowTUI(App):
             self._interrupt_run()
 
     def _interrupt_run(self) -> None:
-        self._cancelled = True
+        if self._run is not None:
+            self._run.cancelled.set()
+            self._interrupted_runs.append(self._run)
         self.workers.cancel_group(self, "agent")
         self._streaming = False
         self.state = reduce(self.state, RunEnded())
@@ -683,7 +785,7 @@ class DeerFlowTUI(App):
         self._refresh_all()
 
     def action_clear_composer(self) -> None:
-        self.query_one("#composer", Input).value = ""
+        self.query_one("#composer", ComposerInput).value = ""
 
     def action_transcript_page_up(self) -> None:
         scroll = self.query_one("#scroll", VerticalScroll)

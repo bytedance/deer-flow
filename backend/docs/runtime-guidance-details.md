@@ -55,7 +55,8 @@ cancellation while waiting for prior finalization still emit a zero-delivery
 receipt. The worker flushes ordinary journal events, idempotently persists the
 run-scoped receipt, and only then persists the staged terminal run status. A
 receipt failure is retried on a short bounded schedule while the owning worker
-still knows the real outcome and holds the lease. Delivery candidates are every
+still knows the real outcome and holds the lease; `terminal_commit_pending` keeps
+heartbeat renewal running until the staged status is committed. Delivery candidates are every
 regular file created or modified under `/mnt/user-data/outputs`; internal
 process-feedback files are excluded (the scanner's `EXCLUDED_DIR_NAMES` plus
 the configured `tool_output.storage_subdir`), so a run that only externalized

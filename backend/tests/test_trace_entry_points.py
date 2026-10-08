@@ -59,7 +59,7 @@ class _StubTaskRepo:
 
 
 class _StubRunRepo:
-    async def list_queued_runs(self, *, limit):
+    async def list_queued_runs(self, *, limit, **_kwargs):
         return []
 
     async def expire_queued_runs(self, **_kwargs):
