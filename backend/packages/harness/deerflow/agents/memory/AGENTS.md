@@ -192,8 +192,8 @@ The older isolation migration remains available:
 PYTHONPATH=. python scripts/migrate_user_isolation.py --dry-run
 ```
 
-It assigns legacy `memory.json`, `threads/`, `agents/`, `skills/`, and the global
-`USER.md` to `--user-id` (default `default`).
+It assigns legacy `memory.json`, `agents/`, `skills/`, and the global `USER.md`
+to `--user-id` (default `default`); `threads/` go to their `threads_meta` owner.
 
 #### Retrieval
 

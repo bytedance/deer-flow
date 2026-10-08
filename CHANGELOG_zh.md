@@ -694,6 +694,12 @@
 
 ### 修复
 
+- **持久化：** `scripts/migrate_user_isolation.py` 现在会把每个 legacy 线程移动到其所属用户下。此前脚本在
+  `{base_dir}/deer-flow.db` 中查找线程归属，而 DeerFlow 从不创建这个文件（数据库是 `{sqlite_dir}/deerflow.db`
+  或 PostgreSQL），因此归属映射始终为空，所有 legacy 线程都被移到 `users/default/`。现在归属从 `config.yaml`
+  所配置数据库的 `threads_meta` 表读取；若存在 legacy 线程但无法读取该表，脚本会在移动任何数据前退出。对于
+  从未记录过线程归属的安装，可传 `--allow-missing-thread-owners`，此时所有 legacy 线程归入 `default`。
+  已运行过旧脚本的安装可按 `docker/provisioner/README.md` 中的步骤恢复线程。([#6450])
 - **沙箱：** e2b 沙箱中失败的命令现在会保留输出和退出码。e2b SDK 在退出码非零时抛出
   `CommandExitException`，而不是返回结果，因此 `E2BSandbox.execute_command` 返回的是
   `Error: Command exited with code N and error: ...`：stdout 被丢弃，`Exit Code: N`
@@ -7516,3 +7522,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6426]: https://github.com/bytedance/deer-flow/pull/6426
 [#6441]: https://github.com/bytedance/deer-flow/pull/6441
 [#6448]: https://github.com/bytedance/deer-flow/pull/6448
+[#6450]: https://github.com/bytedance/deer-flow/pull/6450
