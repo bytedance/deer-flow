@@ -142,6 +142,8 @@ def test_compose_env_files_are_optional(variant: str):
     """
     compose = yaml.safe_load(COMPOSE_PATHS[variant].read_text(encoding="utf-8"))
     for service_name, path in EXPECTED_ENV_FILES.items():
+        if variant == "prod" and service_name in {"gateway", "provisioner"}:
+            path = "${DEER_FLOW_COMPOSE_ENV_FILE:-../.env}"
         entries = compose["services"][service_name]["env_file"]
         assert entries == [{"path": path, "required": False}], f"{variant} {service_name} env_file must be optional; got: {entries!r}"
 

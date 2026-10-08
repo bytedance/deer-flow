@@ -1504,6 +1504,43 @@ For containers, explicitly pass the selector and mount the selected file at a
 container-visible path. Database, runtime-home, storage and tenant isolation
 must be configured separately; selecting a dotenv file does not provide them.
 
+
+## Production Compose env files
+
+Set `DEER_FLOW_COMPOSE_ENV_FILE` in the launcher environment to select a
+production dotenv file for `make up`, `make build`, and `make start`:
+
+```bash
+DEER_FLOW_COMPOSE_ENV_FILE=/srv/deer-flow/stage.env make up
+```
+
+Relative paths are resolved from the checkout root. The production launcher
+passes the same file to Compose's `--env-file`, the Gateway and provisioner
+`env_file` entries, the secret-resolution probe, and optional build-extra
+discovery. It never sources the file as shell code. An explicit missing,
+directory, or unreadable selector fails before Docker is invoked for startup
+or build. `make down` can still stop the stack if the selected file was removed.
+An unset or empty selector preserves the optional repo-root `.env` default.
+
+For direct Compose calls, use an absolute path and provide both selectors:
+`--env-file` controls interpolation; service `env_file` controls container
+variables.
+
+```bash
+DEER_FLOW_COMPOSE_ENV_FILE=/srv/deer-flow/stage.env \
+  docker compose --env-file /srv/deer-flow/stage.env \
+  -f docker/docker-compose.yaml config
+```
+
+Existing shell variables retain Compose's precedence. Export
+`DEER_FLOW_CONFIG_PATH`, `DEER_FLOW_EXTENSIONS_CONFIG_PATH`, and
+`DEER_FLOW_HOME` independently when choosing different configuration and state
+locations. This is a production file-selection option: Docker development,
+`frontend/.env`, project/container names, database separation, and tenant
+isolation are not changed. Stop an existing stack before switching its profile.
+Keep credential-bearing profiles outside the checkout or in local Git exclusions.
+`DEER_FLOW_ENV_FILE` remains the separate backend Python dotenv selector.
+
 ## Configuration Location
 
 The configuration file should be placed in the **project root directory** (`deer-flow/config.yaml`). Set `DEER_FLOW_PROJECT_ROOT` when the process may start from another working directory, or set `DEER_FLOW_CONFIG_PATH` to point at a specific file.
