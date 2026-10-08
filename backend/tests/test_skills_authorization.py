@@ -1723,11 +1723,14 @@ def test_async_tool_policy_uses_aauthorize(monkeypatch, tmp_path):
     )
     request = SimpleNamespace(state={"skill_context": [{"name": "demo-skill", "path": skill_path}]})
 
+    from deerflow.authz.activation_decisions import ActivationDecisions
+
     async def _run():
         return await middleware._collect_activation_decisions(["demo-skill"])
 
     decisions = asyncio.run(_run())
-    assert decisions == {"demo-skill": True}
+    assert isinstance(decisions, ActivationDecisions)
+    assert decisions.decision_for("demo-skill") is True
 
     # End to end through the async hook: the aauthorize-granted entry applies.
     class _ToolsRequest(SimpleNamespace):
@@ -3072,6 +3075,69 @@ def test_slash_dominance_anchors_on_path_across_midrun_rename(tmp_path, monkeypa
 
     # Only the renamed (activation-era) declaration binds — no union of eras.
     assert run_context.get(ACTIVE_SECRETS_CONTEXT_KEY) == {"NEW_KEY": "new-value"}
+
+
+def test_async_batch_miss_never_calls_synchronous_provider(tmp_path, monkeypatch):
+    """[construction hardening] A name missing from an async batch resolves
+    per the provider-error policy WITHOUT consulting the synchronous
+    authorize() — the wrong API from a worker thread. Under the old dict
+    contract the miss silently took that path; with a loop-affine provider
+    and fail_closed=false it flipped denials into allows."""
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+    from deerflow.authz.activation_decisions import ActivationDecisions
+
+    provider = _ActionAwareProvider(denied_activate=set())
+    resolved = _resolved_skill_authorization(provider, fail_closed=False)
+    middleware = SkillActivationMiddleware(
+        available_skills={"demo-skill"},
+        skill_authorization=resolved,
+        slash_source_owner_token="test-token",
+    )
+    empty_batch = ActivationDecisions({}, fail_closed=False)
+
+    # Miss under fail-open allows — and the sync API is never consulted
+    # (the old fallback would have recorded a sync call).
+    assert middleware._activation_allowed("uncovered", activation_decisions=empty_batch) is True
+    assert middleware._activation_allowed("demo-skill", activation_decisions=empty_batch) is True
+    assert provider.sync_calls == []
+    assert provider.async_calls == []
+
+
+def test_async_batch_miss_fails_closed_under_default_policy(tmp_path, monkeypatch):
+    """The production default (fail_closed=True) denies a miss — loudly, and
+    still without touching the synchronous provider."""
+
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+    from deerflow.authz.activation_decisions import ActivationDecisions
+
+    provider = _ActionAwareProvider(denied_activate=set())
+    resolved = _resolved_skill_authorization(provider, fail_closed=True)
+    middleware = SkillActivationMiddleware(
+        available_skills={"demo-skill"},
+        skill_authorization=resolved,
+        slash_source_owner_token="test-token",
+    )
+    empty_batch = ActivationDecisions({}, fail_closed=True)
+
+    assert middleware._activation_allowed("uncovered", activation_decisions=empty_batch) is False
+    assert provider.sync_calls == []
+
+
+def test_sync_chain_none_still_uses_synchronous_api():
+    """``None`` remains the sync-chain signal: the synchronous authorize() is
+    the correct API there and stays in use."""
+    provider = _ActionAwareProvider(denied_activate=set())
+    resolved = _resolved_skill_authorization(provider, fail_closed=True)
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+
+    middleware = SkillActivationMiddleware(
+        available_skills={"demo-skill"},
+        skill_authorization=resolved,
+        slash_source_owner_token="test-token",
+    )
+
+    assert middleware._activation_allowed("demo-skill", activation_decisions=None) is True
+    assert provider.sync_calls == ["demo-skill"]
 
 
 def posixpath_normpath(path: str) -> str:

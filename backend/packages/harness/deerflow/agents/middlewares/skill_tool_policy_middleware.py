@@ -17,6 +17,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
+from deerflow.authz.activation_decisions import ActivationDecisions
 from deerflow.runtime.secret_context import SKILL_TOOL_POLICY_DECISION_CONTEXT_KEY, read_slash_skill_source_paths
 from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
 from deerflow.skills.tool_policy import ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES, allowed_tool_names_for_skills
@@ -80,7 +81,7 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         self._skill_authorization = skill_authorization
         self._decision_owner_token = secrets.token_urlsafe(24)
 
-    def _activation_allowed(self, skill_name: str, *, activation_decisions: dict[str, bool] | None = None) -> bool:
+    def _activation_allowed(self, skill_name: str, *, activation_decisions: ActivationDecisions | None = None) -> bool:
         """Action-scoped ``skill:activate`` decision for one skill name.
 
         Persisted ``skill_context`` entries were authorized when they were
@@ -92,13 +93,16 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         """
         if self._skill_authorization is None:
             return True
-        if activation_decisions is not None and skill_name in activation_decisions:
-            return activation_decisions[skill_name]
+        if activation_decisions is not None:
+            # Construction-enforced: a miss inside an async batch resolves per
+            # the provider-error policy with a loud log — it never falls back
+            # to the synchronous authorize() from a worker thread.
+            return activation_decisions.decision_for(skill_name)
         from deerflow.authz.skill_filter import skill_activation_allowed
 
         return skill_activation_allowed(self._skill_authorization, skill_name)
 
-    async def _collect_activation_decisions(self, names) -> dict[str, bool] | None:
+    async def _collect_activation_decisions(self, names) -> ActivationDecisions | None:
         """Precompute ``skill:activate`` decisions on the event loop (async hooks).
 
         The policy resolution itself runs in a worker thread (storage reads),
@@ -113,14 +117,14 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         if self._skill_authorization is None:
             return None
         candidates = {name for name in names if isinstance(name, str) and name}
-        if not candidates:
-            return None
         from deerflow.authz.skill_filter import skill_activation_allowed_async
 
         decisions: dict[str, bool] = {}
         for name in sorted(candidates):
             decisions[name] = await skill_activation_allowed_async(self._skill_authorization, name)
-        return decisions
+        # An empty batch is still a batch — consumers resolving an uncovered
+        # name must fail per policy, not silently take the sync path.
+        return ActivationDecisions(decisions, fail_closed=self._skill_authorization.fail_closed)
 
     def _resolve_policy_registry(self, paths: tuple[str, ...]) -> tuple[dict[str, Skill] | object, list[str]]:
         """Load the path-keyed registry and canonicalize the policy paths.
@@ -193,7 +197,7 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         self,
         paths: tuple[str, ...],
         *,
-        activation_decisions: dict[str, bool] | None = None,
+        activation_decisions: ActivationDecisions | None = None,
         registry: _RegistryArg = None,
     ) -> tuple[list[Skill], bool]:
         if not paths:
@@ -250,7 +254,7 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         self,
         paths: tuple[str, ...],
         *,
-        activation_decisions: dict[str, bool] | None = None,
+        activation_decisions: ActivationDecisions | None = None,
         registry: _RegistryArg = None,
     ) -> set[str] | None:
         active_skills, policy_failed = self._active_skills_for_paths(paths, activation_decisions=activation_decisions, registry=registry)
@@ -307,7 +311,7 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest | ToolCallRequest,
         *,
         policy: _PolicySignature | None = None,
-        activation_decisions: dict[str, bool] | None = None,
+        activation_decisions: ActivationDecisions | None = None,
         registry: _RegistryArg = None,
     ) -> set[str] | None:
         resolved_policy = self._active_policy(request) if policy is None else policy
@@ -324,7 +328,7 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         *,
         policy: _PolicySignature | None = None,
         refresh_decision: bool = False,
-        activation_decisions: dict[str, bool] | None = None,
+        activation_decisions: ActivationDecisions | None = None,
         registry: _RegistryArg = None,
     ) -> ModelRequest:
         resolved_policy = self._active_policy(request) if policy is None else policy
