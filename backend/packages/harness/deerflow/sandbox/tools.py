@@ -2454,8 +2454,16 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
                 env=local_env,
                 timeout=command_timeout,
             )
+            # The operator-configured ``sandbox.environment`` values ride the
+            # same injection channel into every subprocess (see LocalSandbox),
+            # so they are exactly as leak-prone as request-scoped secrets when
+            # a script echoes its environment — include them in the
+            # secret-redaction set. Request-scoped values keep precedence by
+            # overwriting same-named operator entries.
+            redaction_env = dict(getattr(sandbox, "environment", None) or {})
+            redaction_env.update(injected_env or {})
             return _truncate_bash_output(
-                mask_secret_values(mask_local_paths_in_output(output, thread_data), injected_env),
+                mask_secret_values(mask_local_paths_in_output(output, thread_data), redaction_env),
                 max_chars,
             )
         ensure_thread_directories_exist(runtime)

@@ -174,13 +174,16 @@ class SandboxConfig(BaseModel):
         allow_host_bash: Enable host-side bash execution for LocalSandboxProvider.
             Dangerous and intended only for fully trusted local workflows.
 
-    AioSandboxProvider, BoxliteProvider, E2BSandboxProvider, and OpenSandboxProvider shared options:
+    AioSandboxProvider, BoxliteProvider, E2BSandboxProvider, OpenSandboxProvider, and
+    LocalSandboxProvider shared options:
         image: Sandbox image to use (Docker/AIO, BoxLite OCI, or OpenSandbox image)
         replicas: Positive provider capacity. E2B shares it across Gateway
             workers when ownership uses Redis; other modes/providers keep
             process-local accounting.
         idle_timeout: Idle timeout in seconds before released warm sandboxes/VMs are stopped (default: 600 = 10 minutes). Set to 0 to disable.
-        environment: Environment variables to inject into the sandbox (values starting with $ are resolved from host env)
+        environment: Environment variables to inject into the sandbox (values starting with $ are
+            resolved from host env). Injected entries bypass the env-policy scrubber as
+            operator-authorized values; LocalSandboxProvider also masks them from bash tool output.
 
     BoxliteProvider specific options:
         health_check_skip_seconds: Optional reclaim-time skip window in seconds for recently released warm VMs. Default behavior is 0.0 = always validate before reuse.

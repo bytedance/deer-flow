@@ -235,7 +235,12 @@ class LocalSandbox(Sandbox):
         """
         super().__init__(id)
         self.path_mappings = path_mappings or []
-        self.environment: dict[str, str] = dict(environment) if environment else {}
+        environment = dict(environment) if environment else {}
+        # Config-derived keys flow into every subprocess's Popen(env=...); a
+        # bad name (``"MY=KEY"``, empty) must fail at construction — a clear
+        # startup error — instead of on the first command execution.
+        _validate_extra_env(environment)
+        self.environment: dict[str, str] = environment
         # Track files written through write_file so read_file only
         # reverse-resolves paths in agent-authored content.
         self._agent_written_paths: set[str] = set()

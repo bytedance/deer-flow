@@ -127,15 +127,23 @@ class TestLocalSandboxOperatorEnvironment:
         out = sandbox.execute_command(_echo_env_probe("MINIMAX_API_KEY"))
         assert "platform-key-should-vanish" not in out
 
-    def test_provider_resolves_dollar_refs_from_host_env(self, monkeypatch):
-        """``$VAR`` values resolve from the gateway process env, mirroring AIO."""
-        from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
+    def test_provider_consumes_config_values_verbatim(self, monkeypatch):
+        """Values from the file-backed AppConfig loader arrive pre-resolved
+        ($VAR substitution happens during config load), so a credential that
+        legitimately starts with ``$`` must pass through untouched — re-running
+        $-resolution would expand it into a different variable or the empty
+        string."""
+        from types import SimpleNamespace
 
-        monkeypatch.setenv("GATEWAY_SIDE_KEY", "resolved-from-host")
-        resolved = LocalSandboxProvider._resolve_env_vars(
-            {"MINIMAX_API_KEY": "$GATEWAY_SIDE_KEY", "LITERAL_MODEL": "image-01"}
+        from deerflow.sandbox.local import local_sandbox_provider as provider_module
+
+        monkeypatch.setattr(
+            "deerflow.config.get_app_config",
+            lambda: SimpleNamespace(sandbox=SimpleNamespace(environment={"APP_PASSWORD": "$s3cret-value"})),
+            raising=False,
         )
-        assert resolved == {"MINIMAX_API_KEY": "resolved-from-host", "LITERAL_MODEL": "image-01"}
+        provider = provider_module.LocalSandboxProvider()
+        assert provider._environment == {"APP_PASSWORD": "$s3cret-value"}
 
     def test_provider_missing_config_yields_empty_environment(self, monkeypatch):
         """A missing/unloadable config must degrade to 'inject nothing', not crash."""
@@ -147,6 +155,64 @@ class TestLocalSandboxOperatorEnvironment:
         monkeypatch.setattr("deerflow.config.get_app_config", _raise, raising=False)
         provider = provider_module.LocalSandboxProvider()
         assert provider._environment == {}
+
+    def test_acquire_wires_environment_into_sandboxes(self, monkeypatch):
+        """Both ``acquire()`` call sites must hand the resolved mapping to the
+        LocalSandbox instances they yield — generic singleton and per-thread
+        alike (either construction site could silently drop the kwarg)."""
+        from deerflow.sandbox.local import local_sandbox_provider as provider_module
+
+        provider = provider_module.LocalSandboxProvider()
+        monkeypatch.setattr(provider, "_environment", {"MINIMAX_API_KEY": "operator-value"}, raising=False)
+
+        generic_id = provider.acquire()
+        assert provider.get(generic_id).environment == {"MINIMAX_API_KEY": "operator-value"}
+
+        thread_id = provider.acquire("thread-env-wiring")
+        assert provider.get(thread_id).environment == {"MINIMAX_API_KEY": "operator-value"}
+
+    def test_operator_environment_keys_validated_at_construction(self):
+        """A typo'd key (``MY=KEY``) fails at construction instead of on the
+        first command execution."""
+        with pytest.raises(ValueError):
+            LocalSandbox(id="local", environment={"MY=KEY": "v"})
+
+    def test_operator_environment_masked_from_bash_output(self, monkeypatch):
+        """[P1 regression] An operator-injected credential must not flow back
+        into model-visible tool output when a script echoes its environment —
+        the bash tool's redaction set includes the sandbox's operator
+        environment, with request-scoped values winning on name collision."""
+        from deerflow.sandbox import tools as tools_mod
+
+        class FakeSandbox:
+            environment = {"MINIMAX_API_KEY": "operator-secret-value-123456"}
+
+            def execute_command(self, command, env=None, timeout=None):
+                # Simulate a diagnostic script echoing the injected credential.
+                return "key=operator-secret-value-123456"
+
+        runtime = SimpleNamespace(
+            context={"__active_skill_secrets": {"ERP_TOKEN": "request-secret-value-987654321"}, "user_id": "u-local"},
+            state={"sandbox": {"sandbox_id": "local:1"}},
+        )
+        thread_data = {"workspace_path": "/tmp/ws", "cwd": "/mnt/user-data/workspace"}
+        fake_cfg = SimpleNamespace(sandbox=SimpleNamespace(bash_output_max_chars=20000, bash_command_timeout=42))
+        with (
+            patch.object(tools_mod, "ensure_sandbox_initialized", return_value=FakeSandbox()),
+            patch.object(tools_mod, "is_local_sandbox", return_value=True),
+            patch.object(tools_mod, "is_host_bash_allowed", return_value=True),
+            patch.object(tools_mod, "ensure_thread_directories_exist", return_value=None),
+            patch.object(tools_mod, "get_thread_data", return_value=thread_data),
+            patch.object(tools_mod, "validate_local_bash_command_paths", return_value=None),
+            patch.object(tools_mod, "replace_virtual_paths_in_command", side_effect=lambda command, td: command),
+            patch.object(tools_mod, "_apply_cwd_prefix", side_effect=lambda command, td: command),
+            patch.object(tools_mod, "_is_windows", return_value=False),
+            patch("deerflow.config.app_config.get_app_config", return_value=fake_cfg),
+        ):
+            out = tools_mod.bash_tool.func(runtime=runtime, command="env", description="dump env")
+
+        assert "operator-secret-value-123456" not in out
+        assert "request-secret-value-987654321" not in out
 
 
 class TestAioSandboxEnvInjection:
