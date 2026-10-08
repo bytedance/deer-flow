@@ -784,18 +784,23 @@ function ToolCall({
     if (typeof args.query === "string") {
       label = t.toolCalls.searchOnWebFor(args.query);
     }
+    const results = Array.isArray(result)
+      ? result
+      : typeof result === "object" && result !== null
+        ? result.results
+        : undefined;
     return (
       <ChainOfThoughtStep
         key={id}
         label={resolveLabel(label)}
         icon={SearchIcon}
       >
-        {Array.isArray(result) && (
+        {Array.isArray(results) && (
           <ChainOfThoughtSearchResults>
             {/* Tool args and results are model- or provider-controlled, so
                 every tool link passes the same scheme allowlist as markdown
                 links and degrades to the same UnsafeLink marker. */}
-            {result.map((item) => (
+            {results.map((item) => (
               <ChainOfThoughtSearchResult key={item.url}>
                 {isSafeHref(item.url) ? (
                   <a href={item.url} target="_blank" rel="noopener noreferrer">

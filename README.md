@@ -1329,7 +1329,8 @@ An explicit tool `api_key` takes precedence over the environment variable.
 An explicit call's `max_results` overrides the configured default; omission
 uses configuration or 5 (clamped to 1–100). Invalid configured counts, including
 booleans and fractional numbers, fall back to 5. Results include the matching
-passage, title, URL, publication date, and source metadata. `returned_results`
+passage, title, URL, publication date, and source metadata. The chat search step
+displays source titles and links, including after reloading a conversation. `returned_results`
 counts the returned page, not all matching news articles. Malformed entries are
 skipped with a warning while valid entries are retained; invalid responses or
 pages with no valid entries return an error. Empty result lists remain valid. The tool accepts

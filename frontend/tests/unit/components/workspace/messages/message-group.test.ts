@@ -33,6 +33,74 @@ afterEach(() => {
 });
 
 describe("MessageGroup", () => {
+  it.each(["array", "webz"])(
+    "renders source links from a %s search response",
+    (shape) => {
+      const results = [
+        {
+          title: "Renewable energy news",
+          url: "https://example.com/news",
+          content: "Matching passage",
+          published_at: "2026-09-20T12:00:00Z",
+          source: { domain: "example.com", language: "english", country: "US" },
+        },
+      ];
+      const payload =
+        shape === "webz"
+          ? { query: "renewable energy", returned_results: 1, results }
+          : results;
+      const html = renderToolCall(
+        "web_search",
+        { query: "renewable energy" },
+        JSON.stringify(payload),
+      );
+      expect(html).toContain('href="https://example.com/news"');
+      expect(html).toContain(">Renewable energy news</a>");
+      expect(anchorCount(html)).toBe(1);
+    },
+  );
+
+  it("keeps unsafe links blocked inside a Webz response envelope", () => {
+    const html = renderToolCall(
+      "web_search",
+      { query: "news" },
+      JSON.stringify({
+        query: "news",
+        returned_results: 1,
+        results: [
+          {
+            title: "Unsafe source",
+            url: "javascript:alert(1)",
+            content: "",
+            published_at: "",
+            source: {},
+          },
+        ],
+      }),
+    );
+    expect(unsafeMarkerCount(html)).toBe(1);
+    expect(anchorCount(html)).toBe(0);
+  });
+
+  it.each([
+    null,
+    { results: null },
+    { results: {} },
+    { error: "Webz request failed" },
+    { results: [] },
+  ])(
+    "renders a search step without links for an empty or invalid envelope %j",
+    (payload) => {
+      const html = renderToolCall(
+        "web_search",
+        { query: "news" },
+        JSON.stringify(payload),
+      );
+      expect(html).toContain("news");
+      expect(anchorCount(html)).toBe(0);
+    },
+  );
+
   it("renders unresolved streaming assistant text before a tool call arrives", () => {
     const html = renderGroup(
       [
