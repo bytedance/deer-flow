@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import copy
+import json
+
+import httpx
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 
@@ -138,6 +142,60 @@ def test_vllm_provider_preserves_explicit_enable_thinking_kwarg():
         "enable_thinking": False,
         "foo": "bar",
     }
+
+
+def test_vllm_provider_keeps_legacy_model_defaults_unmodified():
+    extra_body = {"chat_template_kwargs": {"thinking": True}, "tool_stream": True}
+    original = copy.deepcopy(extra_body)
+    model = VllmChatModel(model="qwen3", api_key="dummy", extra_body=extra_body)
+
+    payload = model._get_request_payload([HumanMessage(content="Hello")])
+
+    assert payload["extra_body"] == {"chat_template_kwargs": {"enable_thinking": True}, "tool_stream": True}
+    assert model.extra_body == original
+    assert extra_body == original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True], ids=["sync", "async"])
+async def test_vllm_provider_reused_request_body_can_disable_thinking(async_mode):
+    requests = []
+
+    def handle(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={"id": "completion", "model": "qwen3", "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]})
+
+    extra_body = {"chat_template_kwargs": {"thinking": True, "foo": "bar"}, "tool_stream": True}
+    original = copy.deepcopy(extra_body)
+    with httpx.Client(transport=httpx.MockTransport(handle)) as sync_client:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as async_client:
+            model = VllmChatModel(model="qwen3", api_key="dummy", base_url="https://offline.invalid/v1", http_client=sync_client, http_async_client=async_client, max_retries=0)
+            if async_mode:
+                await model.ainvoke("first", extra_body=extra_body)
+            else:
+                model.invoke("first", extra_body=extra_body)
+            after_first = copy.deepcopy(extra_body)
+            extra_body["chat_template_kwargs"]["thinking"] = False
+            if async_mode:
+                await model.ainvoke("second", extra_body=extra_body)
+            else:
+                model.invoke("second", extra_body=extra_body)
+
+    assert [request["chat_template_kwargs"]["enable_thinking"] for request in requests] == [True, False]
+    assert all(request["chat_template_kwargs"]["foo"] == "bar" and request["tool_stream"] is True for request in requests)
+    assert after_first == original
+    assert extra_body == {"chat_template_kwargs": {"thinking": False, "foo": "bar"}, "tool_stream": True}
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_vllm_provider_explicit_switch_wins_without_mutating_request(enabled):
+    extra_body = {"chat_template_kwargs": {"thinking": not enabled, "enable_thinking": enabled}, "tool_stream": True}
+    original = copy.deepcopy(extra_body)
+
+    payload = _make_model()._get_request_payload([HumanMessage(content="Hello")], extra_body=extra_body)
+
+    assert payload["extra_body"] == {"chat_template_kwargs": {"enable_thinking": enabled}, "tool_stream": True}
+    assert extra_body == original
 
 
 def test_vllm_provider_preserves_reasoning_in_chat_result():
