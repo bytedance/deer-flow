@@ -804,6 +804,26 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **memory:** DeerMem's derived SQLite FTS5 retrieval index can now live
+  outside the memory root, and a Gateway instance now notices facts another
+  instance wrote. The index for every user was one SQLite database in WAL mode
+  at `{storage_path}/.retrieval`, so several Gateway Pods sharing one home
+  volume opened the same WAL file over a network filesystem, which SQLite does
+  not support; every Pod start emptied and refilled the shared index under its
+  peers, one Pod's corruption recovery deleted files the others held open, and
+  a Pod kept serving its own copy of a user's facts after a peer wrote new ones.
+  The new `memory.backend_config.retrieval_index_path` places the index
+  directory elsewhere (empty keeps today's location; a relative path is
+  resolved against `storage_path`), the startup rebuild and corruption recovery
+  touch only that local index, and a search now re-syncs a scope whose
+  `memory.json` revision changed since this process last indexed it, so a
+  peer's facts appear on the next search while this instance's own writes do
+  not trigger a rebuild. A declared multi-instance deployment
+  (`deployment.multi_instance: true` / `DEER_FLOW_MULTI_INSTANCE=1`) that keeps
+  the index inside `storage_path` logs a startup warning. The Helm chart mounts
+  a Pod-local `emptyDir` at `/var/lib/deerflow/memory-index`, points the key at
+  it, and drops the legacy `memory.storage_path: memory.json` line that the
+  Gateway discarded with a warning at every start. `config_version` is now 56.
 - **persistence:** `scripts/migrate_user_isolation.py` now moves each legacy
   thread to the user who owns it. It looked for thread owners in
   `{base_dir}/deer-flow.db`, a file DeerFlow never creates (the database is

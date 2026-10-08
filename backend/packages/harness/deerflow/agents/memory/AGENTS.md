@@ -201,15 +201,27 @@ to `--user-id` (default `default`); `threads/` go to their `threads_meta` owner.
 DeerMem selects persistent SQLite FTS5 by default.
 An empty value selects the substring fallback.
 
-SQLite index data lives below `.retrieval/` and remains rebuildable.
+The SQLite index is rebuildable derived data below `retrieval_index_path`
+(empty = `{storage_path}/.retrieval`; relative resolves against `storage_path`;
+`paths.retrieval_index_directory` is the one resolver). Instances sharing
+`storage_path` keep it instance-local: SQLite WAL is unsupported on network
+filesystems, and the full rebuild and one-shot corruption recovery touch only
+that local index. `deps._validate_memory_retrieval_index` warns when a declared
+multi-instance deployment leaves it inside `storage_path`.
 Chinese tokenization uses `jieba` only with the `memory-zh` extra.
 Malformed facts are logged and skipped during rebuild.
 A fatal rebuild failure keeps lazy retry active.
-A corrupt persistent database is deleted and recreated once.
 
 Storage sends adapter updates after it releases durable locks.
 Adapter failures mark the scope dirty.
 Search then uses canonical substring matching until rebuild succeeds.
+
+Cross-process freshness: `rebuild_index` records each agent scope's manifest
+signature `(mtime_ns, size, revision)` before reading its facts; `search_facts`
+rebuilds a scope whose live signature differs (a peer wrote the user's memory).
+A commit advances the recorded signatures of that user's scopes only when they
+were in sync at the previous revision, so own writes never rebuild while an
+interleaved peer write still does.
 
 Gateway startup schedules `DeerMem.warm_retrieval()` without delaying readiness.
 The first search can rebuild its exact scope.

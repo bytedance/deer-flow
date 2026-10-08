@@ -581,6 +581,10 @@ class FileMemoryStorage(MemoryStorage):
         self._cache_lock = threading.Lock()
         self._scope_locks: weakref.WeakValueDictionary[tuple[str | None, str | None], threading.RLock] = weakref.WeakValueDictionary()
         self._retrieval_dirty_scopes: set[tuple[str | None, str | None]] = set()
+        # Manifest signature at which this process last brought each agent scope's
+        # index in sync. A different live signature means another process wrote
+        # the user's memory, so the scope is rebuilt before it is searched.
+        self._retrieval_synced_signatures: dict[tuple[str | None, str | None], tuple[Any, ...]] = {}
 
     def close(self) -> None:
         """Release the retrieval adapter owned by this storage instance."""
@@ -848,11 +852,23 @@ class FileMemoryStorage(MemoryStorage):
         *,
         user_id: str | None,
         agent_name: str | None,
+        committed: tuple[int, tuple[Any, ...]] | None = None,
     ) -> None:
-        """Notify the optional index only after durable storage locks are released."""
+        """Notify the optional index only after durable storage locks are released.
+
+        ``committed`` is ``(previous_revision, signature)`` of a manifest this
+        process just wrote. Once every notification lands, the user's scopes whose
+        index was in sync at ``previous_revision`` are in sync at ``signature``
+        too: the write was the only change in between and the index carries its
+        delta, so the next search does not rebuild them. A scope synced at an
+        older revision keeps that older signature and is rebuilt, because a peer
+        wrote the manifest in between.
+        """
         if self._retrieval is None:
             return
         scope = _scope_dict(user_id, agent_name)
+        key = self._cache_key(agent_name, user_id=user_id)
+        failed = False
         for action, value, fact_path in notifications:
             try:
                 if action == "upsert":
@@ -860,9 +876,17 @@ class FileMemoryStorage(MemoryStorage):
                 else:
                     self._retrieval.remove(str(value), scope=scope)
             except Exception:
+                failed = True
                 logger.exception("Retrieval notification failed for %s", value)
-                with self._cache_lock:
-                    self._retrieval_dirty_scopes.add(self._cache_key(agent_name, user_id=user_id))
+        with self._cache_lock:
+            if failed:
+                self._retrieval_dirty_scopes.add(key)
+                self._retrieval_synced_signatures.pop(key, None)
+            elif committed is not None:
+                previous_revision, signature = committed
+                for synced_key, synced in list(self._retrieval_synced_signatures.items()):
+                    if synced_key[0] == user_id and (synced[2] or 0) == previous_revision:
+                        self._retrieval_synced_signatures[synced_key] = signature
 
     @staticmethod
     def _validate_loaded_fact(
@@ -1497,7 +1521,7 @@ class FileMemoryStorage(MemoryStorage):
                 summaries = None
                 if agent_name is None:
                     summaries = {"user": memory_data.get("user", {}), "history": memory_data.get("history", {})}
-                _, notifications = self._commit_changes_locked(
+                memory_file, notifications = self._commit_changes_locked(
                     path,
                     user_id=user_id,
                     agent_name=agent_name,
@@ -1508,6 +1532,7 @@ class FileMemoryStorage(MemoryStorage):
                 )
                 document = self._read_document(path, agent_name, user_id=user_id)
                 signature = self._scope_signature(path, agent_name)
+                committed = (int(memory_file.get("revision") or 0) - 1, signature)
                 with self._cache_lock:
                     self._memory_cache[key] = (copy.deepcopy(document), signature)
         except MemoryRevisionConflict:
@@ -1516,7 +1541,7 @@ class FileMemoryStorage(MemoryStorage):
             logger.error("Failed to save memory scope %s: %s", key, exc)
             return False
 
-        self._dispatch_retrieval_notifications(notifications, user_id=user_id, agent_name=agent_name)
+        self._dispatch_retrieval_notifications(notifications, user_id=user_id, agent_name=agent_name, committed=committed)
         if agent_name is not None and deleted_metadata_ids:
             self.clear_fact_metadata(
                 agent_name=agent_name,
@@ -1686,6 +1711,7 @@ class FileMemoryStorage(MemoryStorage):
         expected = expected_manifest_revision
         notifications: list[RetrievalNotification] = []
         memory_file: dict[str, Any] | None = None
+        committed: tuple[int, tuple[Any, ...]] | None = None
         safe_delete_rebase = not deletes or (isinstance(delete_revisions, dict) and all(str(fact_id) in delete_revisions for fact_id in deletes))
         safe_upsert_rebase = all(str(incoming["id"]) in normalized_upsert_revisions for incoming in upserts)
         for attempt in range(3):
@@ -1703,6 +1729,7 @@ class FileMemoryStorage(MemoryStorage):
                         delete_revisions=copy.deepcopy(delete_revisions),
                         upsert_revisions=normalized_upsert_revisions,
                     )
+                    committed = (int(memory_file.get("revision") or 0) - 1, self._scope_signature(path, agent_name))
                 break
             except MemoryManifestRevisionConflict as exc:
                 can_rebase = allow_manifest_rebase and has_fact_changes and summaries is None and safe_delete_rebase and safe_upsert_rebase and attempt < 2
@@ -1711,7 +1738,7 @@ class FileMemoryStorage(MemoryStorage):
                 current = self._load_memory_file(path)
                 expected = int((current or {}).get("revision") or 0)
                 logger.info("Rebasing disjoint memory fact change after revision conflict: %s", exc)
-        self._dispatch_retrieval_notifications(notifications, user_id=user_id, agent_name=agent_name)
+        self._dispatch_retrieval_notifications(notifications, user_id=user_id, agent_name=agent_name, committed=committed)
         if memory_file is None:  # defensive: the bounded loop either commits or raises
             raise MemoryStorageError("Memory repository change did not produce a result")
         deleted_fact_ids = [str(value) for action, value, _ in notifications if action == "remove"]
@@ -1825,6 +1852,15 @@ class FileMemoryStorage(MemoryStorage):
             requested_keys = {self._cache_key(self._scope_kwargs(scope).get("agent_name"), user_id=self._scope_kwargs(scope).get("user_id")) for scope in scopes}
             with self._cache_lock:
                 dirty = requested_keys & self._retrieval_dirty_scopes
+                synced = {key: self._retrieval_synced_signatures.get(key) for key in requested_keys}
+            for key in requested_keys - dirty:
+                user_id, agent_name = key
+                if agent_name is None:
+                    continue
+                # Another process wrote this user's memory since this process last
+                # indexed the scope: the live manifest signature no longer matches.
+                if synced[key] != self._scope_signature(self._get_memory_file_path(agent_name, user_id=user_id), agent_name):
+                    dirty.add(key)
             if dirty:
                 dirty_scopes = [{"userId": user_id, "agentName": agent_name} for user_id, agent_name in dirty]
                 rebuild_result = self.rebuild_index(dirty_scopes)
@@ -1863,15 +1899,26 @@ class FileMemoryStorage(MemoryStorage):
         records: list[tuple[dict[str, Any], dict[str, str | None], str]] = []
         indexed = 0
         failed = 0
+        # Manifest signatures taken before each scope's facts are read. A write that
+        # races the rebuild leaves a newer live signature, so the scope is re-synced on
+        # its next search instead of hiding behind a signature taken after a stale read.
+        synced_signatures: dict[tuple[str | None, str | None], tuple[Any, ...]] = {}
         if scopes is None:
             root = Path(self._config.storage_path) if self._config.storage_path else memory_file_path(self._config).parent
             candidates = root.glob("**/facts/**/*.md")
+            manifest_signatures: dict[tuple[Path, str], tuple[Any, ...]] = {}
             for path in candidates:
                 try:
+                    relative_parts = path.relative_to(root).parts
+                    manifest_key: tuple[Path, str] | None = None
+                    if "agents" in relative_parts[:-1]:
+                        agents_index = relative_parts.index("agents")
+                        manifest_key = (root.joinpath(*relative_parts[:agents_index]) / self._config.manifest_filename, relative_parts[agents_index + 1])
+                        if manifest_key not in manifest_signatures:
+                            manifest_signatures[manifest_key] = self._scope_signature(*manifest_key)
                     fact = _parse_listed_fact(path)
                     if fact is None:
                         continue
-                    relative_parts = path.relative_to(root).parts
                     agents_index = relative_parts.index("agents")
                     expected_agent = relative_parts[agents_index + 1]
                     expected_user_bucket = relative_parts[1] if len(relative_parts) > 1 and relative_parts[0] == "users" else None
@@ -1883,6 +1930,8 @@ class FileMemoryStorage(MemoryStorage):
                         raise MemoryStorageCorruption(f"Fact user scope does not match directory for {path}")
                     validate_agent_name(expected_agent)
                     self._validate_loaded_fact(fact, path, user_id=original_user, agent_name=expected_agent)
+                    if manifest_key is not None:
+                        synced_signatures.setdefault(self._cache_key(expected_agent, user_id=original_user), manifest_signatures[manifest_key])
                     records.append((fact, _scope_dict(original_user, expected_agent), str(path)))
                 except Exception:
                     logger.exception("Failed to rebuild retrieval index for %s", path)
@@ -1894,6 +1943,7 @@ class FileMemoryStorage(MemoryStorage):
                 agent_name = kwargs.get("agent_name")
                 if agent_name is None:
                     continue
+                synced_signatures[self._cache_key(agent_name, user_id=kwargs.get("user_id"))] = self._scope_signature(memory_path, agent_name)
                 for fact in self.list_facts(**kwargs):
                     try:
                         records.append((fact, _scope_dict(kwargs.get("user_id"), agent_name), str(fact_file_path(memory_path, fact["id"], agent_name=agent_name))))
@@ -1901,19 +1951,35 @@ class FileMemoryStorage(MemoryStorage):
                         logger.exception("Failed to rebuild retrieval index for fact %s", fact.get("id"))
                         failed += 1
 
+        requested_keys = None if scopes is None else {self._cache_key(self._scope_kwargs(scope).get("agent_name"), user_id=self._scope_kwargs(scope).get("user_id")) for scope in scopes}
+
+        def mark_synced() -> None:
+            with self._cache_lock:
+                if requested_keys is None:
+                    self._retrieval_dirty_scopes.clear()
+                    self._retrieval_synced_signatures = synced_signatures
+                else:
+                    self._retrieval_dirty_scopes.difference_update(requested_keys)
+                    self._retrieval_synced_signatures.update(synced_signatures)
+
+        def forget_synced() -> None:
+            with self._cache_lock:
+                if requested_keys is None:
+                    self._retrieval_synced_signatures.clear()
+                else:
+                    for key in requested_keys:
+                        self._retrieval_synced_signatures.pop(key, None)
+
         bulk_rebuild = getattr(self._retrieval, "rebuild", None)
         if callable(bulk_rebuild):
             try:
                 bulk_rebuild(records, scopes=scopes)
                 indexed = len(records)
-                with self._cache_lock:
-                    if scopes is None:
-                        self._retrieval_dirty_scopes.clear()
-                    else:
-                        self._retrieval_dirty_scopes.difference_update(self._cache_key(self._scope_kwargs(scope).get("agent_name"), user_id=self._scope_kwargs(scope).get("user_id")) for scope in scopes)
+                mark_synced()
             except Exception:
                 logger.exception("Failed to atomically rebuild retrieval index")
                 failed += len(records) or 1
+                forget_synced()
                 return {"supported": True, "indexed": indexed, "failed": failed, "fatal": True}
         else:
             clear = getattr(self._retrieval, "clear", None)
@@ -1927,11 +1993,9 @@ class FileMemoryStorage(MemoryStorage):
                     logger.exception("Failed to rebuild retrieval index for fact %s", fact.get("id"))
                     failed += 1
             if failed == 0:
-                with self._cache_lock:
-                    if scopes is None:
-                        self._retrieval_dirty_scopes.clear()
-                    else:
-                        self._retrieval_dirty_scopes.difference_update(self._cache_key(self._scope_kwargs(scope).get("agent_name"), user_id=self._scope_kwargs(scope).get("user_id")) for scope in scopes)
+                mark_synced()
+            else:
+                forget_synced()
         return {"supported": True, "indexed": indexed, "failed": failed}
 
     def retrieval_status(self) -> dict[str, Any]:

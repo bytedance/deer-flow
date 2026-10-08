@@ -254,6 +254,13 @@ spec:
             - name: home
               mountPath: /app/backend/.deer-flow
               subPath: deer-flow
+            # Pod-local home for DeerMem's rebuildable SQLite retrieval index
+            # (config memory.backend_config.retrieval_index_path). SQLite WAL is
+            # unsupported on network filesystems and peers must not rebuild or
+            # delete each other's index, so it never lives on the shared home
+            # volume; fsGroup 1000 above makes the emptyDir writable by uid 1000.
+            - name: memory-index
+              mountPath: /var/lib/deerflow/memory-index
       volumes:
         - name: config
           configMap:
@@ -278,3 +285,5 @@ spec:
           {{- else }}
           emptyDir: {}
         {{- end }}
+        - name: memory-index
+          emptyDir: {}
