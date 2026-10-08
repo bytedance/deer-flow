@@ -136,6 +136,14 @@ Offline HTTP-stream coverage: `tests/test_codex_stream_terminal_events.py`.
 - `_apply_prompt_caching` must call `_strip_cache_control` first: it then replaces slots in those payload-owned lists with marked copies and writes `msg["content"]` on copied message dicts, placing at most four breakpoints. Pinned by `tests/test_claude_provider_prompt_caching.py`
 - Exclude `thinking` and `redacted_thinking` blocks before selecting the last four cache candidates: Anthropic forbids direct `cache_control` on these blocks. Keep their content, signatures/data and order intact so they remain part of the prefix covered by a later eligible breakpoint. Stripping stale markers must not add them back to thinking blocks or mutate caller-owned history. The same suite exercises real sync/async SDK tool-followup requests through offline transports.
 
+### Claude thinking budget (`packages/harness/deerflow/models/claude_provider.py`)
+
+`_apply_thinking_budget` enforces Anthropic's `1024 <= budget_tokens < max_tokens`
+window locally instead of letting the API answer HTTP 400: explicit budgets outside
+the window (or non-integer values) raise ValueError, the automatic 80% budget clamps
+up to 1024 when max_tokens leaves room, and thinking enabled with max_tokens <= 1024
+fails locally. Coverage: `tests/test_claude_provider_thinking_budget.py`.
+
 ### vLLM Provider (`packages/harness/deerflow/models/vllm_provider.py`)
 
 - `VllmChatModel` subclasses `langchain_openai:ChatOpenAI` for vLLM 0.19.0 OpenAI-compatible endpoints

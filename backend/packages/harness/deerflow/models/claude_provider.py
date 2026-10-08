@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
 THINKING_BUDGET_RATIO = 0.8
+MIN_THINKING_BUDGET_TOKENS = 1024
 
 # Billing header required by Anthropic API for OAuth token access.
 # Must be the first system prompt block. Format mirrors Claude Code CLI.
@@ -265,17 +266,33 @@ class ClaudeChatModel(ChatAnthropic):
             container[index] = {**container[index], "cache_control": {"type": "ephemeral"}}
 
     def _apply_thinking_budget(self, payload: dict) -> None:
-        """Auto-allocate thinking budget (80% of max_tokens)."""
+        """Auto-allocate thinking budget (80% of max_tokens).
+
+        Anthropic requires 1024 <= budget_tokens < max_tokens and answers
+        HTTP 400 otherwise. Validate explicit budgets against that window,
+        clamp the automatic budget up to the provider minimum when max_tokens
+        leaves room, and fail locally when no valid budget exists so a bad
+        config surfaces here instead of at the API.
+        """
         thinking = payload.get("thinking")
         if not thinking or not isinstance(thinking, dict):
             return
         if thinking.get("type") != "enabled":
             return
-        if thinking.get("budget_tokens"):
-            return
 
         max_tokens = payload.get("max_tokens", 8192)
-        thinking["budget_tokens"] = int(max_tokens * THINKING_BUDGET_RATIO)
+
+        budget = thinking.get("budget_tokens")
+        if budget:
+            if isinstance(budget, bool) or not isinstance(budget, int):
+                raise ValueError(f"thinking.budget_tokens must be an integer, got {budget!r}")
+            if budget < MIN_THINKING_BUDGET_TOKENS or budget >= max_tokens:
+                raise ValueError(f"thinking.budget_tokens={budget} is invalid: Anthropic requires {MIN_THINKING_BUDGET_TOKENS} <= budget_tokens < max_tokens ({max_tokens})")
+            return
+
+        if max_tokens <= MIN_THINKING_BUDGET_TOKENS:
+            raise ValueError(f"max_tokens={max_tokens} leaves no room for extended thinking: Anthropic requires {MIN_THINKING_BUDGET_TOKENS} <= budget_tokens < max_tokens. Raise max_tokens or disable thinking.")
+        thinking["budget_tokens"] = max(int(max_tokens * THINKING_BUDGET_RATIO), MIN_THINKING_BUDGET_TOKENS)
 
     @staticmethod
     def _strip_cache_control(payload: dict) -> None:
