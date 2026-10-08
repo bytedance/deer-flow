@@ -27,6 +27,7 @@ export interface Translations {
     catalogHint: string;
     installationGuide: string;
     catalog: Record<
+      | "batchReview"
       | "agentTeams"
       | "bookmarks"
       | "context"

@@ -212,6 +212,8 @@ clarification references from full grouping.
 Plugin conversation actions can optionally use host-bound `openPluginPage` to
 navigate only to surfaces declared by their installed namespace. The page carries
 an optional thread query into SurfaceContext; this is display context, not a grant.
+The host action component is keyed by authenticated user and conversation; unmount
+aborts its pending actions and fences late navigation, errors and busy updates.
 `callBackend` accepts an optional selection AbortSignal, combined with the page
 lifetime signal; preserve viewer fencing and CSRF/credential handling. Packaged
 batch-review evidence remains scoped to its selected saved result, not the

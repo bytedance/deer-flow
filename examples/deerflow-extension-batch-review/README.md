@@ -12,14 +12,17 @@ From `backend/`, install the trusted local package:
 uv run deerflow extensions install ../examples/deerflow-extension-batch-review --yes
 ```
 
-Add this deployment-owned entry to root `config.yaml`, then restart Gateway:
+The CLI creates a managed `plugins:` entry in root `config.yaml`. In that existing
+entry (`use: deerflow_extension_batch_review:install`), set its private setting:
 
 ```yaml
-plugins:
-  - use: deerflow_extension_batch_review:install
-    config:
-      enabled: true
+config:
+  enabled: true
 ```
+
+Keep the generated `name`, `package`, `use`, host-level `enabled` and `required`
+fields; do not add a second entry. Restart Gateway after this edit. The package's
+private setting defaults off independently of host-level activation.
 
 Open an existing default or Custom Agent conversation. In its plugin actions,
 choose **Batch reports → Review this conversation's results**. The installed page

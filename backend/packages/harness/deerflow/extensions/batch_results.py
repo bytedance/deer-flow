@@ -1,5 +1,6 @@
 """Native storage adapter for the optional public batch result reader."""
 
+import asyncio
 import copy
 import hashlib
 import json
@@ -60,6 +61,17 @@ def _evidence(value: object, report: str) -> dict[str, Any] | None:
     return result
 
 
+def _result_projection(row: dict[str, Any]) -> dict[str, Any]:
+    result = row.get("result")
+    result = result if isinstance(result, str) else None
+    projection = copy.deepcopy({key: row.get(key) for key in _ITEM_FIELDS})
+    projection["result"] = result[:MAX_RESULT_CHARS] if result is not None else None
+    projection["result_truncated"] = row.get("result_truncated") is True or (result is not None and len(result) > MAX_RESULT_CHARS)
+    projection["evidence"] = _evidence(row.get("result_artifact"), projection["result"] or "") if row.get("status") == "succeeded" else None
+    projection["revision"] = hashlib.sha256(json.dumps(projection, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
+    return projection
+
+
 class RepositoryBatchResultReader:
     """No app dependency: the host supplies its principal and thread admission."""
 
@@ -100,12 +112,4 @@ class RepositoryBatchResultReader:
         rows = await self._repository.list_items(batch_id, user_id=self._user_id, offset=position, limit=1, include_result=True)
         if not rows or rows[0].get("position") != position:
             return None
-        row = rows[0]
-        result = row.get("result")
-        result = result if isinstance(result, str) else None
-        projection = copy.deepcopy({key: row.get(key) for key in _ITEM_FIELDS})
-        projection["result"] = result[:MAX_RESULT_CHARS] if result is not None else None
-        projection["result_truncated"] = row.get("result_truncated") is True or (result is not None and len(result) > MAX_RESULT_CHARS)
-        projection["evidence"] = _evidence(row.get("result_artifact"), projection["result"] or "") if row.get("status") == "succeeded" else None
-        projection["revision"] = hashlib.sha256(json.dumps(projection, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
-        return projection
+        return await asyncio.to_thread(_result_projection, rows[0])

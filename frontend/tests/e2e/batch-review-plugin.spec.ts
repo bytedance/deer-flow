@@ -216,6 +216,8 @@ test("browser code boundaries, malformed/legacy evidence and read-error recovery
   let failures = 1;
   let codeExample = false;
   let legacy = false;
+  let ceiling: "brackets" | "citations" | undefined;
+  let citationCount = 0;
   await page.route("**/api/plugins**", async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname.endsWith("/actions/result") && failures-- > 0) {
@@ -237,6 +239,15 @@ test("browser code boundaries, malformed/legacy evidence and read-error recovery
         saved.result = `~~~\n${cite}\n~~~\n\`\`${cite}\`\`\n    ${cite}\n\t${cite}\n\`a\n    b\n${cite}\nc\`\n\\\\\`${cite}\`\n> ~~~\n> ${cite}\n> ~~~\n${cite}\n\`\`\`\n${cite}`;
       }
       if (legacy) saved.evidence = null;
+      if (ceiling) {
+        const cite = `[citation:1](#knowledge-${saved.evidence.sources[0].id})`;
+        citationCount = Math.floor(1_000_000 / cite.length);
+        const quoted = `${"> ".repeat(64)}ordinary quoted text\n`;
+        saved.result =
+          ceiling === "brackets"
+            ? quoted + "[".repeat(1_000_000 - quoted.length)
+            : cite.repeat(citationCount);
+      }
       await route.fulfill({
         response,
         contentType: "application/json",
@@ -276,6 +287,30 @@ test("browser code boundaries, malformed/legacy evidence and read-error recovery
   await expect(
     page.getByRole("button", { name: "Captured.pdf", exact: true }),
   ).toHaveCount(0);
+  legacy = false;
+  ceiling = "brackets";
+  await page.getByRole("button", { name: "Refresh selected result" }).click();
+  await expect
+    .poll(() =>
+      page
+        .getByTestId("batch-saved-report")
+        .evaluate((element) => element.textContent?.length),
+    )
+    .toBe(1_000_000);
+  ceiling = "citations";
+  const refreshed = page.waitForResponse((response) =>
+    response.url().endsWith("/actions/result"),
+  );
+  await page.getByRole("button", { name: "Refresh selected result" }).click();
+  await refreshed;
+  const citations = page
+    .getByTestId("batch-saved-report")
+    .getByRole("button", { name: "citation:1", exact: true });
+  // A maximal single line must still support source interaction and refresh.
+  await expect(citations).toHaveCount(citationCount);
+  await citations.last().click();
+  await expect(page.getByRole("dialog")).toContainText("Original source");
+  await page.getByRole("button", { name: "Close source" }).click();
 });
 
 test("rapid selection cancels obsolete detail reads and never restores old report/source", async ({

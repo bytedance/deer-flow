@@ -1,5 +1,7 @@
 """Public extension reads complement the existing model-facing batch reader."""
 
+import asyncio
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -83,6 +85,33 @@ async def test_result_public_projection_excludes_secrets_and_detaches_snapshot(s
     assert storage.row["result_artifact"]["knowledge_sources"]["sources"][0]["pages"] == [1, 2]
     assert storage.row["acceptance_criteria"] == ["file_exists:report.md"]
     storage.repo.list_items.assert_awaited_once_with("batch", user_id="owner", offset=0, limit=1, include_result=True)
+
+
+@pytest.mark.asyncio
+async def test_paused_result_projection_does_not_block_other_requests(storage, monkeypatch):
+    from deerflow.extensions import batch_results
+
+    entered, release = threading.Event(), threading.Event()
+    original = batch_results._evidence
+    responsive = False
+
+    def paused(value, report):
+        nonlocal responsive
+        entered.set()
+        responsive = release.wait(5)  # Safety bound; progress is controlled by the loop below.
+        return original(value, report)
+
+    monkeypatch.setattr(batch_results, "_evidence", paused)
+    pending = asyncio.create_task(storage.reader.read_item(thread_id="thread", batch_id="batch", position=0))
+    try:
+        assert await asyncio.to_thread(entered.wait, 10), "Projection never started"
+        release.set()  # An unrelated request can advance while projection is paused.
+        result = await pending
+        assert result["evidence"]["sources"] == [source()]
+        assert responsive, "Result projection blocked the event loop until its safety deadline"
+    finally:
+        release.set()
+        await asyncio.gather(pending, return_exceptions=True)
 
 
 @pytest.mark.asyncio

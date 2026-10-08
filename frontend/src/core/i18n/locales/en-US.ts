@@ -40,6 +40,11 @@ export const enUS: Translations = {
       "This entry comes from the repository extension catalog. Ask your deployment administrator to confirm its installation and activation status.",
     installationGuide: "Installation guide",
     catalog: {
+      batchReview: {
+        title: "Batch reports",
+        description:
+          "Review saved batch reports, acceptance results and captured knowledge excerpts without rerunning work.",
+      },
       agentTeams: {
         title: "Agent teams",
         description:

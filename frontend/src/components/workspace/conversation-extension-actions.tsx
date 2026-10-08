@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -14,6 +14,7 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { useAuth } from "@/core/auth/AuthProvider";
 import { resolveConversationActions } from "@/core/extensions/actions";
 import type {
   ConversationAction,
@@ -35,7 +36,20 @@ import { useI18n } from "@/core/i18n/hooks";
 import { Tooltip } from "./tooltip";
 
 /** Shared host slot used by the chat toolbar AND every sidebar conversation. */
-export function ConversationExtensionActions({
+export function ConversationExtensionActions(props: {
+  context: ConversationActionContext;
+  placement?: "toolbar" | "menu";
+}) {
+  const { user } = useAuth();
+  return (
+    <ScopedConversationActions
+      key={JSON.stringify([user?.id, props.context.thread.thread_id])}
+      {...props}
+    />
+  );
+}
+
+function ScopedConversationActions({
   context,
   placement = "toolbar",
 }: {
@@ -47,6 +61,14 @@ export function ConversationExtensionActions({
   const services = useFrontendServices();
   const router = useRouter();
   const [busy, setBusy] = useState(false);
+  const pending = useRef(new Set<AbortController>());
+  useEffect(() => {
+    const tasks = pending.current;
+    return () => {
+      for (const task of tasks) task.abort();
+      tasks.clear();
+    };
+  }, []);
   const entries = query.isError ? [] : (query.data ?? []);
 
   async function execute(
@@ -54,11 +76,13 @@ export function ConversationExtensionActions({
     contribution: FrontendContribution,
     extension: FrontendExtension,
   ) {
+    const controller = new AbortController();
+    pending.current.add(controller);
     setBusy(true);
     try {
       await action.execute(
         context,
-        bindFrontendServices(services, contribution, undefined, {
+        bindFrontendServices(services, contribution, controller.signal, {
           pageIds: (extension.surfaces ?? [])
             .filter((surface) => surface.slot === "page")
             .map((surface) => surface.id),
@@ -66,9 +90,10 @@ export function ConversationExtensionActions({
         }),
       );
     } catch {
-      toast.error(t.extensions.actionFailed);
+      if (!controller.signal.aborted) toast.error(t.extensions.actionFailed);
     } finally {
-      setBusy(false);
+      pending.current.delete(controller);
+      if (!controller.signal.aborted) setBusy(false);
     }
   }
 

@@ -25,6 +25,19 @@ function sourceMap(evidence) {
   return sources;
 }
 
+function fenceMarker(line) {
+  let offset = 0;
+  // Strip quote prefixes once; overlapping optional spaces must not backtrack.
+  while (true) {
+    let quote = offset;
+    for (let spaces = 0; spaces < 3 && line[quote] === " "; spaces++) quote++;
+    if (line[quote] !== ">") break;
+    offset = quote + 1;
+    if (line[offset] === " ") offset++;
+  }
+  return /^ {0,3}(`{3,}|~{3,})([^\n]*)/.exec(line.slice(offset));
+}
+
 // Literal report rendering preserves all text. Only native citation destinations
 // gain actions; fenced/inline code remains literal and never creates a citation.
 export function reportNodes(report, sources, showSource, unavailable) {
@@ -32,7 +45,7 @@ export function reportNodes(report, sources, showSource, unavailable) {
   // Process backtick runs once and precompute their next matching run. An
   // unclosed span stays literal; repeated unequal runs cannot trigger rescans.
   function appendText(text) {
-    const tokens = [...text.matchAll(/(`+)|(?<!!)\[([^\]\n]+)\]\(#knowledge-([a-f0-9]{32}-[1-9][0-9]{0,2})\)/g)].filter((match) => {
+    const tokens = [...text.matchAll(/(`+)|(?<!!)\[([^\[\]\n]+)\]\(#knowledge-([a-f0-9]{32}-[1-9][0-9]{0,2})\)/g)].filter((match) => {
       let escapes = 0;
       for (let i = match.index - 1; i >= 0 && text[i] === "\\"; i--) escapes++;
       return escapes % 2 === 0;
@@ -46,8 +59,12 @@ export function reportNodes(report, sources, showSource, unavailable) {
       nextRun.set(run.length, i);
     }
     let end = 0;
+    let scanned = 0;
+    let lineStart = 0;
     for (let i = 0; i < tokens.length; i++) {
       const match = tokens[i];
+      // Scan each intervening character once, even on a maximal single line.
+      for (; scanned < match.index; scanned++) if (text[scanned] === "\n") lineStart = scanned + 1;
       fragment.append(document.createTextNode(text.slice(end, match.index)));
       if (match[1]) {
         const closing = closes.get(i);
@@ -61,8 +78,7 @@ export function reportNodes(report, sources, showSource, unavailable) {
         fragment.append(document.createTextNode(match[0]));
       } else {
         const source = sources.get(match[3]);
-        const lineStart = text.lastIndexOf("\n", match.index - 1) + 1;
-        const indented = /^(?: {4}|\t)/.test(text.slice(lineStart, match.index));
+        const indented = text[lineStart] === "\t" || text.startsWith("    ", lineStart);
         if (indented) {
           fragment.append(document.createTextNode(match[0]));
           end = match.index + match[0].length;
@@ -80,7 +96,7 @@ export function reportNodes(report, sources, showSource, unavailable) {
   let pending = "";
   let fence = null;
   for (const line of report.match(/[^\n]*\n|[^\n]+$/g) ?? []) {
-    const marker = /^(?: {0,3}> ?)* {0,3}(`{3,}|~{3,})([^\n]*)/.exec(line);
+    const marker = fenceMarker(line);
     if (fence || marker) {
       if (pending) { appendText(pending); pending = ""; }
       fragment.append(document.createTextNode(line));

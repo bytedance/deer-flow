@@ -442,6 +442,8 @@ checks thread access before batch metadata, then exact owner/thread scope. Fixed
 compact projections exclude full results; detail reads take report/verdict/evidence
 from one row and hash that public projection for revision. Never publish execution
 specs, prompts or arbitrary artifacts. Worker availability is not a read gate.
+Detail copying, evidence projection and revision hashing run off the event loop;
+permission, owner and repository reads remain on the request's async path.
 `ActionContext.batch_results` is a lazy request callback, so unrelated actions do
 not acquire a new threads:read requirement. It cannot be serialized or treated as
 an app-global capability. Model-facing `read_batch_item` remains independent.

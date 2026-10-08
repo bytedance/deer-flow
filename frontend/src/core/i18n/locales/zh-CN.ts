@@ -40,6 +40,11 @@ export const zhCN: Translations = {
       "此条目来自仓库扩展目录；实际安装和启用状态请由部署管理员确认。",
     installationGuide: "查看安装说明",
     catalog: {
+      batchReview: {
+        title: "批任务报告",
+        description:
+          "查看已保存的批任务报告、验收结果和检索原文，无需重新执行任务。",
+      },
       agentTeams: {
         title: "Agent 团队",
         description: "让完整 Custom Agent 通过 @成员、共享记录与任务交接协作。",
