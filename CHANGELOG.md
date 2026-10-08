@@ -811,6 +811,24 @@ This release closes that milestone with **439 merged pull requests**.
   still applied. The retry now carries the same reminder as the first attempt,
   without re-reading the skill or recording a second activation, and the retried
   response keeps the skill-usage record. ([#6506])
+- **skills:** Skill changes made through one Gateway replica now reach the
+  skill list in every other replica's system prompt. `SkillStorage` rescans
+  disk on every call, but the prompt layer caches the enabled-skills list and
+  the rendered `<skill_system>` section per process, and installing, editing,
+  deleting, rolling back or toggling a skill (and `POST /api/skills/reload`)
+  only refreshed the process that handled the request, so with several
+  uvicorn workers or several Pods sharing one home volume the other replicas
+  kept offering the old skills until they restarted. Every one of those
+  mutations now also publishes `.extensions_config.json.skills-cache-reset.json`
+  beside the shared `extensions_config.json`, with the same atomic replace and
+  cross-process locks the config uses, and every cache lookup compares that
+  marker's signature at most once per second before serving a cached entry; a
+  marker scoped to one user's custom skills retires only that user's entries.
+  `/api/skills/reload` reports `scope: shared_config` when the marker was
+  written and `scope: process` when no extensions config path resolves, so
+  operators no longer need to call it on every Pod or worker separately. The
+  MCP cache reset's marker now shares the same `deerflow.config.shared_reset_marker`
+  helper. ([#6495])
 - **persistence:** `scripts/migrate_user_isolation.py` now moves each legacy
   thread to the user who owns it. It looked for thread owners in
   `{base_dir}/deer-flow.db`, a file DeerFlow never creates (the database is
@@ -9209,4 +9227,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6448]: https://github.com/bytedance/deer-flow/pull/6448
 [#6450]: https://github.com/bytedance/deer-flow/pull/6450
 [#6481]: https://github.com/bytedance/deer-flow/pull/6481
+[#6495]: https://github.com/bytedance/deer-flow/pull/6495
 [#6506]: https://github.com/bytedance/deer-flow/pull/6506

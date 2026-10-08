@@ -30,6 +30,8 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import BaseMessage
 from pydantic import PrivateAttr
 
+from deerflow.utils.retry_after import bounded_retry_after_ms
+
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
@@ -427,8 +429,10 @@ class ClaudeChatModel(ChatAnthropic):
             retry_after = error.response.headers.get("Retry-After")
             if retry_after:
                 try:
-                    total_ms = int(retry_after) * 1000
-                except (ValueError, TypeError):
+                    hint_ms = bounded_retry_after_ms(int(retry_after) * 1000)
+                    if hint_ms is not None:
+                        total_ms = hint_ms
+                except (ValueError, TypeError, OverflowError):
                     pass
 
         return total_ms
