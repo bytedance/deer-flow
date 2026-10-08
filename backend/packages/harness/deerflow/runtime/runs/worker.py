@@ -938,7 +938,11 @@ async def run_agent(
     pre_run_workspace_snapshot: WorkspaceSnapshot | None = None
     workspace_changes_user_id: str | None = None
     workspace_excluded_dir_names: frozenset[str] | None = None
-    snapshot_capture_failed = False
+    # Fail closed until a pre-run capture completes: a cancellation delivered
+    # before or during capture leaves no rollback point, and treating that as
+    # "the thread had no pre-run checkpoint" would delete a live thread's
+    # checkpoints on a rollback cancel.
+    snapshot_capture_failed = True
     llm_error_fallback_message: str | None = None
     checkpoint_rollback_completed = False
     # Message ids checkpointed *before* this run started. The stream loop uses
@@ -1283,6 +1287,11 @@ async def run_agent(
                 except Exception:
                     snapshot_capture_failed = True
                     logger.warning("Could not capture pre-run checkpoint snapshot for run %s", run_id, exc_info=True)
+                else:
+                    # Only a completed capture proves what the pre-run state was.
+                    # ``None`` now unambiguously means the thread had no
+                    # checkpoint, so rollback may safely reset it to empty.
+                    snapshot_capture_failed = False
                 if rollback_point is not None:
                     pre_run_checkpoint_id = rollback_point.config.get("configurable", {}).get("checkpoint_id")
                     pre_existing_message_ids = _collect_pre_existing_message_ids({"messages": list(rollback_point.messages)})
