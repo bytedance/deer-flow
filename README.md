@@ -543,6 +543,10 @@ such a checkout, use `bash ./scripts/<name>.sh ...`.
 
    The local `make check`, `make install`, `make dev`, and `make start` entry points use a direct `pnpm` executable when available and otherwise fall back to `corepack pnpm`. With native Windows Python, the shared runner checks `pnpm.cmd` before the generic `pnpm` lookup, which follows `PATH`/`PATHEXT` and may select an `.exe` or `.bat` in the same or an earlier PATH directory. The Corepack fallback likewise checks `corepack.cmd` before `corepack`. POSIX Python keeps the generic names first, including when running under MSYS/Cygwin. The runner and diagnostics resolve repository paths absolutely, so these checks work regardless of the caller's current directory. Corepack runs from `frontend/`, so it honors the `packageManager` version pinned in `frontend/package.json`; enabling a global pnpm shim is not required.
 
+   `make check` decodes tool diagnostics as UTF-8 and preserves Unicode pnpm
+   errors on non-UTF-8 hosts. Invalid output bytes are replaced so the checker
+   can report dependency failures instead of aborting while decoding output.
+
 2. **Install dependencies**:
    ```bash
    make install  # Install backend + frontend dependencies + pre-commit hooks
