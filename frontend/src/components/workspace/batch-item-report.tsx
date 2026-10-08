@@ -37,8 +37,11 @@ type ReportProps = {
 
 export function BatchItemReport(props: ReportProps) {
   const { user } = useAuth();
+  const inspectable =
+    ["succeeded", "failed", "cancelled"].includes(props.item.status) ||
+    !!props.item.result_preview;
   // Changing thread, item or principal also removes nested source dialogs.
-  return user ? (
+  return user && inspectable ? (
     <ReportDialog
       key={`${user.id}:${props.threadId}:${props.batchId}:${props.item.position}`}
       {...props}
@@ -111,8 +114,9 @@ function ReportBody({
   const saved = query.data;
   if (!saved) return null;
   const verdict = saved.acceptance_verdict;
-  const acceptance =
-    verdict?.all_hold === true
+  const acceptance = !saved.acceptance_criteria?.length
+    ? labels.noCriteria
+    : verdict?.all_hold === true
       ? labels.accepted
       : verdict?.leaves.some((check) => check.checked && !check.holds)
         ? labels.unmet

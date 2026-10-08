@@ -1957,6 +1957,11 @@ separately from deterministic acceptance: an execution can succeed while its
 criteria remain unmet or unverified. Truncated reports are labeled, and JSONL
 export remains available for bulk results.
 
+Items offer report inspection once terminal or when a saved preview is present.
+Reports without acceptance criteria show **No criteria**; **Unverified** means
+criteria still lack conclusive verification. Blank source names or
+excerpts are unavailable in saved reports; live-chat citation behavior is preserved.
+
 Captured knowledge citations open the original retrieved excerpt through the
 existing source dialog, even after the worker stops or the provider is unavailable.
 Legacy results without captured evidence show unavailable sources; inspection

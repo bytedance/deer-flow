@@ -41,13 +41,14 @@ export function collectKnowledgeSources(messages: readonly Message[]) {
 /** Explicit durable evidence, kept separate from live conversation messages. */
 export function collectSavedKnowledgeSources(payload: unknown) {
   const sources = new Map<string, KnowledgeSource>();
-  appendKnowledgeSources(payload, sources);
+  appendKnowledgeSources(payload, sources, true);
   return sources;
 }
 
 function appendKnowledgeSources(
   payload: unknown,
   sources: Map<string, KnowledgeSource>,
+  rejectBlank = false,
 ) {
   if (
     !record(payload) ||
@@ -65,13 +66,10 @@ function appendKnowledgeSources(
       continue;
     if (
       typeof raw.document_name !== "string" ||
-      !raw.document_name.trim() ||
       raw.document_name.length > 1024 ||
       typeof raw.dataset_name !== "string" ||
-      !raw.dataset_name.trim() ||
       raw.dataset_name.length > 1024 ||
       typeof raw.text !== "string" ||
-      !raw.text.trim() ||
       raw.text.length > 200_000 ||
       typeof raw.truncated !== "boolean" ||
       !Array.isArray(raw.pages) ||
@@ -83,6 +81,15 @@ function appendKnowledgeSources(
           page > 0 &&
           page <= 1_000_000,
       )
+    )
+      continue;
+    // Historical report inspection requires usable evidence. Preserve the
+    // existing live-chat behavior for producer records with empty excerpts.
+    if (
+      rejectBlank &&
+      (!raw.document_name.trim() ||
+        !raw.dataset_name.trim() ||
+        !raw.text.trim())
     )
       continue;
     const source: KnowledgeSource = {

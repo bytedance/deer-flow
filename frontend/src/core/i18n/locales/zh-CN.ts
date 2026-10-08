@@ -733,6 +733,7 @@ export const zhCN: Translations = {
     accepted: "已通过",
     unmet: "未满足",
     unverified: "未验证",
+    noCriteria: "未设置验收条件",
     noReport: "该条目尚未保存报告。",
     reportTruncated: "已保存的报告存在截断。",
     evidenceUnavailable: "该报告的历史来源证据不可用。",

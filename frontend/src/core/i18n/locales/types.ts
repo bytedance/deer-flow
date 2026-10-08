@@ -637,6 +637,7 @@ export interface Translations {
     accepted: string;
     unmet: string;
     unverified: string;
+    noCriteria: string;
     noReport: string;
     reportTruncated: string;
     evidenceUnavailable: string;

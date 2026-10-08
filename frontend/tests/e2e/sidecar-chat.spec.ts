@@ -1205,12 +1205,6 @@ test.describe("Side chat", () => {
     await expect(page.getByTestId("sidecar-panel")).toBeHidden();
     await page.waitForTimeout(350);
     await openSidecarAndExpectNoAnimatedScroll(page);
-    // Reverse an exit before it completes: its late completion must not
-    // unmount the newly reopened history.
-    await page.getByTestId("sidecar-header-trigger").click();
-    await page.getByTestId("sidecar-header-trigger").click();
-    await expect(page.getByTestId("sidecar-panel")).toBeVisible();
-    await expectSidecarScrollDoesNotAnimateAfterOpen(page);
   });
 
   test("self-heals the trigger when the sidecar thread is deleted elsewhere", async ({

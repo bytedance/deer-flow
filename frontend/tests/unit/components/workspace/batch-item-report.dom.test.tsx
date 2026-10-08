@@ -102,10 +102,12 @@ function App({
   position = 0,
   threadId = "thread",
   workerRunning = false,
+  itemOverrides = {},
 }: {
   position?: number;
   threadId?: string;
   workerRunning?: boolean;
+  itemOverrides?: Partial<SubagentBatchItem>;
 }) {
   return (
     <QueryClientProvider client={client}>
@@ -113,13 +115,70 @@ function App({
         <BatchItemReport
           threadId={threadId}
           batchId="batch"
-          item={{ ...item, position }}
+          item={{ ...item, position, ...itemOverrides }}
           workerRunning={workerRunning}
         />
       </I18nProvider>
     </QueryClientProvider>
   );
 }
+
+for (const criteria of [null, []]) {
+  it(`shows No criteria for an optional acceptance definition (${String(criteria)})`, async () => {
+    read.mockResolvedValue({
+      ...saved,
+      acceptance_criteria: criteria,
+      acceptance_verdict: null,
+    });
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "View report" }));
+    const report = await screen.findByTestId("batch-saved-report");
+    expect(report.textContent).toContain("No criteria");
+    expect(report.textContent).not.toContain("Unverified");
+  });
+}
+
+it("keeps a checker error Unverified when criteria exist", async () => {
+  read.mockResolvedValue({ ...saved, acceptance_verdict: null });
+  render(<App />);
+  fireEvent.click(screen.getByRole("button", { name: "View report" }));
+  const report = await screen.findByTestId("batch-saved-report");
+  expect(report.textContent).toContain("Unverified");
+  expect(report.textContent).not.toContain("No criteria");
+});
+
+for (const status of ["pending", "queued", "leased", "running"] as const) {
+  it(`waits for ${status} items without a preview before offering inspection`, async () => {
+    const view = render(
+      <App workerRunning itemOverrides={{ status, result_preview: null }} />,
+    );
+    expect(screen.queryByRole("button", { name: "View report" })).toBeNull();
+    expect(read).not.toHaveBeenCalled();
+    view.rerender(
+      <App
+        workerRunning
+        itemOverrides={{ status: "succeeded", result_preview: null }}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "View report" }));
+    await screen.findByTestId("batch-saved-report");
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+}
+
+for (const status of ["succeeded", "failed", "cancelled"] as const) {
+  it(`allows inspection of a terminal ${status} item without a preview`, () => {
+    render(<App itemOverrides={{ status, result_preview: null }} />);
+    expect(screen.getByRole("button", { name: "View report" })).toBeDefined();
+  });
+}
+
+it("allows a running item's saved preview to be inspected", async () => {
+  render(<App workerRunning itemOverrides={{ status: "running" }} />);
+  fireEvent.click(screen.getByRole("button", { name: "View report" }));
+  await screen.findByTestId("batch-saved-report");
+  expect(read).toHaveBeenCalledTimes(1);
+});
 
 it("reads on demand and uses native Markdown for a list-contained tilde fence", async () => {
   render(<App />);

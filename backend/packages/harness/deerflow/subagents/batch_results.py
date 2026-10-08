@@ -6,7 +6,9 @@ import json
 import re
 from typing import Any
 
-_ITEM_FIELDS = ("id", "item_key", "position", "status", "attempt", "result_preview", "result_truncated", "error", "stop_reason", "acceptance_criteria", "acceptance_verdict", "started_at", "completed_at", "updated_at")
+# Shared owner-facing fields for the native HTTP and model-facing readers.
+BATCH_RESULT_ITEM_FIELDS = ("id", "item_key", "position", "status", "attempt", "result", "result_truncated", "error", "stop_reason", "acceptance_criteria", "acceptance_verdict")
+_ITEM_FIELDS = BATCH_RESULT_ITEM_FIELDS + ("result_preview", "started_at", "completed_at", "updated_at")
 _SOURCE_ID = re.compile(r"[a-f0-9]{32}-[1-9][0-9]{0,2}\Z")
 _SOURCE_FIELDS = ("id", "provider", "dataset_id", "document_id", "chunk_id", "dataset_name", "document_name", "text", "pages", "truncated")
 MAX_RESULT_CHARS = 1_000_000  # Native configuration/schema ceiling, not current submission settings.

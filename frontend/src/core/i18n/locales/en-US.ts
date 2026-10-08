@@ -789,6 +789,7 @@ export const enUS: Translations = {
     accepted: "Passed",
     unmet: "Unmet",
     unverified: "Unverified",
+    noCriteria: "No criteria",
     noReport: "No report saved for this item.",
     reportTruncated: "This saved report was truncated.",
     evidenceUnavailable: "Captured evidence is unavailable for this report.",

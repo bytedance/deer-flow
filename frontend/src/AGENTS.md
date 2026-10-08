@@ -104,6 +104,9 @@ Language-map membership checks only own properties; inherited names such as
    principal in their keys, and discard cached reports on close. Thread/item/account
    changes remove report and source dialogs. Retry invalidates result queries along
    with batch progress. Execution and deterministic acceptance are separate states.
+   An empty criteria definition is No criteria; Unverified applies only to existing
+   criteria without conclusive verification. Offer inspection only for terminal
+   items or an item with a stored result preview.
    The panel must not infer batch mode from prompt text
    or inject the complete result set into chat state.
    Capability Center > Plugins > Lark uses a local generation only to suppress stale React
@@ -220,6 +223,8 @@ or an explicit saved-evidence payload, never both. Saved batch reports use their
 own provider and the existing static SafeStreamdown/CitationLink path without raw
 HTML parsing; code fences are handled by Markdown, not a second citation scanner.
 Normalize both artifact sources through the same validator and first-seen dedup.
+Reject blank names/excerpts only for saved evidence; live tool artifacts retain
+their existing acceptance behavior, including an empty RAGFlow excerpt.
 An unavailable saved snapshot cannot fall back to surrounding conversation sources.
 Browser regressions exercise nested list-contained tilde fences, source dialogs and
 return focus in the native panel.

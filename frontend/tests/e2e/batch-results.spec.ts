@@ -137,7 +137,8 @@ for (const custom of [false, true]) {
         .click();
       const report = page.getByTestId("batch-saved-report");
       await expect(report).toContainText("Full saved report");
-      await expect(report).toContainText("Unverified");
+      await expect(report).toContainText("No criteria");
+      await expect(report).not.toContainText("Unverified");
       await expect(
         report.locator("code").filter({ hasText: "[citation:1]" }),
       ).toHaveCount(1);

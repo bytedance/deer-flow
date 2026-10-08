@@ -14,6 +14,7 @@ from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.extensions import LoadedExtensions, get_loaded_extensions
 from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.subagents.batch_acceptance import check_batch_acceptance
+from deerflow.subagents.batch_results import BATCH_RESULT_ITEM_FIELDS
 from deerflow.subagents.batch_runtime import BatchSubmitRequest
 from deerflow.subagents.capacity import SubagentExecutionCapacity
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
@@ -189,8 +190,7 @@ class SubagentBatchService:
         items = await self._repository.list_items(batch_id, user_id=user_id, offset=position, limit=1, include_result=True)
         if not items:
             return None
-        fields = ("id", "item_key", "position", "status", "attempt", "result", "result_truncated", "error", "stop_reason", "acceptance_criteria", "acceptance_verdict")
-        return {key: items[0].get(key) for key in fields}
+        return {key: items[0].get(key) for key in BATCH_RESULT_ITEM_FIELDS}
 
     async def cancel_batch(
         self,

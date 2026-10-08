@@ -51,6 +51,18 @@ function App({ items = messages }: { items?: Message[] }) {
 }
 
 describe("knowledge source dialogs", () => {
+  it("keeps a live-chat empty excerpt citation actionable", () => {
+    const items = JSON.parse(JSON.stringify(messages)) as Message[];
+    Reflect.get(items[0]!, "artifact").knowledge_sources.sources[0].text = "";
+    render(<App items={items} />);
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "View source: Manual.pdf" })[0]!,
+    );
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.textContent).toContain("Manual.pdf");
+    expect(dialog.textContent).toContain("Engineering");
+    expect(dialog.querySelector("blockquote")?.textContent).toBe("");
+  });
   it("opens the actual excerpt and source page from both citation and source list", () => {
     render(<App />);
     const buttons = screen.getAllByRole("button", {

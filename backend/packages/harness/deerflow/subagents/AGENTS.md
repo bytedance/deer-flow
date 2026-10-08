@@ -17,7 +17,9 @@ successful results under the same lease fence. Full-result exports and the selec
 native result endpoint expose bounded, cited RAG snapshots; compact item projections
 omit them. `batch_results.project_batch_result` allowlists report/state/acceptance
 fields and validated saved evidence, excludes raw artifacts and execution metadata,
-and hashes the detached projection. The HTTP router runs projection off the request
+and hashes the detached projection. It shares `BATCH_RESULT_ITEM_FIELDS` with the
+model-facing reader; HTTP-only preview/timestamps and saved-evidence policy stay
+separate from the tool contract. The HTTP router runs projection off the request
 loop after its existing thread permission and batch ownership checks. Read exactly
 one immutable position with no status filter; a mismatched or absent row is 404. Cancelled,
 failed and stale attempts cannot publish evidence; retry clears it. Cover the
