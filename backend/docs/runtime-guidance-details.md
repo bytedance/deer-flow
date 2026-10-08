@@ -2,7 +2,7 @@
 
 The runtime AGENTS.md indexes these detailed contracts. Preserve their behavior when changing the corresponding code.
 
-**JSONL tail recovery** (`runtime/events/store/jsonl.py`, #6001): every append
+**JSONL tail recovery** (`runtime/events/store/jsonl.py`, #6520): every append
 path goes through `_append_records`. A nonempty file whose last byte is not LF
 gets a separator written first, so a crash that left either valid JSON without
 its newline or a partial record cannot glue the next event onto that tail.
