@@ -31,6 +31,7 @@ from app.gateway.routers import integrations as integrations_router
 from deerflow.config import paths as paths_module
 from deerflow.config.paths import Paths
 from deerflow.integrations import lark_cli
+from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.tools import _lark_cli_env_from_runtime
 from deerflow.skills.storage import reset_skill_storage
 from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
@@ -1020,6 +1021,52 @@ def test_lark_command_overlay_uses_actual_sandbox_mode(monkeypatch, broker):
 
     assert ("DEERFLOW_LARK_BROKER_URL" in env) is broker
     assert ("LARKSUITE_CLI_CONFIG_DIR" in env) is not broker
+    probe.assert_not_called()
+
+
+def test_brokerless_sandbox_provider_keeps_non_broker_overlay(monkeypatch):
+    """Providers without a broker sidecar keep the pre-attestation behavior.
+
+    E2B, OpenSandbox, Tenki, and Boxlite subclass ``Sandbox`` without their
+    own ``lark_cli_broker`` attestation; the base-class ``False`` declares
+    the only mode that exists for them, so the fail-closed raise stays
+    scoped to AioSandbox's deliberate ``None`` default (#6436 review).
+    """
+
+    class _BrokerlessSandbox(Sandbox):
+        def execute_command(self, command, env=None, timeout=None):
+            raise NotImplementedError
+
+        def read_file(self, path, start_line=None, end_line=None):
+            raise NotImplementedError
+
+        def download_file(self, path):
+            raise NotImplementedError
+
+        def list_dir(self, path, max_depth=2):
+            raise NotImplementedError
+
+        def write_file(self, path, content, append=False):
+            raise NotImplementedError
+
+        def glob(self, path, pattern, *, include_dirs=False, max_results=200):
+            raise NotImplementedError
+
+        def grep(self, path, pattern, *, glob=None, literal=False, case_sensitive=False, max_results=100):
+            raise NotImplementedError
+
+        def update_file(self, path, content):
+            raise NotImplementedError
+
+    runtime = SimpleNamespace(context={"user_id": "alice"})
+    sandbox = _BrokerlessSandbox("foreign-provider")
+    probe = MagicMock(side_effect=AssertionError("execution must use the sandbox's mode"))
+    monkeypatch.setattr(lark_cli, "sandbox_lark_broker_active", probe)
+
+    env = _lark_cli_env_from_runtime(runtime, "lark-cli auth status", sandbox_paths=True, sandbox=sandbox)
+
+    assert "DEERFLOW_LARK_BROKER_URL" not in env
+    assert "LARKSUITE_CLI_CONFIG_DIR" in env
     probe.assert_not_called()
 
 
