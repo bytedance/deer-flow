@@ -994,6 +994,21 @@ def test_lark_cli_env_from_runtime_refuses_unverified_broker_mode():
         _lark_cli_env_from_runtime(runtime, "lark-cli auth status", sandbox_paths=True, sandbox=sandbox)
 
 
+def test_aio_constructor_without_attestation_refuses_lark_commands(monkeypatch):
+    from deerflow.community.aio_sandbox import aio_sandbox
+
+    monkeypatch.setattr(aio_sandbox, "AioSandboxClient", MagicMock())
+    sandbox = aio_sandbox.AioSandbox("unattested", "https://sandbox.example.test")
+    overlay = MagicMock(return_value={"LARKSUITE_CLI_CONFIG_DIR": "/mnt/config"})
+    monkeypatch.setattr(lark_cli, "lark_cli_env_overlay", overlay)
+    try:
+        with pytest.raises(RuntimeError, match="unverified"):
+            _lark_cli_env_from_runtime(SimpleNamespace(context={"user_id": "alice"}), "lark-cli auth status", sandbox_paths=True, sandbox=sandbox)
+        overlay.assert_not_called()
+    finally:
+        sandbox.close()
+
+
 @pytest.mark.parametrize("broker", [False, True])
 def test_lark_command_overlay_uses_actual_sandbox_mode(monkeypatch, broker):
     runtime = SimpleNamespace(context={"user_id": "alice"})

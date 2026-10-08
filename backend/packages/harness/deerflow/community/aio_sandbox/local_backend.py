@@ -14,6 +14,7 @@ import logging
 import os
 import platform
 import posixpath
+import re
 import secrets
 import shlex
 import socket
@@ -539,16 +540,37 @@ def _docker_resource_limit(env_name: str, default: str) -> str | None:
     return value
 
 
+# Docker's missing-resource scaffolding drifted in case across CLI releases:
+# v28 printed "Error: No such object: <name>" while v29 lowercases the
+# client-side form to "error: no such object: <name>". The daemon-side wrapper
+# ("Error response from daemon: ") is stable but normalized here as well.
+# Match the fixed scaffolding case-insensitively while capturing the resource
+# name for a byte-exact comparison, so Docker context names and unrelated
+# runtime failures containing "container"/"not found" can never pass.
+_DOCKER_NO_SUCH_CONTAINER_RE = re.compile(
+    r"(?:error(?: response from daemon)?: )?no such (?:object|container): (?P<name>.+)",
+    re.IGNORECASE,
+)
+_DOCKER_NO_SUCH_NETWORK_RE = re.compile(
+    r"(?:error(?: response from daemon)?: )?(?:no such network: (?P<named>.+)|network (?P<embedded>.+) not found)",
+    re.IGNORECASE,
+)
+
+
 def _is_no_such_container_error(stderr: str, container_name: str) -> bool:
     """Return True only when stderr definitively says the container does not exist.
 
     Match the complete resource error and exact target, rather than searching
     for "container" / "not found": Docker context names and runtime failures
-    can contain both. Apple Container's missing-resource error must identify
-    this container too; its logical name is not proof of another missing file.
+    can contain both. The Docker scaffolding is compared case-insensitively
+    (CLI v29 lowercases it) while the container name stays byte-exact.
+    Apple Container's missing-resource error must identify this container too;
+    its logical name is not proof of another missing file.
     """
     message = (stderr or "").strip()
-    docker_errors = {f"{prefix}No such {resource}: {container_name}" for prefix in ("", "Error: ", "Error response from daemon: ") for resource in ("object", "container")}
+    docker_match = _DOCKER_NO_SUCH_CONTAINER_RE.fullmatch(message)
+    if docker_match is not None and docker_match["name"] == container_name:
+        return True
     apple_errors = {
         f"Error: container not found: {container_name}",
         f'Error: notFound: "container not found: {container_name}"',
@@ -556,13 +578,20 @@ def _is_no_such_container_error(stderr: str, container_name: str) -> bool:
         # Preserve the older generic response only for the exact quoted target.
         f'Error: not found: "{container_name}"',
     }
-    return message in docker_errors or message in apple_errors
+    return message in apple_errors
 
 
 def _is_no_such_network_error(stderr: str, network_name: str) -> bool:
-    """Accept Docker's complete missing-network response for this exact name."""
+    """Accept Docker's complete missing-network response for this exact name.
+
+    Same contract as ``_is_no_such_container_error``: case-insensitive
+    scaffolding, byte-exact network name, full-message match.
+    """
     message = (stderr or "").strip()
-    return message in {f"{prefix}{error}" for prefix in ("", "Error: ", "Error response from daemon: ") for error in (f"network {network_name} not found", f"No such network: {network_name}")}
+    match = _DOCKER_NO_SUCH_NETWORK_RE.fullmatch(message)
+    if match is None:
+        return False
+    return (match["named"] or match["embedded"]) == network_name
 
 
 class LocalContainerBackend(SandboxBackend):

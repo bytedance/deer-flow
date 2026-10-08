@@ -75,7 +75,7 @@ class AioSandbox(Sandbox):
         home_dir: str | None = None,
         request_headers: dict[str, str] | None = None,
         default_command_timeout: float | None = None,
-        lark_cli_broker: bool | None = False,
+        lark_cli_broker: bool | None = None,
     ):
         """Initialize the AIO sandbox.
 
@@ -87,6 +87,11 @@ class AioSandbox(Sandbox):
                 relay. These are never injected into sandbox commands.
             default_command_timeout: Provider-configured command deadline used
                 when a command does not provide an explicit timeout.
+            lark_cli_broker: Pod-attested Lark broker mode. ``True``/``False``
+                are attested states; the ``None`` default keeps an unattested
+                sandbox fail-closed, so a construction site that forgets to
+                thread the attested value cannot silently authorize the
+                plaintext credential-mount overlay.
         """
         super().__init__(id)
         self.lark_cli_broker = lark_cli_broker
@@ -317,13 +322,24 @@ class AioSandbox(Sandbox):
             )
 
     @property
+    def has_pending_session_creates(self) -> bool:
+        """Whether a shell/bash create still needs its outcome reconciled."""
+        with self._session_creation_state_lock:
+            return bool(self._shell_session_creation_state.pending or self._bash_session_creation_state.pending)
+
+    @property
     def requires_container_recycle(self) -> bool:
         with self._session_creation_state_lock:
             shell = self._shell_session_creation_state
             bash = self._bash_session_creation_state
             # The implicit shell cannot be cleaned up by a known session id.
             # Its fence must outlive this client, including release/reclaim.
-            return bool(self._default_shell_corrupted or shell.pending or shell.ambiguous or bash.pending or bash.ambiguous)
+            # Pending creations are transient in-flight requests, not uncertain
+            # outcomes: an unresolved create becomes an ambiguous tombstone
+            # before its execution lease ends. Fencing on pending let a
+            # concurrent acquire recycle a healthy container that another run
+            # was actively using.
+            return bool(self._default_shell_corrupted or shell.ambiguous or bash.ambiguous)
 
     def _create_shell_session(self, client) -> str:
         session_id = str(uuid.uuid4())

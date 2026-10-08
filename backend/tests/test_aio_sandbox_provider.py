@@ -592,31 +592,42 @@ def test_shared_sandbox_identity_changes_when_custom_skills_root_changes(
     assert second_root_id != first_root_id
 
 
+@pytest.mark.parametrize("active_holder", [False, True], ids=["idle", "in-use"])
 def test_cached_sandbox_is_replaced_when_expected_identity_changes(
     tmp_path,
     monkeypatch,
+    active_holder,
 ):
-    provider = _make_provider(tmp_path)
+    from deerflow.sandbox.lease import get_sandbox_lease_manager
+
+    provider, sandbox, aio_mod = _make_provider_with_active_sandbox(tmp_path, "stale-root-id")
     provider._config["skills_container_path"] = "/custom-skills"
     provider._thread_sandboxes = {("alice", "thread-shared"): "stale-root-id"}
-    provider._sandboxes = {"stale-root-id": object()}
-    provider._sandbox_infos = {}
     monkeypatch.setattr(
         provider,
         "_sandbox_id_for_thread",
         lambda *_args, **_kwargs: "new-root-id",
     )
-    destroy = MagicMock()
-    monkeypatch.setattr(provider, "destroy", destroy)
-
-    assert (
-        provider._reuse_in_process_sandbox(
-            "thread-shared",
-            user_id="alice",
-        )
-        is None
-    )
-    destroy.assert_called_once_with("stale-root-id")
+    manager = get_sandbox_lease_manager(provider)
+    try:
+        if active_holder:
+            manager.retain("live-run", "stale-root-id", thread_id="thread-shared", user_id="alice")
+            with pytest.raises(aio_mod.SandboxPolicyReplacementDeferredError, match="outdated skills identity"):
+                provider._reuse_in_process_sandbox("thread-shared", user_id="alice")
+            assert provider.get("stale-root-id") is sandbox
+            sandbox.close.assert_not_called()
+            provider._backend.destroy.assert_not_called()
+            manager.release("live-run")
+        else:
+            info = provider._sandbox_infos["stale-root-id"]
+            assert provider._reuse_in_process_sandbox("thread-shared", user_id="alice") is None
+            sandbox.close.assert_called_once_with()
+            provider._backend.destroy.assert_called_once_with(info)
+            assert "stale-root-id" not in provider._sandboxes
+            assert ("alice", "thread-shared") not in provider._thread_sandboxes
+    finally:
+        provider.reset()
+        provider._ownership.close()
 
 
 def test_policy_scoped_create_excludes_local_config_mounts_below_skills_root(
@@ -2723,6 +2734,125 @@ def test_acquire_recycles_quarantined_cached_sandbox_inline(tmp_path, monkeypatc
     assert "sandbox-q-residue" not in provider._sandboxes
 
 
+def test_pending_create_allows_upload_acquire_without_recycling_live_run(failure_recovery_lifecycle, monkeypatch):
+    from deerflow.sandbox.lease import discard_sandbox_lease_manager, get_sandbox_lease_manager
+
+    provider, sandbox, shell, info = failure_recovery_lifecycle
+    manager = get_sandbox_lease_manager(provider)
+    manager.retain("running-agent", info.sandbox_id, thread_id="thread-failure-recovery", user_id="alice")
+    entered, complete = threading.Event(), threading.Event()
+    results: list[str] = []
+
+    def create_session(id, **_kwargs):
+        entered.set()
+        assert complete.wait(timeout=5)
+        return SimpleNamespace(data=SimpleNamespace(session_id=id))
+
+    shell.create_session.side_effect = create_session
+    runner = threading.Thread(target=lambda: results.append(sandbox.execute_command_in_scope("first", scope_id="running-agent")))
+    try:
+        runner.start()
+        assert entered.wait(timeout=5)
+        assert manager.acquire("upload", "thread-failure-recovery", user_id="alice") == info.sandbox_id
+        assert provider.get(info.sandbox_id) is sandbox
+        provider._backend.destroy.assert_not_called()
+        assert not provider._quarantine_store().contains(info)
+        complete.set()
+        runner.join(timeout=5)
+        assert not runner.is_alive()
+        assert results == ["next-turn"]
+        assert sandbox.execute_command_in_scope("second", scope_id="running-agent") == "next-turn"
+        manager.release("upload")
+        assert provider.get(info.sandbox_id) is sandbox
+        manager.release("running-agent")
+        provider._backend.destroy.assert_not_called()
+    finally:
+        complete.set()
+        if runner.ident is not None:
+            runner.join(timeout=5)
+        discard_sandbox_lease_manager(provider)
+
+
+def test_uncertain_runtime_preserves_live_holders_until_final_release(failure_recovery_lifecycle):
+    from deerflow.sandbox.lease import discard_sandbox_lease_manager, get_sandbox_lease_manager
+
+    provider, sandbox, _, info = failure_recovery_lifecycle
+    manager = get_sandbox_lease_manager(provider)
+    manager.retain("parent", info.sandbox_id, thread_id="thread-failure-recovery", user_id="alice")
+    manager.retain("fork", info.sandbox_id, thread_id="fork-thread", user_id="alice", release_on_last=False)
+    sandbox._default_shell_corrupted = True
+    try:
+        provider.release(info.sandbox_id)
+        provider.destroy(info.sandbox_id)
+        assert provider.get(info.sandbox_id) is sandbox
+        provider._backend.destroy.assert_not_called()
+        with pytest.raises(RuntimeError, match="deferred|recycle did not complete"):
+            manager.acquire("upload", "thread-failure-recovery", user_id="alice")
+        assert manager.binding_for("upload") is None
+        provider._backend.destroy.assert_not_called()
+        manager.release("parent")
+        assert provider.get(info.sandbox_id) is sandbox
+        provider._backend.destroy.assert_not_called()
+        manager.release("fork")
+        provider._backend.destroy.assert_called_once_with(info)
+        assert provider.get(info.sandbox_id) is None
+        assert provider._quarantine_store().contains(info)
+    finally:
+        discard_sandbox_lease_manager(provider)
+
+
+@pytest.mark.parametrize("plane", ["shell", "bash"])
+def test_idle_release_quarantines_abandoned_pending_create(failure_recovery_lifecycle, plane):
+    provider, sandbox, _, info = failure_recovery_lifecycle
+    sandbox._begin_session_creation(plane, "abandoned-session")
+    assert sandbox.has_pending_session_creates is True
+    assert sandbox.requires_container_recycle is False
+
+    provider.release(info.sandbox_id)
+
+    provider._backend.destroy.assert_called_once_with(info)
+    assert provider.get(info.sandbox_id) is None
+    assert info.sandbox_id not in provider._warm_pool
+    assert provider._quarantine_store().contains(info)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_acquire", [False, True], ids=["sync", "async"])
+async def test_lease_acquire_can_replace_its_own_fenced_generation(failure_recovery_lifecycle, async_acquire):
+    from deerflow.sandbox.lease import get_sandbox_lease_manager
+
+    provider, sandbox, _, info = failure_recovery_lifecycle
+    sandbox._default_shell_corrupted = True
+    fresh = type(info)(info.sandbox_id, info.sandbox_url, container_id="container-generation-2", lark_cli_broker=False)
+    provider._backend.discover = MagicMock(return_value=fresh)
+    manager = get_sandbox_lease_manager(provider)
+
+    if async_acquire:
+        acquired = await manager.acquire_async("next-run", "thread-failure-recovery", user_id="alice")
+    else:
+        acquired = await asyncio.to_thread(manager.acquire, "next-run", "thread-failure-recovery", user_id="alice")
+
+    assert acquired == info.sandbox_id
+    assert manager.binding_for("next-run") == info.sandbox_id
+    assert provider.get(acquired) is not sandbox
+    assert provider._sandbox_infos[acquired].container_id == fresh.container_id
+    provider._backend.destroy.assert_called_once_with(info)
+    await manager.release_async("next-run")
+
+
+@pytest.mark.parametrize("blocked_by", ["local", "ownership"])
+def test_inline_recycle_reports_a_refused_teardown_as_deferred(failure_recovery_lifecycle, blocked_by, monkeypatch):
+    provider, sandbox, _, info = failure_recovery_lifecycle
+    sandbox._default_shell_corrupted = True
+    if blocked_by == "local":
+        provider._local_teardown.add(info.sandbox_id)
+    else:
+        monkeypatch.setattr(provider, "_claim_ownership", lambda *_args, **_kwargs: False)
+    assert provider._recycle_fenced_tracked_sandbox(info.sandbox_id) is False
+    assert provider.get(info.sandbox_id) is sandbox
+    provider._backend.destroy.assert_not_called()
+
+
 def test_acquire_recycle_failure_defers_with_quarantine_reason(tmp_path, monkeypatch):
     """When the inline recycle cannot destroy the residue, acquire defers with an accurate reason."""
     provider, sandbox, aio_mod = _make_provider_with_active_sandbox(tmp_path, "sandbox-q-stuck")
@@ -2764,6 +2894,37 @@ def test_reuse_policy_defers_to_attested_mode_when_probe_unavailable(tmp_path, m
     assert info.requires_replacement is False
 
 
+@pytest.mark.parametrize("source", ["active", "warm", "discovered"])
+@pytest.mark.parametrize("required_broker", [False, True])
+def test_unattested_broker_mode_refuses_acquire_without_deleting_pod(failure_recovery_lifecycle, monkeypatch, source, required_broker):
+    """Version skew must refuse admission while preserving the existing Pod."""
+    from deerflow.community.aio_sandbox import remote_backend as remote_mod
+
+    provider, sandbox, _, info = failure_recovery_lifecycle
+    info.lark_cli_broker = sandbox.lark_cli_broker = None
+    if source != "active":
+        provider.release(info.sandbox_id)
+        if source == "discovered":
+            provider._warm_pool.clear()
+            provider._warm_pool_identity.clear()
+    backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+    backend.discover = MagicMock(return_value=info)
+    backend.destroy = MagicMock()
+    backend.create = MagicMock(side_effect=AssertionError("must preserve the existing Pod"))
+    provider._backend = backend
+    monkeypatch.setattr(provider, "_lark_integration_active", lambda *_args: True)
+    probe = MagicMock(return_value=required_broker)
+    monkeypatch.setattr(provider, "_lark_broker_active", probe)
+
+    with pytest.raises(RuntimeError, match="broker mode is unverified"):
+        provider.acquire("thread-failure-recovery", user_id="alice")
+
+    assert info.requires_replacement is False
+    backend.destroy.assert_not_called()
+    backend.create.assert_not_called()
+    probe.assert_not_called()
+
+
 def test_reuse_policy_stays_fail_closed_for_unattested_mode_when_probe_unavailable(tmp_path, monkeypatch):
     """Without a Pod attestation there is no stronger evidence: probe failure keeps refusing reuse."""
     from deerflow.community.aio_sandbox.remote_backend import RemoteSandboxBackend
@@ -2780,7 +2941,7 @@ def test_reuse_policy_stays_fail_closed_for_unattested_mode_when_probe_unavailab
     info = provider._sandbox_infos["sandbox-unattested"]
     info.lark_cli_broker = None
 
-    with pytest.raises(lark_cli.LarkBrokerCapabilityUnknownError, match="capability is unknown"):
+    with pytest.raises(aio_mod.SandboxBrokerModeUnverifiedError, match="broker mode is unverified"):
         provider._check_sandbox_reuse_policy(info, "alice")
 
 

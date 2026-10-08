@@ -1875,6 +1875,17 @@ def test_absence_requires_runtime_confirmation(monkeypatch, runtime):
         "OCI runtime failed for container sandbox-missing: executable file not found in $PATH",
         "Error: No such object: sandbox-other",
         "Error response from daemon: No such container: sandbox-missing-extra",
+        # Docker 29 lowercases the client-side scaffolding; the near-miss and
+        # case-sensitivity rules must survive the normalization.
+        "error: no such object: sandbox-other",
+        "error response from daemon: no such container: sandbox-missing-extra",
+        "error: no such object: Sandbox-Missing",
+        "error: no such object",
+        "error: no such image: sandbox-missing",
+        "prefix error: no such object: sandbox-missing",
+        "error: no such object: sandbox-missing suffix",
+        "error: no such object: sandbox-missing\nError response from daemon: permission denied",
+        "warning: using default context\nerror: no such object: sandbox-missing",
     ],
 )
 def test_runtime_absence_rejects_errors_not_about_the_requested_container(monkeypatch, operation, error):
@@ -1897,10 +1908,15 @@ def test_runtime_absence_rejects_errors_not_about_the_requested_container(monkey
     [
         ("docker", "Error: No such object: sandbox-missing"),
         ("docker", "Error response from daemon: No such container: sandbox-missing"),
+        # Docker CLI v29 lowercases the client-side error scaffolding
+        # ("error: no such object: <name>"); the name stays byte-exact.
+        ("docker", "error: no such object: sandbox-missing"),
+        ("docker", "error response from daemon: no such container: sandbox-missing"),
         # ArgumentParser prefers ContainerizationError.errorDescription, so
         # ContainerInspect's missing-resource message has no type or quotes.
         ("container", "Error: container not found: sandbox-missing"),
         ("container", 'Error: notFound: "container not found: sandbox-missing"'),
+        ("container", 'notFound: "container not found: sandbox-missing"'),
         ("container", 'Error: not found: "sandbox-missing"'),
     ],
 )
@@ -2177,7 +2193,7 @@ def test_absent_teardown_removes_leftover_networks_and_allows_restricted_creatio
     assert backend._start_restricted_sandbox("existing", "sandbox-existing", 18080, None, config_mount_exclusion_root=None, relay_token="token") == "replacement-generation"
 
 
-@pytest.mark.parametrize("error_kind", ["context", "wrong-target", "active-endpoint", "empty"])
+@pytest.mark.parametrize("error_kind", ["context", "wrong-target", "wrong-target-lowercase", "case-drift", "active-endpoint", "prefix", "suffix", "mixed-stderr", "empty"])
 def test_absent_teardown_preserves_pending_port_on_unknown_network_cleanup_error(monkeypatch, error_kind):
     backend = _restricted_backend()
     backend._pending_cleanup_ports["old-generation"] = ("existing", 18080)
@@ -2185,7 +2201,12 @@ def test_absent_teardown_preserves_pending_port_on_unknown_network_cleanup_error
     errors = {
         "context": f'context "{network_name}": context not found',
         "wrong-target": f"Error response from daemon: network {network_name}-extra not found",
+        "wrong-target-lowercase": f"error: network {network_name}-extra not found",
+        "case-drift": f"error: network {network_name.upper()} not found",
         "active-endpoint": f"Error response from daemon: network {network_name} has active endpoints",
+        "prefix": f"prefix error: network {network_name} not found",
+        "suffix": f"error: network {network_name} not found suffix",
+        "mixed-stderr": f"error: network {network_name} not found\nError response from daemon: permission denied",
         "empty": "",
     }
     released = []
@@ -2204,26 +2225,88 @@ def test_absent_teardown_preserves_pending_port_on_unknown_network_cleanup_error
     assert backend._pending_cleanup_ports == {"old-generation": ("existing", 18080)}
 
 
-def test_absent_teardown_accepts_only_exact_missing_networks(monkeypatch):
+@pytest.mark.parametrize("error_style", ["legacy", "lowercase-scaffolding", "uppercase-scaffolding"])
+@pytest.mark.parametrize("sandbox_id", ["existing", "Mixed-Case"])
+def test_absent_teardown_accepts_only_exact_missing_networks(monkeypatch, error_style, sandbox_id):
     backend = _restricted_backend()
-    backend._pending_cleanup_ports["old-generation"] = ("existing", 18080)
+    backend._pending_cleanup_ports["old-generation"] = (sandbox_id, 18080)
     released = []
     monkeypatch.setattr(local_backend_module, "release_port", released.append)
     monkeypatch.setattr(backend, "_stop_container", lambda *_args: None)
     commands = []
+    # Docker CLI v29 lowercases client-side error scaffolding; the daemon-side
+    # wrapper is stable, but both shapes must prove absence identically.
+    error_formats = {
+        "legacy": ("Error: No such container: {}", "Error response from daemon: network {} not found"),
+        "lowercase-scaffolding": ("error: no such object: {}", "error: network {} not found"),
+        "uppercase-scaffolding": ("ERROR: NO SUCH OBJECT: {}", "ERROR: NETWORK {} NOT FOUND"),
+    }
+    container_error, network_error = error_formats[error_style]
 
     def runtime(cmd, **kwargs):
         commands.append(cmd)
         if cmd[:3] == ["docker", "rm", "-f"]:
-            return SimpleNamespace(stdout="", stderr=f"Error: No such container: {cmd[-1]}", returncode=1)
-        return SimpleNamespace(stdout="", stderr=f"Error response from daemon: network {cmd[-1]} not found", returncode=1)
+            return SimpleNamespace(stdout="", stderr=container_error.format(cmd[-1]), returncode=1)
+        return SimpleNamespace(stdout="", stderr=network_error.format(cmd[-1]), returncode=1)
 
     monkeypatch.setattr("subprocess.run", runtime)
-    backend.complete_absent_teardown("existing")
+    backend.complete_absent_teardown(sandbox_id)
     assert released == [18080]
     assert backend._pending_cleanup_ports == {}
-    assert ["docker", "network", "rm", backend._resource_names("existing")[1]] in commands
-    assert ["docker", "network", "rm", backend._egress_network_name("existing")] in commands
+    assert ["docker", "network", "rm", backend._resource_names(sandbox_id)[1]] in commands
+    assert ["docker", "network", "rm", backend._egress_network_name(sandbox_id)] in commands
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("Error response from daemon: network sandbox-net not found", True),
+        ("error response from daemon: network sandbox-net not found", True),
+        ("error: network sandbox-net not found", True),
+        ("Error: No such network: sandbox-net", True),
+        ("error: no such network: sandbox-net", True),
+        ("No such network: sandbox-net", True),
+        ("network sandbox-net not found", True),
+        ("error: network sandbox-net-extra not found", False),
+        ("error: network Sandbox-Net not found", False),
+        ("error: no such network: sandbox-other", False),
+        ("error: network sandbox-net has active endpoints", False),
+        ('context "sandbox-net": context not found', False),
+        ("", False),
+    ],
+)
+def test_is_no_such_network_error_matches_scaffolding_case_insensitively(message, expected):
+    assert local_backend_module._is_no_such_network_error(message, "sandbox-net") is expected
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        # Docker <=28 client-side and daemon-side forms.
+        ("Error: No such object: sandbox-x", True),
+        ("Error response from daemon: No such container: sandbox-x", True),
+        ("No such object: sandbox-x", True),
+        # Docker 29 lowercases the client-side scaffolding.
+        ("error: no such object: sandbox-x", True),
+        ("error response from daemon: no such container: sandbox-x", True),
+        # Scaffolding is normalized; the name stays byte-exact and the whole
+        # message must match.
+        ("error: no such object: Sandbox-X", False),
+        ("error: no such object: sandbox-x-extra", False),
+        ("error: no such object", False),
+        ("error: no such image: sandbox-x", False),
+        ("prefix error: no such object: sandbox-x", False),
+        ("error: no such object: sandbox-x suffix", False),
+        # Apple Container forms stay exact-match.
+        ("Error: container not found: sandbox-x", True),
+        ('notFound: "container not found: sandbox-x"', True),
+        ('Error: not found: "sandbox-x"', True),
+        ("error: container not found: sandbox-x", False),
+        ("", False),
+    ],
+)
+def test_is_no_such_container_error_matches_scaffolding_case_insensitively(message, expected):
+    assert local_backend_module._is_no_such_container_error(message, "sandbox-x") is expected
 
 
 def test_apple_absent_teardown_releases_own_unknown_generation_port_after_timeout(monkeypatch):
