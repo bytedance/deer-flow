@@ -3396,7 +3396,8 @@ authorization:
 #     #             one replica is invisible to the others (a multi-instance
 #     #             deployment logs a startup WARNING).
 #     #   db     -- the shared login_throttle table; falls back to memory with
-#     #             a WARNING when database.backend is memory.
+#     #             a WARNING when database.backend is memory, and refuses to
+#     #             start when the configured database's engine is unavailable.
 #     # throttle_storage: auto
 #
 #   oidc:

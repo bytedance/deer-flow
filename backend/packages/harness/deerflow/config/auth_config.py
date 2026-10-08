@@ -138,7 +138,8 @@ class LocalAuthConfig(BaseModel):
                 "Gateway replica sharing that database enforces one lockout per client IP; with database.backend=memory "
                 "it falls back to an in-process counter. 'memory' forces the in-process counter (per process: N replicas "
                 "give an attacker N x max_login_attempts guesses and a lockout on one replica is invisible to the others). "
-                "'db' forces the shared table and falls back to memory with a warning when the database backend is memory."
+                "'db' forces the shared table: it falls back to memory with a warning when the database backend is memory, and refuses to start when the configured "
+                "database's engine is unavailable."
             ),
         ),
     )

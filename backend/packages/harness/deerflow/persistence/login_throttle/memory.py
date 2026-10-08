@@ -64,16 +64,23 @@ class MemoryLoginThrottleStore:
 
     async def record_failure(self, ip: str, *, max_attempts: int, lockout_seconds: float, now: float | None = None) -> LoginThrottleRecord:
         now = time.time() if now is None else now
-        self._sweep_if_full(now)
+        self._sweep_if_full(now, keep=ip)
         record = self._records.get(ip)
         if record is None:
             new_record = LoginThrottleRecord(fail_count=1)
         else:
             new_count = record.fail_count + 1
-            if new_count >= max_attempts:
-                new_record = LoginThrottleRecord(fail_count=new_count, locked_at=now, lock_duration=lockout_seconds)
-            else:
+            if new_count < max_attempts:
+                # Below the (possibly raised) threshold: counting, any lock is cleared.
                 new_record = LoginThrottleRecord(fail_count=new_count)
+            elif record.locked and now < record.expires_at:
+                # A failure during an active lock keeps the lock's start and its
+                # committed duration: the sentence is "N seconds after the lock
+                # started", not "after the last attempt" (#6501 review).
+                new_record = LoginThrottleRecord(fail_count=new_count, locked_at=record.locked_at, lock_duration=record.lock_duration)
+            else:
+                # Never locked, or the lock already served its sentence: start anew.
+                new_record = LoginThrottleRecord(fail_count=new_count, locked_at=now, lock_duration=lockout_seconds)
         self._records[ip] = new_record
         return new_record
 
@@ -85,8 +92,13 @@ class MemoryLoginThrottleStore:
         if self._records.get(ip) == snapshot:
             del self._records[ip]
 
-    def _sweep_if_full(self, now: float) -> None:
+    def _sweep_if_full(self, now: float, *, keep: str) -> None:
         """Evict expired lockouts when the dict grows too large.
+
+        ``keep`` is the IP whose failure is being recorded: its record is live
+        and ``record_failure`` decides its fate from its own values (a served
+        lock starts a fresh sentence), the same contract the SQL store keeps
+        by excluding the upserted row from its sweep.
 
         Expiry is a property of each record's own committed sentence — ``locked
         and now >= expires_at`` — independent of the live threshold: a record
@@ -98,12 +110,12 @@ class MemoryLoginThrottleStore:
         """
         if len(self._records) < self._max_tracked_ips:
             return
-        for key in [k for k, record in self._records.items() if record.locked and now >= record.expires_at]:
+        for key in [k for k, record in self._records.items() if k != keep and record.locked and now >= record.expires_at]:
             del self._records[key]
         # If still too large, evict the cheapest-to-lose half ordered by each
         # record's own expiry: never-locked counters (expires_at == 0.0) first,
         # then locked records whose committed sentence expires earliest.
         if len(self._records) >= self._max_tracked_ips:
-            by_expiry = sorted(self._records.items(), key=lambda kv: kv[1].expires_at)
+            by_expiry = sorted(((k, record) for k, record in self._records.items() if k != keep), key=lambda kv: kv[1].expires_at)
             for key, _ in by_expiry[: len(by_expiry) // 2]:
                 del self._records[key]

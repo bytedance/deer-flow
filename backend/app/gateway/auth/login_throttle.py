@@ -39,9 +39,16 @@ _install_lock = threading.Lock()
 def resolve_login_throttle_store(config: Any | None, *, session_factory: Any | None) -> LoginThrottleStore:
     """Build the store ``config`` asks for, given the (possibly absent) ORM session factory.
 
-    Never raises for a missing database: the login endpoint must keep
-    throttling, so an unsatisfiable ``db`` request degrades to the in-process
-    counter with a warning instead of failing every login.
+    ``auto`` never raises: with no database to share, or a configured database
+    whose engine is not initialised (a bare app without the Gateway lifespan),
+    it degrades to the in-process counter with a warning so the login endpoint
+    keeps throttling. An explicit ``db`` is an operator statement that lockouts
+    must be shared: when the configured database's engine is unavailable this
+    raises ``SystemExit`` with an actionable message — the same failure type
+    as the other startup validations in ``app.gateway.deps`` — so
+    ``langgraph_runtime`` refuses to start instead of silently running every
+    replica on per-process counters. ``db`` on a ``memory`` database still
+    degrades with a warning (there is no shared table to insist on).
     """
     local = getattr(getattr(config, "auth", None), "local", None)
     selector = getattr(local, "throttle_storage", LocalAuthConfig.model_fields["throttle_storage"].default)
@@ -56,6 +63,12 @@ def resolve_login_throttle_store(config: Any | None, *, session_factory: Any | N
             )
         return MemoryLoginThrottleStore()
     if session_factory is None:
+        if selector_value == "db":
+            raise SystemExit(
+                f"auth.local.throttle_storage='db' requires the persistence engine for database.backend={database_backend!r} to be initialised before login "
+                "throttling starts, but no engine is available, so lockouts could not be shared across Gateway replicas. Initialise the database engine first "
+                "(the Gateway does this in langgraph_runtime), or set auth.local.throttle_storage to 'auto' (falls back to the in-process counter with a warning) or 'memory'."
+            )
         logger.warning(
             "auth.local.throttle_storage=%s resolved to the shared database table, but no persistence engine is initialised. Falling back to the in-process login throttle counter for this process.",
             selector_value,
@@ -88,8 +101,10 @@ def resolve_and_install_from_live_config() -> LoginThrottleStore:
     Synchronous and blocking (it reads ``config.yaml``); the router calls it
     through ``asyncio.to_thread``. Only ``FileNotFoundError`` falls back to the
     ``LocalAuthConfig`` defaults, matching ``_login_throttle_policy``: a
-    malformed config propagates rather than silently picking a store. Racing
-    resolvers keep the first installed store.
+    malformed config propagates rather than silently picking a store, and an
+    explicit ``db`` without an initialised engine fails closed exactly as it
+    does at Gateway startup (nothing is installed). Racing resolvers keep the
+    first installed store.
     """
     from deerflow.config.app_config import get_app_config
     from deerflow.persistence.engine import get_session_factory

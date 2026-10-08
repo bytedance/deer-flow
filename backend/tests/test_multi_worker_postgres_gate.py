@@ -725,12 +725,16 @@ def _throttle_warnings(caplog):
 
 def test_login_throttle_warning_fires_for_a_declared_multi_instance_deployment_on_memory(caplog):
     """Explicit memory counters under N replicas hand an attacker N x max_login_attempts guesses."""
+    from deerflow.config.auth_config import LoginThrottleStorage
+
     with caplog.at_level("WARNING"):
-        _validate_login_throttle_storage(_with_throttle_storage(_cluster_ready(deployment_multi_instance=True), "memory"))
+        _validate_login_throttle_storage(_with_throttle_storage(_cluster_ready(deployment_multi_instance=True), LoginThrottleStorage.MEMORY))
     messages = _throttle_warnings(caplog)
     assert messages and "deployment.multi_instance=true" in messages[0]
     assert "max_login_attempts" in messages[0]
-    assert "memory" in messages[0]
+    # The selector is a StrEnum; the warning must render its value, not "LoginThrottleStorage.MEMORY".
+    assert "auth.local.throttle_storage=memory:" in messages[0]
+    assert "LoginThrottleStorage" not in messages[0]
 
 
 def test_login_throttle_warning_names_the_worker_variable(monkeypatch, caplog):

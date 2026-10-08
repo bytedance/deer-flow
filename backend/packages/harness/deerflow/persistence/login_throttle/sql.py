@@ -32,6 +32,28 @@ Concurrency contract:
   already carries its full compare-and-set predicate on the target row for
   the same reason; ``reset`` is unconditional by design.
 
+A failure recorded while a lock is active keeps the lock's ``locked_at`` and
+committed duration (the sentence is "N seconds after the lock started", not
+"after the last attempt"); only a never-locked or already-served row gets a
+fresh stamp. The upsert decides that from the row's own values in one
+statement, so it stays atomic under racing failures.
+
+``locked_at`` is the wall clock (``time.time()``) of whichever replica
+recorded the failure, and every replica evaluates expiry against its own
+clock. Replicas sharing a database must therefore run NTP: a skew of a few
+seconds shifts lock evaluation by that much, which is acceptable for
+lockouts measured in minutes but is the inherent cost of a wall-clock
+lockout shared across hosts.
+
+Housekeeping constants: the shared table, unlike the memory store's bounded
+dict, has no implicit size limit, so every ``record_failure`` sweeps.
+:data:`STALE_COUNTER_SECONDS` is 24 hours — the same guard the upload-staging
+and project-document sweeps use for leftovers that may still be in use on
+another replica — long enough that a legitimate user's typos a day apart are
+not chained together, short enough to keep scanner one-offs from piling up.
+:data:`SWEEP_BATCH_SIZE` (200) bounds the rows one failed login may delete,
+so the write transaction stays short even if a backlog exists.
+
 Database errors propagate: the users table lives in the same database, so a
 login cannot succeed without it anyway, and failing closed keeps the throttle
 from silently handing out unlimited verification.
@@ -39,6 +61,7 @@ from silently handing out unlimited verification.
 
 from __future__ import annotations
 
+import logging
 import time
 from datetime import UTC, datetime, timedelta
 
@@ -49,6 +72,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.login_throttle.base import LoginThrottleRecord
 from deerflow.persistence.login_throttle.model import LOGIN_THROTTLE_IP_LENGTH, LoginThrottleRow
+
+logger = logging.getLogger(__name__)
 
 #: Never-locked counters untouched for this long are dropped by the sweep.
 STALE_COUNTER_SECONDS = 24 * 60 * 60
@@ -70,6 +95,15 @@ def _record(fail_count: int, locked_at: float | None, lock_duration: float | Non
 
 
 def _key(ip: str) -> str:
+    """Bound the row key to the column length; a trusted proxy may forward a token-like ``X-Real-IP``.
+
+    The key itself is never logged: it may be an identifier the proxy did not
+    mean to expose, and it is unbounded. Truncation keeps the throttle
+    fail-closed (colliding prefixes share a stricter budget).
+    """
+    if len(ip) <= LOGIN_THROTTLE_IP_LENGTH:
+        return ip
+    logger.warning("Login throttle client key of %d characters truncated to %d; check the trusted proxy's X-Real-IP value.", len(ip), LOGIN_THROTTLE_IP_LENGTH)
     return ip[:LOGIN_THROTTLE_IP_LENGTH]
 
 
@@ -127,16 +161,21 @@ class SqlLoginThrottleStore:
         now = time.time() if now is None else now
         stamp = _timestamp(now)
         async with self._sf() as session:
-            await self._sweep(session, now)
+            await self._sweep(session, now, keep=key)
             insert = _insert_for(session)
-            locks = LoginThrottleRow.fail_count + 1 >= max_attempts
+            # One atomic decision on the row's own values (see the module
+            # docstring): below the threshold -> counting, lock cleared; at or
+            # over it during an *active* lock -> keep the lock's start and
+            # committed duration; otherwise (never locked / served) -> stamp now.
+            reaches = LoginThrottleRow.fail_count + 1 >= max_attempts
+            active = and_(LoginThrottleRow.locked_at.is_not(None), LoginThrottleRow.locked_at + LoginThrottleRow.lock_duration_seconds > now)
             stmt = insert(LoginThrottleRow).values(ip=key, fail_count=1, locked_at=None, lock_duration_seconds=None, updated_at=stamp)
             stmt = stmt.on_conflict_do_update(
                 index_elements=[LoginThrottleRow.ip],
                 set_={
                     "fail_count": LoginThrottleRow.fail_count + 1,
-                    "locked_at": case((locks, now), else_=None),
-                    "lock_duration_seconds": case((locks, lockout_seconds), else_=None),
+                    "locked_at": case((and_(reaches, active), LoginThrottleRow.locked_at), (reaches, now), else_=None),
+                    "lock_duration_seconds": case((and_(reaches, active), LoginThrottleRow.lock_duration_seconds), (reaches, lockout_seconds), else_=None),
                     "updated_at": stamp,
                 },
             ).returning(LoginThrottleRow.fail_count, LoginThrottleRow.locked_at, LoginThrottleRow.lock_duration_seconds)
@@ -181,8 +220,14 @@ class SqlLoginThrottleStore:
         return or_(served, stale)
 
     @classmethod
-    def sweep_statement(cls, now: float):
+    def sweep_statement(cls, now: float, *, keep: str | None = None):
         """The bounded cleanup ``DELETE`` (see the module docstring's cleanup contract).
+
+        ``keep`` is the key the calling ``record_failure`` is about to upsert:
+        that row is live and the upsert decides its fate from its own values
+        (a served lock starts a fresh sentence, a stale counter keeps counting),
+        exactly as the memory store does; sweeping it first would turn the
+        failure into a fresh ``(1, NULL, NULL)`` row and split the contract.
 
         The expiry predicate appears twice on purpose: once inside the
         ``IN (SELECT ... LIMIT n)`` subquery that bounds the batch, and again
@@ -195,10 +240,12 @@ class SqlLoginThrottleStore:
         that IP would reach password verification. SQLite serializes writers,
         so there the repetition is merely redundant.
         """
-        victims = select(LoginThrottleRow.ip).where(cls._expired(now)).limit(SWEEP_BATCH_SIZE)
-        return delete(LoginThrottleRow).where(LoginThrottleRow.ip.in_(victims), cls._expired(now))
+        candidates = cls._expired(now) if keep is None else and_(LoginThrottleRow.ip != keep, cls._expired(now))
+        victims = select(LoginThrottleRow.ip).where(candidates).limit(SWEEP_BATCH_SIZE)
+        target = cls._expired(now) if keep is None else and_(LoginThrottleRow.ip != keep, cls._expired(now))
+        return delete(LoginThrottleRow).where(LoginThrottleRow.ip.in_(victims), target)
 
-    async def _sweep(self, session: AsyncSession, now: float) -> None:
-        """Bounded cleanup of served locks and stale never-locked counters."""
-        await session.execute(self.sweep_statement(now))
+    async def _sweep(self, session: AsyncSession, now: float, *, keep: str) -> None:
+        """Bounded cleanup of served locks and stale never-locked counters, leaving ``keep`` to the upsert."""
+        await session.execute(self.sweep_statement(now, keep=keep))
         await session.commit()

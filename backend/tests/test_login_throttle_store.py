@@ -197,6 +197,57 @@ async def test_now_defaults_to_the_wall_clock(store):
     assert 0.0 < await store.check(ip, max_attempts=2, lockout_seconds=60.0) <= 60.0
 
 
+async def test_failures_during_an_active_lock_do_not_slide_the_sentence(store):
+    """A failure recorded while the lock is active keeps the lock's start and committed duration.
+
+    Review of #6501: re-stamping ``locked_at = now`` on every failure turned
+    "N seconds after the lock started" into "N seconds after the last
+    attempt", so a sustained attacker never served the sentence.
+    """
+    ip = "10.0.0.20"
+    locked = await _lock(store, ip, max_attempts=2, lockout_seconds=60.0, now=T0)
+    assert locked == LoginThrottleRecord(fail_count=2, locked_at=T0, lock_duration=60.0)
+    for n, offset in enumerate((10.0, 20.0, 50.0), start=3):
+        record = await store.record_failure(ip, max_attempts=2, lockout_seconds=60.0, now=T0 + offset)
+        assert record == LoginThrottleRecord(fail_count=n, locked_at=T0, lock_duration=60.0)
+    assert await store.check(ip, max_attempts=2, lockout_seconds=60.0, now=T0 + 59.0) == pytest.approx(1.0)
+    assert await store.check(ip, max_attempts=2, lockout_seconds=60.0, now=T0 + 61.0) == 0.0  # expires at the original time
+    assert await store.get(ip) is None
+
+
+async def test_failure_during_an_active_lock_keeps_the_committed_duration_not_the_live_one(store):
+    """The duration a ``check`` committed (here a lowered one) is what a later failure preserves."""
+    ip = "10.0.0.21"
+    await _lock(store, ip, max_attempts=2, lockout_seconds=60.0, now=T0)
+    assert await store.check(ip, max_attempts=2, lockout_seconds=10.0, now=T0 + 2.0) == pytest.approx(8.0)  # commits 10s
+    record = await store.record_failure(ip, max_attempts=2, lockout_seconds=300.0, now=T0 + 5.0)
+    assert record == LoginThrottleRecord(fail_count=3, locked_at=T0, lock_duration=10.0)
+
+
+async def test_failure_after_a_served_lock_starts_a_fresh_sentence(store):
+    """A lock whose sentence elapsed (no check cleared it yet) is restarted by the next failure."""
+    ip = "10.0.0.22"
+    await _lock(store, ip, max_attempts=2, lockout_seconds=1.0, now=T0)
+    record = await store.record_failure(ip, max_attempts=2, lockout_seconds=60.0, now=T0 + 5.0)
+    assert record == LoginThrottleRecord(fail_count=3, locked_at=T0 + 5.0, lock_duration=60.0)
+    assert await store.check(ip, max_attempts=2, lockout_seconds=60.0, now=T0 + 6.0) == pytest.approx(59.0)
+
+
+async def test_raised_threshold_clears_the_lock_below_the_new_max_and_restarts_it_when_reached(store):
+    """Raising max_login_attempts mid-lock: a failure below the new threshold leaves the IP counting;
+    the failure that reaches the new threshold starts a fresh lock at that moment."""
+    ip = "10.0.0.23"
+    await _lock(store, ip, max_attempts=2, lockout_seconds=60.0, now=T0)  # (2, T0, 60)
+    record = await store.record_failure(ip, max_attempts=5, lockout_seconds=60.0, now=T0 + 1.0)
+    assert record == LoginThrottleRecord(fail_count=3, locked_at=0.0, lock_duration=0.0)  # counting again under the raised max
+    assert await store.check(ip, max_attempts=5, lockout_seconds=60.0, now=T0 + 1.5) == 0.0
+    record = await store.record_failure(ip, max_attempts=5, lockout_seconds=60.0, now=T0 + 2.0)
+    assert record == LoginThrottleRecord(fail_count=4, locked_at=0.0, lock_duration=0.0)
+    record = await store.record_failure(ip, max_attempts=5, lockout_seconds=60.0, now=T0 + 3.0)
+    assert record == LoginThrottleRecord(fail_count=5, locked_at=T0 + 3.0, lock_duration=60.0)  # fresh lock, not the stale T0
+    assert await store.check(ip, max_attempts=5, lockout_seconds=60.0, now=T0 + 4.0) == pytest.approx(59.0)
+
+
 # ── memory store specifics ──────────────────────────────────────────────────
 
 
@@ -264,13 +315,44 @@ async def test_sql_record_failure_sweeps_expired_locks_and_stale_counters(tmp_pa
         await engine.dispose()
 
 
-async def test_sql_stores_truncate_overlong_keys_consistently(tmp_path):
-    """A trusted proxy can forward an arbitrarily long X-Real-IP; the row key is bounded."""
+async def test_sql_sweep_leaves_the_row_being_recorded_to_the_upsert(tmp_path):
+    """The sweep excludes the IP whose failure is being recorded, so the upsert applies the shared rule.
+
+    A stale counter keeps counting (the memory store never expires counters on
+    its own either) instead of collapsing into a fresh ``(1, NULL, NULL)``
+    row, while other expired rows are still swept by the same call. The
+    served-lock half of the rule is pinned for both stores by
+    ``test_failure_after_a_served_lock_starts_a_fresh_sentence``.
+    """
+    engine = await _sqlite_engine(tmp_path / "keep.db")
+    try:
+        store = _sql_store(engine)
+        stale_now = T0 - STALE_COUNTER_SECONDS - 1
+        for _ in range(4):
+            await store.record_failure("stale-counter", max_attempts=5, lockout_seconds=60.0, now=stale_now)
+        await _lock(store, "other-served-lock", lockout_seconds=1.0, now=T0 - 10.0)
+
+        record = await store.record_failure("stale-counter", max_attempts=5, lockout_seconds=60.0, now=T0)
+        assert record == LoginThrottleRecord(fail_count=5, locked_at=T0, lock_duration=60.0)  # 4 + 1 reaches the threshold
+        assert await store.get("other-served-lock") is None  # swept by that same call
+    finally:
+        await engine.dispose()
+
+
+async def test_sql_stores_truncate_overlong_keys_consistently(tmp_path, caplog):
+    """A trusted proxy can forward an arbitrarily long X-Real-IP; the row key is bounded and the truncation is logged."""
+    import logging
+
     engine = await _sqlite_engine(tmp_path / "long.db")
     try:
         store = _sql_store(engine)
         key = "x" * 400
-        await _lock(store, key, lockout_seconds=60.0, now=T0)
+        with caplog.at_level(logging.WARNING):
+            await _lock(store, key, lockout_seconds=60.0, now=T0)
+        truncation_warnings = [r.message for r in caplog.records if "truncat" in r.message.lower()]
+        assert truncation_warnings, caplog.records
+        assert "400" in truncation_warnings[0] and str(LoginThrottleRow.ip.type.length) in truncation_warnings[0]
+        assert key not in truncation_warnings[0]  # never log the (possibly token-like) key itself
         assert await store.check(key, max_attempts=2, lockout_seconds=60.0, now=T0 + 1) > 0.0
         async with engine.connect() as conn:
             stored = (await conn.execute(sa.select(LoginThrottleRow.ip))).scalar_one()
@@ -305,6 +387,32 @@ async def test_two_sql_stores_over_one_database_share_the_lock(tmp_path):
         # A successful login on one replica releases the IP everywhere.
         await replica_b.reset(ip)
         assert await replica_a.check(ip, max_attempts=5, lockout_seconds=300.0, now=T0 + 3) == 0.0
+    finally:
+        await engine_a.dispose()
+        await engine_b.dispose()
+
+
+async def test_failure_committing_after_a_reset_counts_as_a_fresh_first_failure(tmp_path):
+    """A reset and a peer's failure serialize at the database; whichever commits last defines the state.
+
+    A failure that commits after the successful login's reset leaves
+    ``fail_count = 1`` — one genuine failed attempt after the history was
+    cleared, not a resurrected counter or lock. (A failure that commits
+    before the reset is cleared by it.) The memory store has the same ordering
+    semantics; "a successful login clears the IP everywhere" holds either way.
+    """
+    path = tmp_path / "reset-race.db"
+    engine_a = await _sqlite_engine(path)
+    engine_b = create_async_engine(f"sqlite+aiosqlite:///{path.as_posix()}")
+    try:
+        replica_a, replica_b = _sql_store(engine_a), _sql_store(engine_b)
+        ip = "198.51.100.9"
+        await _lock(replica_a, ip, max_attempts=5, lockout_seconds=300.0, now=T0)
+        await replica_a.reset(ip)  # successful login on replica A
+        record = await replica_b.record_failure(ip, max_attempts=5, lockout_seconds=300.0, now=T0 + 1.0)  # peer's wrong password lands after
+        assert record == LoginThrottleRecord(fail_count=1, locked_at=0.0, lock_duration=0.0)
+        assert await replica_a.get(ip) == record
+        assert await replica_a.check(ip, max_attempts=5, lockout_seconds=300.0, now=T0 + 2.0) == 0.0
     finally:
         await engine_a.dispose()
         await engine_b.dispose()
@@ -356,6 +464,9 @@ async def test_sweep_delete_repeats_the_expiry_predicate_on_the_deleted_row(dial
     assert "login_throttle.locked_at + login_throttle.lock_duration_seconds <=" in outer
     assert "login_throttle.locked_at IS NULL" in outer
     assert "login_throttle.updated_at <=" in outer
+    # The row being recorded is excluded on the target too, not only among the candidates.
+    with_keep = str(SqlLoginThrottleStore.sweep_statement(T0, keep="203.0.113.1").compile(dialect=dialect))
+    assert "login_throttle.ip !=" in _outer_where_without_candidate_subquery(with_keep)
 
 
 async def _wait_until_a_session_waits_on_a_lock(engine: AsyncEngine, *, timeout: float = 15.0) -> None:

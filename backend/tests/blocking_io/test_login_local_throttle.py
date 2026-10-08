@@ -137,3 +137,16 @@ async def test_successful_login_reset_does_not_block_loop(store, monkeypatch) ->
 
     assert result.expires_in > 0
     assert await store.get(_CLIENT_IP) is None
+
+
+async def test_store_reset_and_probe_do_not_block_loop(store) -> None:
+    """Store-level anchor for the success path: ``reset`` (DELETE) and the
+    ``get`` probe run through the async session with no sync driver call or
+    file access on the loop — the SQL variant is the one that matters."""
+    await store.record_failure(_CLIENT_IP, **_POLICY)
+    assert (await store.get(_CLIENT_IP)).fail_count == 1
+
+    await store.reset(_CLIENT_IP)
+
+    assert await store.get(_CLIENT_IP) is None
+    await store.reset(_CLIENT_IP)  # idempotent on a clean IP

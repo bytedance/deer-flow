@@ -114,12 +114,51 @@ def test_explicit_db_without_a_database_falls_back_to_memory_and_warns(caplog):
     assert any("auth.local.throttle_storage=db" in r.message and "database.backend" in r.message for r in caplog.records)
 
 
-def test_db_resolution_without_an_engine_falls_back_to_memory_and_warns(caplog):
-    """A database is configured but no engine was initialised (bare app): never crash the login path."""
+def test_auto_resolution_without_an_engine_falls_back_to_memory_and_warns(caplog):
+    """``auto`` with a configured database but no initialised engine (bare app) keeps the login path working."""
     with caplog.at_level(logging.WARNING):
         store = login_throttle.resolve_login_throttle_store(_config("auto", "sqlite"), session_factory=None)
     assert isinstance(store, MemoryLoginThrottleStore)
-    assert any("engine" in r.message for r in caplog.records)
+    assert any("engine" in r.message and "throttle_storage=auto" in r.message for r in caplog.records)
+
+
+def test_explicit_db_without_an_engine_fails_closed_at_startup():
+    """An operator who asked for the shared table must not silently get per-process counters.
+
+    Same failure type as the other startup validations in ``app.gateway.deps``
+    (``_validate_agent_storage`` / the multi-process gate), so ``langgraph_runtime``
+    surfaces it as a startup failure instead of a first-login surprise.
+    """
+    with pytest.raises(SystemExit, match="auth.local.throttle_storage='db'"):
+        login_throttle.resolve_login_throttle_store(_config("db", "sqlite"), session_factory=None)
+    with pytest.raises(SystemExit, match="database.backend"):
+        login_throttle.resolve_login_throttle_store(_config("db", "postgres"), session_factory=None)
+    assert login_throttle.installed_login_throttle_store() is None
+
+
+def test_lazy_resolution_explicit_db_without_an_engine_fails_closed(monkeypatch):
+    """The bare-app path applies the same rule and installs nothing."""
+    from deerflow.config import app_config as app_config_module
+    from deerflow.persistence import engine as engine_module
+
+    monkeypatch.setattr(app_config_module, "get_app_config", lambda: _config("db", "sqlite"))
+    monkeypatch.setattr(engine_module, "get_session_factory", lambda: None)
+    with pytest.raises(SystemExit, match="auth.local.throttle_storage='db'"):
+        login_throttle.resolve_and_install_from_live_config()
+    assert login_throttle.installed_login_throttle_store() is None
+
+
+def test_lazy_resolution_auto_without_an_engine_falls_back_to_memory(monkeypatch, caplog):
+    from deerflow.config import app_config as app_config_module
+    from deerflow.persistence import engine as engine_module
+
+    monkeypatch.setattr(app_config_module, "get_app_config", lambda: _config("auto", "sqlite"))
+    monkeypatch.setattr(engine_module, "get_session_factory", lambda: None)
+    with caplog.at_level(logging.WARNING):
+        store = login_throttle.resolve_and_install_from_live_config()
+    assert isinstance(store, MemoryLoginThrottleStore)
+    assert login_throttle.installed_login_throttle_store() is store
+    assert any("throttle_storage=auto" in r.message for r in caplog.records)
 
 
 def test_missing_config_resolves_the_memory_store():

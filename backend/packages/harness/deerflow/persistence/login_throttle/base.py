@@ -11,10 +11,15 @@ follows a changed policy.
 Semantics every implementation must share (pinned by
 ``tests/test_login_throttle_store.py`` against both stores):
 
-- ``record_failure`` increments the count; when the new count reaches
-  ``max_attempts`` the lock starts *now* with ``lockout_seconds`` as its
-  committed duration (a record already over the threshold but never locked —
-  the operator tightened the policy mid-count — locks on that next failure).
+- ``record_failure`` increments the count. A new count below ``max_attempts``
+  leaves the IP counting with no lock (so a failure after the operator
+  raised the threshold clears an existing lock). A new count at or over the
+  threshold locks: a failure recorded while a lock is *active* keeps the
+  lock's start and committed duration — the sentence is "N seconds after the
+  lock started", never "after the last attempt" — while a served or absent
+  lock starts anew *now* with ``lockout_seconds`` as its committed duration
+  (a record already over the threshold but never locked — the operator
+  tightened the policy mid-count — locks on that next failure).
 - ``check`` allows a record below the current threshold (raising
   ``max_attempts`` releases a lower count immediately) and one that is over
   it but never locked (the count is kept, not reset). An active lock first
