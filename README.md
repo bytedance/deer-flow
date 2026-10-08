@@ -738,6 +738,7 @@ Tool-produced paths and URLs can be retained as short artifact handles across co
 
 DeerFlow supports configurable MCP servers and skills to extend its capabilities.
 For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`, `refresh_token`).
+Missing, malformed, or out-of-range token response `expires_in` values use a one-hour default lifetime. This includes lifetimes that cannot be added to the current time without overflowing the expiry timestamp.
 Durable HTTP/SSE task status and cancellation calls select configured `user_auth` credentials using the persisted task owner, including after restart; per-request secrets are not retained for background calls. If a request-scoped credential overrides submit authentication, both credentials must authorize access to the same remote task.
 For stdio MCP servers, per-tool call timeouts can be configured with `tool_call_timeout`; durable background-task calls honor the same setting for HTTP/SSE servers as well.
 For stdio file outputs, a bare filename is linked to a uniquely matching file created or changed by that call. Filenames embedded in unrelated paths, including Windows backslash paths, are left intact.
@@ -2129,6 +2130,9 @@ failing the upload; hidden staging files are left for the startup sweep.
 Uploads, new skill support files, and new local sandbox paths reject Windows
 reserved device names on every platform, including `COM¹`, `LPT²`, the console
 aliases `CONIN$` and `CONOUT$`, and names with extensions such as `com³.txt`.
+ASCII spaces before the extension do not make a device name portable:
+`NUL .txt` and `COM1  .log` are rejected too. Ordinary names such as
+`report .txt` are preserved unchanged.
 Rename these files before creating or uploading them so the same file tree
 remains usable on Windows.
 

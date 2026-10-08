@@ -94,6 +94,10 @@ every platform, including the `COM`/`LPT` aliases with superscript ¹, ² and ³
 The console aliases `CONIN$` and `CONOUT$` are reserved too; match them
 case-insensitively before the first dot, without rejecting longer ordinary
 names such as `CONIN$notes.txt`.
+Device-name comparison ignores ASCII spaces before the first dot, so
+`NUL .txt` and `COM1  .log` remain reserved. Trim the comparison stem only,
+not the supplied filename; ordinary names such as `report .txt` and
+non-ASCII whitespace remain unchanged.
 Do not normalize arbitrary Unicode digits into device numbers: names such as
 `COM⁴.txt` and `COM¹notes.txt` are ordinary portable names. Read/removal callers
 retain their existing portability exemptions.
