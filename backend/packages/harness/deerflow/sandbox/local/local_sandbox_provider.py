@@ -97,6 +97,27 @@ class LocalSandboxProvider(SandboxProvider):
         self._thread_sandboxes: OrderedDict[tuple[str, str], LocalSandbox] = OrderedDict()
         self._max_cached_threads = max_cached_threads
         self._lock = threading.Lock()
+        self._environment = self._load_sandbox_environment()
+
+    def _load_sandbox_environment(self) -> dict[str, str]:
+        """Load operator-configured ``sandbox.environment`` for local sandboxes.
+
+        The file-backed AppConfig loader has already substituted every ``$VAR``
+        reference in field values before the parsed config reaches here, so the
+        values are consumed verbatim — re-resolving would corrupt a credential
+        that legitimately starts with ``$`` (e.g. host ``APP_PASSWORD='$s3cret'``
+        would be re-expanded into a different variable or the empty string).
+        Missing/unloadable config yields an empty mapping (nothing injected;
+        scrubbing alone applies).
+        """
+        try:
+            from deerflow.config import get_app_config
+
+            sandbox_config = get_app_config().sandbox
+        except Exception:
+            return {}
+        env_config = getattr(sandbox_config, "environment", None) or {}
+        return dict(env_config)
 
     def _setup_path_mappings(self) -> list[PathMapping]:
         """
@@ -455,7 +476,7 @@ class LocalSandboxProvider(SandboxProvider):
                 if self._generic_sandbox is None:
                     mappings = list(self._path_mappings)
                     self._append_public_skill_mapping(mappings, skill_projection)
-                    self._generic_sandbox = LocalSandbox("local", path_mappings=mappings)
+                    self._generic_sandbox = LocalSandbox("local", path_mappings=mappings, environment=self._environment)
                     _singleton = self._generic_sandbox
                 return self._generic_sandbox.id
 
@@ -506,6 +527,7 @@ class LocalSandboxProvider(SandboxProvider):
                 replacement = LocalSandbox(
                     self._sandbox_id_for_thread(thread_id, effective_user_id),
                     path_mappings=new_mappings,
+                    environment=self._environment,
                 )
                 if cached is not None:
                     replacement._agent_written_paths.update(cached._agent_written_paths)

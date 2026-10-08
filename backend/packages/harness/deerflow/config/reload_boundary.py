@@ -95,6 +95,11 @@ STARTUP_ONLY_FIELDS: dict[str, str] = {
         "make_inbound_dedupe_store() resolves the inbound dedupe store once when ChannelService is constructed at startup; the store "
         "(in-process memory or shared Postgres) is captured onto ChannelManager and is not rebuilt on config.yaml edits."
     ),
+    "auth.local.throttle_storage": (
+        "langgraph_runtime() resolves the login throttle store once at startup from this selector and the persistence engine "
+        "(app.gateway.auth.login_throttle); the store (in-process counter or the shared login_throttle table) is not rebuilt on "
+        "config.yaml edits, so switching it needs a Gateway restart. auth.local.max_login_attempts and lockout_seconds stay live-read."
+    ),
 }
 
 

@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import FastAPI
 
-from app.gateway.deps import _enforce_postgres_for_multi_worker, _validate_agent_storage, _validate_memory_retrieval_index, langgraph_runtime
+from app.gateway.deps import _enforce_postgres_for_multi_worker, _validate_agent_storage, _validate_login_throttle_storage, _validate_memory_retrieval_index, langgraph_runtime
 from app.gateway.routers.browser import _browser_tools_enabled
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.deployment_config import MULTI_INSTANCE_ENV_VAR, DeploymentConfig, multi_instance_declaration
@@ -710,6 +710,60 @@ def test_deployment_declaration_helpers(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Login throttle storage warning (auth.local.throttle_storage)
+# ---------------------------------------------------------------------------
+
+
+def _with_throttle_storage(config, selector):
+    config.auth = SimpleNamespace(local=SimpleNamespace(throttle_storage=selector))
+    return config
+
+
+def _throttle_warnings(caplog):
+    return [r.message for r in caplog.records if "auth.local.throttle_storage" in r.message]
+
+
+def test_login_throttle_warning_fires_for_a_declared_multi_instance_deployment_on_memory(caplog):
+    """Explicit memory counters under N replicas hand an attacker N x max_login_attempts guesses."""
+    from deerflow.config.auth_config import LoginThrottleStorage
+
+    with caplog.at_level("WARNING"):
+        _validate_login_throttle_storage(_with_throttle_storage(_cluster_ready(deployment_multi_instance=True), LoginThrottleStorage.MEMORY))
+    messages = _throttle_warnings(caplog)
+    assert messages and "deployment.multi_instance=true" in messages[0]
+    assert "max_login_attempts" in messages[0]
+    # The selector is a StrEnum; the warning must render its value, not "LoginThrottleStorage.MEMORY".
+    assert "auth.local.throttle_storage=memory:" in messages[0]
+    assert "LoginThrottleStorage" not in messages[0]
+
+
+def test_login_throttle_warning_names_the_worker_variable(monkeypatch, caplog):
+    monkeypatch.setenv("WEB_CONCURRENCY", "2")
+    with caplog.at_level("WARNING"):
+        _validate_login_throttle_storage(_with_throttle_storage(_cluster_ready(), "memory"))
+    messages = _throttle_warnings(caplog)
+    assert messages and "WEB_CONCURRENCY=2" in messages[0]
+
+
+def test_login_throttle_auto_resolves_to_the_database_under_multi_instance_without_warning(caplog):
+    with caplog.at_level("WARNING"):
+        _validate_login_throttle_storage(_with_throttle_storage(_cluster_ready(deployment_multi_instance=True), "auto"))
+        _validate_login_throttle_storage(_with_throttle_storage(_cluster_ready(deployment_multi_instance=True), "db"))
+    assert _throttle_warnings(caplog) == []
+
+
+def test_login_throttle_memory_is_silent_for_a_single_instance(caplog):
+    with caplog.at_level("WARNING"):
+        _validate_login_throttle_storage(_with_throttle_storage(_config_with_backend("sqlite"), "memory"))
+    assert _throttle_warnings(caplog) == []
+
+
+def test_login_throttle_gate_tolerates_a_config_without_an_auth_section(caplog):
+    with caplog.at_level("WARNING"):
+        _validate_login_throttle_storage(_cluster_ready(deployment_multi_instance=True))
+    assert _throttle_warnings(caplog) == []
+
+
 # DeerMem retrieval index: a declared multi-instance deployment must keep the
 # derived SQLite index off the shared memory volume.
 # ---------------------------------------------------------------------------

@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 56
+config_version: 57
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -3380,19 +3380,33 @@ authorization:
 # auth:
 #   local:
 #     allow_registration: false
-#     # Login throttling per client IP (in-process, per worker). Raise
-#     # max_login_attempts when many users share one egress IP (corporate
-#     # proxy / NAT) so shared-IP lockouts don't block the whole office;
-#     # lower it for a stricter posture (minimum 2 — one failed attempt must
-#     # never lock an IP, or a single typo would block the shared egress).
-#     # Defaults preserve the historical hardcoded policy (5 failures /
-#     # 5 minutes). Live-read per login, so a config reload applies without
-#     # a Gateway restart: lowering lockout_seconds releases an active lock
-#     # early and tightening max_login_attempts keeps already-counted
-#     # failures; a raised lockout_seconds extends a still-active lock but
-#     # never resurrects one that already expired.
+#     # Login throttling per client IP. Raise max_login_attempts when many
+#     # users share one egress IP (corporate proxy / NAT) so shared-IP
+#     # lockouts don't block the whole office; lower it for a stricter
+#     # posture (minimum 2 — one failed attempt must never lock an IP, or a
+#     # single typo would block the shared egress). Defaults preserve the
+#     # historical hardcoded policy (5 failures / 5 minutes). Live-read per
+#     # login, so a config reload applies without a Gateway restart: lowering
+#     # lockout_seconds releases an active lock early and tightening
+#     # max_login_attempts keeps already-counted failures; a raised
+#     # lockout_seconds extends a still-active lock but never resurrects one
+#     # that already expired.
 #     # max_login_attempts: 5
 #     # lockout_seconds: 300
+#     # Where the failed-login counters and lockouts live (restart required).
+#     #   auto   -- (default) the application database whenever
+#     #             database.backend is sqlite or postgres, so every Gateway
+#     #             replica sharing that database enforces one lockout per IP;
+#     #             with database.backend: memory it falls back to an
+#     #             in-process counter.
+#     #   memory -- in-process counter only. Per process: N replicas give an
+#     #             attacker N x max_login_attempts guesses and a lockout on
+#     #             one replica is invisible to the others (a multi-instance
+#     #             deployment logs a startup WARNING).
+#     #   db     -- the shared login_throttle table; falls back to memory with
+#     #             a WARNING when database.backend is memory, and refuses to
+#     #             start when the configured database's engine is unavailable.
+#     # throttle_storage: auto
 #
 #   oidc:
 #     enabled: true
