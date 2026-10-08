@@ -1,3 +1,11 @@
+## Dependency Check Diagnostics
+
+`check.py` captures tool output as UTF-8 with replacement for malformed bytes,
+independently of the host locale. Its Python pnpm runner inherits the environment
+with `PYTHONIOENCODING=utf-8:backslashreplace`, matching the capture encoding.
+Keep Unicode failure diagnostics and exit status available to `make check`.
+Real subprocess regressions live in `backend/tests/test_check_script.py`.
+
 ## Manual Claude OAuth Export
 
 `export_claude_code_oauth.py` validates Keychain JSON as an object containing an
