@@ -804,6 +804,13 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **skills:** A `/skill-name` activation now survives a retried model call. The
+  activation was marked as done before the model was called, so when the call
+  failed (rate limit, overload, timeout) or came back empty and was retried, the
+  retry went out without the `SKILL.md` body while the skill's tool restrictions
+  still applied. The retry now carries the same reminder as the first attempt,
+  without re-reading the skill or recording a second activation, and the retried
+  response keeps the skill-usage record.
 - **persistence:** `scripts/migrate_user_isolation.py` now moves each legacy
   thread to the user who owns it. It looked for thread owners in
   `{base_dir}/deer-flow.db`, a file DeerFlow never creates (the database is
