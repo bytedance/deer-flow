@@ -162,43 +162,75 @@ class TestLocalSandboxOperatorEnvironment:
         alike (either construction site could silently drop the kwarg)."""
         from deerflow.sandbox.local import local_sandbox_provider as provider_module
 
+        environment = {"MINIMAX_API_KEY": "operator-value", "APP_PASSWORD": "$s3cret-value"}
+        monkeypatch.setattr(
+            "deerflow.config.get_app_config",
+            lambda: SimpleNamespace(sandbox=SimpleNamespace(environment=environment)),
+        )
         provider = provider_module.LocalSandboxProvider()
-        monkeypatch.setattr(provider, "_environment", {"MINIMAX_API_KEY": "operator-value"}, raising=False)
 
-        generic_id = provider.acquire()
-        assert provider.get(generic_id).environment == {"MINIMAX_API_KEY": "operator-value"}
+        for thread_id in (None, "thread-env-wiring"):
+            sandbox = provider.get(provider.acquire(thread_id))
+            assert sandbox.environment == environment
+            for name, value in environment.items():
+                assert value in sandbox.execute_command(_echo_env_probe(name))
 
-        thread_id = provider.acquire("thread-env-wiring")
-        assert provider.get(thread_id).environment == {"MINIMAX_API_KEY": "operator-value"}
-
-    def test_operator_environment_keys_validated_at_construction(self):
+    @pytest.mark.parametrize("name", ["MY=KEY", "", "MY-KEY", "MY KEY"])
+    def test_operator_environment_keys_validated_at_construction(self, name):
         """A typo'd key (``MY=KEY``) fails at construction instead of on the
         first command execution."""
         with pytest.raises(ValueError):
-            LocalSandbox(id="local", environment={"MY=KEY": "v"})
+            LocalSandbox(id="local", environment={name: "v"})
 
-    def test_operator_environment_masked_from_bash_output(self, monkeypatch):
+    @pytest.mark.parametrize("override", [False, True])
+    @pytest.mark.parametrize("result_kind", ["output", "sandbox_error", "permission_error", "unexpected_error"])
+    def test_operator_environment_masked_from_bash_output(self, override, result_kind):
         """[P1 regression] An operator-injected credential must not flow back
         into model-visible tool output when a script echoes its environment —
         the bash tool's redaction set includes the sandbox's operator
         environment, with request-scoped values winning on name collision."""
         from deerflow.sandbox import tools as tools_mod
+        from deerflow.sandbox.exceptions import SandboxRuntimeError
+
+        operator_secret = "operator-secret-value-123456"
+        request_secret = "request-secret-value-987654321"
+        database_secret = "database-credential-value-123456"
+        errors = {
+            "sandbox_error": SandboxRuntimeError,
+            "permission_error": PermissionError,
+            "unexpected_error": RuntimeError,
+        }
 
         class FakeSandbox:
-            environment = {"MINIMAX_API_KEY": "operator-secret-value-123456"}
+            environment = {
+                "MINIMAX_API_KEY": operator_secret,
+                "DATABASE_URL": database_secret,
+                "IMAGE_GENERATION_MODEL": "readable-model-name",
+                "IMAGE_GENERATION_BASE_URL": "https://images.example.test",
+                "REGION": "readable-region-name",
+            }
+            seen_env = None
 
             def execute_command(self, command, env=None, timeout=None):
-                # Simulate a diagnostic script echoing the injected credential.
-                return "key=operator-secret-value-123456"
+                self.seen_env = env
+                effective_env = {**self.environment, **(env or {})}
+                output = "\n".join(f"{key}={value}" for key, value in effective_env.items())
+                if result_kind in errors:
+                    raise errors[result_kind](output)
+                return output
 
+        active_secrets = {"ERP_TOKEN": request_secret} if override else {}
+        if override:
+            active_secrets["MINIMAX_API_KEY"] = request_secret
+        sandbox = FakeSandbox()
         runtime = SimpleNamespace(
-            context={"__active_skill_secrets": {"ERP_TOKEN": "request-secret-value-987654321"}, "user_id": "u-local"},
+            context={"__active_skill_secrets": active_secrets, "user_id": "u-local"},
             state={"sandbox": {"sandbox_id": "local:1"}},
         )
         thread_data = {"workspace_path": "/tmp/ws", "cwd": "/mnt/user-data/workspace"}
         fake_cfg = SimpleNamespace(sandbox=SimpleNamespace(bash_output_max_chars=20000, bash_command_timeout=42))
         with (
-            patch.object(tools_mod, "ensure_sandbox_initialized", return_value=FakeSandbox()),
+            patch.object(tools_mod, "ensure_sandbox_initialized", return_value=sandbox),
             patch.object(tools_mod, "is_local_sandbox", return_value=True),
             patch.object(tools_mod, "is_host_bash_allowed", return_value=True),
             patch.object(tools_mod, "ensure_thread_directories_exist", return_value=None),
@@ -211,8 +243,17 @@ class TestLocalSandboxOperatorEnvironment:
         ):
             out = tools_mod.bash_tool.func(runtime=runtime, command="env", description="dump env")
 
-        assert "operator-secret-value-123456" not in out
-        assert "request-secret-value-987654321" not in out
+        assert sandbox.seen_env == (active_secrets or None)
+        assert operator_secret not in out
+        assert request_secret not in out
+        assert database_secret not in out
+        assert "MINIMAX_API_KEY=[redacted]" in out
+        assert "DATABASE_URL=[redacted]" in out
+        if override:
+            assert "ERP_TOKEN=[redacted]" in out
+        assert "IMAGE_GENERATION_MODEL=readable-model-name" in out
+        assert "IMAGE_GENERATION_BASE_URL=https://images.example.test" in out
+        assert "REGION=readable-region-name" in out
 
 
 class TestAioSandboxEnvInjection:
