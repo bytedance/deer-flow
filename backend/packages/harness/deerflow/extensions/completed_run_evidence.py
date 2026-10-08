@@ -90,7 +90,7 @@ class HostCompletedRunEvidenceReader:
 
     async def list_changed_runs(self, *, cursor: str | None = None, limit: int = 200) -> RunPage:
         self._supported()
-        EvidenceLimits(max_events=limit)
+        limit = EvidenceLimits(max_events=limit).max_events
         seq, run_id = self._position(cursor, "runs") or (-1, "")
         stmt = (
             select(RunRow.thread_id, RunRow.run_id, RunRow.status, RunRow.created_at, RunRow.updated_at, RunRow.stop_reason, RunRow.change_seq)

@@ -1603,6 +1603,8 @@ or enabled state is out of scope. The host contract requires `deerflow-extension
 for deployment requirements, grants, recovery, and the plugin integration flow.
 Once an owner is enrolled, use the Gateway for skill management: standalone SDK
 processes without its durable mutation runtime refuse enrolled skill access.
+Skill discovery preserves user scope when the caller uses the default configuration.
+Admin operation lists return `next_cursor: null` at the end of pagination.
 This host slice follows up the [Skill Self-Evolution RFC](https://github.com/bytedance/deer-flow/issues/1865)
 and the bilingual [Plugin Host APIs RFC](https://github.com/bytedance/deer-flow/issues/5539).
 

@@ -138,7 +138,9 @@ originating plugin does not disable coordination or recovery.
 
 Administrators using session authentication can discover unresolved publication
 or view operations through paginated `GET /api/skill-mutations/operations`
-(`limit` up to 100, `after_id` from `next_cursor`). They can query
+(`limit` up to 100, `after_id` from `next_cursor`). Operation pagination ends
+with `has_more: false` and `next_cursor: null`, including an empty page after a
+supplied cursor. They can query
 `GET /api/skill-mutations/operations/{operation_id}`, reconcile through
 `POST /api/skill-mutations/operations/{operation_id}/recover`, or reconcile an
 owner's interrupted managed writes through

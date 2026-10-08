@@ -32,7 +32,8 @@ async def _invoke(request, method, *args, **kwargs):
 async def list_operations(request: Request, limit: Annotated[int, Query(ge=1, le=100)] = 50, after_id: Annotated[str | None, Query(pattern=r"^[a-f0-9]{32}$")] = None):
     rows = await _invoke(request, "list_operations", limit=limit + 1, after_id=after_id)
     items = rows[:limit]
-    return {"items": [asdict(row) for row in items], "has_more": len(rows) > limit, "next_cursor": items[-1].operation_id if items else after_id}
+    has_more = len(rows) > limit
+    return {"items": [asdict(row) for row in items], "has_more": has_more, "next_cursor": items[-1].operation_id if has_more else None}
 
 
 @router.get("/operations/{operation_id}")

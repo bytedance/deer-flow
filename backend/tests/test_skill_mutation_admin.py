@@ -94,3 +94,51 @@ async def test_admin_errors_do_not_return_database_or_candidate_content():
             assert "candidate content" not in response.text
     finally:
         await workers.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count,limit", [(0, 2), (1, 2), (2, 2), (3, 2), (3, 1)])
+async def test_operation_pagination_terminates_with_null_cursor(count, limit):
+    from app.gateway.routers.skill_mutations import router
+
+    @dataclass
+    class Result:
+        operation_id: str
+
+    operations = [Result(f"{number:032x}") for number in range(1, count + 1)]
+
+    class Recovery:
+        def list_operations(self, *, limit, after_id):
+            return tuple(row for row in operations if after_id is None or row.operation_id > after_id)[:limit]
+
+    app = FastAPI()
+    workers = MutationWorkers()
+    app.state.skill_mutation_host = SimpleNamespace(workers=workers, recovery=Recovery())
+
+    @app.middleware("http")
+    async def identity(request: Request, call_next):
+        request.state.user = SimpleNamespace(id="admin", system_role="admin")
+        return await call_next(request)
+
+    app.include_router(router)
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            params = {"limit": limit}
+            seen = []
+            for _ in range(count + 1):
+                response = await client.get("/api/skill-mutations/operations", params=params)
+                assert response.status_code == 200
+                page = response.json()
+                seen.extend(row["operation_id"] for row in page["items"])
+                assert page["has_more"] == (page["next_cursor"] is not None)
+                if page["next_cursor"] is None:
+                    break
+                params["after_id"] = page["next_cursor"]
+            else:
+                pytest.fail("Pagination failed to terminate")
+            assert seen == [row.operation_id for row in operations]
+            # A stale end cursor must not echo itself back forever.
+            empty = await client.get("/api/skill-mutations/operations", params={"after_id": "f" * 32, "limit": limit})
+            assert empty.json() == {"items": [], "has_more": False, "next_cursor": None}
+    finally:
+        await workers.close()

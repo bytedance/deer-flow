@@ -735,3 +735,32 @@ def test_migration_upgrades_real_sqlite_and_preserves_legacy_partial(tmp_path):
         assert conn.scalar(text("SELECT content_sha256 FROM run_events WHERE run_id='old'")) is None
         assert "completed_run_snapshots" in inspect(conn).get_table_names()
     engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [0, -1, 2001, True, 1.5])
+async def test_changed_run_page_rejects_invalid_limits(evidence, limit):
+    _sf, _events, runs, reader = evidence
+    await put_run(runs)
+    with pytest.raises(ValueError, match="max_events"):
+        await reader.list_changed_runs(limit=limit)
+
+
+@pytest.mark.asyncio
+async def test_changed_run_page_uses_validated_limit(evidence, monkeypatch):
+    from deerflow_extension_api import EvidenceLimits
+
+    _sf, _events, runs, reader = evidence
+    for run_id in ("a", "b", "c"):
+        await put_run(runs, run_id)
+
+    def bounded_limits(*, max_events):
+        return EvidenceLimits(max_events=min(max_events, 1))
+
+    # Exercise a tighter host policy without changing the public hard limit.
+    monkeypatch.setattr("deerflow.extensions.completed_run_evidence.EvidenceLimits", bounded_limits)
+    first = await reader.list_changed_runs(limit=100)
+    assert [row.run_id for row in first.items] == ["a"]
+    assert first.has_more
+    second = await reader.list_changed_runs(cursor=first.next_cursor, limit=100)
+    assert [row.run_id for row in second.items] == ["b"]

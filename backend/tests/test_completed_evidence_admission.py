@@ -25,8 +25,11 @@ def app_config():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("auth_source, expected", [(None, "interactive"), (AUTH_SOURCE_INTERNAL, "unknown")])
-async def test_client_metadata_cannot_forge_completed_evidence_origin(auth_source, expected):
+@pytest.mark.parametrize(
+    "auth_source, host_origin, expected",
+    [(None, None, "interactive"), (AUTH_SOURCE_INTERNAL, None, "unknown")] + [(AUTH_SOURCE_INTERNAL, origin, origin) for origin in ("interactive", "scheduled", "extension_evaluation", "unknown")],
+)
+async def test_client_metadata_cannot_forge_completed_evidence_origin(auth_source, host_origin, expected):
     manager = RunManager(store=MemoryRunStore())
     request = SimpleNamespace(
         headers={},
@@ -54,7 +57,7 @@ async def test_client_metadata_cannot_forge_completed_evidence_origin(auth_sourc
         patch("app.gateway.services.run_agent", new=AsyncMock()),
         patch.object(manager, "create_or_reject", wraps=manager.create_or_reject) as admission,
     ):
-        record = await start_run(body, "evidence-origin-test", request)
+        record = await start_run(body, "evidence-origin-test", request, evidence_origin=host_origin)
         await record.task
     assert admission.call_args.kwargs["evidence_origin"] == expected
 

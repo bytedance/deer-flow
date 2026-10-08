@@ -21,7 +21,7 @@ from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user,
 from deerflow.utils.time import is_lease_expired
 from deerflow.utils.time import now_iso as _now_iso
 
-from .schemas import DisconnectMode, RunStatus, ThreadOperationKind
+from .schemas import EVIDENCE_ORIGINS, DisconnectMode, RunStatus, ThreadOperationKind
 from .store.base import (
     EditReplayVisibility,
     RunIdempotencyConflict,
@@ -628,7 +628,7 @@ class RunManager:
 
     @staticmethod
     def _validate_evidence_origin(origin: str) -> None:
-        if origin not in ("interactive", "scheduled", "extension_evaluation", "unknown"):
+        if origin not in EVIDENCE_ORIGINS:
             raise ValueError("invalid evidence origin")
 
     async def seal_completed_evidence(self, run_id: str, receipt) -> bool:

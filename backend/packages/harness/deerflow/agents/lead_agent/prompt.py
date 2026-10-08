@@ -187,8 +187,9 @@ def get_enabled_skills_for_config(app_config: AppConfig | None = None, user_id: 
     """
     from deerflow.skills.mutations.guard import owner_is_managed
 
-    if user_id is not None and owner_is_managed(user_id):
-        # Enrolled owners bypass the process-local LRU. The guarded loader
+    if user_id is not None and (app_config is None or owner_is_managed(user_id)):
+        # Without an explicit config, resolve the user storage on each call.
+        # Enrolled owners also bypass the process-local LRU. The guarded loader
         # checks durable readiness, so peer publications cannot leave a stale
         # catalog or treat PREPARED bytes as a committed generation.
         return list(get_or_new_user_skill_storage(user_id, app_config=app_config).load_skills(enabled_only=True))

@@ -91,6 +91,7 @@ from deerflow.runtime.journal import build_checkpoint_history_seed_events
 from deerflow.runtime.keyed_lock import KeyedLockTable
 from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY, make_origin
 from deerflow.runtime.runs.naming import resolve_root_run_name
+from deerflow.runtime.runs.schemas import EVIDENCE_ORIGINS
 from deerflow.runtime.secret_context import (
     LegacyRunMetadataSecretError,
     redact_config_secrets,
@@ -1866,7 +1867,7 @@ async def start_run(
         # Keep this before admission so import failures cannot create a run.
         agent_factory = await run_assembly(resolve_agent_factory, body.assistant_id)
         admitted_origin = evidence_origin or ("unknown" if is_internal_caller else "interactive")
-        if admitted_origin not in {"interactive", "scheduled", "extension_evaluation", "unknown"}:
+        if admitted_origin not in EVIDENCE_ORIGINS:
             raise ValueError("Unsupported host evidence origin")
         command = getattr(body, "command", None)
         if command and command.get("resume") is not None:
