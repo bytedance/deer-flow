@@ -925,6 +925,15 @@ This release closes that milestone with **439 merged pull requests**.
   goal." and `get_goal`/`set_goal`/`clear_goal` raised. The goal helpers now
   fall back to the synchronous methods for those savers. The web UI was not
   affected. ([#6448])
+- **community:** The Browserless `web_fetch` provider now authenticates. It sent
+  the configured token inside the `/content` JSON body, but Browserless reads
+  the token only from the `token` query parameter or the `Authorization`
+  header, and checks it before reading the body. With `BROWSERLESS_TOKEN` set
+  as the configuration guide describes, every `web_fetch` failed with
+  `Browserless HTTP 401` (and with HTTP 400 against an instance started without
+  `TOKEN`, whose body schema rejects the unknown key) while `web_capture`
+  worked with the same token. Both tools now send the token as a query
+  parameter. ([#6484])
 - **mcp:** An MCP server with `task_toolsets` that is unreachable or times out
   during tool discovery no longer removes every MCP tool. Discovery skipped the
   failed server with an empty tool list, the task-toolset check then reported
@@ -9247,6 +9256,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6448]: https://github.com/bytedance/deer-flow/pull/6448
 [#6450]: https://github.com/bytedance/deer-flow/pull/6450
 [#6481]: https://github.com/bytedance/deer-flow/pull/6481
+[#6484]: https://github.com/bytedance/deer-flow/pull/6484
 [#6494]: https://github.com/bytedance/deer-flow/pull/6494
 [#6495]: https://github.com/bytedance/deer-flow/pull/6495
 [#6506]: https://github.com/bytedance/deer-flow/pull/6506
