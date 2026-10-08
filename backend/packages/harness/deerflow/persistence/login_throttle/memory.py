@@ -13,7 +13,7 @@ from __future__ import annotations
 import time
 from dataclasses import replace
 
-from deerflow.persistence.login_throttle.base import LoginThrottleRecord, evaluate_check
+from deerflow.persistence.login_throttle.base import LoginThrottlePolicy, LoginThrottleRecord, evaluate_check
 
 #: Upper bound on tracked IPs before the capacity sweep runs (historical constant).
 MAX_TRACKED_IPS = 10000
@@ -29,17 +29,24 @@ class MemoryLoginThrottleStore:
     async def get(self, ip: str) -> LoginThrottleRecord | None:
         return self._records.get(ip)
 
-    async def check(self, ip: str, *, max_attempts: int, lockout_seconds: float, now: float | None = None) -> float:
+    async def check(self, ip: str, *, policy: LoginThrottlePolicy, now: float | None = None) -> float:
         """Apply the shared ``check`` contract to this process's record.
 
-        The compare-and-set below cannot miss: there is no ``await`` between
-        the read and the write and the event loop thread holds the GIL, so no
-        peer can change the record in between — unlike the SQL store, whose
-        writes race other replicas and therefore check their affected-row
-        count and re-evaluate. The guards are kept only as a statement of the
-        same discipline.
+        The policy is resolved lazily: a clean IP returns before ``policy`` is
+        awaited. That await is a yield point, so the record is read again
+        afterwards and the decision is made on that fresh snapshot — a record
+        a concurrent request cleared or replaced meanwhile is never judged
+        from the stale probe. The compare-and-set that follows cannot miss:
+        there is no ``await`` between the fresh read and the write and the
+        event loop thread holds the GIL, so no peer can change the record in
+        between — unlike the SQL store, whose writes race other replicas and
+        therefore check their affected-row count and re-evaluate. The guards
+        are kept only as a statement of the same discipline.
         """
-        record = self._records.get(ip)
+        if ip not in self._records:
+            return 0.0
+        max_attempts, lockout_seconds = await policy()
+        record = self._records.get(ip)  # fresh: the policy read yielded the loop
         if record is None:
             return 0.0
         now = time.time() if now is None else now

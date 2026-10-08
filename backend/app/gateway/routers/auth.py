@@ -286,26 +286,28 @@ def _get_client_ip(request: Request) -> str:
 async def _check_rate_limit(ip: str) -> None:
     """Raise 429 if the IP is currently locked out.
 
-    The record probe comes before policy resolution on purpose: a clean IP
-    (no failed attempts recorded — the overwhelming majority of logins) must
-    not pay a config read, and ``get_app_config`` re-hashes config.yaml on
-    every call while this endpoint is unauthenticated. When a record exists
-    the policy is resolved off the event loop via ``asyncio.to_thread``:
-    every request from a recorded IP — including an already-locked attacker
-    flooding the endpoint — pays that read on the way to its answer, and the
-    stat + hash must not block the loop.
+    The policy is handed to the store as an async callable and resolved
+    lazily, inside the store's single session: a clean IP (no failed attempts
+    recorded — the overwhelming majority of logins) never pays the config
+    read, and ``get_app_config`` re-hashes config.yaml on every call while
+    this endpoint is unauthenticated. A recorded IP — including an
+    already-locked attacker flooding the endpoint — resolves it exactly once,
+    off the event loop via ``asyncio.to_thread`` (the stat + hash must not
+    block the loop), and the SQL store serves the probe, the resolution and
+    the decision from one connection-pool checkout instead of two.
 
-    The await is a yield point: another request for the same IP may delete or
-    replace the record meanwhile, so the store decides on a fresh read inside
-    ``check`` and guards its own mutations against that snapshot — a record
-    replaced mid-flight (e.g. a successful login followed by a new failure) is
-    never clobbered by a stale decision.
+    The policy read is a yield point: another request for the same IP may
+    delete or replace the record meanwhile, so the store decides on a fresh
+    read taken after it and guards its own mutations against that snapshot —
+    a record replaced mid-flight (e.g. a successful login followed by a new
+    failure) is never clobbered by a stale decision.
     """
     store = await _login_throttle_store()
-    if await store.get(ip) is None:
-        return
-    max_attempts, lockout_seconds = await asyncio.to_thread(_login_throttle_policy)
-    remaining = await store.check(ip, max_attempts=max_attempts, lockout_seconds=lockout_seconds, now=time.time())
+
+    async def policy() -> tuple[int, float]:
+        return await asyncio.to_thread(_login_throttle_policy)
+
+    remaining = await store.check(ip, policy=policy, now=time.time())
     if remaining > 0.0:
         raise HTTPException(
             status_code=429,

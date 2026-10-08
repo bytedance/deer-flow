@@ -1252,13 +1252,14 @@ def throttle_policy():
         reset_app_config()
 
 
-class _MutateBetweenGetAndCheck:
-    """Store wrapper that mutates the record while the router is suspended.
+class _MutateDuringPolicyResolution:
+    """Store wrapper that mutates the record while ``check`` is suspended on the policy read.
 
-    The router pre-reads the record (cheap clean-IP skip), resolves the policy
-    off the loop, then decides on a fresh read. This wrapper runs ``mutation``
-    right after the pre-read, standing in for a concurrent request that lands
-    during the policy resolution.
+    ``check`` probes the record (cheap clean-IP skip), resolves the policy —
+    an off-loop config read, so a yield point — and must then decide on a
+    fresh read. This wrapper runs ``mutation`` right after the policy callable
+    returns, standing in for a concurrent request that lands during the
+    resolution.
     """
 
     def __init__(self, inner, mutation):
@@ -1266,12 +1267,15 @@ class _MutateBetweenGetAndCheck:
         self._mutation = mutation
 
     async def get(self, ip):
-        record = await self._inner.get(ip)
-        await self._mutation(self._inner)
-        return record
+        return await self._inner.get(ip)
 
-    async def check(self, ip, **kwargs):
-        return await self._inner.check(ip, **kwargs)
+    async def check(self, ip, *, policy, now=None):
+        async def racing_policy():
+            resolved = await policy()
+            await self._mutation(self._inner)
+            return resolved
+
+        return await self._inner.check(ip, policy=racing_policy, now=now)
 
     async def record_failure(self, ip, **kwargs):
         return await self._inner.record_failure(ip, **kwargs)
@@ -1585,7 +1589,7 @@ async def test_check_survives_record_deleted_during_policy_resolution(throttle_s
     async def _concurrent_success(inner):
         await inner.reset(ip)
 
-    _install_throttle_store(_MutateBetweenGetAndCheck(throttle_store, _concurrent_success))
+    _install_throttle_store(_MutateDuringPolicyResolution(throttle_store, _concurrent_success))
     monkeypatch.setattr(auth_router, "_login_throttle_policy", lambda: (5, 300.0))
 
     await _check_rate_limit(ip)  # pre-fix: KeyError
@@ -1615,7 +1619,7 @@ async def test_check_never_clobbers_record_replaced_during_policy_resolution(thr
         await inner.reset(ip)
         await inner.record_failure(ip, max_attempts=2, lockout_seconds=60.0, now=_THROTTLE_T0 + 1.0)
 
-    _install_throttle_store(_MutateBetweenGetAndCheck(throttle_store, _success_then_one_failure))
+    _install_throttle_store(_MutateDuringPolicyResolution(throttle_store, _success_then_one_failure))
     monkeypatch.setattr(auth_router, "_login_throttle_policy", lambda: (2, 60.0))
 
     await _check_rate_limit(ip)  # fresh read: (1, 0, 0) < max 2 → allowed

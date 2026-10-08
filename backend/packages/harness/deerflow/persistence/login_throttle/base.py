@@ -31,8 +31,16 @@ Semantics every implementation must share (pinned by
   included), so the stored sentence always matches the policy the lock was
   last evaluated under.
 - ``reset`` forgets the IP (successful login).
-- ``get`` is the cheap existence probe the router uses to skip the policy
-  read for clean IPs; it never mutates.
+- ``check`` takes the policy as an async callable and resolves it lazily:
+  a clean IP (no record — the overwhelming majority of logins) returns
+  ``0.0`` without ever calling it, so the router's ``config.yaml`` read is
+  skipped there; a recorded IP resolves it exactly once, and the decision is
+  then made on a snapshot read *after* that resolution — the policy read is a
+  yield point, and a decision that needs no write has no compare-and-set to
+  catch a record a peer changed meanwhile. The SQL store does the probe,
+  the resolution and the decision in one session.
+- ``get`` is a non-mutating probe (tests and anchors use it); the router no
+  longer needs it because ``check`` skips the policy for clean IPs itself.
 
 ``now`` is an epoch timestamp supplied by the caller (defaulting to
 ``time.time()``) so replicas compare the same clock the lock was stamped with
@@ -41,8 +49,12 @@ and tests can freeze it.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Protocol
+
+#: Resolves ``(max_login_attempts, lockout_seconds)``; awaited by ``check`` at most once, never for a clean IP.
+LoginThrottlePolicy = Callable[[], Awaitable[tuple[int, float]]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,10 +131,11 @@ class LoginThrottleStore(Protocol):
         """Return the record for ``ip`` without mutating anything, or ``None`` for a clean IP."""
         ...
 
-    async def check(self, ip: str, *, max_attempts: int, lockout_seconds: float, now: float | None = None) -> float:
-        """Return the seconds the IP stays locked under the given policy, ``0.0`` when it may log in.
+    async def check(self, ip: str, *, policy: LoginThrottlePolicy, now: float | None = None) -> float:
+        """Return the seconds the IP stays locked under the resolved policy, ``0.0`` when it may log in.
 
-        Clears served / released locks as a side effect (see the module docstring).
+        ``policy`` is awaited at most once and never for a clean IP. Clears
+        served / released locks as a side effect (see the module docstring).
         """
         ...
 

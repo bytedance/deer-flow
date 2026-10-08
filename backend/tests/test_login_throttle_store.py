@@ -69,6 +69,27 @@ async def store(request, tmp_path) -> AsyncIterator[LoginThrottleStore]:
         await engine.dispose()
 
 
+def _policy(max_attempts: int, lockout_seconds: float) -> Callable[[], Awaitable[tuple[int, float]]]:
+    """A ``check`` policy callable for a known policy (the router wraps its config read the same way)."""
+
+    async def resolve() -> tuple[int, float]:
+        return max_attempts, lockout_seconds
+
+    return resolve
+
+
+class _CountingPolicy:
+    """Policy callable that counts how often ``check`` resolved it."""
+
+    def __init__(self, max_attempts: int, lockout_seconds: float) -> None:
+        self.calls = 0
+        self._policy = (max_attempts, lockout_seconds)
+
+    async def __call__(self) -> tuple[int, float]:
+        self.calls += 1
+        return self._policy
+
+
 async def _lock(store: LoginThrottleStore, ip: str, *, max_attempts: int = 2, lockout_seconds: float = 60.0, now: float = T0) -> LoginThrottleRecord:
     record = None
     for _ in range(max_attempts):
@@ -82,7 +103,7 @@ async def _lock(store: LoginThrottleStore, ip: str, *, max_attempts: int = 2, lo
 
 async def test_clean_ip_has_no_record_and_is_allowed(store):
     assert await store.get("192.0.2.1") is None
-    assert await store.check("192.0.2.1", max_attempts=5, lockout_seconds=300.0, now=T0) == 0.0
+    assert await store.check("192.0.2.1", policy=_policy(5, 300.0), now=T0) == 0.0
 
 
 async def test_lock_starts_when_failures_reach_max_attempts(store):
@@ -90,11 +111,11 @@ async def test_lock_starts_when_failures_reach_max_attempts(store):
     for n in range(1, 5):
         record = await store.record_failure(ip, max_attempts=5, lockout_seconds=300.0, now=T0 + n)
         assert record == LoginThrottleRecord(fail_count=n, locked_at=0.0, lock_duration=0.0)
-        assert await store.check(ip, max_attempts=5, lockout_seconds=300.0, now=T0 + n) == 0.0
+        assert await store.check(ip, policy=_policy(5, 300.0), now=T0 + n) == 0.0
     record = await store.record_failure(ip, max_attempts=5, lockout_seconds=300.0, now=T0 + 5)
     assert record == LoginThrottleRecord(fail_count=5, locked_at=T0 + 5, lock_duration=300.0)
     assert await store.get(ip) == record
-    assert await store.check(ip, max_attempts=5, lockout_seconds=300.0, now=T0 + 6) == pytest.approx(299.0)
+    assert await store.check(ip, policy=_policy(5, 300.0), now=T0 + 6) == pytest.approx(299.0)
 
 
 async def test_reset_clears_the_counter(store):
@@ -103,7 +124,7 @@ async def test_reset_clears_the_counter(store):
         await store.record_failure(ip, max_attempts=5, lockout_seconds=300.0, now=T0)
     await store.reset(ip)
     assert await store.get(ip) is None
-    assert await store.check(ip, max_attempts=5, lockout_seconds=300.0, now=T0) == 0.0
+    assert await store.check(ip, policy=_policy(5, 300.0), now=T0) == 0.0
     # Resetting an unknown IP is a no-op.
     await store.reset("203.0.113.77")
 
@@ -111,8 +132,8 @@ async def test_reset_clears_the_counter(store):
 async def test_expired_lock_is_cleared_on_check(store):
     ip = "10.0.0.3"
     await _lock(store, ip, lockout_seconds=60.0, now=T0)
-    assert await store.check(ip, max_attempts=2, lockout_seconds=60.0, now=T0 + 59.0) > 0.0
-    assert await store.check(ip, max_attempts=2, lockout_seconds=60.0, now=T0 + 61.0) == 0.0
+    assert await store.check(ip, policy=_policy(2, 60.0), now=T0 + 59.0) > 0.0
+    assert await store.check(ip, policy=_policy(2, 60.0), now=T0 + 61.0) == 0.0
     assert await store.get(ip) is None
 
 
@@ -120,8 +141,8 @@ async def test_raised_threshold_unblocks_and_keeps_the_count(store):
     """Raising max_login_attempts mid-lock immediately unblocks a lower count (#5108)."""
     ip = "10.0.0.4"
     await _lock(store, ip, max_attempts=2, lockout_seconds=60.0, now=T0)
-    assert await store.check(ip, max_attempts=2, lockout_seconds=60.0, now=T0 + 1) > 0.0
-    assert await store.check(ip, max_attempts=5, lockout_seconds=60.0, now=T0 + 1) == 0.0
+    assert await store.check(ip, policy=_policy(2, 60.0), now=T0 + 1) > 0.0
+    assert await store.check(ip, policy=_policy(5, 60.0), now=T0 + 1) == 0.0
     assert (await store.get(ip)).fail_count == 2
 
 
@@ -130,46 +151,46 @@ async def test_tightened_threshold_preserves_failures_and_locks_on_next(store):
     for _ in range(4):
         await store.record_failure(ip, max_attempts=5, lockout_seconds=60.0, now=T0)
     # Over the new threshold but never locked under it: allowed once, count kept.
-    assert await store.check(ip, max_attempts=2, lockout_seconds=60.0, now=T0 + 1) == 0.0
+    assert await store.check(ip, policy=_policy(2, 60.0), now=T0 + 1) == 0.0
     assert (await store.get(ip)).fail_count == 4
     record = await store.record_failure(ip, max_attempts=2, lockout_seconds=60.0, now=T0 + 2)
     assert record == LoginThrottleRecord(fail_count=5, locked_at=T0 + 2, lock_duration=60.0)
-    assert await store.check(ip, max_attempts=2, lockout_seconds=60.0, now=T0 + 3) > 0.0
+    assert await store.check(ip, policy=_policy(2, 60.0), now=T0 + 3) > 0.0
     await store.reset(ip)
-    assert await store.check(ip, max_attempts=2, lockout_seconds=60.0, now=T0 + 3) == 0.0
+    assert await store.check(ip, policy=_policy(2, 60.0), now=T0 + 3) == 0.0
 
 
 async def test_lowered_duration_releases_an_active_lock_early(store):
     ip = "10.0.0.6"
     await _lock(store, ip, lockout_seconds=60.0, now=T0)
-    assert await store.check(ip, max_attempts=2, lockout_seconds=60.0, now=T0 + 2) > 0.0
-    assert await store.check(ip, max_attempts=2, lockout_seconds=1.0, now=T0 + 2) == 0.0
+    assert await store.check(ip, policy=_policy(2, 60.0), now=T0 + 2) > 0.0
+    assert await store.check(ip, policy=_policy(2, 1.0), now=T0 + 2) == 0.0
     assert await store.get(ip) is None
 
 
 async def test_raised_duration_extends_an_active_lock(store):
     ip = "10.0.0.7"
     await _lock(store, ip, lockout_seconds=1.0, now=T0)
-    assert await store.check(ip, max_attempts=2, lockout_seconds=60.0, now=T0 + 0.5) == pytest.approx(59.5)
+    assert await store.check(ip, policy=_policy(2, 60.0), now=T0 + 0.5) == pytest.approx(59.5)
     # The raise was committed while the lock was active, so it outlives the original 1s.
     assert (await store.get(ip)).lock_duration == 60.0
-    assert await store.check(ip, max_attempts=2, lockout_seconds=60.0, now=T0 + 2.0) == pytest.approx(58.0)
+    assert await store.check(ip, policy=_policy(2, 60.0), now=T0 + 2.0) == pytest.approx(58.0)
 
 
 async def test_served_sentence_is_not_resurrected_by_a_later_raise(store):
     ip = "10.0.0.8"
     await _lock(store, ip, lockout_seconds=1.0, now=T0)
     # No check happened while the 1s sentence ran; raising afterwards must not revive it.
-    assert await store.check(ip, max_attempts=2, lockout_seconds=60.0, now=T0 + 2.0) == 0.0
+    assert await store.check(ip, policy=_policy(2, 60.0), now=T0 + 2.0) == 0.0
     assert await store.get(ip) is None
 
 
 async def test_lowered_then_raised_duration_is_not_resurrected(store):
     ip = "10.0.0.9"
     await _lock(store, ip, lockout_seconds=60.0, now=T0)
-    assert await store.check(ip, max_attempts=2, lockout_seconds=10.0, now=T0 + 6.0) == pytest.approx(4.0)
+    assert await store.check(ip, policy=_policy(2, 10.0), now=T0 + 6.0) == pytest.approx(4.0)
     assert (await store.get(ip)).lock_duration == 10.0
-    assert await store.check(ip, max_attempts=2, lockout_seconds=30.0, now=T0 + 20.0) == 0.0
+    assert await store.check(ip, policy=_policy(2, 30.0), now=T0 + 20.0) == 0.0
     assert await store.get(ip) is None
 
 
@@ -183,7 +204,7 @@ async def test_concurrent_failures_do_not_lose_increments(store):
 async def test_concurrent_checks_of_an_expired_lock_all_resolve_cleanly(store):
     ip = "10.0.0.11"
     await _lock(store, ip, lockout_seconds=1.0, now=T0)
-    results = await asyncio.gather(*[store.check(ip, max_attempts=2, lockout_seconds=1.0, now=T0 + 5.0) for _ in range(8)], return_exceptions=True)
+    results = await asyncio.gather(*[store.check(ip, policy=_policy(2, 1.0), now=T0 + 5.0) for _ in range(8)], return_exceptions=True)
     assert results == [0.0] * 8, results
     assert await store.get(ip) is None
 
@@ -194,7 +215,7 @@ async def test_now_defaults_to_the_wall_clock(store):
     assert record.fail_count == 1 and record.locked_at == 0.0
     record = await store.record_failure(ip, max_attempts=2, lockout_seconds=60.0)
     assert record.locked_at > T0  # a real timestamp, after this test was written
-    assert 0.0 < await store.check(ip, max_attempts=2, lockout_seconds=60.0) <= 60.0
+    assert 0.0 < await store.check(ip, policy=_policy(2, 60.0)) <= 60.0
 
 
 async def test_failures_during_an_active_lock_do_not_slide_the_sentence(store):
@@ -210,8 +231,8 @@ async def test_failures_during_an_active_lock_do_not_slide_the_sentence(store):
     for n, offset in enumerate((10.0, 20.0, 50.0), start=3):
         record = await store.record_failure(ip, max_attempts=2, lockout_seconds=60.0, now=T0 + offset)
         assert record == LoginThrottleRecord(fail_count=n, locked_at=T0, lock_duration=60.0)
-    assert await store.check(ip, max_attempts=2, lockout_seconds=60.0, now=T0 + 59.0) == pytest.approx(1.0)
-    assert await store.check(ip, max_attempts=2, lockout_seconds=60.0, now=T0 + 61.0) == 0.0  # expires at the original time
+    assert await store.check(ip, policy=_policy(2, 60.0), now=T0 + 59.0) == pytest.approx(1.0)
+    assert await store.check(ip, policy=_policy(2, 60.0), now=T0 + 61.0) == 0.0  # expires at the original time
     assert await store.get(ip) is None
 
 
@@ -219,7 +240,7 @@ async def test_failure_during_an_active_lock_keeps_the_committed_duration_not_th
     """The duration a ``check`` committed (here a lowered one) is what a later failure preserves."""
     ip = "10.0.0.21"
     await _lock(store, ip, max_attempts=2, lockout_seconds=60.0, now=T0)
-    assert await store.check(ip, max_attempts=2, lockout_seconds=10.0, now=T0 + 2.0) == pytest.approx(8.0)  # commits 10s
+    assert await store.check(ip, policy=_policy(2, 10.0), now=T0 + 2.0) == pytest.approx(8.0)  # commits 10s
     record = await store.record_failure(ip, max_attempts=2, lockout_seconds=300.0, now=T0 + 5.0)
     assert record == LoginThrottleRecord(fail_count=3, locked_at=T0, lock_duration=10.0)
 
@@ -230,7 +251,7 @@ async def test_failure_after_a_served_lock_starts_a_fresh_sentence(store):
     await _lock(store, ip, max_attempts=2, lockout_seconds=1.0, now=T0)
     record = await store.record_failure(ip, max_attempts=2, lockout_seconds=60.0, now=T0 + 5.0)
     assert record == LoginThrottleRecord(fail_count=3, locked_at=T0 + 5.0, lock_duration=60.0)
-    assert await store.check(ip, max_attempts=2, lockout_seconds=60.0, now=T0 + 6.0) == pytest.approx(59.0)
+    assert await store.check(ip, policy=_policy(2, 60.0), now=T0 + 6.0) == pytest.approx(59.0)
 
 
 async def test_raised_threshold_clears_the_lock_below_the_new_max_and_restarts_it_when_reached(store):
@@ -240,12 +261,31 @@ async def test_raised_threshold_clears_the_lock_below_the_new_max_and_restarts_i
     await _lock(store, ip, max_attempts=2, lockout_seconds=60.0, now=T0)  # (2, T0, 60)
     record = await store.record_failure(ip, max_attempts=5, lockout_seconds=60.0, now=T0 + 1.0)
     assert record == LoginThrottleRecord(fail_count=3, locked_at=0.0, lock_duration=0.0)  # counting again under the raised max
-    assert await store.check(ip, max_attempts=5, lockout_seconds=60.0, now=T0 + 1.5) == 0.0
+    assert await store.check(ip, policy=_policy(5, 60.0), now=T0 + 1.5) == 0.0
     record = await store.record_failure(ip, max_attempts=5, lockout_seconds=60.0, now=T0 + 2.0)
     assert record == LoginThrottleRecord(fail_count=4, locked_at=0.0, lock_duration=0.0)
     record = await store.record_failure(ip, max_attempts=5, lockout_seconds=60.0, now=T0 + 3.0)
     assert record == LoginThrottleRecord(fail_count=5, locked_at=T0 + 3.0, lock_duration=60.0)  # fresh lock, not the stale T0
-    assert await store.check(ip, max_attempts=5, lockout_seconds=60.0, now=T0 + 4.0) == pytest.approx(59.0)
+    assert await store.check(ip, policy=_policy(5, 60.0), now=T0 + 4.0) == pytest.approx(59.0)
+
+
+async def test_check_never_resolves_the_policy_for_a_clean_ip(store):
+    """The clean-IP skip survives the lazy policy: no record, no config read."""
+    policy = _CountingPolicy(5, 300.0)
+    assert await store.check("192.0.2.200", policy=policy, now=T0) == 0.0
+    assert policy.calls == 0
+
+
+async def test_check_resolves_the_policy_exactly_once_for_a_recorded_ip(store):
+    ip = "10.0.0.30"
+    await store.record_failure(ip, max_attempts=5, lockout_seconds=300.0, now=T0)
+    policy = _CountingPolicy(5, 300.0)
+    assert await store.check(ip, policy=policy, now=T0 + 1) == 0.0
+    assert policy.calls == 1
+    await _lock(store, ip, max_attempts=2, lockout_seconds=60.0, now=T0 + 2)
+    policy = _CountingPolicy(2, 60.0)
+    assert await store.check(ip, policy=policy, now=T0 + 3) > 0.0
+    assert policy.calls == 1
 
 
 # ── memory store specifics ──────────────────────────────────────────────────
@@ -295,6 +335,73 @@ async def test_memory_store_default_capacity_matches_the_historical_constant():
 
 
 # ── SQL store specifics ─────────────────────────────────────────────────────
+
+
+class _CountingSession:
+    """Session proxy counting ``commit()`` calls."""
+
+    def __init__(self, inner, counters: dict) -> None:
+        self._inner = inner
+        self._counters = counters
+
+    async def __aenter__(self):
+        await self._inner.__aenter__()
+        return self
+
+    async def __aexit__(self, *exc):
+        return await self._inner.__aexit__(*exc)
+
+    async def commit(self) -> None:
+        self._counters["commits"] += 1
+        await self._inner.commit()
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def _counting_store(engine: AsyncEngine) -> tuple[SqlLoginThrottleStore, dict]:
+    """A SQL store whose session factory counts sessions opened and commits issued."""
+    real = async_sessionmaker(engine, expire_on_commit=False)
+    counters = {"sessions": 0, "commits": 0}
+
+    def factory():
+        counters["sessions"] += 1
+        return _CountingSession(real(), counters)
+
+    return SqlLoginThrottleStore(factory), counters
+
+
+async def test_sql_check_opens_exactly_one_session_per_call(tmp_path):
+    """A recorded IP no longer costs two pool checkouts (probe + decision) on the unauthenticated login path."""
+    engine = await _sqlite_engine(tmp_path / "sessions.db")
+    try:
+        store, counters = _counting_store(engine)
+        ip = "10.0.0.31"
+        assert await store.check(ip, policy=_policy(5, 300.0), now=T0) == 0.0  # clean IP
+        assert counters["sessions"] == 1
+        await _lock(store, ip, max_attempts=2, lockout_seconds=60.0, now=T0)
+        counters["sessions"] = 0
+        assert await store.check(ip, policy=_policy(2, 300.0), now=T0 + 1) > 0.0  # recorded IP, duration committed
+        assert counters["sessions"] == 1
+        counters["sessions"] = 0
+        assert await store.check(ip, policy=_policy(2, 300.0), now=T0 + 2) > 0.0  # recorded IP, nothing to write
+        assert counters["sessions"] == 1
+    finally:
+        await engine.dispose()
+
+
+async def test_sql_record_failure_commits_one_transaction(tmp_path):
+    """Housekeeping rides in the upsert's transaction: one commit per failed login, not two."""
+    engine = await _sqlite_engine(tmp_path / "commits.db")
+    try:
+        store, counters = _counting_store(engine)
+        await _lock(store, "other-served-lock", lockout_seconds=1.0, now=T0 - 10.0)
+        counters["commits"] = 0
+        await store.record_failure("10.0.0.32", max_attempts=5, lockout_seconds=300.0, now=T0)
+        assert counters["commits"] == 1
+        assert await store.get("other-served-lock") is None  # the sweep still ran, inside that transaction
+    finally:
+        await engine.dispose()
 
 
 async def test_sql_record_failure_sweeps_expired_locks_and_stale_counters(tmp_path):
@@ -353,7 +460,7 @@ async def test_sql_stores_truncate_overlong_keys_consistently(tmp_path, caplog):
         assert truncation_warnings, caplog.records
         assert "400" in truncation_warnings[0] and str(LoginThrottleRow.ip.type.length) in truncation_warnings[0]
         assert key not in truncation_warnings[0]  # never log the (possibly token-like) key itself
-        assert await store.check(key, max_attempts=2, lockout_seconds=60.0, now=T0 + 1) > 0.0
+        assert await store.check(key, policy=_policy(2, 60.0), now=T0 + 1) > 0.0
         async with engine.connect() as conn:
             stored = (await conn.execute(sa.select(LoginThrottleRow.ip))).scalar_one()
         assert len(stored) == LoginThrottleRow.ip.type.length
@@ -382,11 +489,11 @@ async def test_two_sql_stores_over_one_database_share_the_lock(tmp_path):
         for _ in range(2):
             await replica_b.record_failure(ip, max_attempts=5, lockout_seconds=300.0, now=T0 + 1)
         assert (await replica_a.get(ip)).fail_count == 5
-        assert await replica_a.check(ip, max_attempts=5, lockout_seconds=300.0, now=T0 + 2) > 0.0
-        assert await replica_b.check(ip, max_attempts=5, lockout_seconds=300.0, now=T0 + 2) > 0.0
+        assert await replica_a.check(ip, policy=_policy(5, 300.0), now=T0 + 2) > 0.0
+        assert await replica_b.check(ip, policy=_policy(5, 300.0), now=T0 + 2) > 0.0
         # A successful login on one replica releases the IP everywhere.
         await replica_b.reset(ip)
-        assert await replica_a.check(ip, max_attempts=5, lockout_seconds=300.0, now=T0 + 3) == 0.0
+        assert await replica_a.check(ip, policy=_policy(5, 300.0), now=T0 + 3) == 0.0
     finally:
         await engine_a.dispose()
         await engine_b.dispose()
@@ -412,7 +519,7 @@ async def test_failure_committing_after_a_reset_counts_as_a_fresh_first_failure(
         record = await replica_b.record_failure(ip, max_attempts=5, lockout_seconds=300.0, now=T0 + 1.0)  # peer's wrong password lands after
         assert record == LoginThrottleRecord(fail_count=1, locked_at=0.0, lock_duration=0.0)
         assert await replica_a.get(ip) == record
-        assert await replica_a.check(ip, max_attempts=5, lockout_seconds=300.0, now=T0 + 2.0) == 0.0
+        assert await replica_a.check(ip, policy=_policy(5, 300.0), now=T0 + 2.0) == 0.0
     finally:
         await engine_a.dispose()
         await engine_b.dispose()
@@ -424,8 +531,8 @@ async def test_two_memory_stores_do_not_share_the_lock():
     ip = "198.51.100.8"
     for _ in range(5):
         await replica_a.record_failure(ip, max_attempts=5, lockout_seconds=300.0, now=T0)
-    assert await replica_a.check(ip, max_attempts=5, lockout_seconds=300.0, now=T0 + 1) > 0.0
-    assert await replica_b.check(ip, max_attempts=5, lockout_seconds=300.0, now=T0 + 1) == 0.0
+    assert await replica_a.check(ip, policy=_policy(5, 300.0), now=T0 + 1) > 0.0
+    assert await replica_b.check(ip, policy=_policy(5, 300.0), now=T0 + 1) == 0.0
     assert await replica_b.get(ip) is None
 
 
@@ -518,7 +625,7 @@ async def test_postgres_sweep_keeps_a_lock_extended_by_a_concurrent_check():
             await sweeping
 
         assert await replica_a.get(ip) == LoginThrottleRecord(fail_count=2, locked_at=T0, lock_duration=60.0)
-        assert await replica_b.check(ip, max_attempts=2, lockout_seconds=60.0, now=T0 + 2.0) == pytest.approx(58.0)
+        assert await replica_b.check(ip, policy=_policy(2, 60.0), now=T0 + 2.0) == pytest.approx(58.0)
         assert (await replica_b.get("203.0.113.5")).fail_count == 1  # the sweeping failure was still counted
     finally:
         async with engine_a.begin() as conn:
@@ -596,10 +703,12 @@ async def test_check_recommits_a_raised_duration_after_a_concurrent_increment(tm
             await replica_b.record_failure(ip, max_attempts=5, lockout_seconds=1.0, now=T0 + 0.5)
 
         replica_a, state = _racing_store(engine_a, peer_failure)
-        assert await replica_a.check(ip, max_attempts=5, lockout_seconds=60.0, now=T0 + 0.5) == pytest.approx(59.5)
+        policy = _CountingPolicy(5, 60.0)
+        assert await replica_a.check(ip, policy=policy, now=T0 + 0.5) == pytest.approx(59.5)
         assert state["fired"] == 1
+        assert policy.calls == 1  # resolved once, even though the compare-and-set retried
         assert await replica_b.get(ip) == LoginThrottleRecord(fail_count=6, locked_at=T0, lock_duration=60.0)  # increment kept, extension committed
-        assert await replica_b.check(ip, max_attempts=5, lockout_seconds=60.0, now=T0 + 2.0) == pytest.approx(58.0)
+        assert await replica_b.check(ip, policy=_policy(5, 60.0), now=T0 + 2.0) == pytest.approx(58.0)
     finally:
         await engine_a.dispose()
         await engine_b.dispose()
@@ -617,10 +726,10 @@ async def test_check_recommits_a_lowered_duration_after_a_concurrent_increment(t
             await replica_b.record_failure(ip, max_attempts=5, lockout_seconds=60.0, now=T0 + 6.0)
 
         replica_a, state = _racing_store(engine_a, peer_failure)
-        assert await replica_a.check(ip, max_attempts=5, lockout_seconds=10.0, now=T0 + 6.0) == pytest.approx(4.0)
+        assert await replica_a.check(ip, policy=_policy(5, 10.0), now=T0 + 6.0) == pytest.approx(4.0)
         assert state["fired"] == 1
         assert await replica_b.get(ip) == LoginThrottleRecord(fail_count=6, locked_at=T0, lock_duration=10.0)  # the decrease is committed
-        assert await replica_b.check(ip, max_attempts=5, lockout_seconds=30.0, now=T0 + 12.0) == 0.0  # 10s sentence served; not resurrected
+        assert await replica_b.check(ip, policy=_policy(5, 30.0), now=T0 + 12.0) == 0.0  # 10s sentence served; not resurrected
     finally:
         await engine_a.dispose()
         await engine_b.dispose()
@@ -639,7 +748,7 @@ async def test_check_releases_early_on_the_fresh_row_after_a_concurrent_incremen
 
         replica_a, state = _racing_store(engine_a, peer_failure)
         # Lowered to 10s and 20s have passed: release early — on the row as it is now.
-        assert await replica_a.check(ip, max_attempts=5, lockout_seconds=10.0, now=T0 + 20.0) == 0.0
+        assert await replica_a.check(ip, policy=_policy(5, 10.0), now=T0 + 20.0) == 0.0
         assert state["fired"] == 1
         assert await replica_b.get(ip) is None
     finally:
@@ -660,7 +769,7 @@ async def test_check_allows_when_a_reset_lands_between_read_and_write(tmp_path):
             await replica_b.reset(ip)
 
         replica_a, state = _racing_store(engine_a, peer_success)
-        assert await replica_a.check(ip, max_attempts=5, lockout_seconds=60.0, now=T0 + 0.5) == 0.0
+        assert await replica_a.check(ip, policy=_policy(5, 60.0), now=T0 + 0.5) == 0.0
         assert state["fired"] == 1
         assert await replica_b.get(ip) is None
     finally:
@@ -686,11 +795,12 @@ async def test_check_fails_closed_when_the_compare_and_set_keeps_missing(tmp_pat
 
         replica_a, state = _racing_store(engine_a, peer_failure, every_time=True)
         with caplog.at_level(logging.DEBUG, logger="deerflow.persistence.login_throttle.sql"):
-            remaining = await replica_a.check(ip, max_attempts=5, lockout_seconds=60.0, now=T0 + 0.5)
+            remaining = await replica_a.check(ip, policy=_policy(5, 60.0), now=T0 + 0.5)
         assert remaining == pytest.approx(59.5)  # locked snapshot under the live 60s policy: fail closed
-        assert state["fired"] == CHECK_CAS_ATTEMPTS
+        # One probe read before the policy is resolved, then one read per compare-and-set attempt.
+        assert state["fired"] == 1 + CHECK_CAS_ATTEMPTS
         # Nothing was committed by the losing checks; every peer increment survived.
-        assert await replica_b.get(ip) == LoginThrottleRecord(fail_count=5 + CHECK_CAS_ATTEMPTS, locked_at=T0, lock_duration=1.0)
+        assert await replica_b.get(ip) == LoginThrottleRecord(fail_count=5 + 1 + CHECK_CAS_ATTEMPTS, locked_at=T0, lock_duration=1.0)
         assert any("compare-and-set" in r.message for r in caplog.records if r.levelno == logging.DEBUG)
     finally:
         await engine_a.dispose()

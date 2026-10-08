@@ -11,9 +11,13 @@ Concurrency contract:
   same statement, so racing failures never lose an increment and the
   "count reached ``max_attempts``" decision is made on the row's own value,
   not on a value read earlier.
-- ``check`` reads the row in one short transaction and applies its decision
-  (clear a served lock, commit a changed sentence) with a compare-and-set
-  predicate on the snapshot it decided on, in a *separate* write transaction.
+- ``check`` works in one session (one pool checkout): it probes the row and
+  returns for a clean IP before resolving the policy, resolves the policy
+  exactly once otherwise, then re-reads the row — the policy read is a yield
+  point and a decision that needs no write has no compare-and-set to catch a
+  row a peer changed meanwhile — and applies its decision (clear a served
+  lock, commit a changed sentence) with a compare-and-set predicate on the
+  snapshot it decided on, in a *separate* write transaction.
   Keeping the read transaction out of the write avoids SQLite's read→write
   upgrade (``SQLITE_BUSY`` / ``BUSY_SNAPSHOT`` under contention) while the
   predicate guarantees a racing success or failure is never clobbered — the
@@ -31,8 +35,13 @@ Concurrency contract:
 - Cleanup is amortized into ``record_failure``: a bounded ``DELETE`` removes
   locks whose sentence has elapsed and never-locked counters idle for
   :data:`STALE_COUNTER_SECONDS` (the shared-table equivalent of the memory
-  store's capacity eviction) so the table cannot grow without bound. The
-  candidates come from an ``IN (SELECT ... LIMIT n)`` subquery bound to the
+  store's capacity eviction) so the table cannot grow without bound. It runs
+  in the upsert's own transaction — one commit (one WAL flush on PostgreSQL)
+  per failed login, not two; the ``keep`` exclusion protects the row being
+  recorded — and ``ix_login_throttle_updated_at`` serves its stale-counter
+  predicate, while the served-lock predicate (``locked_at +
+  lock_duration_seconds <= now``) scans a table the sweep itself keeps
+  small. The candidates come from an ``IN (SELECT ... LIMIT n)`` subquery bound to the
   statement snapshot, and the same expiry predicate is repeated on the
   ``DELETE`` target: PostgreSQL READ COMMITTED re-evaluates only the
   statement's *own* WHERE on a row it had to wait for, so without the outer
@@ -80,7 +89,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from deerflow.persistence.login_throttle.base import LoginThrottleRecord, evaluate_check
+from deerflow.persistence.login_throttle.base import LoginThrottlePolicy, LoginThrottleRecord, evaluate_check
 from deerflow.persistence.login_throttle.model import LOGIN_THROTTLE_IP_LENGTH, LoginThrottleRow
 
 logger = logging.getLogger(__name__)
@@ -134,11 +143,19 @@ class SqlLoginThrottleStore:
             row = (await session.execute(self._select(_key(ip)))).first()
         return None if row is None else _record(*row)
 
-    async def check(self, ip: str, *, max_attempts: int, lockout_seconds: float, now: float | None = None) -> float:
+    async def check(self, ip: str, *, policy: LoginThrottlePolicy, now: float | None = None) -> float:
         key = _key(ip)
         now = time.time() if now is None else now
-        record: LoginThrottleRecord | None = None
         async with self._sf() as session:
+            # Probe first: a clean IP never pays the policy read (the router's
+            # config.yaml stat + hash) nor a second query.
+            record = await self._read_snapshot(session, key)
+            if record is None:
+                return 0.0
+            max_attempts, lockout_seconds = await policy()
+            # The policy read yielded the loop; decide on a snapshot taken after
+            # it (a decision that needs no write has no compare-and-set to catch
+            # a row a peer changed meanwhile). Same session, same pool checkout.
             for _attempt in range(CHECK_CAS_ATTEMPTS):
                 record = await self._read_snapshot(session, key)
                 if record is None:
@@ -159,7 +176,6 @@ class SqlLoginThrottleStore:
                 # extension or decrease is committed on it).
         # Sustained contention exhausted the bound. Nothing was written; fail
         # closed on the last snapshot under the live policy.
-        assert record is not None
         remaining = max(0.0, record.locked_at + lockout_seconds - now) if record.locked else 0.0
         logger.debug("Login throttle check gave up after %d compare-and-set misses on a contended row; reporting %.1fs remaining from the last snapshot without writing.", CHECK_CAS_ATTEMPTS, remaining)
         return remaining
@@ -169,7 +185,9 @@ class SqlLoginThrottleStore:
         now = time.time() if now is None else now
         stamp = _timestamp(now)
         async with self._sf() as session:
-            await self._sweep(session, now, keep=key)
+            # Housekeeping rides in the upsert's transaction (one commit per
+            # failed login); ``keep`` leaves this IP's row to the upsert below.
+            await session.execute(self.sweep_statement(now, keep=key))
             insert = _insert_for(session)
             # One atomic decision on the row's own values (see the module
             # docstring): below the threshold -> counting, lock cleared; at or
@@ -266,8 +284,3 @@ class SqlLoginThrottleStore:
         victims = select(LoginThrottleRow.ip).where(candidates).limit(SWEEP_BATCH_SIZE)
         target = cls._expired(now) if keep is None else and_(LoginThrottleRow.ip != keep, cls._expired(now))
         return delete(LoginThrottleRow).where(LoginThrottleRow.ip.in_(victims), target)
-
-    async def _sweep(self, session: AsyncSession, now: float, *, keep: str) -> None:
-        """Bounded cleanup of served locks and stale never-locked counters, leaving ``keep`` to the upsert."""
-        await session.execute(self.sweep_statement(now, keep=keep))
-        await session.commit()

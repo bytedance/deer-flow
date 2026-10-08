@@ -24,6 +24,7 @@ REVISION = "0035_login_throttle"
 PREVIOUS = "0034_run_event_seq_watermark"
 TABLE = "login_throttle"
 COLUMNS = {"ip", "fail_count", "locked_at", "lock_duration_seconds", "updated_at"}
+INDEX = "ix_login_throttle_updated_at"
 pytestmark = pytest.mark.asyncio
 
 
@@ -57,6 +58,7 @@ async def _shape(engine) -> dict:
                 "tables": tables,
                 "columns": {col["name"]: col for col in inspector.get_columns(TABLE)},
                 "pk": inspector.get_pk_constraint(TABLE)["constrained_columns"],
+                "indexes": {index["name"]: index["column_names"] for index in inspector.get_indexes(TABLE)},
             }
 
         return await conn.run_sync(read)
@@ -98,6 +100,7 @@ async def test_0035_creates_the_table_matching_the_orm_and_downgrades_cleanly(tm
         assert shape["columns"]["locked_at"]["nullable"] is True
         assert shape["columns"]["lock_duration_seconds"]["nullable"] is True
         assert shape["columns"]["updated_at"]["nullable"] is False
+        assert shape["indexes"][INDEX] == ["updated_at"]  # serves the sweep's stale-counter predicate
         # ``make migrate-rev`` would propose nothing: the revision matches the ORM model.
         assert await _orm_diff(engine) == []
 
@@ -111,11 +114,18 @@ async def test_0035_creates_the_table_matching_the_orm_and_downgrades_cleanly(tm
         assert tuple(row) == (5, 1_700_000_000.5, 300.0)
 
         await asyncio.to_thread(command.downgrade, cfg, PREVIOUS)
-        assert TABLE not in (await _shape(engine))["tables"]
+        shape = await _shape(engine)
+        assert TABLE not in shape["tables"]
+        async with engine.connect() as conn:
+            # The index goes with the table on downgrade (named, so a leftover would be visible).
+            leftover = await conn.run_sync(lambda sync: [name for table in sa.inspect(sync).get_table_names() for name in {index["name"] for index in sa.inspect(sync).get_indexes(table)} if name == INDEX])
+        assert leftover == []
 
         # Downgrade then upgrade again is clean.
         await asyncio.to_thread(command.upgrade, cfg, REVISION)
-        assert TABLE in (await _shape(engine))["tables"]
+        shape = await _shape(engine)
+        assert TABLE in shape["tables"]
+        assert INDEX in shape["indexes"]
     finally:
         if schema:
             async with engine.begin() as conn:
@@ -134,10 +144,13 @@ async def test_0035_completes_a_partially_applied_upgrade(tmp_path, backend):
                 await conn.execute(sa.text(f'CREATE SCHEMA "{schema}"'))
         await asyncio.to_thread(command.upgrade, cfg, PREVIOUS)
         async with engine.begin() as conn:
+            # The table exists but its index was never built (an interrupted earlier attempt).
             await conn.run_sync(Base.metadata.create_all, tables=[LoginThrottleRow.__table__])
+            await conn.execute(sa.text(f"DROP INDEX {INDEX}"))
             await conn.execute(sa.insert(LoginThrottleRow).values(ip="203.0.113.9", fail_count=2, updated_at=sa.func.now()))
 
         await asyncio.to_thread(command.upgrade, cfg, REVISION)
+        assert INDEX in (await _shape(engine))["indexes"]  # the partial upgrade is completed
         async with engine.connect() as conn:
             assert (await conn.execute(sa.text(f"SELECT fail_count FROM {TABLE} WHERE ip='203.0.113.9'"))).scalar_one() == 2
             assert (await conn.execute(sa.text("SELECT version_num FROM alembic_version"))).scalar_one() == REVISION
@@ -162,6 +175,7 @@ async def test_bootstrap_provisions_the_table_on_an_empty_database_and_is_idempo
         await bootstrap.bootstrap_schema(engine, backend="sqlite")
         shape = await _shape(engine)
         assert set(shape["columns"]) == COLUMNS
+        assert INDEX in shape["indexes"]
         async with engine.connect() as conn:
             assert (await conn.execute(sa.text("SELECT version_num FROM alembic_version"))).scalar_one() == REVISION
     finally:
