@@ -694,6 +694,9 @@
 
 ### 修复
 
+- **技能：** `/技能名` 激活现在在模型调用重试时不再丢失。此前激活在调用模型之前就被标记为已完成，因此调用失败
+  （限流、过载、超时）或返回空响应而重试时，重试请求不再包含 `SKILL.md` 正文，而该技能的工具限制仍然生效。现在重试
+  会携带与首次尝试相同的激活内容，不会重新读取技能或重复记录激活，重试得到的响应也保留技能使用记录。([#6506])
 - **持久化：** `scripts/migrate_user_isolation.py` 现在会把每个 legacy 线程移动到其所属用户下。此前脚本在
   `{base_dir}/deer-flow.db` 中查找线程归属，而 DeerFlow 从不创建这个文件（数据库是 `{sqlite_dir}/deerflow.db`
   或 PostgreSQL），因此归属映射始终为空，所有 legacy 线程都被移到 `users/default/`。现在归属从 `config.yaml`
@@ -721,6 +724,10 @@
   同步检查点保存器定义了异步方法，但调用时会抛出 `NotImplementedError`，而目标读写只要异步方法存在就会调用它，因此
   `/goal` 只会显示 "Could not set goal."，`get_goal`/`set_goal`/`clear_goal` 则直接抛出异常。现在目标读写在这类保存器上
   会改用同步方法。Web UI 不受影响。([#6448])
+- **mcp：** 配置了 `task_toolsets` 的 MCP 服务器在工具发现时无法连接或超时，不再导致所有 MCP 工具丢失。此前发现阶段以空
+  工具列表跳过失败的服务器，随后任务工具集检查把它的 submit、status、cancel 工具报告为缺失，抛出的错误连同所有正常服务器
+  的工具一起丢弃；由于缓存从未发布，每次构建智能体都会重新发现全部服务器，重启 stdio 服务器并重新请求 OAuth 令牌。现在发现
+  失败的服务器与其他失败服务器一样被跳过；已应答但缺少所配置工具的服务器仍按配置错误处理。([#6481])
 - **前端：** 侧边对话发送失败时不再清空输入框。侧边对话的提交处理在弹出错误提示后仍以成功返回，输入框据此视为成功，
   因此在创建侧边对话或上传附件失败时，已输入的文字和附件都会丢失；发往新侧边对话的第一条消息也会在排队时（实际发送前）
   就被清空。现在提交处理会在提示后抛出错误，排队的首条发送也以其自身结果完成提交，因此草稿会保留以便重试，只有消息
@@ -7523,3 +7530,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6441]: https://github.com/bytedance/deer-flow/pull/6441
 [#6448]: https://github.com/bytedance/deer-flow/pull/6448
 [#6450]: https://github.com/bytedance/deer-flow/pull/6450
+[#6481]: https://github.com/bytedance/deer-flow/pull/6481
+[#6506]: https://github.com/bytedance/deer-flow/pull/6506

@@ -1527,3 +1527,41 @@ class TestLazyInitializationFailure:
 
         assert len(calls) == 1
         assert cache_module._cache_initialized is True
+
+
+def test_failed_task_server_discovery_publishes_healthy_tools_once(cache_globals, monkeypatch, tmp_path):
+    """An unreachable task-enabled server must not leave the cache uninitialized."""
+    from langchain_core.tools import StructuredTool
+
+    cfg = tmp_path / "extensions_config.json"
+    toolset = {"name": "reports", "submit_tool": "submit_report", "status_tool": "get_report_status", "cancel_tool": "cancel_report"}
+    _write_extensions_config(
+        cfg,
+        {
+            "healthy": {"type": "http", "url": "http://healthy.invalid/mcp"},
+            "reports": {"type": "http", "url": "http://reports.invalid/mcp", "task_toolsets": [toolset]},
+        },
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+    discovered: list[str] = []
+
+    class FakeClient:
+        def __init__(self, connections, *, callbacks=None, tool_interceptors=None, tool_name_prefix=False):
+            self.callbacks = callbacks
+            self.tool_interceptors = tool_interceptors or []
+
+        async def get_tools(self, *, server_name=None):
+            discovered.append(server_name)
+            if server_name == "reports":
+                raise ConnectionError("reports is down")
+            return [StructuredTool.from_function(lambda: "ok", name="healthy_search", description="search")]
+
+    monkeypatch.setattr("langchain_mcp_adapters.client.MultiServerMCPClient", FakeClient)
+
+    first = cache_module.get_cached_mcp_tools()
+    second = cache_module.get_cached_mcp_tools()
+
+    assert [tool.name for tool in first] == ["healthy_search"]
+    assert second == first
+    assert cache_module._cache_initialized is True
+    assert sorted(discovered) == ["healthy", "reports"]

@@ -804,6 +804,31 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **skills:** A `/skill-name` activation now survives a retried model call. The
+  activation was marked as done before the model was called, so when the call
+  failed (rate limit, overload, timeout) or came back empty and was retried, the
+  retry went out without the `SKILL.md` body while the skill's tool restrictions
+  still applied. The retry now carries the same reminder as the first attempt,
+  without re-reading the skill or recording a second activation, and the retried
+  response keeps the skill-usage record. ([#6506])
+- **skills:** Skill changes made through one Gateway replica now reach the
+  skill list in every other replica's system prompt. `SkillStorage` rescans
+  disk on every call, but the prompt layer caches the enabled-skills list and
+  the rendered `<skill_system>` section per process, and installing, editing,
+  deleting, rolling back or toggling a skill (and `POST /api/skills/reload`)
+  only refreshed the process that handled the request, so with several
+  uvicorn workers or several Pods sharing one home volume the other replicas
+  kept offering the old skills until they restarted. Every one of those
+  mutations now also publishes `.extensions_config.json.skills-cache-reset.json`
+  beside the shared `extensions_config.json`, with the same atomic replace and
+  cross-process locks the config uses, and every cache lookup compares that
+  marker's signature at most once per second before serving a cached entry; a
+  marker scoped to one user's custom skills retires only that user's entries.
+  `/api/skills/reload` reports `scope: shared_config` when the marker was
+  written and `scope: process` when no extensions config path resolves, so
+  operators no longer need to call it on every Pod or worker separately. The
+  MCP cache reset's marker now shares the same `deerflow.config.shared_reset_marker`
+  helper. ([#6495])
 - **persistence:** `scripts/migrate_user_isolation.py` now moves each legacy
   thread to the user who owns it. It looked for thread owners in
   `{base_dir}/deer-flow.db`, a file DeerFlow never creates (the database is
@@ -880,6 +905,15 @@ This release closes that milestone with **439 merged pull requests**.
   goal." and `get_goal`/`set_goal`/`clear_goal` raised. The goal helpers now
   fall back to the synchronous methods for those savers. The web UI was not
   affected. ([#6448])
+- **mcp:** An MCP server with `task_toolsets` that is unreachable or times out
+  during tool discovery no longer removes every MCP tool. Discovery skipped the
+  failed server with an empty tool list, the task-toolset check then reported
+  its submit, status and cancel tools as missing, and the resulting error
+  discarded the tools of every healthy server. Because the cache was never
+  published, each agent build repeated discovery for all servers, respawning
+  stdio servers and re-requesting OAuth tokens. A server whose discovery fails
+  is now skipped like any other failed server; a server that answers without
+  its configured tools still fails as a configuration error. ([#6481])
 - **frontend:** A failed side-chat send no longer clears the composer. The side
   chat's submit handler showed the error toast and then resolved, which the
   composer treats as success, so the typed text and attachments were lost when
@@ -9192,3 +9226,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6447]: https://github.com/bytedance/deer-flow/pull/6447
 [#6448]: https://github.com/bytedance/deer-flow/pull/6448
 [#6450]: https://github.com/bytedance/deer-flow/pull/6450
+[#6481]: https://github.com/bytedance/deer-flow/pull/6481
+[#6495]: https://github.com/bytedance/deer-flow/pull/6495
+[#6506]: https://github.com/bytedance/deer-flow/pull/6506

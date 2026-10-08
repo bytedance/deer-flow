@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import threading
-import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,6 +12,7 @@ from langchain_core.tools import BaseTool
 
 from deerflow.config.file_signature import ConfigSignature as _ConfigSignature
 from deerflow.config.file_signature import get_config_signature as _get_config_signature
+from deerflow.config.shared_reset_marker import SharedResetMarker
 from deerflow.mcp.config_normalization import normalize_mcp_interceptor_paths, normalize_mcp_server_config
 
 logger = logging.getLogger(__name__)
@@ -126,19 +126,20 @@ _cache_reset_marker_signature: _ConfigSignature | None = None
 # a binding still leaves a baseline that can retire the residual server.
 _applied_mcp_revision: _AppliedMcpRevision | None = None
 
+#: ``.<extensions config name>.mcp-cache-reset.json`` beside the resolved config.
+#: The generic marker/tracker contract lives in ``deerflow.config.shared_reset_marker``
+#: and is shared with the skills prompt-cache reset.
+MCP_CACHE_RESET_MARKER = SharedResetMarker("mcp-cache-reset")
+
 
 def _cache_reset_marker_path(config_path: Path) -> Path:
     """Return the shared reset marker colocated with the extensions config."""
-    path = Path(config_path)
-    target = path.resolve(strict=False) if path.is_symlink() else path
-    return target.parent / f".{target.name}.mcp-cache-reset.json"
+    return MCP_CACHE_RESET_MARKER.path_for(config_path)
 
 
 def _current_cache_reset_marker_signature(config_path: Path | None) -> _ConfigSignature | None:
     """Return the current shared-reset marker signature, if one exists."""
-    if config_path is None:
-        return None
-    return _get_config_signature(_cache_reset_marker_path(config_path))
+    return MCP_CACHE_RESET_MARKER.current_signature(config_path)
 
 
 def _resolve_config_path() -> Path | None:
@@ -1003,19 +1004,10 @@ def publish_mcp_tools_cache_reset() -> str | None:
         reset_mcp_tools_cache()
         return None
 
-    from deerflow.config.extensions_config import (
-        atomic_write_extensions_config,
-        extensions_config_file_lock,
-        extensions_config_write_lock,
-    )
-
-    generation = uuid.uuid4().hex
-    marker_path = _cache_reset_marker_path(config_path)
-    with extensions_config_write_lock, extensions_config_file_lock(config_path):
-        atomic_write_extensions_config(
-            marker_path,
-            {"version": 1, "generation": generation},
-        )
+    # The marker is replaced atomically under ``extensions_config_write_lock``
+    # and the cross-process ``extensions_config_file_lock``, the same discipline
+    # every ``extensions_config.json`` writer follows.
+    generation = MCP_CACHE_RESET_MARKER.publish(config_path)
 
     # Publish-before-retire is intentional.  A successful API response must
     # never mean only the handling worker was refreshed; if publication fails,

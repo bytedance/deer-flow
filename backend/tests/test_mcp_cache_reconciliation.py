@@ -1349,7 +1349,7 @@ async def test_stale_binding_error_without_supersession_is_not_swallowed(reconci
 
 @pytest.mark.asyncio
 async def test_applied_baseline_never_carries_resolved_credentials(reconciler, monkeypatch, tmp_path):
-    """The connection-identity baseline exposes no resolved credentials.the connection-identity baseline exposes no resolved credentials.
+    """The connection-identity baseline exposes no resolved credentials.
 
     ``effective_snapshot`` necessarily holds the resolved MCP slice (it is the
     same string the published baseline records), so it is excluded from repr to
