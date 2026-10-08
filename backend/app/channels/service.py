@@ -546,6 +546,12 @@ class ChannelService:
             channel = channel_cls(bus=self.bus, config=config)
             self._channels[name] = channel
             await channel.start()
+            # A concurrent service stop may finish while channel.start() is
+            # suspended, removing this instance before it subscribes. Drain
+            # the late-started transport rather than leaving an orphan.
+            if self._stopping or not self._running:
+                await self._stop_and_discard_channel(name, channel)
+                return False
             if not channel.is_running:
                 logger.error("Channel did not enter a running state after start()")
                 await self._stop_and_discard_channel(name, channel)
