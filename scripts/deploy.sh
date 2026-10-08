@@ -118,7 +118,25 @@ if [ -z "$DEER_FLOW_HOME" ]; then
     export DEER_FLOW_HOME="$REPO_ROOT/backend/.deer-flow"
 fi
 echo -e "${BLUE}DEER_FLOW_HOME=$DEER_FLOW_HOME${NC}"
-mkdir -p "$DEER_FLOW_HOME"
+mkdir -p "$DEER_FLOW_HOME" 2>/dev/null || true
+
+# ── State-dir writability preflight (#6462) ─────────────────────────────────
+# The dev stack (docker-compose-dev.yaml) bind-mounts backend/ into its
+# root-privileged gateway, which creates backend/.deer-flow root-owned on the
+# host. `make up` then dies with a bare "Permission denied" at the
+# BETTER_AUTH_SECRET persistence step — and so does `make down` when the
+# secret files are missing, because the generation block is not down-guarded
+# (unlike DEER_FLOW_INTERNAL_AUTH_TOKEN). Fail fast with the exact recovery
+# command instead. When both secret files are already readable no write is
+# pending, so read-only invocations (e.g. `down` with persisted secrets) keep
+# working against a non-writable directory, exactly as before.
+if { [ ! -r "$DEER_FLOW_HOME/.better-auth-secret" ] || [ ! -r "$DEER_FLOW_HOME/.internal-auth-token" ]; } && [ ! -w "$DEER_FLOW_HOME" ]; then
+    echo -e "${RED}✗ $DEER_FLOW_HOME is not writable by $(id -un) — deployment secrets cannot be persisted." >&2
+    echo    "  Typical cause: the dev stack (make docker-start) created this directory as root." >&2
+    echo    "  Recovery:" >&2
+    echo    "    sudo chown -R $(id -u):$(id -g) \"$DEER_FLOW_HOME\"" >&2
+    exit 1
+fi
 
 # ── DEER_FLOW_REPO_ROOT (for skills host path in DooD) ───────────────────────
 
