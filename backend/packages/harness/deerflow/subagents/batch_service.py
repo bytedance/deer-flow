@@ -64,6 +64,7 @@ class SubagentBatchService:
         self._stop = asyncio.Event()
         self._poller: asyncio.Task[None] | None = None
         self._stopping = False
+        self._stop_drains = 0
         self._executions: dict[str, asyncio.Task[None]] = {}
         self._execution_ids: dict[str, str] = {}
         self._item_batches: dict[str, str] = {}
@@ -79,6 +80,7 @@ class SubagentBatchService:
     async def stop(self) -> None:
         # Keep poller ownership visible until the entire drain finishes.
         # Otherwise start() could create a fresh poller during this await.
+        self._stop_drains += 1
         self._stopping = True
         self._stop.set()
         poller = self._poller
@@ -106,7 +108,9 @@ class SubagentBatchService:
         self._item_batches.clear()
         if self._poller is poller:
             self._poller = None
-        self._stopping = False
+        self._stop_drains -= 1
+        if self._stop_drains == 0:
+            self._stopping = False
 
     async def _run(self) -> None:
         while not self._stop.is_set():
