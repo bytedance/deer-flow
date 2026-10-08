@@ -25,9 +25,12 @@ def once_run_still_scheduled(task: ScheduledTaskRow, occurrence: ScheduledTaskRu
     time it must not consume that run, so the parent keeps its status rather
     than taking the once outcome. ``next_run_at`` holds the run time only
     while it was still ahead at the trial's launch; the launch write (or the
-    projection repairing it) clears it otherwise.
+    projection repairing it) clears it otherwise. Always False for a recurring
+    task, whose ``next_run_at`` is set between runs. The launch path, which
+    has no occurrence row yet, encodes the same rule in
+    ``ScheduledTaskService._task_status_for_launch``.
     """
-    return occurrence.trigger == "manual" and task.next_run_at is not None
+    return task.schedule_type == "once" and occurrence.trigger == "manual" and task.next_run_at is not None
 
 
 def account_launch(task: ScheduledTaskRow, occurrence: ScheduledTaskRunRow, run_id: str) -> bool:

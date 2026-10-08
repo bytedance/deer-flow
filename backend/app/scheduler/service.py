@@ -449,7 +449,10 @@ class ScheduledTaskService:
         # would stick if the run fails or the process dies (startup
         # reconciliation is cancel_stuck_once_tasks). A manual trial before
         # the run time (``next_at`` still set) is not that run: like a failed
-        # trial, it must not consume the task's scheduled future.
+        # trial, it must not consume the task's scheduled future. Keep this in
+        # step with projection.once_run_still_scheduled, which applies the same
+        # rule when the trial finalizes; if they disagree, a trial parks the
+        # task in "running" and the stuck-once recovery ends up owning it.
         if task["schedule_type"] == "once" and (trigger != "manual" or next_at is None):
             return "running"
         if trigger == "manual" and task.get("status") == "paused":

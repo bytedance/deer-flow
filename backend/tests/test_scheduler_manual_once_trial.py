@@ -17,7 +17,10 @@ from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs import ScheduledTaskRunRepository
+from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
+from deerflow.persistence.scheduled_task_runs.projection import once_run_still_scheduled
 from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
+from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 from deerflow.runtime import RunStatus
 from deerflow.runtime.runs.manager import RunRecord
 from deerflow.runtime.runs.schemas import DisconnectMode
@@ -227,3 +230,14 @@ async def test_trial_after_run_time_still_finalizes_the_once_task(repos):
 
     after = await tasks.get(TASK_ID, user_id=OWNER)
     assert (after["status"], after["next_run_at"]) == ("completed", None)
+
+
+@pytest.mark.parametrize(
+    ("schedule_type", "trigger", "expected"),
+    [("once", "manual", True), ("once", "scheduled", False), ("cron", "manual", False), ("interval", "manual", False)],
+)
+def test_once_run_still_scheduled_applies_only_to_once_trials(schedule_type, trigger, expected):
+    """A recurring task always has a next run, so the rule must not read that as a pending once run."""
+    task = ScheduledTaskRow(schedule_type=schedule_type, next_run_at=datetime.now(UTC) + timedelta(days=1))
+    occurrence = ScheduledTaskRunRow(trigger=trigger)
+    assert once_run_still_scheduled(task, occurrence) is expected
