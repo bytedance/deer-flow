@@ -652,6 +652,36 @@ export function flattenThreadHistoryPages(
   );
 }
 
+/** Read persisted history independently of the loaded UI and compacted state. */
+export async function fetchThreadExportMessages(threadId: string) {
+  const pages: ThreadMessagesPageResponse[] = [];
+  let beforeSeq: number | undefined;
+  do {
+    const response = await fetch(
+      buildThreadMessagesPageUrl(getBackendBaseURL(), threadId, beforeSeq),
+    );
+    if (!response.ok) {
+      throw new Error("Failed to load conversation for export.");
+    }
+    const page = parseThreadMessagesPageResponse(await response.json());
+    const next = getThreadHistoryNextPageParam(page);
+    if (
+      next !== undefined &&
+      (page.data.length === 0 ||
+        next !== page.data[0]?.seq ||
+        (beforeSeq !== undefined && next >= beforeSeq))
+    ) {
+      throw new Error("Thread export history cursor did not advance.");
+    }
+    pages.push(page);
+    beforeSeq = next;
+  } while (beforeSeq !== undefined);
+  return buildVisibleHistoryMessages(
+    flattenThreadHistoryPages(pages),
+    new Set<string>(),
+  );
+}
+
 /**
  * Preserve rows that this client has already loaded while newest-first cursor
  * pages move forward during a long run.

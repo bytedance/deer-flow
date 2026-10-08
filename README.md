@@ -779,6 +779,11 @@ Signed-in users' notification toggle, default model, conversation mode, and reas
 In a new chat, the submitted question stays above its streamed reasoning and
 tool steps while the server creates the conversation and confirms the message.
 
+Markdown and JSON conversation exports from the chat header or sidebar read all
+persisted history pages, including earlier turns outside the loaded view or
+compacted model context. A failed history read stops the export instead of
+downloading a partial transcript. Public demos export their bundled messages.
+
 Capability Center groups plugins by office collaboration, documents and knowledge, search and research, business and data, and development and operations. The directory includes setup references alongside existing MCP configurations and Lark. Recommended integrations and built-in support do not imply an installed or verified connection; the Installed filter shows configured MCP entries and installed Lark only.
 
 Personal MCP connections configured in the web interface are persisted per user.

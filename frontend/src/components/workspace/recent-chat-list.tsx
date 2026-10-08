@@ -56,6 +56,7 @@ import { useLocalSettings } from "@/core/settings";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 import { exportThread, type ThreadExportFormat } from "@/core/threads/export";
 import {
+  fetchThreadExportMessages,
   useInfiniteThreads,
   useMoveThreadToProject,
   usePinThread,
@@ -137,6 +138,7 @@ export function ThreadSidebarItem({
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const [newProjectDialogOpen, setNewProjectDialogOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
 
   const handleRenameSubmit = useCallback(() => {
     if (renameValue.trim()) {
@@ -199,12 +201,15 @@ export function ThreadSidebarItem({
 
   const handleExport = useCallback(
     async (format: ThreadExportFormat) => {
+      setExporting(true);
       try {
-        const apiClient = getAPIClient();
-        const state = await apiClient.threads.getState<AgentThreadState>(
-          thread.thread_id,
-        );
-        const messages = state.values?.messages ?? [];
+        const messages = isStaticWebsiteOnly()
+          ? ((
+              await getAPIClient().threads.getState<AgentThreadState>(
+                thread.thread_id,
+              )
+            ).values?.messages ?? [])
+          : await fetchThreadExportMessages(thread.thread_id);
         if (messages.length === 0) {
           toast.error(t.conversation.noMessages);
           return;
@@ -213,6 +218,8 @@ export function ThreadSidebarItem({
         toast.success(t.common.exportSuccess);
       } catch {
         toast.error(t.common.exportFailed);
+      } finally {
+        setExporting(false);
       }
     },
     [t, thread],
@@ -326,7 +333,7 @@ export function ThreadSidebarItem({
               <span>{t.common.share}</span>
             </DropdownMenuItem>
             <DropdownMenuSub>
-              <DropdownMenuSubTrigger>
+              <DropdownMenuSubTrigger disabled={exporting}>
                 <Download className="text-muted-foreground" />
                 <span>{t.common.export}</span>
               </DropdownMenuSubTrigger>
