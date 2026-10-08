@@ -1,9 +1,11 @@
 """Tests for Browserless community tools."""
 
 import ipaddress
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from deerflow.community.browserless import tools
@@ -159,7 +161,7 @@ class TestBrowserlessClient:
             assert "timed out" in result.lower() or "timeout" in result.lower()
 
     async def test_fetch_html_with_token(self):
-        """fetch_html includes token in payload when set."""
+        """fetch_html sends the token as a query parameter, never in the body."""
         with patch("deerflow.community.browserless.browserless_client.httpx.AsyncClient") as mock_cls:
             mock_ctx = MagicMock()
             mock_cls.return_value.__aenter__.return_value = mock_ctx
@@ -173,8 +175,9 @@ class TestBrowserlessClient:
             client = BrowserlessClient(base_url="http://browserless:3000", token="my-token")
             await client.fetch_html("https://example.com")
 
-            payload = mock_ctx.post.call_args.kwargs["json"]
-            assert payload["token"] == "my-token"
+            call = mock_ctx.post.call_args
+            assert call.kwargs["params"] == {"token": "my-token"}
+            assert "token" not in call.kwargs["json"]
 
     async def test_fetch_html_with_wait_for_selector(self):
         """fetch_html sends waitForSelector when selector is set."""
@@ -304,6 +307,52 @@ class TestBrowserlessClient:
             result = await client.capture_screenshot("https://example.com")
 
         assert result == "Error: Browserless returned empty screenshot response"
+
+
+def _browserless_transport(server_token: str | None) -> httpx.MockTransport:
+    """Stand-in for a Browserless server's request gate.
+
+    Browserless authenticates from the ``token`` query parameter or an
+    ``Authorization`` header only, before it reads the body, and its body
+    schemas reject unknown keys such as ``token``.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if server_token is not None:
+            bearer = request.headers.get("Authorization", "").removeprefix("Bearer ")
+            if server_token not in (request.url.params.get("token"), bearer):
+                return httpx.Response(401, text="Bad or missing authentication.")
+        if "token" in json.loads(request.content):
+            return httpx.Response(400, text="POST Body validation failed: must NOT have additional properties")
+        if request.url.path == "/screenshot":
+            return httpx.Response(200, content=b"\x89PNG\r\n\x1a\n", headers={"Content-Type": "image/png"})
+        return httpx.Response(200, text="<html><body>OK</body></html>")
+
+    return httpx.MockTransport(handler)
+
+
+async def _fetch(client: BrowserlessClient):
+    return await client.fetch_html_with_status("https://example.com")
+
+
+async def _capture(client: BrowserlessClient):
+    return await client.capture_screenshot("https://example.com")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("call", [_fetch, _capture], ids=["fetch", "capture"])
+@pytest.mark.parametrize("server_token", ["secret-token", None], ids=["server-requires-token", "server-without-token"])
+async def test_configured_token_passes_browserless_request_gate(call, server_token) -> None:
+    transport = _browserless_transport(server_token)
+    real_client = httpx.AsyncClient
+
+    def client_with_transport(**kwargs):
+        return real_client(transport=transport, **kwargs)
+
+    with patch("deerflow.community.browserless.browserless_client.httpx.AsyncClient", side_effect=client_with_transport):
+        result = await call(BrowserlessClient(base_url="http://browserless:3000", token="secret-token"))
+
+    assert not isinstance(result, str), result
 
 
 @pytest.mark.asyncio
