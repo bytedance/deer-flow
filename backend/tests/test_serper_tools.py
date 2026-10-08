@@ -111,18 +111,34 @@ class TestSerperBaseUrl:
         assert client.post.call_args.kwargs["json"] == {"q": "test", "num": 5, "tbs": "qdr:w"}
 
     @pytest.mark.parametrize("route", ["search", "images"])
-    def test_override_diagnostic_omits_credentials(self, monkeypatch, caplog, route: str) -> None:
+    @pytest.mark.parametrize("redact_urls", [False, True], ids=["plain-log", "redacted-log"])
+    def test_override_diagnostic_omits_credentials(self, monkeypatch, caplog, route: str, redact_urls: bool) -> None:
         import deerflow.community.serper.tools as serper_mod
+        from deerflow.logging_config import UrlRedactionFilter
+
+        if redact_urls:
+            # Production logging installs this filter on root handlers; another
+            # test may already have enabled it before this test runs in a shard.
+            monkeypatch.setattr(caplog.handler, "filters", [*caplog.handler.filters, UrlRedactionFilter()])
 
         monkeypatch.setenv("SERPER_BASE_URL", "https://user:password@proxy.example:8443/api/v1/")
         with caplog.at_level(logging.DEBUG, logger=serper_mod.__name__), patch("deerflow.community.serper.tools.httpx.Client") as client_class:
-            client_class.return_value.__enter__.return_value.post.return_value = _make_serper_response([])
+            post = client_class.return_value.__enter__.return_value.post
+            post.return_value = _make_serper_response([])
             _, error = serper_mod._serper_post(f"https://google.serper.dev/{route}", "test-secret-api-key", "test", 5)
 
         assert error is None
+        post.assert_called_once()
+        assert post.call_args.args[0] == f"https://user:password@proxy.example:8443/api/v1/{route}"
         records = [record for record in caplog.records if "SERPER_BASE_URL" in record.getMessage()]
         assert len(records) == 1
-        assert f"https://proxy.example:8443/api/v1/{route}" in records[0].getMessage()
+        diagnostic = records[0].getMessage()
+        assert diagnostic in {
+            f"Serper endpoint from base_url/SERPER_BASE_URL: https://proxy.example:8443/api/v1/{route}",
+            "Serper endpoint from base_url/SERPER_BASE_URL: https://proxy.example:8443/<redacted>",
+        }
+        if redact_urls:
+            assert "<redacted>" in diagnostic
         assert "user:password" not in caplog.text
         assert "test-secret-api-key" not in caplog.text
 

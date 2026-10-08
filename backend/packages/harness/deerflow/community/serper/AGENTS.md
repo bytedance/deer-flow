@@ -27,5 +27,8 @@ restrict the operator's API host.
 
 Tests: `backend/tests/test_serper_domain_filters.py`, `test_serper_tools.py` and
 `test_serper_endpoints.py`.
+Diagnostic tests cover plain logs and the shared `UrlRedactionFilter`; root
+handlers can redact paths. Assert full endpoint routing on the captured HTTP
+request, and verify diagnostic host/port and credential omission in both modes.
 Mock HTTP; live Serper semantics remain unverified. See
 `backend/docs/CONFIGURATION.md#serper-source-filters` for the operator contract.
