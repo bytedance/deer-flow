@@ -28,8 +28,14 @@ export interface ToolStreamingContextValue {
     toolCallId: string,
     output: ToolStreamOutput | null,
   ) => void;
-  /** Drop every streaming output entry. */
-  clearToolStream: () => void;
+  /**
+   * Drop the named streaming output entries.  Deliberately scoped rather than
+   * a whole-map reset: the provider is mounted once for a whole route, and
+   * more than one stream can run through it at the same time (the main
+   * conversation and the sidecar panel), so a run-end teardown must not remove
+   * another stream's in-flight entries.
+   */
+  clearToolStream: (toolCallIds: Iterable<string>) => void;
 }
 
 /**
@@ -99,14 +105,26 @@ export function applyToolStreamUpdate(
 }
 
 /**
- * Pure teardown for the whole streaming-output map.  Returns the input map
- * (same reference) when there is nothing to clear so the provider can skip a
- * render — mirroring ``applyToolStreamUpdate``.
+ * Pure teardown for the streaming-output entries named by ``toolCallIds``.
+ * Scoping the teardown to the caller's own entries is what keeps a run ending
+ * on one stream from erasing another stream's in-flight output when both share
+ * the provider.  Returns the input map (same reference) when nothing was
+ * removed so the provider can skip a render — mirroring
+ * ``applyToolStreamUpdate``.
  */
 export function clearToolStreamState(
   outputs: Readonly<Record<string, ToolStreamOutput>>,
+  toolCallIds: Iterable<string>,
 ): Readonly<Record<string, ToolStreamOutput>> {
-  return Object.keys(outputs).length === 0 ? outputs : {};
+  let next: Record<string, ToolStreamOutput> | null = null;
+  for (const toolCallId of toolCallIds) {
+    if (!(toolCallId in outputs)) {
+      continue;
+    }
+    next ??= { ...outputs };
+    delete next[toolCallId];
+  }
+  return next ?? outputs;
 }
 
 const ToolStreamingContext = createContext<ToolStreamingContextValue>({
@@ -136,9 +154,9 @@ export function ToolStreamingProvider({
     [],
   );
 
-  const clearToolStream = useCallback(() => {
+  const clearToolStream = useCallback((toolCallIds: Iterable<string>) => {
     setState((prev) => {
-      const next = clearToolStreamState(prev.outputs);
+      const next = clearToolStreamState(prev.outputs, toolCallIds);
       return next === prev.outputs ? prev : { outputs: next };
     });
   }, []);

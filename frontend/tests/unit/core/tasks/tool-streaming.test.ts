@@ -106,32 +106,50 @@ describe("applyToolStreamUpdate (production reducer)", () => {
 });
 
 // ----------------------------------------------------------------
-// clearToolStreamState — run-end teardown for the whole map
+// clearToolStreamState — run-end teardown for the caller's own entries
 // ----------------------------------------------------------------
 
 describe("clearToolStreamState (run-end teardown)", () => {
-  it("returns the same reference for an already-empty map", () => {
+  it("returns the same reference when nothing named is present", () => {
     const outputs: Record<string, ToolStreamOutput> = {};
     // Same reference back, so the provider skips a render.
-    expect(clearToolStreamState(outputs)).toBe(outputs);
+    expect(clearToolStreamState(outputs, ["tc-1"])).toBe(outputs);
+    const populated = applyToolStreamUpdate({}, "tc-1", partial("text"));
+    expect(clearToolStreamState(populated, [])).toBe(populated);
+    expect(clearToolStreamState(populated, ["tc-unknown"])).toBe(populated);
   });
 
-  it("drops every entry, including calls that never received a final chunk", () => {
+  it("drops every named entry, including calls that never received a final chunk", () => {
     let outputs = applyToolStreamUpdate({}, "tc-bash", partial("bash-output"));
     outputs = applyToolStreamUpdate(
       outputs,
       "tc-search",
       partial("search-output", "web_search"),
     );
-    const cleared = clearToolStreamState(outputs);
+    const cleared = clearToolStreamState(outputs, ["tc-bash", "tc-search"]);
     expect(Object.keys(cleared)).toHaveLength(0);
+    expect(cleared).not.toBe(outputs);
+  });
+
+  it("leaves entries it was not asked to clear alone (concurrent streams)", () => {
+    // Two streams share one provider: each owns its own tool call ids, so one
+    // stream's run ending must not erase the other's in-flight entry.
+    let outputs = applyToolStreamUpdate({}, "tc-main", partial("main-output"));
+    outputs = applyToolStreamUpdate(
+      outputs,
+      "tc-sidecar",
+      partial("sidecar-output"),
+    );
+    const cleared = clearToolStreamState(outputs, ["tc-main"]);
+    expect("tc-main" in cleared).toBe(false);
+    expect(cleared["tc-sidecar"]?.text).toBe("sidecar-output");
     expect(cleared).not.toBe(outputs);
   });
 
   it("is idempotent", () => {
     const outputs = applyToolStreamUpdate({}, "tc-1", partial("text"));
-    const once = clearToolStreamState(outputs);
-    expect(clearToolStreamState(once)).toBe(once);
+    const once = clearToolStreamState(outputs, ["tc-1"]);
+    expect(clearToolStreamState(once, ["tc-1"])).toBe(once);
   });
 });
 
