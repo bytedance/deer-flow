@@ -590,3 +590,64 @@ async def test_shutdown_without_durable_cancel_does_not_commit_staged_success(da
     finally:
         release.set()
         await asyncio.gather(record.task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_unstarted_edit_replay_releases_admission_sql(database_runtime):
+    """SQL store: an edit replay cancelled before try_start must release admission.
+
+    The run never reached ``try_start`` (host cancellation during preflight), so
+    no checkpoint restore is owed. The durable row must be terminalized instead
+    of leaking the thread's admission slot.
+    """
+    from deerflow.runtime.events.store.memory import MemoryRunEventStore
+    from deerflow.runtime.runs.manager import RunStartOutcome
+
+    store, _ = database_runtime
+    ownership = RunOwnershipConfig(heartbeat_enabled=True, lease_seconds=30, grace_seconds=10)
+    manager = RunManager(store=store, worker_id="owner", run_ownership_config=ownership)
+    record = await manager.create_or_reject(
+        "result",
+        user_id="alice",
+        metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-run"},
+    )
+
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def blocking_try_start(_run_id):
+        entered.set()
+        await release.wait()
+        return RunStartOutcome.started
+
+    manager.try_start = blocking_try_start  # type: ignore[method-assign]
+
+    class DummyCheckpointer:
+        async def aget_tuple(self, _config):
+            return None
+
+    task = asyncio.create_task(
+        worker.run_agent(
+            _bridge(),
+            manager,
+            record,
+            ctx=worker.RunContext(checkpointer=DummyCheckpointer(), event_store=MemoryRunEventStore()),
+            agent_factory=lambda **kwargs: object(),
+            graph_input={},
+            config={},
+        )
+    )
+    record.task = task
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=10)
+        task.cancel()
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+    row = await store.get(record.run_id, user_id="alice")
+    assert row["status"] == "interrupted", row
+    peer = RunManager(store=store, worker_id="peer", run_ownership_config=ownership)
+    admitted = await peer.create_or_reject("result", user_id="alice")
+    assert admitted.thread_id == "result"

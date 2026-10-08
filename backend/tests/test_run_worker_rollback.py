@@ -27,7 +27,7 @@ from deerflow.runtime.context_compaction import compact_thread_context
 from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY, CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.journal import RunJournal
-from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, RunManager
+from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, RunManager, RunStartOutcome
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.runs.worker import (
@@ -5618,3 +5618,82 @@ async def test_edit_replay_failed_restore_without_durable_cancel_keeps_admission
     )
     with pytest.raises(ConflictError):
         await peer.create_or_reject("thread-1", user_id=record.user_id)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("trigger", ["host_cancel", "shutdown"])
+async def test_unstarted_edit_replay_releases_admission(trigger, monkeypatch):
+    """A preflight-cancelled edit replay must still release admission.
+
+    The run never reached ``try_start``, so no checkpoint restore is owed and it
+    must be terminalized (``interrupted``); otherwise the thread's durable
+    admission slot is leaked and no later run can start on it.
+    """
+    run_store = MemoryRunStore()
+    ownership = RunOwnershipConfig(lease_seconds=30, grace_seconds=10, heartbeat_enabled=True)
+    run_manager = RunManager(store=run_store, run_ownership_config=ownership)
+    record = await run_manager.create(
+        "thread-1",
+        metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-run"},
+    )
+
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def blocking_try_start(_run_id):
+        entered.set()
+        await release.wait()
+        return RunStartOutcome.started
+
+    monkeypatch.setattr(run_manager, "try_start", blocking_try_start)
+
+    class DummyCheckpointer:
+        async def aget_tuple(self, _config):
+            return None
+
+    class DummyAgent:
+        async def aget_state(self, _config):
+            return None
+
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            if False:  # pragma: no cover - never started
+                yield
+
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+    task = asyncio.create_task(
+        run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=DummyCheckpointer(), event_store=MemoryRunEventStore()),
+            agent_factory=lambda *, config: DummyAgent(),
+            graph_input={},
+            config={},
+        )
+    )
+    record.task = task
+    shutdown = None
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        if trigger == "host_cancel":
+            task.cancel()
+        else:
+            shutdown = asyncio.create_task(run_manager.shutdown(timeout=5))
+            while not record.abort_event.is_set():
+                await asyncio.sleep(0)
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        if shutdown is not None:
+            await asyncio.wait_for(shutdown, timeout=10)
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+    row = await run_store.get(record.run_id)
+    assert row["status"] == "interrupted", f"an edit replay cancelled before try_start owes no restore and must release admission: row status is {row['status']!r}"
+    peer = RunManager(
+        store=run_store,
+        worker_id="peer",
+        run_ownership_config=RunOwnershipConfig(lease_seconds=30, grace_seconds=10, heartbeat_enabled=True),
+    )
+    admitted = await peer.create_or_reject("thread-1", user_id=record.user_id)
+    assert admitted.thread_id == "thread-1"

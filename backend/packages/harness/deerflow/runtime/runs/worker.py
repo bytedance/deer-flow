@@ -1168,7 +1168,13 @@ async def run_agent(
         peer could otherwise claim while the old snapshot is still restoring.
         """
         if record.ownership_lost:
+            # Ownership is checked first: a fenced worker must never write a
+            # terminal row, not even for a run it never started.
             return False
+        if not started:
+            # The preflight never reached ``try_start``, so no edit-replay
+            # checkpoint restore is owed and the admission slot must be released.
+            return True
         if _is_edit_replay_run(record) and record.status != RunStatus.success and not checkpoint_rollback_completed:
             return False
         return True
