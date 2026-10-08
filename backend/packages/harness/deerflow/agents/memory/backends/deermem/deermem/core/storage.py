@@ -878,14 +878,18 @@ class FileMemoryStorage(MemoryStorage):
         that older signature and is rebuilt, because a peer wrote the manifest
         in between; a no-op commit leaves every recorded signature as it was.
 
-        The promotion is generation-fenced: the SQLite lock covers single adapter
-        calls only, so ``rebuild_index`` may replace a scope's rows between the
-        notifications below and the promotion. Such a rebuild can have read its
-        facts before this commit (resurrecting a fact this write deleted) and
-        then records the signature it captured; promoting over it would stamp
-        those stale rows as current. Scopes whose generation moved since the
-        snapshot taken before the first adapter call therefore keep the
-        rebuild's signature, and the next search's comparison decides.
+        A scope is promoted only when the delta is provably compatible with the
+        published snapshot: it is synced at exactly ``previous_revision`` and no
+        rebuild published rows for it (or storage-wide) since the generation
+        snapshot taken before the first adapter call. The SQLite lock covers
+        single adapter calls only, so ``rebuild_index`` may replace the scope's
+        rows at any point around the notifications below, and a rebuild may
+        have read its facts before this commit (resurrecting a fact this write
+        deleted) or after it (so that an older delta replayed on top reinserts
+        a fact a peer has since deleted). The scope this delta mutated therefore
+        forgets its recorded signature whenever compatibility cannot be proved,
+        so the next search's comparison rebuilds it; the user's other scopes
+        were not mutated here and are promoted when provable, else left alone.
         """
         if self._retrieval is None:
             return
@@ -905,18 +909,32 @@ class FileMemoryStorage(MemoryStorage):
             except Exception:
                 failed = True
                 logger.exception("Retrieval notification failed for %s", value)
+        # Decided under _cache_lock together with the generation reads, so a
+        # rebuild publishing concurrently is either seen here or sees the result.
         with self._cache_lock:
             if failed:
                 self._retrieval_dirty_scopes.add(key)
                 self._retrieval_synced_signatures.pop(key, None)
-            elif committed is not None and fence is not None and fence[0] == self._retrieval_index_generation:
-                previous_revision, signature = committed
-                scope_generations = fence[1]
-                for synced_key, synced in list(self._retrieval_synced_signatures.items()):
-                    if synced_key[0] != user_id or (synced[2] or 0) != previous_revision:
-                        continue
-                    if self._retrieval_scope_generations.get(synced_key, 0) != scope_generations.get(synced_key, 0):
-                        continue  # a rebuild republished this scope meanwhile; its own signature stands
+                return
+            publication_moved = fence is None or fence[0] != self._retrieval_index_generation
+
+            def provably_compatible(synced_key: tuple[str | None, str | None]) -> bool:
+                if committed is None or fence is None or publication_moved:
+                    return False
+                synced = self._retrieval_synced_signatures.get(synced_key)
+                if synced is None or (synced[2] or 0) != committed[0]:
+                    return False
+                return self._retrieval_scope_generations.get(synced_key, 0) == fence[1].get(synced_key, 0)
+
+            if notifications and not provably_compatible(key):
+                # Rows of this scope were mutated by a delta that may be older than
+                # the published snapshot: drop the signature so the next search rebuilds.
+                self._retrieval_synced_signatures.pop(key, None)
+            if committed is None or publication_moved:
+                return
+            signature = committed[1]
+            for synced_key in [synced_key for synced_key in self._retrieval_synced_signatures if synced_key[0] == user_id]:
+                if provably_compatible(synced_key):
                     self._retrieval_synced_signatures[synced_key] = signature
 
     @staticmethod

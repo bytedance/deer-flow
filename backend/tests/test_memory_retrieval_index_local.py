@@ -279,12 +279,15 @@ def test_scoped_resync_indexes_every_fact_of_a_large_scope(tmp_path: Path) -> No
 
 
 class _PausableAdapter:
-    """FTS5 adapter whose next bulk install and every remove can be held at a chosen point.
+    """FTS5 adapter whose next bulk install, next upsert and every remove can be held at a chosen point.
 
     With ``pause_after_next_install`` armed, ``rebuild`` performs the real
     install, signals ``installed`` and waits for ``allow_publish`` before
     returning, which holds the owning rebuild between its row replacement and
     its signature publication (one call; later rebuilds run unpaused).
+    With ``pause_next_upsert`` armed, ``upsert`` signals ``at_upsert`` and
+    waits for ``allow_upsert`` before the real upsert, which holds the owning
+    write after it released the user lock and before its adapter mutation.
     ``remove`` performs the real removal, signals ``removed`` and waits for
     ``allow_promote`` before returning, which holds the owning write after its
     adapter notification and before its signature promotion.
@@ -295,6 +298,9 @@ class _PausableAdapter:
         self.pause_after_next_install = False
         self.installed = threading.Event()
         self.allow_publish = threading.Event()
+        self.pause_next_upsert = False
+        self.at_upsert = threading.Event()
+        self.allow_upsert = threading.Event()
         self.removed = threading.Event()
         self.allow_promote = threading.Event()
 
@@ -305,6 +311,13 @@ class _PausableAdapter:
             self.installed.set()
             assert self.allow_publish.wait(10), "test orchestration stalled before the signature publication"
 
+    def upsert(self, fact, *, scope, path):
+        if self.pause_next_upsert:
+            self.pause_next_upsert = False
+            self.at_upsert.set()
+            assert self.allow_upsert.wait(10), "test orchestration stalled before the adapter upsert"
+        self._inner.upsert(fact, scope=scope, path=path)
+
     def remove(self, fact_id, *, scope):
         self._inner.remove(fact_id, scope=scope)
         self.removed.set()
@@ -312,6 +325,7 @@ class _PausableAdapter:
 
     def release(self) -> None:
         self.allow_publish.set()
+        self.allow_upsert.set()
         self.allow_promote.set()
 
     def __getattr__(self, name: str):
@@ -523,5 +537,44 @@ def test_manifest_read_failure_during_the_freshness_compare_serves_the_local_ind
         pod_b.upsert_fact(_fact("two", "beta written on pod b"), user_id="alice", agent_name="agent-a")
         assert _ids(pod_a.search_facts("beta", scopes=[SCOPE])) == ["two"]  # the compare works again and re-syncs
     finally:
+        pod_a.close()
+        pod_b.close()
+
+
+def test_stale_own_delta_replayed_over_a_newer_snapshot_forgets_the_scope(tmp_path: Path) -> None:
+    """Reviewer interleaving: own PATCH commits r+1 and is held before its adapter upsert; peer deletes;
+    a search rebuilds without the fact and publishes r+2; the held upsert then reinserts the deleted fact.
+
+    The promotion rule cannot promote (the scope is synced at r+2, not at the
+    PATCH's previous r), but merely skipping would leave the r+2 signature
+    trusted over rows this delta just mutated. The scope's signature must be
+    forgotten so the next search rebuilds without the deleted fact.
+    """
+    storage_root = tmp_path / "home"
+    (tmp_path / "index-a").mkdir()
+    adapter = _PausableAdapter(FTS5RetrievalAdapter(tmp_path / "index-a" / INDEX_FILENAME))
+    pod_a = FileMemoryStorage(DeerMemConfig(storage_path=str(storage_root)), retrieval=adapter)  # type: ignore[arg-type]
+    pod_b = _instance(storage_root, tmp_path / "index-b")
+    errors: list[BaseException] = []
+    try:
+        pod_a.apply_changes({"upserts": [_fact("f1", "alpha stays"), _fact("f2", "beta version one")]}, user_id="alice", agent_name="agent-a")
+        assert pod_a.rebuild_index()["failed"] == 0  # warmed at r
+        stored = pod_a.get_fact("f2", user_id="alice", agent_name="agent-a")
+        assert stored is not None
+
+        adapter.pause_next_upsert = True
+        patch_thread = _run(lambda: pod_a.upsert_fact({**stored, "content": "beta version two"}, user_id="alice", agent_name="agent-a", expected_fact_revision=stored["revision"]), errors)
+        assert adapter.at_upsert.wait(10)  # r+1 committed, user lock released, adapter upsert pending
+
+        pod_b.delete_fact("f2", user_id="alice", agent_name="agent-a")  # r+2 on the shared manifest
+        assert pod_a.search_facts("beta", scopes=[SCOPE]) == []  # A re-syncs without f2 and publishes r+2
+
+        adapter.allow_upsert.set()  # the stale r+1 delta reinserts the deleted fact
+        _join(patch_thread, errors)
+
+        assert pod_a.search_facts("beta", scopes=[SCOPE]) == []
+        assert _ids(pod_a.search_facts("alpha", scopes=[SCOPE])) == ["f1"]
+    finally:
+        adapter.release()
         pod_a.close()
         pod_b.close()

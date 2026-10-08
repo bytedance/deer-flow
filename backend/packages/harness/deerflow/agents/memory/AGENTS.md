@@ -228,7 +228,9 @@ write still does. Promotion is generation-fenced: `rebuild_index` bumps a
 per-scope (full rebuild: storage-wide) generation under `_cache_lock` when it
 publishes or forgets rows, the dispatcher snapshots them before its first
 adapter call, and a scope whose generation moved keeps the rebuild's own
-signature for the next search to compare. A rebuild's row replacement and its
+signature for the next search to compare; an own delta that cannot be proved
+compatible with the published snapshot forgets the mutated scope's signature
+instead of merely skipping promotion. A rebuild's row replacement and its
 publication run as one unit under `_retrieval_publish_lock` (fact reads stay
 outside), so overlapping refreshes of a scope publish in install order.
 
