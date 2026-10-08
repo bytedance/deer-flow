@@ -489,8 +489,8 @@ class ChannelService:
 
     async def _start_channel(self, name: str, config: dict[str, Any]) -> bool:
         """Instantiate and start a single channel."""
-        if self._stopping:
-            logger.warning("Refusing to start %s while ChannelService shutdown is in progress", name)
+        if self._stopping or not self._running:
+            logger.warning("Refusing to start %s while ChannelService is stopped or stopping", name)
             return False
 
         import_path = _CHANNEL_REGISTRY.get(name)
@@ -540,8 +540,8 @@ class ChannelService:
             # A stop may have started while this coroutine was suspended in
             # pre-start I/O above. Fence publication again immediately before
             # the new instance becomes service-owned.
-            if self._stopping:
-                logger.warning("Refusing to publish %s channel while ChannelService shutdown is in progress", name)
+            if self._stopping or not self._running:
+                logger.warning("Refusing to publish %s channel while ChannelService is stopped or stopping", name)
                 return False
             channel = channel_cls(bus=self.bus, config=config)
             self._channels[name] = channel
