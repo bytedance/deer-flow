@@ -17,7 +17,17 @@ Concurrency contract:
   Keeping the read transaction out of the write avoids SQLite's read→write
   upgrade (``SQLITE_BUSY`` / ``BUSY_SNAPSHOT`` under contention) while the
   predicate guarantees a racing success or failure is never clobbered — the
-  same compare-and-set discipline the memory store uses on its dict.
+  same compare-and-set discipline the memory store uses on its dict. Every
+  such write checks its affected-row count: a miss means a peer changed the
+  row between the read and the write (a failure incremented the count, a
+  success cleared it, a fresh lock started), and the decision is *not* taken
+  as applied — the row is re-read and re-evaluated, up to
+  :data:`CHECK_CAS_ATTEMPTS` times, so an extension or decrease of the
+  sentence that ``check`` reports is also what the row stores, a cleared row
+  is reported as allowed, and a fresh peer lock is reported as locked (#6501
+  review). Exhausting the bound under sustained contention fails closed:
+  nothing is written and the answer is the last snapshot's lock under the
+  live policy.
 - Cleanup is amortized into ``record_failure``: a bounded ``DELETE`` removes
   locks whose sentence has elapsed and never-locked counters idle for
   :data:`STALE_COUNTER_SECONDS` (the shared-table equivalent of the memory
@@ -70,7 +80,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from deerflow.persistence.login_throttle.base import LoginThrottleRecord
+from deerflow.persistence.login_throttle.base import LoginThrottleRecord, evaluate_check
 from deerflow.persistence.login_throttle.model import LOGIN_THROTTLE_IP_LENGTH, LoginThrottleRow
 
 logger = logging.getLogger(__name__)
@@ -79,6 +89,8 @@ logger = logging.getLogger(__name__)
 STALE_COUNTER_SECONDS = 24 * 60 * 60
 #: Rows one ``record_failure`` call may delete; bounds the write transaction.
 SWEEP_BATCH_SIZE = 200
+#: Snapshot reads one ``check`` may make before it stops retrying a missed compare-and-set.
+CHECK_CAS_ATTEMPTS = 3
 
 
 def _insert_for(session: AsyncSession):
@@ -124,37 +136,33 @@ class SqlLoginThrottleStore:
 
     async def check(self, ip: str, *, max_attempts: int, lockout_seconds: float, now: float | None = None) -> float:
         key = _key(ip)
+        now = time.time() if now is None else now
+        record: LoginThrottleRecord | None = None
         async with self._sf() as session:
-            row = (await session.execute(self._select(key))).first()
-            await session.rollback()  # end the read transaction before any write
-            if row is None:
-                return 0.0
-            record = _record(*row)
-            if record.fail_count < max_attempts:
-                return 0.0
-            if not record.locked:
-                # Over the current threshold but never locked under it (the
-                # operator tightened max_login_attempts mid-count): keep the
-                # count, the next failure starts the lock.
-                return 0.0
-            now = time.time() if now is None else now
-            if now >= record.expires_at:
-                # Served the sentence committed when it started; a later raise
-                # of lockout_seconds must not resurrect it.
-                await self._discard(session, key, record)
-                return 0.0
-            if now < record.locked_at + lockout_seconds:
-                # Still locked under the current duration; commit that
-                # evaluation (decreases included) so the stored sentence
-                # matches the policy the lock was last evaluated under.
-                if lockout_seconds != record.lock_duration:
-                    await session.execute(update(LoginThrottleRow).where(self._matches(key, record)).values(lock_duration_seconds=lockout_seconds, updated_at=_timestamp(now)))
-                    await session.commit()
-                return record.locked_at + lockout_seconds - now
-            # Original sentence still running but the current (lowered)
-            # duration already elapsed: release early.
-            await self._discard(session, key, record)
-            return 0.0
+            for _attempt in range(CHECK_CAS_ATTEMPTS):
+                record = await self._read_snapshot(session, key)
+                if record is None:
+                    return 0.0
+                decision = evaluate_check(record, max_attempts=max_attempts, lockout_seconds=lockout_seconds, now=now)
+                if decision.discard:
+                    if await self._discard(session, key, record):
+                        return 0.0
+                elif decision.commit_duration is not None:
+                    if await self._commit_duration(session, key, record, decision.commit_duration, now):
+                        return decision.remaining
+                else:
+                    return decision.remaining
+                # The compare-and-set missed: a peer changed the row between the
+                # snapshot and the write. Never report the stale decision as
+                # applied — re-read and decide again on the fresh row (gone ->
+                # allowed; a fresh lock -> locked; an incremented count -> the
+                # extension or decrease is committed on it).
+        # Sustained contention exhausted the bound. Nothing was written; fail
+        # closed on the last snapshot under the live policy.
+        assert record is not None
+        remaining = max(0.0, record.locked_at + lockout_seconds - now) if record.locked else 0.0
+        logger.debug("Login throttle check gave up after %d compare-and-set misses on a contended row; reporting %.1fs remaining from the last snapshot without writing.", CHECK_CAS_ATTEMPTS, remaining)
+        return remaining
 
     async def record_failure(self, ip: str, *, max_attempts: int, lockout_seconds: float, now: float | None = None) -> LoginThrottleRecord:
         key = _key(ip)
@@ -192,6 +200,12 @@ class SqlLoginThrottleStore:
     def _select(key: str):
         return select(LoginThrottleRow.fail_count, LoginThrottleRow.locked_at, LoginThrottleRow.lock_duration_seconds).where(LoginThrottleRow.ip == key)
 
+    async def _read_snapshot(self, session: AsyncSession, key: str) -> LoginThrottleRecord | None:
+        """Read the row and end the read transaction before any write (see the module docstring)."""
+        row = (await session.execute(self._select(key))).first()
+        await session.rollback()
+        return None if row is None else _record(*row)
+
     @staticmethod
     def _matches(key: str, snapshot: LoginThrottleRecord):
         """Compare-and-set predicate: the row still is the one the decision was made on.
@@ -208,9 +222,17 @@ class SqlLoginThrottleStore:
             LoginThrottleRow.lock_duration_seconds == snapshot.lock_duration,
         )
 
-    async def _discard(self, session: AsyncSession, key: str, snapshot: LoginThrottleRecord) -> None:
-        await session.execute(delete(LoginThrottleRow).where(self._matches(key, snapshot)))
+    async def _discard(self, session: AsyncSession, key: str, snapshot: LoginThrottleRecord) -> bool:
+        """Compare-and-delete the snapshot's row; ``False`` when a peer changed it first."""
+        result = await session.execute(delete(LoginThrottleRow).where(self._matches(key, snapshot)))
         await session.commit()
+        return result.rowcount == 1
+
+    async def _commit_duration(self, session: AsyncSession, key: str, snapshot: LoginThrottleRecord, lock_duration: float, now: float) -> bool:
+        """Compare-and-set the live duration on the snapshot's row; ``False`` when a peer changed it first."""
+        result = await session.execute(update(LoginThrottleRow).where(self._matches(key, snapshot)).values(lock_duration_seconds=lock_duration, updated_at=_timestamp(now)))
+        await session.commit()
+        return result.rowcount == 1
 
     @staticmethod
     def _expired(now: float):

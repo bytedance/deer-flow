@@ -18,7 +18,7 @@ import asyncio
 import os
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -525,3 +525,173 @@ async def test_postgres_sweep_keeps_a_lock_extended_by_a_concurrent_check():
             await conn.execute(sa.text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
         for engine in engines:
             await engine.dispose()
+
+
+# ── check(): compare-and-set misses between the snapshot read and the write ──
+
+
+class _RacingSession:
+    """Session proxy that lets a peer act right after ``check`` ends its read transaction.
+
+    ``check`` reads its snapshot and ends that transaction with ``rollback()``
+    before writing. Running the peer mutation at that point — on another
+    engine over the same database — is exactly the reviewer's interleaving
+    (#6501): the compare-and-set that follows sees a row that changed since
+    the snapshot. The hook fires after the first read only unless
+    ``every_time`` is set, which forces a miss on every attempt.
+    """
+
+    def __init__(self, inner, on_read_end: Callable[[], Awaitable[None]], state, *, every_time: bool) -> None:
+        self._inner = inner
+        self._on_read_end = on_read_end
+        self._state = state
+        self._every_time = every_time
+
+    async def __aenter__(self):
+        await self._inner.__aenter__()
+        return self
+
+    async def __aexit__(self, *exc):
+        return await self._inner.__aexit__(*exc)
+
+    async def rollback(self) -> None:
+        await self._inner.rollback()
+        if self._every_time or self._state["fired"] == 0:
+            self._state["fired"] += 1
+            await self._on_read_end()
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def _racing_store(engine: AsyncEngine, on_read_end: Callable[[], Awaitable[None]], *, every_time: bool = False) -> tuple[SqlLoginThrottleStore, dict]:
+    real = async_sessionmaker(engine, expire_on_commit=False)
+    state = {"fired": 0}
+    return SqlLoginThrottleStore(lambda: _RacingSession(real(), on_read_end, state, every_time=every_time)), state
+
+
+async def _two_replicas(path: Path):
+    engine_a = await _sqlite_engine(path)
+    engine_b = create_async_engine(f"sqlite+aiosqlite:///{path.as_posix()}")
+    return engine_a, engine_b
+
+
+async def test_check_recommits_a_raised_duration_after_a_concurrent_increment(tmp_path):
+    """Reviewer's interleaving: the extension must be committed, not merely reported.
+
+    Lock (5, T, 1s); operator raises lockout_seconds to 60. Replica A reads
+    the row at T+0.5; before A's UPDATE an admitted wrong password on replica
+    B increments the count (keeping the active lock's 1s duration). A's
+    compare-and-set misses on ``fail_count``; it must re-read and commit the
+    60s sentence on the fresh row, so a check at T+2 still reports locked.
+    """
+    engine_a, engine_b = await _two_replicas(tmp_path / "raise.db")
+    try:
+        replica_b = _sql_store(engine_b)
+        ip = "198.51.100.50"
+        for _ in range(5):
+            await replica_b.record_failure(ip, max_attempts=5, lockout_seconds=1.0, now=T0)
+
+        async def peer_failure() -> None:
+            await replica_b.record_failure(ip, max_attempts=5, lockout_seconds=1.0, now=T0 + 0.5)
+
+        replica_a, state = _racing_store(engine_a, peer_failure)
+        assert await replica_a.check(ip, max_attempts=5, lockout_seconds=60.0, now=T0 + 0.5) == pytest.approx(59.5)
+        assert state["fired"] == 1
+        assert await replica_b.get(ip) == LoginThrottleRecord(fail_count=6, locked_at=T0, lock_duration=60.0)  # increment kept, extension committed
+        assert await replica_b.check(ip, max_attempts=5, lockout_seconds=60.0, now=T0 + 2.0) == pytest.approx(58.0)
+    finally:
+        await engine_a.dispose()
+        await engine_b.dispose()
+
+
+async def test_check_recommits_a_lowered_duration_after_a_concurrent_increment(tmp_path):
+    engine_a, engine_b = await _two_replicas(tmp_path / "lower.db")
+    try:
+        replica_b = _sql_store(engine_b)
+        ip = "198.51.100.51"
+        for _ in range(5):
+            await replica_b.record_failure(ip, max_attempts=5, lockout_seconds=60.0, now=T0)
+
+        async def peer_failure() -> None:
+            await replica_b.record_failure(ip, max_attempts=5, lockout_seconds=60.0, now=T0 + 6.0)
+
+        replica_a, state = _racing_store(engine_a, peer_failure)
+        assert await replica_a.check(ip, max_attempts=5, lockout_seconds=10.0, now=T0 + 6.0) == pytest.approx(4.0)
+        assert state["fired"] == 1
+        assert await replica_b.get(ip) == LoginThrottleRecord(fail_count=6, locked_at=T0, lock_duration=10.0)  # the decrease is committed
+        assert await replica_b.check(ip, max_attempts=5, lockout_seconds=30.0, now=T0 + 12.0) == 0.0  # 10s sentence served; not resurrected
+    finally:
+        await engine_a.dispose()
+        await engine_b.dispose()
+
+
+async def test_check_releases_early_on_the_fresh_row_after_a_concurrent_increment(tmp_path):
+    engine_a, engine_b = await _two_replicas(tmp_path / "release.db")
+    try:
+        replica_b = _sql_store(engine_b)
+        ip = "198.51.100.52"
+        for _ in range(5):
+            await replica_b.record_failure(ip, max_attempts=5, lockout_seconds=60.0, now=T0)
+
+        async def peer_failure() -> None:
+            await replica_b.record_failure(ip, max_attempts=5, lockout_seconds=60.0, now=T0 + 20.0)
+
+        replica_a, state = _racing_store(engine_a, peer_failure)
+        # Lowered to 10s and 20s have passed: release early — on the row as it is now.
+        assert await replica_a.check(ip, max_attempts=5, lockout_seconds=10.0, now=T0 + 20.0) == 0.0
+        assert state["fired"] == 1
+        assert await replica_b.get(ip) is None
+    finally:
+        await engine_a.dispose()
+        await engine_b.dispose()
+
+
+async def test_check_allows_when_a_reset_lands_between_read_and_write(tmp_path):
+    """A successful login on a peer clears the row mid-check: allowed, and nothing is recreated."""
+    engine_a, engine_b = await _two_replicas(tmp_path / "reset.db")
+    try:
+        replica_b = _sql_store(engine_b)
+        ip = "198.51.100.53"
+        for _ in range(5):
+            await replica_b.record_failure(ip, max_attempts=5, lockout_seconds=1.0, now=T0)
+
+        async def peer_success() -> None:
+            await replica_b.reset(ip)
+
+        replica_a, state = _racing_store(engine_a, peer_success)
+        assert await replica_a.check(ip, max_attempts=5, lockout_seconds=60.0, now=T0 + 0.5) == 0.0
+        assert state["fired"] == 1
+        assert await replica_b.get(ip) is None
+    finally:
+        await engine_a.dispose()
+        await engine_b.dispose()
+
+
+async def test_check_fails_closed_when_the_compare_and_set_keeps_missing(tmp_path, caplog):
+    """Sustained contention exhausts the bounded retries: report the last snapshot under the live policy, write nothing."""
+    import logging
+
+    from deerflow.persistence.login_throttle.sql import CHECK_CAS_ATTEMPTS
+
+    engine_a, engine_b = await _two_replicas(tmp_path / "exhaust.db")
+    try:
+        replica_b = _sql_store(engine_b)
+        ip = "198.51.100.54"
+        for _ in range(5):
+            await replica_b.record_failure(ip, max_attempts=5, lockout_seconds=1.0, now=T0)
+
+        async def peer_failure() -> None:
+            await replica_b.record_failure(ip, max_attempts=5, lockout_seconds=1.0, now=T0 + 0.5)
+
+        replica_a, state = _racing_store(engine_a, peer_failure, every_time=True)
+        with caplog.at_level(logging.DEBUG, logger="deerflow.persistence.login_throttle.sql"):
+            remaining = await replica_a.check(ip, max_attempts=5, lockout_seconds=60.0, now=T0 + 0.5)
+        assert remaining == pytest.approx(59.5)  # locked snapshot under the live 60s policy: fail closed
+        assert state["fired"] == CHECK_CAS_ATTEMPTS
+        # Nothing was committed by the losing checks; every peer increment survived.
+        assert await replica_b.get(ip) == LoginThrottleRecord(fail_count=5 + CHECK_CAS_ATTEMPTS, locked_at=T0, lock_duration=1.0)
+        assert any("compare-and-set" in r.message for r in caplog.records if r.levelno == logging.DEBUG)
+    finally:
+        await engine_a.dispose()
+        await engine_b.dispose()

@@ -67,6 +67,51 @@ class LoginThrottleRecord:
         return self.locked_at + self.lock_duration if self.locked else 0.0
 
 
+@dataclass(frozen=True, slots=True)
+class CheckDecision:
+    """What ``check`` concluded from one snapshot, and the write that must follow it.
+
+    ``remaining`` is the answer (seconds still locked, ``0.0`` = allowed);
+    ``discard`` asks the store to clear the snapshot's record (served or
+    released early); ``commit_duration`` asks it to store the live duration
+    on the still-active lock. At most one of the two writes is set. Stores
+    apply the write with a compare-and-set against the snapshot it was
+    decided on, so a record a peer changed meanwhile is never clobbered.
+    """
+
+    remaining: float
+    discard: bool = False
+    commit_duration: float | None = None
+
+
+def evaluate_check(record: LoginThrottleRecord, *, max_attempts: int, lockout_seconds: float, now: float) -> CheckDecision:
+    """The ``check`` contract on one snapshot, shared by every store (see the module docstring)."""
+    if record.fail_count < max_attempts:
+        return CheckDecision(0.0)
+    if not record.locked:
+        # Over the current threshold but the lock never started under the
+        # threshold these failures accumulated under (the operator tightened
+        # max_login_attempts mid-count). Keep the record: the next failure
+        # starts the lock and a successful login clears it — deleting here
+        # would hand the IP a fresh budget under a stricter policy.
+        return CheckDecision(0.0)
+    if now >= record.expires_at:
+        # The lock served the full sentence of the duration in force when it
+        # started — a later duration increase must not resurrect it.
+        return CheckDecision(0.0, discard=True)
+    if now < record.locked_at + lockout_seconds:
+        # Still locked. The sentence now follows the current duration, and that
+        # evaluation is committed — including decreases — so the stored sentence
+        # always matches the policy the lock was last evaluated under; a later
+        # raise can never resurrect time the lock already served under a shorter
+        # policy.
+        commit = lockout_seconds if lockout_seconds != record.lock_duration else None
+        return CheckDecision(record.locked_at + lockout_seconds - now, commit_duration=commit)
+    # Original sentence still running, but the current (lowered) duration has
+    # already elapsed — release early.
+    return CheckDecision(0.0, discard=True)
+
+
 class LoginThrottleStore(Protocol):
     """Async per-IP failed-login counter shared by every login replica using it."""
 

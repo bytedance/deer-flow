@@ -13,7 +13,7 @@ from __future__ import annotations
 import time
 from dataclasses import replace
 
-from deerflow.persistence.login_throttle.base import LoginThrottleRecord
+from deerflow.persistence.login_throttle.base import LoginThrottleRecord, evaluate_check
 
 #: Upper bound on tracked IPs before the capacity sweep runs (historical constant).
 MAX_TRACKED_IPS = 10000
@@ -30,37 +30,25 @@ class MemoryLoginThrottleStore:
         return self._records.get(ip)
 
     async def check(self, ip: str, *, max_attempts: int, lockout_seconds: float, now: float | None = None) -> float:
+        """Apply the shared ``check`` contract to this process's record.
+
+        The compare-and-set below cannot miss: there is no ``await`` between
+        the read and the write and the event loop thread holds the GIL, so no
+        peer can change the record in between — unlike the SQL store, whose
+        writes race other replicas and therefore check their affected-row
+        count and re-evaluate. The guards are kept only as a statement of the
+        same discipline.
+        """
         record = self._records.get(ip)
         if record is None:
             return 0.0
-        if record.fail_count < max_attempts:
-            return 0.0
-        if not record.locked:
-            # Over the *current* threshold but the lock never started under the
-            # threshold these failures accumulated under (the operator tightened
-            # max_login_attempts mid-count). Keep the record: the next failure
-            # starts the lock and a successful login clears it — deleting here
-            # would hand the IP a fresh budget under a stricter policy.
-            return 0.0
         now = time.time() if now is None else now
-        if now >= record.expires_at:
-            # The lock served the full sentence of the duration in force when it
-            # started — a later duration increase must not resurrect it.
+        decision = evaluate_check(record, max_attempts=max_attempts, lockout_seconds=lockout_seconds, now=now)
+        if decision.discard:
             self._discard(ip, record)
-            return 0.0
-        if now < record.locked_at + lockout_seconds:
-            # Still locked. The sentence now follows the current duration, and
-            # that evaluation is committed — including decreases — so the stored
-            # sentence always matches the policy the lock was last evaluated
-            # under; a later raise can never resurrect time the lock already
-            # served under a shorter policy.
-            if lockout_seconds != record.lock_duration and self._records.get(ip) == record:
-                self._records[ip] = replace(record, lock_duration=lockout_seconds)
-            return record.locked_at + lockout_seconds - now
-        # Original sentence still running, but the current (lowered) duration has
-        # already elapsed — release early.
-        self._discard(ip, record)
-        return 0.0
+        elif decision.commit_duration is not None and self._records.get(ip) == record:
+            self._records[ip] = replace(record, lock_duration=decision.commit_duration)
+        return decision.remaining
 
     async def record_failure(self, ip: str, *, max_attempts: int, lockout_seconds: float, now: float | None = None) -> LoginThrottleRecord:
         now = time.time() if now is None else now
