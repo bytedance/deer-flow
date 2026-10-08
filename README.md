@@ -1709,7 +1709,7 @@ Rebuild with `make up` after changing the managed extension set. See
 
 Gateway-generated follow-up suggestions now normalize both plain-string model output and block/list-style rich content before parsing the JSON array response, so provider-specific content wrappers do not silently drop suggestions.
 
-Backend response cleanup preserves unrelated tag names such as `<think-tank>` and `<think:note>` in follow-up suggestions and polished drafts; only the exact `<think>` name (optionally followed by attributes) starts a reasoning block.
+Backend response cleanup preserves unrelated tag names such as `<think-tank>` and `<think:note>` in follow-up suggestions and polished drafts; only the exact `<think>` name (optionally followed by attributes) starts a reasoning block. Self-closing `<think/>` and `<think />` tags are empty reasoning blocks and leave the following answer intact.
 
 The Web UI composer can polish draft input before sending. The rewrite runs as a short Gateway LLM request using the `input_polish` model configuration, keeps slash skill prefixes such as `/data-analysis`, and only replaces the local draft after the user clicks the polish button; it does not create a thread run or persist a message.
 

@@ -29,8 +29,11 @@ suffix. Keep its case-insensitive tag handling, optional whitespace before
 the closing `>`, and the `truncate_unclosed` behavior. Regression coverage
 lives in `tests/test_utils_llm_text.py`.
 
-Opening reasoning tags require whitespace or `>` after the exact `think` name;
-punctuated names such as `<think-tank>` and `<think:note>` are ordinary content.
+Opening reasoning tags require whitespace, `>`, or `/>` after the exact `think`
+name; punctuated names such as `<think-tank>`, `<think:note>`, and `<think/other>`
+are ordinary content. The shared prefix regex owns this boundary rule; do not
+duplicate it in a manual re-check. Self-closing `<think/>` and `<think />` tags
+are empty reasoning blocks: remove the tag without consuming subsequent text.
 Keep exact unfinished `<think` prefixes hidden in leading summaries. Coverage:
 `tests/test_think_tag_boundaries.py`.
 

@@ -29,6 +29,53 @@ def test_leading_unfinished_reasoning_still_has_no_visible_answer(text: str) -> 
     assert strip_leading_think_blocks(text) == ""
 
 
+@pytest.mark.parametrize("tag", ["<think/>", "<think />", "<THINK class='reasoning'/>"])
+@pytest.mark.parametrize("truncate_unclosed", [True, False])
+def test_self_closing_think_tag_preserves_text_before_next_reasoning_block(tag: str, truncate_unclosed: bool) -> None:
+    text = f"before{tag}middle<think>private reasoning</think>after"
+    assert strip_think_blocks(text, truncate_unclosed=truncate_unclosed) == "beforemiddleafter"
+
+
+@pytest.mark.parametrize("tag", ["<think/>", "<think />", "<THINK class='reasoning'/>"])
+def test_leading_self_closing_think_tag_preserves_answer_and_literal_tags(tag: str) -> None:
+    assert strip_leading_think_blocks(f"{tag}answer <think>literal example</think>") == "answer <think>literal example</think>"
+
+
+@pytest.mark.parametrize("cleaner", [strip_think_blocks, strip_leading_think_blocks], ids=["inline", "leading"])
+def test_self_closing_and_complete_reasoning_blocks_can_be_combined(cleaner) -> None:
+    assert cleaner("<think/><think>private reasoning</think><think />answer") == "answer"
+
+
+@pytest.mark.parametrize("cleaner", [strip_think_blocks, strip_leading_think_blocks], ids=["inline", "leading"])
+@pytest.mark.parametrize("quote", ["'", '"'])
+def test_self_closing_delimiter_inside_quoted_attribute_does_not_expose_reasoning(cleaner, quote: str) -> None:
+    text = f"<think note={quote}/>{quote}>private reasoning</think>answer"
+    assert cleaner(text) == "answer"
+
+
+@pytest.mark.parametrize("name", ["think/other", "think//"])
+def test_unrelated_slash_tag_remains_visible_in_leading_answer(name: str) -> None:
+    text = f"<{name}>public content</{name}>"
+    assert strip_leading_think_blocks(text) == text
+
+
+@pytest.mark.parametrize("tag", ["<think/>", "<think />"])
+@pytest.mark.parametrize("indent", ["    ", "\t"])
+def test_self_closing_think_tag_in_indented_code_remains_literal(tag: str, indent: str) -> None:
+    text = f"{indent}{tag}\nanswer"
+    assert strip_leading_think_blocks(text) == text.strip()
+
+
+@pytest.mark.parametrize("tag", ["<think/>", "<think />"])
+def test_self_closing_think_tag_does_not_hide_suggestions(tag: str) -> None:
+    assert suggestions._parse_json_string_list(f'{tag}["What next?"]') == ["What next?"]
+
+
+@pytest.mark.parametrize("tag", ["<think/>", "<think />"])
+def test_input_polish_removes_self_closing_tag_without_losing_draft(tag: str) -> None:
+    assert input_polish._clean_rewritten_text(f"before{tag}after") == "beforeafter"
+
+
 def test_suggestions_parser_preserves_unrelated_tag_inside_json() -> None:
     text = '<think>choose questions</think>\n["How does <think-tank> work?", "What next?"]'
     assert suggestions._parse_json_string_list(text) == ["How does <think-tank> work?", "What next?"]
