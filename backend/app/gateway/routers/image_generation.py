@@ -1,6 +1,7 @@
 """Administrator-managed image providers and safe readiness projection."""
 
 import asyncio
+import logging
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
@@ -27,6 +28,7 @@ from deerflow.config.image_generation import (
 
 router = APIRouter(prefix="/api/image-generation", tags=["image-generation"])
 _ADMIN = "Admin privileges are required to manage image generation."
+logger = logging.getLogger(__name__)
 
 
 class SaveImageProfileRequest(BaseModel):
@@ -119,7 +121,14 @@ def _list_profiles() -> dict:
     status = _status()
     current_default = ImageGenerationDefaultStore().read()
     status["default_revision"] = current_default.revision if current_default else None
-    status["default_active"] = current_default is not None and saved_image_generation_source(get_app_config().image_generation_environment) == current_default.source
+    if current_default is None or (legacy is None and not any(item.enabled for item in stored_profiles)):
+        default_source = None
+    else:
+        try:
+            default_source = saved_image_generation_source(get_app_config().image_generation_environment)
+        except ImageConfigurationError:
+            default_source = None
+    status["default_active"] = current_default is not None and default_source == current_default.source
     choice_required = legacy is not None and image_profile_choice_needed(get_app_config().image_generation_environment)
     status["choice_required"] = choice_required
     managed_selected = status["source"] == "managed"
@@ -261,7 +270,10 @@ def _test_server(body: TestServerImageProfileRequest, operation: Literal["genera
         if current is None or image_profile_container_identity(current) != image_profile_container_identity(profile):
             raise HTTPException(409, "Server image profile changed during the test; reload before retrying")
         if result not in {"missing_api_key", "invalid_operation"}:
-            ServerImageProbeStore().record(profile, operation, result)
+            try:
+                ServerImageProbeStore().record(profile, operation, result)
+            except (ValueError, OSError) as exc:
+                logger.warning("Could not save server image probe result: %s", type(exc).__name__)
         return {"ok": result == "success", "message": result}
     except HTTPException:
         raise

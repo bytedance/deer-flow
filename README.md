@@ -1346,6 +1346,9 @@ image_generation:
 The server entry is read-only in Settings, but admins can test generation and
 reference editing there. Results are tied to the exact provider, model,
 endpoint, and key; changing any of them clears the displayed test result.
+If the saved server test results become unreadable, Settings shows the model as
+unverified. A new test still returns its live result even if that result cannot
+be saved for later display.
 The old `sandbox.environment` image variables remain a fallback when the typed
 block is absent. Do not define image settings in both places; configuration
 loading rejects that conflict. The server entry can coexist with web profiles,

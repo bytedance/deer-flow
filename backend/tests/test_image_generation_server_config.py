@@ -210,6 +210,46 @@ async def test_missing_server_probe_key_keeps_config_only_status_available(tmp_p
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sidecar_failure", "probe_result"),
+    [("missing_key", "success"), ("corrupt_sidecar", "unreachable")],
+)
+async def test_server_probe_result_survives_unreadable_readiness_sidecar(tmp_path, monkeypatch, caplog, sidecar_failure, probe_result):
+    from app.gateway.routers import image_generation as router
+    from deerflow.config.image_generation import ServerImageProbeStore, image_profile_identity, resolve_server_image_profile
+
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    config = _config()
+    monkeypatch.setattr(router, "get_app_config", lambda: config)
+    server = resolve_server_image_profile(config)
+    assert server is not None
+    probes = ServerImageProbeStore()
+    probes.record(server, "generation", "success")
+    if sidecar_failure == "missing_key":
+        probes._catalog.key_path.unlink()
+    else:
+        probes._catalog.path.write_bytes(b"invalid synthetic probe catalog")
+    original_sidecar = probes._catalog.path.read_bytes()
+    calls = []
+    monkeypatch.setattr(router, "probe_image_profile", lambda _profile, operation: calls.append(operation) or probe_result)
+    admin = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
+
+    result = await router.test_server_image_profile(
+        admin,
+        "generation",
+        router.TestServerImageProfileRequest(expected_identity=image_profile_identity(server)),
+    )
+
+    assert result == {"ok": probe_result == "success", "message": probe_result}
+    assert calls == ["generation"]
+    assert probes._catalog.path.read_bytes() == original_sidecar
+    assert (await router.image_generation_status(admin))["status"] == "configured_unverified"
+    if sidecar_failure == "missing_key":
+        assert not probes._catalog.key_path.exists()
+    assert "server image probe result" in caplog.text.lower()
+
+
+@pytest.mark.asyncio
 async def test_server_probe_requires_admin_and_rejects_stale_model(tmp_path, monkeypatch):
     from fastapi import HTTPException
 
