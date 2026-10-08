@@ -199,3 +199,10 @@ or when the filesystem does not enforce those bits. Cover both persisted
 secrets, shell/Compose dotenv overrides, readable read-only secrets, and teardown
 without secret exports. `down` must not probe, read, or generate secrets.
 Writable-directory cases remain portable.
+
+## Workspace text cache
+
+`test_scanner_text_cache_atomic.py` verifies complete publication and preservation
+of an existing entry on failure. A cleanup failure must preserve the original
+publish exception, including interruption. Import the scanner during fixture
+setup, after the autouse fixtures initialize runtime, to avoid the package cycle.

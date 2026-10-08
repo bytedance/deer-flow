@@ -334,7 +334,10 @@ def _publish_text_atomically(path: Path, content: str) -> None:
             os.fsync(handle.fileno())
         os.replace(temporary, path)
     except BaseException:
-        Path(temporary).unlink(missing_ok=True)
+        try:
+            Path(temporary).unlink(missing_ok=True)
+        except OSError:
+            pass
         raise
 
 
