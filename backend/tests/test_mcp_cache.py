@@ -53,6 +53,7 @@ _TRACKED_GLOBALS = (
     "_mcp_config_snapshot",
     "_initialized_without_config",
     "_cache_reset_marker_signature",
+    "_applied_mcp_revision",
 )
 
 
@@ -87,6 +88,7 @@ def cache_globals():
         "_mcp_config_snapshot",
         "_initialized_without_config",
         "_cache_reset_marker_signature",
+        "_applied_mcp_revision",
     ):
         if hasattr(cache_module, name):
             setattr(cache_module, name, None)
@@ -326,7 +328,7 @@ class TestCrossLoopReinitialization:
         try:
             cache_module._mcp_tools_cache = None
             cache_module._cache_initialized = False
-            for name in ("_config_path", "_config_signature", "_config_mtime"):
+            for name in ("_config_path", "_config_signature", "_config_mtime", "_applied_mcp_revision"):
                 if hasattr(cache_module, name):
                     setattr(cache_module, name, None)
             cache_module._init_lock = threading.RLock()
@@ -365,7 +367,7 @@ class TestCrossLoopReinitialization:
         try:
             cache_module._mcp_tools_cache = None
             cache_module._cache_initialized = False
-            for name in ("_config_path", "_config_signature", "_config_mtime"):
+            for name in ("_config_path", "_config_signature", "_config_mtime", "_applied_mcp_revision"):
                 if hasattr(cache_module, name):
                     setattr(cache_module, name, None)
             cache_module._init_lock = threading.RLock()
@@ -414,7 +416,7 @@ class TestCrossLoopReinitialization:
         try:
             cache_module._mcp_tools_cache = None
             cache_module._cache_initialized = False
-            for name in ("_config_path", "_config_signature", "_config_mtime"):
+            for name in ("_config_path", "_config_signature", "_config_mtime", "_applied_mcp_revision"):
                 if hasattr(cache_module, name):
                     setattr(cache_module, name, None)
             cache_module._init_lock = threading.RLock()
@@ -481,40 +483,45 @@ def test_config_change_during_initialization_discards_stale_tools(cache_globals,
     assert calls == 2
 
 
-def test_config_change_during_initialization_retires_pool_for_same_server_connection_change(cache_globals, monkeypatch, tmp_path):
-    """Discarding a mid-load config change must also retire pooled sessions.
+def test_config_change_during_initialization_reconciles_in_place_for_same_server(cache_globals, monkeypatch, tmp_path):
+    """Discarding a mid-load config change must retire the superseded session.
 
     A stale load can create a pooled session before ``initialize_mcp_tools``
     notices that the config changed and discards the loaded tools. If the server
     name and scope stay the same while the connection changes, the next load can
     otherwise reuse that old session because ``MCPSessionPool`` keys only by
     ``(server_name, scope_key)``.
+
+    Auto-invalidation keeps the same pool here: only the changed server's binding
+    epoch advances, which fences the session created under the superseded
+    connection while leaving every other server untouched.
     """
     from deerflow.mcp import session_pool as session_pool_module
+    from deerflow.mcp.client import build_server_params
+    from deerflow.mcp.session_pool import normalized_connection_fingerprint
 
     class FakeSession:
         def __init__(self, command: str) -> None:
             self.command = command
 
-    class FakeSessionPool:
-        def __init__(self) -> None:
-            self.closed = False
-            self.sessions = {}
+        async def initialize(self) -> None:
+            return None
 
-        async def get_session(self, server_name, scope_key, connection):
-            key = (server_name, scope_key)
-            if key not in self.sessions:
-                self.sessions[key] = FakeSession(connection["command"])
-            return self.sessions[key]
+    class FakeSessionCm:
+        def __init__(self, connection: dict) -> None:
+            self.session = FakeSession(connection["command"])
 
-        def retire_all(self) -> None:
-            pass
+        async def __aenter__(self):
+            return self.session
 
-        def close_all_sync(self) -> None:
-            self.closed = True
+        async def __aexit__(self, *_exc) -> None:
+            return None
+
+    # The pool must stay real (its binding epochs are reconciled in place), so
+    # replace only the transport that would spawn ``npx``.
+    monkeypatch.setattr("langchain_mcp_adapters.sessions.create_session", FakeSessionCm)
 
     real_reset_session_pool = session_pool_module.reset_session_pool
-    monkeypatch.setattr(session_pool_module, "MCPSessionPool", FakeSessionPool)
     real_reset_session_pool()
     old_pool = session_pool_module.get_session_pool()
 
@@ -525,13 +532,17 @@ def test_config_change_during_initialization_retires_pool_for_same_server_connec
     calls = 0
     loaded_pools = []
     loaded_sessions = []
+    installed_bindings = []
 
-    async def _fake_tools(**_kwargs):
+    async def _fake_tools(*, extensions_config, session_pool=None):
         nonlocal calls
         calls += 1
-        server = json.loads(cfg.read_text())["mcpServers"]["same"]
-        pool = session_pool_module.get_session_pool()
-        session = await pool.get_session("same", "thread-1", server)
+        pool = session_pool if session_pool is not None else session_pool_module.get_session_pool()
+        server = extensions_config.mcp_servers["same"]
+        connection = build_server_params("same", server)
+        binding = pool.ensure_binding("same", normalized_connection_fingerprint(connection), domain="deployment")
+        installed_bindings.append(binding)
+        session = await pool.get_session("same", "thread-1", connection, binding=binding)
         loaded_pools.append(pool)
         loaded_sessions.append(session)
         if calls == 1:
@@ -549,9 +560,13 @@ def test_config_change_during_initialization_retires_pool_for_same_server_connec
 
         assert second == ["session-uvx"]
         assert loaded_pools[0] is old_pool
-        assert loaded_pools[1] is not old_pool
+        assert loaded_pools[1] is old_pool
         assert loaded_sessions[0] is not loaded_sessions[1]
-        assert old_pool.closed is True
+        assert loaded_sessions[0].command == "npx"
+        assert loaded_sessions[1].command == "uvx"
+        # The epoch that carried the superseded connection is no longer current.
+        assert old_pool._bindings[("deployment", "same")] is not installed_bindings[0]
+        assert old_pool._bindings[("deployment", "same")].fingerprint != installed_bindings[0].fingerprint
         assert cache_module._cache_initialized is True
     finally:
         real_reset_session_pool()
@@ -560,17 +575,18 @@ def test_config_change_during_initialization_retires_pool_for_same_server_connec
 def test_superseded_initializer_cannot_seed_replacement_pool(cache_globals, monkeypatch, tmp_path):
     """A superseded initializer must not install its binding into the new pool.
 
-    Generation invalidation already discards the stale result, but
-    ``ensure_binding()`` is a persistent side effect on the session pool. If the
-    stale initializer re-resolves the singleton *after* the reset, it seeds the
-    replacement pool with the fingerprint it read from the superseded config;
-    the successor initializer then fails closed on its own clean pool and the
-    cache can never publish again until an explicit reset.
+    A claim installs its revision's epochs into the pool it captured, so the
+    stale initializer holds a binding on the *retired* pool. The hazard is if it
+    re-resolves the singleton after the reset: it would seed the replacement pool
+    with the fingerprint it read from the superseded config, and the successor
+    initializer would then fail closed on its own pool and never publish again
+    until an explicit reset.
     """
     from unittest.mock import AsyncMock
 
     from deerflow.mcp import session_pool as session_pool_module
     from deerflow.mcp import tools as tools_module
+    from deerflow.mcp.session_pool import normalized_connection_fingerprint
 
     cfg = tmp_path / "extensions_config.json"
     _write_extensions_config(cfg, {"A": _server("old-cmd")})
@@ -627,8 +643,10 @@ def test_superseded_initializer_cannot_seed_replacement_pool(cache_globals, monk
 
         new_pool = session_pool_module.get_session_pool()
         assert new_pool is not old_pool
-        assert old_pool._bindings == {}
-        assert ("deployment", "A") in new_pool._bindings
+        # The replacement pool holds exactly the successor's own revision; the
+        # superseded claim never seeded it with the config it read.
+        assert new_pool._bindings[("deployment", "A")].fingerprint == normalized_connection_fingerprint({"transport": "stdio", "command": "new-cmd", "args": []})
+        assert set(new_pool._bindings) == {("deployment", "A")}
 
     try:
         asyncio.run(_scenario())
@@ -707,8 +725,10 @@ def test_automatic_stale_invalidation_retires_session_pool_before_reinitializing
         result = cache_module.get_cached_mcp_tools()
 
         assert result == ["new-tools"]
-        assert loaded_pools == [session_pool_module.get_session_pool()]
-        assert loaded_pools[0] is not old_pool
+        # The pool singleton is preserved: automatic invalidation retires only
+        # the server whose connection identity changed, not every session.
+        assert loaded_pools == [old_pool]
+        assert session_pool_module.get_session_pool() is old_pool
         assert cache_module._cache_initialized is True
     finally:
         real_reset_session_pool()
@@ -1003,7 +1023,7 @@ def test_refresh_is_noop_before_initialization(cache_globals, monkeypatch):
 
 
 def test_refresh_retires_cache_when_last_server_is_disabled(cache_globals, monkeypatch, tmp_path):
-    """Disabling the last server still converges an already-initialized cache."""
+    """Disabling the last server converges the cache without swapping the pool."""
     from deerflow.mcp.session_pool import get_session_pool, reset_session_pool
 
     cfg = tmp_path / "extensions_config.json"
@@ -1020,8 +1040,11 @@ def test_refresh_retires_cache_when_last_server_is_disabled(cache_globals, monke
         assert cache_module._cache_initialized is False
         assert cache_module._mcp_tools_cache is None
         assert cache_module._mcp_config_snapshot is None
-        assert get_session_pool() is not old_pool
-        assert closed == [True]
+        # The pool singleton and every other binding stay alive; the last
+        # deployment stdio server is the only one tombstoned.
+        assert get_session_pool() is old_pool
+        assert closed == []
+        assert old_pool._bindings[("deployment", "srv1")].fingerprint is None
     finally:
         reset_session_pool()
 
