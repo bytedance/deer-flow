@@ -38,7 +38,9 @@ Scope model (mirrors the structural guardrails):
   :func:`redact_text` is the shared entry point they call, wired from
   SummarizationMiddleware (compaction input) and DurableContextMiddleware
   (reinjected ``summary_text``); TitleMiddleware redacts its complete user and
-  assistant fields before truncation and direct model invocation.
+  assistant fields before truncation and direct model invocation. The goal
+  evaluator (``runtime/goal.py``) likewise redacts whole messages before its
+  evidence caps, and its assembled input.
 
 Detector order is fixed and pinned by a regression test; email → api_key →
 national_id → credit_card → phone. Checksum-gated national IDs run *before*

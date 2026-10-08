@@ -1827,8 +1827,9 @@ DeerFlow adds a reminder using the latest task statuses before the next model
 call. Skipped or failed compaction leaves the existing messages unchanged.
 
 Optional `pii_redaction.enabled` redacts detected identifiers in user messages,
-remote tool results, compaction input, reinjected summaries, and configured
-LLM title input. Memory admission, including pre-compaction flushes, also redacts
+remote tool results, compaction input, reinjected summaries, configured
+LLM title input, and the `/goal` evaluator's input. Memory admission,
+including pre-compaction flushes, also redacts
 detected identifiers in supported text/JSON content, parsed and invalid call arguments/error text,
 provider-raw/legacy function calls and supported user-content provenance.
 It is off by default; enabled deployments supply a secret for stable, keyed

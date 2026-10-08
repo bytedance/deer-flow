@@ -346,6 +346,12 @@ def _cap_evidence(lines: list[str]) -> str:
     return "\n\n".join([*head, *marker, *kept])
 
 
+def _evidence_window(messages: list[Any]) -> list[Any]:
+    """The messages ``format_visible_conversation`` reads: from the first of the last ``MAX_GOAL_CONVERSATION_MESSAGES`` visible ones."""
+    visible_positions = [index for index, message in enumerate(messages) if _is_visible_message(message)]
+    return messages[visible_positions[-MAX_GOAL_CONVERSATION_MESSAGES:][0] :] if visible_positions else []
+
+
 def format_visible_conversation(messages: list[Any]) -> str:
     """Return the conversation evidence for goal evaluation.
 
@@ -444,7 +450,16 @@ async def evaluate_goal_completion(
     callbacks to lift it — same fix as PR #2944 (main graph) and PR #3902
     (memory_agent/suggest_agent).
     """
-    conversation = format_visible_conversation(messages)
+    # This model call bypasses PiiRedactionMiddleware. As TitleMiddleware does, whole messages are
+    # redacted before the evidence caps can split an identifier, and the input once more. Only the
+    # evidence window is redacted: the pass is synchronous work on the event loop, and the evaluator
+    # never sees earlier messages. Imported here because the redaction middleware reaches this module
+    # through deerflow.tools and the runtime.
+    from deerflow.agents.middlewares.memory_middleware import redact_queued_messages
+    from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
+
+    pii_redaction = getattr(app_config, "pii_redaction", None)
+    conversation = format_visible_conversation(redact_queued_messages(_evidence_window(messages), pii_redaction) if pii_redaction is not None and pii_redaction.enabled else messages)
     if not conversation or not has_visible_assistant_evidence(messages):
         return GoalEvaluation(
             satisfied=False,
@@ -494,7 +509,7 @@ async def evaluate_goal_completion(
     )
     prompt_messages = [
         SystemMessage(content=system_instruction),
-        HumanMessage(content=user_content),
+        HumanMessage(content=redact_text(user_content, pii_redaction)),
     ]
     source_id = "goal-evaluator:" + uuid4().hex
 

@@ -4184,6 +4184,16 @@ This release closes that milestone with **439 merged pull requests**.
   messages are rebuilt via `model_copy` so originals are never mutated. The gate
   stays off by default and behavior is unchanged while unset. ([#5577])
 
+- **goal:** Enabling `pii_redaction` now also redacts the `/goal` evaluator's
+  input. The evaluator calls its model directly, outside
+  `PiiRedactionMiddleware`, so it sent raw user lines, tool arguments, tool
+  results and Human Input Card answers. The messages it reads are now
+  redacted whole before the evidence caps can cut an identifier in two, and
+  the assembled input, goal objective included, is redacted again; thread
+  state keeps the raw text. A redaction error fails the check
+  (`evaluator_failed`) instead of sending raw text. With redaction off, the
+  input is byte-identical. ([#PR])
+
 - **authz:** Skill authorization is now enforced at agent assembly and
   activation, so an RBAC policy such as `skills: {allow: ["data-analysis"]}`
   can actually deny a skill — Phase 2A (#4439) covered Gateway routes, but
