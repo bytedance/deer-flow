@@ -158,29 +158,46 @@ def test_vllm_provider_keeps_legacy_model_defaults_unmodified():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_mode", [False, True], ids=["sync", "async"])
-async def test_vllm_provider_reused_request_body_can_disable_thinking(async_mode):
+@pytest.mark.parametrize("streaming", [False, True], ids=["invoke", "stream"])
+async def test_vllm_provider_reused_request_body_can_disable_thinking(async_mode, streaming):
     requests = []
 
     def handle(request):
-        requests.append(json.loads(request.content))
+        body = json.loads(request.content)
+        requests.append(body)
+        if body.get("stream"):
+            chunks = [
+                {"id": "completion", "object": "chat.completion.chunk", "created": 0, "model": "qwen3", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "ok"}, "finish_reason": None}]},
+                {"id": "completion", "object": "chat.completion.chunk", "created": 0, "model": "qwen3", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+            ]
+            content = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks) + "data: [DONE]\n\n"
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=content)
         return httpx.Response(200, json={"id": "completion", "model": "qwen3", "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]})
+
+    async def call(model, prompt, extra_body):
+        if streaming:
+            if async_mode:
+                chunks = [chunk async for chunk in model.astream(prompt, extra_body=extra_body)]
+            else:
+                chunks = list(model.stream(prompt, extra_body=extra_body))
+            assert "".join(chunk.content for chunk in chunks) == "ok"
+            assert any(chunk.response_metadata.get("finish_reason") == "stop" for chunk in chunks)
+        elif async_mode:
+            assert (await model.ainvoke(prompt, extra_body=extra_body)).content == "ok"
+        else:
+            assert model.invoke(prompt, extra_body=extra_body).content == "ok"
 
     extra_body = {"chat_template_kwargs": {"thinking": True, "foo": "bar"}, "tool_stream": True}
     original = copy.deepcopy(extra_body)
     with httpx.Client(transport=httpx.MockTransport(handle)) as sync_client:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as async_client:
             model = VllmChatModel(model="qwen3", api_key="dummy", base_url="https://offline.invalid/v1", http_client=sync_client, http_async_client=async_client, max_retries=0)
-            if async_mode:
-                await model.ainvoke("first", extra_body=extra_body)
-            else:
-                model.invoke("first", extra_body=extra_body)
+            await call(model, "first", extra_body)
             after_first = copy.deepcopy(extra_body)
             extra_body["chat_template_kwargs"]["thinking"] = False
-            if async_mode:
-                await model.ainvoke("second", extra_body=extra_body)
-            else:
-                model.invoke("second", extra_body=extra_body)
+            await call(model, "second", extra_body)
 
+    assert [request["stream"] for request in requests] == [streaming, streaming]
     assert [request["chat_template_kwargs"]["enable_thinking"] for request in requests] == [True, False]
     assert all(request["chat_template_kwargs"]["foo"] == "bar" and request["tool_stream"] is True for request in requests)
     assert after_first == original
