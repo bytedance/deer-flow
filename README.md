@@ -187,8 +187,23 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
    only, and does not include `.env`, raw conversation messages, or user file
    contents. Subprocess diagnostics are captured as UTF-8, with Python helpers
    emitting UTF-8 even on non-UTF-8 hosts and escaping unencodable characters.
+   Thread manifests follow the local launcher's runtime paths: checkout `.env`
+   values override shell exports, and a project-root override alone still uses
+   `backend/.deer-flow` first. Simple variable references such as
+   `DEER_FLOW_HOME="$PWD/backend/.deer-flow"` use the checkout as `PWD`;
+   single-quoted references remain literal. For standalone Gateway launches using `backend/.env`
+   or `DEER_FLOW_ENV_FILE`, export the effective `DEER_FLOW_HOME` when collecting
+   the bundle and ensure the checkout `.env` does not override it.
    Doctor's internal tool probes also decode UTF-8 with replacement for invalid
    bytes so the remaining diagnostic output stays available.
+
+   When a thread manifest is requested, a nonempty `DEER_FLOW_HOME` selects the
+   runtime data directory instead of stale checkout data. External data paths
+   appear as `{DEER_FLOW_HOME}` in the report; file contents remain excluded.
+   Runtime path settings also come from the checkout `.env`, with shell exports
+   taking precedence. Relative paths resolve from the checkout as in `make dev`.
+   Without an explicit home, a configured `DEER_FLOW_PROJECT_ROOT` selects its
+   `.deer-flow` directory; external paths use that variable name in the report.
 
    > **Advanced / manual configuration**: If you prefer to edit `config.yaml` directly, run `make config` instead to copy the full template. Optional dependency auto-detection accepts UTF-8 configuration files with or without a byte-order mark (BOM). See `config.example.yaml` for the complete reference including CLI-backed providers (Codex CLI, Claude Code OAuth), OpenRouter, Responses API, subagent runtime caps such as `subagents.max_total_per_run`, and more.
 
@@ -304,7 +319,7 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
 
    Models whose provider contract differs from DeerFlow's generic thinking/effort assumptions can declare a per-model mapping-valued `reasoning:` block (thinking `unsupported`/`optional`/`required`, the accepted effort values with aliases and a default, the payload dialect, and the reasoning-history requirement). The setup wizard's Z.AI GLM-5.3-Flash profile uses it: thinking stays on for every foreground and background call, and the effort selector offers the model's own `low`/`high`/`max` levels. Ollama's existing boolean `reasoning: true` remains a native provider setting and is forwarded to ChatOllama. When migrating a profile to a custom effort `path`, remove any old `reasoning_effort` setting from the profile and thinking templates; configuration validation rejects the leftover key. The chat UI drops a remembered provider-specific effort when switching to a legacy model that does not advertise it. Profiles without the block keep their existing provider behavior. See `config.example.yaml` for the shape and the equivalent manual configuration.
 
-   For vLLM 0.19.0, use `deerflow.models.vllm_provider:VllmChatModel`. For Qwen-style reasoning models, DeerFlow toggles reasoning with `extra_body.chat_template_kwargs.enable_thinking` and preserves vLLM's non-standard `reasoning` field across multi-turn tool-call conversations. Legacy `thinking` configs are normalized automatically for backward compatibility. If the endpoint reports a cumulative usage snapshot on every streaming chunk, set `cumulative_stream_usage: true` so DeerFlow converts those snapshots into per-chunk deltas; the option is disabled by default and leaves usage unchanged when a stable completion id is unavailable. Reasoning models may also require the server to be started with `--reasoning-parser ...`. If your local vLLM deployment accepts any non-empty API key, you can still set `VLLM_API_KEY` to a placeholder value.
+   For vLLM 0.19.0, use `deerflow.models.vllm_provider:VllmChatModel`. For Qwen-style reasoning models, DeerFlow toggles reasoning with `extra_body.chat_template_kwargs.enable_thinking` and preserves vLLM's non-standard `reasoning` field across multi-turn tool-call conversations. Legacy `thinking` configs are normalized automatically for backward compatibility, without modifying model defaults or caller-owned `extra_body` dictionaries; a reused dictionary can change the legacy switch between requests. If the endpoint reports a cumulative usage snapshot on every streaming chunk, set `cumulative_stream_usage: true` so DeerFlow converts those snapshots into per-chunk deltas; the option is disabled by default and leaves usage unchanged when a stable completion id is unavailable. Reasoning models may also require the server to be started with `--reasoning-parser ...`. If your local vLLM deployment accepts any non-empty API key, you can still set `VLLM_API_KEY` to a placeholder value.
 
    When prompt caching is enabled for a model configured with
    `deerflow.models.claude_provider:ClaudeChatModel`, DeerFlow preserves thinking
