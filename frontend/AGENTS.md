@@ -204,6 +204,12 @@ organization requests can otherwise roll back each other's confirmed state.
 Run-created optimistic snapshots have no archive flag: refresh archive-filtered
 lists from the server instead of inserting those snapshots into either view.
 
+Desktop right panels pin their final content width before paint and retain it
+until the panel's own CSS transition finishes. Invalidate pending completion on
+toggle/unmount; do not await child animations. Mobile Sheet exits retain their
+separate content lifetime. Mobile browser tests must await the committed mobile
+layout before clicking controls rendered by the desktop SSR snapshot.
+
 ### Delimited artifact preview
 
 CSV/TSV previews share `artifact-table-preview.tsx` between the panel and standalone viewer. Papa Parse runs only inside `delimited-preview.worker.ts`; `use-delimited-preview.ts` bounds input before transfer, cancels stale work, and enforces a five-second timeout. The parser detects the first record separator outside quoted fields and passes it explicitly to Papa Parse, so embedded newlines in an incomplete quoted field cannot corrupt newline detection. It retains at most 202 logical records and 50 columns, discarding an incomplete final record from truncated input. UI pagination displays at most 200 data rows in pages of 50. Keep the table mounted but inactive when switching to source so header/pagination state survives; changing file identity resets it. Pending `write_file` content stays in source mode until success.
