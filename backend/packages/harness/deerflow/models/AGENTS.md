@@ -159,6 +159,13 @@ finite negative values clamp to zero. Sync/async 429/500 regressions live in
 
 ### MindIE Provider (`packages/harness/deerflow/models/mindie_provider.py`)
 
+Public sync and async streams use the same message normalization. No-tool native
+streams share the fence-stateful newline decoder; tool-enabled streams explicitly
+request `stream=False`, including with `streaming=True` model defaults, then use
+the shared simulated chunker. Preserve terminal usage exactly once, XML/native
+tool calls, invalid calls, and the original messages. Offline SDK boundary tests:
+`tests/test_mindie_provider.py::test_public_stream_compatibility_through_sdk`.
+
 `_fix_messages` converts tool results to the XML text format expected by MindIE.
 Only tool-message `type=json` payloads join the text channel; other non-text
 blocks remain omitted. Keep the `<tool_response>` escaping boundary and the
