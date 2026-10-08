@@ -700,7 +700,7 @@ def test_task_tool_preserves_overwrite_sandbox_state_for_executor(monkeypatch):
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: _make_subagent_config())
     monkeypatch.setattr(
         task_tool_module,
         "get_background_task_result",
