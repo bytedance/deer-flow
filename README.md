@@ -146,6 +146,8 @@ For Google's official Gemini OpenAI-compatible endpoint, use the
 
 For MindIE XML tool calls, see the
 [argument parsing and newline compatibility guide](backend/docs/CONFIGURATION.md#mindie-xml-tool-arguments).
+Both synchronous and asynchronous streams retain this compatibility: tool-enabled
+streams simulate chunks from a non-streaming response, while no-tool streams stay native.
 
 1. **Clone the DeerFlow repository**
 
