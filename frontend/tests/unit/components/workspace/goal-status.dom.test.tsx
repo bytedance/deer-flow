@@ -202,8 +202,8 @@ const CASES: Case[] = [
   {
     name: "unchecked",
     props: { goal: stoodDown("evaluator_failed") },
-    en: `Goal${OBJECTIVE}Couldn't check the goalDetails | Couldn't check the goal; the run itself may be fine. It's checked again after your next message.`,
-    zh: `目标${OBJECTIVE}未能检查目标详情 | 未能检查目标，这次运行本身可能没问题。下次发消息后会重新检查。`,
+    en: `Goal${OBJECTIVE}Couldn't check the goalDetails | The run itself may be fine. It's checked again after your next message.`,
+    zh: `目标${OBJECTIVE}未能检查目标详情 | 这次运行本身可能没问题。下次发消息后会重新检查。`,
   },
   {
     name: "stopped for an unknown reason",

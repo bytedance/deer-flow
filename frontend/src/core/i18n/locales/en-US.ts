@@ -535,6 +535,11 @@ export const enUS: Translations = {
         paused:
           "Auto-continued {count}/{max}. The run ended before the goal was confirmed. Send a message to check again.",
       },
+      uncheckedReasons: {
+        evaluatorFailed: "The run itself may be fine",
+        noDurableEndOfTurn: "No final reply was saved",
+        threadChanged: "The chat changed during the check",
+      },
     },
     compactSuccess:
       "Earlier context compacted. The full chat remains visible; future model calls will use the summary and recent messages.",

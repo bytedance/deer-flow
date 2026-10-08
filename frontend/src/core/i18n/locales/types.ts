@@ -435,6 +435,12 @@ export interface Translations {
         unknown: string;
         paused: string;
       };
+      /** Why a check failed, without the "Couldn't check the goal" of its chip. */
+      uncheckedReasons: {
+        evaluatorFailed: string;
+        noDurableEndOfTurn: string;
+        threadChanged: string;
+      };
     };
     compactSuccess: string;
     compactSkipped: string;

@@ -325,9 +325,12 @@ export function describeGoalBarCopy(
       );
     case "stopped": {
       const goalCopy = t.scheduledTasks.goal;
-      // Only the "unchecked" row names its reason, in the scheduled page's words.
+      // Only the "unchecked" row names its reason, in the scheduled page's
+      // words after the "Couldn't check the goal" its chip already shows.
+      const uncheckedReasons: Partial<Record<GoalReasonKey, string>> =
+        bar.uncheckedReasons;
       const reason = view.reasonKey
-        ? goalCopy.reasons[view.reasonKey]
+        ? (uncheckedReasons[view.reasonKey] ?? goalCopy.reasons[view.reasonKey])
         : goalCopy.unchecked;
       return withDetail(
         view.chip === "unchecked" ? goalCopy.unchecked : bar[view.chip],

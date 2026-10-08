@@ -498,6 +498,11 @@ export const zhCN: Translations = {
         paused:
           "已自动续跑 {count}/{max} 次，运行在确认达成前结束了。发送消息即可重新检查。",
       },
+      uncheckedReasons: {
+        evaluatorFailed: "这次运行本身可能没问题",
+        noDurableEndOfTurn: "没有保存最终回复",
+        threadChanged: "检查期间对话发生了变化",
+      },
     },
     compactSuccess:
       "已压缩早期上下文。完整聊天记录仍保留，后续模型将基于摘要和最近消息继续。",
