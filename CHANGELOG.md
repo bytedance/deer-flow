@@ -812,7 +812,7 @@ This release closes that milestone with **439 merged pull requests**.
   trial launched before the run time now leaves the task's status and
   `next_run_at` unchanged, like a trial on a recurring task; its outcome is kept
   on the trial's run row. A trial after the run time has passed still counts as
-  the task's run.
+  the task's run. ([#6512])
 - **skills:** A `/skill-name` activation now survives a retried model call. The
   activation was marked as done before the model was called, so when the call
   failed (rate limit, overload, timeout) or came back empty and was retried, the
@@ -9238,3 +9238,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6481]: https://github.com/bytedance/deer-flow/pull/6481
 [#6495]: https://github.com/bytedance/deer-flow/pull/6495
 [#6506]: https://github.com/bytedance/deer-flow/pull/6506
+[#6512]: https://github.com/bytedance/deer-flow/pull/6512
