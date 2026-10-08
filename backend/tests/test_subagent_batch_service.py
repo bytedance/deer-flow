@@ -532,3 +532,40 @@ async def test_start_cannot_replace_poller_while_stop_is_draining(monkeypatch: p
     await service.start()
     assert service._poller is not original_poller
     await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_batch_stop_allows_successful_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = SubagentBatchService(
+        repository=SimpleNamespace(),
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(),
+    )
+    poller_entered = asyncio.Event()
+    release_poller = asyncio.Event()
+
+    async def reluctant_poller() -> None:
+        poller_entered.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            await release_poller.wait()
+
+    monkeypatch.setattr(service, "_run", reluctant_poller)
+    await service.start()
+    await asyncio.wait_for(poller_entered.wait(), timeout=1)
+    first_stop = asyncio.create_task(service.stop())
+    await asyncio.sleep(0)
+    first_stop.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first_stop
+    assert service._stop_drains == 0
+    assert service._stopping
+    with pytest.raises(RuntimeError, match="before stop completes"):
+        await service.start()
+
+    release_poller.set()
+    await asyncio.wait_for(service.stop(), timeout=1)
+    assert service._poller is None
+    assert service._stop_drains == 0
+    assert not service._stopping
