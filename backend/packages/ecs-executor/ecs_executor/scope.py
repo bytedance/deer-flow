@@ -148,3 +148,46 @@ def verify_execution_scope(token: str, *, secret: bytes, authenticated_user_id: 
     if not hmac.compare_digest(claims["args_sha256"], arguments_sha256(arguments)):
         raise ValueError("Execution scope arguments mismatch")
     return claims
+
+
+def mint_management_scope(*, secret: bytes, audience: str, user_id: str, task_id: str, operation: str, now: int | None = None, ttl_seconds: int = 60) -> str:
+    """Owner/task capability for the native poller, which has no active run."""
+    _secret(secret)
+    issued = int(time.time()) if now is None else now
+    for value in (audience, user_id, task_id):
+        _identifier(value)
+    _integer(issued)
+    if operation not in {"status", "cancel"} or type(ttl_seconds) is not int or not 1 <= ttl_seconds <= MAX_TTL_SECONDS:
+        raise ValueError("Invalid management scope")
+    claims = {"aud": audience, "user_id": user_id, "task_id": task_id, "operation": operation, "iat": issued, "exp": issued + ttl_seconds, "args_sha256": arguments_sha256({"task_id": task_id})}
+    payload = _encode(_json(claims))
+    return payload + "." + _encode(hmac.digest(secret, payload.encode("ascii"), "sha256"))
+
+
+def verify_management_scope(token: str, *, secret: bytes, authenticated_user_id: str, arguments: dict[str, Any], expected_audience: str, expected_operation: str, now: int | None = None) -> dict[str, Any]:
+    _secret(secret)
+    if not isinstance(token, str) or not 1 <= len(token) <= MAX_TOKEN_BYTES or token.count(".") != 1:
+        raise ValueError("Invalid management scope")
+    payload, signature = token.split(".")
+    encoded = _decode(payload)
+    if not hmac.compare_digest(_decode(signature), hmac.digest(secret, payload.encode("ascii"), "sha256")):
+        raise ValueError("Invalid management signature")
+    try:
+        claims = json.loads(encoded)
+    except (ValueError, UnicodeError, RecursionError):
+        raise ValueError("Invalid management claims") from None
+    if not isinstance(claims, dict) or set(claims) != {"aud", "user_id", "task_id", "operation", "iat", "exp", "args_sha256"} or _json(claims) != encoded:
+        raise ValueError("Invalid management claims")
+    for name in ("aud", "user_id", "task_id"):
+        _identifier(claims[name])
+    _integer(claims["iat"])
+    _integer(claims["exp"])
+    current = int(time.time()) if now is None else now
+    _integer(current)
+    if not 1 <= claims["exp"] - claims["iat"] <= MAX_TTL_SECONDS or not claims["iat"] <= current < claims["exp"]:
+        raise ValueError("Invalid management lifetime")
+    if claims["aud"] != expected_audience or claims["user_id"] != authenticated_user_id or claims["operation"] != expected_operation or expected_operation not in {"status", "cancel"}:
+        raise ValueError("Management authority mismatch")
+    if arguments != {"task_id": claims["task_id"]} or claims["args_sha256"] != arguments_sha256(arguments):
+        raise ValueError("Management arguments mismatch")
+    return claims
