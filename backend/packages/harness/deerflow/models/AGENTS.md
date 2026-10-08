@@ -69,6 +69,13 @@ the same policy first so run metadata reports the effective values. Design note:
 - Every request goes through `_strip_cache_control`, with caching on or off, so markers stored by older checkpoints never reach the API. It copies a marked block without its marker and replaces the system, message, content and tool lists and every message dict with copies; langchain-anthropic already builds fresh message dicts and content lists, so that part is defensive
 - `_apply_prompt_caching` must call `_strip_cache_control` first: it then replaces slots in those payload-owned lists with marked copies and writes `msg["content"]` on copied message dicts, placing at most four breakpoints. Pinned by `tests/test_claude_provider_prompt_caching.py`
 
+### Claude Thinking Budget (`packages/harness/deerflow/models/claude_provider.py`)
+
+- With `auto_thinking_budget=True`, manual `thinking.type=enabled` requests validate integer budgets of at least 1024. Ordinary thinking also requires `budget_tokens < max_tokens` and integer `max_tokens > 1024`; an absent/null budget uses `max(1024, int(max_tokens * 0.8))`, defaulting to an 8192 output limit.
+- Manual interleaving permits a budget equal to or above a positive integer output limit, but only with tools, the effective `interleaved-thinking-2025-05-14` beta, and a supported Sonnet 4/4.5/4.6 or Opus 4/4.1/4.5 model (aliases and dated IDs). Haiku 4.5 and Opus 4.6 do not interleave in manual mode even with that header. Follow [Anthropic's model-specific rules](https://platform.claude.com/docs/en/build-with-claude/extended-thinking#interleaved-thinking-in-manual-mode) when updating this capability gate.
+- Resolve the beta header as the SDK does: client defaults, then request `betas` (including an empty list), then `extra_headers`. Match comma-separated beta names exactly; a removed or replaced beta must not relax the budget bound.
+- Automatic allocation replaces the payload's thinking mapping with a copy: LangChain aliases it to `self.thinking`, so in-place writes leak across requests and make smaller per-call output limits fail. `auto_thinking_budget=False` bypasses normalization/validation; absent, disabled and adaptive thinking remain untouched. Coverage: `tests/test_claude_provider_thinking.py`, including native request construction and offline SDK serialization.
+
 ### vLLM Provider (`packages/harness/deerflow/models/vllm_provider.py`)
 
 - `VllmChatModel` subclasses `langchain_openai:ChatOpenAI` for vLLM 0.19.0 OpenAI-compatible endpoints
