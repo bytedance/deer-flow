@@ -296,7 +296,8 @@ avoid that ambiguity. Numeric conversion failures and unsafe Python-literal
 containers retain the entire original argument rather than rewriting it.
 
 The same behavior applies to synchronous generation, asynchronous generation,
-and tool-enabled simulated streaming. Native tool-call arguments remain unchanged.
+tool-enabled simulated streaming, and native no-tool streaming (which carries the
+fence state across chunks). Native tool-call arguments remain unchanged.
 No additional configuration is required.
 
 #### Gemini via Google's OpenAI-compatible endpoint
