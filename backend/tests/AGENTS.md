@@ -188,3 +188,12 @@ assignment. Use offline transports. Detection is not behavioral defense; do not 
 the final model input from an isolated hook test. `test_jev_screening_policy.py` uses
 the host descriptor builder to pin policy identity; hash endpoint/prompt text and
 never project credential values.
+
+## Deploy home permission tests
+
+`test_deploy_home_writability.py` covers the production deploy permission
+preflight. It runs the complete script with a recording Docker stub and
+isolated runtime paths. Permission cases remove directory write bits and
+restore them during teardown; they skip on Windows, as root, or when the
+filesystem does not enforce those bits. Writable-directory cases remain
+portable.
