@@ -811,7 +811,7 @@ This release closes that milestone with **439 merged pull requests**.
   was invisible to the others. The counter now lives behind a
   `LoginThrottleStore`: the new `auth.local.throttle_storage` selector
   (default `auto`) keeps it in the shared `login_throttle` table (migration
-  `0034_login_throttle`) whenever `database.backend` is `sqlite` or
+  `0035_login_throttle`) whenever `database.backend` is `sqlite` or
   `postgres`, and falls back to the in-process counter with a warning when
   there is no database to share (a `memory` database, or a configured database
   whose engine is not initialised); `memory` forces the historical per-process

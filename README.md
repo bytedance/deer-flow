@@ -470,6 +470,12 @@ exits non-zero and prints the container status plus recent Gateway logs. The
 production image starts from its already-built environment and never resolves
 or installs Python dependencies at container startup.
 
+If `make up` reports an unwritable runtime home or an unreadable persisted secret
+after `make docker-start`, run the printed `sudo chown -R <uid>:<gid> '<home>'`
+recovery command and retry. The check honors secret overrides from the shell or
+`.env`, accepts readable read-only secret files, and leaves `make down` available
+without reading or generating secrets.
+
 For persistent deployments, configure `database.backend` as `sqlite` or
 `postgres`. The selected backend is shared by the LangGraph checkpointer,
 LangGraph Store, and DeerFlow application data. The deprecated `checkpointer`
@@ -1877,6 +1883,8 @@ The lead agent can spawn sub-agents on the fly — each with its own scoped cont
 
 Cancelled or timed-out background sub-agent executions retain provider-reported token usage from completed model calls, including responses received before their next progress update. Final usage delivery to the parent run does not count earlier progress snapshots twice.
 
+For `tests_passed:go test ./...`, packages marked `[no test files]` or `[no tests to run]` do not veto a passing summary from another package. Runs with only zero-test package summaries remain `UNVERIFIED`; failures still take precedence. This checks recorded execution evidence, not claim correctness.
+
 For file acceptance criteria, an empty regular file in the shared workspace can satisfy `file:<path> exists` and `file_written:<path>`, including on remote sandboxes. It fails `file:<path> non-empty` with a deterministic empty-file result.
 
 To request JSON syntax validation, explicitly set a `task` or `batch_task` item's
@@ -2367,6 +2375,8 @@ editing the saved agent configuration to refresh the selection.
 `DeerFlowClient.stream()` includes `summary_text` in each `values` event. This is the current compacted context summary, or `None` when absent. Consumers can record changes without reading checkpoint internals; repeated snapshots may carry the same summary, and an initial snapshot may already contain one from an earlier turn.
 
 DeerFlow can be used as an embedded Python library without running the full HTTP services. The `DeerFlowClient` provides direct in-process access to all agent and Gateway capabilities, returning the same response schemas as the HTTP Gateway API. The HTTP Gateway also exposes `DELETE /api/threads/{thread_id}` to remove DeerFlow-managed local thread data after the LangGraph thread itself has been deleted:
+
+For database-backed run events, deleting a run preserves its thread's sequence watermark. Thread deletion removes that watermark once no events remain, allowing a recreated thread to restart at sequence 1. Owner-scoped deletion preserves the watermark when another owner's events remain.
 
 Thread IDs may be supplied by callers and do not have to be UUIDs. Explicit
 IDs must contain 1–64 ASCII letters, digits, hyphens, or underscores

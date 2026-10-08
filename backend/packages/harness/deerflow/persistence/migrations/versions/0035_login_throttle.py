@@ -1,7 +1,7 @@
 """Shared failed-login counter for cross-replica lockouts.
 
-Revision ID: 0034_login_throttle
-Revises: 0033_batch_result_artifact
+Revision ID: 0035_login_throttle
+Revises: 0034_run_event_seq_watermark
 
 Creates ``login_throttle``: one row per client IP that failed a local login,
 keyed by ``ip``, with the consecutive failure count, the epoch timestamp the
@@ -25,8 +25,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0034_login_throttle"
-down_revision: str | Sequence[str] | None = "0033_batch_result_artifact"
+revision: str = "0035_login_throttle"
+down_revision: str | Sequence[str] | None = "0034_run_event_seq_watermark"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

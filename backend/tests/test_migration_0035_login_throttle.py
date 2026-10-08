@@ -1,4 +1,4 @@
-"""Migration 0034: the shared ``login_throttle`` table for cross-replica lockouts."""
+"""Migration 0035: the shared ``login_throttle`` table for cross-replica lockouts."""
 
 from __future__ import annotations
 
@@ -20,14 +20,14 @@ from deerflow.persistence.base import Base
 from deerflow.persistence.login_throttle import LoginThrottleRow
 from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 
-REVISION = "0034_login_throttle"
-PREVIOUS = "0033_batch_result_artifact"
+REVISION = "0035_login_throttle"
+PREVIOUS = "0034_run_event_seq_watermark"
 TABLE = "login_throttle"
 COLUMNS = {"ip", "fail_count", "locked_at", "lock_duration_seconds", "updated_at"}
 pytestmark = pytest.mark.asyncio
 
 
-async def test_0034_is_the_single_head_and_chains_after_0033():
+async def test_0035_is_the_single_head_and_chains_after_0034():
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
     assert script.get_heads() == [REVISION]
     assert script.get_revision(REVISION).down_revision == PREVIOUS
@@ -40,7 +40,7 @@ def _engine(tmp_path, backend):
         return create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'migration.db'}"), None
     uri = os.environ.get("TEST_POSTGRES_URI")
     if not uri:
-        pytest.skip("requires TEST_POSTGRES_URI (real Postgres migration 0034)")
+        pytest.skip("requires TEST_POSTGRES_URI (real Postgres migration 0035)")
     schema = f"login_throttle_{uuid.uuid4().hex}"
     return create_async_engine(asyncpg_test_url(uri), connect_args=build_asyncpg_connect_args(schema)), schema
 
@@ -80,7 +80,7 @@ async def _orm_diff(engine) -> list:
 
 
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"])
-async def test_0034_creates_the_table_matching_the_orm_and_downgrades_cleanly(tmp_path, backend):
+async def test_0035_creates_the_table_matching_the_orm_and_downgrades_cleanly(tmp_path, backend):
     engine, schema = _engine(tmp_path, backend)
     cfg = bootstrap._get_alembic_config(engine, postgres_schema=schema or "")
     try:
@@ -124,7 +124,7 @@ async def test_0034_creates_the_table_matching_the_orm_and_downgrades_cleanly(tm
 
 
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"])
-async def test_0034_completes_a_partially_applied_upgrade(tmp_path, backend):
+async def test_0035_completes_a_partially_applied_upgrade(tmp_path, backend):
     """The table already exists (an interrupted earlier attempt): upgrade still lands."""
     engine, schema = _engine(tmp_path, backend)
     cfg = bootstrap._get_alembic_config(engine, postgres_schema=schema or "")

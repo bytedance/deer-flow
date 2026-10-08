@@ -67,6 +67,14 @@ where `make up` replaced the operator's secret with a generated one.
 its real-Compose cases run against the installed `docker` CLI and against any
 standalone binaries listed in `DEER_FLOW_TEST_COMPOSE_BINARIES`.
 
+Deployment commands check `DEER_FLOW_HOME` writability before setup and check
+persisted secret readability only when shell/Compose dotenv overrides are absent.
+Both failures identify the affected path and print the recursive ownership
+recovery hint for the runtime home. Existing secrets are only read, so a
+readable, read-only file is valid. `down` skips these checks and all secret
+resolution/generation so permission damage cannot prevent teardown. Coverage:
+`backend/tests/test_deploy_home_writability.py`.
+
 `doctor.py` checks the config file the Gateway would load, not a fixed
 `<checkout>/config.yaml`. It mirrors how `serve.sh` hands the two
 config-location variables to the Gateway: `.env` values for
