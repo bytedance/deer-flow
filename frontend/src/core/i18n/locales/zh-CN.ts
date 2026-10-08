@@ -487,7 +487,7 @@ export const zhCN: Translations = {
         tokenCapped:
           "已达到 token 预算。发送消息即可继续，新的运行会重新计算预算。",
         missingEvidence:
-          "目标检查：缺少依据。可以让它把结果展示出来，或回复说明还差什么。",
+          "目标检查：缺少依据。可以让它展示结果或说明卡在哪里；如果目标已不适用，用 /goal clear 清除目标。",
         runFailed:
           "目标检查：这次运行没有完成任务。先看看回复里的错误，再发送消息重试。",
         needsInputCard: "回答上面的问题即可继续。",

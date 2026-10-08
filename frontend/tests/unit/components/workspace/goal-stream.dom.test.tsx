@@ -307,7 +307,7 @@ describe.each([false, true])("a goal run (new chat: %s)", (startNew) => {
     expect(current().hasGoal).toBe(true);
     expect(barState()).toBe("stopped");
     expect(screen.getByTestId("goal-status-detail").textContent).toBe(
-      "Goal check: evidence missing. Ask it to show the result, or reply with what's left.",
+      "Goal check: evidence missing. Ask it to show the result or explain what's missing; if the goal no longer applies, run /goal clear.",
     );
   });
 });

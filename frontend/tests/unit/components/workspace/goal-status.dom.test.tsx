@@ -165,8 +165,8 @@ const CASES: Case[] = [
   {
     name: "stopped without evidence (count 0)",
     props: { goal: stoodDown("blocked:missing_evidence") },
-    en: `Goal${OBJECTIVE}StoppedDetails | Goal check: evidence missing. Ask it to show the result, or reply with what's left.`,
-    zh: `目标${OBJECTIVE}已停止详情 | 目标检查：缺少依据。可以让它把结果展示出来，或回复说明还差什么。`,
+    en: `Goal${OBJECTIVE}StoppedDetails | Goal check: evidence missing. Ask it to show the result or explain what's missing; if the goal no longer applies, run /goal clear.`,
+    zh: `目标${OBJECTIVE}已停止详情 | 目标检查：缺少依据。可以让它展示结果或说明卡在哪里；如果目标已不适用，用 /goal clear 清除目标。`,
   },
   {
     name: "stopped after a failed run",

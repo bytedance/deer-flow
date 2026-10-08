@@ -523,7 +523,7 @@ export const enUS: Translations = {
         tokenCapped:
           "Token budget reached. Send a message to continue; a new run starts with a fresh budget.",
         missingEvidence:
-          "Goal check: evidence missing. Ask it to show the result, or reply with what's left.",
+          "Goal check: evidence missing. Ask it to show the result or explain what's missing; if the goal no longer applies, run /goal clear.",
         runFailed:
           "Goal check: the run did not finish the work. Check the reply for errors, then send a message to retry.",
         needsInputCard: "Answer the question above to continue.",
