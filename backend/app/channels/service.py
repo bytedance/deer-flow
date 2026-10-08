@@ -161,6 +161,7 @@ class ChannelService:
         self._config = config
         self._running = False
         self._stopping = False
+        self._shutdown_generation = 0
         self._readiness_locks: dict[str, asyncio.Lock] = {}
         self._config_epochs: dict[str, int] = {}
 
@@ -206,7 +207,13 @@ class ChannelService:
         if self._stopping:
             raise RuntimeError("cannot start ChannelService while shutdown is incomplete")
 
+        generation = self._shutdown_generation
         await self.manager.start()
+        if generation != self._shutdown_generation or self._stopping:
+            # stop() may have completed while manager.start() was suspended.
+            # Drain the manager it started rather than resurrecting the service.
+            await self.manager.stop()
+            return
         self._running = True
 
         ready_status = await self.ensure_ready_channels(attempts=2)
@@ -297,6 +304,7 @@ class ChannelService:
 
     async def stop(self) -> None:
         """Drain accepted messages while channels can still deliver replies."""
+        self._shutdown_generation += 1
         self._stopping = True
         self._running = False
         # Reject new provider work first. Existing workers keep draining during
