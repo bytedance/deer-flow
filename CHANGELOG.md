@@ -804,7 +804,6 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
-<<<<<<< HEAD
 - **memory:** DeerMem's derived SQLite FTS5 retrieval index can now live
   outside the memory root, and a Gateway instance now notices facts another
   instance wrote. The index for every user was one SQLite database in WAL mode
@@ -825,7 +824,6 @@ This release closes that milestone with **439 merged pull requests**.
   a Pod-local `emptyDir` at `/var/lib/deerflow/memory-index`, points the key at
   it, and drops the legacy `memory.storage_path: memory.json` line that the
   Gateway discarded with a warning at every start. `config_version` is now 56. ([#6494])
-=======
 - **skills:** A `/skill-name` activation now survives a retried model call. The
   activation was marked as done before the model was called, so when the call
   failed (rate limit, overload, timeout) or came back empty and was retried, the
@@ -851,7 +849,6 @@ This release closes that milestone with **439 merged pull requests**.
   operators no longer need to call it on every Pod or worker separately. The
   MCP cache reset's marker now shares the same `deerflow.config.shared_reset_marker`
   helper. ([#6495])
->>>>>>> 16b4fcd968b8100984cf4ba8fba119bcac844d2e
 - **persistence:** `scripts/migrate_user_isolation.py` now moves each legacy
   thread to the user who owns it. It looked for thread owners in
   `{base_dir}/deer-flow.db`, a file DeerFlow never creates (the database is
@@ -9250,9 +9247,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6448]: https://github.com/bytedance/deer-flow/pull/6448
 [#6450]: https://github.com/bytedance/deer-flow/pull/6450
 [#6481]: https://github.com/bytedance/deer-flow/pull/6481
-<<<<<<< HEAD
 [#6494]: https://github.com/bytedance/deer-flow/pull/6494
-=======
 [#6495]: https://github.com/bytedance/deer-flow/pull/6495
 [#6506]: https://github.com/bytedance/deer-flow/pull/6506
->>>>>>> 16b4fcd968b8100984cf4ba8fba119bcac844d2e
