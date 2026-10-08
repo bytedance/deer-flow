@@ -160,6 +160,7 @@ class ChannelService:
         self._channels: dict[str, Any] = {}  # name -> Channel instance
         self._config = config
         self._running = False
+        self._stopping = False
         self._readiness_locks: dict[str, asyncio.Lock] = {}
         self._config_epochs: dict[str, int] = {}
 
@@ -202,6 +203,8 @@ class ChannelService:
         """Start the manager and all enabled channels."""
         if self._running:
             return
+        if self._stopping:
+            raise RuntimeError("cannot start ChannelService while shutdown is incomplete")
 
         await self.manager.start()
         self._running = True
@@ -294,6 +297,7 @@ class ChannelService:
 
     async def stop(self) -> None:
         """Drain accepted messages while channels can still deliver replies."""
+        self._stopping = True
         self._running = False
         # Reject new provider work first. Existing workers keep draining during
         # manager.stop(), and channel transports remain alive until that drain
@@ -323,6 +327,7 @@ class ChannelService:
         if stop_errors:
             raise ExceptionGroup("one or more channels failed to stop", stop_errors)
 
+        self._stopping = False
         logger.info("ChannelService stopped")
 
     def _load_channel_config(self, name: str) -> dict[str, Any] | None:
@@ -484,6 +489,10 @@ class ChannelService:
 
     async def _start_channel(self, name: str, config: dict[str, Any]) -> bool:
         """Instantiate and start a single channel."""
+        if self._stopping:
+            logger.warning("Refusing to start %s while ChannelService shutdown is in progress", name)
+            return False
+
         import_path = _CHANNEL_REGISTRY.get(name)
         if not import_path:
             logger.warning("Unknown channel type")
@@ -528,6 +537,12 @@ class ChannelService:
                 config["seen_event_store_path"] = await asyncio.to_thread(_default_seen_store_path)
             if self._connection_repo is not None:
                 config["connection_repo"] = self._connection_repo
+            # A stop may have started while this coroutine was suspended in
+            # pre-start I/O above. Fence publication again immediately before
+            # the new instance becomes service-owned.
+            if self._stopping:
+                logger.warning("Refusing to publish %s channel while ChannelService shutdown is in progress", name)
+                return False
             channel = channel_cls(bus=self.bus, config=config)
             self._channels[name] = channel
             await channel.start()
