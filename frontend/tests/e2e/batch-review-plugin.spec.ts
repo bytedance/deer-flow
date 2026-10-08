@@ -264,7 +264,7 @@ test("browser code boundaries, malformed/legacy evidence and read-error recovery
     .getByRole("button", { name: "Historical research ·", exact: false })
     .click();
   await page.getByRole("button", { name: "topic-0 · succeeded" }).click();
-  await expect(page.getByRole("alert")).toContainText(
+  await expect(page.getByRole("main").getByRole("alert")).toContainText(
     "Unable to load saved results",
   );
   await page.getByRole("button", { name: "Retry read" }).click();
