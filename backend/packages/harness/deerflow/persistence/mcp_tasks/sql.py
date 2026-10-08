@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.mcp.tasks import ATTENTION_TASK_STATUSES, POLLABLE_TASK_STATUSES, TERMINAL_TASK_STATUSES
+from deerflow.mcp.tasks.models import TaskStatus
 from deerflow.persistence.mcp_tasks.model import McpTaskRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.utils.time import coerce_iso
@@ -275,6 +276,7 @@ class McpTaskRepository:
         thread_incarnation: str | None,
         limit: int = 50,
         active_only: bool = False,
+        status: TaskStatus | None = None,
     ) -> list[dict[str, Any]]:
         stmt = select(McpTaskRow).where(
             McpTaskRow.thread_id == thread_id,
@@ -288,6 +290,8 @@ class McpTaskRepository:
         )
         if active_only:
             stmt = stmt.where(McpTaskRow.status.in_(_POLLABLE_STATUS_VALUES))
+        if status is not None:
+            stmt = stmt.where(McpTaskRow.status == TaskStatus(status).value)
         stmt = stmt.order_by(McpTaskRow.created_at.desc(), McpTaskRow.id.desc()).limit(limit)
         async with self._sf() as session:
             result = await session.execute(stmt)

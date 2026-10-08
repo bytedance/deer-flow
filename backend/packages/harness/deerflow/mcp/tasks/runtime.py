@@ -6,7 +6,7 @@ from typing import Any, Protocol
 
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.mcp.config_normalization import normalize_mcp_interceptor_paths, normalize_mcp_server_config
-from deerflow.mcp.tasks.models import TaskSubmitRequest
+from deerflow.mcp.tasks.models import TaskStatus, TaskSubmitRequest
 
 
 class McpTaskConfigurationError(RuntimeError):
@@ -30,6 +30,7 @@ class McpTaskSubmitter(Protocol):
         thread_incarnation: str | None,
         limit: int = 50,
         active_only: bool = False,
+        status: TaskStatus | None = None,
     ) -> list[dict[str, Any]]: ...
 
     async def cancel_matching_task(
