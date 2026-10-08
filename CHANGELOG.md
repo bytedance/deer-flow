@@ -827,6 +827,13 @@ This release closes that milestone with **439 merged pull requests**.
   keeps `memory` logs a startup warning. Status codes and messages of the
   login endpoint are unchanged; `max_login_attempts` and `lockout_seconds`
   stay live-read. ([#6501])
+- **skills:** A `/skill-name` activation now survives a retried model call. The
+  activation was marked as done before the model was called, so when the call
+  failed (rate limit, overload, timeout) or came back empty and was retried, the
+  retry went out without the `SKILL.md` body while the skill's tool restrictions
+  still applied. The retry now carries the same reminder as the first attempt,
+  without re-reading the skill or recording a second activation, and the retried
+  response keeps the skill-usage record. ([#6506])
 - **skills:** Skill changes made through one Gateway replica now reach the
   skill list in every other replica's system prompt. `SkillStorage` rescans
   disk on every call, but the prompt layer caches the enabled-skills list and
@@ -9245,3 +9252,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6481]: https://github.com/bytedance/deer-flow/pull/6481
 [#6495]: https://github.com/bytedance/deer-flow/pull/6495
 [#6501]: https://github.com/bytedance/deer-flow/pull/6501
+[#6506]: https://github.com/bytedance/deer-flow/pull/6506
