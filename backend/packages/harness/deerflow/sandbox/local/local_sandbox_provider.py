@@ -1,4 +1,5 @@
 import logging
+import os
 import threading
 from collections import OrderedDict
 from pathlib import Path
@@ -97,6 +98,39 @@ class LocalSandboxProvider(SandboxProvider):
         self._thread_sandboxes: OrderedDict[tuple[str, str], LocalSandbox] = OrderedDict()
         self._max_cached_threads = max_cached_threads
         self._lock = threading.Lock()
+        self._environment = self._load_sandbox_environment()
+
+    @staticmethod
+    def _resolve_env_vars(env_config: dict[str, str]) -> dict[str, str]:
+        """Resolve environment variable references (values starting with $).
+
+        Mirrors the AIO sandbox provider's resolution so a config.yaml that
+        sets ``sandbox.environment`` behaves identically across providers.
+        """
+        resolved = {}
+        for key, value in env_config.items():
+            if isinstance(value, str) and value.startswith("$"):
+                resolved[key] = os.environ.get(value[1:], "")
+            else:
+                resolved[key] = str(value)
+        return resolved
+
+    def _load_sandbox_environment(self) -> dict[str, str]:
+        """Load operator-configured ``sandbox.environment`` for local sandboxes.
+
+        Values starting with ``$`` are resolved from the gateway process env,
+        matching the documented config field and the AIO provider. Missing
+        config yields an empty mapping (nothing injected; scrubbing alone
+        applies).
+        """
+        try:
+            from deerflow.config import get_app_config
+
+            sandbox_config = get_app_config().sandbox
+        except Exception:
+            return {}
+        env_config = getattr(sandbox_config, "environment", None) or {}
+        return self._resolve_env_vars(dict(env_config))
 
     def _setup_path_mappings(self) -> list[PathMapping]:
         """
@@ -455,7 +489,9 @@ class LocalSandboxProvider(SandboxProvider):
                 if self._generic_sandbox is None:
                     mappings = list(self._path_mappings)
                     self._append_public_skill_mapping(mappings, skill_projection)
-                    self._generic_sandbox = LocalSandbox("local", path_mappings=mappings)
+                    self._generic_sandbox = LocalSandbox(
+                        "local", path_mappings=mappings, environment=self._environment
+                    )
                     _singleton = self._generic_sandbox
                 return self._generic_sandbox.id
 
@@ -506,6 +542,7 @@ class LocalSandboxProvider(SandboxProvider):
                 replacement = LocalSandbox(
                     self._sandbox_id_for_thread(thread_id, effective_user_id),
                     path_mappings=new_mappings,
+                    environment=self._environment,
                 )
                 if cached is not None:
                     replacement._agent_written_paths.update(cached._agent_written_paths)

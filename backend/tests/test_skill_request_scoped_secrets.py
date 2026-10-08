@@ -93,6 +93,62 @@ class TestLocalSandboxEnvInjection:
         assert "scoped-value" in out
 
 
+class TestLocalSandboxOperatorEnvironment:
+    """``sandbox.environment`` (operator config) rides the authorized injection channel.
+
+    The env-policy scrubber drops secret-looking names from inherited os.environ,
+    and dashboard-driven runs cannot supply request-scoped ``context.secrets``
+    (there is no UI for it), so ``sandbox.environment`` is the only operator-owned
+    path for e.g. ``MINIMAX_API_KEY`` to reach public generation skills on the
+    local provider — matching the AIO provider, which already honors the field.
+    """
+
+    def test_operator_environment_survives_scrub(self):
+        sandbox = LocalSandbox(id="local", environment={"MINIMAX_API_KEY": "operator-value"})
+        out = sandbox.execute_command(_echo_env_probe("MINIMAX_API_KEY"))
+        assert "operator-value" in out
+
+    def test_request_scoped_env_wins_over_operator_environment(self):
+        """A request-scoped value (declared ``required-secrets``) overrides the
+        shared operator value — the per-user-key-overrides-shared-key case."""
+        sandbox = LocalSandbox(id="local", environment={"SHARED_API_KEY": "operator-value"})
+        out = sandbox.execute_command(
+            _echo_env_probe("SHARED_API_KEY"),
+            env={"SHARED_API_KEY": "request-scoped-value"},
+        )
+        assert "request-scoped-value" in out
+        assert "operator-value" not in out
+
+    def test_no_environment_config_keeps_pure_scrubbing(self, monkeypatch):
+        """Omitting the parameter must not weaken the baseline: a platform secret
+        in os.environ still never reaches the subprocess."""
+        monkeypatch.setenv("MINIMAX_API_KEY", "platform-key-should-vanish")
+        sandbox = LocalSandbox(id="local")
+        out = sandbox.execute_command(_echo_env_probe("MINIMAX_API_KEY"))
+        assert "platform-key-should-vanish" not in out
+
+    def test_provider_resolves_dollar_refs_from_host_env(self, monkeypatch):
+        """``$VAR`` values resolve from the gateway process env, mirroring AIO."""
+        from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
+
+        monkeypatch.setenv("GATEWAY_SIDE_KEY", "resolved-from-host")
+        resolved = LocalSandboxProvider._resolve_env_vars(
+            {"MINIMAX_API_KEY": "$GATEWAY_SIDE_KEY", "LITERAL_MODEL": "image-01"}
+        )
+        assert resolved == {"MINIMAX_API_KEY": "resolved-from-host", "LITERAL_MODEL": "image-01"}
+
+    def test_provider_missing_config_yields_empty_environment(self, monkeypatch):
+        """A missing/unloadable config must degrade to 'inject nothing', not crash."""
+        from deerflow.sandbox.local import local_sandbox_provider as provider_module
+
+        def _raise():
+            raise RuntimeError("no config on this host")
+
+        monkeypatch.setattr("deerflow.config.get_app_config", _raise, raising=False)
+        provider = provider_module.LocalSandboxProvider()
+        assert provider._environment == {}
+
+
 class TestAioSandboxEnvInjection:
     @pytest.fixture
     def sandbox(self):

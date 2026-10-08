@@ -212,7 +212,12 @@ class LocalSandbox(Sandbox):
         except OSError:
             return False
 
-    def __init__(self, id: str, path_mappings: list[PathMapping] | None = None):
+    def __init__(
+        self,
+        id: str,
+        path_mappings: list[PathMapping] | None = None,
+        environment: dict[str, str] | None = None,
+    ):
         """
         Initialize local sandbox with optional path mappings.
 
@@ -220,9 +225,17 @@ class LocalSandbox(Sandbox):
             id: Sandbox identifier
             path_mappings: List of path mappings with optional read-only flag.
                           Skills directory is read-only by default.
+            environment: Operator-authorized variables (``sandbox.environment``
+                          in config.yaml, ``$VAR`` refs already resolved) layered
+                          into every subprocess even when the env-policy scrubber
+                          would drop them from inherited ``os.environ`` — the
+                          same injection channel as request-scoped secrets, so
+                          an entry here is trusted like a declared
+                          ``required-secrets`` value.
         """
         super().__init__(id)
         self.path_mappings = path_mappings or []
+        self.environment: dict[str, str] = dict(environment) if environment else {}
         # Track files written through write_file so read_file only
         # reverse-resolves paths in agent-authored content.
         self._agent_written_paths: set[str] = set()
@@ -516,10 +529,13 @@ class LocalSandbox(Sandbox):
         if timeout is None:
             timeout = DEFAULT_COMMAND_TIMEOUT_SECONDS
 
-        # Inherit os.environ minus platform secrets, then layer any injected
-        # request-scoped secrets on top (#3861). An explicit env is always passed
-        # so platform credentials never leak into skill subprocesses.
-        sandbox_env = build_sandbox_env(env)
+        # Inherit os.environ minus platform secrets, then layer injected
+        # request-scoped secrets on top (#3861). Operator-configured
+        # ``sandbox.environment`` entries ride the same authorized injection
+        # channel (and lose to request-scoped values on key collision), so
+        # platform credentials still never leak into skill subprocesses.
+        injected = {**self.environment, **(env or {})}
+        sandbox_env = build_sandbox_env(injected)
         timed_out = False
         if os.name == "nt":
             if self._is_powershell(shell):
