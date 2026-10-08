@@ -4,7 +4,7 @@ import ipaddress
 
 import pytest
 
-from deerflow.community.url_safety import is_blocked_address, validate_public_http_url
+from deerflow.community.url_safety import is_blocked_address, validate_delegated_backend_url, validate_public_http_url
 
 
 @pytest.mark.parametrize(
@@ -51,3 +51,43 @@ def test_validator_refuses_a_hostname_resolving_into_shared_address_space():
     error = validate_public_http_url("http://metadata.example/latest/meta-data/", resolver=lambda _host: [ipaddress.ip_address("100.100.100.200")])
 
     assert error == "Error: Refusing to fetch a private, loopback, or metadata address"
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://localhost:3032",
+        "http://127.0.0.1:3032",
+        "http://10.0.0.5:3032",
+        "http://169.254.169.254:3032",
+        "http://[::1]:3032",
+    ],
+)
+def test_delegated_backend_fails_closed_on_private_addresses(base_url):
+    error = validate_delegated_backend_url(base_url)
+
+    assert error is not None
+    assert "network_isolation_confirmed" in error
+
+
+def test_delegated_backend_fails_closed_when_unresolvable():
+    error = validate_delegated_backend_url("http://browserless:3000", resolver=lambda _host: [])
+
+    assert error is not None
+    assert "network_isolation_confirmed" in error
+
+
+def test_delegated_backend_allows_public_address():
+    error = validate_delegated_backend_url(
+        "https://production-sfo.browserless.io", resolver=lambda _host: [ipaddress.ip_address("93.184.216.34")]
+    )
+
+    assert error is None
+
+
+def test_delegated_backend_allows_private_when_isolation_confirmed():
+    assert validate_delegated_backend_url("http://10.0.0.5:3032", network_isolation_confirmed=True) is None
+
+
+def test_delegated_backend_rejects_non_http_scheme():
+    assert validate_delegated_backend_url("ftp://example.com") == "Error: Only http:// and https:// backend URLs are supported"

@@ -32,6 +32,7 @@ async def test_web_fetch_resolves_relative_links_through_real_extraction(monkeyp
         client = SimpleNamespace(fetch_html_with_status=AsyncMock(return_value=BrowserlessFetchResult(html, "200", "OK")))
         monkeypatch.setattr(module, "_get_browserless_client", lambda name: client)
         monkeypatch.setattr(module, "_resolve_host_addresses", lambda host: [ip_address("93.184.216.34")])
+        monkeypatch.setattr(module, "_validate_backend_base_url", lambda cfg: None)
     result = await module.web_fetch_tool.ainvoke({"url": PAGE_URL})
     assert "[Next](https://example.com/next)" in result
     assert "[Reference](https://example.com/reference)" in result
