@@ -120,6 +120,21 @@ fi
 echo -e "${BLUE}DEER_FLOW_HOME=$DEER_FLOW_HOME${NC}"
 mkdir -p "$DEER_FLOW_HOME"
 
+# ── DEER_FLOW_HOME writability preflight ─────────────────────────────────────
+
+# `make docker-start` bind-mounts the host `backend/` directory into the gateway
+# container, whose process runs as root, so state it creates under
+# backend/.deer-flow ends up owned by root on the host. A later `make up` runs
+# this script as the invoking user and only fails deep into the run with a bare
+# "Permission denied" while persisting generated secrets. Detect it up front and
+# print the exact recovery command instead.
+if [ "$CMD" != "down" ] && [ ! -w "$DEER_FLOW_HOME" ]; then
+    echo -e "${RED}✗ $DEER_FLOW_HOME is not writable by '$(id -un)'.${NC}" >&2
+    echo -e "${RED}  This usually happens when the dev stack (make docker-start) created it as root.${NC}" >&2
+    echo -e "${YELLOW}  Recover with: sudo chown -R $(id -u):$(id -g) '$DEER_FLOW_HOME'${NC}" >&2
+    exit 1
+fi
+
 # ── DEER_FLOW_REPO_ROOT (for skills host path in DooD) ───────────────────────
 
 export DEER_FLOW_REPO_ROOT="$REPO_ROOT"
