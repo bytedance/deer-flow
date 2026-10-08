@@ -821,7 +821,7 @@ This release closes that milestone with **439 merged pull requests**.
   written and `scope: process` when no extensions config path resolves, so
   operators no longer need to call it on every Pod or worker separately. The
   MCP cache reset's marker now shares the same `deerflow.config.shared_reset_marker`
-  helper.
+  helper. ([#6495])
 - **persistence:** `scripts/migrate_user_isolation.py` now moves each legacy
   thread to the user who owns it. It looked for thread owners in
   `{base_dir}/deer-flow.db`, a file DeerFlow never creates (the database is
@@ -9210,3 +9210,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6447]: https://github.com/bytedance/deer-flow/pull/6447
 [#6448]: https://github.com/bytedance/deer-flow/pull/6448
 [#6450]: https://github.com/bytedance/deer-flow/pull/6450
+[#6495]: https://github.com/bytedance/deer-flow/pull/6495
