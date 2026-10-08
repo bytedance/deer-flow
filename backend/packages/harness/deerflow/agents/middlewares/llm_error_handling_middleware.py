@@ -27,6 +27,7 @@ from deerflow.agents.middlewares.model_response import append_visible_text, fini
 from deerflow.config.app_config import AppConfig
 from deerflow.models.request_admission import AdmissionError
 from deerflow.utils.custom_events import aemit_custom_event, emit_custom_event
+from deerflow.utils.retry_after import bounded_retry_after_ms
 
 logger = logging.getLogger(__name__)
 
@@ -695,7 +696,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     def _build_retry_delay_ms(self, prev_delay_ms: int | None, exc: BaseException, reason: str = "transient") -> int:
         """Compute the next retry delay (ms) using decorrelated jitter.
 
-        An explicit ``Retry-After`` from the provider is honored as-is (no
+        A finite ``Retry-After`` up to 24 hours is honored as-is (no
         jitter) - the server told us exactly when to come back, and for a
         burst-rate 429 this is strongly preferred over any computed delay.
         Otherwise AWS-style "decorrelated jitter" is applied:
@@ -1074,12 +1075,12 @@ def _extract_retry_after_ms(exc: BaseException) -> int | None:
 
     try:
         multiplier = 1 if "ms" in header_name.lower() else 1000
-        return max(0, int(float(raw) * multiplier))
+        return bounded_retry_after_ms(float(raw) * multiplier)
     except (TypeError, ValueError, OverflowError):
         try:
             target = parsedate_to_datetime(str(raw))
             delta = target.timestamp() - time.time()
-            return max(0, int(delta * 1000))
+            return bounded_retry_after_ms(delta * 1000)
         except (TypeError, ValueError, OverflowError):
             return None
 

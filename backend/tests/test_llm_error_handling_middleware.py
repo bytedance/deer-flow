@@ -5,6 +5,8 @@ import concurrent.futures
 import threading
 import time
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -1872,32 +1874,95 @@ def test_retry_delay_honors_retry_after_without_jitter() -> None:
     assert delay == 5000
 
 
-def test_retry_after_non_finite_value_falls_back_to_jitter() -> None:
-    """A non-finite ``Retry-After`` (e.g. ``1e999``, which json/float parse to
-    ``inf``) must be treated as an unusable hint, not crash the retry loop:
-    ``int(float('inf'))`` raises ``OverflowError``, which the numeric branch of
-    ``_extract_retry_after_ms`` did not guard — and that branch runs inside the
-    retry loop's ``except Exception`` handler, so the new exception escapes and
-    kills the whole run instead of falling back to jittered backoff. The
-    date-parsing fallback in the same helper already guards ``OverflowError``;
-    the numeric branch must too.
-    """
+@pytest.mark.parametrize("header_name", ["Retry-After", "retry-after", "Retry-After-Ms", "retry-after-ms"])
+@pytest.mark.parametrize("header_value", ["1e999", "inf", "-inf", "nan", "1e15", "1e308", "99999999999999999999", "not-a-number"])
+def test_unusable_retry_after_falls_back_to_jitter(header_name: str, header_value: str) -> None:
+    """Unusable provider delays must fall back to bounded jitter."""
     middleware = _build_middleware(retry_base_delay_ms=100, retry_cap_delay_ms=10000)
-    for header_value in ("1e999", "inf", "-inf", "nan"):
-        exc = FakeError("rate limited", status_code=429, headers={"Retry-After": header_value})
-        delay = middleware._build_retry_delay_ms(100, exc)  # must not raise
-        assert 100 <= delay <= 10000
-
-    # The ms-suffixed header takes the same numeric branch.
-    exc = FakeError("rate limited", status_code=429, headers={"Retry-After-Ms": "1e999"})
-    assert 100 <= middleware._build_retry_delay_ms(100, exc) <= 10000
+    exc = FakeError("rate limited", status_code=429, headers={header_name: header_value})
+    assert 100 <= middleware._build_retry_delay_ms(100, exc) <= 300
 
 
-def test_extract_retry_after_ms_non_finite_returns_none() -> None:
-    """Unit level: non-finite hints return None (unusable) instead of raising."""
-    for header_value in ("1e999", "inf", "-inf"):
-        exc = FakeError("rate limited", status_code=429, headers={"Retry-After": header_value})
-        assert _extract_retry_after_ms(exc) is None
+@pytest.mark.parametrize("header_name", ["Retry-After", "retry-after", "Retry-After-Ms", "retry-after-ms"])
+@pytest.mark.parametrize("header_value", ["1e999", "inf", "-inf", "nan", "1e15", "1e308", "99999999999999999999", "not-a-number"])
+def test_extract_unusable_retry_after_ms_returns_none(header_name: str, header_value: str) -> None:
+    """Mirror the delay-level cases, including nan's existing safe fallback."""
+    exc = FakeError("rate limited", status_code=429, headers={header_name: header_value})
+    assert _extract_retry_after_ms(exc) is None
+
+
+@pytest.mark.parametrize(
+    ("header_name", "header_value", "expected_ms"),
+    [
+        ("Retry-After", "60", 60000),
+        ("retry-after-ms", "60000", 60000),
+        ("Retry-After", "2.5", 2500),
+        ("retry-after-ms", "2.5", 2),
+        ("Retry-After", "-2", 0),
+        ("retry-after-ms", "-2", 0),
+        ("Retry-After", "0", 0),
+        ("retry-after-ms", "0", 0),
+        ("Retry-After", "86400", 86400000),
+        ("retry-after-ms", "86400000", 86400000),
+        ("Retry-After", "86400.001", None),
+        ("retry-after-ms", "86400001", None),
+    ],
+)
+def test_retry_after_numeric_boundaries(header_name: str, header_value: str, expected_ms: int | None) -> None:
+    exc = FakeError("rate limited", status_code=429, headers={header_name: header_value})
+    assert _extract_retry_after_ms(exc) == expected_ms
+    middleware = _build_middleware(retry_base_delay_ms=100, retry_cap_delay_ms=10000)
+    delay = middleware._build_retry_delay_ms(100, exc)
+    if expected_ms is None:
+        assert 100 <= delay <= 300
+    else:
+        assert delay == expected_ms
+
+
+@pytest.mark.parametrize(("delta_seconds", "expected_ms"), [(-60, 0), (60, 60000), (86400, 86400000), (86401, None)])
+def test_retry_after_date_boundaries(monkeypatch: pytest.MonkeyPatch, delta_seconds: int, expected_ms: int | None) -> None:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    monkeypatch.setattr(time, "time", lambda: now.timestamp())
+    raw = format_datetime(now + timedelta(seconds=delta_seconds), usegmt=True)
+    exc = FakeError("rate limited", status_code=429, headers={"Retry-After": raw})
+    assert _extract_retry_after_ms(exc) == expected_ms
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize("header_name", ["Retry-After", "retry-after-ms"])
+@pytest.mark.parametrize("header_value", ["1e999", "nan", "1e15", "99999999999999999999", "Fri, 31 Dec 9999 23:59:59 GMT"])
+async def test_retry_loops_recover_from_unusable_hints(monkeypatch: pytest.MonkeyPatch, mode: str, header_name: str, header_value: str) -> None:
+    middleware = _build_middleware(retry_max_attempts=2, retry_base_delay_ms=100, retry_cap_delay_ms=300)
+    attempts = 0
+    waits: list[float] = []
+
+    def fake_sleep(delay: float) -> None:
+        assert 0.1 <= delay <= 0.3
+        waits.append(delay)
+
+    async def fake_async_sleep(delay: float) -> None:
+        fake_sleep(delay)
+
+    def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise FakeError("rate limited", status_code=429, headers={header_name: header_value})
+        return AIMessage(content="recovered")
+
+    async def async_handler(request) -> AIMessage:
+        return handler(request)
+
+    monkeypatch.setattr(time, "sleep", fake_sleep)
+    monkeypatch.setattr(asyncio, "sleep", fake_async_sleep)
+    if mode == "sync":
+        result = middleware.wrap_model_call(SimpleNamespace(), handler)
+    else:
+        result = await middleware.awrap_model_call(SimpleNamespace(), async_handler)
+    assert result.content == "recovered"
+    assert attempts == 2
+    assert len(waits) == 1
 
 
 @pytest.mark.anyio

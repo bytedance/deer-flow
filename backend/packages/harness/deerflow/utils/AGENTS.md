@@ -1,3 +1,10 @@
+### Model Retry Hints
+
+`retry_after.py::bounded_retry_after_ms` shares the 24-hour provider-hint ceiling
+between LLM middleware (numeric/date hints) and Claude backoff. Non-finite or
+over-limit delays return `None` for local backoff; finite negatives clamp to zero.
+Validate before integer truncation and preserve valid hints above the jitter cap.
+
 ### Port Allocation Bounds
 
 `network.py::PortAllocator.allocate` caps its exclusive search endpoint at
