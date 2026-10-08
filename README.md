@@ -191,6 +191,10 @@ For MindIE XML tool calls, see the
    When a thread manifest is requested, a nonempty `DEER_FLOW_HOME` selects the
    runtime data directory instead of stale checkout data. External data paths
    appear as `{DEER_FLOW_HOME}` in the report; file contents remain excluded.
+   Runtime path settings also come from the checkout `.env`, with shell exports
+   taking precedence. Relative paths resolve from the checkout as in `make dev`.
+   Without an explicit home, a configured `DEER_FLOW_PROJECT_ROOT` selects its
+   `.deer-flow` directory; external paths use that variable name in the report.
 
    > **Advanced / manual configuration**: If you prefer to edit `config.yaml` directly, run `make config` instead to copy the full template. Optional dependency auto-detection accepts UTF-8 configuration files with or without a byte-order mark (BOM). See `config.example.yaml` for the complete reference including CLI-backed providers (Codex CLI, Claude Code OAuth), OpenRouter, Responses API, subagent runtime caps such as `subagents.max_total_per_run`, and more.
 

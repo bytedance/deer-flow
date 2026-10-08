@@ -262,14 +262,28 @@ def _validate_thread_id(thread_id: str) -> None:
         raise ValueError(f"Invalid thread_id: {thread_id!r}")
 
 
+def _thread_data_roots(project_root: Path) -> list[tuple[Path, str]]:
+    """Resolve launcher-relative runtime paths without exporting .env secrets."""
+    env_file = project_root / ".env"
+    values = {}
+    if env_file.is_file():
+        from dotenv import dotenv_values
+
+        values = dotenv_values(env_file, encoding="utf-8-sig")
+    home = os.environ.get("DEER_FLOW_HOME", values.get("DEER_FLOW_HOME"))
+    runtime_project = os.environ.get("DEER_FLOW_PROJECT_ROOT", values.get("DEER_FLOW_PROJECT_ROOT"))
+    if home:
+        return [((project_root / home).resolve(), "{DEER_FLOW_HOME}")]
+    if runtime_project:
+        return [((project_root / runtime_project).resolve() / ".deer-flow", "{DEER_FLOW_PROJECT_ROOT}/.deer-flow")]
+    return [(project_root / ".deer-flow", ""), (project_root / "backend" / ".deer-flow", "")]
+
+
 def _candidate_thread_data_dirs(project_root: Path, thread_id: str) -> list[Path]:
     _validate_thread_id(thread_id)
-    if env_home := os.getenv("DEER_FLOW_HOME"):
-        data_roots = [Path(env_home).resolve()]
-    else:
-        data_roots = [project_root / ".deer-flow", project_root / "backend" / ".deer-flow"]
-    candidates = [root / "threads" / thread_id / "user-data" for root in data_roots]
-    for base in (root / "users" for root in data_roots):
+    roots = _thread_data_roots(project_root)
+    candidates = [root / "threads" / thread_id / "user-data" for root, _ in roots]
+    for base in (root / "users" for root, _ in roots):
         if base.exists():
             candidates.extend(user_dir / "threads" / thread_id / "user-data" for user_dir in base.iterdir() if user_dir.is_dir())
     return candidates
@@ -279,12 +293,12 @@ def _display_path(path: Path, project_root: Path) -> str:
     try:
         return path.resolve().relative_to(project_root.resolve()).as_posix()
     except (OSError, ValueError):
-        if env_home := os.getenv("DEER_FLOW_HOME"):
-            try:
-                relative = path.resolve().relative_to(Path(env_home).resolve()).as_posix()
-                return "{DEER_FLOW_HOME}/" + relative
-            except (OSError, ValueError):
-                pass
+        for root, marker in _thread_data_roots(project_root):
+            if marker:
+                try:
+                    return marker + "/" + path.resolve().relative_to(root.resolve()).as_posix()
+                except (OSError, ValueError):
+                    pass
         return redact_text(path.as_posix())
 
 
@@ -318,7 +332,8 @@ def _file_manifest(root: Path, *, max_files: int = 500) -> list[dict[str, Any]]:
 
 def collect_thread_summary(project_root: Path, thread_id: str) -> dict[str, Any]:
     """Collect a thread file manifest without reading user file contents."""
-    for data_dir in _candidate_thread_data_dirs(project_root, thread_id):
+    candidates = _candidate_thread_data_dirs(project_root, thread_id)
+    for data_dir in candidates:
         if data_dir.exists():
             return {
                 "thread_id": thread_id,
@@ -331,7 +346,7 @@ def collect_thread_summary(project_root: Path, thread_id: str) -> dict[str, Any]
     return {
         "thread_id": thread_id,
         "found": False,
-        "checked_layouts": [_display_path(path, project_root) for path in _candidate_thread_data_dirs(project_root, thread_id)],
+        "checked_layouts": [_display_path(path, project_root) for path in candidates],
     }
 
 

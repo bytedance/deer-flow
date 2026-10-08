@@ -1,7 +1,9 @@
 ## Support Bundle Runtime Home
 
 Thread manifests use a nonempty `DEER_FLOW_HOME` exclusively, resolving relative
-values from the caller's current directory like `Paths.base_dir`. Scan both
+values from the checkout like the local launcher. Read `.env` path settings without
+exporting secrets; shell exports win, including empty exports. Honor a configured
+`DEER_FLOW_PROJECT_ROOT` when home is unset. Scan both
 legacy threads and user-scoped threads in that root. With no override, retain
 the two checkout layouts. Display an external home as `{DEER_FLOW_HOME}` rather
 than its absolute host path, and never include file contents in the manifest.
