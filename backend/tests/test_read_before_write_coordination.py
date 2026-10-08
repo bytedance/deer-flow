@@ -40,6 +40,12 @@ class _ObservedLock:
     def release(self):
         self.lock.release()
 
+    def __enter__(self):
+        return self.acquire()
+
+    def __exit__(self, *_exc):
+        self.release()
+
 
 @pytest.mark.parametrize("workers", [2, 32])
 def test_same_path_waiters_do_not_starve_the_holder_or_unrelated_work(tmp_path, monkeypatch, workers):
@@ -121,6 +127,76 @@ def test_cancel_after_unlock_does_not_orphan_the_gate():
             if not task.done():
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+def test_async_tool_waits_for_sync_tool_on_the_same_path(tmp_path, monkeypatch):
+    path = tmp_path / "report.md"
+    path.write_text("shared file", encoding="utf-8")
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        holder_entered = threading.Event()
+        release_holder = threading.Event()
+        waiter_arrived = asyncio.Event()
+        waiter_ran = False
+        sync_results = []
+        sync_errors = []
+        arrivals = 0
+        guard = threading.Lock()
+        middleware = gate.ReadBeforeWriteMiddleware(content_reader=lambda _runtime, _path: path.read_text(encoding="utf-8"))
+
+        def arrived():
+            nonlocal arrivals
+            with guard:
+                arrivals += 1
+                if arrivals == 2:
+                    loop.call_soon_threadsafe(waiter_arrived.set)
+
+        observed = _ObservedLock(middleware._lock_for(_request("sync-holder"), "/report.md"), arrived)
+        monkeypatch.setattr(middleware, "_lock_for", lambda _request, _path: observed)
+
+        def sync_handler(request):
+            holder_entered.set()
+            assert release_holder.wait(5), "test did not release the synchronous holder"
+            return ToolMessage(content="shared file", tool_call_id=request.tool_call["id"], name="read_file")
+
+        def sync_call():
+            try:
+                sync_results.append(middleware.wrap_tool_call(_request("sync-holder"), sync_handler))
+            except BaseException as exc:
+                sync_errors.append(exc)
+
+        async def async_handler(request):
+            nonlocal waiter_ran
+            waiter_ran = True
+            return ToolMessage(content="shared file", tool_call_id=request.tool_call["id"], name="read_file")
+
+        thread = threading.Thread(target=sync_call)
+        task = None
+        thread.start()
+        try:
+            assert await asyncio.to_thread(holder_entered.wait, 5)
+            task = asyncio.create_task(middleware.awrap_tool_call(_request("async-waiter"), async_handler))
+            await asyncio.wait_for(waiter_arrived.wait(), 5)
+            assert not waiter_ran
+            release_holder.set()
+            result = await asyncio.wait_for(task, 5)
+            assert waiter_ran
+        finally:
+            release_holder.set()
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            await asyncio.to_thread(thread.join, 5)
+            assert not thread.is_alive()
+
+        assert not sync_errors
+        expected = hashlib.sha256(b"shared file").hexdigest()
+        assert len(sync_results) == 1
+        assert sync_results[0].additional_kwargs[gate.READ_MARK_KEY]["hash"] == expected
+        assert result.additional_kwargs[gate.READ_MARK_KEY]["hash"] == expected
 
     asyncio.run(scenario())
 

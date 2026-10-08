@@ -131,6 +131,8 @@ class _GateLock:
             self._condition.notify_all()
         # Future callbacks can schedule work on other event loops. Notify after
         # releasing the state lock, and tolerate a concurrent waiter cancellation.
+        # Wake everyone: a caller cancelled before re-acquiring must not leave
+        # the remaining waiters asleep on an unlocked gate.
         for waiter in waiters:
             try:
                 waiter.set_result(None)
