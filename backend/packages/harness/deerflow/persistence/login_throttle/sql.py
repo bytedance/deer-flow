@@ -21,7 +21,16 @@ Concurrency contract:
 - Cleanup is amortized into ``record_failure``: a bounded ``DELETE`` removes
   locks whose sentence has elapsed and never-locked counters idle for
   :data:`STALE_COUNTER_SECONDS` (the shared-table equivalent of the memory
-  store's capacity eviction) so the table cannot grow without bound.
+  store's capacity eviction) so the table cannot grow without bound. The
+  candidates come from an ``IN (SELECT ... LIMIT n)`` subquery bound to the
+  statement snapshot, and the same expiry predicate is repeated on the
+  ``DELETE`` target: PostgreSQL READ COMMITTED re-evaluates only the
+  statement's *own* WHERE on a row it had to wait for, so without the outer
+  predicate a lock that a concurrent ``check`` extended (or a stale counter a
+  concurrent failure re-armed) between the snapshot and the row lock would
+  still be deleted. Every other write (``_discard``, the ``check`` UPDATE)
+  already carries its full compare-and-set predicate on the target row for
+  the same reason; ``reset`` is unconditional by design.
 
 Database errors propagate: the users table lives in the same database, so a
 login cannot succeed without it anyway, and failing closed keeps the throttle
@@ -146,7 +155,13 @@ class SqlLoginThrottleStore:
 
     @staticmethod
     def _matches(key: str, snapshot: LoginThrottleRecord):
-        """Compare-and-set predicate: the row still is the one the decision was made on."""
+        """Compare-and-set predicate: the row still is the one the decision was made on.
+
+        Carried by the target row of every ``check`` write, so a database
+        that re-evaluates the WHERE after waiting on a concurrent writer
+        (PostgreSQL READ COMMITTED) sees the changed tuple and skips the
+        stale decision instead of applying it.
+        """
         return and_(
             LoginThrottleRow.ip == key,
             LoginThrottleRow.fail_count == snapshot.fail_count,
@@ -158,10 +173,32 @@ class SqlLoginThrottleStore:
         await session.execute(delete(LoginThrottleRow).where(self._matches(key, snapshot)))
         await session.commit()
 
-    async def _sweep(self, session: AsyncSession, now: float) -> None:
-        """Bounded cleanup of served locks and stale never-locked counters."""
+    @staticmethod
+    def _expired(now: float):
+        """Rows the sweep may drop: served locks and never-locked counters idle past the stale window."""
         served = and_(LoginThrottleRow.locked_at.is_not(None), LoginThrottleRow.locked_at + LoginThrottleRow.lock_duration_seconds <= now)
         stale = and_(LoginThrottleRow.locked_at.is_(None), LoginThrottleRow.updated_at <= _timestamp(now) - timedelta(seconds=STALE_COUNTER_SECONDS))
-        victims = select(LoginThrottleRow.ip).where(or_(served, stale)).limit(SWEEP_BATCH_SIZE)
-        await session.execute(delete(LoginThrottleRow).where(LoginThrottleRow.ip.in_(victims)))
+        return or_(served, stale)
+
+    @classmethod
+    def sweep_statement(cls, now: float):
+        """The bounded cleanup ``DELETE`` (see the module docstring's cleanup contract).
+
+        The expiry predicate appears twice on purpose: once inside the
+        ``IN (SELECT ... LIMIT n)`` subquery that bounds the batch, and again
+        on the ``DELETE`` target. The subquery is evaluated against the
+        statement snapshot; PostgreSQL READ COMMITTED re-evaluates only the
+        outer WHERE on a row whose lock it had to wait for, and ``ip IN (...)``
+        still holds for that old candidate — so without the repeated predicate
+        a lock that a concurrent ``check`` just extended (its UPDATE committed
+        while this DELETE waited) would be deleted and the next attempt from
+        that IP would reach password verification. SQLite serializes writers,
+        so there the repetition is merely redundant.
+        """
+        victims = select(LoginThrottleRow.ip).where(cls._expired(now)).limit(SWEEP_BATCH_SIZE)
+        return delete(LoginThrottleRow).where(LoginThrottleRow.ip.in_(victims), cls._expired(now))
+
+    async def _sweep(self, session: AsyncSession, now: float) -> None:
+        """Bounded cleanup of served locks and stale never-locked counters."""
+        await session.execute(self.sweep_statement(now))
         await session.commit()

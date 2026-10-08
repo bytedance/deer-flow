@@ -15,13 +15,19 @@ the lock, two memory stores do not).
 from __future__ import annotations
 
 import asyncio
+import os
+import time
+import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 import pytest_asyncio
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
+from support.postgres import asyncpg_test_url
 
 from deerflow.persistence.base import Base
 from deerflow.persistence.login_throttle import (
@@ -33,6 +39,7 @@ from deerflow.persistence.login_throttle import (
     MemoryLoginThrottleStore,
     SqlLoginThrottleStore,
 )
+from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 
 pytestmark = pytest.mark.asyncio
 
@@ -312,3 +319,98 @@ async def test_two_memory_stores_do_not_share_the_lock():
     assert await replica_a.check(ip, max_attempts=5, lockout_seconds=300.0, now=T0 + 1) > 0.0
     assert await replica_b.check(ip, max_attempts=5, lockout_seconds=300.0, now=T0 + 1) == 0.0
     assert await replica_b.get(ip) is None
+
+
+# ── sweep versus a concurrent lock extension ─────────────────────────────────
+
+
+def _outer_where_without_candidate_subquery(sql: str) -> str:
+    """The DELETE's own WHERE clause with the ``IN (SELECT ...)`` candidate subquery replaced by ``(...)``."""
+    outer = sql[sql.index("WHERE") :]
+    start = outer.index("IN (") + len("IN ")
+    depth, end = 0, start
+    for end in range(start, len(outer)):
+        depth += {"(": 1, ")": -1}.get(outer[end], 0)
+        if depth == 0:
+            break
+    return outer[:start] + "(...)" + outer[end + 1 :]
+
+
+@pytest.mark.parametrize("dialect", [postgresql.dialect(), sqlite.dialect()], ids=["postgresql", "sqlite"])
+async def test_sweep_delete_repeats_the_expiry_predicate_on_the_deleted_row(dialect):
+    """The sweep's DELETE must re-check expiry on the row it deletes, not only IP membership.
+
+    PostgreSQL READ COMMITTED re-evaluates only the DELETE's *own* WHERE on a
+    row it had to wait for; the ``IN (SELECT ... LIMIT n)`` candidate subquery is
+    bound to the statement snapshot. With ``ip IN (...)`` alone, a lock that a
+    concurrent ``check`` extended between the snapshot and the row lock would
+    still be deleted (review of #6501). Compiling the statement pins the guard
+    without a live PostgreSQL.
+    """
+    sql = str(SqlLoginThrottleStore.sweep_statement(T0).compile(dialect=dialect))
+    assert sql.startswith("DELETE FROM login_throttle")
+    assert "LIMIT" in sql  # bounded candidate selection is kept
+    outer = _outer_where_without_candidate_subquery(sql)
+    assert "login_throttle.ip IN" in outer
+    assert "login_throttle.locked_at IS NOT NULL" in outer
+    assert "login_throttle.locked_at + login_throttle.lock_duration_seconds <=" in outer
+    assert "login_throttle.locked_at IS NULL" in outer
+    assert "login_throttle.updated_at <=" in outer
+
+
+async def _wait_until_a_session_waits_on_a_lock(engine: AsyncEngine, *, timeout: float = 15.0) -> None:
+    """Block until another backend of this database is waiting on a lock (pg_stat_activity)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        async with engine.connect() as conn:
+            waiting = await conn.scalar(sa.text("SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()"))
+        if waiting:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("the sweeping replica never blocked on the extending replica's row lock")
+
+
+async def test_postgres_sweep_keeps_a_lock_extended_by_a_concurrent_check():
+    """Reproduces the #6501 review interleaving on a real PostgreSQL.
+
+    Replica A evaluates an expiring lock under a raised ``lockout_seconds``
+    and extends it (the UPDATE ``check`` issues) without committing yet. An
+    unrelated failed login on replica B sweeps: its snapshot still lists the IP
+    as expired, its DELETE waits on A's row lock, and once A commits the
+    re-evaluated row must survive — otherwise the next attempt from that IP
+    gets a clean record and reaches password verification.
+    """
+    uri = os.environ.get("TEST_POSTGRES_URI")
+    if not uri:
+        pytest.skip("requires TEST_POSTGRES_URI (PostgreSQL READ COMMITTED sweep/update interleaving)")
+    schema = f"login_throttle_sweep_{uuid.uuid4().hex}"
+    engines = [create_async_engine(asyncpg_test_url(uri), connect_args=build_asyncpg_connect_args(schema)) for _ in range(2)]
+    engine_a, engine_b = engines
+    try:
+        async with engine_a.begin() as conn:
+            await conn.execute(sa.text(f'CREATE SCHEMA "{schema}"'))
+            await conn.run_sync(Base.metadata.create_all, tables=[LoginThrottleRow.__table__])
+        session_factory_a = async_sessionmaker(engine_a, expire_on_commit=False)
+        replica_a, replica_b = _sql_store(engine_a), _sql_store(engine_b)
+        ip = "198.51.100.42"
+        await _lock(replica_a, ip, lockout_seconds=1.0, now=T0)  # sentence ends at T0 + 1
+
+        async with session_factory_a() as extending:
+            # Replica A at T0 + 0.5 under lockout_seconds=60: the lock is still
+            # active, so check() commits the longer sentence — held open here.
+            await extending.execute(sa.update(LoginThrottleRow).where(LoginThrottleRow.ip == ip).values(lock_duration_seconds=60.0, updated_at=datetime.fromtimestamp(T0 + 0.5, UTC)))
+            # Replica B at T0 + 2: an unrelated failure sweeps; its snapshot sees
+            # the IP as expired and the DELETE blocks on A's row lock.
+            sweeping = asyncio.create_task(replica_b.record_failure("203.0.113.5", max_attempts=5, lockout_seconds=60.0, now=T0 + 2.0))
+            await _wait_until_a_session_waits_on_a_lock(engine_a)
+            await extending.commit()
+            await sweeping
+
+        assert await replica_a.get(ip) == LoginThrottleRecord(fail_count=2, locked_at=T0, lock_duration=60.0)
+        assert await replica_b.check(ip, max_attempts=2, lockout_seconds=60.0, now=T0 + 2.0) == pytest.approx(58.0)
+        assert (await replica_b.get("203.0.113.5")).fail_count == 1  # the sweeping failure was still counted
+    finally:
+        async with engine_a.begin() as conn:
+            await conn.execute(sa.text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        for engine in engines:
+            await engine.dispose()
