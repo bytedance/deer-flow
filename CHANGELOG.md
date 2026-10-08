@@ -804,6 +804,18 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **auth:** In the Docker stack, five wrong passwords from one client no longer
+  lock every user out of login for five minutes. Failed logins are counted per
+  client IP, and the Gateway honors `X-Real-IP` only from a peer listed in
+  `AUTH_TRUSTED_PROXIES`, which the compose files never set; every browser
+  request reaches the Gateway from the `nginx` container, so all logins shared
+  nginx's address and one lockout. `AUTH_TRUSTED_PROXIES` now also accepts
+  hostnames, resolved off the event loop and cached for 10 seconds (failures
+  included), and both compose files default it to the bundled `nginx` service.
+  nginx overwrites `X-Real-IP` with `$remote_addr` on every Gateway route, so
+  a client cannot choose its own address. An `AUTH_TRUSTED_PROXIES` value in
+  `.env` still takes precedence. Deployments behind another reverse proxy also
+  need nginx's `real_ip` module for that proxy; see `.env.example`.
 - **auth:** Login lockouts are now counted once per client IP across every
   Gateway replica. `POST /api/v1/auth/login/local` kept its failed-login
   counter in a per-process dict, so with N replicas behind one load balancer an

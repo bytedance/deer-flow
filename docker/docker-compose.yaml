@@ -168,6 +168,11 @@ services:
       # DooD path/network translation
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
+      # The login lockout counts failures per client IP, but every browser
+      # request reaches the Gateway from nginx. Trust nginx's X-Real-IP (it
+      # overwrites the header on every Gateway route) so one client's wrong
+      # passwords cannot lock everyone out. Hostname, re-resolved every 10s.
+      - AUTH_TRUSTED_PROXIES=${AUTH_TRUSTED_PROXIES:-nginx}
       # Proxy values (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY) are inherited from ../.env via env_file.
       # Only NO_PROXY is declared here so internal service hostnames are always exempt from the proxy.
       - NO_PROXY=${NO_PROXY:-}${NO_PROXY:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,openviking,host.docker.internal

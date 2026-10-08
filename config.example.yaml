@@ -3380,7 +3380,9 @@ authorization:
 # auth:
 #   local:
 #     allow_registration: false
-#     # Login throttling per client IP. Raise max_login_attempts when many
+#     # Login throttling per client IP. The client IP is X-Real-IP from a
+#     # proxy listed in AUTH_TRUSTED_PROXIES (the Docker stack trusts its
+#     # bundled nginx), else the TCP peer. Raise max_login_attempts when many
 #     # users share one egress IP (corporate proxy / NAT) so shared-IP
 #     # lockouts don't block the whole office; lower it for a stricter
 #     # posture (minimum 2 — one failed attempt must never lock an IP, or a
