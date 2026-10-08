@@ -16,3 +16,9 @@ and returns a body-free terminal Error before extraction, for every status.
 Keep one retry loop/deadline and reset the counter per response. Never re-decode
 compression or mutate HTTPX internals. Decoder allocations/wire bytes are outside
 the cap. Offline transports: `tests/test_jina_response_limit.py`.
+
+DEBUG completion summaries keep counters local, count HTTPX API attempts, and
+measure monotonic elapsed/backoff time (including cancelled waits). Classify
+branches, never error text; emit only enums/numbers in the message for existing
+formatters/trace filters. Logging failure must preserve results/cancellation.
+Offline coverage: `tests/test_jina_diagnostics.py`.
