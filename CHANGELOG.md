@@ -865,7 +865,7 @@ This release closes that milestone with **439 merged pull requests**.
   published, each agent build repeated discovery for all servers, respawning
   stdio servers and re-requesting OAuth tokens. A server whose discovery fails
   is now skipped like any other failed server; a server that answers without
-  its configured tools still fails as a configuration error.
+  its configured tools still fails as a configuration error. ([#6481])
 - **frontend:** A failed side-chat send no longer clears the composer. The side
   chat's submit handler showed the error toast and then resolved, which the
   composer treats as success, so the typed text and attachments were lost when
@@ -9176,3 +9176,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6445]: https://github.com/bytedance/deer-flow/pull/6445
 [#6447]: https://github.com/bytedance/deer-flow/pull/6447
 [#6448]: https://github.com/bytedance/deer-flow/pull/6448
+[#6481]: https://github.com/bytedance/deer-flow/pull/6481
