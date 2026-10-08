@@ -64,7 +64,6 @@ async def test_restart_is_fenced_while_service_shutdown_is_in_progress(
     assert service._stopping is False
 
 
-
 @pytest.mark.asyncio
 async def test_channel_cannot_publish_after_stop_finishes_during_prestart_io(
     monkeypatch: pytest.MonkeyPatch,
