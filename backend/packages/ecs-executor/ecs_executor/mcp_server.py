@@ -81,13 +81,27 @@ def create_server(jobs: ExecutionJobs, *, user_credentials: dict[str, str], disc
     return server
 
 
-def create_app(jobs: ExecutionJobs, **kwargs):
+def create_app(jobs: ExecutionJobs, *, pool=None, worker_credentials=None, **kwargs):
     """One worker process owns the local ledger/container namespace at a time."""
     import fcntl
 
     server = create_server(jobs, **kwargs)
     app = server.streamable_http_app()
     original_lifespan = app.router.lifespan_context
+    if pool is not None:
+        from ecs_executor.dispatch import install_dispatch
+
+        if set((worker_credentials or {}).values()) & (set(kwargs["user_credentials"].values()) | {kwargs["discovery_credential"]}):
+            raise ValueError("Worker credentials must be separate from MCP credentials")
+        install_dispatch(app, pool, worker_credentials or {}, jobs.artifact_root)
+
+        @asynccontextmanager
+        async def central_lifespan(application):
+            async with original_lifespan(application):
+                yield
+
+        app.router.lifespan_context = central_lifespan
+        return app
 
     @asynccontextmanager
     async def lifespan(application):
@@ -130,8 +144,26 @@ def main():
         metadata_database_url=config.get("metadata_database_url"),
         max_input_bytes=config.get("max_input_bytes", 8 * 1024 * 1024),
     )
+    pool = None
+    credentials = None
+    mode = config.get("mode", "single_host")
+    if mode == "pool":
+        from ecs_executor.nodes import Node
+        from ecs_executor.scheduling import Scheduling
+
+        if store.engine.dialect.name != "postgresql":
+            raise ValueError("Pool mode requires PostgreSQL")
+        pool = Scheduling(store, nodes={key: Node.model_validate(value) for key, value in config["nodes"].items()}, lease_seconds=config.get("lease_seconds", 120))
+        credentials = {key: os.environ[var] for key, var in config["worker_credential_env"].items()}
+    elif mode != "single_host":
+        raise ValueError("Explicit single_host or pool mode required")
     app = create_app(
-        jobs, user_credentials={user: os.environ[variable] for user, variable in config["user_credential_env"].items()}, discovery_credential=os.environ[config["discovery_credential_env"]], artifact_base_url=config["artifact_base_url"]
+        jobs,
+        pool=pool,
+        worker_credentials=credentials,
+        user_credentials={user: os.environ[variable] for user, variable in config["user_credential_env"].items()},
+        discovery_credential=os.environ[config["discovery_credential_env"]],
+        artifact_base_url=config["artifact_base_url"],
     )
     uvicorn.run(app, host="127.0.0.1", port=config.get("port", 8003))
 

@@ -105,7 +105,7 @@ class ExecutionJobs:
             namespace=namespace,
             request_key=spec.request_key,
             spec_digest=arguments_sha256(args),
-            record={**identity, "spec": spec.model_dump(), "profile": self.profiles[spec.profile].model_dump(), "staged_deadline": time.time() + self.staged_ttl_seconds, "max_input_bytes": self.max_input_bytes},
+            record={**identity, "kind": "B", "spec": spec.model_dump(), "profile": self.profiles[spec.profile].model_dump(), "staged_deadline": time.time() + self.staged_ttl_seconds, "max_input_bytes": self.max_input_bytes},
         )
         return {"task_id": job["id"], "status": "running"}
 

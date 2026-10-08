@@ -143,3 +143,95 @@ it snapshots an existing upload script, mutates the source, verifies the produce
 file through the native artifact API, restarts the executor without another
 container start, and confirms cancellation after STOP. See
 [local B verification evidence](LOCAL_B_EVIDENCE.md) for the recorded run.
+
+
+## Outbound PostgreSQL pool
+
+Set `mode: "pool"` in the private central JSON configuration. Pool mode requires
+PostgreSQL; omit `mode` only for the existing single-host compatibility mode.
+Central starts no Docker worker and never sends HTTP/SSH to a worker. Keep its
+HTTP endpoint private behind the operator's authenticated TLS network ingress.
+Do not expose worker listeners or attach public IPs for this transport.
+
+Add fixed operator nodes and separate credential environment variables:
+
+```json
+{
+  "mode": "pool",
+  "lease_seconds": 120,
+  "nodes": {
+    "ecs-one": {
+      "cpu_millis": 2000, "memory_mib": 1024,
+      "resident_cpu_millis": 500, "resident_memory_mib": 256,
+      "max_concurrency": 2, "profiles": ["small"],
+      "kinds": ["B", "C"], "drain": false,
+      "worker_version": "0.1.0"
+    }
+  },
+  "worker_credential_env": {"ecs-one": "ECS_ONE_TOKEN"}
+}
+```
+
+These are additions to the existing central config, including its fixed
+`artifact_root`, profiles and owner credentials. Each node's CPU/memory ledger
+subtracts the explicitly configured resident native Gateway allocation. B and C
+share this resource ledger; C has admission only in this phase, with no native
+Agent runtime dispatch. A drained node receives no new work. Authenticated polls
+persist node heartbeat health and renew assigned jobs. Config changes require
+central restart. All central instances must use the same operator configuration.
+
+Mount the same NAS `artifact_root` at the same absolute path on central and nodes
+before starting either service. Central creates `pool-mount-id`; workers refuse
+to start without that marker and the server checks its identity before admission.
+Verify the mount with a cross-host write/read probe as an operator deployment
+check; a local multi-process test does not establish cloud NAS mount correctness.
+Optional native publication retains the existing fixed `workspace_root` and
+metadata DB settings; the metadata connection performs only native ownership
+reads/row locks, never `mcp_tasks` or control job-ledger writes.
+
+A worker's private configuration contains no execution-ledger DB URL:
+
+```json
+{
+  "executor_url": "https://private-executor.example",
+  "node_id": "ecs-one",
+  "credential_env": "ECS_ONE_TOKEN",
+  "artifact_root": "/shared/executor"
+}
+```
+
+Run `ECS_WORKER_CONFIG=/private/worker.json python -m ecs_executor.dispatch`
+in the installed executor environment. Add `workspace_root` and
+`metadata_database_url` only when using native shared-file publication. Each node
+holds its own NAS lock; separate credentials bind it to its fixed node. Run the
+worker under a process supervisor (`Restart=always`, `RestartSec=5` for systemd):
+a failed outbound transport can terminate the process. Restarted workers wait
+for the previous 120-second lease before same-node reconciliation; they never
+replay the unknown physical start or free its reservation. Server
+protocol and expected worker version fail closed. The worker reuses `LocalWorker`
+and deterministic Docker job names plus job/spec/node labels.
+
+Resource admission uses SQL COUNT/SUM over unreleased reservations, and takes
+only one eligible queued payload per claim. Recovery filters node/kind/STOP in
+SQL; completed historical input snapshots are not loaded by polling.
+
+Claims persist assignment, attempt, report generation and reservation before
+HTTP delivery. No lost response or restart issues another start. A new process
+may adopt only its same node's unresolved jobs after the 120-second lease, and
+only reconciles their existing physical state. Heartbeat loss, lease expiry and
+unknown/failed outcomes retain reservations. Actual STOP/removal releases the
+job allocation; resident Gateway overhead stays allocated. Program deadlines,
+HMAC capability TTL and the 120-second cleanup safety allowance are independent.
+
+The opt-in main acceptance test provisions only a task-owned PostgreSQL
+container, starts a central TCP process and two outbound worker OS processes,
+and runs three real Alpine jobs through unchanged native MCP task tracking:
+
+```bash
+ECS_EXECUTOR_POOL_TEST=1 uv run --no-sync pytest tests/test_ecs_executor_dispatch_main.py -q
+```
+
+It verifies node assignment, resident overhead/concurrency caps, queued work
+using released capacity, report fencing, and physical cleanup. It removes only
+its own PostgreSQL/job containers. This is local transport evidence, not cloud
+or native C-runtime deployment evidence.

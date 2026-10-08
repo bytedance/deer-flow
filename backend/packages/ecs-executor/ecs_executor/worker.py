@@ -40,7 +40,8 @@ class Docker:
 
 
 class LocalWorker:
-    def __init__(self, jobs, *, docker=None):
+    def __init__(self, jobs, *, docker=None, node_id=None):
+        self.node_id = node_id
         self.jobs = jobs
         self.store = jobs.store
         self.docker = docker or Docker()
@@ -72,7 +73,7 @@ class LocalWorker:
 
     def _owned(self, job, observation):
         labels = observation["Config"].get("Labels") or {}
-        if labels.get("deerflow.execution.job") != job["id"] or labels.get("deerflow.execution.spec") != job["spec_digest"]:
+        if labels.get("deerflow.execution.job") != job["id"] or labels.get("deerflow.execution.spec") != job["spec_digest"] or (self.node_id and labels.get("deerflow.execution.node") != self.node_id):
             raise RuntimeError("Container ownership/integrity mismatch")
 
     async def cleanup(self, job):
@@ -85,7 +86,7 @@ class LocalWorker:
             if await self.docker.inspect(self._ref(job)) is not None:
                 raise RuntimeError("Terminal removal not confirmed")
         # A crash after removal merely re-observes absence on the next tick.
-        await asyncio.to_thread(self.store.mutate, job["id"], lambda record: record.update(cleanup_pending=False))
+        await asyncio.to_thread(self.store.mutate, job["id"], lambda record: record.update(cleanup_pending=False, physical_stopped=True))
 
     async def launch(self, job):
         ref, profile = self._ref(job), job["profile"]
@@ -100,6 +101,8 @@ class LocalWorker:
                 "deerflow.execution.job=" + job["id"],
                 "--label",
                 "deerflow.execution.spec=" + job["spec_digest"],
+                "--label",
+                "deerflow.execution.node=" + (self.node_id or "local"),
                 "--restart=no",
                 "--read-only",
                 "--cap-drop=ALL",
@@ -169,7 +172,7 @@ class LocalWorker:
 
             def stopped(record):
                 if record["state"] not in TERMINAL:
-                    record.update(state="cancelled" if record.get("cancel_requested") else "failed", error="Execution cancelled" if record.get("cancel_requested") else "Execution deadline exceeded")
+                    record.update(physical_stopped=True, state="cancelled" if record.get("cancel_requested") else "failed", error="Execution cancelled" if record.get("cancel_requested") else "Execution deadline exceeded")
 
             await asyncio.to_thread(self.store.mutate, job["id"], stopped)
             return
