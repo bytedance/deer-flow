@@ -38,7 +38,7 @@ Memory has two operation modes:
 
 In tool mode, the five `memory_*` tool names are reserved. If an MCP server or custom tool already uses `memory_search`, `memory_get`, `memory_add`, `memory_update`, or `memory_delete`, the existing tool keeps that name and the colliding memory tool is skipped with a warning.
 
-`memory_get(fact_id)` reads a stored fact by its exact ID in the current runtime user and agent scope. Use `memory_search` when the ID is unknown. Missing and out-of-scope IDs return the same not-found error; unsupported reads or named-agent scopes return an error.
+`memory_get(fact_id)` reads a stored fact by its exact ID in the current runtime user and agent scope. Use `memory_search` when the ID is unknown. Missing and out-of-scope IDs return the same not-found error; unsupported reads return an error. Named-agent reads also return an error when the backend does not support agent-scoped management.
 
 ## Memory Manager: the pluggable memory manager
 
