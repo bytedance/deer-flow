@@ -307,7 +307,7 @@ async def _orphan_recovery_observed_after_heartbeat(
     ``stop_reason`` is written atomically with the terminal status. Only that
     explicit signal may synthesize END after a heartbeat.
     """
-    if not record.store_only:
+    if not record.store_only and not record.ownership_lost:
         return False
     refreshed = await run_mgr.get(record.run_id, user_id=record.user_id)
     return refreshed is not None and _run_is_terminal(refreshed) and refreshed.stop_reason == ORPHAN_RECOVERY_STOP_REASON
@@ -1742,6 +1742,171 @@ def _admit_scheduler_metadata(value: object, *, trusted: bool) -> dict[str, Any]
     return result
 
 
+async def execute_admitted_native_run(
+    request,
+    record,
+    *,
+    run_ctx,
+    body,
+    config,
+    graph_input,
+    owner_user_id,
+    require_existing_thread,
+    agent_factory,
+    stream_modes,
+    admitted_knowledge_scope,
+    current_human_message,
+    internal_owner_user,
+    user,
+    scope_assistant_id,
+    scheduled_task_runtime,
+):
+    """Execute an already-admitted native record; never creates another run."""
+    thread_id = record.thread_id
+    bridge = get_stream_bridge(request)
+    run_mgr = get_run_manager(request)
+    metadata_task = asyncio.create_task(
+        _ensure_thread_metadata(
+            run_ctx,
+            record,
+            owner_user_id=owner_user_id,
+            require_existing_thread=require_existing_thread,
+        )
+    )
+    abort_task = asyncio.create_task(record.abort_event.wait())
+    metadata_failure_logged = False
+    metadata_failure: Exception | None = None
+    metadata_record: dict[str, Any] | None = None
+    try:
+        done, _ = await asyncio.wait(
+            (metadata_task, abort_task),
+            timeout=_THREAD_METADATA_SETUP_TIMEOUT_SECONDS,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if metadata_task in done:
+            try:
+                metadata_record = metadata_task.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                metadata_failure_logged = True
+                metadata_failure = exc
+                logger.warning(
+                    "Failed to ensure thread_meta for %s%s",
+                    sanitize_log_param(thread_id),
+                    "" if require_existing_thread else " (non-fatal)",
+                    exc_info=True,
+                )
+        elif abort_task not in done:
+            logger.warning(
+                "Timed out ensuring thread_meta for %s after %.1fs",
+                sanitize_log_param(thread_id),
+                _THREAD_METADATA_SETUP_TIMEOUT_SECONDS,
+            )
+            if require_existing_thread:
+                metadata_failure = TimeoutError("Timed out verifying existing thread metadata")
+    finally:
+        if metadata_task.done():
+            if metadata_record is None and not metadata_failure_logged:
+                try:
+                    metadata_record = metadata_task.result()
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:
+                    metadata_failure_logged = True
+                    metadata_failure = exc
+                    logger.warning(
+                        "Failed to ensure thread_meta for %s%s",
+                        sanitize_log_param(thread_id),
+                        "" if require_existing_thread else " (non-fatal)",
+                        exc_info=True,
+                    )
+        else:
+            metadata_task.cancel()
+            metadata_task.add_done_callback(
+                lambda task: _log_thread_metadata_task_result(
+                    task,
+                    thread_id=thread_id,
+                )
+            )
+        if not abort_task.done():
+            abort_task.cancel()
+            abort_task.add_done_callback(_consume_task_result)
+    if metadata_failure is not None and require_existing_thread:
+        await run_mgr.fail_start_if_pending(
+            record.run_id,
+            error=str(metadata_failure),
+        )
+    # Continue through run_agent even after metadata abort, timeout,
+    # or strict verification failure:
+    # its startup barrier is the single path that turns pending
+    # cancellation into no-agent-construction plus publish_end.
+    incarnation_kwargs: dict[str, str | None] = {}
+    if metadata_record is None:
+        if not record.abort_event.is_set():
+            logger.warning(
+                "Thread metadata for %s is unavailable; MCP access will fail closed",
+                sanitize_log_param(thread_id),
+            )
+    else:
+        if "incarnation" not in metadata_record:
+            logger.warning(
+                "Thread metadata for %s has no incarnation; MCP access will fail closed",
+                sanitize_log_param(thread_id),
+            )
+        else:
+            incarnation = metadata_record["incarnation"]
+            if is_valid_thread_incarnation(incarnation):
+                incarnation_kwargs["thread_incarnation"] = incarnation
+            else:
+                logger.warning(
+                    "Thread metadata for %s has an invalid incarnation; MCP access will fail closed",
+                    sanitize_log_param(thread_id),
+                )
+    from app.gateway.scheduled_task_access import prepare_scheduler_capability
+
+    human_text = ""
+    if current_human_message is not None:
+        original = current_human_message.additional_kwargs.get("original_user_content", current_human_message.content)
+        if isinstance(original, str):
+            human_text = original
+        elif isinstance(original, list):
+            human_text = "\n".join(block["text"] for block in original if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str))
+    scheduler_capability = None
+    if scheduler_tools_enabled(getattr(run_ctx, "app_config", None)):
+        client_timezone = await _client_timezone_from_context(body.context)
+        try:
+            scheduler_capability = await prepare_scheduler_capability(
+                request,
+                user=internal_owner_user or user,
+                thread_id=thread_id,
+                run_id=record.run_id,
+                assistant_id=scope_assistant_id,
+                original_user_text=human_text,
+                interaction_policy=resolve_run_interaction_policy(config),
+                scheduled_task_runtime=scheduled_task_runtime,
+                client_timezone=client_timezone,
+            )
+        except Exception:
+            logger.warning("Scheduler tool capability is unavailable for this run", exc_info=True)
+    execution_context = replace(run_ctx, scheduler_capability=scheduler_capability) if scheduler_capability is not None else run_ctx
+    await run_agent(
+        bridge,
+        run_mgr,
+        record,
+        ctx=execution_context,
+        agent_factory=agent_factory,
+        graph_input=graph_input,
+        config=config,
+        stream_modes=stream_modes,
+        stream_subgraphs=body.stream_subgraphs,
+        interrupt_before=body.interrupt_before,
+        interrupt_after=body.interrupt_after,
+        knowledge_scope=admitted_knowledge_scope,
+        **incarnation_kwargs,
+    )
+
+
 async def start_run(
     body: RunCreateRequest,
     thread_id: str,
@@ -1790,7 +1955,6 @@ async def start_run(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     stream_modes = normalize_stream_modes(body.stream_mode)
-    bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
     run_ctx = get_run_context(request)
 
@@ -2050,145 +2214,23 @@ async def start_run(
             config["context"][PROJECT_CONTEXT_KEY] = project_context
 
         async def run_after_metadata(record: RunRecord) -> None:
-            metadata_task = asyncio.create_task(
-                _ensure_thread_metadata(
-                    run_ctx,
-                    record,
-                    owner_user_id=owner_user_id,
-                    require_existing_thread=require_existing_thread,
-                )
-            )
-            abort_task = asyncio.create_task(record.abort_event.wait())
-            metadata_failure_logged = False
-            metadata_failure: Exception | None = None
-            metadata_record: dict[str, Any] | None = None
-            try:
-                done, _ = await asyncio.wait(
-                    (metadata_task, abort_task),
-                    timeout=_THREAD_METADATA_SETUP_TIMEOUT_SECONDS,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if metadata_task in done:
-                    try:
-                        metadata_record = metadata_task.result()
-                    except asyncio.CancelledError:
-                        pass
-                    except Exception as exc:
-                        metadata_failure_logged = True
-                        metadata_failure = exc
-                        logger.warning(
-                            "Failed to ensure thread_meta for %s%s",
-                            sanitize_log_param(thread_id),
-                            "" if require_existing_thread else " (non-fatal)",
-                            exc_info=True,
-                        )
-                elif abort_task not in done:
-                    logger.warning(
-                        "Timed out ensuring thread_meta for %s after %.1fs",
-                        sanitize_log_param(thread_id),
-                        _THREAD_METADATA_SETUP_TIMEOUT_SECONDS,
-                    )
-                    if require_existing_thread:
-                        metadata_failure = TimeoutError("Timed out verifying existing thread metadata")
-            finally:
-                if metadata_task.done():
-                    if metadata_record is None and not metadata_failure_logged:
-                        try:
-                            metadata_record = metadata_task.result()
-                        except asyncio.CancelledError:
-                            pass
-                        except Exception as exc:
-                            metadata_failure_logged = True
-                            metadata_failure = exc
-                            logger.warning(
-                                "Failed to ensure thread_meta for %s%s",
-                                sanitize_log_param(thread_id),
-                                "" if require_existing_thread else " (non-fatal)",
-                                exc_info=True,
-                            )
-                else:
-                    metadata_task.cancel()
-                    metadata_task.add_done_callback(
-                        lambda task: _log_thread_metadata_task_result(
-                            task,
-                            thread_id=thread_id,
-                        )
-                    )
-                if not abort_task.done():
-                    abort_task.cancel()
-                    abort_task.add_done_callback(_consume_task_result)
-            if metadata_failure is not None and require_existing_thread:
-                await run_mgr.fail_start_if_pending(
-                    record.run_id,
-                    error=str(metadata_failure),
-                )
-            # Continue through run_agent even after metadata abort, timeout,
-            # or strict verification failure:
-            # its startup barrier is the single path that turns pending
-            # cancellation into no-agent-construction plus publish_end.
-            incarnation_kwargs: dict[str, str | None] = {}
-            if metadata_record is None:
-                if not record.abort_event.is_set():
-                    logger.warning(
-                        "Thread metadata for %s is unavailable; MCP access will fail closed",
-                        sanitize_log_param(thread_id),
-                    )
-            else:
-                if "incarnation" not in metadata_record:
-                    logger.warning(
-                        "Thread metadata for %s has no incarnation; MCP access will fail closed",
-                        sanitize_log_param(thread_id),
-                    )
-                else:
-                    incarnation = metadata_record["incarnation"]
-                    if is_valid_thread_incarnation(incarnation):
-                        incarnation_kwargs["thread_incarnation"] = incarnation
-                    else:
-                        logger.warning(
-                            "Thread metadata for %s has an invalid incarnation; MCP access will fail closed",
-                            sanitize_log_param(thread_id),
-                        )
-            from app.gateway.scheduled_task_access import prepare_scheduler_capability
-
-            human_text = ""
-            if current_human_message is not None:
-                original = current_human_message.additional_kwargs.get("original_user_content", current_human_message.content)
-                if isinstance(original, str):
-                    human_text = original
-                elif isinstance(original, list):
-                    human_text = "\n".join(block["text"] for block in original if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str))
-            scheduler_capability = None
-            if scheduler_tools_enabled(getattr(run_ctx, "app_config", None)):
-                client_timezone = await _client_timezone_from_context(body.context)
-                try:
-                    scheduler_capability = await prepare_scheduler_capability(
-                        request,
-                        user=internal_owner_user or user,
-                        thread_id=thread_id,
-                        run_id=record.run_id,
-                        assistant_id=scope_assistant_id,
-                        original_user_text=human_text,
-                        interaction_policy=resolve_run_interaction_policy(config),
-                        scheduled_task_runtime=scheduled_task_runtime,
-                        client_timezone=client_timezone,
-                    )
-                except Exception:
-                    logger.warning("Scheduler tool capability is unavailable for this run", exc_info=True)
-            execution_context = replace(run_ctx, scheduler_capability=scheduler_capability) if scheduler_capability is not None else run_ctx
-            await run_agent(
-                bridge,
-                run_mgr,
+            await execute_admitted_native_run(
+                request,
                 record,
-                ctx=execution_context,
-                agent_factory=agent_factory,
-                graph_input=graph_input,
+                run_ctx=run_ctx,
+                body=body,
                 config=config,
+                graph_input=graph_input,
+                owner_user_id=owner_user_id,
+                require_existing_thread=require_existing_thread,
+                agent_factory=agent_factory,
                 stream_modes=stream_modes,
-                stream_subgraphs=body.stream_subgraphs,
-                interrupt_before=body.interrupt_before,
-                interrupt_after=body.interrupt_after,
-                knowledge_scope=admitted_knowledge_scope,
-                **incarnation_kwargs,
+                admitted_knowledge_scope=admitted_knowledge_scope,
+                current_human_message=current_human_message,
+                internal_owner_user=internal_owner_user,
+                user=user,
+                scope_assistant_id=scope_assistant_id,
+                scheduled_task_runtime=scheduled_task_runtime,
             )
 
         try:
@@ -2249,11 +2291,26 @@ async def start_run(
                         )
                     return record
 
-                from app.gateway.native_admission import attach_native_admission
-
                 # The default path attaches without yielding. An operator host
                 # may instead stage and CAS hand off this same pending run.
-                await attach_native_admission(request, run_mgr, record, run_after_metadata)
+                from app.gateway.native_admission import attach_native_admission, make_native_snapshot
+
+                async def snapshot_factory(**transport):
+                    return await make_native_snapshot(
+                        request,
+                        record,
+                        run_ctx=run_ctx,
+                        body=body,
+                        config=config,
+                        graph_input=graph_input,
+                        admitted_knowledge_scope=admitted_knowledge_scope,
+                        scope_assistant_id=scope_assistant_id,
+                        scheduled_task_runtime=scheduled_task_runtime,
+                        require_existing_thread=require_existing_thread,
+                        **transport,
+                    )
+
+                await attach_native_admission(request, run_mgr, record, run_after_metadata, snapshot_factory=snapshot_factory)
 
         except ConflictError as exc:
             raise BusyThreadConflict(str(exc)) from exc
@@ -2622,6 +2679,10 @@ async def wait_for_run_completion(
                 # even if the client just disconnected so the caller still serializes
                 # the real final checkpoint.
                 if entry is END_SENTINEL:
+                    if record.ownership_lost or record.store_only:
+                        refreshed = await run_mgr.get(record.run_id, user_id=record.user_id)
+                        if refreshed is not None:
+                            record.status, record.error, record.stop_reason = refreshed.status, refreshed.error, refreshed.stop_reason
                     completed = True
                     return True
                 if isinstance(entry, StreamGap):

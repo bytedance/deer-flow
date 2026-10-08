@@ -363,6 +363,23 @@ class RunRepository(RunStore):
             await session.commit()
             return result.rowcount != 0
 
+    async def finish_dispatch_pending(self, run_id: str, *, owner_worker_id: str, error: str | None = None) -> bool:
+        """Terminalize a queued dispatch admission only before worker adoption.
+
+        The dispatch host must first fence its job against claim/start. The
+        pending owner CAS makes adoption and this terminal commit exclusive.
+        """
+        async with self._sf() as session:
+            conditions = [RunRow.run_id == run_id, RunRow.owner_worker_id == owner_worker_id, RunRow.status == "pending"]
+            if error is None:
+                conditions.append(RunRow.cancel_action.is_not(None))
+            else:
+                conditions.append(RunRow.cancel_action.is_(None))
+            change_seq = await self._next_change_seq(session)
+            result = await session.execute(update(RunRow).where(*conditions).values(status="error" if error else "interrupted", error=error, updated_at=datetime.now(UTC), change_seq=change_seq))
+            await session.commit()
+            return result.rowcount != 0
+
     async def transfer_pending(self, run_id: str, *, thread_id: str, user_id: str | None, expected_owner_worker_id: str, owner_worker_id: str, lease_expires_at: str | None) -> bool:
         """Transfer only the exact uncancelled admission; keep its identity and payload."""
         async with self._sf() as session:

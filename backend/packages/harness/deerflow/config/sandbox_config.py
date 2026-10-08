@@ -222,6 +222,7 @@ class SandboxConfig(BaseModel):
         le=65535,
         description="Base port for sandbox containers",
     )
+    hard_capacity: bool = Field(default=False, description="AIO opt-in: serialize acquisition and refuse new containers when warm eviction cannot free replicas capacity.")
     replicas: int | None = Field(
         default=None,
         gt=0,

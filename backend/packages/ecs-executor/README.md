@@ -178,8 +178,8 @@ Add fixed operator nodes and separate credential environment variables:
 These are additions to the existing central config, including its fixed
 `artifact_root`, profiles and owner credentials. Each node's CPU/memory ledger
 subtracts the explicitly configured resident native Gateway allocation. B and C
-share this resource ledger; C has admission only in this phase, with no native
-Agent runtime dispatch. A drained node receives no new work. Authenticated polls
+share this resource ledger; native C uses the separate operator-enabled
+Gateway transport described below. A drained node receives no new work. Authenticated polls
 persist node heartbeat health and renew assigned jobs. Config changes require
 central restart. All central instances must use the same operator configuration.
 
@@ -238,3 +238,82 @@ It verifies node assignment, resident overhead/concurrency caps, queued work
 using released capacity, report fencing, and physical cleanup. It removes only
 its own PostgreSQL/job containers. This is local transport evidence, not cloud
 or native C-runtime deployment evidence.
+
+
+## Native Gateway outbound execution (opt-in)
+
+`ECS_NATIVE_CONFIG=/private/central.json` or `/private/worker.json` installs a
+trusted native admission host in the normal Gateway lifespan. Missing optional
+package, invalid configuration, or host initialization failure aborts enabled
+startup. Install this package alongside the normal backend environment; launch
+both roles through the normal `uvicorn app.gateway.app:app` entry point.
+The JSON examples in `examples/ecs-native/` contain environment references only.
+Use the same PostgreSQL, Redis, JWT/internal-auth secrets, native owner database,
+and absolute NAS paths for both Gateways. Native config requires
+`deployment.multi_instance: true`, PostgreSQL, DB run events, Redis stream bridge,
+and ownership heartbeats. Thread admission and deletion retain native serialization.
+
+The central stages a C job before handing off the original pending native Run.
+The worker polls outbound, verifies the signed canonical admission and assignment,
+and adopts that exact Run without another `create_or_reject` or graph loop.
+Native checkpoints, events, results, and cross-instance cancellation retain their
+existing APIs. Adopted tasks remain tracked through retryable transport/report
+failures; known settled outcomes retry idempotent reports and owned STOP without
+replaying a graph. Shutdown first quiesces claims/adoption before RunManager takes its drain
+snapshot. An adoption lock and synchronous checks around native CAS/task attach
+fence late graphs. A cleanup-only watcher observes already-adopted aborts and
+shares owned STOP to unblock native tool finalizers. Host cleanup waits within
+the 120-second physical allowance, then cancels retry wrappers; unresolved native
+finalizers/STOP retain the client and node lock until they unwind. Queued
+cancellation and pre-adoption refusals persist typed SQL-filtered settlement
+intents before native terminal commits. Refusals require exact dispatch ownership
+and assigned node/worker/generation; cancellation wins the pending error CAS.
+Recovery confirms matching native error/action and END before dynamic release.
+A changed native owner remains uncertain and reserved, without synthetic END. Trusted scheduled origin places new heavy work remotely; later
+admissions for the same owner/thread/incarnation follow durable fixed-node affinity.
+External request metadata cannot select placement. Caller request secrets use
+the native Fernet credential cipher keyed by the selected node credential; only
+string pairs cross, inside an owner/thread/incarnation/Run/node-bound carrier in
+the signed immutable snapshot. Ledger and native config remain redacted, and
+only the worker in-memory config restores the native skill secret carrier. B polling only consumes B jobs.
+Queued C leases renew before native startup orphan reconciliation on every role.
+Workers require authenticated outbound bootstrap renewal before that recovery;
+central unavailability aborts worker startup and releases its client/node lock so
+a supervisor can retry after central is ready. Unknown started
+attempts are retained, never replayed or treated as physically stopped.
+
+The 2 CPU / 4 GiB example reserves 1500m CPU / 2048 MiB continuously: native warm
+AIO uses Docker limits 1 CPU / 1 GiB and the Gateway has a conservative 500m CPU /
+1 GiB resident allowance. C dynamically reserves another 500m / 1024 MiB. The
+Gateway allowance is a total process cap, not a separate cgroup per Run. Linux
+launch supervision must actually enforce that cap; local macOS HTTP acceptance
+does not prove Linux cgroup enforcement. Warm AIO remains charged after a success.
+`physical_stopped=true` on successful C releases its dynamic reservation only;
+cancelled C additionally proves exact sandbox absence after native task finalizers.
+Native `hard_capacity: true` blocks creation if warm destruction fails or physical
+old containers remain; default provider behavior is unchanged. One native role
+holds a separate NAS node lock, allowing the ordinary B daemon on the same node.
+
+The initial real main acceptance config explicitly enables native bash/file tools
+and disables browser, memory, and scheduler. It proves actual model and isolated
+native tools, original Run ownership, peer events/checkpoints, and affinity. Full
+configured browser capability remains subject to the native multi-instance gate;
+worker-local scheduled/notification continuations still need the next admission
+integration. These are pending capabilities, not silently substituted tools.
+Shared memory text/locks must use NAS and the SQLite FTS index must stay local per
+instance when enabled. Cloud NAS/cgroup/combined C-B-C deployment acceptance is
+still required before claiming full remote deployment completion.
+
+Run the single opt-in actual model acceptance with operator-owned model sources:
+
+```bash
+ECS_NATIVE_LIVE=1 ECS_NATIVE_MODEL_CONFIG=/private/config.yaml \
+  ECS_NATIVE_MODEL_ENV=/private/.env uv run --no-sync pytest tests/test_ecs_executor_c_live.py -m live -q -s
+```
+
+It starts test-owned PostgreSQL/Redis and two normal native HTTP Gateway processes,
+uses DeepSeek plus native AIO Docker tools, reads peer native state, checks the one
+original Run/worker owner and native tool calls, verifies container-local warm
+state on a later interactive admission, then requests central cancellation and
+checks physical Docker STOP. It cleans only its own infrastructure. Model secrets
+stay in child environments and are not persisted in the execution snapshot.

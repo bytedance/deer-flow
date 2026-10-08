@@ -1,0 +1,71 @@
+# Operator shell-main configuration; model credentials are environment references.
+models:
+- name: deepseek-chat
+  display_name: DeepSeek
+  use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
+  model: deepseek-chat
+  api_base: $DEEPSEEK_API_BASE
+  api_key: $DEEPSEEK_API_KEY
+  timeout: 180
+  max_retries: 2
+tool_groups:
+- name: web
+- name: file:read
+- name: file:write
+- name: bash
+- name: browser
+- name: knowledge
+tools:
+- name: ls
+  group: file:read
+  use: deerflow.sandbox.tools:ls_tool
+- name: read_file
+  group: file:read
+  use: deerflow.sandbox.tools:read_file_tool
+- name: glob
+  group: file:read
+  use: deerflow.sandbox.tools:glob_tool
+  max_results: 200
+- name: grep
+  group: file:read
+  use: deerflow.sandbox.tools:grep_tool
+  max_results: 100
+- name: write_file
+  group: file:write
+  use: deerflow.sandbox.tools:write_file_tool
+- name: str_replace
+  group: file:write
+  use: deerflow.sandbox.tools:str_replace_tool
+- name: bash
+  group: bash
+  use: deerflow.sandbox.tools:bash_tool
+sandbox:
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
+  image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0
+  replicas: 1
+  hard_capacity: true
+  container_prefix: deer-native-one
+  ownership:
+    type: redis
+    redis_url: $REDIS_URL
+  idle_timeout: 600
+database:
+  backend: postgres
+  postgres_url: $DATABASE_URL
+agent_storage:
+  backend: db
+deployment:
+  multi_instance: true
+run_events:
+  backend: db
+run_ownership:
+  heartbeat_enabled: true
+  lease_seconds: 120
+stream_bridge:
+  type: redis
+  redis_url: $REDIS_URL
+  heartbeat_interval_seconds: 1
+memory:
+  enabled: false
+scheduler:
+  enabled: false

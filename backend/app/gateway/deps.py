@@ -779,6 +779,12 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             event_store=app.state.run_event_store,
             on_orphans_recovered=terminalize_recovered_runs,
         )
+        from app.gateway.native_admission import prepare_native_host
+
+        native_host = await prepare_native_host(app, config)
+        if native_host is not None:
+            stack.push_async_callback(native_host.stop)
+
         # Startup recovery: mark inflight runs whose lease has expired as error.
         # In single-worker mode (SQLite / backend=memory), no run has a lease, so
         # all inflight rows are reclaimed (unchanged behaviour). In multi-worker
@@ -806,10 +812,14 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         # Start the lease heartbeat if enabled (multi-worker deployments).
         await app.state.run_manager.start_heartbeat()
+        if native_host is not None:
+            await native_host.start()
 
         try:
             yield
         finally:
+            if native_host is not None:
+                await native_host.quiesce()
             app.state.agent_runs_host.close()
             # Drain in-flight run tasks BEFORE the AsyncExitStack tears down the
             # checkpointer (and its connection pool). A run still mid-graph would

@@ -46,7 +46,8 @@ class Scheduling:
     def eligible(self, node_id, job):
         node = self.nodes[node_id]
         return (
-            not node.drain
+            job.get("affinity_node", node_id) == node_id
+            and not node.drain
             and job.get("kind", "B") in node.kinds
             and job["spec"]["profile"] in node.profiles
             and job["profile"]["cpu_millis"] <= node.cpu_millis - node.resident_cpu_millis
@@ -71,6 +72,7 @@ class Scheduling:
                 select(_JOBS)
                 .where(
                     _JOBS.c.state == "queued",
+                    func.coalesce(_JOBS.c.record["affinity_node"].as_string(), node_id) == node_id,
                     func.coalesce(_JOBS.c.record["kind"].as_string(), "B") == kind,
                     _JOBS.c.record["spec"]["profile"].as_string().in_(node.profiles),
                     _JOBS.c.record["profile"]["cpu_millis"].as_integer() <= available_cpu,

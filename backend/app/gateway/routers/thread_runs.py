@@ -1054,7 +1054,7 @@ async def wait_run(
         record = await _refresh_store_backed_run(run_mgr, record)
         return serialize_wait_run_status(record)
 
-    if record.task is not None or getattr(record, "store_only", False):
+    if record.task is not None or getattr(record, "store_only", False) or record.ownership_lost:
         completed = await wait_for_run_completion(bridge, record, request, run_mgr)
     else:
         completed = True

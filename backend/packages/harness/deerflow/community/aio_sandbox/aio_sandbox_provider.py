@@ -402,6 +402,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             "idle_timeout": idle_timeout if idle_timeout is not None else DEFAULT_IDLE_TIMEOUT,
             "command_timeout": command_timeout,
             "replicas": replicas if replicas is not None else DEFAULT_REPLICAS,
+            "hard_capacity": getattr(sandbox_config, "hard_capacity", False),
             "mounts": sandbox_config.mounts or [],
             "thread_data_mounts": getattr(sandbox_config, "thread_data_mounts", None),
             "environment": environment,
@@ -2126,6 +2127,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             The ID of the acquired sandbox environment.
         """
         effective_user_id = self._effective_acquire_user_id(user_id)
+        if self._config.get("hard_capacity"):
+            with self._acquire_serializer.hold(("__native_capacity__", "")):
+                return self._acquire_internal(thread_id, user_id=effective_user_id)
         if thread_id:
             with self._acquire_serializer.hold(self._thread_key(thread_id, effective_user_id)):
                 return self._acquire_internal(thread_id, user_id=effective_user_id)
@@ -2139,6 +2143,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         sandboxes.
         """
         effective_user_id = self._effective_acquire_user_id(user_id)
+        if self._config.get("hard_capacity"):
+            async with self._acquire_serializer.hold_async(("__native_capacity__", "")):
+                return await self._acquire_internal_async(thread_id, user_id=effective_user_id)
         if thread_id:
             async with self._acquire_serializer.hold_async(self._thread_key(thread_id, effective_user_id)):
                 return await self._acquire_internal_async(thread_id, user_id=effective_user_id)
@@ -2363,6 +2370,20 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         finally:
             self._finish_local_teardown(sandbox_id)
 
+    def _enforce_create_capacity(self, sandbox_id: str) -> None:
+        replicas, total = self._replica_count()
+        if total >= replicas:
+            evicted = self._evict_oldest_warm()
+            if self._config.get("hard_capacity") and self._replica_count()[1] >= replicas:
+                raise RuntimeError("Native AIO hard capacity remains occupied; physical warm STOP was not confirmed")
+            self._log_replicas_soft_cap(replicas, sandbox_id, evicted)
+        if self._config.get("hard_capacity"):
+            physical_count = getattr(self._backend, "count_running_strict", None)
+            if not callable(physical_count):
+                raise RuntimeError("Native AIO hard capacity requires a strict local container backend")
+            if physical_count() >= replicas:
+                raise RuntimeError("Native AIO hard capacity remains physically occupied after restart")
+
     def _create_sandbox(self, thread_id: str | None, sandbox_id: str, *, user_id: str | None = None) -> str:
         """Create a new sandbox via the backend.
 
@@ -2387,10 +2408,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         # Enforce replicas: only warm-pool containers count toward eviction budget.
         # Active sandboxes are in use by live threads and must not be forcibly stopped.
-        replicas, total = self._replica_count()
-        if total >= replicas:
-            evicted = self._evict_oldest_warm()
-            self._log_replicas_soft_cap(replicas, sandbox_id, evicted)
+        self._enforce_create_capacity(sandbox_id)
 
         create_kwargs = {}
         if config_mount_exclusion_root is not None:
@@ -2433,10 +2451,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         # Enforce replicas: only warm-pool containers count toward eviction budget.
         # Active sandboxes are in use by live threads and must not be forcibly stopped.
-        replicas, total = self._replica_count()
-        if total >= replicas:
-            evicted = await run_sync_lifecycle_operation(self._evict_oldest_warm)
-            self._log_replicas_soft_cap(replicas, sandbox_id, evicted)
+        await run_sync_lifecycle_operation(self._enforce_create_capacity, sandbox_id)
 
         create_kwargs = {}
         if config_mount_exclusion_root is not None:
@@ -2628,6 +2643,28 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         # nothing here would ever reap or reclaim it.
         if not self._claim_ownership(sandbox_id, for_destroy=True):
             logger.warning("Refusing to destroy sandbox %s: owned by another instance", sandbox_id)
+            return
+
+        if self._config.get("hard_capacity", False):
+            # A busy SDK shell holds the client's close lock. Stop physical
+            # execution first so that call can unwind; retain tracking until
+            # the owned backend stop succeeds, including on unknown failures.
+            with self._lock:
+                info = self._sandbox_infos.get(sandbox_id)
+                if info is None and sandbox_id in self._warm_pool:
+                    info = self._warm_pool[sandbox_id][0]
+            if info is not None:
+                with self._held_teardown_lease(sandbox_id):
+                    self._backend.destroy(info)
+                    inspect_running = getattr(self._backend, "_is_container_running", None)
+                    if not info.container_name or not callable(inspect_running) or inspect_running(info.container_name):
+                        raise RuntimeError("Native hard capacity physical STOP remains unconfirmed")
+                sandbox, _, _ = self._remove_tracked_sandbox(sandbox_id, expected_info=info)
+                if sandbox is not None:
+                    sandbox.close()
+                logger.info("Destroyed sandbox %s after physical stop", sandbox_id)
+            else:
+                self._release_ownership(sandbox_id)
             return
 
         sandbox, info, _ = self._remove_tracked_sandbox(sandbox_id)

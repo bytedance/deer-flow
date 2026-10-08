@@ -86,9 +86,27 @@ class JobStore:
                     return record
         raise RuntimeError("Concurrent execution update must be retried")
 
-    def list_active(self) -> list[dict[str, Any]]:
+    def list_active(self, *, kind=None) -> list[dict[str, Any]]:
+        query = select(_JOBS.c.record).where(_JOBS.c.state.not_in(TERMINAL))
+        if kind is not None:
+            from sqlalchemy import func
+
+            query = query.where(func.coalesce(_JOBS.c.record["kind"].as_string(), "B") == kind)
         with self.engine.connect() as connection:
-            return [dict(row.record) for row in connection.execute(select(_JOBS.c.record).where(_JOBS.c.state.not_in(TERMINAL)))]
+            return [dict(row.record) for row in connection.execute(query)]
+
+    def list_native_settlement_pending(self) -> list[dict[str, Any]]:
+        query = (
+            select(_JOBS.c.record)
+            .where(
+                _JOBS.c.record["kind"].as_string() == "C",
+                _JOBS.c.record["settlement_pending"].as_boolean().is_(True),
+            )
+            .order_by(_JOBS.c.id)
+            .limit(100)
+        )
+        with self.engine.connect() as connection:
+            return [dict(row.record) for row in connection.execute(query)]
 
     def list_cleanup_pending(self) -> list[dict[str, Any]]:
         with self.engine.connect() as connection:
@@ -114,7 +132,7 @@ class JobStore:
 
     def expire_staged(self, *, now: float | None = None):
         current = time.time() if now is None else now
-        for job in self.list_active():
+        for job in self.list_active(kind="B"):
 
             def expire(record):
                 if record["state"] == "staged" and record["staged_deadline"] <= current:

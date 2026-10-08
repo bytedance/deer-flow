@@ -2650,3 +2650,48 @@ def test_deterministic_sandbox_id_matches_shared_identity():
 
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     assert aio_mod.AioSandboxProvider._deterministic_sandbox_id("t-1", "u-1") == derive_sandbox_scope_token(user_id="u-1", thread_id="t-1")
+
+
+def test_opt_in_hard_capacity_refuses_second_container_after_failed_warm_stop(monkeypatch):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    provider._config = {"replicas": 1, "hard_capacity": True}
+    provider._lock = threading.RLock()
+    provider._sandboxes = {}
+    provider._warm_pool = {"still-running": (object(), 1)}
+    monkeypatch.setattr(provider, "_destroy_warm_entry", lambda *args, **kwargs: False)
+    with pytest.raises(RuntimeError, match="hard capacity"):
+        provider._enforce_create_capacity("second")
+    assert "still-running" in provider._warm_pool
+
+
+def test_opt_in_hard_capacity_counts_physical_warm_container_not_adopted_after_restart():
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    provider._config = {"replicas": 1, "hard_capacity": True}
+    provider._lock = threading.RLock()
+    provider._sandboxes = {}
+    provider._warm_pool = {}
+    provider._backend = SimpleNamespace(count_running_strict=lambda: 1)
+    with pytest.raises(RuntimeError, match="hard capacity"):
+        provider._enforce_create_capacity("second-after-restart")
+
+
+def test_hard_capacity_stop_precedes_busy_client_close(monkeypatch):
+    from contextlib import nullcontext
+
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    provider._config = {"hard_capacity": True}
+    operations = []
+    info = SimpleNamespace(container_name="native-busy")
+    provider._lock = threading.RLock()
+    provider._sandbox_infos = {"busy-native": info}
+    provider._warm_pool = {}
+    sandbox = SimpleNamespace(close=lambda: operations.append("client-close"))
+    provider._backend = SimpleNamespace(destroy=lambda info: operations.append("physical-stop"), _is_container_running=lambda name: (operations.append("strict-inspect"), False)[1])
+    monkeypatch.setattr(provider, "_claim_ownership", lambda *args, **kwargs: True)
+    monkeypatch.setattr(provider, "_remove_tracked_sandbox", lambda sandbox_id, **kwargs: (sandbox, info, None))
+    monkeypatch.setattr(provider, "_held_teardown_lease", lambda sandbox_id: nullcontext())
+    provider._destroy_reserved("busy-native")
+    assert operations == ["physical-stop", "strict-inspect", "client-close"]

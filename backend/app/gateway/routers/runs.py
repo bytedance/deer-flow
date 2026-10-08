@@ -73,7 +73,7 @@ async def stateless_wait(body: RunCreateRequest, request: Request) -> dict:
     record = await start_run(body, thread_id, request)
 
     completed = True
-    if record.task is not None:
+    if record.task is not None or record.ownership_lost:
         completed = await wait_for_run_completion(bridge, record, request, run_mgr)
 
     if completed and record.status == RunStatus.error:
