@@ -724,7 +724,7 @@
 - **community：** Browserless 的 `web_fetch` 提供方现在可以通过认证。此前它把配置的令牌放在 `/content` 请求的 JSON 正文里，
   而 Browserless 只从 `token` 查询参数或 `Authorization` 请求头读取令牌，并在读取正文之前完成校验。按照配置指南设置
   `BROWSERLESS_TOKEN` 后，每次 `web_fetch` 都返回 `Browserless HTTP 401`（对未设置 `TOKEN` 启动的实例则因正文模式拒绝
-  未知字段而返回 HTTP 400），而使用同一令牌的 `web_capture` 正常工作。现在两个工具都以查询参数发送令牌。
+  未知字段而返回 HTTP 400），而使用同一令牌的 `web_capture` 正常工作。现在两个工具都以查询参数发送令牌。([#6484])
 - **前端：** 侧边对话发送失败时不再清空输入框。侧边对话的提交处理在弹出错误提示后仍以成功返回，输入框据此视为成功，
   因此在创建侧边对话或上传附件失败时，已输入的文字和附件都会丢失；发往新侧边对话的第一条消息也会在排队时（实际发送前）
   就被清空。现在提交处理会在提示后抛出错误，排队的首条发送也以其自身结果完成提交，因此草稿会保留以便重试，只有消息
@@ -7527,3 +7527,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6441]: https://github.com/bytedance/deer-flow/pull/6441
 [#6448]: https://github.com/bytedance/deer-flow/pull/6448
 [#6450]: https://github.com/bytedance/deer-flow/pull/6450
+[#6484]: https://github.com/bytedance/deer-flow/pull/6484

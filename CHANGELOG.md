@@ -888,7 +888,7 @@ This release closes that milestone with **439 merged pull requests**.
   `Browserless HTTP 401` (and with HTTP 400 against an instance started without
   `TOKEN`, whose body schema rejects the unknown key) while `web_capture`
   worked with the same token. Both tools now send the token as a query
-  parameter.
+  parameter. ([#6484])
 - **frontend:** A failed side-chat send no longer clears the composer. The side
   chat's submit handler showed the error toast and then resolved, which the
   composer treats as success, so the typed text and attachments were lost when
@@ -9201,3 +9201,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6447]: https://github.com/bytedance/deer-flow/pull/6447
 [#6448]: https://github.com/bytedance/deer-flow/pull/6448
 [#6450]: https://github.com/bytedance/deer-flow/pull/6450
+[#6484]: https://github.com/bytedance/deer-flow/pull/6484
