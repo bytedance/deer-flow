@@ -4,12 +4,15 @@ import asyncio
 import contextlib
 import hashlib
 import importlib
+import os
 import stat
 import threading
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
+from _windows_acl_helpers import _windows_acl_owner_sid, _windows_acl_sids
+from pydantic import ValidationError
 
 from deerflow.config.paths import Paths, join_host_path
 from deerflow.config.sandbox_config import SandboxConfig
@@ -42,8 +45,12 @@ def test_load_config_preserves_thread_data_mounts_override(sandbox_overrides, ex
     monkeypatch.setattr(aio_mod, "get_app_config", lambda: app_config)
     provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
 
-    assert provider._load_config()["thread_data_mounts"] is expected
-    assert provider._load_config()["skills_container_path"] == "/mnt/skills"
+    loaded = provider._load_config()
+
+    assert loaded["thread_data_mounts"] is expected
+    assert loaded["skills_container_path"] == "/mnt/skills"
+    assert loaded["max_shell_sessions"] is None
+    assert "MAX_SHELL_SESSIONS" not in loaded["environment"]
 
 
 def test_load_config_snapshots_custom_skills_container_path(monkeypatch):
@@ -60,6 +67,157 @@ def test_load_config_snapshots_custom_skills_container_path(monkeypatch):
     provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
 
     assert provider._load_config()["skills_container_path"] == "/custom-skills"
+
+
+def test_load_config_wires_bash_command_timeout_to_aio_default(monkeypatch):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    sandbox_config = SandboxConfig(
+        use="deerflow.community.aio_sandbox:AioSandboxProvider",
+        bash_command_timeout=42.5,
+    )
+    app_config = SimpleNamespace(sandbox=sandbox_config, stream_bridge=None)
+    monkeypatch.setattr(aio_mod, "get_app_config", lambda: app_config)
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+
+    assert provider._load_config()["command_timeout"] == 42.5
+
+
+@pytest.mark.parametrize("invalid_timeout", [float("nan"), float("inf"), float("-inf"), 0, -1])
+def test_positive_float_rejects_non_positive_or_non_finite_values(invalid_timeout):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+
+    with pytest.raises(ValueError, match="sandbox.bash_command_timeout must be positive"):
+        aio_mod.AioSandboxProvider._positive_float("bash_command_timeout", invalid_timeout, 600)
+
+
+def test_positive_float_accepts_fractional_value():
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+
+    assert aio_mod.AioSandboxProvider._positive_float("bash_command_timeout", 42.5, 600) == 42.5
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_bash_command_timeout_rejects_non_finite_values(value):
+    with pytest.raises(ValidationError):
+        SandboxConfig(bash_command_timeout=value)
+
+
+def test_register_created_sandbox_forwards_configured_command_timeout(tmp_path):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._config["command_timeout"] = 42
+    provider._warm_pool = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._last_activity = {}
+    provider._publish_ownership = MagicMock()
+    info = aio_mod.SandboxInfo(sandbox_id="sandbox-timeout", sandbox_url="http://sandbox")
+
+    with patch.object(aio_mod, "AioSandbox") as sandbox_cls:
+        provider._register_created_sandbox("thread-timeout", "sandbox-timeout", info, user_id="user-timeout")
+
+    sandbox_cls.assert_called_once_with(
+        id="sandbox-timeout",
+        base_url="http://sandbox",
+        request_headers=info.request_headers,
+        default_command_timeout=42,
+    )
+
+
+def test_load_config_sizes_aio_shell_capacity_for_subagent_runtime(monkeypatch):
+    """Twelve subagents must not exceed AIO 1.11's ten-session default."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    sandbox_config = SandboxConfig(
+        use="deerflow.community.aio_sandbox:AioSandboxProvider",
+    )
+    app_config = SimpleNamespace(
+        sandbox=sandbox_config,
+        stream_bridge=None,
+        subagent_runtime=SimpleNamespace(max_running=12),
+    )
+    monkeypatch.setattr(aio_mod, "get_app_config", lambda: app_config)
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+
+    loaded = provider._load_config()
+
+    assert loaded["max_shell_sessions"] == 13
+    assert loaded["environment"]["MAX_SHELL_SESSIONS"] == str(loaded["max_shell_sessions"])
+
+
+@pytest.mark.parametrize("remote", [False, True], ids=["docker", "provisioner"])
+@pytest.mark.parametrize("persisted_capacity", [4, 9, 13])
+def test_backend_checks_runtime_minimum_without_overriding_image_default(monkeypatch, remote, persisted_capacity):
+    """Removing a four-session override must not reuse it for eight subagents."""
+    from deerflow.community.aio_sandbox import aio_sandbox_provider as aio_mod
+    from deerflow.community.aio_sandbox import local_backend as local_mod
+    from deerflow.community.aio_sandbox import remote_backend as remote_mod
+
+    app_config = SimpleNamespace(
+        sandbox=SandboxConfig(
+            use="deerflow.community.aio_sandbox:AioSandboxProvider",
+            container_prefix="sandbox",
+            provisioner_url="http://provisioner:8002" if remote else None,
+            environment={"MAX_SHELL_SESSIONS": "4"},
+        ),
+        stream_bridge=None,
+        subagent_runtime=SimpleNamespace(max_running=3),
+    )
+    monkeypatch.setattr(aio_mod, "get_app_config", lambda: app_config)
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+    assert provider._load_config()["max_shell_sessions"] == 4
+    app_config.subagent_runtime.max_running = 8
+    app_config.sandbox.environment = {}
+    provider._config = provider._load_config()
+    assert provider._config["max_shell_sessions"] is None
+    assert "MAX_SHELL_SESSIONS" not in provider._config["environment"]
+    monkeypatch.setattr(local_mod.LocalContainerBackend, "_detect_runtime", lambda _self: "docker")
+    backend = provider._create_backend()
+    if remote:
+        payload = {"sandbox_id": "example", "sandbox_url": "http://sandbox:8080", "max_shell_sessions": persisted_capacity}
+
+        def get(url, **_kwargs):
+            data = {"sandboxes": [payload]} if url.endswith("/api/sandboxes") else payload
+            return SimpleNamespace(status_code=200, raise_for_status=lambda: None, json=lambda: data)
+
+        monkeypatch.setattr(remote_mod.requests, "get", get)
+    else:
+        monkeypatch.setattr(backend, "_is_container_running", lambda _name: True)
+        monkeypatch.setattr(local_mod, "wait_for_sandbox_ready", lambda *_a, **_kw: True)
+        monkeypatch.setattr(local_mod.subprocess, "run", lambda *_a, **_kw: SimpleNamespace(returncode=0, stdout="sandbox-example\n"))
+        inspection = local_mod._ContainerInspection(
+            created_at=1.0,
+            host_port=18080,
+            image="sandbox:latest",
+            networks=frozenset({"bridge"}),
+            labels={"deerflow.role": "sandbox", "deerflow.sandbox_id": "example", "deerflow.network_mode": "open"},
+            max_shell_sessions=persisted_capacity,
+        )
+        monkeypatch.setattr(backend, "_batch_inspect", lambda *_a, **_kw: {"sandbox-example": inspection})
+
+    discovered = backend.discover("example")
+    assert discovered is not None
+    assert discovered.requires_replacement is (persisted_capacity < 9)
+    listed = backend.list_running()
+    assert len(listed) == 1
+    assert listed[0].requires_replacement is (persisted_capacity < 9)
+
+
+def test_load_config_rejects_shell_capacity_below_subagent_runtime(monkeypatch):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    sandbox_config = SandboxConfig(
+        use="deerflow.community.aio_sandbox:AioSandboxProvider",
+        environment={"MAX_SHELL_SESSIONS": "12"},
+    )
+    app_config = SimpleNamespace(
+        sandbox=sandbox_config,
+        stream_bridge=None,
+        subagent_runtime=SimpleNamespace(max_running=12),
+    )
+    monkeypatch.setattr(aio_mod, "get_app_config", lambda: app_config)
+    provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
+
+    with pytest.raises(ValueError, match=r"at least subagent_runtime\.max_running \+ 1"):
+        provider._load_config()
 
 
 @pytest.mark.parametrize(
@@ -129,7 +287,7 @@ def _make_provider(tmp_path):
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     with patch.object(aio_mod.AioSandboxProvider, "_start_idle_checker"):
         provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
-        provider._config = {"idle_timeout": 600, "replicas": 3}
+        provider._config = {"command_timeout": 600.0, "idle_timeout": 600, "replicas": 3}
         provider._sandboxes = {}
         provider._active_sandbox_identity = {}
         provider._warm_pool_identity = {}
@@ -138,6 +296,7 @@ def _make_provider(tmp_path):
         provider._acquire_epoch_counter = 0
         provider._acquire_inflight = {}
         provider._acquire_serializer = AcquireSerializer(thread_name_prefix="aio-sandbox-lock-wait")
+        provider._acquire_worker_executor = aio_mod.ThreadPoolExecutor(thread_name_prefix="aio-sandbox-owned-worker-test")
         provider._lock = MagicMock()
         provider._idle_checker_stop = MagicMock()
         provider._renewal_stop = MagicMock()
@@ -218,9 +377,19 @@ def test_get_lark_cli_runtime_mounts_uses_user_auth_dirs(tmp_path, monkeypatch):
         str(tmp_path / "users" / "alice" / "integrations" / "lark-cli" / "data"),
         False,
     )
-    assert stat.S_IMODE((tmp_path / "users" / "alice" / "integrations" / "lark-cli" / "config").stat().st_mode) == 0o700
-    assert stat.S_IMODE((tmp_path / "users" / "alice" / "integrations" / "lark-cli" / "config" / "locks").stat().st_mode) == 0o700
-    assert stat.S_IMODE((tmp_path / "users" / "alice" / "integrations" / "lark-cli" / "data").stat().st_mode) == 0o700
+    config_dir = tmp_path / "users" / "alice" / "integrations" / "lark-cli" / "config"
+    locks_dir = config_dir / "locks"
+    data_dir = tmp_path / "users" / "alice" / "integrations" / "lark-cli" / "data"
+    if os.name == "nt":
+        # NTFS cannot represent POSIX modes; the contract the credential-tree
+        # hardener establishes on Windows is an owner-only inheritable DACL.
+        owner_sid = _windows_acl_owner_sid(config_dir)
+        for hardened in (config_dir, locks_dir, data_dir):
+            assert _windows_acl_sids(hardened) == {owner_sid}
+    else:
+        assert stat.S_IMODE(config_dir.stat().st_mode) == 0o700
+        assert stat.S_IMODE(locks_dir.stat().st_mode) == 0o700
+        assert stat.S_IMODE(data_dir.stat().st_mode) == 0o700
     assert container_paths["/mnt/integrations/lark-cli/runtime"] == (
         str(runtime_dir),
         True,
@@ -463,6 +632,7 @@ def test_policy_scoped_create_excludes_local_config_mounts_below_skills_root(
 
     provider = _make_provider(tmp_path)
     provider._config = {
+        "command_timeout": 600.0,
         "replicas": 3,
         "skills_container_path": "/mnt/skills",
     }
@@ -519,6 +689,7 @@ def test_remote_create_forwards_configured_skills_container_path(
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     provider = _make_provider(tmp_path)
     provider._config = {
+        "command_timeout": 600.0,
         "replicas": 3,
         "skills_container_path": "/custom-skills",
     }
@@ -581,6 +752,7 @@ async def test_remote_create_async_forwards_configured_skills_container_path(
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     provider = _make_provider(tmp_path)
     provider._config = {
+        "command_timeout": 600.0,
         "replicas": 3,
         "skills_container_path": "/custom-skills",
     }
@@ -699,7 +871,7 @@ async def test_acquire_async_uses_async_readiness_polling(monkeypatch):
     """AioSandboxProvider async creation must not use sync readiness polling."""
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     provider = _make_provider(None)
-    provider._config = {"replicas": 3}
+    provider._config = {"command_timeout": 600.0, "replicas": 3}
     provider._warm_pool = {}
     provider._sandbox_infos = {}
     provider._thread_sandboxes = {}
@@ -764,6 +936,332 @@ async def test_discover_or_create_with_lock_async_offloads_lock_file_open_and_cl
     assert sandbox_id == "sandbox-async-lock"
     assert aio_mod._open_lock_file in to_thread_calls
     assert any(getattr(func, "__name__", "") == "close" for func in to_thread_calls)
+
+
+@pytest.mark.anyio
+async def test_discover_or_create_with_lock_async_cancellation_aborts_flock_wait(tmp_path, monkeypatch):
+    """A cancelled waiter must not park until a peer releases the cross-process flock."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._discover_or_create_with_lock_async = aio_mod.AioSandboxProvider._discover_or_create_with_lock_async.__get__(
+        provider,
+        aio_mod.AioSandboxProvider,
+    )
+    provider._backend = SimpleNamespace(discover=MagicMock(return_value=None))
+
+    peer_lock = threading.Lock()
+    peer_lock.acquire()
+    attempt_seen = threading.Event()
+    closed = threading.Event()
+
+    class TrackedLockFile:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def close(self):
+            self._inner.close()
+            closed.set()
+
+    def open_lock_file(lock_path):
+        return TrackedLockFile(open(lock_path, "a", encoding="utf-8"))
+
+    def try_lock(_lock_file) -> bool:
+        attempt_seen.set()
+        return peer_lock.acquire(blocking=False)
+
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(aio_mod, "_open_lock_file", open_lock_file)
+    monkeypatch.setattr(aio_mod, "_try_lock_file_exclusive", try_lock)
+
+    owner = asyncio.create_task(
+        provider._discover_or_create_with_lock_async(
+            "thread-cancel-flock-wait",
+            "sandbox-cancel-flock-wait",
+            user_id="default",
+        )
+    )
+    try:
+        assert await asyncio.to_thread(attempt_seen.wait, 2)
+        owner.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(owner, timeout=0.5)
+        assert closed.is_set()
+        provider._backend.discover.assert_not_called()
+    finally:
+        peer_lock.release()
+        if not owner.done():
+            owner.cancel()
+            await asyncio.gather(owner, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_discover_or_create_with_lock_async_cancellation_keeps_file_lock_until_worker_finishes(tmp_path, monkeypatch):
+    """Caller cancellation must not release the cross-process lock over an admitted worker."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._discover_or_create_with_lock_async = aio_mod.AioSandboxProvider._discover_or_create_with_lock_async.__get__(
+        provider,
+        aio_mod.AioSandboxProvider,
+    )
+    provider._warm_pool = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._sandboxes = {}
+    provider._last_activity = {}
+    provider._lock = aio_mod.threading.Lock()
+
+    discover_started = threading.Event()
+    allow_discover = threading.Event()
+    contender_acquired = threading.Event()
+    release_contender = threading.Event()
+    cross_process_lock = threading.Lock()
+
+    def blocking_discover(_sandbox_id: str):
+        discover_started.set()
+        assert allow_discover.wait(timeout=2)
+        return None
+
+    create_calls: list[tuple[str | None, str, str | None]] = []
+
+    async def fake_create(thread_id: str | None, sandbox_id: str, *, user_id: str | None = None) -> str:
+        create_calls.append((thread_id, sandbox_id, user_id))
+        return sandbox_id
+
+    def contend_for_lock() -> None:
+        cross_process_lock.acquire()
+        try:
+            contender_acquired.set()
+            assert release_contender.wait(timeout=2)
+        finally:
+            cross_process_lock.release()
+
+    provider._backend = SimpleNamespace(discover=blocking_discover)
+    monkeypatch.setattr(provider, "_create_sandbox_async", fake_create)
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(aio_mod, "_try_lock_file_exclusive", lambda _lock_file: cross_process_lock.acquire(blocking=False))
+    monkeypatch.setattr(aio_mod, "_unlock_file", lambda _lock_file: cross_process_lock.release())
+
+    owner = asyncio.create_task(
+        provider._discover_or_create_with_lock_async(
+            "thread-cancel-flock",
+            "sandbox-cancel-flock",
+            user_id="default",
+        )
+    )
+    contender = None
+    try:
+        assert await asyncio.to_thread(discover_started.wait, 2)
+        owner.cancel()
+        contender = asyncio.create_task(asyncio.to_thread(contend_for_lock))
+
+        await asyncio.sleep(0.05)
+        assert not contender_acquired.is_set(), "cross-process lock released while discover worker was still running"
+
+        allow_discover.set()
+        with pytest.raises(asyncio.CancelledError):
+            await owner
+
+        assert await asyncio.to_thread(contender_acquired.wait, 2)
+        assert create_calls == []
+    finally:
+        allow_discover.set()
+        release_contender.set()
+        if not owner.done():
+            owner.cancel()
+            await asyncio.gather(owner, return_exceptions=True)
+        if contender is not None:
+            await contender
+
+
+@pytest.mark.anyio
+async def test_discover_or_create_with_lock_async_cancellation_drains_create_before_unlock(tmp_path, monkeypatch):
+    """Cancellation during create must finish the async lifecycle before releasing the flock."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._discover_or_create_with_lock_async = aio_mod.AioSandboxProvider._discover_or_create_with_lock_async.__get__(
+        provider,
+        aio_mod.AioSandboxProvider,
+    )
+    provider._warm_pool = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._sandboxes = {}
+    provider._last_activity = {}
+    provider._lock = aio_mod.threading.Lock()
+
+    create_started = asyncio.Event()
+    allow_create = asyncio.Event()
+    create_finished = asyncio.Event()
+    contender_acquired = threading.Event()
+    release_contender = threading.Event()
+    cross_process_lock = threading.Lock()
+
+    async def fake_create(thread_id: str | None, sandbox_id: str, *, user_id: str | None = None) -> str:
+        assert thread_id == "thread-cancel-create"
+        assert sandbox_id == "sandbox-cancel-create"
+        assert user_id == "default"
+        create_started.set()
+        await allow_create.wait()
+        create_finished.set()
+        return sandbox_id
+
+    def contend_for_lock() -> None:
+        cross_process_lock.acquire()
+        try:
+            contender_acquired.set()
+            assert release_contender.wait(timeout=2)
+        finally:
+            cross_process_lock.release()
+
+    provider._backend = SimpleNamespace(discover=MagicMock(return_value=None))
+    monkeypatch.setattr(provider, "_create_sandbox_async", fake_create)
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(aio_mod, "_try_lock_file_exclusive", lambda _lock_file: cross_process_lock.acquire(blocking=False))
+    monkeypatch.setattr(aio_mod, "_unlock_file", lambda _lock_file: cross_process_lock.release())
+
+    owner = asyncio.create_task(
+        provider._discover_or_create_with_lock_async(
+            "thread-cancel-create",
+            "sandbox-cancel-create",
+            user_id="default",
+        )
+    )
+    contender = None
+    try:
+        await asyncio.wait_for(create_started.wait(), timeout=2)
+        owner.cancel()
+        contender = asyncio.create_task(asyncio.to_thread(contend_for_lock))
+
+        await asyncio.sleep(0.05)
+        assert not contender_acquired.is_set(), "flock released before the async create lifecycle finished"
+
+        allow_create.set()
+        with pytest.raises(asyncio.CancelledError):
+            await owner
+
+        assert create_finished.is_set()
+        assert await asyncio.to_thread(contender_acquired.wait, 2)
+    finally:
+        allow_create.set()
+        release_contender.set()
+        if not owner.done():
+            owner.cancel()
+            await asyncio.gather(owner, return_exceptions=True)
+        if contender is not None:
+            await contender
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("blocked_step", ["create", "register"])
+async def test_discover_or_create_with_lock_async_cancellation_drains_create_lifecycle_steps(
+    blocked_step,
+    tmp_path,
+    monkeypatch,
+):
+    """Create/register workers must settle before cancellation releases the flock."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._discover_or_create_with_lock_async = aio_mod.AioSandboxProvider._discover_or_create_with_lock_async.__get__(
+        provider,
+        aio_mod.AioSandboxProvider,
+    )
+    provider._warm_pool = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._sandboxes = {}
+    provider._last_activity = {}
+    provider._lock = aio_mod.threading.Lock()
+    provider._config = {"command_timeout": 600.0, "idle_timeout": 600, "replicas": 3}
+
+    step_started = threading.Event()
+    allow_step = threading.Event()
+    step_finished = threading.Event()
+    register_called = threading.Event()
+    contender_acquired = threading.Event()
+    release_contender = threading.Event()
+    cross_process_lock = threading.Lock()
+
+    info = aio_mod.SandboxInfo(
+        sandbox_id="sandbox-cancel-lifecycle",
+        sandbox_url="http://sandbox",
+    )
+
+    def create(*_args, **_kwargs):
+        if blocked_step == "create":
+            step_started.set()
+            assert allow_step.wait(timeout=2)
+            step_finished.set()
+        return info
+
+    def register(*_args, **_kwargs):
+        register_called.set()
+        if blocked_step == "register":
+            step_started.set()
+            assert allow_step.wait(timeout=2)
+            step_finished.set()
+        return info.sandbox_id
+
+    async def ready(*_args, **_kwargs):
+        return True
+
+    def contend_for_lock() -> None:
+        cross_process_lock.acquire()
+        try:
+            contender_acquired.set()
+            assert release_contender.wait(timeout=2)
+        finally:
+            cross_process_lock.release()
+
+    provider._backend = SimpleNamespace(
+        create=create,
+        destroy=MagicMock(),
+        discover=MagicMock(return_value=None),
+    )
+    monkeypatch.setattr(provider, "_get_extra_mounts", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(provider, "_lark_integration_active", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(provider, "_lark_broker_active", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(provider, "_local_config_mount_exclusion_root", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(provider, "_replica_count", lambda: (3, 0))
+    monkeypatch.setattr(provider, "_register_created_sandbox", register)
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready_async", ready)
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(aio_mod, "_try_lock_file_exclusive", lambda _lock_file: cross_process_lock.acquire(blocking=False))
+    monkeypatch.setattr(aio_mod, "_unlock_file", lambda _lock_file: cross_process_lock.release())
+
+    owner = asyncio.create_task(
+        provider._discover_or_create_with_lock_async(
+            "thread-cancel-lifecycle",
+            info.sandbox_id,
+            user_id="default",
+        )
+    )
+    contender = None
+    try:
+        assert await asyncio.to_thread(step_started.wait, 2)
+        owner.cancel()
+        contender = asyncio.create_task(asyncio.to_thread(contend_for_lock))
+
+        await asyncio.sleep(0.05)
+        assert not contender_acquired.is_set()
+
+        allow_step.set()
+        with pytest.raises(asyncio.CancelledError):
+            await owner
+
+        assert step_finished.is_set()
+        assert register_called.is_set()
+        assert await asyncio.to_thread(contender_acquired.wait, 2)
+    finally:
+        allow_step.set()
+        release_contender.set()
+        if not owner.done():
+            owner.cancel()
+            await asyncio.gather(owner, return_exceptions=True)
+        if contender is not None:
+            await contender
 
 
 @pytest.mark.anyio
@@ -878,6 +1376,244 @@ async def test_acquire_async_cancelled_waiter_does_not_block_successor(tmp_path,
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("blocked_step", ["reuse", "reclaim"])
+async def test_acquire_async_cancellation_keeps_serializer_until_started_worker_finishes(
+    blocked_step,
+    tmp_path,
+    monkeypatch,
+):
+    """A cancelled same-key acquire must not overlap an already-started worker."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._warm_pool = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._sandboxes = {}
+    provider._last_activity = {}
+    provider._lock = aio_mod.threading.Lock()
+
+    first_started = threading.Event()
+    allow_first_finish = threading.Event()
+    successor_started = threading.Event()
+    state_lock = threading.Lock()
+    active = 0
+    max_active = 0
+    calls = 0
+
+    monkeypatch.setattr(provider, "_ensure_skills_projection", lambda _user_id: None)
+
+    def blocked_worker(result):
+        nonlocal active, max_active, calls
+        with state_lock:
+            calls += 1
+            call_number = calls
+            active += 1
+            max_active = max(max_active, active)
+        try:
+            if call_number == 1:
+                first_started.set()
+                assert allow_first_finish.wait(timeout=2)
+            else:
+                successor_started.set()
+            return result
+        finally:
+            with state_lock:
+                active -= 1
+
+    def reuse(*_args, **_kwargs):
+        if blocked_step == "reuse":
+            return blocked_worker("sandbox-reused")
+        return None
+
+    def reclaim(*_args, **_kwargs):
+        if blocked_step == "reclaim":
+            return blocked_worker("sandbox-reclaimed")
+        raise AssertionError("warm reclaim should not run after cached reuse succeeds")
+
+    monkeypatch.setattr(provider, "_reuse_in_process_sandbox", reuse)
+    monkeypatch.setattr(provider, "_reclaim_warm_pool_sandbox", reclaim)
+
+    owner = asyncio.create_task(provider.acquire_async("thread-owned-worker", user_id="default"))
+    successor = None
+    try:
+        assert await asyncio.to_thread(first_started.wait, 2)
+        owner.cancel()
+        successor = asyncio.create_task(provider.acquire_async("thread-owned-worker", user_id="default"))
+
+        await asyncio.sleep(0.05)
+        assert not successor_started.is_set(), "serializer released while cancelled worker was still running"
+
+        allow_first_finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await owner
+
+        assert await asyncio.to_thread(successor_started.wait, 2)
+        expected = "sandbox-reused" if blocked_step == "reuse" else "sandbox-reclaimed"
+        assert await asyncio.wait_for(successor, timeout=1) == expected
+        assert max_active == 1
+    finally:
+        allow_first_finish.set()
+        if not owner.done():
+            owner.cancel()
+            await asyncio.gather(owner, return_exceptions=True)
+        if successor is not None and not successor.done():
+            successor.cancel()
+            await asyncio.gather(successor, return_exceptions=True)
+        provider.reset()
+
+
+@pytest.mark.anyio
+async def test_acquire_async_cancellation_cancels_queued_reclaim_before_it_runs(tmp_path, monkeypatch):
+    """Cancellation must not force a not-yet-started reclaim to run later."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._acquire_worker_executor.shutdown(wait=False, cancel_futures=True)
+    provider._acquire_worker_executor = aio_mod.ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="aio-owned-worker-test",
+    )
+    provider._warm_pool = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._sandboxes = {}
+    provider._last_activity = {}
+    provider._lock = aio_mod.threading.Lock()
+
+    blocker_started = threading.Event()
+    allow_blocker = threading.Event()
+    reclaim_submitted = threading.Event()
+    reclaim_calls = 0
+
+    executor = provider._acquire_worker_executor
+    original_submit = executor.submit
+    submit_count = 0
+
+    def occupy_lifecycle_executor():
+        blocker_started.set()
+        assert allow_blocker.wait(timeout=2)
+
+    def reuse(*_args, **_kwargs):
+        # We are running on the owned-lifecycle executor. Queue the blocker
+        # behind this worker before returning None; with max_workers=1 it starts
+        # immediately after reuse returns and before the event loop can submit
+        # warm reclaim.
+        original_submit(occupy_lifecycle_executor)
+        return None
+
+    def reclaim(*_args, **_kwargs):
+        nonlocal reclaim_calls
+        reclaim_calls += 1
+        return "sandbox-reclaimed"
+
+    def tracking_submit(*args, **kwargs):
+        nonlocal submit_count
+        submit_count += 1
+        future = original_submit(*args, **kwargs)
+        # Submission 1 runs cached reuse; submission 2 is warm reclaim,
+        # now queued behind occupy_lifecycle_executor.
+        if submit_count == 2:
+            reclaim_submitted.set()
+        return future
+
+    monkeypatch.setattr(provider, "_ensure_skills_projection", lambda _user_id: None)
+    monkeypatch.setattr(provider, "_reuse_in_process_sandbox", reuse)
+    monkeypatch.setattr(provider, "_reclaim_warm_pool_sandbox", reclaim)
+    monkeypatch.setattr(executor, "submit", tracking_submit)
+
+    owner = asyncio.create_task(provider.acquire_async("thread-queued-reclaim", user_id="default"))
+    try:
+        assert await asyncio.to_thread(blocker_started.wait, 2)
+        assert await asyncio.to_thread(reclaim_submitted.wait, 2)
+
+        owner.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await owner
+
+        allow_blocker.set()
+        await asyncio.sleep(0.05)
+        assert reclaim_calls == 0
+    finally:
+        allow_blocker.set()
+        if not owner.done():
+            owner.cancel()
+            await asyncio.gather(owner, return_exceptions=True)
+        provider._acquire_serializer.close()
+        provider._acquire_worker_executor.shutdown(wait=False, cancel_futures=True)
+
+
+@pytest.mark.anyio
+async def test_acquire_async_lock_waiters_do_not_starve_holder_worker(tmp_path, monkeypatch):
+    """Lock waiters must not occupy the executor needed by the lock holder."""
+    provider = _make_provider(tmp_path)
+    provider._acquire_serializer.close()
+    provider._acquire_serializer = AcquireSerializer(
+        max_workers=2,
+        thread_name_prefix="aio-holder-deadlock-test",
+    )
+
+    projection_started = threading.Event()
+    allow_projection = threading.Event()
+    waiter_workers_started = threading.Event()
+    count_lock = threading.Lock()
+    started_workers = 0
+    projection_calls = 0
+
+    executor = provider._acquire_serializer.executor
+    original_submit = executor.submit
+
+    def tracking_submit(func, /, *args, **kwargs):
+        def tracked():
+            nonlocal started_workers
+            with count_lock:
+                started_workers += 1
+                if started_workers >= 3:
+                    waiter_workers_started.set()
+            return func(*args, **kwargs)
+
+        return original_submit(tracked)
+
+    def ensure_projection(_user_id):
+        nonlocal projection_calls
+        projection_calls += 1
+        if projection_calls == 1:
+            projection_started.set()
+            assert allow_projection.wait(timeout=2)
+
+    monkeypatch.setattr(executor, "submit", tracking_submit)
+    monkeypatch.setattr(provider, "_ensure_skills_projection", ensure_projection)
+    monkeypatch.setattr(
+        provider,
+        "_reuse_in_process_sandbox",
+        lambda *_args, **_kwargs: "sandbox-cached",
+    )
+
+    owner = asyncio.create_task(provider.acquire_async("thread-holder-deadlock", user_id="default"))
+    successors: list[asyncio.Task[str]] = []
+    try:
+        assert await asyncio.to_thread(projection_started.wait, 2)
+        successors = [asyncio.create_task(provider.acquire_async("thread-holder-deadlock", user_id="default")) for _ in range(2)]
+        # Submission 1 acquired the holder's key. Submissions 2 and 3 are now
+        # both running in the bounded serializer pool, blocked on that same key.
+        assert await asyncio.to_thread(waiter_workers_started.wait, 2)
+
+        allow_projection.set()
+        assert await asyncio.wait_for(owner, timeout=1) == "sandbox-cached"
+        assert await asyncio.wait_for(
+            asyncio.gather(*successors),
+            timeout=1,
+        ) == ["sandbox-cached", "sandbox-cached"]
+    finally:
+        allow_projection.set()
+        if not owner.done():
+            owner.cancel()
+        for task in successors:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(owner, *successors, return_exceptions=True)
+        provider.reset()
+
+
+@pytest.mark.anyio
 async def test_acquire_internal_async_offloads_cached_reuse_health_check(tmp_path, monkeypatch):
     """Async cached reuse must keep backend health checks off the event loop."""
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
@@ -898,7 +1634,6 @@ async def test_acquire_internal_async_offloads_cached_reuse_health_check(tmp_pat
     assert sandbox_id == "sandbox-cached-async"
     assert to_thread_calls == [
         (provider._ensure_skills_projection, ("default",)),
-        (provider._reuse_in_process_sandbox, ("thread-cached-async",)),
     ]
 
 
@@ -967,11 +1702,38 @@ def test_remote_backend_create_prefers_explicit_user_id(monkeypatch):
     assert posted["json"]["include_legacy_skills"] is False
 
 
+def test_remote_backend_forwards_shell_capacity_to_provisioner(monkeypatch):
+    remote_mod = importlib.import_module("deerflow.community.aio_sandbox.remote_backend")
+    backend = remote_mod.RemoteSandboxBackend(
+        "http://provisioner:8002",
+        max_shell_sessions=13,
+    )
+    posted: dict = {}
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"sandbox_url": "http://sandbox.local", "max_shell_sessions": 13}
+
+    def _post(url, json, timeout, headers=None):  # noqa: A002 - mirrors requests.post kwarg
+        posted.update({"url": url, "json": json, "timeout": timeout})
+        return _Response()
+
+    monkeypatch.setattr(remote_mod.requests, "post", _post)
+    monkeypatch.setattr(remote_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+
+    backend.create("thread-42", "sandbox-42", user_id="user-7")
+
+    assert posted["json"]["max_shell_sessions"] == 13
+
+
 def test_create_sandbox_requests_runtime_when_lark_installed(tmp_path, monkeypatch):
     """The provider must request lark-cli runtime provisioning when Lark is installed."""
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     provider = _make_provider(tmp_path)
-    provider._config = {"replicas": 3}
+    provider._config = {"command_timeout": 600.0, "replicas": 3}
     provider._warm_pool = {}
     provider._sandbox_infos = {}
     provider._thread_sandboxes = {}
@@ -1001,7 +1763,7 @@ def test_create_sandbox_requests_broker_when_active(tmp_path, monkeypatch):
     """Broker mode (Pattern B) is requested when the provisioner reports it."""
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     provider = _make_provider(tmp_path)
-    provider._config = {"replicas": 3}
+    provider._config = {"command_timeout": 600.0, "replicas": 3}
     provider._warm_pool = {}
     provider._sandbox_infos = {}
     provider._thread_sandboxes = {}
@@ -1031,7 +1793,7 @@ def test_create_sandbox_skips_runtime_when_lark_absent(tmp_path, monkeypatch):
     """No runtime provisioning request when the Lark skill pack is not installed."""
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     provider = _make_provider(tmp_path)
-    provider._config = {"replicas": 3}
+    provider._config = {"command_timeout": 600.0, "replicas": 3}
     provider._warm_pool = {}
     provider._sandbox_infos = {}
     provider._thread_sandboxes = {}
@@ -1082,8 +1844,32 @@ def _make_provider_with_active_sandbox(tmp_path, sandbox_id: str):
     sandbox = MagicMock()
     sandbox.id = sandbox_id
     sandbox.close = MagicMock()
+    sandbox.requires_container_recycle = False
     provider._sandboxes = {sandbox_id: sandbox}
     return provider, sandbox, aio_mod
+
+
+def test_reused_active_sandbox_requires_matching_releases(tmp_path):
+    """The execution lease manager keeps AIO clients active until the final holder exits."""
+    from deerflow.sandbox.lease import SandboxLeaseManager
+
+    provider, sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "sandbox-lease")
+    manager = SandboxLeaseManager(provider)
+    try:
+        for owner in ("active-run", "temporary-upload"):
+            manager.retain(owner, "sandbox-lease", thread_id="thread-lease", user_id="owner-upload")
+
+        manager.release("temporary-upload")
+        assert "sandbox-lease" in provider._sandboxes
+        assert "sandbox-lease" not in provider._warm_pool
+        sandbox.close.assert_not_called()
+
+        manager.release("active-run")
+        assert "sandbox-lease" not in provider._sandboxes
+        assert "sandbox-lease" in provider._warm_pool
+        sandbox.close.assert_called_once_with()
+    finally:
+        manager.close()
 
 
 def test_release_closes_cached_sandbox_client(tmp_path):
@@ -1140,6 +1926,79 @@ async def test_reset_closes_acquire_serializer_executor(tmp_path):
             pass
 
 
+def test_release_dirty_sandbox_branches_before_warm_pool(
+    tmp_path,
+):
+    provider, sandbox, _ = _make_provider_with_active_sandbox(
+        tmp_path,
+        "sandbox-dirty",
+    )
+    sandbox.requires_container_recycle = True
+
+    observed: dict[str, bool] = {}
+
+    def destroy_tracked(
+        sandbox_id,
+        *,
+        still_reapable,
+    ):
+        observed["active_before_destroy"] = provider._sandboxes.get(sandbox_id) is sandbox
+        observed["warm_before_destroy"] = sandbox_id in provider._warm_pool
+        observed["still_reapable"] = still_reapable()
+
+    provider._destroy_tracked = MagicMock(side_effect=destroy_tracked)
+
+    provider.release("sandbox-dirty")
+
+    assert observed == {
+        "active_before_destroy": True,
+        "warm_before_destroy": False,
+        "still_reapable": True,
+    }
+
+
+def test_release_dirty_sandbox_destroys_container_instead_of_warming(
+    tmp_path,
+):
+    provider, sandbox, _ = _make_provider_with_active_sandbox(
+        tmp_path,
+        "sandbox-dirty-destroy",
+    )
+    sandbox.requires_container_recycle = True
+    info = provider._sandbox_infos["sandbox-dirty-destroy"]
+
+    provider.release("sandbox-dirty-destroy")
+
+    assert "sandbox-dirty-destroy" not in provider._warm_pool
+    assert "sandbox-dirty-destroy" not in provider._sandboxes
+    assert "sandbox-dirty-destroy" not in provider._sandbox_infos
+
+    sandbox.close.assert_called_once_with()
+    provider._backend.destroy.assert_called_once_with(info)
+
+
+def test_release_dirty_sandbox_destroy_failure_is_logged_without_warming(
+    tmp_path,
+    caplog,
+):
+    provider, sandbox, _ = _make_provider_with_active_sandbox(
+        tmp_path,
+        "sandbox-dirty-fail",
+    )
+    sandbox.requires_container_recycle = True
+    provider._backend.destroy.side_effect = RuntimeError("container stop failed")
+
+    with caplog.at_level("ERROR"):
+        provider.release("sandbox-dirty-fail")
+
+    assert "sandbox-dirty-fail" not in provider._warm_pool
+    assert "sandbox-dirty-fail" not in provider._sandboxes
+    assert "sandbox-dirty-fail" not in provider._sandbox_infos
+    assert "Failed to recycle sandbox sandbox-dirty-fail" in caplog.text
+    provider._backend.destroy.assert_called_once()
+    sandbox.close.assert_called_once_with()
+
+
 def test_release_swallows_close_errors(tmp_path, caplog):
     """A failure inside sandbox.close() must not break provider release()."""
     provider, sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "sandbox-rel-err")
@@ -1166,7 +2025,7 @@ def test_acquire_drops_dead_cached_sandbox(tmp_path, monkeypatch):
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     provider, sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "sandbox-dead")
     provider._thread_sandboxes = {("default", "thread-dead"): "sandbox-dead"}
-    provider._config = {"replicas": 3}
+    provider._config = {"command_timeout": 600.0, "replicas": 3}
     provider._backend.is_alive = MagicMock(return_value=False)
     provider._backend.discover = MagicMock(return_value=None)
     provider._backend.create = MagicMock(
@@ -1250,7 +2109,7 @@ def test_acquire_skips_dead_warm_pool_sandbox(tmp_path, monkeypatch):
             0.0,
         )
     }
-    provider._config = {"replicas": 3}
+    provider._config = {"command_timeout": 600.0, "replicas": 3}
     provider._backend = SimpleNamespace(
         is_alive=MagicMock(return_value=False),
         destroy=MagicMock(),
@@ -1290,6 +2149,115 @@ def test_destroy_swallows_close_errors_and_still_destroys_backend(tmp_path, capl
 
     assert "Error closing sandbox sandbox-dest-err during destroy" in caplog.text
     provider._backend.destroy.assert_called_once()
+
+
+def test_shutdown_keeps_aio_warm_entries_owned_when_idle_checker_stop_times_out(tmp_path):
+    """A failed reaper join must leave AIO warm entries available to a retry."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._lock = aio_mod.threading.Lock()
+    provider._shutdown_called = False
+    provider._sandboxes = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._last_activity = {}
+    warm_info = aio_mod.SandboxInfo(sandbox_id="warm-retry", sandbox_url="http://warm-retry")
+    provider._warm_pool = {"warm-retry": (warm_info, 1.0)}
+    provider._warm_pool_identity = {"warm-retry": ("default", "thread-retry")}
+    provider._stop_idle_checker = MagicMock(side_effect=[RuntimeError("reaper still alive"), None])
+    provider._stop_lease_renewal = MagicMock()
+    provider._destroy_warm_entry = MagicMock()
+    provider._ownership.close = MagicMock()
+
+    with pytest.raises(RuntimeError, match="reaper still alive"):
+        provider.shutdown()
+
+    assert provider._shutdown_called is False
+    assert provider._warm_pool == {"warm-retry": (warm_info, 1.0)}
+    assert provider._warm_pool_identity == {"warm-retry": ("default", "thread-retry")}
+    provider._destroy_warm_entry.assert_not_called()
+
+    provider.shutdown()
+
+    provider._destroy_warm_entry.assert_called_once_with(
+        "warm-retry",
+        warm_info,
+        reason="shutdown",
+        still_reapable=ANY,
+    )
+    assert provider._warm_pool == {}
+    assert provider._warm_pool_identity == {}
+
+
+def test_shutdown_keeps_aio_warm_entries_owned_when_lease_renewal_stop_times_out(tmp_path):
+    """A live renewal worker must keep AIO ownership attached for shutdown retry."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._lock = aio_mod.threading.Lock()
+    provider._shutdown_called = False
+    provider._sandboxes = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._last_activity = {}
+    warm_info = aio_mod.SandboxInfo(sandbox_id="warm-renewal-retry", sandbox_url="http://warm-renewal-retry")
+    provider._warm_pool = {"warm-renewal-retry": (warm_info, 1.0)}
+    provider._warm_pool_identity = {"warm-renewal-retry": ("default", "thread-retry")}
+    provider._stop_idle_checker = MagicMock()
+    provider._destroy_warm_entry = MagicMock()
+    provider._ownership.close = MagicMock()
+
+    renewal_thread = MagicMock()
+    renewal_thread.is_alive.side_effect = [True, True, False, False]
+    provider._renewal_thread = renewal_thread
+
+    with pytest.raises(RuntimeError, match="lease-renewal thread is still running after stop timeout"):
+        provider.shutdown()
+
+    assert provider._shutdown_called is False
+    assert provider._warm_pool == {"warm-renewal-retry": (warm_info, 1.0)}
+    assert provider._warm_pool_identity == {"warm-renewal-retry": ("default", "thread-retry")}
+    renewal_thread.join.assert_called_once_with(timeout=5)
+    provider._destroy_warm_entry.assert_not_called()
+    provider._ownership.close.assert_not_called()
+
+    provider.shutdown()
+
+    provider._destroy_warm_entry.assert_called_once_with(
+        "warm-renewal-retry",
+        warm_info,
+        reason="shutdown",
+        still_reapable=ANY,
+    )
+    assert provider._warm_pool == {}
+    assert provider._warm_pool_identity == {}
+
+
+def test_signal_handler_forwards_original_signal_when_shutdown_fails(tmp_path, monkeypatch, caplog):
+    """A fail-closed shutdown must not swallow or replace the process signal."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider.shutdown = MagicMock(side_effect=RuntimeError("renewal worker still alive"))
+
+    forwarded = MagicMock()
+    installed = {}
+
+    def fake_getsignal(signum):
+        return forwarded if signum == aio_mod.signal.SIGTERM else aio_mod.signal.SIG_IGN
+
+    def fake_signal(signum, handler):
+        installed[signum] = handler
+
+    monkeypatch.setattr(aio_mod.signal, "getsignal", fake_getsignal)
+    monkeypatch.setattr(aio_mod.signal, "signal", fake_signal)
+
+    provider._register_signal_handlers()
+
+    with caplog.at_level("ERROR"):
+        installed[aio_mod.signal.SIGTERM](aio_mod.signal.SIGTERM, None)
+
+    provider.shutdown.assert_called_once_with()
+    forwarded.assert_called_once_with(aio_mod.signal.SIGTERM, None)
+    assert "Sandbox shutdown failed while handling signal" in caplog.text
 
 
 def test_cleanup_idle_sandboxes_keeps_active_cleanup_and_delegates_warm_expiry(tmp_path):
@@ -1333,7 +2301,7 @@ def test_create_sandbox_evicts_oldest_warm_replica_via_shared_lifecycle(tmp_path
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     provider = _make_provider(tmp_path)
     provider._lock = aio_mod.threading.Lock()
-    provider._config = {"replicas": 2}
+    provider._config = {"command_timeout": 600.0, "replicas": 2}
     provider._sandboxes = {}
     provider._sandbox_infos = {}
     provider._thread_sandboxes = {}
@@ -1374,7 +2342,7 @@ def _make_tenant_isolation_provider(tmp_path, monkeypatch):
     provider._active_sandbox_identity = {}
     provider._warm_pool_identity = {}
     provider._shutdown_called = False
-    provider._config = {"replicas": 3, "idle_timeout": 0}
+    provider._config = {"command_timeout": 600.0, "replicas": 3, "idle_timeout": 0}
 
     create_calls = []
 
@@ -1471,7 +2439,7 @@ def _make_unready_destroy_provider(tmp_path, *, sandbox_id, base_url, monkeypatc
     """
     provider = _make_provider(tmp_path)
     provider._lock = aio_mod.threading.Lock()
-    provider._config = {"replicas": 3}
+    provider._config = {"command_timeout": 600.0, "replicas": 3}
     provider._warm_pool = {}
     provider._sandbox_infos = {}
     provider._thread_sandboxes = {}

@@ -1,8 +1,9 @@
 import asyncio
 import re
+import threading
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
 import pytest
@@ -16,6 +17,7 @@ from langgraph.store.memory import InMemoryStore
 from langgraph.types import Overwrite
 
 from app.gateway import services as gateway_services
+from app.gateway.auth.models import User
 from app.gateway.routers import thread_runs, threads
 from deerflow.config.paths import Paths
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
@@ -31,7 +33,10 @@ from deerflow.persistence.thread_meta import (
 from deerflow.persistence.thread_meta.memory import THREADS_NS, MemoryThreadMetaStore
 from deerflow.runtime import ConflictError, ThreadOperationKind
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
+from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY
 from deerflow.runtime.user_context import reset_current_user, set_current_user
+from deerflow.uploads.companions import companion_names, register_companion, resolve_companion
+from deerflow.utils.file_outline import extract_outline_for_file
 
 _ISO_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
 
@@ -179,6 +184,30 @@ def test_update_state_rejects_run_owned_by_another_worker(monkeypatch) -> None:
     accessor.aupdate.assert_not_awaited()
 
 
+def test_update_state_rejects_external_system_without_writing(monkeypatch) -> None:
+    app, _store, checkpointer = _build_thread_app()
+    accessor = SimpleNamespace(graph=None, aupdate=AsyncMock(), aget=AsyncMock())
+    monkeypatch.setattr(threads, "build_thread_checkpoint_state_mutation_accessor", AsyncMock(return_value=(accessor, {"configurable": {"thread_id": "system-role-test"}})))
+
+    with TestClient(app) as client:
+        assert client.post("/api/threads", json={"thread_id": "system-role-test"}).status_code == 200
+        before = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": "system-role-test"}}))
+        response = client.post(
+            "/api/threads/system-role-test/state",
+            json={
+                "values": {
+                    "messages": [{"role": "system", "content": "synthetic marker"}],
+                    "title": "must not be written",
+                }
+            },
+        )
+
+    assert response.status_code == 400
+    assert "synthetic marker" not in response.text
+    accessor.aupdate.assert_not_awaited()
+    assert asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": "system-role-test"}})) == before
+
+
 class _RawStateAccessor:
     def __init__(self, checkpointer: InMemorySaver):
         self.checkpointer = checkpointer
@@ -210,6 +239,10 @@ class _RawStateAccessor:
     async def aget(self, config):
         checkpoint_tuple = await self.checkpointer.aget_tuple(config)
         return self._snapshot(checkpoint_tuple, config)
+
+    async def aget_metadata(self, config):
+        checkpoint_tuple = await self.checkpointer.aget_tuple(config)
+        return dict(getattr(checkpoint_tuple, "metadata", {}) or {})
 
     async def ahistory(self, config, *, limit=None):
         snapshots = []
@@ -384,15 +417,14 @@ def test_delete_thread_data_rejects_invalid_thread_id(tmp_path):
 
 
 def test_delete_thread_route_cleans_thread_directory(tmp_path):
-    from deerflow.runtime.user_context import get_effective_user_id
-
     paths = Paths(tmp_path)
-    user_id = get_effective_user_id()
+    owner = User(email="thread-owner@example.com", password_hash="x")
+    user_id = str(owner.id)
     thread_dir = paths.thread_dir("thread-route", user_id=user_id)
     paths.sandbox_work_dir("thread-route", user_id=user_id).mkdir(parents=True, exist_ok=True)
     (paths.sandbox_work_dir("thread-route", user_id=user_id) / "notes.txt").write_text("hello", encoding="utf-8")
 
-    app = make_authed_test_app()
+    app = make_authed_test_app(user_factory=lambda: owner, bind_current_user=True)
     app.state.run_manager = _ThreadTestRunManager()
     app.include_router(threads.router)
 
@@ -427,6 +459,184 @@ def test_delete_thread_route_closes_browser_session(tmp_path):
 
     assert response.status_code == 200
     manager.close_session.assert_awaited_once_with("thread-browser")
+
+
+def test_delete_thread_route_closes_mcp_sessions(tmp_path):
+    """Deleting a thread tears down its persistent MCP sessions so a later
+    caller who reuses the id gets fresh MCP server state instead of a retained
+    session (and its leaked owner task plus subprocess) — the same invariant the
+    browser-session cleanup above guards (#5188)."""
+    paths = Paths(tmp_path)
+    owner = User(email="mcp-owner@example.com", password_hash="x")
+
+    app = make_authed_test_app(user_factory=lambda: owner, bind_current_user=True)
+    app.state.run_manager = _ThreadTestRunManager()
+    app.include_router(threads.router)
+
+    pool = SimpleNamespace(close_thread_scope=AsyncMock(return_value=None))
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=paths),
+        patch("deerflow.mcp.session_pool.get_session_pool", return_value=pool),
+    ):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-mcp")
+
+    assert response.status_code == 200
+    pool.close_thread_scope.assert_awaited_once_with(
+        user_id=str(owner.id),
+        thread_id="thread-mcp",
+    )
+
+
+def test_delete_thread_route_isolates_failing_mcp_cleanup(tmp_path):
+    """A failing MCP teardown must stay best-effort like every other cleanup step.
+
+    The delete has already removed the thread's filesystem data, checkpoints and
+    metadata by the time MCP sessions are closed, so an exception here must not
+    turn a successful deletion into a 500.
+    """
+    paths = Paths(tmp_path)
+
+    app = make_authed_test_app()
+    app.state.run_manager = _ThreadTestRunManager()
+    app.include_router(threads.router)
+
+    pool = SimpleNamespace(close_thread_scope=AsyncMock(side_effect=RuntimeError("simulated MCP teardown failure")))
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=paths),
+        patch("deerflow.mcp.session_pool.get_session_pool", return_value=pool),
+    ):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-mcp-fail")
+
+    assert response.status_code == 200
+    assert response.json() == {"success": True, "message": "Deleted local thread data for thread-mcp-fail"}
+    pool.close_thread_scope.assert_awaited_once()
+
+
+def _persistence_cleanup_app(tmp_path, *, run_store, event_store, feedback_repo):
+    app = make_authed_test_app()
+    app.state.run_manager = _ThreadTestRunManager()
+    app.state.run_store = run_store
+    app.state.run_event_store = event_store
+    app.state.feedback_repo = feedback_repo
+    app.include_router(threads.router)
+    return app
+
+
+def test_delete_thread_route_cleans_persisted_records(tmp_path):
+    """run_events, historical runs and feedback are cleaned under the reservation."""
+    from deerflow.runtime.user_context import get_effective_user_id
+
+    paths = Paths(tmp_path)
+    user_id = get_effective_user_id()
+    run_store = MagicMock()
+    run_store.delete_by_thread = AsyncMock(return_value=2)
+    event_store = MagicMock()
+    event_store.delete_by_thread = AsyncMock(return_value=4)
+    feedback_repo = MagicMock()
+    feedback_repo.delete_by_thread = AsyncMock(return_value=1)
+
+    app = _persistence_cleanup_app(
+        tmp_path,
+        run_store=run_store,
+        event_store=event_store,
+        feedback_repo=feedback_repo,
+    )
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-cleanup")
+
+    assert response.status_code == 200
+    run_store.delete_by_thread.assert_awaited_once_with("thread-cleanup", user_id=user_id)
+    event_store.delete_by_thread.assert_awaited_once_with("thread-cleanup", user_id=user_id)
+    feedback_repo.delete_by_thread.assert_awaited_once_with("thread-cleanup", user_id=user_id)
+
+
+def test_delete_thread_route_isolates_failing_persistence_cleanup(tmp_path):
+    """One failing store must not stop the remaining cleanup attempts."""
+    paths = Paths(tmp_path)
+    run_store = MagicMock()
+    run_store.delete_by_thread = AsyncMock(side_effect=RuntimeError("simulated cleanup failure"))
+    event_store = MagicMock()
+    event_store.delete_by_thread = AsyncMock(return_value=4)
+    feedback_repo = MagicMock()
+    feedback_repo.delete_by_thread = AsyncMock(return_value=1)
+
+    app = _persistence_cleanup_app(
+        tmp_path,
+        run_store=run_store,
+        event_store=event_store,
+        feedback_repo=feedback_repo,
+    )
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-cleanup")
+
+    assert response.status_code == 200
+    event_store.delete_by_thread.assert_awaited_once()
+    feedback_repo.delete_by_thread.assert_awaited_once()
+
+
+def test_delete_thread_route_tolerates_store_without_bulk_cleanup(tmp_path):
+    """Third-party RunStore implementations without the capability stay usable."""
+    paths = Paths(tmp_path)
+    run_store = SimpleNamespace()  # no delete_by_thread attribute
+    event_store = MagicMock()
+    event_store.delete_by_thread = AsyncMock(return_value=0)
+    feedback_repo = MagicMock()
+    feedback_repo.delete_by_thread = AsyncMock(return_value=0)
+
+    app = _persistence_cleanup_app(
+        tmp_path,
+        run_store=run_store,
+        event_store=event_store,
+        feedback_repo=feedback_repo,
+    )
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-cleanup")
+
+    assert response.status_code == 200
+    event_store.delete_by_thread.assert_awaited_once()
+
+
+class _LegacyRunEventStore:
+    """Event store still on the pre-owner-scope delete contract.
+
+    ``RunEventStore`` is an ABC, but Python never validates override signatures,
+    so this store satisfies it while rejecting the new ``user_id`` keyword.
+    """
+
+    def __init__(self) -> None:
+        self.deleted_threads: list[str] = []
+
+    async def delete_by_thread(self, thread_id: str) -> int:
+        self.deleted_threads.append(thread_id)
+        return 1
+
+
+def test_delete_thread_route_supports_legacy_event_store_delete_signature(tmp_path):
+    """A legacy event store still deletes; the owner kwarg is only passed when accepted."""
+    paths = Paths(tmp_path)
+    event_store = _LegacyRunEventStore()
+
+    app = _persistence_cleanup_app(
+        tmp_path,
+        run_store=SimpleNamespace(),
+        event_store=event_store,
+        feedback_repo=None,
+    )
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-cleanup")
+
+    assert response.status_code == 200
+    assert event_store.deleted_threads == ["thread-cleanup"]
 
 
 def test_delete_thread_route_rejects_invalid_thread_id(tmp_path):
@@ -536,6 +746,55 @@ def test_delete_thread_route_rejects_active_thread_operation_without_deleting_me
 
     assert response.status_code == 409
     assert asyncio.run(store.aget(THREADS_NS, "thread-active-delete")) is not None
+
+
+def test_delete_thread_route_holds_reservation_until_cancelled_removal_finishes(tmp_path):
+    """A cancelled delete must not release its reservation mid-rmtree.
+
+    The removal runs on a file-IO worker. Cancelling the request abandons the
+    await, not the worker, so a bare await would let ``reserve_thread_operation``
+    exit -- and admit a new run on the thread -- while its files are still
+    being deleted. The stalled removal below makes that window observable.
+    """
+    events: list[str] = []
+    removal_started = threading.Event()
+    release_removal = threading.Event()
+
+    class RecordingRunManager(_ThreadTestRunManager):
+        @asynccontextmanager
+        async def reserve_thread_operation(self, _thread_id: str, **_kwargs):
+            try:
+                yield
+            finally:
+                events.append("reservation released")
+
+    def stalled_delete_thread_dir(_thread_id, *, user_id=None):
+        removal_started.set()
+        release_removal.wait(timeout=5)
+        events.append("removal finished")
+
+    paths = Paths(tmp_path)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(run_manager=RecordingRunManager(), checkpointer=None)))
+
+    async def scenario() -> None:
+        task = asyncio.create_task(threads.delete_thread_data.__wrapped__("thread-cancelled-delete", request))
+        assert await asyncio.to_thread(removal_started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        # Cancellation is deferred while the removal is still running.
+        assert not task.done()
+        assert events == []
+        release_removal.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=paths),
+        patch.object(paths, "delete_thread_dir", side_effect=stalled_delete_thread_dir),
+    ):
+        asyncio.run(scenario())
+
+    assert events == ["removal finished", "reservation released"]
 
 
 def test_branch_thread_route_rejects_concurrent_source_operation_without_creating_child():
@@ -792,7 +1051,14 @@ def test_insert_race_recovery_claims_unscoped_row_for_trusted_owner() -> None:
     thread_store = _RacingOwnerStore(store)
     request = SimpleNamespace(
         headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
-        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE), auth_source=AUTH_SOURCE_INTERNAL),
+        # Realistic internal-auth fields: the create_thread permission wrapper
+        # authenticates these direct calls, and get_current_user_from_request
+        # honors state.user only when auth_source marks a trusted origin.
+        cookies={},
+        state=SimpleNamespace(
+            user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE),
+            auth_source=AUTH_SOURCE_INTERNAL,
+        ),
         app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
     )
 
@@ -1050,7 +1316,14 @@ def test_internal_owner_header_assigns_thread_to_owner() -> None:
     thread_store = MemoryThreadMetaStore(store)
     request = SimpleNamespace(
         headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
-        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE), auth_source=AUTH_SOURCE_INTERNAL),
+        # Realistic internal-auth fields: the create_thread permission wrapper
+        # authenticates these direct calls, and get_current_user_from_request
+        # honors state.user only when auth_source marks a trusted origin.
+        cookies={},
+        state=SimpleNamespace(
+            user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE),
+            auth_source=AUTH_SOURCE_INTERNAL,
+        ),
         app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
     )
 
@@ -1082,7 +1355,14 @@ def test_goal_thread_creation_uses_internal_owner_header() -> None:
     thread_store = MemoryThreadMetaStore(store)
     request = SimpleNamespace(
         headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
-        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE), auth_source=AUTH_SOURCE_INTERNAL),
+        # Realistic internal-auth fields: the create_thread permission wrapper
+        # authenticates these direct calls, and get_current_user_from_request
+        # honors state.user only when auth_source marks a trusted origin.
+        cookies={},
+        state=SimpleNamespace(
+            user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE),
+            auth_source=AUTH_SOURCE_INTERNAL,
+        ),
         app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
     )
 
@@ -3076,20 +3356,23 @@ def _wire_extension_agent(monkeypatch, app, checkpointer, mode):
     return custom_factory
 
 
-async def _seed_extension_source(checkpointer, custom_factory, mode, source_thread_id):
+async def _seed_extension_source(checkpointer, custom_factory, mode, source_thread_id, *, agent_name=None):
     accessor = CheckpointStateAccessor.bind(custom_factory(), checkpointer, mode=mode)
+    config = {"configurable": {"thread_id": source_thread_id, "checkpoint_ns": ""}}
+    if agent_name is not None:
+        config["metadata"] = {CHECKPOINT_AGENT_NAME_METADATA_KEY: agent_name}
     await accessor.aupdate(
-        {"configurable": {"thread_id": source_thread_id, "checkpoint_ns": ""}},
+        config,
         {"messages": [HumanMessage(id="h1", content="question")], "ext_list": ["merged"]},
         as_node="model",
     )
     await accessor.aupdate(
-        {"configurable": {"thread_id": source_thread_id, "checkpoint_ns": ""}},
+        config,
         {"messages": [AIMessage(id="a1", content="answer")], "ext_list": ["payload"]},
         as_node="model",
     )
     await accessor.aupdate(
-        {"configurable": {"thread_id": source_thread_id, "checkpoint_ns": ""}},
+        config,
         {
             "messages": [
                 HumanMessage(
@@ -3102,7 +3385,7 @@ async def _seed_extension_source(checkpointer, custom_factory, mode, source_thre
         as_node="model",
     )
     await accessor.aupdate(
-        {"configurable": {"thread_id": source_thread_id, "checkpoint_ns": ""}},
+        config,
         {"messages": [AIMessage(id="a2", content="follow-up answer")]},
         as_node="model",
     )
@@ -3158,7 +3441,15 @@ def test_state_endpoints_preserve_extension_reducer_channels(monkeypatch, mode) 
         assert created.status_code == 200, created.text
 
         # Seed after creation: create_thread writes an empty head checkpoint.
-        asyncio.run(_seed_extension_source(checkpointer, custom_factory, mode, source_thread_id))
+        asyncio.run(
+            _seed_extension_source(
+                checkpointer,
+                custom_factory,
+                mode,
+                source_thread_id,
+                agent_name="stateless-worker",
+            )
+        )
 
         read_response = client.get(f"/api/threads/{source_thread_id}/state")
         assert read_response.status_code == 200, read_response.text
@@ -3192,18 +3483,19 @@ def test_state_endpoints_preserve_extension_reducer_channels(monkeypatch, mode) 
 
     async def materialize(thread_id):
         accessor = CheckpointStateAccessor.bind(custom_factory(), checkpointer, mode=mode)
-        snapshot = await accessor.aget({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
-        return snapshot.values
+        return await accessor.aget({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
 
-    branch_values = asyncio.run(materialize(branch_thread_id))
+    branch_snapshot = asyncio.run(materialize(branch_thread_id))
+    branch_values = branch_snapshot.values
     assert branch_values["ext_list"] == ["replaced"]
     assert [message.id for message in branch_values["messages"]] == ["h1", "a1", "h2", "a2"]
+    assert branch_snapshot.metadata[CHECKPOINT_AGENT_NAME_METADATA_KEY] == "stateless-worker"
 
     prepared = prepare_response.json()
     assert prepared["target_run_id"] == "source-run"
     assert prepared["input"]["messages"][0]["id"] == "h2"
     base_accessor = CheckpointStateAccessor.bind(custom_factory(), checkpointer, mode=mode)
-    base_values = asyncio.run(
+    base_snapshot = asyncio.run(
         base_accessor.aget(
             {
                 "configurable": {
@@ -3213,8 +3505,10 @@ def test_state_endpoints_preserve_extension_reducer_channels(monkeypatch, mode) 
                 }
             }
         )
-    ).values
+    )
+    base_values = base_snapshot.values
     assert [message.id for message in base_values["messages"]] == ["h1", "a1"]
+    assert base_snapshot.metadata[CHECKPOINT_AGENT_NAME_METADATA_KEY] == "stateless-worker"
 
 
 async def _seed_branch_history_source(checkpointer, custom_factory, mode, source_thread_id):
@@ -3445,6 +3739,86 @@ def test_update_thread_state_overwrite_into_never_written_channel(monkeypatch, m
         assert read_response.json()["values"]["goal"] == {"objective": "finish"}
 
 
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_update_thread_state_preserves_agent_binding_for_manual_compaction(monkeypatch, mode) -> None:
+    """A manual state rewrite must retain the state-producing agent policy."""
+    import deerflow.config.agents_config as agents_config
+    from deerflow.runtime import context_compaction
+
+    app, _store, checkpointer = _build_thread_app()
+    custom_factory = _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    thread_id = f"state-binding-{mode}"
+
+    async def seed_bound_state() -> None:
+        accessor = CheckpointStateAccessor.bind(custom_factory(), checkpointer, mode=mode)
+        await accessor.aupdate(
+            {
+                "configurable": {"thread_id": thread_id, "checkpoint_ns": ""},
+                "metadata": {CHECKPOINT_AGENT_NAME_METADATA_KEY: "stateless-worker"},
+            },
+            {
+                "messages": [
+                    HumanMessage(id="h1", content="old question"),
+                    AIMessage(id="a1", content="old answer"),
+                    HumanMessage(id="h2", content="latest question"),
+                ]
+            },
+            as_node="model",
+        )
+
+    config_reads: list[str] = []
+
+    def load_agent_config(name, **_kwargs):
+        config_reads.append(name)
+        if name != "stateless-worker":
+            raise AssertionError(f"untrusted agent name reached policy lookup: {name}")
+        return SimpleNamespace(model=None, memory_enabled=False)
+
+    monkeypatch.setattr(agents_config, "load_agent_config", load_agent_config)
+    monkeypatch.setattr(context_compaction, "get_app_config", lambda: SimpleNamespace(models=[]))
+    captured: dict[str, object] = {}
+
+    class CompactionMiddleware:
+        async def acompact_state(self, state, runtime, *, force=False, raise_on_failure=False):
+            del runtime, force, raise_on_failure
+            return SimpleNamespace(
+                summary_text="summary",
+                messages_to_summarize=tuple(state["messages"][:-1]),
+                preserved_messages=tuple(state["messages"][-1:]),
+                total_tokens=42,
+            )
+
+    def create_compaction_middleware(**kwargs):
+        captured.update(kwargs)
+        return CompactionMiddleware()
+
+    monkeypatch.setattr(context_compaction, "_create_compaction_middleware", create_compaction_middleware)
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/threads",
+            json={"thread_id": thread_id, "metadata": {}, "assistant_id": "extension-agent"},
+        )
+        assert created.status_code == 200, created.text
+        asyncio.run(seed_bound_state())
+
+        updated = client.post(
+            f"/api/threads/{thread_id}/state",
+            json={"values": {"title": "Renamed"}},
+        )
+        assert updated.status_code == 200, updated.text
+
+        compacted = client.post(
+            f"/api/threads/{thread_id}/compact",
+            json={"force": True, "agent_name": "memory-enabled-impostor"},
+        )
+
+    assert compacted.status_code == 200, compacted.text
+    assert compacted.json()["compacted"] is True
+    assert captured["skip_memory_flush"] is True
+    assert config_reads == ["stateless-worker"]
+
+
 def test_update_thread_state_rejects_unknown_state_fields(monkeypatch) -> None:
     """Unknown fields fail 422 instead of a false-success 200."""
     app, _store, checkpointer = _build_thread_app()
@@ -3574,6 +3948,13 @@ def test_branch_thread_best_effort_copies_current_workspace(tmp_path) -> None:
     source_uploads.mkdir(parents=True, exist_ok=True)
     (source_outputs / "result.txt").write_text("answer", encoding="utf-8")
     (source_uploads / ".upload-stale.part").write_text("partial", encoding="utf-8")
+    original = source_uploads / "report.pdf"
+    markdown = source_uploads / "report.md"
+    original.write_bytes(b"%PDF")
+    markdown.write_text("# Converted report\n", encoding="utf-8")
+    register_companion(original, markdown)
+    (source_uploads / "unrelated.pdf").write_bytes(b"%PDF")
+    (source_uploads / "unrelated.md").write_text("# User notes\n", encoding="utf-8")
 
     human = HumanMessage(id="human-file", content="Make a file")
     ai = AIMessage(id="ai-file", content="Done")
@@ -3606,6 +3987,11 @@ def test_branch_thread_best_effort_copies_current_workspace(tmp_path) -> None:
     assert target_user_data.exists()
     assert (target_user_data / "outputs" / "result.txt").read_text(encoding="utf-8") == "answer"
     assert not (target_user_data / "uploads" / ".upload-stale.part").exists()
+    branch_original = target_user_data / "uploads" / "report.pdf"
+    assert resolve_companion(branch_original) == target_user_data / "uploads" / "report.md"
+    assert extract_outline_for_file(branch_original)[0] == [{"title": "Converted report", "line": 1}]
+    assert companion_names(target_user_data / "uploads") == {"report.md"}
+    assert resolve_companion(target_user_data / "uploads" / "unrelated.pdf") is None
     assert source_user_data.exists()
 
 
@@ -3763,6 +4149,9 @@ def test_update_thread_state_overwrites_reducer_fields_and_writes_last_values_di
 
     accessor = SimpleNamespace(
         aupdate=aupdate,
+        aget_metadata=AsyncMock(
+            return_value={CHECKPOINT_AGENT_NAME_METADATA_KEY: "stateless-worker"},
+        ),
         aget=AsyncMock(return_value=snapshot),
     )
 
@@ -3799,12 +4188,16 @@ def test_update_thread_state_overwrites_reducer_fields_and_writes_last_values_di
     assert len(update_calls) == 1
     read_config, updates, as_node = update_calls[0]
     assert read_config["configurable"]["thread_id"] == "state-overwrite"
+    assert read_config["metadata"] == {CHECKPOINT_AGENT_NAME_METADATA_KEY: "stateless-worker"}
     assert isinstance(updates["messages"], Overwrite)
-    assert updates["messages"].value[0]["id"] == "h1"
+    assert updates["messages"].value[0].id == "h1"
     assert isinstance(updates["artifacts"], Overwrite)
     assert updates["artifacts"].value == ["artifact-1"]
     assert updates["title"] == "Renamed"
     assert as_node == "manual_state_update"
+    accessor.aget_metadata.assert_awaited_once_with(
+        {"configurable": {"thread_id": "state-overwrite", "checkpoint_ns": ""}},
+    )
     accessor.aget.assert_awaited_once_with(updated_config)
     assert response.json()["checkpoint_id"] == "ckpt-updated"
 
@@ -4437,3 +4830,152 @@ def test_task_notes_state_write_normalizes_and_replaces(monkeypatch, mode, fallb
         read = client.get("/api/threads/note-replacement/state")
         assert read.status_code == 200, read.text
         assert read.json()["values"]["task_notes"] == {"new": {"content": "keep backups", "source_ids": [], "authority": "model_report"}}
+
+
+# ---------------------------------------------------------------------------
+# Server-owned origin marker and per-user unread state (deerflow_origin)
+# ---------------------------------------------------------------------------
+
+
+def test_strip_reserved_metadata_drops_client_origin():
+    from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY
+
+    assert DEERFLOW_ORIGIN_KEY in threads._SERVER_RESERVED_METADATA_KEYS
+    assert threads._strip_reserved_metadata({DEERFLOW_ORIGIN_KEY: {"kind": "schedule"}, "keep": 1}) == {"keep": 1}
+
+
+def test_create_and_patch_strip_a_client_supplied_origin() -> None:
+    from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY
+
+    app, _store, checkpointer = _build_thread_app()
+    forged = {DEERFLOW_ORIGIN_KEY: {"kind": "schedule"}, "title": "mine"}
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": "origin-forge", "metadata": forged})
+        assert created.status_code == 200, created.text
+        assert created.json()["metadata"] == {"title": "mine"}
+        patched = client.patch("/api/threads/origin-forge", json={"metadata": {DEERFLOW_ORIGIN_KEY: {"kind": "im_channel"}}})
+        assert patched.status_code == 200, patched.text
+        assert DEERFLOW_ORIGIN_KEY not in patched.json()["metadata"]
+        fetched = client.post("/api/threads/search", json={"limit": 10})
+        assert all(DEERFLOW_ORIGIN_KEY not in item["metadata"] for item in fetched.json())
+
+    checkpoint = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": "origin-forge", "checkpoint_ns": ""}}))
+    assert DEERFLOW_ORIGIN_KEY not in checkpoint.metadata
+
+
+def test_create_thread_marks_a_host_origin_from_request_state() -> None:
+    """Only server code can set request.state.run_origin (an extension handle)."""
+    from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY
+
+    app, _store, _checkpointer = _build_thread_app()
+
+    @app.middleware("http")
+    async def host_origin(request, call_next):
+        request.state.run_origin = {"kind": "extension", "namespace": "community.teams"}
+        return await call_next(request)
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads", json={"thread_id": "ext-thread", "metadata": {"title": "t"}})
+    assert response.status_code == 200, response.text
+    assert response.json()["metadata"] == {"title": "t", DEERFLOW_ORIGIN_KEY: {"kind": "extension", "namespace": "community.teams"}}
+
+
+def _unread_app(tmp_path, *, owner_check_passes: bool = True):
+    from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from deerflow.persistence.base import Base
+    from deerflow.persistence.run import RunRepository
+    from deerflow.persistence.run.model import RunChangeClockRow, RunRow
+    from deerflow.persistence.thread_reads import ThreadReadMarkerRow, ThreadReadRepository, ThreadReadVersionRow
+
+    user = User(id=UUID("31f5a8c2-1d4e-4b6f-8a9c-0d1e2f3a4b5c"), email="unread@example.com", password_hash="x", system_role="user")
+    app = make_authed_test_app(user_factory=lambda: user, owner_check_passes=owner_check_passes, bind_current_user=True)
+    store = InMemoryStore()
+    app.state.store = store
+    app.state.checkpointer = InMemorySaver()
+    app.state.run_manager = _ThreadTestRunManager()
+    app.state.thread_store = _PermissiveThreadMetaStore(store)
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'unread.db'}")
+
+    async def _init():
+        async with engine.begin() as conn:
+            await conn.run_sync(lambda sync: Base.metadata.create_all(sync, tables=[m.__table__ for m in (RunRow, RunChangeClockRow, ThreadReadMarkerRow, ThreadReadVersionRow)]))
+
+    asyncio.run(_init())
+    sf = async_sessionmaker(engine, expire_on_commit=False)
+    app.state.thread_read_repo = ThreadReadRepository(sf)
+    app.include_router(threads.router)
+    return app, store, RunRepository(sf), str(user.id), engine
+
+
+def test_search_items_carry_unread_until_the_thread_is_read(tmp_path) -> None:
+    from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY
+
+    app, store, runs, user_id, engine = _unread_app(tmp_path)
+
+    async def _seed():
+        for thread_id, metadata in (("sched-thread", {DEERFLOW_ORIGIN_KEY: {"kind": "schedule"}}), ("chat-thread", {})):
+            await store.aput(THREADS_NS, thread_id, {"thread_id": thread_id, "status": "idle", "created_at": "2026-10-06T00:00:00+00:00", "updated_at": "2026-10-06T00:00:00+00:00", "metadata": metadata})
+        await runs.put("run-sched", thread_id="sched-thread", user_id=user_id, status="success", metadata={DEERFLOW_ORIGIN_KEY: {"kind": "schedule"}})
+        await runs.put("run-chat", thread_id="chat-thread", user_id=user_id, status="success", metadata={})
+
+    asyncio.run(_seed())
+    try:
+        with TestClient(app) as client:
+            items = {item["thread_id"]: item for item in client.post("/api/threads/search", json={"limit": 10}).json()}
+            assert items["sched-thread"]["unread"] is True
+            assert items["chat-thread"]["unread"] is False
+
+            read = client.post("/api/threads/sched-thread/read")
+            assert read.status_code == 200, read.text
+            assert read.json() == {"unread": False, "read_version": 1}
+            items = {item["thread_id"]: item for item in client.post("/api/threads/search", json={"limit": 10}).json()}
+            assert items["sched-thread"]["unread"] is False
+    finally:
+        asyncio.run(engine.dispose())
+
+
+def test_search_unread_is_null_without_sql_read_state() -> None:
+    app, store, _checkpointer = _build_thread_app()
+    asyncio.run(store.aput(THREADS_NS, "t", {"thread_id": "t", "status": "idle", "created_at": "2026-10-06T00:00:00+00:00", "updated_at": "2026-10-06T00:00:00+00:00", "metadata": {}}))
+    with TestClient(app) as client:
+        assert [item["unread"] for item in client.post("/api/threads/search", json={"limit": 10}).json()] == [None]
+
+
+def test_mark_read_on_another_users_thread_is_404(tmp_path) -> None:
+    app, _store, _runs, user_id, engine = _unread_app(tmp_path, owner_check_passes=False)
+    try:
+        with TestClient(app) as client:
+            response = client.post("/api/threads/someone-elses/read")
+        assert response.status_code == 404
+        assert asyncio.run(app.state.thread_read_repo.read_version(user_id=user_id)) == 0
+    finally:
+        asyncio.run(engine.dispose())
+
+
+def test_delete_thread_route_removes_read_markers(tmp_path) -> None:
+    app, store, runs, user_id, engine = _unread_app(tmp_path)
+
+    async def _seed():
+        await store.aput(THREADS_NS, "gone", {"thread_id": "gone", "status": "idle", "created_at": "2026-10-06T00:00:00+00:00", "updated_at": "2026-10-06T00:00:00+00:00", "metadata": {}})
+        await runs.put("run-gone", thread_id="gone", user_id=user_id, status="success", metadata={"deerflow_origin": {"kind": "schedule"}})
+        await app.state.thread_read_repo.mark_read(user_id=user_id, thread_id="gone")
+
+    asyncio.run(_seed())
+    app.state.run_event_store = MagicMock(delete_by_thread=AsyncMock())
+    app.state.run_store = runs
+    try:
+        with patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)), TestClient(app) as client:
+            assert client.delete("/api/threads/gone").status_code == 200
+        from deerflow.persistence.thread_reads import ThreadReadMarkerRow
+
+        async def _count():
+            async with app.state.thread_read_repo._sf() as session:
+                return await session.get(ThreadReadMarkerRow, (user_id, "gone"))
+
+        assert asyncio.run(_count()) is None
+    finally:
+        asyncio.run(engine.dispose())

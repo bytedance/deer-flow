@@ -62,6 +62,8 @@ for (const agent of [false, true]) {
         mode: "pro",
         reasoning_effort: "medium",
         notification_enabled: true,
+        // The account already has the UI language, so only the edits below are sent.
+        locale: "en-US",
       };
       await page.route("**/api/v1/auth/preferences", async (route) => {
         if (route.request().method() === "PATCH") {
@@ -195,6 +197,7 @@ test("custom agent automatic default does not become an account preference", asy
           mode: null,
           reasoning_effort: null,
           notification_enabled: true,
+          locale: "en-US",
         },
       });
     }
@@ -220,7 +223,9 @@ test("custom agent automatic default does not become an account preference", asy
   expect(patches).toEqual([]);
   // Explicit model selections on this same page must still be synchronized.
   await page.getByRole("button", { name: "Agent Model", exact: true }).click();
-  await page.getByRole("option").filter({ hasText: "First Model" }).click();
+  await page
+    .getByRole("button", { name: "First Model (first-model)", exact: true })
+    .click();
   await expect.poll(() => patches).toEqual([{ model_name: "first-model" }]);
 });
 
@@ -268,6 +273,7 @@ test("automatic model fallback cannot overwrite a slowly loaded account preferen
         mode: "pro",
         reasoning_effort: "high",
         notification_enabled: true,
+        locale: "en-US",
       },
     });
   });

@@ -108,7 +108,7 @@ def test_user_store_agents_join_runtime_catalog_with_user_scoping(monkeypatch):
     }
     assert resolved is not None
     assert resolved.description == "User writer"
-    assert resolved.system_prompt == "You are the writer."
+    assert resolved.user_soul == "You are the writer."
     assert resolved.tools == ["web_search"]
     assert resolved.skills == ["style-guide"]
     assert resolved.model == "inherit"
@@ -156,10 +156,10 @@ def test_file_store_bridge_keeps_user_agents_isolated(monkeypatch, tmp_path):
     assert registry.get_subagent_config("alice-only", app_config=app_config, user_id="bob") is None
     assert alice_writer is not None
     assert alice_writer.description == "Alice writer"
-    assert alice_writer.system_prompt == "You are Alice's writer."
+    assert alice_writer.user_soul == "You are Alice's writer."
     assert bob_writer is not None
     assert bob_writer.description == "Bob writer"
-    assert bob_writer.system_prompt == "You are Bob's writer."
+    assert bob_writer.user_soul == "You are Bob's writer."
 
 
 def test_file_store_bridge_rejects_path_traversal(monkeypatch, tmp_path):
@@ -246,7 +246,7 @@ def test_user_store_agents_do_not_shadow_operator_definitions(monkeypatch):
     assert names == ["general-purpose", "bash", "reviewer", "planner", "writer"]
     assert registry.get_subagent_config("reviewer", app_config=config, user_id="user-1").system_prompt == "Config wins."
     assert registry.get_subagent_config("planner", app_config=config, user_id="user-1").system_prompt == "You are planner."
-    assert registry.get_subagent_config("writer", app_config=config, user_id="user-1").system_prompt == "User soul"
+    assert registry.get_subagent_config("writer", app_config=config, user_id="user-1").user_soul == "User soul"
 
 
 def test_user_store_config_failure_degrades_without_crashing(monkeypatch, caplog):

@@ -29,10 +29,12 @@ from langgraph.types import Checkpointer
 
 from deerflow.community.browser_automation.session import browser_multi_worker_error
 from deerflow.config.app_config import AppConfig, get_app_config
+from deerflow.config.deployment_config import multi_instance_declaration
 from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, STARTUP_ORPHAN_RECOVERY_ERROR, RunContext, RunManager, StreamBridge
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.runs.store.base import RunStore
+from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 
@@ -55,9 +57,85 @@ def _browser_tools_enabled_in_config(config: AppConfig) -> bool:
     return any(getattr(tool, "name", None) == "browser_navigate" for tool in (getattr(config, "tools", None) or []))
 
 
+# ``GATEWAY_WORKERS`` is the knob this project documents and the one
+# ``docker/docker-compose.yaml`` forwards as ``--workers``. ``backend/Dockerfile``
+# and ``scripts/serve.sh`` launch uvicorn with no worker count at all, and uvicorn
+# then takes the count from ``WEB_CONCURRENCY``. Both must be read, otherwise a
+# multi-process deployment starts with the safety gates inert.
+# A blank value means "unset", as the compose command's ``${GATEWAY_WORKERS:-1}`` treats it.
+_WORKER_COUNT_ENV_VARS = ("GATEWAY_WORKERS", "WEB_CONCURRENCY")
+
+
+def _gateway_worker_count() -> tuple[int, str]:
+    """Return the Gateway worker-process count and the environment variable that set it.
+
+    The name belongs in the refusal text: an operator who only ever set
+    ``WEB_CONCURRENCY`` cannot act on a message about ``GATEWAY_WORKERS``.
+    """
+    for name in _WORKER_COUNT_ENV_VARS:
+        raw = os.environ.get(name)
+        if not raw or not raw.strip():
+            continue
+        try:
+            return int(raw), name
+        except (TypeError, ValueError):
+            # Uvicorn rejects a non-numeric count itself, so this is not the place
+            # to fail the launch -- but an unparsable documented knob must not hide
+            # the count uvicorn takes from ``WEB_CONCURRENCY`` on the launches that
+            # pass no ``--workers``. Keep looking; report 1 only after the loop.
+            continue
+    return 1, _WORKER_COUNT_ENV_VARS[0]
+
+
+def _multi_process_signal(config: AppConfig) -> tuple[str, str] | None:
+    """Return ``(reason, rollback)`` when this process must assume peer Gateway processes.
+
+    ``reason`` names the knob that established the topology (``GATEWAY_WORKERS=2``,
+    ``DEER_FLOW_MULTI_INSTANCE=1`` or ``deployment.multi_instance=true``) and
+    ``rollback`` is the single-instance remediation a refusal message offers.
+    When the worker count and a declaration are both active, ``rollback``
+    withdraws both: resetting only the worker count would bounce the operator
+    through a second refusal on the declaration at the next start.
+
+    The worker-count variables only see one process tree, so a Kubernetes
+    Deployment with ``replicas > 1`` and one worker per Pod is invisible to
+    them; the explicit declaration exists for exactly that topology.
+    """
+    workers, worker_env = _gateway_worker_count()
+    declaration = multi_instance_declaration(config)
+    if workers > 1:
+        rollback = f"Set {worker_env}=1"
+        if declaration is not None:
+            rollback = f"{rollback} and {declaration.rollback}"
+        return f"{worker_env}={workers}", rollback
+    if declaration is None:
+        return None
+    step = declaration.rollback
+    return declaration.knob, f"{step[0].upper()}{step[1:]} and run a single Gateway instance"
+
+
+def _stream_bridge_is_cross_process(config: AppConfig) -> bool:
+    """Return whether live run events can reach SSE clients on every instance.
+
+    Mirrors ``runtime/stream_bridge/async_provider.py::_resolve_config``: the
+    config.yaml section wins, and an omitted section falls back to the
+    ``DEER_FLOW_STREAM_BRIDGE_REDIS_URL`` variable the Docker and Helm
+    deployments inject.
+    """
+    bridge = getattr(config, "stream_bridge", None)
+    if bridge is not None:
+        return getattr(bridge, "type", None) == "redis"
+    return bool((os.environ.get("DEER_FLOW_STREAM_BRIDGE_REDIS_URL") or "").strip())
+
+
 def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
     """Refuse unsafe multi-process configurations before persistence starts.
 
+    A deployment counts as multi-process when ``GATEWAY_WORKERS`` /
+    ``WEB_CONCURRENCY`` is above 1, or when the operator declares peers with
+    ``deployment.multi_instance: true`` / ``DEER_FLOW_MULTI_INSTANCE=1`` (the
+    worker count cannot see other Pods, and a Pod that starts next to a peer
+    without these prerequisites writes the peer's live runs off as orphans).
     Multi-instance scheduler recovery also needs the durable run ownership
     contract even when each Pod runs a single Gateway worker.
 
@@ -74,16 +152,16 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
        every run has a NULL lease, so reconciliation treats all inflight
        runs as orphans and Worker B would kill Worker A's live runs on
        every rolling update or scale-up.
+    6. The stream bridge must be Redis. The memory bridge is process-local,
+       so SSE streams, reconnects and ``/wait`` only work on the owner.
+    7. ``sandbox.ownership.type`` must not be an explicit ``memory``: an
+       in-process ownership store cannot see peers, so reconciliation would
+       adopt and idle-destroy another instance's live containers (#4206).
 
     This gate runs once at startup before any persistence engine is
     initialised so the error message is clear and the process exits
     immediately.
     """
-    try:
-        workers = int(os.environ.get("GATEWAY_WORKERS", "1"))
-    except (TypeError, ValueError):
-        workers = 1
-
     scheduler = getattr(config, "scheduler", None)
     multi_instance_requested = bool(getattr(scheduler, "multi_instance", False))
     multi_instance_scheduler = bool(getattr(scheduler, "enabled", False) and multi_instance_requested)
@@ -99,32 +177,52 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
     if multi_instance_requested and (run_ownership is None or not run_ownership.heartbeat_enabled):
         raise SystemExit("scheduler.multi_instance=true requires run_ownership.heartbeat_enabled=true so peer runs retain a valid lease. Set scheduler.multi_instance=false or enable run ownership heartbeats.")
 
-    if workers <= 1:
+    signal = _multi_process_signal(config)
+    if signal is None:
         return
+    reason, rollback = signal
 
     if config.scheduler.enabled and not multi_instance_scheduler:
-        raise SystemExit(f"GATEWAY_WORKERS={workers} cannot run with scheduler.enabled=true because each worker starts its own scheduler. Set GATEWAY_WORKERS=1, scheduler.multi_instance=true, or scheduler.enabled=false.")
+        raise SystemExit(f"{reason} cannot run with scheduler.enabled=true because each worker starts its own scheduler. {rollback}, scheduler.multi_instance=true, or scheduler.enabled=false.")
 
     if _browser_tools_enabled_in_config(config):
-        raise SystemExit(browser_multi_worker_error(workers))
+        workers, _worker_env = _gateway_worker_count()
+        if workers > 1 and multi_instance_declaration(config) is None:
+            raise SystemExit(browser_multi_worker_error(workers))
+        raise SystemExit(f"{reason} cannot enable agentic browser tools: browser sessions are process-local and a request can land on any instance. {rollback} or disable the browser_navigate tool.")
 
     if backend != "postgres":
-        raise SystemExit(f"GATEWAY_WORKERS={workers} requires database.backend='postgres', but database.backend is '{backend}'. SQLite cannot support concurrent multi-process access. Set GATEWAY_WORKERS=1 or switch to Postgres.")
+        raise SystemExit(f"{reason} requires database.backend='postgres', but database.backend is '{backend}'. SQLite cannot support concurrent multi-process access. {rollback} or switch to Postgres.")
 
     if run_events_backend != "db":
         raise SystemExit(
-            f"GATEWAY_WORKERS={workers} requires run_events.backend='db', but run_events.backend is '{run_events_backend}'. "
+            f"{reason} requires run_events.backend='db', but run_events.backend is '{run_events_backend}'. "
             "Memory and JSONL event stores are process-local, so delivery receipt singleton guarantees cannot hold across workers. "
-            "Set GATEWAY_WORKERS=1 or configure run_events.backend: db."
+            f"{rollback} or configure run_events.backend: db."
         )
 
     if run_ownership is None or not run_ownership.heartbeat_enabled:
         raise SystemExit(
-            f"GATEWAY_WORKERS={workers} requires run_ownership.heartbeat_enabled=true. "
+            f"{reason} requires run_ownership.heartbeat_enabled=true. "
             "Without heartbeat, every run has a NULL lease, so reconciliation "
-            "treats all inflight runs as orphans — Worker B would kill Worker A's "
-            "live runs on every rolling update or scale-up. "
+            "treats all inflight runs as orphans — a starting instance would kill its "
+            "peers' live runs on every rolling update or scale-up. "
             "Set run_ownership.heartbeat_enabled=true in config.yaml."
+        )
+
+    if not _stream_bridge_is_cross_process(config):
+        raise SystemExit(
+            f"{reason} requires stream_bridge.type='redis' (or DEER_FLOW_STREAM_BRIDGE_REDIS_URL), "
+            "but the stream bridge is the process-local memory bridge: SSE streams, reconnects and /wait "
+            f"only work on the instance that owns the run. {rollback} or configure the redis stream bridge."
+        )
+
+    ownership = getattr(getattr(config, "sandbox", None), "ownership", None)
+    if ownership is not None and getattr(ownership, "type", None) == "memory":
+        raise SystemExit(
+            f"{reason} cannot run with sandbox.ownership.type='memory': an in-process ownership store cannot see "
+            "peer instances, so startup reconciliation would adopt and idle-destroy containers another instance is "
+            "using (#4206). Set sandbox.ownership.type='redis', or omit the section so it is inferred from the redis stream bridge."
         )
 
 
@@ -150,16 +248,13 @@ def _validate_agent_storage(config: AppConfig) -> None:
             f"but database.backend is '{db_backend}'. A 'memory' database is per-process and cannot "
             "share agent definitions across nodes. Set database.backend, or use agent_storage.backend='file'."
         )
-    try:
-        workers = int(os.environ.get("GATEWAY_WORKERS", "1"))
-    except (TypeError, ValueError):
-        workers = 1
-    if workers > 1 and db_backend == "postgres" and backend == "file":
+    signal = _multi_process_signal(config)
+    if signal is not None and db_backend == "postgres" and backend == "file":
         logger.warning(
-            "GATEWAY_WORKERS=%s with database.backend='postgres' but agent_storage.backend='file': "
+            "%s with database.backend='postgres' but agent_storage.backend='file': "
             "custom agents and managed subagents are stored per-node on local disk and are not visible "
             "across workers/nodes. Set agent_storage.backend='db' to share them.",
-            workers,
+            signal[0],
         )
 
 
@@ -167,24 +262,37 @@ async def _drain_inflight_runs(run_manager: RunManager) -> None:
     """Drain in-flight runs before the checkpointer is torn down (issue #3373).
 
     Shields the (internally-bounded) drain so that even if the lifespan
-    coroutine is itself cancelled mid-shutdown — a second SIGINT or the server's
-    graceful-shutdown timeout, i.e. the same signal storm behind #3373 — the
-    checkpointer pool is not closed while run tasks are still writing
-    checkpoints. On such a cancellation we let the already-running drain finish
-    (it is bounded by ``RunManager.shutdown``'s own timeout) and then propagate
-    the cancellation.
+    coroutine is repeatedly cancelled mid-shutdown — e.g. signal escalation or
+    the server's graceful-shutdown timeout — the checkpointer pool is not closed
+    while run tasks are still writing checkpoints. Cancellation is remembered
+    and propagated only after the already-running drain reaches a safe terminal
+    point.
     """
     drain = asyncio.create_task(run_manager.shutdown(timeout=_RUN_DRAIN_TIMEOUT_SECONDS))
-    try:
-        await asyncio.shield(drain)
-    except asyncio.CancelledError:
-        # Re-shield so this second wait does not abandon the in-flight drain;
-        # it is bounded, so this cannot hang. Then re-raise to honour shutdown.
+    cancellation: asyncio.CancelledError | None = None
+
+    while not drain.done():
         try:
             await asyncio.shield(drain)
+        except asyncio.CancelledError as exc:
+            if cancellation is None:
+                cancellation = exc
+        except Exception:
+            if cancellation is not None:
+                logger.exception("In-flight run drain failed after shutdown cancellation")
+                raise cancellation
+            logger.exception("Failed to drain in-flight runs during shutdown")
+            return
+
+    if cancellation is not None:
+        try:
+            drain.result()
         except Exception:
             logger.exception("In-flight run drain failed after shutdown cancellation")
-        raise
+        raise cancellation
+
+    try:
+        drain.result()
     except Exception:
         logger.exception("Failed to drain in-flight runs during shutdown")
 
@@ -231,6 +339,20 @@ def _log_recovered_stream_cleanup_result(task: asyncio.Task[None], run_id: str) 
         task.result()
     except Exception:
         logger.warning("Failed to clean up recovered run stream for %s", run_id, exc_info=True)
+
+
+async def _cleanup_recovered_scheduled_goals(recovered_runs: list[RunRecord], *, run_manager: RunManager, checkpointer: Checkpointer) -> None:
+    """Clear only confirmed occurrence-owned goals after durable orphan recovery."""
+    from deerflow.runtime.runs.worker import clear_recovered_scheduled_goal
+
+    for record in recovered_runs:
+        metadata = getattr(record, "metadata", None) or {}
+        if not isinstance(metadata.get("scheduled_goal_objective"), str):
+            continue
+        try:
+            await clear_recovered_scheduled_goal(record, run_manager=run_manager, checkpointer=checkpointer)
+        except Exception:
+            logger.warning("Scheduled goal cleanup failed for recovered run %s; retained for guarded next-run cleanup", record.run_id, exc_info=True)
 
 
 async def _flush_recovered_stream_cleanups(
@@ -413,6 +535,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         # startup-failure and cancellation path below.
         try:
             from deerflow.extensions.notify import (
+                drain_extension_notify_dispatches,
                 reset_extension_notify_loop,
                 set_extension_notify_loop,
             )
@@ -422,16 +545,24 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             logger.exception("Failed to register the extension notify loop; sync observations will be dropped")
         else:
 
-            def reset_notify_loop_safely() -> None:
+            async def reset_notify_loop_safely() -> None:
                 try:
-                    reset_extension_notify_loop()
+                    await drain_extension_notify_dispatches()
                 except Exception:
                     logger.debug(
-                        "Failed to reset the extension notify loop (non-fatal)",
+                        "Failed to drain pending extension notifications (non-fatal)",
                         exc_info=True,
                     )
+                finally:
+                    try:
+                        reset_extension_notify_loop()
+                    except Exception:
+                        logger.debug(
+                            "Failed to reset the extension notify loop (non-fatal)",
+                            exc_info=True,
+                        )
 
-            stack.callback(reset_notify_loop_safely)
+            stack.push_async_callback(reset_notify_loop_safely)
 
         config = startup_config
         app.state.checkpoint_channel_mode = freeze_checkpoint_channel_mode(config.database.checkpoint_channel_mode)
@@ -449,14 +580,17 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         app.state.checkpointer = await stack.enter_async_context(make_checkpointer(config))
         app.state.store = await stack.enter_async_context(make_store(config))
 
-        # Record the checkpointer/Store backend selected from this startup
-        # snapshot so GET /health/ready probes what the running process
-        # actually uses. These singletons are restart-required by design and
-        # are never rebuilt on config.yaml hot reload, so the probe must not
-        # re-resolve process-wide configuration per request.
-        from app.gateway.health import READINESS_CHECKPOINTER_CONFIG_ATTR, resolve_checkpointer_config
+        # Record the checkpointer/Store backend and the provisioner endpoint
+        # selected from this startup snapshot so GET /health/ready probes what
+        # the running process actually uses. These singletons are
+        # restart-required by design and are never rebuilt on config.yaml hot
+        # reload, so the probe must not re-resolve process-wide configuration
+        # per request. The stream bridge needs no snapshot: the probe pings the
+        # singleton stored on app.state.stream_bridge above.
+        from app.gateway.health import READINESS_CHECKPOINTER_CONFIG_ATTR, READINESS_PROVISIONER_URL_ATTR, resolve_checkpointer_config, resolve_provisioner_url
 
         setattr(app.state, READINESS_CHECKPOINTER_CONFIG_ATTR, resolve_checkpointer_config(config))
+        setattr(app.state, READINESS_PROVISIONER_URL_ATTR, resolve_provisioner_url(config))
 
         # Initialize repositories — one get_session_factory() call for all.
         sf = get_session_factory()
@@ -479,6 +613,27 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             # cannot be validated there and are rejected by the middleware.
             app.state.pat_repo = None
 
+        # Evidence readers are available to Gateway-lifetime extension services,
+        # so the configured event store must exist before those services start.
+        run_events_config = getattr(config, "run_events", None)
+        app.state.run_events_config = run_events_config
+        app.state.run_event_store = make_run_event_store(run_events_config)
+
+        from deerflow.extensions.run_evidence import StoreRunEvidenceReader, StoreRunEvidenceReaderFactory
+
+        # Gateway-lifetime services are trusted operator extensions without a
+        # request principal. None deliberately binds this app-scoped reader to
+        # global, cross-user visibility; event content is not secret-redacted.
+        app.state.run_evidence_reader = StoreRunEvidenceReader(
+            app.state.run_store,
+            app.state.run_event_store,
+            user_id=None,
+        )
+        app.state.run_evidence_reader_factory = StoreRunEvidenceReaderFactory(
+            app.state.run_store,
+            app.state.run_event_store,
+        )
+
         # Services are app-scoped. Capture this app's immutable extension set
         # once and close over the same object for teardown; the process-wide
         # singleton may be replaced by another app/test before shutdown.
@@ -490,9 +645,11 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         async def stop_extension_services() -> None:
             record_runtime_diagnostics(
-                await stop_services(
-                    extensions,
-                    service_entries=attempted_services,
+                await await_drained(
+                    stop_services(
+                        extensions,
+                        service_entries=attempted_services,
+                    )
                 )
             )
 
@@ -504,6 +661,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 extensions,
                 config,
                 sf,
+                run_evidence_reader=app.state.run_evidence_reader,
                 attempted_services=attempted_services,
             )
         )
@@ -513,14 +671,17 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         app.state.thread_store = make_thread_store(sf, app.state.store)
         if sf is not None:
             from deerflow.persistence.mcp_tasks import McpTaskRepository
-            from deerflow.persistence.projects import ProjectRepository
+            from deerflow.persistence.projects import ProjectDocumentRepository, ProjectRepository
+            from deerflow.persistence.scheduled_task_events import ScheduledTaskEventRepository
             from deerflow.persistence.scheduled_task_runs import (
                 ScheduledTaskRunRepository,
             )
             from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
             from deerflow.persistence.subagent_batches import SubagentBatchRepository
+            from deerflow.persistence.thread_reads import ThreadReadRepository
 
             app.state.project_repo = ProjectRepository(sf)
+            app.state.project_document_repo = ProjectDocumentRepository(sf)
             app.state.scheduled_task_repo = ScheduledTaskRepository(
                 sf,
                 run_repository=app.state.run_store,
@@ -529,22 +690,20 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 sf,
                 run_repository=app.state.run_store,
             )
+            app.state.scheduled_task_event_repo = ScheduledTaskEventRepository(sf)
+            # Per-user unread state and the activity feed's read clock.
+            app.state.thread_read_repo = ThreadReadRepository(sf)
             app.state.mcp_task_repo = McpTaskRepository(sf)
             app.state.subagent_batch_repo = SubagentBatchRepository(sf)
         else:
             app.state.mcp_task_repo = None
             app.state.project_repo = None
+            app.state.project_document_repo = None
             app.state.subagent_batch_repo = None
             app.state.scheduled_task_repo = None
             app.state.scheduled_task_run_repo = None
-
-        # Run event store. The store and the matching ``run_events_config`` are
-        # both frozen at startup so ``get_run_context`` does not combine a
-        # freshly-reloaded ``AppConfig.run_events`` with a store still bound to
-        # the previous backend.
-        run_events_config = getattr(config, "run_events", None)
-        app.state.run_events_config = run_events_config
-        app.state.run_event_store = make_run_event_store(run_events_config)
+            app.state.scheduled_task_event_repo = None
+            app.state.thread_read_repo = None
 
         # RunManager with store backing for persistence
         run_ownership_config = getattr(config, "run_ownership", None)
@@ -560,6 +719,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             task.add_done_callback(lambda completed: recovered_stream_cleanup_tasks.pop(completed, None))
 
         async def terminalize_recovered_runs(recovered_runs: list[RunRecord]) -> None:
+            await _cleanup_recovered_scheduled_goals(recovered_runs, run_manager=app.state.run_manager, checkpointer=app.state.checkpointer)
             await _terminalize_recovered_runs(
                 app.state.stream_bridge,
                 recovered_runs,
@@ -585,17 +745,18 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             before=now_iso(),
             stop_reason=ORPHAN_RECOVERY_STOP_REASON,
         )
-        await _terminalize_recovered_runs(
-            app.state.stream_bridge,
-            recovered_runs,
-            cleanup_delay=cleanup_delay,
-            on_cleanup_scheduled=track_recovered_stream_cleanup,
-        )
+        await terminalize_recovered_runs(recovered_runs)
         await _mark_latest_startup_recovered_threads_error(
             app.state.run_manager,
             app.state.thread_store,
             recovered_runs,
         )
+
+        from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+        from app.gateway.extension_agent_runs import GatewayAgentRunsHost
+
+        app.state.agent_runs_host = GatewayAgentRunsHost(app, load_user=SQLiteUserRepository(sf).get_user_by_id if sf is not None else None)
+        stack.callback(app.state.agent_runs_host.close)
 
         # Start the lease heartbeat if enabled (multi-worker deployments).
         await app.state.run_manager.start_heartbeat()
@@ -603,6 +764,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         try:
             yield
         finally:
+            app.state.agent_runs_host.close()
             # Drain in-flight run tasks BEFORE the AsyncExitStack tears down the
             # checkpointer (and its connection pool). A run still mid-graph would
             # otherwise leak into asyncio.run() shutdown, where langgraph's
@@ -652,6 +814,7 @@ get_run_event_store: Callable[[Request], RunEventStore] = _require("run_event_st
 get_feedback_repo: Callable[[Request], FeedbackRepository] = _require("feedback_repo", "Feedback")
 get_run_store: Callable[[Request], RunStore] = _require("run_store", "Run store")
 get_project_repo = _require("project_repo", "Projects")
+get_project_document_repo = _require("project_document_repo", "Projects")
 
 
 def get_store(request: Request):
@@ -667,25 +830,51 @@ def get_thread_store(request: Request) -> ThreadMetaStore:
     return val
 
 
+def _scheduler_unavailable(message: str) -> HTTPException:
+    """Coded 503 for the scheduled-task routes (contracts/scheduled_task_errors_contract.json)."""
+    from app.gateway.scheduled_task_errors import scheduler_error
+
+    return scheduler_error(503, "scheduler_unavailable", message)
+
+
 def get_scheduled_task_repo(request: Request):
     val = getattr(request.app.state, "scheduled_task_repo", None)
     if val is None:
-        raise HTTPException(status_code=503, detail="Scheduled task repo not available")
+        raise _scheduler_unavailable("Scheduled task repo not available")
     return val
 
 
 def get_scheduled_task_run_repo(request: Request):
     val = getattr(request.app.state, "scheduled_task_run_repo", None)
     if val is None:
-        raise HTTPException(status_code=503, detail="Scheduled task run repo not available")
+        raise _scheduler_unavailable("Scheduled task run repo not available")
+    return val
+
+
+def get_scheduled_task_event_repo(request: Request):
+    val = getattr(request.app.state, "scheduled_task_event_repo", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="Scheduled task event repo not available")
     return val
 
 
 def get_scheduled_task_service(request: Request):
     val = getattr(request.app.state, "scheduled_task_service", None)
     if val is None:
-        raise HTTPException(status_code=503, detail="Scheduled task service not available")
+        raise _scheduler_unavailable("Scheduled task service not available")
     return val
+
+
+def is_scheduler_running(request: Request) -> bool:
+    """Whether this Gateway process's scheduler poller is running.
+
+    False when the service is absent (no scheduler persistence) or was never
+    started (``scheduler.enabled: false``) or its poller stopped. Per process:
+    another worker may report differently.
+    """
+    state = getattr(getattr(request, "app", None), "state", None)
+    service = getattr(state, "scheduled_task_service", None)
+    return bool(getattr(service, "is_running", False))
 
 
 def get_mcp_task_repo(request: Request):
@@ -723,10 +912,14 @@ def get_run_context(request: Request) -> RunContext:
     ``app_config`` field is resolved live so per-run fields (e.g.
     ``models[*].max_tokens``) follow ``config.yaml`` edits; the
     ``event_store`` / ``run_events_config`` pair stays frozen to the snapshot
-    captured in :func:`langgraph_runtime` so callers never see a store bound
-    to one backend paired with a config pointing at another.
+    captured in :func:`langgraph_runtime` so callers never see a store bound to
+    one backend paired with a config pointing at another.
     """
+    host = getattr(request.app.state, "agent_runs_host", None)
+    # Internal/channel and PAT runs deliberately receive no retained delegation.
+    agent_runs = host.bind(request) if host is not None else None
     return RunContext(
+        agent_runs=agent_runs,
         checkpointer=get_checkpointer(request),
         store=get_store(request),
         event_store=get_run_event_store(request),
@@ -748,6 +941,18 @@ def get_run_context(request: Request) -> RunContext:
 # Cached singletons to avoid repeated instantiation per request
 _cached_local_provider: LocalAuthProvider | None = None
 _cached_repo: SQLiteUserRepository | None = None
+
+
+def get_user_repository() -> SQLiteUserRepository:
+    """Return the cached user repository (created on first use).
+
+    Origin: admin user-management surface (RFC #4063 / #3462 gap 2). Shares
+    the ``get_local_provider`` cache so both surfaces see one store.
+    """
+
+    get_local_provider()
+    assert _cached_repo is not None
+    return _cached_repo
 
 
 def get_local_provider() -> LocalAuthProvider:

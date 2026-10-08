@@ -14,13 +14,16 @@ class FakeRepository:
         self.list_calls = []
         self.get_calls = []
 
-    async def list_by_thread(self, thread_id, *, user_id, limit):
-        self.list_calls.append((thread_id, user_id, limit))
+    async def list_by_thread(self, thread_id, *, user_id, thread_incarnation, limit):
+        self.list_calls.append((thread_id, user_id, thread_incarnation, limit))
         return list(self.rows)
 
-    async def get(self, task_id, *, user_id):
-        self.get_calls.append((task_id, user_id))
-        return next((row for row in self.rows if row["id"] == task_id and row["user_id"] == user_id), None)
+    async def get(self, task_id, *, user_id, thread_id, thread_incarnation):
+        self.get_calls.append((task_id, user_id, thread_id, thread_incarnation))
+        return next(
+            (row for row in self.rows if row["id"] == task_id and row["user_id"] == user_id and row["thread_id"] == thread_id),
+            None,
+        )
 
 
 def _record(**overrides):
@@ -56,6 +59,15 @@ def _request(repo):
             state=SimpleNamespace(
                 mcp_task_repo=repo,
                 mcp_task_service=SimpleNamespace(tracking_degraded_after_errors=3),
+                thread_store=SimpleNamespace(
+                    get=AsyncMock(
+                        return_value={
+                            "thread_id": "thread-1",
+                            "user_id": "user-1",
+                            "incarnation": "incarnation-1",
+                        }
+                    )
+                ),
             )
         )
     )
@@ -65,6 +77,93 @@ def test_gateway_mounts_thread_scoped_mcp_task_routes() -> None:
     paths = {route.path for route in create_app().routes}
     assert "/api/threads/{thread_id}/mcp-tasks" in paths
     assert "/api/threads/{thread_id}/mcp-tasks/{task_id}" in paths
+
+
+@pytest.mark.asyncio
+async def test_current_thread_incarnation_rejects_missing_thread() -> None:
+    request = _request(FakeRepository([]))
+    request.app.state.thread_store.get = AsyncMock(side_effect=[None, None])
+
+    with pytest.raises(HTTPException) as exc_info:
+        await mcp_tasks._current_thread_incarnation(
+            request,
+            thread_id="missing-thread",
+            user_id="user-1",
+        )
+
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_current_thread_incarnation_accepts_shared_fallback() -> None:
+    request = _request(FakeRepository([]))
+    request.app.state.thread_store.get = AsyncMock(
+        side_effect=[
+            None,
+            {
+                "thread_id": "shared-thread",
+                "user_id": None,
+                "incarnation": "shared-incarnation",
+            },
+        ]
+    )
+
+    incarnation = await mcp_tasks._current_thread_incarnation(
+        request,
+        thread_id="shared-thread",
+        user_id="user-1",
+    )
+
+    assert incarnation == "shared-incarnation"
+    assert request.app.state.thread_store.get.await_args_list[1].kwargs == {"user_id": None}
+
+
+@pytest.mark.asyncio
+async def test_current_thread_incarnation_rejects_foreign_unscoped_fallback() -> None:
+    request = _request(FakeRepository([]))
+    request.app.state.thread_store.get = AsyncMock(
+        side_effect=[
+            None,
+            {
+                "thread_id": "foreign-thread",
+                "user_id": "user-2",
+                "incarnation": "foreign-incarnation",
+            },
+        ]
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await mcp_tasks._current_thread_incarnation(
+            request,
+            thread_id="foreign-thread",
+            user_id="user-1",
+        )
+
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("incarnation", ["", 7, False])
+async def test_current_thread_incarnation_rejects_malformed_value(
+    incarnation,
+) -> None:
+    request = _request(FakeRepository([]))
+    request.app.state.thread_store.get = AsyncMock(
+        return_value={
+            "thread_id": "thread-1",
+            "user_id": "user-1",
+            "incarnation": incarnation,
+        }
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await mcp_tasks._current_thread_incarnation(
+            request,
+            thread_id="thread-1",
+            user_id="user-1",
+        )
+
+    assert exc_info.value.status_code == 404
 
 
 @pytest.mark.asyncio
@@ -78,7 +177,7 @@ async def test_list_returns_only_safe_current_user_thread_fields(monkeypatch) ->
         limit=25,
     )
 
-    assert repo.list_calls == [("thread-1", "user-1", 25)]
+    assert repo.list_calls == [("thread-1", "user-1", "incarnation-1", 25)]
     assert response == [
         {
             "task_id": "mcp-task-1",
@@ -174,6 +273,7 @@ async def test_cancel_uses_service_with_exact_user_and_thread_scope(monkeypatch)
         task_id="mcp-task-1",
         thread_id="thread-1",
         user_id="user-1",
+        thread_incarnation="incarnation-1",
     )
     assert response["status"] == "working"
     assert response["cancel_requested"] is True

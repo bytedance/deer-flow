@@ -12,6 +12,7 @@ matching the LangGraph Platform wire format expected by the
 
 from __future__ import annotations
 
+import inspect
 import logging
 import shutil
 import uuid
@@ -32,7 +33,7 @@ from app.gateway.checkpoint_lineage import (
     find_checkpoint_before_message_chronologically,
     is_duration_only_checkpoint,
 )
-from app.gateway.deps import get_checkpointer, get_run_event_store, get_run_manager
+from app.gateway.deps import get_checkpointer, get_run_event_store, get_run_manager, get_run_store
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.services import (
     abuild_checkpoint_state_accessor,
@@ -56,6 +57,7 @@ from deerflow.runtime.context_compaction import (
     ThreadCompactionResult,
     compact_thread_context,
 )
+from deerflow.runtime.context_keys import checkpoint_agent_binding_metadata
 from deerflow.runtime.events.message_seq import stamp_messages_with_seq
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
@@ -66,11 +68,13 @@ from deerflow.runtime.goal import (
     write_thread_goal,
 )
 from deerflow.runtime.journal import build_branch_history_seed_events
+from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY, admit_origin
 from deerflow.runtime.runs.manager import ConflictError
 from deerflow.runtime.runs.worker import RUN_MESSAGE_IDS_METADATA_KEY, valid_duration_entry, valid_run_message_id_entry
 from deerflow.runtime.secret_context import redact_metadata_secrets
 from deerflow.runtime.user_context import get_effective_user_id
-from deerflow.utils.file_io import run_file_io
+from deerflow.uploads.companions import register_companion, resolve_companion
+from deerflow.utils.file_io import await_drained, run_file_io
 from deerflow.utils.thread_id import ThreadId, resolve_thread_id, validate_thread_id
 from deerflow.utils.time import coerce_iso, now_iso
 
@@ -111,7 +115,9 @@ def _checkpoint_mode_http_error(exc: Exception, thread_id: str) -> HTTPException
 # owner identity through the API surface. Defense-in-depth — the
 # row-level invariant is still ``threads_meta.user_id`` populated from
 # the auth contextvar; this list closes the metadata-blob echo gap.
-_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id", THREAD_PROJECT_METADATA_KEY})
+# ``deerflow_origin`` marks a thread the server created for a schedule or an
+# extension; only the server sets it (``create_thread`` below, run admission).
+_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id", THREAD_PROJECT_METADATA_KEY, DEERFLOW_ORIGIN_KEY})
 _SIDECAR_METADATA_KEY = "deerflow_sidecar"
 _BRANCH_METADATA_KEY = "deerflow_branch"
 _BRANCH_TITLE_SEQUENCE_METADATA_KEY = "branch_title_sequence"
@@ -329,6 +335,17 @@ def _copy_branch_user_data_sync(paths: Paths, source_thread_id: str, target_thre
         return "not_found"
 
     shutil.copytree(source, target, ignore=_ignore_branch_user_data, dirs_exist_ok=True)
+    source_uploads = paths.sandbox_uploads_dir(source_thread_id, user_id=user_id)
+    target_uploads = paths.sandbox_uploads_dir(target_thread_id, user_id=user_id)
+    if source_uploads.is_dir() and target_uploads.is_dir():
+        for original in source_uploads.iterdir():
+            markdown = resolve_companion(original)
+            if markdown is None:
+                continue
+            copied_original = target_uploads / original.name
+            copied_markdown = target_uploads / markdown.name
+            if copied_original.is_file() and not copied_original.is_symlink() and copied_markdown.is_file() and not copied_markdown.is_symlink():
+                register_companion(copied_original, copied_markdown)
     return "current_thread_best_effort"
 
 
@@ -442,6 +459,14 @@ class ThreadResponse(_MetadataRedactingResponse):
     metadata: dict[str, Any] = Field(default_factory=dict, description="Thread metadata")
     values: dict[str, Any] = Field(default_factory=dict, description="Current state channel values")
     interrupts: dict[str, Any] = Field(default_factory=dict, description="Pending interrupts")
+    unread: bool | None = Field(default=None, description="Thread search only: a server-originated run of the caller changed since the caller last opened the thread; null when unknown")
+
+
+class ThreadReadResponse(BaseModel):
+    """Response of ``POST /api/threads/{thread_id}/read``."""
+
+    unread: bool = Field(default=False)
+    read_version: int = Field(description="The caller's per-user read clock after this call")
 
 
 class ThreadCreateRequest(BaseModel):
@@ -548,7 +573,7 @@ class ThreadCompactRequest(BaseModel):
 
     force: bool = Field(default=True, description="Run compaction even if automatic summarization thresholds are not met")
     keep: ContextSize | None = Field(default=None, description="Optional retention policy for this compaction only")
-    agent_name: str | None = Field(default=None, max_length=128, description="Optional custom agent name for memory attribution")
+    agent_name: str | None = Field(default=None, max_length=128, description="Optional legacy agent hint for model selection; memory policy is bound to checkpoint metadata")
     model_name: str | None = Field(default=None, max_length=128, description="Optional model to summarize with; resolved request override -> custom-agent model -> default, mirroring run model selection")
 
 
@@ -726,9 +751,32 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
         ) from None
 
 
+def _event_delete_owner_kwargs(delete_by_thread: Any, user_id: str) -> dict[str, str]:
+    """Pass owner scope only when an event store accepts that keyword.
+
+    Third-party ``RunEventStore`` implementations may still expose the legacy
+    ``delete_by_thread(thread_id)`` contract; they must keep deleting, just
+    without the owner filter (their storage is not user-scoped). An
+    uninspectable callable keeps the old call contract, and a ``TypeError``
+    raised inside the backend must never trigger a retry.
+    """
+    try:
+        parameters = inspect.signature(delete_by_thread).parameters.values()
+    except (TypeError, ValueError):
+        return {}
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD or (parameter.name == "user_id" and parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)) for parameter in parameters):
+        return {"user_id": user_id}
+    return {}
+
+
 async def _delete_thread_data_with_reservation(thread_id: str, request: Request) -> ThreadDeleteResponse:
     """Delete a thread while its durable exclusive reservation is held."""
     from app.gateway.deps import get_thread_store
+
+    # One owner identity for every cleanup step below: the filesystem bucket, the
+    # persisted runs/events/feedback and the thread_meta row all belong to the
+    # same owner, so they must not resolve their scope independently.
+    user_id = get_effective_user_id()
 
     # Legacy IDs may predate the canonical filesystem-safe contract. They can
     # still be removed from metadata/checkpoint stores, but must never be
@@ -741,7 +789,11 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
             message="Skipped local data cleanup for legacy thread ID",
         )
     else:
-        response = _delete_thread_data(thread_id, user_id=get_effective_user_id())
+        # rmtree over a large workspace must not stall the loop. Drained, not
+        # bare-awaited: cancelling the await abandons the worker, not the
+        # removal, so the reservation would release while files are still
+        # being deleted under a run that has just been admitted.
+        response = await await_drained(run_file_io(_delete_thread_data, thread_id, user_id=user_id))
 
     # Remove checkpoints (best-effort)
     checkpointer = getattr(request.app.state, "checkpointer", None)
@@ -752,13 +804,69 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
         except Exception:
             logger.debug("Could not delete checkpoints for thread %s (not critical)", sanitize_log_param(thread_id))
 
+    # Remove historical runs (best-effort). Only ``operation_kind == "run"`` rows
+    # are deleted, so the durable thread-operation reservation protecting this
+    # very request survives until ``reserve_thread_operation`` exits. Third-party
+    # RunStore implementations that predate the capability are skipped.
+    try:
+        delete_runs = getattr(get_run_store(request), "delete_by_thread", None)
+        if delete_runs is not None:
+            await delete_runs(thread_id, user_id=user_id)
+    except Exception:
+        logger.debug("Could not delete run records for thread %s (not critical)", sanitize_log_param(thread_id))
+
+    # Remove persisted run events (best-effort). These are the user-visible
+    # conversation history, not a cache: leaving them behind makes a deleted
+    # thread's feed readable again through GET /threads/{id}/messages. A legacy
+    # store that predates the owner-scoped signature is still called, with the
+    # old contract.
+    try:
+        delete_events = get_run_event_store(request).delete_by_thread
+        await delete_events(thread_id, **_event_delete_owner_kwargs(delete_events, user_id))
+    except Exception:
+        logger.debug("Could not delete run events for thread %s (not critical)", sanitize_log_param(thread_id))
+
+    # Remove persisted feedback best-effort. This cleans existing rows; fencing
+    # already-admitted writes across thread deletion is a separate lifecycle
+    # concern. The memory backend legitimately sets ``feedback_repo = None``, so
+    # the optional accessor is used here.
+    try:
+        feedback_repo = getattr(request.app.state, "feedback_repo", None)
+        if feedback_repo is not None:
+            await feedback_repo.delete_by_thread(thread_id, user_id=user_id)
+    except Exception:
+        logger.debug("Could not delete feedback for thread %s (not critical)", sanitize_log_param(thread_id))
+
     # Remove thread_meta row (best-effort) — required for sqlite backend
     # so the deleted thread no longer appears in /threads/search.
     try:
         thread_store = get_thread_store(request)
-        await thread_store.delete(thread_id)
+        await thread_store.delete(thread_id, user_id=user_id)
     except Exception:
         logger.debug("Could not delete thread_meta for %s (not critical)", sanitize_log_param(thread_id))
+
+    # Remove the chat's scheduled-task lifecycle lines (best-effort). They are
+    # display-only history of this chat; the tasks themselves are untouched.
+    # This runs after the thread_meta delete: the finalization observer writes
+    # a line only while that row exists, and holds a share lock on it (FOR
+    # SHARE) until its transaction commits. A thread_meta delete racing a
+    # finalization therefore commits after the line, and this step removes it,
+    # so a task finishing during the delete cannot leave a line behind.
+    try:
+        task_event_repo = getattr(request.app.state, "scheduled_task_event_repo", None)
+        if task_event_repo is not None:
+            await task_event_repo.delete_by_thread(thread_id, user_id=user_id)
+    except Exception:
+        logger.debug("Could not delete scheduled task events for thread %s (not critical)", sanitize_log_param(thread_id))
+
+    # Remove every user's read marker for the thread (best-effort): the thread
+    # is gone, so its unread state is meaningless for all of them.
+    try:
+        thread_read_repo = getattr(request.app.state, "thread_read_repo", None)
+        if thread_read_repo is not None:
+            await thread_read_repo.delete_by_thread(thread_id)
+    except Exception:
+        logger.debug("Could not delete read markers for thread %s (not critical)", sanitize_log_param(thread_id))
 
     # Tear down any live browser session (best-effort). Sessions are keyed only
     # by thread_id, so leaving one alive after the owner deletes the thread lets
@@ -771,6 +879,22 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
         pass  # Playwright is an optional dependency.
     except Exception:
         logger.debug("Could not close browser session for %s (not critical)", sanitize_log_param(thread_id))
+
+    # Tear down persistent MCP sessions scoped to this user/thread (best-effort).
+    # The same invariant as the browser session above applies, and harder: a
+    # persistent stdio MCP server such as Playwright keeps retained pages and
+    # cookies, and its leaked owner task plus subprocess keep holding memory and
+    # file descriptors. Scope keys encode user/thread/incarnation, so the whole
+    # thread identity is closed across every incarnation -- a legacy
+    # (incarnation-less) scope and a newer versioned scope are both stale once
+    # the thread is gone, and reading the current incarnation here would race a
+    # concurrently minted one. See #5188.
+    try:
+        from deerflow.mcp.session_pool import get_session_pool
+
+        await get_session_pool().close_thread_scope(user_id=user_id, thread_id=thread_id)
+    except Exception:
+        logger.debug("Could not close MCP sessions for %s (not critical)", sanitize_log_param(thread_id))
 
     return response
 
@@ -824,6 +948,11 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
     thread_owner_kwargs = {"user_id": thread_owner_user_id} if thread_owner_user_id else {}
     # ``body.metadata`` is already stripped of server-reserved keys by
     # ``ThreadCreateRequest._strip_reserved`` — see the model definition.
+    # A server-side caller (an extension handle) marks the thread it creates;
+    # request.state is never HTTP input.
+    metadata = dict(body.metadata)
+    if (origin := admit_origin(getattr(request.state, "run_origin", None))) is not None:
+        metadata[DEERFLOW_ORIGIN_KEY] = origin
 
     # Idempotency: return existing record when already present
     existing_record = await _resolve_existing_thread(thread_store, thread_id, thread_owner_user_id, thread_owner_kwargs)
@@ -838,7 +967,7 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
             thread_id,
             assistant_id=getattr(body, "assistant_id", None),
             **thread_owner_kwargs,
-            metadata=body.metadata,
+            metadata=metadata,
             project_id=body.project_id,
         )
     except ProjectNotAssignableError:
@@ -876,7 +1005,7 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
             "source": "input",
             "writes": None,
             "parents": {},
-            **body.metadata,
+            **metadata,
             "created_at": now,
         }
         await checkpointer.aput(config, empty_checkpoint(), ckpt_metadata, {})
@@ -1023,6 +1152,7 @@ async def _branch_thread_with_reservation(
     # Stamp both synthetic checkpoints with the branch-creation time because
     # serializers fall back to metadata when snapshot.created_at is absent.
     checkpoint_metadata_updates = {
+        **checkpoint_agent_binding_metadata(getattr(snapshot, "metadata", None)),
         **branch_metadata,
         "source": "branch",
         "updated_at": now,
@@ -1137,6 +1267,7 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
         )
     except InvalidMetadataFilterError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    unread_ids = await _unread_thread_ids(request, [r["thread_id"] for r in rows])
     return [
         ThreadResponse(
             thread_id=r["thread_id"],
@@ -1149,9 +1280,44 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
             metadata=r.get("metadata", {}),
             values={"title": r["display_name"]} if r.get("display_name") else {},
             interrupts={},
+            unread=(r["thread_id"] in unread_ids) if unread_ids is not None else None,
         )
         for r in rows
     ]
+
+
+async def _unread_thread_ids(request: Request, thread_ids: list[str]) -> set[str] | None:
+    """One query for the page's unread threads; ``None`` (unknown) without SQL read state.
+
+    The list must keep loading when the lookup fails, so a failure degrades to
+    ``None`` instead of failing the search.
+    """
+    repo = getattr(request.app.state, "thread_read_repo", None)
+    if repo is None:
+        return None
+    if not thread_ids:
+        return set()
+    try:
+        return await repo.unread_thread_ids(user_id=str(get_effective_user_id()), thread_ids=thread_ids)
+    except Exception:
+        logger.warning("Could not resolve unread threads for a thread search", exc_info=True)
+        return None
+
+
+@router.post("/{thread_id}/read", response_model=ThreadReadResponse)
+@require_permission("threads", "read", owner_check=True, require_existing=True)
+async def mark_thread_read(thread_id: ThreadId, request: Request) -> ThreadReadResponse:
+    """Mark the thread read for the caller (per user, monotonic across devices).
+
+    A thread already read up to its latest run writes nothing and leaves
+    ``read_version`` unchanged, so other tabs and devices do not refetch.
+    """
+    repo = getattr(request.app.state, "thread_read_repo", None)
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Thread read state is not available")
+    user_id = str(get_effective_user_id())
+    await repo.mark_read(user_id=user_id, thread_id=thread_id)
+    return ThreadReadResponse(unread=False, read_version=await repo.read_version(user_id=user_id))
 
 
 @router.patch("/{thread_id}", response_model=ThreadResponse)
@@ -1440,6 +1606,8 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
     from app.gateway.deps import get_thread_store
 
     thread_store = get_thread_store(request)
+    # Validate external roles before materializing a graph or reserving a write.
+    values = strip_server_owned_state_metadata(dict(body.values or {}))
     if body.checkpoint_id is not None:
         if not body.checkpoint_id:
             raise HTTPException(status_code=404, detail="Checkpoint not found")
@@ -1467,12 +1635,6 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
         as_node=mutation_node,
         checkpoint_id=body.checkpoint_id,
     )
-    # These values go straight into a checkpoint, so they need the same
-    # server-owned-metadata stripping the run path gets inside normalize_input.
-    # Without it an authenticated client can persist forged provenance and
-    # transform trails, which later readers are entitled to treat as facts
-    # about what the host itself did.
-    values = strip_server_owned_state_metadata(dict(body.values or {}))
     writable_channels = graph_writable_channels(getattr(accessor, "graph", None))
     if writable_channels is not None:
         unknown_fields = sorted(set(values) - writable_channels)
@@ -1487,8 +1649,14 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
     updates = {key: Overwrite(value) if key in reducer_fields else value for key, value in values.items()}
     try:
         async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
+            source_metadata = await accessor.aget_metadata(read_config)
+            update_config = {
+                **read_config,
+                "configurable": dict(read_config.get("configurable", {})),
+                "metadata": checkpoint_agent_binding_metadata(source_metadata),
+            }
             updated_config = await accessor.aupdate(
-                read_config,
+                update_config,
                 updates,
                 as_node=mutation_node,
             )

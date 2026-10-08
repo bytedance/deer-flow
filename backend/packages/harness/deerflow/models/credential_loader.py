@@ -92,8 +92,8 @@ def _load_json_file(path: Path, label: str) -> dict[str, Any] | None:
         return None
 
     try:
-        return json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError) as e:
+        return json.loads(path.read_text(encoding="utf-8-sig"))
+    except (json.JSONDecodeError, OSError, UnicodeError) as e:
         logger.warning(f"Failed to read {label}: {e}")
         return None
 
@@ -117,7 +117,7 @@ def _read_secret_from_file_descriptor(env_var: str) -> str | None:
 
         try:
             secret = os.read(fd, 1024 * 1024).decode().strip()
-        except OSError as e:
+        except (OSError, UnicodeError) as e:
             logger.warning(f"Failed to read {env_var}: {e}")
             return None
 
@@ -148,16 +148,38 @@ def _iter_claude_code_credential_paths() -> list[Path]:
 
 
 def _extract_claude_code_credential(data: dict[str, Any], source: str) -> ClaudeCodeCredential | None:
-    oauth = data.get("claudeAiOauth", {})
-    access_token = oauth.get("accessToken", "")
-    if not access_token:
-        logger.debug("Claude Code credentials container exists but no accessToken found")
+    if not isinstance(data, dict):
+        logger.debug("Claude Code credentials source %s is not a JSON object; skipping", source)
         return None
+    oauth = data.get("claudeAiOauth")
+    if not isinstance(oauth, dict):
+        logger.debug("Claude Code credentials source %s has a non-object claudeAiOauth container; skipping", source)
+        return None
+    access_token = oauth.get("accessToken", "")
+    if isinstance(access_token, str):
+        # The env and descriptor handoffs strip before they test the token, so a blank or
+        # padded value must not become a credential here either.
+        access_token = access_token.strip()
+    else:
+        access_token = ""
+    if not access_token:
+        logger.debug("Claude Code credentials container exists but no string accessToken found")
+        return None
+
+    expires_at = oauth.get("expiresAt", 0)
+    if not isinstance(expires_at, (int, float)):
+        logger.debug("Claude Code credentials source %s has a non-numeric expiresAt; skipping", source)
+        return None
+
+    refresh_token = oauth.get("refreshToken", "")
+    if not isinstance(refresh_token, str):
+        logger.debug("Claude Code credentials source %s has a non-string refreshToken; using no refresh token", source)
+        refresh_token = ""
 
     cred = ClaudeCodeCredential(
         access_token=access_token,
-        refresh_token=oauth.get("refreshToken", ""),
-        expires_at=oauth.get("expiresAt", 0),
+        refresh_token=refresh_token,
+        expires_at=expires_at,
         source=source,
     )
 
@@ -221,7 +243,8 @@ def load_codex_cli_credential() -> CodexCliCredential | None:
     """Load credential from Codex CLI (~/.codex/auth.json)."""
     cred_path = _resolve_credential_path("CODEX_AUTH_PATH", ".codex/auth.json")
     data = _load_json_file(cred_path, "Codex CLI credentials")
-    if data is None:
+    if not isinstance(data, dict):
+        logger.debug("Codex CLI credentials file is not a JSON object; skipping")
         return None
     tokens = data.get("tokens", {})
     if not isinstance(tokens, dict):
@@ -229,8 +252,13 @@ def load_codex_cli_credential() -> CodexCliCredential | None:
 
     access_token = data.get("access_token") or data.get("token") or tokens.get("access_token", "")
     account_id = data.get("account_id") or tokens.get("account_id", "")
-    if not access_token:
-        logger.debug("Codex CLI credentials file exists but no token found")
+    if isinstance(access_token, str):
+        access_token = access_token.strip()
+    if not isinstance(account_id, str):
+        logger.debug("Codex CLI credentials file has a non-string account_id; using no account")
+        account_id = ""
+    if not isinstance(access_token, str) or not access_token:
+        logger.debug("Codex CLI credentials file exists but no string token found")
         return None
 
     logger.info("Loaded Codex CLI credential")

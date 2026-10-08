@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+
 import pytest
 from langchain.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage
@@ -11,6 +13,7 @@ from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.models import factory as factory_module
 from deerflow.models import openai_codex_provider as codex_provider_module
+from deerflow.models.reasoning import resolve_reasoning_contract
 from deerflow.reflection import resolve_class
 
 # ---------------------------------------------------------------------------
@@ -282,6 +285,291 @@ def test_thinking_enabled_merges_when_thinking_enabled_settings(monkeypatch):
 
     assert FakeChatModel.captured_kwargs.get("temperature") == 1.0
     assert FakeChatModel.captured_kwargs.get("max_tokens") == 16000
+
+
+def _legacy_model_with_base_extra_body(when_thinking_enabled: dict, extra_body: dict, when_thinking_disabled: dict | None = None) -> ModelConfig:
+    """A profile without ``reasoning:`` whose base ``extra_body`` carries keys the templates must not clobber."""
+    return ModelConfig(
+        name="legacy-glm",
+        display_name="legacy-glm",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="legacy-glm",
+        supports_thinking=True,
+        extra_body=extra_body,
+        when_thinking_enabled=when_thinking_enabled,
+        when_thinking_disabled=when_thinking_disabled,
+    )
+
+
+@pytest.mark.parametrize("thinking_enabled", [True, False], ids=["thinking-on", "thinking-off"])
+def test_legacy_when_thinking_disabled_template_deep_merges_like_the_enable_template(monkeypatch, thinking_enabled):
+    """Most ``extra_body``-based profiles in ``config.example.yaml`` declare *both* templates.
+    An operator-provided ``when_thinking_disabled`` was still ``dict.update``-ed, so fixing only
+    the enable branch would have left thinking-off dropping ``tool_stream`` while thinking-on
+    kept it. The same profile must not behave differently depending on the toggle."""
+    model = _legacy_model_with_base_extra_body(
+        when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled"}}},
+        when_thinking_disabled={"extra_body": {"thinking": {"type": "disabled"}}},
+        extra_body={"tool_stream": True},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-glm", thinking_enabled=thinking_enabled)
+
+    expected_type = "enabled" if thinking_enabled else "disabled"
+    assert captured["extra_body"] == {"tool_stream": True, "thinking": {"type": expected_type}}
+
+
+@pytest.mark.parametrize(
+    "templates",
+    [
+        {"when_thinking_disabled": {"extra_body": {"thinking": {"type": "disabled"}}}},
+        {"when_thinking_enabled": {"extra_body": {"thinking": {"type": "enabled"}}}},
+    ],
+    ids=["operator-disable-template", "synthesized-disable"],
+)
+def test_disable_cannot_clear_enable_only_keys_kept_in_the_base_extra_body(monkeypatch, templates):
+    """Stated migration rule: keys are never removed, so a base
+    ``extra_body.thinking: {type: enabled, budget_tokens: N}`` reaches the provider as
+    ``{type: disabled, budget_tokens: N}`` when thinking is off. The synthesized disable payload
+    (and the contract path) already behaved this way on ``main``; the operator-provided legacy
+    disable template now does too. Enable-only keys belong in ``when_thinking_enabled`` — the
+    changelog, ``models/AGENTS.md`` and ``configuration.mdx`` say so, and this test keeps the
+    behaviour deliberate rather than accidental."""
+    model = ModelConfig(
+        name="legacy-anthropic-proxy",
+        display_name="legacy-anthropic-proxy",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="claude",
+        supports_thinking=True,
+        extra_body={"thinking": {"type": "enabled", "budget_tokens": 4096}},
+        **templates,
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-anthropic-proxy", thinking_enabled=False)
+
+    assert captured["extra_body"]["thinking"] == {"type": "disabled", "budget_tokens": 4096}
+
+
+def _mapping_ids(value: object) -> set[int]:
+    """Identities of every mapping reachable from *value*, for alias checks."""
+    if not isinstance(value, dict):
+        return set()
+    ids = {id(value)}
+    for nested in value.values():
+        ids |= _mapping_ids(nested)
+    return ids
+
+
+@pytest.mark.parametrize(
+    "base_extra_body, template_extra_body",
+    [
+        ({"top_k": 20}, {"chat_template_kwargs": {"thinking": True}}),
+        (None, {"chat_template_kwargs": {"thinking": True}}),
+        ({"top_k": 20}, {"thinking": {"type": "enabled", "options": {"budget_tokens": 1024}}}),
+    ],
+    ids=["template-adds-a-nested-mapping", "profile-has-no-extra_body", "template-adds-two-levels"],
+)
+def test_thinking_templates_are_copied_not_aliased_into_constructor_kwargs(monkeypatch, base_extra_body, template_extra_body):
+    """Wherever the base lacked a key, the merge used to store the template's own mapping by
+    reference, so the constructor kwargs (and any later in-place adjustment, such as the vLLM
+    switch mirroring) pointed at the cached ``ModelConfig``. Every mapping a template
+    contributes, at every depth, must be a copy, and the profile must be unchanged after the
+    build."""
+    template = {"extra_body": template_extra_body}
+    model = _legacy_model_with_base_extra_body(when_thinking_enabled=template, extra_body=base_extra_body)
+    pristine = copy.deepcopy(model.when_thinking_enabled)
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-glm", thinking_enabled=True)
+
+    assert captured["extra_body"] == {**(base_extra_body or {}), **template_extra_body}
+    assert _mapping_ids(captured["extra_body"]) & _mapping_ids(model.when_thinking_enabled) == set()
+    assert model.when_thinking_enabled == pristine
+
+
+def test_legacy_templates_only_add_or_override_nested_keys_never_remove_them(monkeypatch):
+    """The flip side of deep-merging: a template cannot drop a base key by omitting it.
+    OpenRouter-style ``reasoning: {exclude: true}`` in the profile survives a template that
+    only sets ``reasoning.effort`` — the operator must clear a key explicitly if that is meant."""
+    model = _legacy_model_with_base_extra_body(
+        when_thinking_enabled={"extra_body": {"reasoning": {"effort": "high"}}},
+        extra_body={"reasoning": {"exclude": True}},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-glm", thinking_enabled=True)
+
+    assert captured["extra_body"] == {"reasoning": {"exclude": True, "effort": "high"}}
+
+
+@pytest.mark.parametrize(
+    "when_thinking_enabled, expected_extra_body",
+    [
+        ({"extra_body": "oops"}, "oops"),
+        ({"extra_body": {"chat_template_kwargs": True}}, {"chat_template_kwargs": True}),
+    ],
+    ids=["extra_body-not-a-mapping", "chat_template_kwargs-not-a-mapping"],
+)
+def test_legacy_non_mapping_template_values_are_forwarded_not_rejected(monkeypatch, when_thinking_enabled, expected_extra_body):
+    """``ModelConfig.when_thinking_enabled`` is ``dict | None`` with unvalidated nested values,
+    so a non-mapping ``extra_body`` or ``chat_template_kwargs`` is reachable from ``config.yaml``.
+    The factory used to forward it unchanged; the vLLM-switch bookkeeping must not turn that
+    into an ``AttributeError`` / ``TypeError`` inside ``create_chat_model``."""
+    model = _legacy_model_with_base_extra_body(
+        when_thinking_enabled=when_thinking_enabled,
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-glm", thinking_enabled=True)
+
+    assert captured["extra_body"] == expected_extra_body
+
+
+@pytest.mark.parametrize("thinking_enabled", [True, False], ids=["thinking-on", "thinking-off"])
+def test_legacy_when_thinking_enabled_deep_merges_into_the_base_extra_body(monkeypatch, thinking_enabled):
+    """The legacy enable path used ``dict.update``, so ``when_thinking_enabled.extra_body``
+    replaced the profile's whole ``extra_body`` and dropped sibling keys such as GLM's
+    ``tool_stream`` — but only when thinking was ON; the disable path already deep-merged.
+    Both directions must keep the operator's keys."""
+    model = _legacy_model_with_base_extra_body(
+        when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled"}}},
+        extra_body={"tool_stream": True},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-glm", thinking_enabled=thinking_enabled)
+
+    expected_type = "enabled" if thinking_enabled else "disabled"
+    assert captured["extra_body"] == {"tool_stream": True, "thinking": {"type": expected_type}}
+
+
+def test_legacy_when_thinking_enabled_merges_nested_mappings_recursively(monkeypatch):
+    """A vLLM template that only sets ``chat_template_kwargs.enable_thinking`` must keep the
+    profile's other chat-template kwargs, not replace the nested mapping."""
+    model = _legacy_model_with_base_extra_body(
+        when_thinking_enabled={"extra_body": {"chat_template_kwargs": {"enable_thinking": True}}},
+        extra_body={"tool_stream": True, "chat_template_kwargs": {"preserve_thinking": True}},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-glm", thinking_enabled=True)
+
+    assert captured["extra_body"] == {
+        "tool_stream": True,
+        "chat_template_kwargs": {"preserve_thinking": True, "enable_thinking": True},
+    }
+
+
+def _effective_vllm_switch(captured: dict) -> dict:
+    """What vLLM receives: the provider normalizes the legacy ``thinking`` alias just before sending."""
+    from deerflow.models.vllm_provider import _normalize_vllm_chat_template_kwargs
+
+    payload = {"extra_body": dict(captured["extra_body"])}
+    _normalize_vllm_chat_template_kwargs(payload)
+    return payload["extra_body"]["chat_template_kwargs"]
+
+
+def _vllm_switch_profile(*, base_key: str, template_key: str, base_value: bool, reasoning: dict | None, use: str = "deerflow.models.vllm_provider:VllmChatModel") -> ModelConfig:
+    kwargs: dict = dict(
+        name="qwen",
+        display_name="qwen",
+        description=None,
+        use=use,
+        model="qwen",
+        supports_thinking=True,
+        extra_body={"chat_template_kwargs": {base_key: base_value, "preserve_thinking": True}},
+        when_thinking_enabled={"extra_body": {"chat_template_kwargs": {template_key: True}}},
+    )
+    if reasoning is not None:
+        kwargs["reasoning"] = reasoning
+    return ModelConfig(**kwargs)
+
+
+@pytest.mark.parametrize("reasoning", [None, {"thinking": "optional", "dialect": "vllm_chat_template"}], ids=["legacy", "contract"])
+@pytest.mark.parametrize("base_key, template_key", [("enable_thinking", "thinking"), ("thinking", "enable_thinking")], ids=["base-enable_thinking/template-thinking", "base-thinking/template-enable_thinking"])
+@pytest.mark.parametrize("thinking_enabled", [True, False], ids=["thinking-on", "thinking-off"])
+def test_vllm_switch_spelled_by_the_template_wins_over_the_profile_alias(monkeypatch, reasoning, base_key, template_key, thinking_enabled):
+    """vLLM's toggle has two spellings (legacy ``thinking``, current ``enable_thinking``) and the
+    provider maps the alias only when ``enable_thinking`` is absent. A profile that spells the
+    switch differently from its template must not be able to pin the switch after the merge:
+    the template's (or synthesized) spelling decides, in both directions, on both paths."""
+    from deerflow.models.vllm_provider import VllmChatModel
+
+    model = _vllm_switch_profile(base_key=base_key, template_key=template_key, base_value=not thinking_enabled, reasoning=reasoning)
+    captured: dict = {}
+    # Resolve the REAL provider class, so a future class-gated merge is exercised as vLLM.
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(VllmChatModel, captured))
+
+    factory_module.create_chat_model(name="qwen", thinking_enabled=thinking_enabled)
+
+    effective = _effective_vllm_switch(captured)
+    assert effective["enable_thinking"] is thinking_enabled
+    assert effective["preserve_thinking"] is True  # unrelated chat-template kwargs still survive
+
+
+@pytest.mark.parametrize("reasoning", [None, {"thinking": "optional", "dialect": "vllm_chat_template"}], ids=["legacy", "contract"])
+@pytest.mark.parametrize("base_key, template_key", [("enable_thinking", "thinking"), ("thinking", "enable_thinking")], ids=["base-enable_thinking/template-thinking", "base-thinking/template-enable_thinking"])
+@pytest.mark.parametrize("thinking_enabled", [True, False], ids=["thinking-on", "thinking-off"])
+def test_vllm_switch_is_mirrored_onto_the_profile_spelling_for_classes_that_do_not_normalize(monkeypatch, reasoning, base_key, template_key, thinking_enabled):
+    """Only ``VllmChatModel`` maps the ``thinking`` alias onto ``enable_thinking``; a plain
+    ``langchain_openai:ChatOpenAI`` profile pointed at vLLM sends ``chat_template_kwargs`` raw, and
+    the server reads whichever key its chat template honors. Deleting the profile's spelling would
+    remove the only key such a server reads (a base ``enable_thinking: false`` beside a template
+    ``thinking: false`` would leave Qwen3 defaulting to *on*). So the template's value is mirrored
+    onto the profile's spelling instead: both keys carry the template's intent, raw."""
+    from langchain_openai import ChatOpenAI
+
+    model = _vllm_switch_profile(base_key=base_key, template_key=template_key, base_value=not thinking_enabled, reasoning=reasoning, use="langchain_openai:ChatOpenAI")
+    captured: dict = {}
+    # Resolve the REAL ChatOpenAI (not a stand-in), so a merge gated on the vLLM class would fail here.
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(ChatOpenAI, captured))
+
+    factory_module.create_chat_model(name="qwen", thinking_enabled=thinking_enabled)
+
+    raw = captured["extra_body"]["chat_template_kwargs"]  # no normalization: what ChatOpenAI puts on the wire
+    assert raw == {base_key: thinking_enabled, template_key: thinking_enabled, "preserve_thinking": True}
+
+
+def test_vllm_switch_mirroring_never_invents_the_other_spelling(monkeypatch):
+    """A template that spells the switch one way, on a profile that does not spell it at all,
+    must not grow the second key: ``VllmChatModel`` would ignore it, but a chat template that
+    honors only ``thinking`` would suddenly see an ``enable_thinking`` it never asked for."""
+    model = _legacy_model_with_base_extra_body(
+        when_thinking_enabled={"extra_body": {"chat_template_kwargs": {"thinking": True}}},
+        extra_body={"chat_template_kwargs": {"preserve_thinking": True}},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-glm", thinking_enabled=True)
+
+    assert captured["extra_body"]["chat_template_kwargs"] == {"preserve_thinking": True, "thinking": True}
+
+
+def test_legacy_when_thinking_enabled_template_still_wins_on_conflicts(monkeypatch):
+    """Deep-merging must not weaken precedence: a key set in both places takes the template's value."""
+    model = _legacy_model_with_base_extra_body(
+        when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled", "budget_tokens": 4096}}},
+        extra_body={"thinking": {"type": "disabled", "budget_tokens": 1}, "tool_stream": True},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-glm", thinking_enabled=True)
+
+    assert captured["extra_body"] == {"tool_stream": True, "thinking": {"type": "enabled", "budget_tokens": 4096}}
 
 
 # ---------------------------------------------------------------------------
@@ -1265,6 +1553,48 @@ def test_no_duplicate_kwarg_when_reasoning_effort_in_config_and_thinking_disable
 
 
 @pytest.mark.parametrize(
+    ("runtime_effort", "expected_effort"),
+    [
+        (None, "high"),
+        ("low", "low"),
+    ],
+)
+def test_runtime_reasoning_effort_merges_with_profile_without_duplicate_kwarg(
+    monkeypatch,
+    runtime_effort,
+    expected_effort,
+):
+    model = ModelConfig(
+        name="deepseek-reasoner",
+        display_name="DeepSeek Reasoner",
+        description=None,
+        use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+        model="deepseek-reasoner",
+        reasoning_effort="high",
+        supports_thinking=True,
+        supports_reasoning_effort=True,
+        supports_vision=False,
+    )
+    cfg = _make_app_config([model])
+    captured: dict = {}
+
+    class CapturingModel(FakeChatModel):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            BaseChatModel.__init__(self, **kwargs)
+
+    _patch_factory(monkeypatch, cfg, model_class=CapturingModel)
+
+    factory_module.create_chat_model(
+        name="deepseek-reasoner",
+        thinking_enabled=True,
+        reasoning_effort=runtime_effort,
+    )
+
+    assert captured["reasoning_effort"] == expected_effort
+
+
+@pytest.mark.parametrize(
     ("profile", "thinking_enabled", "requested_effort", "expected_effort"),
     [
         pytest.param({"reasoning_effort": "high"}, True, None, "high", id="unset-request-keeps-profile-value"),
@@ -1796,3 +2126,389 @@ def test_codex_still_strips_overridden_max_tokens(monkeypatch):
     factory_module.create_chat_model(name="codex", model_overrides={"max_tokens": 9999})
 
     assert "max_tokens" not in captured
+
+
+# ---------------------------------------------------------------------------
+# Declarative reasoning capability contract (issue #5073)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("provider_name", ["ollama_qwen", "ollama_gemma"])
+def test_ollama_wizard_native_reasoning_survives_config_load_and_model_build(monkeypatch, provider_name):
+    import yaml
+    from wizard.providers import LLM_PROVIDERS
+    from wizard.writer import build_minimal_config
+
+    provider = next(item for item in LLM_PROVIDERS if item.name == provider_name)
+    content = build_minimal_config(
+        provider_use=provider.use,
+        model_name=provider.default_model,
+        display_name=provider.display_name,
+        api_key_field=provider.api_key_field,
+        env_var=provider.env_var,
+        extra_model_config=provider.extra_config,
+    )
+    config = AppConfig.model_validate(yaml.safe_load(content))
+    model = config.models[0]
+    assert model.reasoning is True
+    assert model.supports_thinking is True
+    assert resolve_reasoning_contract(model).source == "legacy"
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, config, model_class=_capturing_class(FakeChatModel, captured))
+    factory_module.create_chat_model(name=model.name, thinking_enabled=True)
+    assert captured["reasoning"] is True
+
+
+@pytest.mark.parametrize("level", ["low", "medium", "high"])
+def test_native_provider_reasoning_level_string_is_forwarded(monkeypatch, level):
+    """langchain-ollama accepts ``reasoning: low|medium|high`` (e.g. gpt-oss). Before the
+    contract field existed the string passed straight through; it still must."""
+    model = ModelConfig(name="ollama", use="langchain_ollama:ChatOllama", model="gpt-oss:20b", reasoning=level)
+    assert model.reasoning == level
+    assert model.supports_thinking is False
+    assert resolve_reasoning_contract(model).source == "legacy"
+
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="ollama", thinking_enabled=True)
+
+    assert captured["reasoning"] == level
+
+
+def test_native_provider_reasoning_false_is_forwarded(monkeypatch):
+    model = ModelConfig(name="ollama", use="langchain_ollama:ChatOllama", model="ollama", reasoning=False)
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="ollama", thinking_enabled=False)
+
+    assert captured["reasoning"] is False
+
+
+def _glm_effort() -> dict:
+    return {"values": ["low", "high", "max"], "default": "max", "aliases": {"minimal": "low", "medium": "high"}}
+
+
+def _contract_model(name: str = "contract-model", *, use: str = "langchain_openai:ChatOpenAI", reasoning: dict, **extras) -> ModelConfig:
+    return ModelConfig(
+        name=name,
+        display_name=name,
+        description=None,
+        use=use,
+        model=name,
+        api_key="test-key",
+        supports_vision=False,
+        reasoning=reasoning,
+        **extras,
+    )
+
+
+def test_contract_required_thinking_never_receives_a_disable_payload():
+    """A background caller asking for ``thinking_enabled=False`` on GLM-5.3-Flash
+    keeps thinking on and receives a mapped provider effort instead of the
+    synthesized ``thinking.type=disabled`` + ``reasoning_effort=minimal`` pair."""
+    model = _contract_model(
+        "glm-5.3-flash",
+        use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+        reasoning={"thinking": "required", "dialect": "openai_extra_body", "history": "clear", "effort": _glm_effort()},
+        api_base="https://api.z.ai/api/paas/v4",
+        stream_usage=False,
+        extra_body={"tool_stream": True},
+    )
+    chat_model = factory_module.create_chat_model(
+        name="glm-5.3-flash",
+        thinking_enabled=False,
+        reasoning_effort="medium",
+        app_config=_make_app_config([model]),
+        attach_tracing=False,
+    )
+    payload = chat_model._get_request_payload([HumanMessage(content="ping")])
+
+    assert payload["extra_body"] == {
+        "thinking": {"type": "enabled", "clear_thinking": True},
+        "tool_stream": True,
+    }
+    assert payload["reasoning_effort"] == "high"
+    assert chat_model.stream_usage is False
+
+
+def test_contract_required_thinking_uses_the_default_effort_for_background_callers():
+    model = _contract_model(
+        "glm-5.3-flash",
+        use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+        reasoning={"thinking": "required", "dialect": "openai_extra_body", "effort": _glm_effort()},
+        api_base="https://api.z.ai/api/paas/v4",
+    )
+    chat_model = factory_module.create_chat_model(name="glm-5.3-flash", thinking_enabled=False, app_config=_make_app_config([model]), attach_tracing=False)
+    payload = chat_model._get_request_payload([HumanMessage(content="ping")])
+
+    assert payload["extra_body"]["thinking"] == {"type": "enabled"}
+    assert payload["reasoning_effort"] == "max"
+
+
+def test_contract_optional_thinking_disable_path_maps_effort_instead_of_synthesizing_minimal(monkeypatch):
+    model = _contract_model(
+        reasoning={"thinking": "optional", "dialect": "openai_extra_body", "effort": {"values": ["low", "medium", "high"], "aliases": {"minimal": "low"}}},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=False, reasoning_effort="minimal")
+
+    assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert captured["reasoning_effort"] == "low"
+
+
+def test_contract_unknown_effort_without_default_is_not_forwarded(monkeypatch):
+    model = _contract_model(reasoning={"thinking": "optional", "effort": {"values": ["low", "high"]}})
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=True, reasoning_effort="medium")
+
+    assert "reasoning_effort" not in captured
+
+
+def test_contract_custom_effort_path_drops_generic_override(monkeypatch):
+    model = _contract_model(reasoning={"thinking": "optional", "effort": {"values": ["low", "high"], "default": "high", "path": "extra_body.thinking.effort"}})
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=True, model_overrides={"reasoning_effort": "minimal"})
+
+    assert "reasoning_effort" not in captured
+    assert captured["extra_body"]["thinking"]["effort"] == "high"
+
+
+def test_contract_custom_effort_path_stays_canonical_for_codex(monkeypatch):
+    model = _contract_model(
+        "codex-model",
+        use="deerflow.models.openai_codex_provider:CodexChatModel",
+        reasoning={"thinking": "optional", "effort": {"values": ["low", "high"], "default": "high", "path": "extra_body.thinking.effort"}},
+    )
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=FakeCodexChatModel)
+    monkeypatch.setattr(codex_provider_module, "CodexChatModel", FakeCodexChatModel)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="codex-model", thinking_enabled=True, model_overrides={"reasoning_effort": "minimal"})
+
+    assert "reasoning_effort" not in FakeChatModel.captured_kwargs
+    assert FakeChatModel.captured_kwargs["extra_body"]["thinking"]["effort"] == "high"
+
+
+def test_contract_without_effort_never_forwards_reasoning_effort(monkeypatch):
+    model = _contract_model(reasoning={"thinking": "optional"})
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=True, reasoning_effort="high")
+
+    assert "reasoning_effort" not in captured
+
+
+def test_contract_dialect_auto_infers_disable_payload_from_when_thinking_enabled(monkeypatch):
+    model = _contract_model(
+        reasoning={"thinking": "optional", "effort": {"values": ["low", "medium", "high"], "aliases": {"minimal": "low"}}},
+        when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled"}}},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=False)
+
+    assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "reasoning_effort" not in captured
+
+
+@pytest.mark.parametrize(("thinking_enabled", "expected"), [(True, True), (False, False)])
+def test_contract_dialect_vllm_synthesizes_chat_template_kwargs(monkeypatch, thinking_enabled, expected):
+    model = _contract_model(reasoning={"thinking": "optional", "dialect": "vllm_chat_template"})
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=thinking_enabled)
+
+    assert captured["extra_body"] == {"chat_template_kwargs": {"enable_thinking": expected}}
+
+
+def test_contract_dialect_vllm_enable_mirrors_the_declared_template_keys(monkeypatch):
+    """A template that declares the older ``thinking`` switch must not also grow
+    ``enable_thinking`` on the enable path — the legacy path never produced that shape."""
+    model = _contract_model(
+        reasoning={"thinking": "optional", "dialect": "vllm_chat_template"},
+        when_thinking_enabled={"extra_body": {"chat_template_kwargs": {"thinking": True}}},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=True)
+
+    assert captured["extra_body"] == {"chat_template_kwargs": {"thinking": True}}
+
+
+def test_contract_dialect_vllm_disable_mirrors_the_declared_template_keys(monkeypatch):
+    model = _contract_model(
+        reasoning={"thinking": "optional", "dialect": "vllm_chat_template"},
+        when_thinking_enabled={"extra_body": {"chat_template_kwargs": {"thinking": True}}},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=False)
+
+    assert captured["extra_body"] == {"chat_template_kwargs": {"thinking": False}}
+
+
+def test_contract_dialect_anthropic_merges_the_thinking_shortcut(monkeypatch):
+    model = _contract_model(reasoning={"thinking": "optional", "dialect": "anthropic"}, thinking={"budget_tokens": 2048})
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=True)
+    assert captured["thinking"] == {"type": "enabled", "budget_tokens": 2048}
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=False)
+    assert captured["thinking"] == {"type": "disabled"}
+
+
+@pytest.mark.parametrize(("thinking_enabled", "expected"), [(True, True), (False, False)])
+def test_contract_dialect_ollama_sets_the_reasoning_flag(monkeypatch, thinking_enabled, expected):
+    model = _contract_model(reasoning={"thinking": "optional", "dialect": "ollama"})
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=thinking_enabled)
+
+    assert captured["reasoning"] is expected
+
+
+def test_contract_dialect_none_leaves_the_payload_alone(monkeypatch):
+    model = _contract_model(reasoning={"thinking": "optional", "dialect": "none", "effort": {"values": ["minimal", "low", "medium", "high"]}})
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=False, reasoning_effort="minimal")
+
+    assert "extra_body" not in captured
+    assert "thinking" not in captured
+    assert captured["reasoning_effort"] == "minimal"
+
+
+def test_contract_history_preserve_serializes_clear_thinking_false(monkeypatch):
+    model = _contract_model(reasoning={"thinking": "optional", "dialect": "openai_extra_body", "history": "preserve"})
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=True)
+
+    assert captured["extra_body"] == {"thinking": {"type": "enabled", "clear_thinking": False}}
+
+
+def test_contract_history_is_inferred_for_auto_dialect(monkeypatch):
+    model = _contract_model(
+        reasoning={"thinking": "optional", "history": "clear"},
+        when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled"}}},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=True)
+
+    assert captured["extra_body"] == {"thinking": {"type": "enabled", "clear_thinking": True}}
+
+
+def test_contract_effort_path_serializes_nested_values(monkeypatch):
+    model = _contract_model(
+        reasoning={"thinking": "optional", "dialect": "openai_extra_body", "effort": {"values": ["low", "high"], "path": "extra_body.thinking.effort"}},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=True, reasoning_effort="high")
+
+    assert captured["extra_body"] == {"thinking": {"type": "enabled", "effort": "high"}}
+    assert "reasoning_effort" not in captured
+
+
+def test_contract_when_thinking_enabled_deep_merges_into_the_base_extra_body(monkeypatch):
+    model = _contract_model(
+        reasoning={"thinking": "optional"},
+        extra_body={"tool_stream": True},
+        when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled"}}},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=True)
+
+    assert captured["extra_body"] == {"tool_stream": True, "thinking": {"type": "enabled"}}
+
+
+def test_contract_when_thinking_disabled_template_wins_over_dialect_synthesis(monkeypatch):
+    model = _contract_model(
+        reasoning={"thinking": "optional", "dialect": "openai_extra_body", "effort": {"values": ["low", "high"]}},
+        when_thinking_disabled={"reasoning_effort": "low"},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=False)
+
+    assert "extra_body" not in captured
+    assert captured["reasoning_effort"] == "low"
+
+
+@pytest.mark.parametrize(("requested", "expected"), [("high", "high"), (None, "medium")])
+def test_contract_validated_request_wins_over_template_effort(monkeypatch, requested, expected):
+    model = _contract_model(
+        reasoning={"thinking": "optional", "effort": {"values": ["low", "medium", "high"]}},
+        when_thinking_enabled={"reasoning_effort": "medium"},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="contract-model", thinking_enabled=True, reasoning_effort=requested)
+
+    assert captured["reasoning_effort"] == expected
+
+
+def test_contract_reject_policy_fails_before_the_provider_is_built(monkeypatch):
+    model = _contract_model(reasoning={"thinking": "required", "on_disable_request": "reject", "dialect": "openai_extra_body"})
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    with pytest.raises(ValueError, match="requires thinking"):
+        factory_module.create_chat_model(name="contract-model", thinking_enabled=False)
+
+    assert captured == {}
+
+
+def test_contract_codex_maps_aliases_before_codex_validation(monkeypatch):
+    model = _contract_model(
+        "codex-model",
+        use="deerflow.models.openai_codex_provider:CodexChatModel",
+        reasoning={"thinking": "optional", "dialect": "none", "effort": {"values": ["low", "medium", "high", "xhigh"], "aliases": {"minimal": "low"}}},
+    )
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=FakeCodexChatModel)
+    monkeypatch.setattr(codex_provider_module, "CodexChatModel", FakeCodexChatModel)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="codex-model", thinking_enabled=True, reasoning_effort="minimal")
+
+    assert FakeChatModel.captured_kwargs.get("reasoning_effort") == "low"
+
+
+def test_legacy_profiles_are_untouched_by_the_contract_machinery(monkeypatch):
+    """A profile without ``reasoning:`` still takes the historical disable path, including
+    the hard-coded ``minimal`` effort the contract path deliberately drops."""
+    wte = {"extra_body": {"thinking": {"type": "enabled"}}}
+    cfg = _make_app_config([_make_model("legacy", supports_thinking=True, supports_reasoning_effort=True, when_thinking_enabled=wte)])
+    captured: dict = {}
+    _patch_factory(monkeypatch, cfg, model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy", thinking_enabled=False, reasoning_effort="high")
+
+    assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert captured["reasoning_effort"] == "minimal"

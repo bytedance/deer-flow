@@ -8,6 +8,7 @@ Coverage:
 - periodic reconciliation notifies Gateway recovery orchestration
 - Worker reconciliation skips runs with unexpired leases
 - Lease heartbeat renews active run leases
+- Lease heartbeat keeps renewing a staged terminal run until its commit
 - GATEWAY_WORKERS=1 + heartbeat_enabled=false behaviour unchanged
 """
 
@@ -15,14 +16,17 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
 from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, RunManager, RunStatus, ThreadOperationKind
+from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, _generate_worker_id
 from deerflow.runtime.runs.store.memory import MemoryRunStore
+from deerflow.runtime.runs.worker import RunContext, run_agent
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1115,6 +1119,139 @@ async def test_heartbeat_skips_runs_not_owned_by_this_worker():
 
 
 @pytest.mark.anyio
+async def test_staged_terminal_run_keeps_lease_through_worker_finalization():
+    """A worker finalizing a staged success must keep its lease renewed.
+
+    With an event store the worker stages the terminal status locally and
+    commits it only after its receipt and duration writes. The durable row
+    stays active meanwhile, so an unrenewed lease would let a peer reclaim
+    the successful run as an orphan ``error``.
+    """
+    config = _lease_config(lease_seconds=30, grace_seconds=0, heartbeat_enabled=True)
+    store = MemoryRunStore()
+    owner = _make_manager(store=store, worker_id="worker-a", run_ownership_config=config)
+    peer = _make_manager(store=store, worker_id="worker-b", run_ownership_config=config)
+    record = await owner.create_or_reject("thread-finalize")
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+    finalizing = asyncio.Event()
+    release = asyncio.Event()
+
+    class SlowReceiptEventStore(MemoryRunEventStore):
+        async def put_if_absent(self, **event):
+            if event["event_type"] == "run.delivery":
+                finalizing.set()
+                await release.wait()
+            return await super().put_if_absent(**event)
+
+    class FinishingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            yield {"messages": []}
+
+    task = asyncio.create_task(
+        run_agent(
+            bridge,
+            owner,
+            record,
+            ctx=RunContext(checkpointer=None, event_store=SlowReceiptEventStore()),
+            agent_factory=lambda **_kwargs: FinishingAgent(),
+            graph_input={},
+            config={},
+        )
+    )
+    record.task = task
+
+    try:
+        await asyncio.wait_for(finalizing.wait(), timeout=1)
+        assert record.status == RunStatus.success
+        assert (await store.get(record.run_id))["status"] == "running"
+
+        # Shrink the confirmed lease so it lapses during the test; only a
+        # heartbeat renewal can keep the peer from claiming the row.
+        near_expiry = (datetime.now(UTC) + timedelta(milliseconds=50)).isoformat()
+        record.lease_expires_at = near_expiry
+        store._runs[record.run_id]["lease_expires_at"] = near_expiry
+        await owner._renew_leases()
+        await asyncio.sleep(0.1)
+
+        assert await peer.reconcile_orphaned_inflight_runs(error="orphaned") == []
+    finally:
+        release.set()
+        await asyncio.wait_for(task, timeout=1)
+
+    assert record.ownership_lost is False
+    assert record.terminal_commit_pending is False
+    assert (await store.get(record.run_id))["status"] == "success"
+
+
+@pytest.mark.anyio
+async def test_renewal_rejected_by_own_terminal_commit_releases_barrier():
+    """A renewal racing this worker's terminal commit must not fence the run."""
+    config = _lease_config(lease_seconds=30, heartbeat_enabled=True)
+    store = MemoryRunStore()
+    manager = _make_manager(store=store, worker_id="worker-a", run_ownership_config=config)
+    record = await manager.create_or_reject("thread-1")
+    record.task = asyncio.create_task(asyncio.sleep(3600))
+    record.terminal_commit_pending = True
+    await manager.set_status(record.run_id, RunStatus.success, persist=False)
+    # The terminal write lands before the worker clears its barrier.
+    assert (await store.finalize_if_not_cancelled(record.run_id, status="success")).finalized
+
+    try:
+        await manager._renew_leases()
+
+        assert record.ownership_lost is False
+        assert record.terminal_commit_pending is False
+        assert record.status == RunStatus.success
+    finally:
+        record.task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await record.task
+
+
+@pytest.mark.anyio
+async def test_renewal_rejected_by_peer_fences_staged_terminal_run():
+    """A peer claim during finalization must fence the staged outcome."""
+    config = _lease_config(lease_seconds=30, heartbeat_enabled=True)
+    store = MemoryRunStore()
+    manager = _make_manager(store=store, worker_id="worker-a", run_ownership_config=config)
+    record = await manager.create_or_reject("thread-1")
+    record.task = asyncio.create_task(asyncio.sleep(3600))
+    record.terminal_commit_pending = True
+    await manager.set_status(record.run_id, RunStatus.success, persist=False)
+    store._runs[record.run_id]["owner_worker_id"] = "worker-b"
+
+    await manager._renew_leases()
+    await asyncio.sleep(0)
+
+    assert record.ownership_lost is True
+    assert record.task.cancelled()
+
+
+@pytest.mark.anyio
+async def test_fenced_staged_terminal_run_stops_renewing():
+    """Fencing ends the terminal-commit barrier, so its lease can lapse."""
+    config = _lease_config(lease_seconds=30, heartbeat_enabled=True)
+    store = MemoryRunStore()
+    manager = _make_manager(store=store, worker_id="worker-a", run_ownership_config=config)
+    record = await manager.create_or_reject("thread-1")
+    record.task = asyncio.create_task(asyncio.sleep(3600))
+    record.terminal_commit_pending = True
+    await manager.set_status(record.run_id, RunStatus.success, persist=False)
+    await manager._mark_ownership_lost(record, reason="Test fence", require_active=False)
+    store.update_lease = AsyncMock(wraps=store.update_lease)
+
+    try:
+        await manager._renew_leases()
+
+        store.update_lease.assert_not_awaited()
+        assert record.terminal_commit_pending is False
+    finally:
+        with pytest.raises(asyncio.CancelledError):
+            await record.task
+
+
+@pytest.mark.anyio
 async def test_heartbeat_not_started_when_disabled():
     """When heartbeat_enabled is False, start_heartbeat must be a no-op."""
     config = _lease_config(heartbeat_enabled=False)
@@ -1294,6 +1431,97 @@ async def test_create_thread_operation_atomic_interrupt_claims_and_creates():
     # Old run must be interrupted in-store
     old_row = await store.get("run-old")
     assert old_row["status"] == "interrupted"
+
+
+@pytest.mark.anyio
+async def test_create_thread_operation_atomic_uses_one_change_position():
+    """One atomic thread operation advances the change cursor once.
+
+    ``runtime/AGENTS.md`` documents that an atomic thread operation uses one
+    position for its interrupted rows and its new row, with ``run_id``
+    ordering ties, and ``test_run_evidence_reader`` pins that for the SQL
+    store. The memory store must agree: it is the backend an install runs
+    whenever no durable database is configured. Advancing once per row splits
+    a single interrupt-and-replace into two positions in the
+    ``(change_seq, run_id)`` cursor extensions page with.
+    """
+    store = MemoryRunStore()
+    config = _lease_config()
+    expired_lease = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
+
+    await store.create_thread_operation_atomic(
+        run_id="run-old",
+        thread_id="thread-1",
+        owner_worker_id="w1",
+        lease_expires_at=expired_lease,
+        multitask_strategy="reject",
+        grace_seconds=config.grace_seconds,
+    )
+
+    new_row, claimed = await store.create_thread_operation_atomic(
+        run_id="run-new",
+        thread_id="thread-1",
+        owner_worker_id="w2",
+        lease_expires_at=(datetime.now(UTC) + timedelta(seconds=30)).isoformat(),
+        multitask_strategy="interrupt",
+        grace_seconds=config.grace_seconds,
+    )
+
+    assert [row["run_id"] for row in claimed] == ["run-old"]
+    assert claimed[0]["change_seq"] == new_row["change_seq"]
+
+    # The shared position is what a paging consumer observes: the interrupted
+    # row and its replacement surface under one cursor value, ordered by
+    # ``run_id``, exactly as the SQL store reports them.
+    changed = await store.list_changed(after_change_seq=-1, after_run_id="")
+    positions = {row["run_id"]: row["change_seq"] for row in changed}
+    assert positions["run-old"] == positions["run-new"]
+    assert [row["run_id"] for row in changed if row["change_seq"] == positions["run-new"]] == ["run-new", "run-old"]
+
+
+@pytest.mark.anyio
+async def test_create_thread_operation_atomic_rejection_consumes_no_change_position():
+    """A ``ConflictError``-rejected operation advances no change position.
+
+    ``create_thread_operation_atomic`` allocates its position only after the
+    raise-only candidate scan, so a rejected operation consumes nothing — the
+    memory-store counterpart of the SQL store's rollback leaving the clock
+    untouched. A consumed-but-unused position leaves no trace in the rows
+    themselves, so the assertion is on the position the next accepted
+    operation lands on. Hoisting the allocation above the scan keeps every
+    other test in this file green and shows up here as a gap.
+    """
+    store = MemoryRunStore()
+    config = _lease_config(grace_seconds=10)
+
+    accepted, _ = await store.create_thread_operation_atomic(
+        run_id="valid-lease-run",
+        thread_id="thread-1",
+        owner_worker_id="other-worker",
+        lease_expires_at=(datetime.now(UTC) + timedelta(seconds=30)).isoformat(),
+        multitask_strategy="reject",
+        grace_seconds=config.grace_seconds,
+    )
+
+    with pytest.raises(ConflictError, match="another worker"):
+        await store.create_thread_operation_atomic(
+            run_id="run-new",
+            thread_id="thread-1",
+            owner_worker_id="w2",
+            lease_expires_at=(datetime.now(UTC) + timedelta(seconds=30)).isoformat(),
+            multitask_strategy="interrupt",
+            grace_seconds=config.grace_seconds,
+        )
+
+    next_row, _ = await store.create_thread_operation_atomic(
+        run_id="run-after",
+        thread_id="thread-2",
+        owner_worker_id="w2",
+        lease_expires_at=(datetime.now(UTC) + timedelta(seconds=30)).isoformat(),
+        multitask_strategy="reject",
+        grace_seconds=config.grace_seconds,
+    )
+    assert next_row["change_seq"] == accepted["change_seq"] + 1
 
 
 @pytest.mark.anyio

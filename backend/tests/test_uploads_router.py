@@ -1,9 +1,12 @@
 import asyncio
+import errno
 import os
 import stat
 import threading
+import time
+from datetime import timedelta
 from io import BytesIO
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -12,9 +15,13 @@ from _router_auth_helpers import call_unwrapped, make_authed_test_app
 from fastapi import HTTPException, UploadFile
 from fastapi.testclient import TestClient
 
+from app.gateway import upload_ingestion
+from app.gateway.auth.models import User
 from app.gateway.deps import get_config
 from app.gateway.routers import uploads
 from deerflow.sandbox.lease import get_sandbox_lease_manager
+from deerflow.uploads.companions import resolve_companion
+from deerflow.uploads.manager import cleanup_stale_upload_staging_files
 
 
 class ChunkedUpload:
@@ -72,6 +79,7 @@ def test_upload_files_writes_thread_storage_and_skips_local_sandbox_sync(tmp_pat
     assert (thread_uploads_dir / "notes.txt").read_bytes() == b"hello uploads"
 
     sandbox.update_file.assert_not_called()
+    provider.release.assert_not_called()
 
 
 def test_upload_and_list_response_models_expose_size_as_int(tmp_path):
@@ -132,6 +140,46 @@ def test_upload_files_auto_renames_duplicate_form_filenames(tmp_path):
     assert result.files[1].original_filename == "data.txt"
     assert (thread_uploads_dir / "data.txt").read_bytes() == b"first"
     assert (thread_uploads_dir / "data_1.txt").read_bytes() == b"second"
+
+
+def test_upload_files_deduplicates_case_variants_across_requests(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir()
+    user = User(email="upload-test@example.com")
+    app = make_authed_test_app(user_factory=lambda: user, bind_current_user=True)
+    app.include_router(uploads.router)
+    app.dependency_overrides[get_config] = lambda: SimpleNamespace()
+
+    claims = []
+    real_claim = uploads.claim_unique_filename
+
+    def capture_claim(name, seen):
+        claims.append((name, set(seen)))
+        return real_claim(name, seen)
+
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()),
+        patch.object(uploads, "claim_unique_filename", side_effect=capture_claim),
+        TestClient(app) as client,
+    ):
+        first = client.post("/api/threads/thread-local/uploads", files={"files": ("Report.txt", b"first")})
+        assert first.status_code == 200
+        assert first.json()["success"] is True
+        assert [entry["filename"] for entry in first.json()["files"]] == ["Report.txt"]
+
+        second = client.post("/api/threads/thread-local/uploads", files={"files": ("report.txt", b"second")})
+
+    assert second.status_code == 200
+    assert second.json()["success"] is True
+    assert [entry["filename"] for entry in second.json()["files"]] == ["report_1.txt"]
+    assert second.json()["files"][0]["original_filename"] == "report.txt"
+    assert (thread_uploads_dir / first.json()["files"][0]["filename"]).read_bytes() == b"first"
+    assert (thread_uploads_dir / second.json()["files"][0]["filename"]).read_bytes() == b"second"
+    assert {path.name for path in thread_uploads_dir.iterdir()} == {"Report.txt", "report_1.txt"}
+    # On case-insensitive hosts the link retry can hide a missing disk seed.
+    # Observe the real claim inputs so this invariant is checked on every host.
+    assert claims == [("Report.txt", set()), ("report.txt", {"Report.txt"})]
 
 
 def test_upload_files_deduplicates_max_length_filenames_without_failing_the_batch(tmp_path):
@@ -263,6 +311,7 @@ def test_upload_files_syncs_non_local_sandbox_and_marks_markdown_file(tmp_path):
 
     assert (thread_uploads_dir / "report.pdf").read_bytes() == b"pdf-bytes"
     assert (thread_uploads_dir / "report.md").read_text(encoding="utf-8") == "converted"
+    assert resolve_companion(thread_uploads_dir / "report.pdf") == thread_uploads_dir / "report.md"
 
     sandbox.update_file.assert_any_call("/mnt/user-data/uploads/report.pdf", b"pdf-bytes")
     sandbox.update_file.assert_any_call("/mnt/user-data/uploads/report.md", b"converted")
@@ -371,6 +420,191 @@ def test_upload_files_makes_non_local_files_sandbox_writable(tmp_path):
     make_writable.assert_any_call(thread_uploads_dir / "report.md")
 
 
+def test_upload_files_removes_the_staged_part_when_the_platform_blocks_an_open_unlink(tmp_path, monkeypatch):
+    """A staged ``.part`` that is still open must neither fail the upload nor leak.
+
+    Windows refuses to remove a file that still has an open handle, and the
+    conversion path deliberately holds a descriptor on the staged inode across
+    the link commit (that descriptor is what keeps conversion reading the bytes
+    this request wrote). Reproduce the resulting sharing violation portably by
+    pinning the staged name for as long as the descriptor lives: the commit's
+    own removal attempt would raise ``PermissionError``, and the deferred one
+    after the descriptor is released succeeds.
+    """
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = False
+    provider.acquire.side_effect = AssertionError("upload route should use acquire_async")
+    provider.acquire_async = AsyncMock(return_value="aio-1")
+    sandbox = MagicMock()
+    provider.get.return_value = sandbox
+
+    async def fake_convert(file_path: Path, output_path: Path | None = None) -> Path:
+        md_path = output_path if output_path is not None else file_path.with_suffix(".md")
+        md_path.write_text("converted", encoding="utf-8")
+        return md_path
+
+    pinned: set[str] = set()
+    real_unlink = os.unlink
+    real_prepare_upload_destination = uploads._prepare_upload_destination
+    real_copy_fd_to_path = upload_ingestion._copy_fd_to_path
+
+    def prepare_upload_destination(uploads_dir, display_filename):
+        upload_temp = real_prepare_upload_destination(uploads_dir, display_filename)
+        pinned.add(str(upload_temp.temp_path))
+        return upload_temp
+
+    def copy_fd_to_path(fd: int, dest: Path) -> None:
+        try:
+            real_copy_fd_to_path(fd, dest)
+        finally:
+            # The descriptor is gone: the staged inode is removable again.
+            pinned.clear()
+
+    def unlink(path, *args, **kwargs):
+        if str(path) in pinned:
+            raise PermissionError(32, "The process cannot access the file because it is being used by another process")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(uploads, "_prepare_upload_destination", prepare_upload_destination)
+    monkeypatch.setattr(upload_ingestion, "_copy_fd_to_path", copy_fd_to_path)
+    monkeypatch.setattr(os, "unlink", unlink)
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
+        patch.object(uploads, "convert_file_to_markdown", AsyncMock(side_effect=fake_convert)),
+        patch.object(uploads, "_make_file_sandbox_writable"),
+    ):
+        file = UploadFile(filename="report.pdf", file=BytesIO(b"pdf-bytes"))
+        result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-aio", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    assert result.success is True
+    assert result.files[0].filename == "report.pdf"
+    assert result.files[0].markdown_file == "report.md"
+    assert (thread_uploads_dir / "report.pdf").read_bytes() == b"pdf-bytes"
+    assert (thread_uploads_dir / "report.md").read_text(encoding="utf-8") == "converted"
+    assert not list(thread_uploads_dir.glob(f"{uploads.UPLOAD_STAGING_PREFIX}*{uploads.UPLOAD_STAGING_SUFFIX}"))
+
+
+@pytest.mark.parametrize("filename", ["notes.txt", "report.pdf"])
+@pytest.mark.parametrize("simulate_sharing_violation", [False, True])
+def test_upload_files_preserves_link_error_and_cleans_staging_after_closing_conversion_fd(tmp_path, monkeypatch, filename, simulate_sharing_violation):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir()
+    conversion_fds: set[int] = set()
+    duplicated_fds: list[int] = []
+    blocked_unlinks: list[str] = []
+    real_dup = upload_ingestion._dup_for_conversion
+    real_close = upload_ingestion._close_fd
+    real_unlink = os.unlink
+
+    async def dup_for_conversion(fd):
+        duplicate = await real_dup(fd)
+        conversion_fds.add(duplicate)
+        duplicated_fds.append(duplicate)
+        return duplicate
+
+    def close_fd(fd):
+        real_close(fd)
+        conversion_fds.discard(fd)
+
+    def unlink(path, *args, **kwargs):
+        # Simulate Windows sharing violations on every platform, while keeping
+        # the real conversion descriptor and the production abort path.
+        if simulate_sharing_violation and conversion_fds and str(path).endswith(uploads.UPLOAD_STAGING_SUFFIX):
+            blocked_unlinks.append(str(path))
+            raise PermissionError("conversion descriptor is still open")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(upload_ingestion, "_dup_for_conversion", dup_for_conversion)
+    monkeypatch.setattr(upload_ingestion, "_close_fd", close_fd)
+    monkeypatch.setattr(os, "unlink", unlink)
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
+        patch.object(os, "link", side_effect=OSError(errno.EIO, "original link failure")),
+    ):
+        file = UploadFile(filename=filename, file=BytesIO(b"upload bytes"))
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(call_unwrapped(uploads.upload_files, "thread-link-error", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    assert exc_info.value.status_code == 500
+    assert "original link failure" in exc_info.value.detail
+    assert not blocked_unlinks
+    assert not conversion_fds
+    assert len(duplicated_fds) == (1 if filename == "report.pdf" else 0)
+    assert list(thread_uploads_dir.iterdir()) == []
+
+
+def test_upload_files_succeeds_when_published_staging_cleanup_fails(tmp_path, monkeypatch, caplog):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir()
+    real_unlink = os.unlink
+
+    def unlink(path, *args, **kwargs):
+        if str(path).endswith(uploads.UPLOAD_STAGING_SUFFIX):
+            raise PermissionError("staged cleanup failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", unlink)
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=False),
+    ):
+        file = UploadFile(filename="notes.txt", file=BytesIO(b"published bytes"))
+        result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-cleanup-error", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    assert result.success
+    assert (thread_uploads_dir / "notes.txt").read_bytes() == b"published bytes"
+    # The hidden staging name is left for the startup sweep, not reported as a
+    # failed upload after the destination has already been published.
+    staged_paths = list(thread_uploads_dir.glob(".upload-*.part"))
+    assert len(staged_paths) == 1
+    assert "Failed to remove staged upload file" in caplog.text
+
+
+def test_link_staged_preserves_original_error_when_cleanup_fails(tmp_path):
+    staged_path = tmp_path / "upload.part"
+    staged_path.write_bytes(b"upload bytes")
+    original_error = OSError(errno.EIO, "original link failure")
+    with (
+        patch.object(os, "link", side_effect=original_error),
+        patch.object(os, "unlink", side_effect=PermissionError("cleanup failure")) as unlink,
+        pytest.raises(OSError) as exc_info,
+    ):
+        uploads._link_staged_no_overwrite(staged_path, tmp_path, "report.pdf")
+
+    assert exc_info.value is original_error
+    unlink.assert_called_once_with(staged_path)
+    assert staged_path.read_bytes() == b"upload bytes"
+    assert not (tmp_path / "report.pdf").exists()
+
+
+def test_link_staged_failure_leaves_staged_file_for_caller_when_not_owning(tmp_path):
+    staged_path = tmp_path / "upload.part"
+    staged_path.write_bytes(b"upload bytes")
+    original_error = OSError(errno.EIO, "original link failure")
+    with (
+        patch.object(os, "link", side_effect=original_error),
+        patch.object(uploads, "_remove_staged_file") as remove_mock,
+        pytest.raises(OSError) as exc_info,
+    ):
+        uploads._link_staged_no_overwrite(staged_path, tmp_path, "report.pdf", unlink_staged=False)
+
+    assert exc_info.value is original_error
+    remove_mock.assert_not_called()
+    assert staged_path.read_bytes() == b"upload bytes"
+
+
 def test_upload_files_does_not_adjust_permissions_for_local_sandbox(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
@@ -429,6 +663,7 @@ def test_upload_files_acquires_non_local_sandbox_before_writing(tmp_path):
     provider.acquire.assert_not_called()
     provider.acquire_async.assert_awaited_once_with("thread-aio", user_id="owner-upload")
     sandbox.update_file.assert_called_once_with("/mnt/user-data/uploads/notes.txt", b"hello uploads")
+    provider.release.assert_called_once_with("aio-1")
 
 
 def test_upload_files_fails_before_writing_when_non_local_sandbox_unavailable(tmp_path):
@@ -452,6 +687,7 @@ def test_upload_files_fails_before_writing_when_non_local_sandbox_unavailable(tm
     assert file.read_calls == []
     provider.acquire.assert_not_called()
     provider.get.assert_not_called()
+    provider.release.assert_not_called()
 
 
 def test_upload_files_rejects_too_many_files_before_writing(tmp_path):
@@ -474,6 +710,190 @@ def test_upload_files_rejects_too_many_files_before_writing(tmp_path):
     assert list(thread_uploads_dir.iterdir()) == []
     assert files[0].read_calls == []
     assert files[1].read_calls == []
+
+
+def test_upload_files_releases_partial_lease_when_acquired_sandbox_is_missing(tmp_path):
+    """open() acquires the sandbox request lease and THEN raises when the
+    lease yields no sandbox; setup runs inside the cleanup scope, so the
+    partially acquired holder is released."""
+    from app.gateway.authz import SandboxRequestLease
+
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = False
+    lost_lease = SandboxRequestLease(sandbox=None, sandbox_id="aio-1", denied=False, owner_id="gateway:upload:x", provider=provider)
+    file = ChunkedUpload("notes.txt", [b"hello uploads"])
+
+    with (
+        patch.object(SandboxRequestLease, "release", AsyncMock()) as release,
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "try_acquire_sandbox_for_request", AsyncMock(return_value=lost_lease)),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(call_unwrapped(uploads.upload_files, "thread-aio", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    assert exc_info.value.status_code == 500
+    release.assert_awaited_once()
+    assert list(thread_uploads_dir.iterdir()) == []
+    assert file.read_calls == []
+
+
+def test_upload_files_in_flight_upload_is_invisible_to_listings(tmp_path):
+    """Before the atomic link commit, only the hidden ``.upload-*.part``
+    staging file exists: listings expose no zero-byte or partial final name,
+    and no placeholder sits at the destination."""
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = _mounted_provider()
+    real_write = uploads._write_upload_chunk
+    write_started = threading.Event()
+    release_write = threading.Event()
+
+    def gated_write(upload_temp, chunk) -> None:
+        write_started.set()
+        assert release_write.wait(timeout=10)
+        real_write(upload_temp, chunk)
+
+    results = []
+
+    def run_upload() -> None:
+        file = ChunkedUpload("notes.txt", [b"hello"])
+        results.append(asyncio.run(call_unwrapped(uploads.upload_files, "thread-local", request=MagicMock(), files=[file], config=SimpleNamespace())))
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "_write_upload_chunk", side_effect=gated_write),
+    ):
+        upload_thread = threading.Thread(target=run_upload)
+        upload_thread.start()
+        assert write_started.wait(timeout=10)
+        # Mid-upload: the final name is absent and listings expose nothing —
+        # only the hidden staging part is on disk.
+        assert not (thread_uploads_dir / "notes.txt").exists()
+        assert uploads.list_files_in_dir(thread_uploads_dir)["files"] == []
+        staged = [p.name for p in thread_uploads_dir.iterdir()]
+        assert len(staged) == 1 and staged[0].startswith(".upload-") and staged[0].endswith(".part")
+        release_write.set()
+        upload_thread.join(timeout=15)
+
+    assert not upload_thread.is_alive()
+    assert results[0].success is True
+    assert (thread_uploads_dir / "notes.txt").read_bytes() == b"hello"
+    # Commit consumed the staged part; nothing transient remains.
+    assert [p.name for p in thread_uploads_dir.iterdir()] == ["notes.txt"]
+
+
+def test_orphaned_staging_part_is_hidden_from_listings_and_swept(tmp_path):
+    """A crashed upload leaves only a hidden ``.upload-*.part`` file: the
+    listing never exposes it and, once it is older than the in-flight guard,
+    the startup cleanup removes it."""
+    thread_uploads_dir = tmp_path / "threads" / "t1" / "user-data" / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    orphan = thread_uploads_dir / ".upload-crashed.part"
+    orphan.write_bytes(b"partial")
+    stale = time.time() - timedelta(days=2).total_seconds()
+    os.utime(orphan, (stale, stale))
+    visible = thread_uploads_dir / "kept.txt"
+    visible.write_bytes(b"kept")
+
+    listing = uploads.list_files_in_dir(thread_uploads_dir)
+    assert [f["filename"] for f in listing["files"]] == ["kept.txt"]
+    assert cleanup_stale_upload_staging_files(tmp_path) == 1
+    assert not orphan.exists()
+    assert visible.read_bytes() == b"kept"
+
+
+def test_startup_cleanup_reclaims_a_published_staging_alias_immediately(tmp_path):
+    """A Gateway that dies after the commit's ``os.link`` but before the staged
+    name is removed leaves ``notes.txt`` and its ``.upload-*.part`` alias on one
+    inode. The next startup must reclaim the alias at once: left in place, the
+    destination fails the multi-link check on its next replacement upload."""
+    from deerflow.uploads.manager import validate_upload_destination
+
+    thread_uploads_dir = tmp_path / "threads" / "thread-local" / "user-data" / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    provider = _mounted_provider()
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        # The crash: the staged name is never removed after the link publishes the bytes.
+        patch.object(uploads, "_remove_staged_file"),
+    ):
+        file = ChunkedUpload("notes.txt", [b"hello"])
+        result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-local", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    assert result.success is True
+    names = sorted(p.name for p in thread_uploads_dir.iterdir())
+    assert names[-1] == "notes.txt" and len(names) == 2 and names[0].startswith(".upload-") and names[0].endswith(".part")
+    assert os.lstat(thread_uploads_dir / "notes.txt").st_nlink == 2
+    with pytest.raises(ValueError, match="multiple links"):
+        validate_upload_destination(thread_uploads_dir, "notes.txt")
+
+    assert cleanup_stale_upload_staging_files(tmp_path) == 1
+
+    assert [p.name for p in thread_uploads_dir.iterdir()] == ["notes.txt"]
+    assert (thread_uploads_dir / "notes.txt").read_bytes() == b"hello"
+    assert validate_upload_destination(thread_uploads_dir, "notes.txt") == thread_uploads_dir / "notes.txt"
+
+
+def test_startup_cleanup_keeps_an_in_flight_upload_on_a_shared_volume(tmp_path):
+    """Several Gateway replicas can share one home volume. A replica starting
+    while another one is still writing a ``.upload-*.part`` must not sweep it:
+    that upload would lose its staged bytes at the atomic link and fail."""
+    thread_uploads_dir = tmp_path / "threads" / "thread-local" / "user-data" / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = _mounted_provider()
+    real_write = uploads._write_upload_chunk
+    write_started = threading.Event()
+    release_write = threading.Event()
+
+    def gated_write(upload_temp, chunk) -> None:
+        write_started.set()
+        assert release_write.wait(timeout=10)
+        real_write(upload_temp, chunk)
+
+    results = []
+
+    def run_upload() -> None:
+        file = ChunkedUpload("notes.txt", [b"hello"])
+        try:
+            results.append(asyncio.run(call_unwrapped(uploads.upload_files, "thread-local", request=MagicMock(), files=[file], config=SimpleNamespace())))
+        except BaseException as exc:  # noqa: BLE001 - surfaced through the assertions below
+            results.append(exc)
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "_write_upload_chunk", side_effect=gated_write),
+    ):
+        upload_thread = threading.Thread(target=run_upload)
+        upload_thread.start()
+        assert write_started.wait(timeout=10)
+        staged = [p.name for p in thread_uploads_dir.iterdir()]
+        assert len(staged) == 1 and staged[0].startswith(".upload-") and staged[0].endswith(".part")
+
+        # Another replica starts up mid-upload and runs its staging sweep.
+        assert cleanup_stale_upload_staging_files(tmp_path) == 0
+        assert [p.name for p in thread_uploads_dir.iterdir()] == staged
+
+        release_write.set()
+        upload_thread.join(timeout=15)
+
+    assert not upload_thread.is_alive()
+    assert not isinstance(results[0], BaseException), results[0]
+    assert results[0].success is True
+    assert (thread_uploads_dir / "notes.txt").read_bytes() == b"hello"
+    assert [p.name for p in thread_uploads_dir.iterdir()] == ["notes.txt"]
 
 
 def test_upload_files_rejects_oversized_single_file_and_removes_partial_file(tmp_path):
@@ -547,6 +967,7 @@ def test_upload_files_does_not_sync_non_local_sandbox_when_total_size_exceeds_li
     provider.acquire_async.assert_awaited_once_with("thread-aio", user_id="owner-upload")
     assert provider.get.call_count == 2
     assert all(call.args == ("aio-1",) for call in provider.get.call_args_list)
+    provider.release.assert_called_once_with("aio-1")
     sandbox.update_file.assert_not_called()
 
 
@@ -577,8 +998,76 @@ def test_upload_files_does_not_sync_non_local_sandbox_when_conversion_fails(tmp_
     provider.acquire_async.assert_awaited_once_with("thread-aio", user_id="owner-upload")
     assert provider.get.call_count == 2
     assert all(call.args == ("aio-1",) for call in provider.get.call_args_list)
+    provider.release.assert_called_once_with("aio-1")
     sandbox.update_file.assert_not_called()
     assert not (thread_uploads_dir / "report.pdf").exists()
+
+
+@pytest.mark.parametrize("failure", ["lookup", "sync"])
+def test_upload_files_releases_non_local_sandbox_when_sync_fails(tmp_path, failure):
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = False
+    provider.acquire_async = AsyncMock(return_value="aio-1")
+    sandbox = provider.get.return_value
+    if failure == "lookup":
+        provider.get.return_value = None
+    else:
+        sandbox.update_file.side_effect = RuntimeError("sync failed")
+    file = ChunkedUpload("notes.txt", [b"hello uploads"])
+
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=tmp_path),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+    ):
+        with pytest.raises(HTTPException if failure == "lookup" else RuntimeError):
+            asyncio.run(call_unwrapped(uploads.upload_files, "thread-aio", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    provider.release.assert_called_once_with("aio-1")
+    if failure == "lookup":
+        assert file.read_calls == []
+        assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("run_finishes_during_sync", [False, True])
+def test_upload_files_keeps_active_run_sandbox_until_last_holder_finishes(tmp_path, run_finishes_during_sync):
+    from deerflow.sandbox.lease import discard_sandbox_lease_manager, get_sandbox_lease_manager
+
+    async def go():
+        provider = MagicMock()
+        provider.uses_thread_data_mounts = False
+        provider.acquire_async = AsyncMock(return_value="aio-1")
+        sandbox = provider.get.return_value
+        manager = get_sandbox_lease_manager(provider)
+        await manager.acquire_async("active-run", "thread-aio", user_id="owner-upload")
+
+        def sync_file(path, content):
+            assert path == "/mnt/user-data/uploads/notes.txt"
+            assert content == b"hello uploads"
+            if run_finishes_during_sync:
+                manager.release("active-run")
+            provider.release.assert_not_called()
+
+        sandbox.update_file.side_effect = sync_file
+        try:
+            with (
+                patch.object(uploads, "get_effective_user_id", return_value="owner-upload"),
+                patch.object(uploads, "ensure_uploads_dir", return_value=tmp_path),
+                patch.object(uploads, "get_sandbox_provider", return_value=provider),
+            ):
+                file = UploadFile(filename="notes.txt", file=BytesIO(b"hello uploads"))
+                result = await call_unwrapped(uploads.upload_files, "thread-aio", request=MagicMock(), files=[file], config=SimpleNamespace())
+
+            assert result.success
+            if not run_finishes_during_sync:
+                provider.release.assert_not_called()
+                assert manager.binding_for("active-run") == "aio-1"
+                await manager.release_async("active-run")
+            provider.release.assert_called_once_with("aio-1")
+        finally:
+            await manager.release_async("active-run")
+            discard_sandbox_lease_manager(provider)
+
+    asyncio.run(go())
 
 
 def test_make_file_sandbox_writable_adds_write_bits_for_regular_files(tmp_path):
@@ -662,6 +1151,87 @@ def test_upload_files_adjusts_read_permissions_for_mounted_non_local_sandbox(tmp
     assert called_path.name == "notes.txt"
 
 
+@pytest.mark.parametrize("filename", [".upload-notes.part", ".upload-.part", "folder/.upload-notes.part"])
+@pytest.mark.parametrize("batch", ["single", "reserved_first", "reserved_last"])
+def test_upload_files_rejects_reserved_names_before_starting_batch(tmp_path, filename, batch):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir()
+    existing = thread_uploads_dir / "existing.txt"
+    existing.write_bytes(b"existing document")
+    app = make_authed_test_app()
+    app.include_router(uploads.router)
+    app.dependency_overrides[get_config] = lambda: SimpleNamespace()
+
+    reserved = ("files", (filename, b"reserved document"))
+    normal = ("files", ("normal.txt", b"normal document"))
+    files = [reserved] if batch == "single" else [reserved, normal] if batch == "reserved_first" else [normal, reserved]
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir) as ensure_dir,
+        patch.object(uploads, "get_sandbox_provider") as get_provider,
+        TestClient(app) as client,
+    ):
+        response = client.post("/api/threads/thread-local/uploads", files=files)
+
+    assert response.status_code == 400
+    assert "reserved upload staging" in response.json()["detail"]
+    assert "Rename" in response.json()["detail"]
+    ensure_dir.assert_not_called()
+    get_provider.assert_not_called()
+    assert [path.name for path in thread_uploads_dir.iterdir()] == ["existing.txt"]
+    assert existing.read_bytes() == b"existing document"
+
+
+@pytest.mark.parametrize("filename", [r"folder\.upload-notes.part", r"C:\users\.upload-notes.part"])
+@pytest.mark.parametrize("batch", ["single", "reserved_first", "reserved_last"])
+def test_upload_files_rejects_windows_reserved_names_with_posix_basename_rules(tmp_path, monkeypatch, filename, batch):
+    # Emulate Linux basename parsing only for the multipart filename; keep
+    # native filesystem paths for ingestion and the test fixtures.
+    monkeypatch.setattr(uploads, "Path", lambda value: PurePosixPath(value) if value == filename else Path(value))
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir()
+    existing = thread_uploads_dir / "existing.txt"
+    existing.write_bytes(b"existing document")
+    reserved = ChunkedUpload(filename, [b"reserved document"])
+    normal = ChunkedUpload("normal.txt", [b"normal document"])
+    files = [reserved] if batch == "single" else [reserved, normal] if batch == "reserved_first" else [normal, reserved]
+
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir) as ensure_dir,
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()) as get_provider,
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        asyncio.run(call_unwrapped(uploads.upload_files, "thread-local", request=MagicMock(), files=files, config=SimpleNamespace()))
+
+    assert exc_info.value.status_code == 400
+    assert "reserved upload staging" in exc_info.value.detail
+    assert "Rename" in exc_info.value.detail
+    ensure_dir.assert_not_called()
+    get_provider.assert_not_called()
+    assert all(file.read_calls == [] for file in files)
+    assert [path.name for path in thread_uploads_dir.iterdir()] == ["existing.txt"]
+    assert existing.read_bytes() == b"existing document"
+
+
+@pytest.mark.parametrize("filename", [".upload-notes.txt", "notes.part", ".env"])
+def test_upload_files_accepts_names_near_reserved_pattern(tmp_path, filename):
+    app = make_authed_test_app()
+    app.include_router(uploads.router)
+    app.dependency_overrides[get_config] = lambda: SimpleNamespace()
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = True
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=tmp_path),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        TestClient(app) as client,
+    ):
+        response = client.post("/api/threads/thread-local/uploads", files={"files": (filename, b"user document")})
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+    assert [entry["filename"] for entry in response.json()["files"]] == [filename]
+    assert (tmp_path / filename).read_bytes() == b"user document"
+
+
 def test_upload_files_rejects_dotdot_and_dot_filenames(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
@@ -692,6 +1262,33 @@ def test_upload_files_rejects_dotdot_and_dot_filenames(tmp_path):
 
     # Only the safely normalised file should exist
     assert [f.name for f in thread_uploads_dir.iterdir()] == ["passwd"]
+
+
+def test_upload_files_skips_nul_filename_without_rolling_back_valid_file(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir()
+    provider = _mounted_provider()
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+    ):
+        result = asyncio.run(
+            call_unwrapped(
+                uploads.upload_files,
+                "thread-local",
+                request=MagicMock(),
+                files=[
+                    UploadFile(filename="valid.txt", file=BytesIO(b"kept")),
+                    UploadFile(filename="report\x00.pdf", file=BytesIO(b"invalid")),
+                ],
+                config=SimpleNamespace(),
+            )
+        )
+
+    assert [file.filename for file in result.files] == ["valid.txt"]
+    assert (thread_uploads_dir / "valid.txt").read_bytes() == b"kept"
 
 
 def test_upload_files_rejects_preexisting_symlink_destination(tmp_path):
@@ -744,7 +1341,14 @@ def test_upload_files_rejects_dangling_symlink_destination(tmp_path):
     assert (thread_uploads_dir / "victim.txt").is_symlink()
 
 
-def test_upload_files_rejects_hardlinked_destination_without_truncating(tmp_path):
+def test_upload_files_never_writes_through_a_hardlinked_destination(tmp_path):
+    """A same-named upload against a hardlinked destination is DIVERTED, not
+    written through: the hardlink appears in the seeded listing like any
+    regular file, so the upload claims ``victim_1.txt`` and the hardlinked
+    victim (and its outside source) keep their bytes. Unlike a symlink — an
+    un-listed unsafe name the destination validator still rejects — a
+    hardlink is indistinguishable from a legitimate existing file, and the
+    unique-name mechanism makes writing through it structurally impossible."""
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
     outside_file = tmp_path / "outside.txt"
@@ -762,14 +1366,19 @@ def test_upload_files_rejects_hardlinked_destination_without_truncating(tmp_path
         file = UploadFile(filename="victim.txt", file=BytesIO(b"attacker upload"))
         result = asyncio.run(uploads.upload_files("thread-local", files=[file]))
 
-    assert result.success is False
-    assert result.files == []
-    assert result.skipped_files == ["victim.txt"]
+    assert result.success is True
+    assert [file_info.filename for file_info in result.files] == ["victim_1.txt"]
     assert outside_file.read_text(encoding="utf-8") == "protected"
     assert (thread_uploads_dir / "victim.txt").read_text(encoding="utf-8") == "protected"
+    assert (thread_uploads_dir / "victim_1.txt").read_bytes() == b"attacker upload"
 
 
-def test_upload_files_overwrites_existing_regular_file(tmp_path):
+def test_upload_files_unique_names_a_same_name_reupload(tmp_path):
+    """A same-name re-upload never replaces the existing file: the ingestion
+    service seeds claimed names from the thread's current uploads and
+    reserves destinations atomically, so the re-upload lands as
+    ``notes_1.txt`` with the original bytes intact. (In-place update is the
+    artifacts PUT endpoint's job, never the uploads endpoint's.)"""
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
     existing_file = thread_uploads_dir / "notes.txt"
@@ -788,9 +1397,11 @@ def test_upload_files_overwrites_existing_regular_file(tmp_path):
         result = asyncio.run(uploads.upload_files("thread-local", files=[file]))
 
     assert result.success is True
-    assert [file_info.filename for file_info in result.files] == ["notes.txt"]
-    assert existing_file.read_bytes() == b"new upload"
+    assert [file_info.filename for file_info in result.files] == ["notes_1.txt"]
+    assert result.files[0].original_filename == "notes.txt"
+    assert existing_file.read_bytes() == b"old upload"
     assert existing_file.stat().st_nlink == 1
+    assert (thread_uploads_dir / "notes_1.txt").read_bytes() == b"new upload"
 
 
 def test_upload_files_oversized_replacement_preserves_existing_regular_file(tmp_path):
@@ -825,18 +1436,351 @@ def test_upload_files_oversized_replacement_preserves_existing_regular_file(tmp_
     assert [path.name for path in thread_uploads_dir.iterdir()] == ["a.txt"]
 
 
-def test_delete_uploaded_file_removes_generated_markdown_companion(tmp_path):
+def test_upload_files_converts_the_bytes_it_wrote_not_the_committed_name(tmp_path):
+    """A sandbox swapping the landed upload must not redirect conversion at a host file."""
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
+    host_file = tmp_path / "host-secret.pdf"
+    host_file.write_bytes(b"HOST SECRET")
+
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = True
+
+    async def racing_convert(file_path: Path, output_path: Path | None = None) -> Path:
+        # The sandbox wins the race: the committed name now points outside uploads.
+        landed = thread_uploads_dir / "report.pdf"
+        if landed.exists() and not landed.is_symlink():
+            landed.unlink()
+            _symlink_to_or_skip(landed, host_file)
+        md_path = output_path if output_path is not None else file_path.with_suffix(".md")
+        md_path.write_bytes(b"CONVERTED:" + file_path.read_bytes())
+        return md_path
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
+        patch.object(uploads, "convert_file_to_markdown", AsyncMock(side_effect=racing_convert)),
+    ):
+        file = ChunkedUpload("report.pdf", [b"pdf-bytes"])
+        result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-race", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    companion = thread_uploads_dir / result.files[0].markdown_file
+    assert companion.read_bytes() == b"CONVERTED:pdf-bytes"
+    assert b"HOST SECRET" not in companion.read_bytes()
+
+
+def test_upload_files_conversion_source_survives_a_swap_before_it_is_read(tmp_path):
+    """The swap lands after the upload commits and before conversion reads it."""
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    host_file = tmp_path / "host-secret.pdf"
+    host_file.write_bytes(b"HOST SECRET")
+
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = True
+    real_mkdtemp = upload_ingestion.tempfile.mkdtemp
+
+    def swap_then_mkdtemp(*args, **kwargs):
+        # Runs between the link-commit and the read of the staged bytes.
+        landed = thread_uploads_dir / "report.pdf"
+        if landed.exists() and not landed.is_symlink():
+            landed.unlink()
+            _symlink_to_or_skip(landed, host_file)
+        return real_mkdtemp(*args, **kwargs)
+
+    async def fake_convert(file_path: Path, output_path: Path | None = None) -> Path:
+        md_path = output_path if output_path is not None else file_path.with_suffix(".md")
+        md_path.write_bytes(b"CONVERTED:" + file_path.read_bytes())
+        return md_path
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
+        patch.object(uploads, "convert_file_to_markdown", AsyncMock(side_effect=fake_convert)),
+        patch.object(upload_ingestion.tempfile, "mkdtemp", side_effect=swap_then_mkdtemp),
+    ):
+        file = ChunkedUpload("report.pdf", [b"pdf-bytes"])
+        result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-race2", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    companion = thread_uploads_dir / result.files[0].markdown_file
+    assert companion.read_bytes() == b"CONVERTED:pdf-bytes"
+    assert b"HOST SECRET" not in companion.read_bytes()
+
+
+def test_upload_files_closes_conversion_descriptor_when_private_dir_fails(tmp_path):
+    """A failed temp-dir creation must not strand the duplicated descriptor."""
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = True
+
+    duplicated: list[int] = []
+    closed: list[int] = []
+    real_dup, real_close = os.dup, os.close
+
+    def tracking_dup(fd: int) -> int:
+        new_fd = real_dup(fd)
+        duplicated.append(new_fd)
+        return new_fd
+
+    def tracking_close(fd: int) -> None:
+        closed.append(fd)
+        real_close(fd)
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
+        patch.object(uploads, "convert_file_to_markdown", AsyncMock()),
+        patch.object(upload_ingestion.os, "dup", side_effect=tracking_dup),
+        patch.object(upload_ingestion.os, "close", side_effect=tracking_close),
+        patch.object(upload_ingestion.tempfile, "mkdtemp", side_effect=OSError("No space left on device")),
+    ):
+        file = ChunkedUpload("report.pdf", [b"pdf-bytes"])
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(call_unwrapped(uploads.upload_files, "thread-fd", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    assert exc_info.value.status_code == 500
+    assert len(duplicated) == 1
+    assert duplicated[0] in closed
+
+
+def test_upload_files_closes_conversion_descriptor_when_ingestion_is_cancelled(tmp_path):
+    """Cancelling mid-duplication must not strand the descriptor the worker still produces."""
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = True
+
+    started = threading.Event()
+    release = threading.Event()
+    duplicated: list[int] = []
+    closed: list[int] = []
+    real_dup, real_close = os.dup, os.close
+
+    def slow_dup(fd: int) -> int:
+        # Allocate first, then stall: the descriptor exists while the caller
+        # is cancelled, which is exactly what must not be abandoned.
+        new_fd = real_dup(fd)
+        duplicated.append(new_fd)
+        started.set()
+        release.wait(5)
+        return new_fd
+
+    def tracking_close(fd: int) -> None:
+        closed.append(fd)
+        real_close(fd)
+
+    async def scenario() -> None:
+        service = upload_ingestion.ThreadUploadIngestionService(request=None, thread_id="thread-cancel", user_id="u", app_config=SimpleNamespace())
+        await service.open()
+
+        async def chunks():
+            yield b"pdf-bytes"
+
+        task = asyncio.create_task(service.ingest_chunks(chunks(), display_name="report.pdf"))
+        await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # The worker cannot be interrupted; it finishes after the cancellation.
+        release.set()
+        for _ in range(100):
+            if duplicated and duplicated[0] in closed:
+                break
+            await asyncio.sleep(0.05)
+        await service.aclose()
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
+        patch.object(uploads, "convert_file_to_markdown", AsyncMock()),
+        patch.object(upload_ingestion.os, "dup", side_effect=slow_dup),
+        patch.object(upload_ingestion.os, "close", side_effect=tracking_close),
+    ):
+        asyncio.run(scenario())
+
+    assert len(duplicated) == 1, "the duplication worker must have run"
+    assert duplicated[0] in closed, "the abandoned descriptor was never closed"
+
+
+def test_upload_files_closes_conversion_descriptor_when_cancelled_during_commit(tmp_path):
+    """Cancellation after the descriptor is owned must still close it."""
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = True
+
+    started = threading.Event()
+    release = threading.Event()
+    duplicated: list[int] = []
+    closed: list[int] = []
+    real_dup, real_close = os.dup, os.close
+    real_commit = uploads._commit_upload_temp_no_overwrite
+
+    def tracking_dup(fd: int) -> int:
+        new_fd = real_dup(fd)
+        duplicated.append(new_fd)
+        return new_fd
+
+    def tracking_close(fd: int) -> None:
+        closed.append(fd)
+        real_close(fd)
+
+    def slow_commit(*args, **kwargs):
+        started.set()
+        release.wait(5)
+        return real_commit(*args, **kwargs)
+
+    async def scenario() -> None:
+        service = upload_ingestion.ThreadUploadIngestionService(request=None, thread_id="thread-cancel-commit", user_id="u", app_config=SimpleNamespace())
+        await service.open()
+
+        async def chunks():
+            yield b"pdf-bytes"
+
+        task = asyncio.create_task(service.ingest_chunks(chunks(), display_name="report.pdf"))
+        await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+        for _ in range(100):
+            if duplicated and duplicated[0] in closed:
+                break
+            await asyncio.sleep(0.05)
+        await service.aclose()
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
+        patch.object(uploads, "convert_file_to_markdown", AsyncMock()),
+        patch.object(uploads, "_commit_upload_temp_no_overwrite", side_effect=slow_commit),
+        patch.object(upload_ingestion.os, "dup", side_effect=tracking_dup),
+        patch.object(upload_ingestion.os, "close", side_effect=tracking_close),
+    ):
+        asyncio.run(scenario())
+
+    assert len(duplicated) == 1
+    assert duplicated[0] in closed, "the owned descriptor was not closed on cancellation"
+
+
+def test_upload_files_closes_conversion_descriptor_when_cancelled_while_copy_is_queued(tmp_path):
+    """A copy job cancelled before its worker starts must not strand the descriptor."""
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = True
+
+    duplicated: list[int] = []
+    closed: list[int] = []
+    real_dup, real_close = os.dup, os.close
+    real_run_file_io = upload_ingestion.run_file_io
+    state: dict[str, object] = {}
+
+    def tracking_dup(fd: int) -> int:
+        new_fd = real_dup(fd)
+        duplicated.append(new_fd)
+        return new_fd
+
+    def tracking_close(fd: int) -> None:
+        closed.append(fd)
+        real_close(fd)
+
+    async def queueing_run_file_io(func, *args, **kwargs):
+        if func is not upload_ingestion._copy_fd_to_path:
+            return await real_run_file_io(func, *args, **kwargs)
+        # The pool is busy: the job is queued, not running.
+        state["queued"].set()
+        await state["release"].wait()
+        # Only a job that was never cancelled reaches its worker.
+        return func(*args, **kwargs)
+
+    async def scenario() -> None:
+        state["queued"] = asyncio.Event()
+        state["release"] = asyncio.Event()
+        service = upload_ingestion.ThreadUploadIngestionService(request=None, thread_id="thread-cancel-copy", user_id="u", app_config=SimpleNamespace())
+        await service.open()
+
+        async def chunks():
+            yield b"pdf-bytes"
+
+        task = asyncio.create_task(service.ingest_chunks(chunks(), display_name="report.pdf"))
+        await asyncio.wait_for(state["queued"].wait(), 5)
+        task.cancel()
+        state["release"].set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        for _ in range(100):
+            if duplicated and duplicated[0] in closed:
+                break
+            await asyncio.sleep(0.05)
+        await service.aclose()
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
+        patch.object(uploads, "convert_file_to_markdown", AsyncMock()),
+        patch.object(upload_ingestion, "run_file_io", side_effect=queueing_run_file_io),
+        patch.object(upload_ingestion.os, "dup", side_effect=tracking_dup),
+        patch.object(upload_ingestion.os, "close", side_effect=tracking_close),
+    ):
+        asyncio.run(scenario())
+
+    assert len(duplicated) == 1
+    assert duplicated[0] in closed, "the descriptor handed to the queued copy was never closed"
+
+
+def test_delete_uploaded_file_keeps_the_converted_markdown(tmp_path):
+    """The .md next to a document may belong to another document, or to the user."""
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    (thread_uploads_dir / "report.docx").write_bytes(b"docx-bytes")
+    (thread_uploads_dir / "report.md").write_text("converted from the docx", encoding="utf-8")
     (thread_uploads_dir / "report.pdf").write_bytes(b"pdf-bytes")
-    (thread_uploads_dir / "report.md").write_text("converted", encoding="utf-8")
+    (thread_uploads_dir / "report_1.md").write_text("converted from the pdf", encoding="utf-8")
 
     with patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir):
         result = asyncio.run(call_unwrapped(uploads.delete_uploaded_file, "thread-aio", "report.pdf", request=MagicMock()))
 
     assert result == {"success": True, "message": "Deleted report.pdf"}
     assert not (thread_uploads_dir / "report.pdf").exists()
-    assert not (thread_uploads_dir / "report.md").exists()
+    # report.md belongs to report.docx; deleting report.pdf used to remove it.
+    assert (thread_uploads_dir / "report.md").read_text(encoding="utf-8") == "converted from the docx"
+    assert (thread_uploads_dir / "report_1.md").read_text(encoding="utf-8") == "converted from the pdf"
+
+
+def test_delete_uploaded_file_rejects_symlink_to_sibling_upload(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    victim = thread_uploads_dir / "victim.pdf"
+    victim.write_bytes(b"pdf-bytes")
+    (thread_uploads_dir / "victim.md").write_text("converted", encoding="utf-8")
+    _symlink_to_or_skip(thread_uploads_dir / "alias.pdf", victim)
+
+    with patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir):
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(call_unwrapped(uploads.delete_uploaded_file, "thread-local", "alias.pdf", request=MagicMock()))
+
+    assert exc_info.value.status_code == 404
+    assert victim.read_bytes() == b"pdf-bytes"
+    assert (thread_uploads_dir / "victim.md").exists()
+    assert (thread_uploads_dir / "alias.pdf").is_symlink()
 
 
 def test_auto_convert_documents_enabled_defaults_to_false_on_config_errors():
@@ -915,6 +1859,23 @@ def test_upload_limits_accept_legacy_config_keys():
     limits = uploads._get_upload_limits(cfg)
 
     assert limits == uploads.UploadLimits(max_files=7, max_file_size=123, max_total_size=456)
+
+
+@pytest.mark.parametrize(
+    ("key", "default"),
+    [
+        ("max_files", uploads.DEFAULT_MAX_FILES),
+        ("max_file_size", uploads.DEFAULT_MAX_FILE_SIZE),
+        ("max_total_size", uploads.DEFAULT_MAX_TOTAL_SIZE),
+    ],
+)
+def test_upload_limits_reject_boolean_values(key, default):
+    cfg = MagicMock()
+    cfg.uploads = {key: True}
+
+    limits = uploads._get_upload_limits(cfg)
+
+    assert getattr(limits, key) == default
 
 
 def test_upload_files_uses_configured_file_count_limit(tmp_path):

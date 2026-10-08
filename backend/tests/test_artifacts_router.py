@@ -1,6 +1,8 @@
 import asyncio
 import hashlib
+import os
 import stat
+import threading
 import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -106,6 +108,73 @@ class _RemoteSandboxProvider:
 
 def _artifact_sha256(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+@pytest.mark.parametrize("mutation", ["grow", "replace"])
+def test_load_editable_artifact_bounds_read_after_size_probe(tmp_path, monkeypatch, mutation) -> None:
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_bytes(b"before")
+    limit = artifacts_router.MAX_EDITABLE_ARTIFACT_BYTES
+    oversized = b"x" * (2 * limit)
+    replacement_path = tmp_path / "replacement.txt"
+    replacement_path.write_bytes(oversized)
+    original_lstat = os.lstat
+    original_open = Path.open
+    read_calls = []
+    handles = []
+
+    def mutate_after_size_probe(path, *args, **kwargs):
+        file_stat = original_lstat(path, *args, **kwargs)
+        if Path(path) == artifact_path:
+            if mutation == "grow":
+                artifact_path.write_bytes(oversized)
+            else:
+                os.replace(replacement_path, artifact_path)
+        return file_stat
+
+    class RecordingReader:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __enter__(self):
+            self.handle.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.handle.__exit__(*args)
+
+        def read(self, size=-1):
+            content = self.handle.read(size)
+            read_calls.append((size, len(content)))
+            return content
+
+    def record_open(path, mode="r", *args, **kwargs):
+        handle = original_open(path, mode, *args, **kwargs)
+        if path == artifact_path and mode == "rb":
+            handles.append(handle)
+            return RecordingReader(handle)
+        return handle
+
+    monkeypatch.setattr(os, "lstat", mutate_after_size_probe)
+    monkeypatch.setattr(Path, "open", record_open)
+    with pytest.raises(HTTPException) as exc_info:
+        artifacts_router._load_editable_artifact(artifact_path, "mnt/user-data/outputs/note.txt", _artifact_sha256("before"))
+
+    assert exc_info.value.status_code == 413
+    assert read_calls == [(limit + 1, limit + 1)]
+    assert all(handle.closed for handle in handles)
+
+
+@pytest.mark.parametrize("size", [0, 6, artifacts_router.MAX_EDITABLE_ARTIFACT_BYTES])
+def test_load_editable_artifact_accepts_text_up_to_size_limit(tmp_path, size) -> None:
+    artifact_path = tmp_path / "note.txt"
+    content = b"x" * size
+    artifact_path.write_bytes(content)
+
+    loaded, file_stat = artifacts_router._load_editable_artifact(artifact_path, "mnt/user-data/outputs/note.txt", hashlib.sha256(content).hexdigest())
+
+    assert loaded == content
+    assert file_stat.st_size == size
 
 
 def _patch_artifact_update_dependencies(monkeypatch, artifact_path: Path, provider=None) -> None:
@@ -426,6 +495,102 @@ def test_update_artifact_rolls_back_remote_when_local_replace_fails(tmp_path, mo
     assert artifact_path.read_text(encoding="utf-8") == "before"
 
 
+def test_update_artifact_cancellation_drains_remote_sync_before_releasing_write(tmp_path, monkeypatch) -> None:
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_text("before", encoding="utf-8")
+    provider = _RemoteSandboxProvider()
+    _patch_artifact_update_dependencies(monkeypatch, artifact_path, provider)
+
+    sync_started = threading.Event()
+    allow_sync = threading.Event()
+    sync_finished = threading.Event()
+    original_sync = artifacts_router._sync_artifact_to_sandbox
+
+    def blocking_sync(sandbox, virtual_path: str, content: bytes) -> None:
+        if content == b"after":
+            sync_started.set()
+            assert allow_sync.wait(timeout=2)
+        try:
+            original_sync(sandbox, virtual_path, content)
+        finally:
+            if content == b"after":
+                sync_finished.set()
+
+    monkeypatch.setattr(artifacts_router, "_sync_artifact_to_sandbox", blocking_sync)
+
+    async def run_cancelled_update() -> None:
+        task = asyncio.create_task(
+            call_unwrapped(
+                artifacts_router.update_artifact,
+                "thread-1",
+                "mnt/user-data/outputs/note.txt",
+                artifacts_router.ArtifactUpdateRequest(content="after", expected_sha256=_artifact_sha256("before")),
+                _make_request(),
+            )
+        )
+        assert await asyncio.to_thread(sync_started.wait, 2)
+        task.cancel()
+        allow_sync.set()
+        assert await asyncio.to_thread(sync_finished.wait, 2)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run_cancelled_update())
+
+    # The coherent final remote/host state is the regression oracle. Merely
+    # observing that the task is still pending after one loop turn is not:
+    # the old rollback/release path also needed additional scheduling turns.
+    assert provider.sandbox.updates == [("/mnt/user-data/outputs/note.txt", b"after")]
+    assert artifact_path.read_text(encoding="utf-8") == "after"
+
+
+def test_update_artifact_logs_primary_failure_when_cancelled_commit_fails(tmp_path, monkeypatch, caplog) -> None:
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_text("before", encoding="utf-8")
+    provider = _RemoteSandboxProvider()
+    _patch_artifact_update_dependencies(monkeypatch, artifact_path, provider)
+
+    sync_started = threading.Event()
+    allow_sync = threading.Event()
+    original_sync = artifacts_router._sync_artifact_to_sandbox
+
+    def blocking_failing_sync(sandbox, virtual_path: str, content: bytes) -> None:
+        if content == b"after":
+            sync_started.set()
+            assert allow_sync.wait(timeout=2)
+            raise RuntimeError("sandbox sync failed after cancellation")
+        original_sync(sandbox, virtual_path, content)
+
+    monkeypatch.setattr(artifacts_router, "_sync_artifact_to_sandbox", blocking_failing_sync)
+    caplog.set_level("ERROR", logger=artifacts_router.logger.name)
+
+    async def run_cancelled_failure() -> None:
+        task = asyncio.create_task(
+            call_unwrapped(
+                artifacts_router.update_artifact,
+                "thread-1",
+                "mnt/user-data/outputs/note.txt",
+                artifacts_router.ArtifactUpdateRequest(content="after", expected_sha256=_artifact_sha256("before")),
+                _make_request(),
+            )
+        )
+        assert await asyncio.to_thread(sync_started.wait, 2)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+
+        allow_sync.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run_cancelled_failure())
+
+    assert provider.sandbox.updates == [("/mnt/user-data/outputs/note.txt", b"before")]
+    assert provider.released == ["sandbox-1"]
+    assert artifact_path.read_text(encoding="utf-8") == "before"
+    assert any("Failed to commit artifact update before rollback" in record.getMessage() and record.exc_info is not None for record in caplog.records)
+
+
 def test_update_artifact_rejects_oversized_content(tmp_path, monkeypatch) -> None:
     artifact_path = tmp_path / "note.txt"
     artifact_path.write_text("before", encoding="utf-8")
@@ -498,6 +663,7 @@ def test_get_artifact_text_preview_supports_bounded_range_requests(tmp_path, mon
     assert preview.content == payload[:1_048_576]
     assert preview.headers["content-range"] == f"bytes 0-1048575/{len(payload)}"
     assert preview.headers["content-disposition"].startswith("inline;")
+    assert preview.headers["x-content-type-options"] == "nosniff"
     assert invalid.status_code == 416
     assert invalid.headers["content-range"] == f"bytes */{len(payload)}"
 
@@ -516,6 +682,147 @@ def test_get_artifact_inline_text_returns_sha256_etag(tmp_path, monkeypatch) -> 
     assert response.status_code == 200
     expected = hashlib.sha256(payload).hexdigest()
     assert response.headers.get("etag") == f'"{expected}"'
+
+
+def _replace_preserving_artifact_mtime(path: Path, content: bytes) -> None:
+    before = path.stat()
+    staged = path.with_name("replacement.part")
+    staged.write_bytes(content)
+    os.utime(staged, ns=(before.st_atime_ns, before.st_mtime_ns))
+    os.replace(staged, path)
+    after = path.stat()
+    assert after.st_size == before.st_size
+    assert after.st_mtime_ns == before.st_mtime_ns
+    assert after.st_ino != before.st_ino
+
+
+@pytest.mark.parametrize(
+    ("filename", "query", "request_headers", "disposition", "expected_status"),
+    [
+        ("note.txt", "", {}, "inline", 200),
+        ("note.txt", "", {"Range": "bytes=0-2"}, "inline", 206),
+        ("note.txt", "?download=true", {}, "attachment", 200),
+        ("page.html", "", {}, "attachment", 200),
+    ],
+)
+def test_artifact_etag_tracks_external_atomic_replacement(tmp_path, monkeypatch, filename, query, request_headers, disposition, expected_status) -> None:
+    artifact_path = tmp_path / filename
+    old, new = b"old report", b"new report"
+    artifact_path.write_bytes(old)
+    artifacts_router._sha256_of_file_cached.cache_clear()
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    url = f"/api/threads/thread-1/artifacts/mnt/user-data/outputs/{filename}{query}"
+
+    with TestClient(app) as client:
+        first = client.get(url)
+        assert first.content == old
+        assert first.headers["etag"] == f'"{hashlib.sha256(old).hexdigest()}"'
+        _replace_preserving_artifact_mtime(artifact_path, new)
+        second = client.get(url, headers=request_headers)
+
+    assert second.status_code == expected_status
+    assert second.content == (new[:3] if request_headers else new)
+    assert second.headers["etag"] == f'"{hashlib.sha256(new).hexdigest()}"'
+    assert second.headers["content-disposition"].startswith(f"{disposition};")
+    if request_headers:
+        assert second.headers["content-range"] == f"bytes 0-2/{len(new)}"
+
+
+def test_refreshed_artifact_etag_can_be_used_to_save(tmp_path, monkeypatch) -> None:
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_bytes(b"old report")
+    artifacts_router._sha256_of_file_cached.cache_clear()
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
+    _patch_artifact_update_dependencies(monkeypatch, artifact_path)
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    url = "/api/threads/thread-1/artifacts/mnt/user-data/outputs/note.txt"
+
+    with TestClient(app) as client:
+        previous = client.get(url)
+        _replace_preserving_artifact_mtime(artifact_path, b"new report")
+        refreshed = client.get(url)
+        rejected = client.put(url, json={"content": "user edit", "expected_sha256": previous.headers["etag"].strip('"')})
+        saved = client.put(url, json={"content": "user edit", "expected_sha256": refreshed.headers["etag"].strip('"')})
+
+    assert rejected.status_code == 412
+    assert saved.status_code == 200
+    assert artifact_path.read_bytes() == b"user edit"
+    assert saved.json()["sha256"] == hashlib.sha256(b"user edit").hexdigest()
+
+
+def test_replaced_artifact_rejects_previous_if_range_validator(tmp_path, monkeypatch) -> None:
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_bytes(b"old report")
+    artifacts_router._sha256_of_file_cached.cache_clear()
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    url = "/api/threads/thread-1/artifacts/mnt/user-data/outputs/note.txt"
+
+    with TestClient(app) as client:
+        first = client.get(url)
+        _replace_preserving_artifact_mtime(artifact_path, b"new report")
+        response = client.get(url, headers={"Range": "bytes=0-2", "If-Range": first.headers["etag"]})
+
+    assert response.status_code == 200
+    assert response.content == b"new report"
+    assert "content-range" not in response.headers
+    assert response.headers["etag"] == f'"{hashlib.sha256(b"new report").hexdigest()}"'
+
+
+@pytest.mark.parametrize("changed_field", ["st_dev", "st_ino", "st_ctime_ns"])
+def test_artifact_digest_invalidates_when_file_identity_changes(tmp_path, monkeypatch, changed_field) -> None:
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_bytes(b"old report")
+    actual_stat = artifact_path.stat()
+    metadata = {field: getattr(actual_stat, field) for field in ("st_dev", "st_ino", "st_ctime_ns", "st_mtime_ns", "st_size")}
+    original_stat = Path.stat
+
+    def controlled_stat(path, *args, **kwargs):
+        return SimpleNamespace(**metadata) if path == artifact_path else original_stat(path, *args, **kwargs)
+
+    # Control the metadata rather than depending on filesystem clock resolution
+    # or treating Windows creation time as a POSIX change time.
+    monkeypatch.setattr(Path, "stat", controlled_stat)
+    artifacts_router._sha256_of_file_cached.cache_clear()
+    assert artifacts_router._sha256_of_file(artifact_path) == hashlib.sha256(b"old report").hexdigest()
+    artifact_path.write_bytes(b"new report")
+    metadata[changed_field] += 1
+    assert artifacts_router._sha256_of_file(artifact_path) == hashlib.sha256(b"new report").hexdigest()
+
+
+def test_unchanged_artifact_digest_is_reused_without_rereading(tmp_path, monkeypatch) -> None:
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_bytes(b"unchanged report")
+    expected = hashlib.sha256(b"unchanged report").hexdigest()
+    artifacts_router._sha256_of_file_cached.cache_clear()
+    assert artifacts_router._sha256_of_file(artifact_path) == expected
+
+    def unexpected_open(*_args, **_kwargs):
+        pytest.fail("An unchanged artifact must not be rehashed for each preview")
+
+    monkeypatch.setattr(artifacts_router, "open", unexpected_open, raising=False)
+    assert artifacts_router._sha256_of_file(artifact_path) == expected
+
+
+def test_artifact_digest_cache_separates_paths_with_matching_metadata(tmp_path, monkeypatch) -> None:
+    paths = [tmp_path / "first.txt", tmp_path / "second.txt"]
+    contents = [b"old report", b"new report"]
+    for path, content in zip(paths, contents, strict=True):
+        path.write_bytes(content)
+    metadata = SimpleNamespace(st_dev=1, st_ino=2, st_ctime_ns=3, st_mtime_ns=4, st_size=10)
+    original_stat = Path.stat
+
+    def controlled_stat(path, *args, **kwargs):
+        return metadata if path in paths else original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", controlled_stat)
+    artifacts_router._sha256_of_file_cached.cache_clear()
+    for path, content in zip(paths, contents, strict=True):
+        assert artifacts_router._sha256_of_file(path) == hashlib.sha256(content).hexdigest()
 
 
 def test_get_skill_archive_preview_supports_bounded_range_requests(tmp_path, monkeypatch) -> None:
@@ -562,6 +869,7 @@ def test_get_skill_archive_inline_returns_sha256_etag(tmp_path, monkeypatch) -> 
     assert response.status_code == 200
     expected = hashlib.sha256(payload).hexdigest()
     assert response.headers.get("etag") == f'"{expected}"'
+    assert response.headers["x-content-type-options"] == "nosniff"
 
 
 @pytest.mark.parametrize(("filename", "content"), ACTIVE_ARTIFACT_CASES)
@@ -575,6 +883,7 @@ def test_get_artifact_forces_download_for_active_content(tmp_path, monkeypatch, 
 
     assert isinstance(response, FileResponse)
     assert response.headers.get("content-disposition", "").startswith("attachment;")
+    assert response.headers.get("x-content-type-options") == "nosniff"
     # The forced-download branch must carry a real SHA-256 ETag so the
     # frontend can enable inline editing (see issue #4864 review feedback).
     assert response.headers.get("etag") == f'"{hashlib.sha256(content.encode()).hexdigest()}"'
@@ -591,6 +900,7 @@ def test_get_artifact_forces_download_for_active_content_in_skill_archive(tmp_pa
     response = asyncio.run(call_unwrapped(artifacts_router.get_artifact, "thread-1", f"mnt/user-data/outputs/sample.skill/{filename}", _make_request()))
 
     assert response.headers.get("content-disposition", "").startswith("attachment;")
+    assert response.headers.get("x-content-type-options") == "nosniff"
     assert bytes(response.body) == content.encode("utf-8")
 
 
@@ -622,6 +932,7 @@ def test_get_artifact_forces_download_for_any_xml_subtype(tmp_path, monkeypatch,
         "text/html",
         "application/xhtml+xml",
         "image/svg+xml",
+        "image/svg",
         "text/xml",
         "application/xml",
         "text/xsl",
@@ -632,8 +943,8 @@ def test_get_artifact_forces_download_for_any_xml_subtype(tmp_path, monkeypatch,
     ],
 )
 def test_is_active_content_mime_type_covers_html_and_xml_documents(mime_type: str) -> None:
-    # Whether .rss or .atom guess to a +xml type depends on the host's
-    # mime.types file, so the classification is pinned on MIME types directly.
+    # MIME guesses depend on the host database (Windows uses image/svg), so
+    # classification is pinned on MIME types directly.
     assert artifacts_router._is_active_content_mime_type(mime_type)
 
 
@@ -665,6 +976,7 @@ def test_get_artifact_xml_download_supports_bounded_range_requests(tmp_path, mon
     assert preview.content == payload[:1_048_576]
     assert preview.headers["content-range"] == f"bytes 0-1048575/{len(payload)}"
     assert preview.headers["content-disposition"].startswith("attachment;")
+    assert preview.headers["x-content-type-options"] == "nosniff"
 
 
 def test_get_artifact_download_false_does_not_force_attachment(tmp_path, monkeypatch) -> None:
@@ -682,6 +994,7 @@ def test_get_artifact_download_false_does_not_force_attachment(tmp_path, monkeyp
     assert response.status_code == 200
     assert response.text == "hello"
     assert response.headers["content-disposition"].startswith("inline;")
+    assert response.headers["x-content-type-options"] == "nosniff"
 
 
 def test_get_artifact_binary_preview_is_inline_file_response(tmp_path, monkeypatch) -> None:
@@ -847,11 +1160,10 @@ def test_skill_archive_preview_rejects_oversized_member_before_decompression(tmp
     assert exc_info.value.status_code == 413
 
 
-def test_get_artifact_large_text_skips_etag(tmp_path, monkeypatch) -> None:
+def test_get_artifact_large_text_skips_content_hashing(tmp_path, monkeypatch) -> None:
     # A text artifact larger than MAX_EDITABLE_ARTIFACT_BYTES must not be hashed
     # on every GET / Range request (performance P1 from review). The response
-    # still streams, but carries no full-content SHA-256 ETag; the client falls
-    # back to its own hashing where crypto.subtle is available.
+    # still streams with an opaque metadata validator, not an editable digest.
     payload = b"a" * (artifacts_router.MAX_EDITABLE_ARTIFACT_BYTES + 1)
     artifact_path = tmp_path / "large.txt"
     artifact_path.write_bytes(payload)
@@ -869,15 +1181,11 @@ def test_get_artifact_large_text_skips_etag(tmp_path, monkeypatch) -> None:
         )
 
     assert response.status_code == 200
-    # Oversized artifacts skip the full-file SHA-256 pass, so there must be no
-    # 64-hex content-hash ETag. Starlette's FileResponse may still attach a
-    # cheap mtime/size-derived ETag, which requires no file read.
-    etag = response.headers.get("etag")
-    assert etag is None or len(etag.strip('"')) != 64
+    assert response.headers["etag"].startswith('"stat-')
     assert response.content == payload
 
 
-def test_get_artifact_large_active_content_skips_etag(tmp_path, monkeypatch) -> None:
+def test_get_artifact_large_active_content_skips_content_hashing(tmp_path, monkeypatch) -> None:
     # Active content (e.g. .html) is force-downloaded. A large active file must
     # still force a download but skip the full-file SHA-256 pass (performance P1).
     payload = "<html>" + ("a" * (artifacts_router.MAX_EDITABLE_ARTIFACT_BYTES + 1)) + "</html>"
@@ -900,4 +1208,127 @@ def test_get_artifact_large_active_content_skips_etag(tmp_path, monkeypatch) -> 
 
     assert isinstance(response, FileResponse)
     assert response.headers.get("content-disposition", "").startswith("attachment;")
-    assert response.headers.get("etag") is None
+    assert response.headers["etag"].startswith('"stat-')
+
+
+@pytest.mark.parametrize(
+    ("filename", "query", "disposition"),
+    [
+        ("large.txt", "", "inline"),
+        ("large.txt", "?download=true", "attachment"),
+        ("large.html", "", "attachment"),
+        ("large.bin", "", "inline"),
+    ],
+)
+@pytest.mark.parametrize("validator_header", ["etag", "last-modified"])
+def test_large_artifact_replacement_rejects_stale_if_range(tmp_path, monkeypatch, filename, query, disposition, validator_header) -> None:
+    artifact_path = tmp_path / filename
+    prefix = b"\x00" if filename.endswith(".bin") else b"a"
+    old = prefix + b"a" * artifacts_router.MAX_EDITABLE_ARTIFACT_BYTES
+    new = prefix + b"b" * artifacts_router.MAX_EDITABLE_ARTIFACT_BYTES
+    artifact_path.write_bytes(old)
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
+
+    def unexpected_hash(*_args, **_kwargs):
+        pytest.fail("Oversized artifacts must not be read in full to generate an ETag")
+
+    monkeypatch.setattr(artifacts_router, "_sha256_of_file", unexpected_hash)
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    url = f"/api/threads/thread-1/artifacts/mnt/user-data/outputs/{filename}{query}"
+
+    with TestClient(app) as client:
+        first = client.get(url)
+        assert first.content == old
+        matching = client.get(url, headers={"Range": "bytes=0-2", "If-Range": first.headers["etag"]})
+        assert matching.status_code == 206
+        assert matching.content == old[:3]
+        _replace_preserving_artifact_mtime(artifact_path, new)
+        stale = client.get(url, headers={"Range": "bytes=0-2", "If-Range": first.headers[validator_header]})
+        assert stale.status_code == 200
+        assert stale.content == new
+        assert "content-range" not in stale.headers
+        assert stale.headers["etag"] != first.headers["etag"]
+        assert stale.headers["last-modified"] == first.headers["last-modified"]
+        assert stale.headers["etag"].startswith('"stat-')
+        assert stale.headers["content-disposition"].startswith(f"{disposition};")
+        current = client.get(url, headers={"Range": "bytes=0-2", "If-Range": stale.headers["etag"]})
+        ordinary = client.get(url, headers={"Range": "bytes=0-2"})
+
+    for response in (current, ordinary):
+        assert response.status_code == 206
+        assert response.content == new[:3]
+        assert response.headers["content-range"] == f"bytes 0-2/{len(new)}"
+        assert response.headers["etag"] == stale.headers["etag"]
+
+
+@pytest.mark.parametrize("changed_field", ["st_dev", "st_ino", "st_ctime_ns", "st_mtime_ns", "st_size"])
+@pytest.mark.parametrize("download", [False, True])
+def test_large_artifact_validator_tracks_metadata_without_reading(tmp_path, monkeypatch, changed_field, download) -> None:
+    artifact_path = tmp_path / "large.txt"
+    artifact_path.write_bytes(b"a" * (artifacts_router.MAX_EDITABLE_ARTIFACT_BYTES + 1))
+    file_stat = artifact_path.stat()
+    metadata = {field: getattr(file_stat, field) for field in ("st_dev", "st_ino", "st_ctime_ns", "st_mtime_ns", "st_size", "st_mode", "st_mtime")}
+    original_stat = Path.stat
+    original_open = Path.open
+
+    def controlled_stat(path, *args, **kwargs):
+        return SimpleNamespace(**metadata) if path == artifact_path else original_stat(path, *args, **kwargs)
+
+    def unexpected_open(path, *args, **kwargs):
+        if path == artifact_path:
+            pytest.fail("Planning an oversized text response must only read metadata")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", controlled_stat)
+    monkeypatch.setattr(Path, "open", unexpected_open)
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
+
+    def plan_response():
+        return asyncio.run(call_unwrapped(artifacts_router.get_artifact, "thread-1", "mnt/user-data/outputs/large.txt", _make_request(), download=download))
+
+    first = plan_response()
+    unchanged = plan_response()
+    assert first.headers["etag"] == unchanged.headers["etag"]
+    assert first.headers["etag"].startswith('"stat-')
+    metadata[changed_field] += 1
+    changed = plan_response()
+    assert changed.headers["etag"] != first.headers["etag"]
+
+
+def test_small_artifact_replacement_rejects_date_if_range(tmp_path, monkeypatch) -> None:
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_bytes(b"old report")
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    url = "/api/threads/thread-1/artifacts/mnt/user-data/outputs/note.txt"
+
+    with TestClient(app) as client:
+        first = client.get(url)
+        _replace_preserving_artifact_mtime(artifact_path, b"new report")
+        response = client.get(url, headers={"Range": "bytes=0-2", "If-Range": first.headers["last-modified"]})
+
+    assert response.status_code == 200
+    assert response.content == b"new report"
+    assert "content-range" not in response.headers
+    assert response.headers["etag"] == f'"{hashlib.sha256(b"new report").hexdigest()}"'
+
+
+def test_artifact_at_editing_size_limit_keeps_a_saveable_content_revision(tmp_path, monkeypatch) -> None:
+    artifact_path = tmp_path / "limit.txt"
+    payload = b"a" * artifacts_router.MAX_EDITABLE_ARTIFACT_BYTES
+    artifact_path.write_bytes(payload)
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
+    _patch_artifact_update_dependencies(monkeypatch, artifact_path)
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    url = "/api/threads/thread-1/artifacts/mnt/user-data/outputs/limit.txt"
+
+    with TestClient(app) as client:
+        preview = client.get(url)
+        assert preview.headers["etag"] == f'"{hashlib.sha256(payload).hexdigest()}"'
+        saved = client.put(url, json={"content": "edited", "expected_sha256": preview.headers["etag"].strip('"')})
+
+    assert saved.status_code == 200
+    assert artifact_path.read_bytes() == b"edited"

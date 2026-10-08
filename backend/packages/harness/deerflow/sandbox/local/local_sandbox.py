@@ -355,28 +355,40 @@ class LocalSandbox(Sandbox):
         normalized_path = path.replace("\\", "/")
         path_str = os.path.realpath(normalized_path)
 
+        container_path = self._container_path_for_local(path_str)
+        if container_path is None:
+            # A symlink under a mount can resolve outside every mount. Its own
+            # spelling still names a path inside the mount, so translate that
+            # rather than hand the model the link target's host path. ``normpath``
+            # keeps ``mount/../x`` from passing as inside the mount.
+            container_path = self._container_path_for_local(os.path.normpath(normalized_path))
+        if container_path is not None:
+            return container_path
+
+        # No mapping found, return original path
+        return path_str
+
+    def _container_path_for_local(self, local_path: str) -> str | None:
+        """Translate a native-separated host path under a mount, or return ``None``."""
         # Try each mapping (longest local path first for more specific matches)
         for mapping in self._mappings_by_local_specificity:
             local_path_resolved = self._resolved_local_paths[mapping]
             # ``Path.resolve()`` always renders with the native separator
-            # (backslash on Windows), regardless of the forward-slash
-            # normalization above, so the containment check must compare with
+            # (backslash on Windows), regardless of the caller's forward-slash
+            # normalization, so the containment check must compare with
             # ``os.sep`` here too -- mirroring ``_is_read_only_path`` -- instead
             # of a hardcoded "/". A hardcoded "/" can never match a
             # backslash-joined nested path on Windows, so every nested path
-            # silently fell through to the "no mapping found" branch below and
+            # silently fell through to the "no mapping found" fallback and
             # leaked the raw host path (real username, full directory tree).
-            if path_str == local_path_resolved or path_str.startswith(local_path_resolved + os.sep):
+            if local_path == local_path_resolved or local_path.startswith(local_path_resolved + os.sep):
                 # Replace the local path prefix with container path. Container
                 # paths are always POSIX-style, so the extracted relative
                 # portion (native-separated on Windows) is normalized to
                 # forward slashes before being spliced in.
-                relative = path_str[len(local_path_resolved) :].lstrip(os.sep).replace(os.sep, "/")
-                resolved = f"{mapping.container_path}/{relative}" if relative else mapping.container_path
-                return resolved
-
-        # No mapping found, return original path
-        return path_str
+                relative = local_path[len(local_path_resolved) :].lstrip(os.sep).replace(os.sep, "/")
+                return f"{mapping.container_path}/{relative}" if relative else mapping.container_path
+        return None
 
     def _reverse_resolve_paths_in_output(self, output: str) -> str:
         """
@@ -511,7 +523,11 @@ class LocalSandbox(Sandbox):
         timed_out = False
         if os.name == "nt":
             if self._is_powershell(shell):
-                args = [shell, "-NoProfile", "-Command", resolved_command]
+                # Pair PowerShell's output encoding with the pipe decoder.
+                # Console setters can fail without an attached console; guard
+                # them independently so setup errors do not pollute tool output.
+                utf8_preamble = "try{[Console]::InputEncoding=[System.Text.Encoding]::UTF8}catch{};try{[Console]::OutputEncoding=[System.Text.Encoding]::UTF8}catch{};$OutputEncoding=[System.Text.Encoding]::UTF8;"
+                args = [shell, "-NoProfile", "-Command", utf8_preamble + resolved_command]
             elif self._is_cmd_shell(shell):
                 args = [shell, "/c", resolved_command]
             else:
@@ -524,7 +540,10 @@ class LocalSandbox(Sandbox):
                             "MSYS2_ARG_CONV_EXCL": exclusions,
                         }
 
-            stdout, stderr, returncode, timed_out = self._run_windows_command(args, timeout, sandbox_env)
+            if self._is_powershell(shell):
+                stdout, stderr, returncode, timed_out = self._run_windows_command(args, timeout, sandbox_env, encoding="utf-8")
+            else:
+                stdout, stderr, returncode, timed_out = self._run_windows_command(args, timeout, sandbox_env)
         else:
             args = [shell, "-c", resolved_command]
             stdout, stderr, returncode, timed_out = self._run_posix_command(args, timeout, sandbox_env)
@@ -551,8 +570,10 @@ class LocalSandbox(Sandbox):
         args: list[str],
         timeout: float,
         env: dict[str, str] | None = None,
+        *,
+        encoding: str | None = None,
     ) -> tuple[str, str, int, bool]:
-        """Run a Windows command with bounded capture and process-tree timeout."""
+        """Run with bounded capture, a process-tree timeout, and locale decoding unless overridden."""
         timed_out = False
         stdout_read_fd, stdout_write_fd = os.pipe()
         stderr_read_fd, stderr_write_fd = os.pipe()
@@ -582,7 +603,8 @@ class LocalSandbox(Sandbox):
                     # The write fd may already be closed by the exception cleanup above.
                     pass
 
-        encoding = locale.getpreferredencoding(False)
+        if encoding is None:
+            encoding = locale.getpreferredencoding(False)
         stdout_capture, stdout_thread = LocalSandbox._start_pipe_drain(
             stdout_read_fd,
             "deerflow-bash-stdout-drain",
@@ -748,7 +770,32 @@ class LocalSandbox(Sandbox):
 
     def list_dir(self, path: str, max_depth=2) -> list[str]:
         resolved_path = self._resolve_path(path)
-        entries = list_dir(resolved_path, max_depth)
+        container_path = path.rstrip("/")
+        virtual_children: list[PathMapping] = []
+        for mapping in self.path_mappings:
+            if not mapping.container_path.startswith(container_path + "/"):
+                continue
+            child_rel = mapping.container_path[len(container_path) + 1 :]
+            if "/" in child_rel:
+                continue
+            try:
+                if os.path.isdir(self._resolved_local_paths[mapping]):
+                    virtual_children.append(mapping)
+            except OSError:
+                pass
+
+        try:
+            entries = list_dir(resolved_path, max_depth)
+        except FileNotFoundError:
+            # The requested path may exist only in the container, as the
+            # parent of mounted sub-directories (e.g. /mnt/skills with only
+            # per-category mounts and no aggregate root mapping). Continue
+            # with virtual children only when the resolved host path is
+            # missing. An existing file is not a directory and must still
+            # raise, as must a path without direct virtual children.
+            if not virtual_children or os.path.exists(resolved_path):
+                raise
+            entries = []
         # Reverse resolve local paths back to container paths and preserve
         # list_dir's trailing "/" marker for directories.
         result: list[str] = []
@@ -763,28 +810,16 @@ class LocalSandbox(Sandbox):
         # the ``list_dir`` utility skips them for security. We patch those
         # missing virtual children back in so the agent can discover them via
         # ``ls /mnt/skills``.
-        container_path = path.rstrip("/")
         existing_dirs = {e.rstrip("/") for e in result if e.endswith("/")}
-        for mapping in self.path_mappings:
-            # A mapping is a virtual child if:
-            # 1. Its container_path is a direct child of the requested path
-            # 2. It is NOT already present in the result (was skipped by list_dir)
-            if mapping.container_path.startswith(container_path + "/"):
-                child_rel = mapping.container_path[len(container_path) + 1 :]
-                # Only direct children (no further slashes), e.g. "public", "custom".
-                # Compare the mapping's full container path -- not the bare child
-                # name -- against existing_dirs, which holds full paths (e.g.
-                # "/mnt/user-data/workspace"). Comparing the bare name here would
-                # never match, so an already-listed mount (the common case: real
-                # nested workspace/uploads/outputs subdirectories under
-                # /mnt/user-data) would be appended a second time.
-                if "/" not in child_rel and mapping.container_path.rstrip("/") not in existing_dirs:
-                    # Verify the host path exists so we don't add phantom entries
-                    try:
-                        if os.path.isdir(os.path.realpath(mapping.local_path)):
-                            result.append(f"{mapping.container_path}/")
-                    except OSError:
-                        pass
+        for mapping in virtual_children:
+            # Compare the mapping's full container path -- not the bare child
+            # name -- against existing_dirs, which holds full paths (e.g.
+            # "/mnt/user-data/workspace"). Comparing the bare name here would
+            # never match, so an already-listed mount (the common case: real
+            # nested workspace/uploads/outputs subdirectories under
+            # /mnt/user-data) would be appended a second time.
+            if mapping.container_path.rstrip("/") not in existing_dirs:
+                result.append(f"{mapping.container_path}/")
 
         return sorted(result)
 
@@ -797,7 +832,11 @@ class LocalSandbox(Sandbox):
         resolved_path = self._resolve_path(path)
         should_slice = start_line is not None or end_line is not None
         try:
-            with open(resolved_path, encoding="utf-8") as f:
+            # newline="\n" returns line endings as stored, like the remote
+            # providers (a translated read hid CRLF from str_replace, which then
+            # wrote the whole file back as LF), and ends lines only at "\n", the
+            # rule count_file_lines and read_file's truncation marker count by.
+            with open(resolved_path, encoding="utf-8", newline="\n") as f:
                 if not should_slice:
                     content = f.read()
 
@@ -857,7 +896,9 @@ class LocalSandbox(Sandbox):
             # using the content-specific resolver (forward-slash safe)
             resolved_content = self._resolve_paths_in_content(content)
             mode = "a" if append else "w"
-            with open(resolved_path, mode, encoding="utf-8") as f:
+            # newline="" writes the content as given; the default would turn
+            # every "\n" into "\r\n" on Windows (breaking `bash run.sh`).
+            with open(resolved_path, mode, encoding="utf-8", newline="") as f:
                 f.write(resolved_content)
             # Track this path so read_file knows to reverse-resolve on read.
             # Only agent-written files get reverse-resolved; user uploads and

@@ -121,17 +121,21 @@ secrets:
 
 The default ingress annotations permit a 100 MiB local `.skill` archive plus
 multipart framing, stream request bodies without ingress buffering, and allow
-up to 600 seconds for validation. If you replace `ingress.annotations`,
-preserve equivalent size, streaming, and response-timeout settings for your
-ingress controller or local skill uploads may fail before DeerFlow completes
-the installation.
+up to 600 seconds for a response, which the API requests that wait on a model
+call or a whole run all need — skill install and custom-skill edits (each file
+is scanned by an LLM), `/api/threads/{id}/compact`, `/api/input-polish`, and
+`/api/runs/wait`. If you replace `ingress.annotations`, preserve equivalent
+size, streaming, and response-timeout settings for your ingress controller, or
+local skill uploads may fail before DeerFlow completes the installation and
+those requests may time out while Gateway is still working — for
+`/api/runs/wait` the disconnect also cancels the run.
 
 Provide your model config under `config` (keep secrets as `$VAR` references —
 they resolve from the `secrets` map):
 
 ```yaml
 config: |
-  config_version: 43
+  config_version: 55
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI
@@ -141,6 +145,7 @@ config: |
   sandbox:
     use: deerflow.community.aio_sandbox:AioSandboxProvider
     provisioner_url: http://provisioner:8002
+    provisioner_api_key: $PROVISIONER_API_KEY   # injected from the app Secret
   database:
     backend: postgres
     postgres_url: $DATABASE_URL
@@ -151,6 +156,10 @@ config: |
     connection_string: $DATABASE_URL
   stream_bridge:
     type: redis   # cross-pod SSE; URL from DEER_FLOW_STREAM_BRIDGE_REDIS_URL
+  knowledge_base:
+    enabled: true
+    scope_selection_enabled: false
+    # Provider connection/retrieval settings belong on the knowledge_search tool.
   # Tools MUST be listed explicitly - the agent gets none otherwise
   # (BUILTIN_TOOLS only adds present_file + ask_clarification). The chart
   # default in values.yaml enables the sandbox tools + web tools (web_search,
@@ -162,6 +171,7 @@ config: |
     - name: file:read
     - name: file:write
     - name: bash
+    - name: knowledge
   tools:
     - name: web_search
       group: web
@@ -175,6 +185,14 @@ config: |
       group: web
       use: deerflow.community.image_search.tools:image_search_tool
       max_results: 5
+    - name: knowledge_search
+      group: knowledge
+      use: deerflow.community.ragflow.tools:knowledge_search_tool
+      base_url: http://ragflow:9380
+      api_key: $RAGFLOW_API_KEY
+    - name: list_knowledge_bases
+      group: knowledge
+      use: deerflow.community.ragflow.tools:list_knowledge_bases_tool
     - name: bash
       group: bash
       use: deerflow.sandbox.tools:bash_tool
@@ -216,12 +234,21 @@ helm install deer-flow deploy/helm/deer-flow \
 ```bash
 kubectl -n deer-flow get pods
 kubectl -n deer-flow port-forward svc/nginx 2026:2026
-curl http://localhost:2026/health          # gateway health via nginx
+curl http://localhost:2026/health          # gateway liveness via nginx
+curl http://localhost:2026/health/ready    # readiness: database, checkpointer, stream_bridge, provisioner
 ```
+
+`/health/ready` is what the gateway `readinessProbe` hits. It answers 503 while
+Postgres or the Redis stream bridge is unreachable (`stream_bridge: unreachable`),
+so those pods leave the Service instead of accepting runs they cannot stream.
+The `provisioner` field reports the provisioner's own `/health` but never
+changes the status code: every gateway pod shares that one provisioner.
 
 Hit the Ingress host (map it in `/etc/hosts` for local clusters) to load the UI.
 
-Provisioner sanity check:
+Provisioner sanity check (`/health` is unauthenticated; `/api/*` requires the
+`PROVISIONER_API_KEY` the chart generates into the app Secret, so a 401 from
+the gateway's sandbox calls means the two Pods disagree on that key):
 
 ```bash
 kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002/health
@@ -235,28 +262,87 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   (key `database-url`) and injected as `DATABASE_URL`; `config.yaml` references
   it as `$DATABASE_URL` in `database.postgres_url`. Schema is bootstrapped
   automatically on gateway startup (alembic `create_all` + `stamp head`).
-  For real HA, disable the bundled instance and point at a managed DB:
+  For real HA, disable the bundled instance and point at a managed DB with a
+  full DSN (the chart wraps it into the Secret) or with a Secret you manage
+  (key `database-url`):
   ```yaml
   postgresql:
     enabled: false
     external:
-      host: mydb.example.com   # or set databaseUrl / existingSecret
-      port: 5432
-      database: deerflow
-      username: deerflow
-      password: changeme
+      databaseUrl: postgresql://deerflow:changeme@mydb.example.com:5432/deerflow
+      # or: existingSecret: my-deerflow-db   # key `database-url`
   ```
-- **Graceful shutdown & memory drain.** The gateway pod sets `terminationGracePeriodSeconds` (default 45s, overridable via `gateway.terminationGracePeriodSeconds`) plus an optional `preStop` sleep (`gateway.preStopSleepSeconds`, default 5s). The grace period MUST exceed the Gateway's graceful-shutdown work — channel stop (~5s) plus the memory-queue drain (`memory.shutdown_flush_timeout_seconds`, default 30s) plus a buffer — because the drain runs on a daemon thread and K8s SIGKILLs anything still running at the end of the grace window. K8s defaults to 30s, which SIGKILLs the drain mid-flight and silently re-introduces the memory loss the drain is fixing. **When you raise `memory.shutdown_flush_timeout_seconds`, raise `gateway.terminationGracePeriodSeconds` to match** (channel stop + drain + buffer).
-- **Gateway replicas.** Postgres + the Redis stream bridge together make the
-  gateway's *persisted* state (checkpointer + run/thread metadata) and *live
-  stream* path cross-pod-safe. The default is still 1 replica: **do not raise
-  `gateway.replicas` past 1 yet.** Run control — `create_or_reject` dedup,
-  `cancel`, and orphan reconciliation — is still worker-local (in-process
-  `asyncio.Lock` + in-memory `record.task`), tracked by [issue
-  #3948](https://github.com/bytedance/deer-flow/issues/3948). With >1 replica a
-  double-submit can create two runs on one thread (checkpoint corruption), a
-  cancel can land on a non-owner pod (409), and a crashed pod's runs stay
-  `pending`/`running` forever. Stay on 1 replica until that work lands.
+
+  URL-encode special characters in the DSN password (for example, `@` as
+  `%40`). The chart uses an external `databaseUrl` verbatim and does not
+  rewrite the DSN in a user-managed Secret.
+
+- **Graceful shutdown & memory drain.** The gateway pod sets `terminationGracePeriodSeconds` (default 90s, overridable via `gateway.terminationGracePeriodSeconds`) plus an optional `preStop` sleep (`gateway.preStopSleepSeconds`, default 5s), and bounds uvicorn's `--timeout-graceful-shutdown` (`gateway.uvicornGracefulShutdownSeconds`, default 10s) so an idle SSE connection cannot hold up lifespan shutdown indefinitely. The grace period MUST exceed the Gateway's graceful-shutdown work — the preStop sleep, the uvicorn timeout, and the lifespan's worst case: seven hooks bounded at 5s each (startup trash sweep, notification delivery worker, channel service, scheduled task service, subagent batch service, browser sessions, MCP session pool), the 1s retrieval-warm wait, the in-flight run drain (5s) and the memory-queue drain (`memory.shutdown_flush_timeout_seconds`, default 30s), about 71s in total, plus a buffer — because the drain runs on a daemon thread and K8s SIGKILLs anything still running at the end of the grace window. K8s defaults to 30s, which SIGKILLs the drain mid-flight and silently re-introduces the memory loss the drain is fixing. `backend/tests/_gateway_shutdown_budget.py` reads these bounds from the Gateway and pins the chart and compose budgets against them. **When you raise `memory.shutdown_flush_timeout_seconds`, raise `gateway.terminationGracePeriodSeconds` to match** (preStop + uvicorn timeout + ~41s of bounded hooks and drains + memory drain + buffer).
+- **Gateway replicas.** Run control is cross-pod-safe since the work tracked
+  by [issue #3948](https://github.com/bytedance/deer-flow/issues/3948) landed
+  (#4003, #4064, #4500): admission is a durable one-active-run-per-thread
+  constraint with `Idempotency-Key` reuse, a cancel that lands on a non-owner
+  Pod is recorded durably and executed by the owner on its next lease renewal,
+  and a crashed Pod's runs are reclaimed by a peer once their lease expires.
+  The chart's default `config` enables what that needs — Postgres for
+  `database` and `checkpointer`, `run_events.backend: db`,
+  `run_ownership.heartbeat_enabled: true`, and the Redis stream bridge
+  (sandbox ownership leases are inferred from it) — and exports
+  `DEER_FLOW_MULTI_INSTANCE=true` whenever `gateway.replicas > 1`, so the
+  Gateway's startup gate verifies those prerequisites instead of staying inert
+  (its worker count only sees one Pod). If you scale with `kubectl scale` or
+  an HPA instead of `gateway.replicas`, set `gateway.multiInstance: true`
+  first: those change the replica count without a Helm upgrade, so the
+  derived declaration, the PodDisruptionBudget and the required shared
+  `AUTH_JWT_SECRET` would otherwise keep their single-replica rendering.
+  Mind the window between setting it and the actual scale-up: the
+  PodDisruptionBudget (`minAvailable: 1`) is rendered immediately and blocks
+  every voluntary eviction and node drain while only one Pod exists, so set
+  `gateway.podDisruptionBudget.enabled: false` for that interim if you need
+  to drain nodes first. `gateway.replicas: 1` stays the
+  default because the following are still single-instance: **IM channels**
+  (every Pod would connect to every platform — Telegram polling conflicts and
+  Discord double-processes; keep 1 replica while channels are enabled), the
+  WeChat QR login, and browser tools. Before raising replicas, also set
+  `persistence.home.accessMode: ReadWriteMany` on multi-node clusters (thread
+  uploads, outputs, memory and `extensions_config.json` live on that volume)
+  and `agent_storage.backend: db` so custom agents are visible on every Pod.
+  A `PodDisruptionBudget` (`minAvailable: 1`) is rendered automatically for a
+  multi-instance gateway (same rule), and the rollout strategy is
+  surge-then-drain (`maxSurge: 1`, `maxUnavailable: 0`).
+- **App secret.** `<release>-app` holds `BETTER_AUTH_SECRET`,
+  `DEER_FLOW_INTERNAL_AUTH_TOKEN`, `AUTH_JWT_SECRET` (the session-cookie
+  signing key) and `PROVISIONER_API_KEY` (the key the gateway presents to the
+  sandbox provisioner), each generated once and preserved across upgrades via
+  `lookup`. `existingAppSecret` points the gateway, frontend and provisioner
+  at a Secret you manage instead (no `<release>-app` is generated); it must
+  carry the first three keys and, while `provisioner.enabled` is true, also
+  `PROVISIONER_API_KEY`: the provisioner's `verify_api_key` middleware
+  answers 401 to every `/api/*` request while its key is empty or differs
+  from the one the gateway sends, so a deployment without it cannot create a
+  single sandbox. The chart injects the same Secret value into both Pods and
+  the default `config` references it as `sandbox.provisioner_api_key:
+  $PROVISIONER_API_KEY` (keep that line when you override `config:`; the
+  harness refuses to start when a referenced variable is unset). With
+  `provisioner.enabled: false` the gateway takes `PROVISIONER_API_KEY` from
+  `secrets` or `existingSecret` when you supply one, so an external
+  provisioner keeps its key (the chart emits no `env` entry, which would win
+  over `envFrom`); otherwise the gateway's start command defaults the
+  variable to an empty string, so the default `config` still loads even when
+  a user-managed provider Secret holds only model keys. `AUTH_JWT_SECRET` is
+  required whenever the gateway is
+  multi-instance — without it, concurrently booting Pods race to write their
+  own `.jwt_secret` on the home volume and sign sessions with different keys —
+  and only a single Pod may omit it and fall back to that file. **Upgrading a
+  release that predates `AUTH_JWT_SECRET`** generates a new key, so every
+  existing browser session is signed out once. To keep sessions, copy the key
+  the gateway has been using into the Secret before upgrading; `lookup` then
+  preserves it like the other app secrets:
+
+  ```bash
+  JWT=$(kubectl -n deer-flow exec deploy/deer-flow-gateway -- cat /app/backend/.deer-flow/.jwt_secret)
+  kubectl -n deer-flow patch secret deer-flow-app -p "{\"stringData\":{\"AUTH_JWT_SECRET\":\"$JWT\"}}"
+  ```
 - **Scheduled task recovery.** If a deployment explicitly enables
   `scheduler.multi_instance: true`, it must use shared Postgres,
   `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`.
@@ -264,8 +350,8 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   atomically takes over only expired leases, and fences stale post-launch
   bookkeeping. `max_concurrent_runs` is a shared global cap across Pods,
   including pre-launch dispatch reservations. Restart all Gateway Pods after
-  changing these startup-only settings. This does not remove the broader
-  Gateway replica limitations described above.
+  changing these startup-only settings. IM channels remain single-instance
+  regardless (see Gateway replicas above).
 - **Redis stream bridge.** A bundled single-instance redis StatefulSet
   (`redis.enabled: true`, `redis:7-alpine`) runs in the namespace and the
   gateway connects via the in-cluster Service. Per-run SSE events are stored in
@@ -275,7 +361,10 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   `DEER_FLOW_STREAM_BRIDGE_REDIS_URL`; `config.yaml` sets `stream_bridge.type:
   redis` by default. No-auth by default (ClusterIP isolation, matching compose);
   set `redis.auth.password` to enable AUTH. For a managed Redis, disable the
-  bundled instance and point at it via `redis.external`.
+  bundled instance and point at it via `redis.external`. The gateway readiness
+  probe pings this Redis on every check and reports the pod unready while it
+  is unreachable, since without the bridge no run can publish, stream or be
+  cancelled from a peer pod.
 - **Persistence.** A PVC (`<release>-home`) backs `/app/backend/.deer-flow`
   (sqlite DB, memory, custom agents, per-thread user-data). The gateway mounts
   it with `subPath: deer-flow` so the layout matches the provisioner's PVC
@@ -440,6 +529,44 @@ provisioner:
 On multi-node clusters, also switch `persistence.home.accessMode` to
 `ReadWriteMany` (this is orthogonal to the Service type - it governs whether a
 sandbox Pod can be scheduled on a node other than the gateway's).
+
+## Sandbox lark-cli runtime (optional)
+
+The Lark/Feishu `lark-cli` integration needs a `lark-cli` binary inside the
+sandbox. For remote/Kubernetes (provisioner) deployments the sandbox-side path
+comes from an optional runtime image instead of an install-time GitHub
+download. The chart exposes the same two knobs the Compose stack reads on the
+provisioner:
+
+```yaml
+provisioner:
+  # Pattern A - an init container copies the binaries into a shared emptyDir.
+  larkCliInitImage: deer-flow/lark-cli-init:v1.0.65
+  # Pattern B - a shim init container + broker sidecar owns the credentials, so
+  # the plaintext config/data dirs are never mounted into the sandbox.
+  # Supersedes larkCliInitImage when both are set.
+  larkCliBrokerImage: deer-flow/lark-cli-broker:v1.0.65
+```
+
+Both default to empty, which leaves the feature off (legacy behavior) and makes
+an in-sandbox `lark-cli` call fail with exit 127 (`command not found`). When
+set, they render `LARK_CLI_INIT_IMAGE` / `LARK_CLI_BROKER_IMAGE` on the
+provisioner Deployment - the names `docker/docker-compose.yaml` uses - and the
+variable is omitted entirely while empty. Point them at a tag that exists in a
+registry your nodes can pull from (mirror the registry prefix if you do not use
+Docker Hub). The images are built from `docker/lark-cli-init` and
+`docker/lark-cli-broker`; see those READMEs and the root README's Lark section
+for the build/publish flow and the credential model. Broker mode is the safer
+choice on a shared cluster: the app secret and OAuth tokens stay in the sidecar
+instead of the sandbox container.
+
+> An image here does not authenticate anyone by itself. The Gateway only asks
+the provisioner to attach the runtime once the Lark integration pack is
+installed for the user, so the sandbox gets the binary but the per-user
+credentials still follow the normal install/authorize flow. The Lark
+integration status reports `sandbox_runtime_mode` / `sandbox_runtime_ready` so
+the Settings UI surfaces a missing runtime instead of a later
+`command not found`.
 
 ## Lint / dry-run
 

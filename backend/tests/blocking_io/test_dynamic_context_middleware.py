@@ -46,6 +46,22 @@ class _FakeModel(FakeMessagesListChatModel):
         return self
 
 
+class _FakeRequest:
+    """Minimal ModelRequest stand-in for the wrap_model_call hooks."""
+
+    def __init__(self, messages, runtime):
+        self.messages = list(messages)
+        self.runtime = runtime
+
+    def override(self, **kwargs):
+        return _FakeRequest(kwargs.get("messages", self.messages), self.runtime)
+
+
+def _drive_model_call(mw: DynamicContextMiddleware, messages, runtime) -> None:
+    """Drive one model-request assembly; the context event fires here now."""
+    mw.wrap_model_call(_FakeRequest(messages, runtime), lambda _request: "response")
+
+
 class _LegacyBackend(MemoryManager):
     """Third-party backend that inherits the default timeout-policy resolver."""
 
@@ -83,11 +99,11 @@ async def test_abefore_agent_does_not_block_event_loop() -> None:
     # event-loop blocking visible to the Blockbuster gate.
     original_build = mw._build_full_reminder
 
-    def slow_build_reminder(runtime=None):
+    def slow_build_reminder(runtime=None, *, query=None):
         import time
 
         time.sleep(0.05)  # 50ms sync sleep — blocks the thread it runs on
-        return original_build(runtime)
+        return original_build(runtime, query=query)
 
     with (
         mock.patch.object(mw, "_build_full_reminder", slow_build_reminder),
@@ -193,8 +209,15 @@ async def test_abefore_agent_returns_none_on_timeout(
 
     assert started.is_set()
     assert result is None
+    # The timed-out injection produced no state update, so the first model
+    # call assembles without any memory block and records no context event.
+    _drive_model_call(mw, state["messages"], runtime)
+    journal.record_memory_context.assert_not_called()
     release.set()
     assert await asyncio.to_thread(finished.wait, 1)
+    # The late worker's phantom ``__memory`` never entered state: a subsequent
+    # assembly still finds nothing to claim.
+    _drive_model_call(mw, state["messages"], runtime)
     journal.record_memory_context.assert_not_called()
 
 
@@ -271,11 +294,13 @@ async def test_abefore_agent_propagates_strict_memory_timeout(
         ),
     ],
 )
+@pytest.mark.parametrize("slow_policy", [False, True], ids=["normal_policy", "slow_policy"])
 async def test_abefore_agent_policy_resolution_failure_does_not_replace_timeout(
     monkeypatch: pytest.MonkeyPatch,
     manager_class: str,
     backend_config: dict,
     api_key: str | None,
+    slow_policy: bool,
 ) -> None:
     """An unresolved timeout policy must fail closed with the original cause."""
     if api_key is None:
@@ -294,26 +319,40 @@ async def test_abefore_agent_policy_resolution_failure_does_not_replace_timeout(
     release = threading.Event()
     finished = threading.Event()
 
+    if slow_policy:
+        original_policy = mw._read_failures_are_fatal
+
+        def delayed_policy(*, allow_io=True):
+            if not allow_io:
+                return None
+            # Exercise a cold worker still resolving policy after the 10ms timeout.
+            threading.Event().wait(0.05)
+            return original_policy(allow_io=allow_io)
+
+        monkeypatch.setattr(mw, "_read_failures_are_fatal", delayed_policy)
+
     def blocking_inject(state, runtime=None):
         started.set()
         release.wait(timeout=2)
         finished.set()
 
-    try:
-        with (
-            mock.patch.object(mw, "_inject", blocking_inject),
-            mock.patch(
-                "deerflow.agents.middlewares.dynamic_context_middleware._INJECT_TIMEOUT_SECONDS",
-                0.01,
-            ),
-        ):
+    with (
+        mock.patch.object(mw, "_inject", blocking_inject),
+        mock.patch(
+            "deerflow.agents.middlewares.dynamic_context_middleware._INJECT_TIMEOUT_SECONDS",
+            0.01,
+        ),
+    ):
+        try:
             state = {"messages": [HumanMessage(content="Hello", id="msg-1")]}
             runtime = SimpleNamespace(context={})
             with pytest.raises(MemoryReadError) as exc_info:
                 await mw.abefore_agent(state, runtime)
-    finally:
-        release.set()
-        assert await asyncio.to_thread(finished.wait, 1)
+        finally:
+            # The worker can reach self._inject only after cold policy resolution.
+            # Keep its mock installed until the worker exits, including on timeout.
+            release.set()
+            assert await asyncio.to_thread(finished.wait, 1)
 
     assert isinstance(exc_info.value.__cause__, TimeoutError)
     assert started.is_set()
@@ -369,13 +408,18 @@ async def test_abefore_agent_records_checkpointed_memory_on_timeout() -> None:
     ):
         result = await mw.abefore_agent(state, runtime)
 
+    assert result is None
+    # The first model call assembles with the frozen checkpoint block: the
+    # recorded identity is the checkpointed content, not the late replacement.
+    _drive_model_call(mw, state["messages"], runtime)
     recorded_call = journal.record_memory_context.call_args
     release.set()
     assert await asyncio.to_thread(finished.wait, 1)
     assert started.is_set()
-    assert result is None
     assert recorded_call == mock.call(
         content_sha256=hashlib.sha256(memory_content.encode("utf-8")).hexdigest(),
+        project_context_revision=None,
+        project_shelf_revision=None,
     )
     journal.record_memory_context.assert_called_once()
 

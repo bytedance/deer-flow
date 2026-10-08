@@ -58,7 +58,7 @@ def _coerce_max_results(
 ) -> int:
     try:
         coerced = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         logger.warning("Invalid Serply max_results=%r; using default %s", value, default)
         coerced = default
     if coerced < 1:

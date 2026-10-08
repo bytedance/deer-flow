@@ -106,7 +106,7 @@ skills:
 技能可用性在 `extensions_config.json` 中跟踪（独立于 `config.yaml`）。你可以管理技能状态：
 
 - **通过 DeerFlow 应用界面**：技能面板允许你切换技能的启用/禁用状态。
-- **通过 Gateway API**：`POST /api/extensions/skills/{name}/enable` 和 `/disable`。
+- **通过 Gateway API**：`PUT /api/skills/{name}`，请求体为 `{"enabled": true}` 或 `{"enabled": false}`（仅管理员）。
 - **直接编辑 `extensions_config.json`**。
 
 由于 `load_skills()` 每次调用都重新读取扩展配置，更改立即生效——无需重启服务器。

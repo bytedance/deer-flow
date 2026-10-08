@@ -44,10 +44,16 @@ _SEGMENT_BOUNDARY = r"(?=/|$|[^\w./-])"
 # The path tail following the base. ``[/\\]`` keeps Windows-separated paths
 # matching; the negated class stops at whitespace and shell punctuation so a
 # path embedded in a larger line is not over-consumed.
-_PATH_TAIL = r"(?:[/\\][^\s\"';&|<>()]*)?"
+#
+# ``:`` ends the tail as well. Scanning resumes after a match, so a tail that
+# ran on through a ``:``-joined list ($PATH, $PYTHONPATH) carried every later
+# entry under the same base to the model unmasked. ``;``, the Windows list
+# separator, already ended it. A ``:`` inside one path (``grep -n`` output,
+# a file name) only shortens the match; the rest is copied through verbatim.
+_PATH_TAIL = r"(?:[/\\][^\s\"';&|<>():]*)?"
 
 _SEGMENT_BOUNDARY_CHAR = re.compile(r"[^\w./-]")
-_PATH_TAIL_TERMINATORS = frozenset("\"';&|<>()")
+_PATH_TAIL_TERMINATORS = frozenset("\"';&|<>():")
 
 
 def normalize_mask_tail(tail: str) -> str:

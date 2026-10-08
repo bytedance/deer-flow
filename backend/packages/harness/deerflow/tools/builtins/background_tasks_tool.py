@@ -8,6 +8,7 @@ from langchain.tools import tool
 
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.mcp.tasks.runtime import get_mcp_task_submitter
+from deerflow.mcp_scope import runtime_thread_incarnation
 from deerflow.tools.builtins.list_uploaded_files_tool import _resolve_thread_id, _resolve_user_id
 from deerflow.tools.types import Runtime
 
@@ -36,6 +37,7 @@ async def _list_background_tasks_impl(
     records = await get_mcp_task_submitter().list_tasks(
         thread_id=thread_id,
         user_id=_resolve_user_id(runtime),
+        thread_incarnation=runtime_thread_incarnation(runtime),
         limit=max(1, min(limit, 50)),
         active_only=active_only,
     )
@@ -72,6 +74,7 @@ async def cancel_background_task(
         record = await get_mcp_task_submitter().cancel_matching_task(
             thread_id=thread_id,
             user_id=_resolve_user_id(runtime),
+            thread_incarnation=runtime_thread_incarnation(runtime),
             task=task,
         )
     except (LookupError, ValueError) as exc:

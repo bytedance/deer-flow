@@ -48,7 +48,7 @@ from .paths import (
 logger = logging.getLogger(__name__)
 
 DOCUMENT_VERSION = "2.0"
-CORE_CATEGORIES = frozenset({"preference", "correction", "context", "goal", "behavior", "identity", "constraint", "decision", "other"})
+CORE_CATEGORIES = frozenset({"preference", "correction", "context", "goal", "behavior", "cognitive", "identity", "constraint", "decision", "other"})
 
 
 class MemoryStorageError(RuntimeError):
@@ -103,6 +103,7 @@ def create_empty_memory() -> dict[str, Any]:
             "workContext": {"summary": "", "updatedAt": ""},
             "personalContext": {"summary": "", "updatedAt": ""},
             "topOfMind": {"summary": "", "updatedAt": ""},
+            "cognitiveStyle": {"summary": "", "updatedAt": ""},
         },
         "history": {
             "recentMonths": {"summary": "", "updatedAt": ""},
@@ -111,6 +112,84 @@ def create_empty_memory() -> dict[str, Any]:
         },
         "facts": [],
     }
+
+
+def _normalize_context_section(value: Any) -> dict[str, Any]:
+    """Return a canonical summary section while preserving extension fields."""
+    if not isinstance(value, dict):
+        return {"summary": "", "updatedAt": ""}
+    section = copy.deepcopy(value)
+    section["summary"] = value.get("summary") if isinstance(value.get("summary"), str) else ""
+    section["updatedAt"] = value.get("updatedAt") if isinstance(value.get("updatedAt"), str) else ""
+    return section
+
+
+def _normalize_legacy_import_fact(value: Any) -> dict[str, Any] | None:
+    """Canonicalize recoverable public/legacy fact fields before repository writes."""
+    if not isinstance(value, dict):
+        return None
+    content = value.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return None
+
+    fact = copy.deepcopy(value)
+    fact["content"] = content.strip()
+    fact_id = fact.get("id")
+    fact["id"] = fact_id.strip() if isinstance(fact_id, str) and fact_id.strip() else f"fact_{uuid.uuid4().hex[:8]}"
+    category = fact.get("category")
+    fact["category"] = category.strip() if isinstance(category, str) and category.strip() else "context"
+
+    confidence = fact.get("confidence", 0.5)
+    if isinstance(confidence, bool):
+        numeric_confidence = 0.5
+    else:
+        try:
+            numeric_confidence = float(confidence)
+        except (TypeError, ValueError):
+            numeric_confidence = 0.5
+    fact["confidence"] = min(1.0, max(0.0, numeric_confidence)) if math.isfinite(numeric_confidence) else 0.5
+
+    created_at = fact.get("createdAt")
+    fact["createdAt"] = created_at.strip() if isinstance(created_at, str) else ""
+    source = fact.get("source")
+    fact["source"] = source.strip() if isinstance(source, str) and source.strip() else "unknown"
+    if "sourceError" in fact and fact["sourceError"] is not None and not isinstance(fact["sourceError"], str):
+        fact.pop("sourceError")
+    return fact
+
+
+def _normalize_memory_summaries(data: dict[str, Any]) -> dict[str, Any]:
+    """Normalize additive summary fields without relaxing fact validation."""
+    empty = create_empty_memory()
+    summaries: dict[str, Any] = {}
+    for section_name, section_keys in (
+        ("user", ("workContext", "personalContext", "topOfMind", "cognitiveStyle")),
+        ("history", ("recentMonths", "earlierContext", "longTermBackground")),
+    ):
+        incoming = data.get(section_name)
+        incoming = incoming if isinstance(incoming, dict) else {}
+        complete = copy.deepcopy(empty[section_name])
+        for key, value in incoming.items():
+            complete[key] = _normalize_context_section(value) if key in section_keys else copy.deepcopy(value)
+        for key in section_keys:
+            complete[key] = _normalize_context_section(complete.get(key))
+        summaries[section_name] = complete
+
+    return summaries
+
+
+def normalize_memory_data(data: dict[str, Any]) -> dict[str, Any]:
+    """Return a canonical compatibility document without mutating the caller."""
+    normalized = copy.deepcopy(data) if isinstance(data, dict) else {}
+    normalized.update(_normalize_memory_summaries(normalized))
+
+    facts = normalized.get("facts")
+    normalized["facts"] = [fact for value in facts if (fact := _normalize_legacy_import_fact(value)) is not None] if isinstance(facts, list) else []
+    if not isinstance(normalized.get("version"), str):
+        normalized["version"] = "1.0"
+    if not isinstance(normalized.get("lastUpdated"), str):
+        normalized["lastUpdated"] = ""
+    return normalized
 
 
 def _has_meaningful_data(value: Any) -> bool:
@@ -329,6 +408,26 @@ def _parse_fact_markdown(path: Path) -> dict[str, Any]:
         return metadata
     except (OSError, UnicodeError, ValueError, yaml.YAMLError) as exc:
         raise MemoryStorageCorruption(f"Failed to parse canonical fact {path}: {exc}") from exc
+
+
+def _parse_listed_fact(path: Path) -> dict[str, Any] | None:
+    """Parse a fact found by a directory scan that ran without the scope locks.
+
+    A commit can delete a listed fact before it is opened; that vanished entry
+    returns ``None``. An entry that is still present but unreadable (such as a
+    dangling symlink) remains corruption.
+
+    The ``lexists`` re-check is a best-effort heuristic, not an exact test: a
+    delete followed by a recreate of the same id before the check still raises
+    (the conservative side), and an ``lstat`` failure on a parent directory
+    (such as ``EACCES``) reads as vanished, so that entry is skipped.
+    """
+    try:
+        return _parse_fact_markdown(path)
+    except MemoryStorageCorruption:
+        if os.path.lexists(path):
+            raise
+        return None
 
 
 def _fsync_parent_directory(directory: Path) -> None:
@@ -790,7 +889,12 @@ class FileMemoryStorage(MemoryStorage):
             return []
         facts: list[dict[str, Any]] = []
         for fact_path in sorted(agent_facts_directory(path, agent_name).glob("**/*.md")):
-            fact = _parse_fact_markdown(fact_path)
+            # Reached both unlocked (load()/reload()) and under the scope locks
+            # (save(), clear_all(), default-bucket migration); the vanished-entry
+            # skip only ever fires on the unlocked paths.
+            fact = _parse_listed_fact(fact_path)
+            if fact is None:
+                continue
             facts.append(self._validate_loaded_fact(fact, fact_path, user_id=user_id, agent_name=agent_name))
         # Shard directories are an internal layout detail and must not change
         # the stable fact order observed by callers.
@@ -1157,16 +1261,13 @@ class FileMemoryStorage(MemoryStorage):
         if not sources:
             return False, from_version, []
 
-        base = global_memory or create_empty_memory()
-        migrated_summaries = {
-            "user": copy.deepcopy(base.get("user", {})),
-            "history": copy.deepcopy(base.get("history", {})),
-        }
+        migrated_summaries = _normalize_memory_summaries(global_memory or {})
         if legacy_memory is not None and adopt_legacy_summaries:
+            legacy_summaries = _normalize_memory_summaries(legacy_memory)
             for section in ("user", "history"):
                 migrated_summaries[section] = _merge_legacy_summary_section(
                     canonical=migrated_summaries[section],
-                    legacy=legacy_memory.get(section, {}),
+                    legacy=legacy_summaries[section],
                     section=section,
                     legacy_path=legacy_path,
                 )
@@ -1253,6 +1354,17 @@ class FileMemoryStorage(MemoryStorage):
             raise MemoryStorageCorruption(f"Legacy facts in {path} must be a list or mapping")
         result = {key: copy.deepcopy(value) for key, value in memory_file.items() if key != "facts"}
         result.setdefault("revision", 0)
+        summary_view = normalize_memory_data(
+            {
+                "version": result.get("version"),
+                "lastUpdated": result.get("lastUpdated"),
+                "user": result.get("user"),
+                "history": result.get("history"),
+                "facts": [],
+            }
+        )
+        result["user"] = summary_view["user"]
+        result["history"] = summary_view["history"]
         result["facts"] = facts
         return result
 
@@ -1309,8 +1421,11 @@ class FileMemoryStorage(MemoryStorage):
                 migration_notifications = self._run_read_migrations_locked(path, agent_name, user_id=user_id)
         for notification_agent, notifications in migration_notifications:
             self._dispatch_retrieval_notifications(notifications, user_id=user_id, agent_name=notification_agent)
-        document = self._read_document(path, agent_name, user_id=user_id)
+        # Sign before reading, as load() does: a write landing in between then
+        # leaves a stale signature that forces a re-read, never a stale
+        # document cached under the new signature.
         signature = self._scope_signature(path, agent_name)
+        document = self._read_document(path, agent_name, user_id=user_id)
         with self._cache_lock:
             self._memory_cache[key] = (copy.deepcopy(document), signature)
         if _rebuild_retrieval and agent_name is not None and self._retrieval is not None:
@@ -1735,7 +1850,10 @@ class FileMemoryStorage(MemoryStorage):
             for fact in facts:
                 content = fact.get("content")
                 if isinstance(content, str) and query_lower in content.lower():
-                    results.append({"fact": fact, "score": float(fact.get("confidence") or 0.5), "matchType": "substring"})
+                    # 0.0 is a persisted confidence _normalize_fact accepts; only unset/null defaults.
+                    confidence = fact.get("confidence")
+                    score = 0.5 if confidence is None else float(confidence)
+                    results.append({"fact": fact, "score": score, "matchType": "substring"})
         results.sort(key=lambda result: result["score"], reverse=True)
         return results[:top_k]
 
@@ -1750,7 +1868,9 @@ class FileMemoryStorage(MemoryStorage):
             candidates = root.glob("**/facts/**/*.md")
             for path in candidates:
                 try:
-                    fact = _parse_fact_markdown(path)
+                    fact = _parse_listed_fact(path)
+                    if fact is None:
+                        continue
                     relative_parts = path.relative_to(root).parts
                     agents_index = relative_parts.index("agents")
                     expected_agent = relative_parts[agents_index + 1]
@@ -1843,6 +1963,10 @@ def create_storage(config: DeerMemConfig, retrieval: RetrievalPort | None = None
     storage_class_path = config.storage_class
     if not storage_class_path or storage_class_path == "file":
         return FileMemoryStorage(config, retrieval=retrieval)
+    if storage_class_path == "markdown":
+        from .markdown_storage import MarkdownMemoryStorage
+
+        return MarkdownMemoryStorage(config, retrieval=retrieval)
     try:
         module_path, class_name = storage_class_path.rsplit(".", 1)
         storage_class = getattr(importlib.import_module(module_path), class_name)

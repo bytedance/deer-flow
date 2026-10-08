@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import builtins
 import gc
+import json
+import logging
+import sys
 import threading
 import weakref
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -31,6 +34,224 @@ def test_discord_channel_init() -> None:
     channel = DiscordChannel(bus=bus, config={"bot_token": "token"})
 
     assert channel.name == "discord"
+
+
+@pytest.mark.asyncio
+async def test_start_without_discord_module_points_at_the_extra(caplog) -> None:
+    """discord.py ships in the optional ``discord`` extra, so the missing-dependency
+    hint must send the operator to ``uv sync --extra discord`` — the same command
+    ``scripts/detect_uv_extras.py`` and the Docker builds already use — rather than
+    ``uv add``, which would rewrite pyproject.toml and diverge from ``uv sync --locked``."""
+    channel = DiscordChannel(bus=MessageBus(), config={"bot_token": "token"})
+
+    with caplog.at_level("ERROR", logger="app.channels.discord"), patch.dict(sys.modules, {"discord": None}):
+        await channel.start()
+
+    assert any("uv sync --extra discord" in record.message for record in caplog.records)
+    assert not any("uv add" in record.message for record in caplog.records)
+    assert channel._running is False
+
+
+# ---------------------------------------------------------------------------
+# thread-mapping persistence across restart (#2897)
+# ---------------------------------------------------------------------------
+
+
+def test_discord_thread_mapping_persists_across_restart(tmp_path) -> None:
+    """A channel->thread mapping written before shutdown is restored on a
+    subsequent start, so conversations are not lost across restarts (#2897)."""
+    store_path = tmp_path / "discord_threads.json"
+
+    # First process lifetime: record and persist a mapping.
+    first = DiscordChannel(bus=MessageBus(), config={"bot_token": "token"})
+    first._thread_store_path = store_path
+    first._record_thread_mapping("chan-1", "thread-1")
+    first._persist_thread_mappings()
+    assert store_path.exists()
+    assert json.loads(store_path.read_text()) == {"chan-1": "thread-1"}
+
+    # Restart: a brand-new channel instance reads the same file.
+    second = DiscordChannel(bus=MessageBus(), config={"bot_token": "token"})
+    second._thread_store_path = store_path
+    second._active_threads.clear()
+    second._active_thread_ids.clear()
+    second._load_active_threads()
+
+    assert second._active_threads == {"chan-1": "thread-1"}
+    assert "thread-1" in second._active_thread_ids
+
+
+@pytest.mark.asyncio
+async def test_discord_stop_flushes_thread_mappings(tmp_path) -> None:
+    """stop() best-effort flushes in-memory thread mappings to disk so the
+    most recent mapping survives a hard shutdown."""
+    channel = DiscordChannel(bus=MessageBus(), config={"bot_token": "token"})
+    channel._thread_store_path = tmp_path / "discord_threads.json"
+    # stop() only flushes once the load has marked the in-memory map
+    # authoritative (see DiscordChannel._thread_store_loaded); simulate the
+    # normal post-start() state so this exercises the flush, not the guard.
+    channel._thread_store_loaded = True
+    # Minimal shutdown context: no live client/loop/thread to tear down.
+    channel._discord_loop = None
+    channel._client = None
+    channel._thread = None
+    channel._cancel_ephemeral_tasks = AsyncMock()
+
+    channel._record_thread_mapping("chan-2", "thread-2")
+    await channel.stop()
+
+    assert channel._thread_store_path.exists()
+    assert json.loads(channel._thread_store_path.read_text()) == {"chan-2": "thread-2"}
+
+
+@pytest.mark.asyncio
+async def test_discord_stop_does_not_clobber_store_before_load(tmp_path) -> None:
+    """stop() before the initial load must not overwrite the persisted file.
+
+    ``ChannelService`` deliberately stops a channel whose ``start()`` bailed
+    before ``_load_active_threads()`` ran (missing bot_token / discord import
+    error), when the in-memory map is still empty. An ungated flush would write
+    ``{}`` over the persisted mappings — the #2897 data loss this PR exists to
+    prevent.
+    """
+    store_path = tmp_path / "discord_threads.json"
+    store_path.write_text(json.dumps({"chan-9": "thread-9"}))
+
+    channel = DiscordChannel(bus=MessageBus(), config={"bot_token": "token"})
+    channel._thread_store_path = store_path
+    # start() bailed before the load, so the flag is still False.
+    assert channel._thread_store_loaded is False
+    # Minimal shutdown context: no live client/loop/thread to tear down.
+    channel._discord_loop = None
+    channel._client = None
+    channel._thread = None
+    channel._cancel_ephemeral_tasks = AsyncMock()
+
+    await channel.stop()
+
+    # The pre-existing mapping survives intact: nothing was flushed over it.
+    assert json.loads(store_path.read_text()) == {"chan-9": "thread-9"}
+
+
+@pytest.mark.asyncio
+async def test_discord_stop_joins_client_thread_off_the_event_loop() -> None:
+    """stop() must not join the client thread on the shared Gateway loop.
+
+    The thread usually exits right after the cross-loop client close, but a
+    timed-out close or a slow ``_run_client()`` drain keeps it alive for up to
+    the 10s join timeout, and the Gateway loop must keep running meanwhile.
+    """
+    channel = DiscordChannel(bus=MessageBus(), config={"bot_token": "token"})
+    release = threading.Event()
+    # Bounded so a join run on the event loop fails the assertion below
+    # instead of hanging the test.
+    client_thread = threading.Thread(target=release.wait, args=(2,), daemon=True)
+    client_thread.start()
+    channel._discord_loop = None
+    channel._client = None
+    channel._thread = client_thread
+    channel._cancel_ephemeral_tasks = AsyncMock()
+
+    stop_task = asyncio.create_task(channel.stop())
+    await asyncio.sleep(0.05)
+    assert not stop_task.done()
+
+    release.set()
+    await stop_task
+    assert channel._thread is None
+
+
+class _TypingTarget:
+    """Messageable stand-in shaped like discord.py 2.x.
+
+    discord.py 2.0 removed ``Messageable.trigger_typing()``: ``typing()``
+    returns a ``Typing`` object, and awaiting it sends one indicator. This
+    fake deliberately has no ``trigger_typing``, so code still calling the
+    1.x API fails here the way it fails against the real library.
+    """
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.sent = asyncio.Event()
+        self.calls = 0
+        self._error = error
+
+    def typing(self):
+        return self._send()
+
+    async def _send(self) -> None:
+        self.calls += 1
+        self.sent.set()
+        if self._error is not None:
+            raise self._error
+
+
+@pytest.mark.asyncio
+async def test_start_typing_sends_indicator_through_discord_typing_api() -> None:
+    channel = DiscordChannel(bus=MessageBus(), config={"bot_token": "token"})
+    channel._running = True
+    target = _TypingTarget()
+
+    await channel._start_typing(target, "chat-1")
+    try:
+        await asyncio.wait_for(target.sent.wait(), timeout=1)
+    finally:
+        await channel._stop_typing("chat-1")
+
+    assert target.calls == 1
+
+
+async def _wait_for_typing_calls(target: _TypingTarget, count: int, sleep) -> None:
+    for _ in range(1000):
+        if target.calls >= count:
+            return
+        await sleep(0)
+    raise AssertionError(f"typing loop made {target.calls} calls, expected {count}")
+
+
+@pytest.mark.asyncio
+async def test_start_typing_warns_on_first_failure_then_logs_at_debug(caplog, monkeypatch) -> None:
+    """A loop's first failed indicator logs at WARNING so a permanently dead
+    indicator is visible at the default level; later ticks of the same loop
+    log at DEBUG, and the loop keeps retrying. A new loop warns again."""
+    import app.channels.discord as discord_module
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(_delay):
+        await real_sleep(0)
+
+    # Collapse the 10s tick so several ticks run inside the test.
+    monkeypatch.setattr(discord_module.asyncio, "sleep", fast_sleep)
+    channel = DiscordChannel(bus=MessageBus(), config={"bot_token": "token"})
+    channel._running = True
+    target = _TypingTarget(error=RuntimeError("missing permissions"))
+
+    def failure_records():
+        return [record for record in caplog.records if "failed to send typing indicator" in record.getMessage()]
+
+    with caplog.at_level("DEBUG", logger="app.channels.discord"):
+        await channel._start_typing(target, "chat-1")
+        typing_task = channel._typing_tasks["chat-1"]
+        try:
+            await _wait_for_typing_calls(target, 3, real_sleep)
+            assert not typing_task.done()
+        finally:
+            await channel._stop_typing("chat-1")
+
+        first_loop = failure_records()
+        assert [record.levelno for record in first_loop[:3]] == [logging.WARNING, logging.DEBUG, logging.DEBUG]
+        assert [record.levelno for record in first_loop].count(logging.WARNING) == 1
+        assert first_loop[0].exc_info is not None
+
+        caplog.clear()
+        target.calls = 0
+        await channel._start_typing(target, "chat-1")
+        try:
+            await _wait_for_typing_calls(target, 1, real_sleep)
+        finally:
+            await channel._stop_typing("chat-1")
+
+    assert failure_records()[0].levelno == logging.WARNING
 
 
 def _make_discord_message(text: str):
@@ -60,9 +281,8 @@ async def test_discord_bot_mention_slash_skill_routes_as_chat() -> None:
     channel._add_reaction = noop
 
     await channel._on_message(_make_discord_message("<@999> /data-analysis analyze uploads/foo.csv"))
-    await asyncio.sleep(0)
-
-    inbound = bus.get_inbound_nowait()
+    # The commit runs as a task on the Gateway loop (identity lookup included).
+    inbound = await asyncio.wait_for(bus.get_inbound(), timeout=5)
     bus.inbound_task_done()
     assert inbound.text == "/data-analysis analyze uploads/foo.csv"
     assert inbound.msg_type == InboundMessageType.CHAT
@@ -85,9 +305,8 @@ async def test_discord_bot_mention_known_command_routes_as_command() -> None:
     channel._add_reaction = noop
 
     await channel._on_message(_make_discord_message("<@999> /help"))
-    await asyncio.sleep(0)
-
-    inbound = bus.get_inbound_nowait()
+    # The commit runs as a task on the Gateway loop (identity lookup included).
+    inbound = await asyncio.wait_for(bus.get_inbound(), timeout=5)
     bus.inbound_task_done()
     assert inbound.text == "/help"
     assert inbound.msg_type == InboundMessageType.COMMAND
@@ -568,3 +787,115 @@ async def test_send_control_calls_keep_the_default_outbound_bound() -> None:
     assert len(run_mock.await_args_list) == 2  # stop_typing + one text chunk
     for call in run_mock.await_args_list:
         assert "timeout" not in call.kwargs
+
+
+# ---------------------------------------------------------------------------
+# allowed_guilds / allowed_channels parsing
+# ---------------------------------------------------------------------------
+
+
+class TestDiscordAllowedGuilds:
+    """A restriction the operator configured must never silently open the bot."""
+
+    @staticmethod
+    def _channel(config_extra: dict) -> DiscordChannel:
+        return DiscordChannel(bus=MessageBus(), config={"bot_token": "token", **config_extra})
+
+    @pytest.mark.parametrize("config_extra", [{}, {"allowed_guilds": None}, {"allowed_guilds": []}, {"allowed_guilds": " "}])
+    def test_unset_or_empty_allowlist_allows_every_guild_without_warning(self, config_extra, caplog):
+        with caplog.at_level(logging.WARNING, logger="app.channels.discord"):
+            channel = self._channel(config_extra)
+
+        assert channel._check_guild(SimpleNamespace(id=321))
+        assert channel._check_guild(None)
+        assert caplog.records == []
+
+    def test_listed_guild_ids_are_allowed_and_others_denied(self):
+        channel = self._channel({"allowed_guilds": [321, "654"]})
+
+        assert channel._check_guild(SimpleNamespace(id=321))
+        assert channel._check_guild(SimpleNamespace(id=654))
+        assert not channel._check_guild(SimpleNamespace(id=1))
+        assert not channel._check_guild(None)
+
+    @pytest.mark.parametrize("allowed_guilds", ["321", 321], ids=["str", "int"])
+    def test_scalar_guild_id_is_one_entry_not_its_digits(self, allowed_guilds):
+        # config.example.yaml sells this shorthand ("can also be a single guild
+        # ID"). Iterating the string "321" admitted guilds 1, 2 and 3 while
+        # blocking 321; an unquoted YAML int raised TypeError in the constructor.
+        channel = self._channel({"allowed_guilds": allowed_guilds})
+
+        assert channel._check_guild(SimpleNamespace(id=321))
+        assert not channel._check_guild(SimpleNamespace(id=3))
+
+    @pytest.mark.parametrize("bad_entry", ["@acme", "321,654", 0, -5, None, 4.2, True])
+    def test_unparseable_entry_is_dropped_with_warning(self, bad_entry, caplog):
+        with caplog.at_level(logging.WARNING, logger="app.channels.discord"):
+            channel = self._channel({"allowed_guilds": [321, bad_entry]})
+
+        assert channel._check_guild(SimpleNamespace(id=321))
+        assert not channel._check_guild(SimpleNamespace(id=1))
+        assert repr(bad_entry) in caplog.text
+        # 0, -5 and True are numeric, so the hint has to say what they lack.
+        assert "positive numeric guild ID" in caplog.text
+
+    @pytest.mark.parametrize(
+        "allowed_guilds",
+        # "321,654" is what a $ENV reference to a comma-separated value resolves
+        # to; the dict reaches the constructor from the runtime channel config.
+        [["@acme", "server"], "@acme", "321,654", [True], [4.2], {"id": 321}],
+    )
+    def test_allowlist_without_a_parseable_entry_denies_every_guild(self, allowed_guilds, caplog):
+        with caplog.at_level(logging.WARNING, logger="app.channels.discord"):
+            channel = self._channel({"allowed_guilds": allowed_guilds})
+
+        assert not channel._check_guild(SimpleNamespace(id=321))
+        assert not channel._check_guild(SimpleNamespace(id=3))
+        assert any(record.levelno == logging.ERROR for record in caplog.records)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("allowed_guilds", "admitted"), [("321", True), ("322", False)])
+    async def test_on_message_applies_the_allowlist(self, allowed_guilds, admitted):
+        # _make_discord_message reports guild ID 321 — the documented scalar.
+        channel = self._channel({"allowed_guilds": allowed_guilds})
+        channel._running = True
+        channel._client = SimpleNamespace(user=SimpleNamespace(id=999, mention="<@999>"))
+        channel._discord_module = SimpleNamespace(Thread=type("FakeThread", (), {}))
+        channel._main_loop = asyncio.get_running_loop()
+        # A refused capacity slot ends the hand-off here, so nothing is stubbed
+        # beyond it: the assertion is purely "did the gate let the message in".
+        channel._reserve_inbound = MagicMock(return_value=None)
+
+        await channel._on_message(_make_discord_message("hello"))
+
+        assert channel._reserve_inbound.called is admitted
+
+
+class TestDiscordAllowedChannels:
+    """``allowed_channels`` is parsed by the same lines, so it breaks the same way."""
+
+    @staticmethod
+    def _channel(config_extra: dict) -> DiscordChannel:
+        return DiscordChannel(bus=MessageBus(), config={"bot_token": "token", "mention_only": True, "thread_mode": False, **config_extra})
+
+    @pytest.mark.parametrize("allowed_channels", ["456", 456], ids=["str", "int"])
+    def test_scalar_channel_id_is_one_entry_not_its_digits(self, allowed_channels):
+        channel = self._channel({"allowed_channels": allowed_channels})
+
+        assert "456" in channel._allowed_channels
+        assert "4" not in channel._allowed_channels
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("allowed_channels", "admitted"), [("456", True), ("457", False)])
+    async def test_exempt_channel_needs_no_mention(self, allowed_channels, admitted):
+        channel = self._channel({"allowed_channels": allowed_channels})
+        channel._running = True
+        channel._client = SimpleNamespace(user=SimpleNamespace(id=999, mention="<@999>"))
+        channel._discord_module = SimpleNamespace(Thread=type("FakeThread", (), {}))
+        channel._main_loop = asyncio.get_running_loop()
+        channel._reserve_inbound = MagicMock(return_value=MagicMock())
+        channel._publish_reserved = MagicMock(return_value=None)
+
+        await channel._on_message(_make_discord_message("hello"))
+
+        assert channel._publish_reserved.called is admitted

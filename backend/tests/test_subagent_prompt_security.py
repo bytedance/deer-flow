@@ -62,7 +62,7 @@ def test_build_subagent_section_lists_only_caller_allowlisted_subagents(monkeypa
 
     section = prompt_module._build_subagent_section(3, allowed_subagents=["planner"])
 
-    assert "**planner**" in section
+    assert "catalog data" in section
     assert "**writer**" not in section
 
 
@@ -77,7 +77,8 @@ def test_build_subagent_section_threads_user_id_to_custom_agent_lookups(monkeypa
 
     section = prompt_module._build_subagent_section(3, user_id="user-1")
 
-    assert "**writer**: User writer" in section
+    assert "User writer" not in section
+    assert "catalog data" in section
     assert captured["available"]["user_id"] == "user-1"
 
 

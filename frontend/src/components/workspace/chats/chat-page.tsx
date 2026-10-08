@@ -18,6 +18,7 @@ import {
   InputBox,
   type InputBoxSubmitOptions,
 } from "@/components/workspace/input-box";
+import { KnowledgeScopeSelector } from "@/components/workspace/knowledge-scope-selector";
 import {
   MessageList,
   MESSAGE_LIST_DEFAULT_PADDING_BOTTOM,
@@ -29,7 +30,8 @@ import {
 } from "@/components/workspace/sidecar";
 import { ThreadArchiveStatus } from "@/components/workspace/thread-archive-status";
 import { ThreadBackgroundTasks } from "@/components/workspace/thread-background-tasks";
-import { ThreadScheduledTasksLink } from "@/components/workspace/thread-scheduled-tasks-link";
+import { ThreadExtensionActions } from "@/components/workspace/thread-extension-actions";
+import { ThreadScheduledTasksButton } from "@/components/workspace/thread-scheduled-tasks-button";
 import { ThreadSubagentBatches } from "@/components/workspace/thread-subagent-batches";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
@@ -38,8 +40,17 @@ import { useActiveGoal } from "@/components/workspace/use-active-goal";
 import { Welcome } from "@/components/workspace/welcome";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { hasPermission, PERMISSIONS } from "@/core/auth/permissions";
-import { useBrowserControlEnabled } from "@/core/features";
+import {
+  useBrowserControlEnabled,
+  useKnowledgeBaseEnabled,
+} from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
+import {
+  ALL_KNOWLEDGE_SCOPE,
+  buildKnowledgeScopeSnapshot,
+  KNOWLEDGE_SCOPE_KEY,
+  type KnowledgeScopeSelection,
+} from "@/core/knowledge";
 import {
   buildHumanInputResponseText,
   hasOpenHumanInputRequest,
@@ -50,6 +61,8 @@ import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useProject } from "@/core/projects";
+import { useThreadScheduledTaskEvents } from "@/core/scheduled-tasks/events";
+import { useScheduleToolResultRefresh } from "@/core/scheduled-tasks/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
 import { resolveThreadContext } from "@/core/settings/store";
 import { createThread } from "@/core/threads/api";
@@ -70,12 +83,14 @@ import { cn } from "@/lib/utils";
 
 import { ChatBox } from "./chat-box";
 import { useSpecificChatMode } from "./use-chat-mode";
+import { useMarkOpenThreadRead } from "./use-mark-open-thread-read";
 import { useThreadChat } from "./use-thread-chat";
 
 export default function ChatPage() {
   const { t } = useI18n();
   const { user } = useAuth();
   const canStopStreaming = hasPermission(user, PERMISSIONS.RUNS_CANCEL);
+  const canCreateRuns = hasPermission(user, PERMISSIONS.RUNS_CREATE);
   const router = useRouter();
   const searchParams = useSearchParams();
   const { threadId, setThreadId, isNewThread, setIsNewThread, isMock } =
@@ -108,6 +123,17 @@ export default function ChatPage() {
     enabled: !isNewThread && !isMock,
     isMock,
   });
+  // A saved thread that exists on the server is being read while open:
+  // clears its unread dot (sidebar and chats list) on every device.
+  const markThreadRead = useMarkOpenThreadRead(threadId, {
+    enabled: !isNewThread && !isMock && threadMetadata.data != null,
+  });
+  // Lifecycle lines of schedules created in this chat ("Paused by agent",
+  // "Finished"); they stay after the task is deleted.
+  const scheduledTaskEvents = useThreadScheduledTaskEvents(threadId, {
+    isNewThread,
+    enabled: !isMock,
+  });
   const branchThread = useBranchThread();
   const backendTokenUsage = threadTokenUsageToTokenUsage(threadTokenUsage.data);
   const contextUsage = selectContextUsage(threadTokenUsage.data);
@@ -127,6 +153,41 @@ export default function ChatPage() {
   }, [isNewThread]);
 
   const { showNotification } = useNotification();
+  const { scopeSelectionEnabled } = useKnowledgeBaseEnabled();
+  const selectorVisible =
+    scopeSelectionEnabled && env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true";
+  const [knowledgeScope, setKnowledgeScope] =
+    useState<KnowledgeScopeSelection | null>(null);
+  const previousConversationRef = useRef({ threadId, isNewThread });
+
+  useEffect(() => {
+    setKnowledgeScope((current) => {
+      if (!selectorVisible) return null;
+      return current ?? ALL_KNOWLEDGE_SCOPE;
+    });
+  }, [selectorVisible]);
+
+  useEffect(() => {
+    const previous = previousConversationRef.current;
+    if (
+      previous.threadId !== threadId ||
+      previous.isNewThread !== isNewThread
+    ) {
+      const isNewThreadRouteReplacement = previous.isNewThread && !isNewThread;
+      if (!isNewThreadRouteReplacement) {
+        setKnowledgeScope(selectorVisible ? ALL_KNOWLEDGE_SCOPE : null);
+      }
+    }
+    previousConversationRef.current = { threadId, isNewThread };
+  }, [isNewThread, selectorVisible, threadId]);
+
+  const currentKnowledgeScopeSnapshot = useMemo(
+    () =>
+      selectorVisible && knowledgeScope
+        ? buildKnowledgeScopeSnapshot(knowledgeScope)
+        : null,
+    [knowledgeScope, selectorVisible],
+  );
 
   const {
     thread,
@@ -156,6 +217,9 @@ export default function ChatPage() {
       setIsNewThread(false);
     },
     onFinish: (state) => {
+      // A run in this thread ended (a send, or a joined scheduled run) while
+      // it is open: it has been read.
+      markThreadRead();
       if (document.hidden || !document.hasFocus()) {
         let body = "Conversation finished";
         const lastMessage = state.messages.at(-1);
@@ -174,6 +238,8 @@ export default function ChatPage() {
   });
 
   const hasThreadMessages = thread.messages.length > 0;
+  // A schedule_task result refreshes the header button and cards at once.
+  useScheduleToolResultRefresh(isMock ? null : threadId, thread.messages);
 
   useEffect(() => {
     if (
@@ -216,7 +282,13 @@ export default function ChatPage() {
       return;
     }
     try {
-      await createThread(threadId, projectParam);
+      const created = await createThread(threadId, projectParam);
+      // Keep confirmed membership available while the first metadata read is pending
+      // or fails after the composer materializes this new project thread.
+      queryClient.setQueryData(
+        ["thread", "metadata", threadId, false],
+        created,
+      );
       void queryClient.invalidateQueries({
         queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
       });
@@ -257,13 +329,27 @@ export default function ChatPage() {
       if (submissionEpochRef.current !== submissionEpoch) {
         throw new Error("thread-submission-stale");
       }
-      const sendPromise = sendMessage(threadId, message, undefined, options);
+      const scopedOptions = currentKnowledgeScopeSnapshot
+        ? {
+            ...options,
+            additionalKwargs: {
+              ...options?.additionalKwargs,
+              [KNOWLEDGE_SCOPE_KEY]: currentKnowledgeScopeSnapshot,
+            },
+          }
+        : options;
+      const sendPromise = sendMessage(
+        threadId,
+        message,
+        undefined,
+        scopedOptions,
+      );
       if (message.files.length > 0) {
         return sendPromise;
       }
       void sendPromise;
     },
-    [sendMessage, threadId, ensureProjectThread],
+    [currentKnowledgeScopeSnapshot, sendMessage, threadId, ensureProjectThread],
   );
   const handleSubmitHumanInput = useCallback(
     async (request: HumanInputRequest, response: HumanInputResponse) => {
@@ -279,6 +365,9 @@ export default function ChatPage() {
           additionalKwargs: {
             hide_from_ui: true,
             human_input_response: response,
+            ...(currentKnowledgeScopeSnapshot
+              ? { [KNOWLEDGE_SCOPE_KEY]: currentKnowledgeScopeSnapshot }
+              : {}),
           },
           onSent: () => {
             sent = true;
@@ -287,7 +376,7 @@ export default function ChatPage() {
       );
       return sent;
     },
-    [sendMessage, threadId],
+    [currentKnowledgeScopeSnapshot, sendMessage, threadId],
   );
   const handleStop = useCallback(async () => {
     await thread.stop();
@@ -299,8 +388,15 @@ export default function ChatPage() {
   );
   const handleEditAndRegenerate = useCallback(
     (messageId: string, replacementText: string) =>
-      editAndRegenerateMessage(threadId, messageId, replacementText),
-    [editAndRegenerateMessage, threadId],
+      editAndRegenerateMessage(
+        threadId,
+        messageId,
+        replacementText,
+        currentKnowledgeScopeSnapshot
+          ? { [KNOWLEDGE_SCOPE_KEY]: currentKnowledgeScopeSnapshot }
+          : undefined,
+      ),
+    [currentKnowledgeScopeSnapshot, editAndRegenerateMessage, threadId],
   );
   const handleBranchTurn = useCallback(
     async (messageId: string, messageIds: string[]) => {
@@ -403,7 +499,7 @@ export default function ChatPage() {
                     <ThreadSubagentBatches threadId={threadId} />
                   )}
                 {!isNewThread && !isMock && (
-                  <ThreadScheduledTasksLink threadId={threadId} />
+                  <ThreadScheduledTasksButton threadId={threadId} />
                 )}
                 {tokenUsageEnabled ? (
                   <TokenUsageIndicator
@@ -424,6 +520,7 @@ export default function ChatPage() {
                 <SidecarTrigger />
                 {browserEnabled && <BrowserTrigger />}
                 <ExportTrigger threadId={threadId} />
+                <ThreadExtensionActions threadId={threadId} />
                 <ArtifactTrigger />
               </div>
             </header>
@@ -437,6 +534,7 @@ export default function ChatPage() {
                   testId="main-message-list"
                   threadId={threadId}
                   thread={thread}
+                  scheduledTaskEvents={scheduledTaskEvents.data}
                   enableConversationOutline
                   paddingBottom={MESSAGE_LIST_DEFAULT_PADDING_BOTTOM}
                   hasMoreHistory={hasMoreHistory}
@@ -526,7 +624,18 @@ export default function ChatPage() {
                       )}
                       isWelcomeMode={isWelcomeMode}
                       threadId={threadId}
+                      projectId={projectParam ?? affiliatedProjectId}
                       draftThreadId={isNewThread ? "new" : threadId}
+                      knowledgeScopeControl={
+                        selectorVisible && knowledgeScope ? (
+                          <KnowledgeScopeSelector
+                            agentName="lead_agent"
+                            disabled={thread.isLoading || isUploading}
+                            selection={knowledgeScope}
+                            onChange={setKnowledgeScope}
+                          />
+                        ) : undefined
+                      }
                       autoFocus={isWelcomeMode}
                       status={
                         thread.error
@@ -554,9 +663,20 @@ export default function ChatPage() {
                       }}
                       onGoalChange={setLocalGoal}
                       onPrepareThread={ensureProjectThread}
+                      onReferenceFileAttached={() => {
+                        if (!isNewThread) return;
+                        history.replaceState(
+                          null,
+                          "",
+                          `/workspace/chats/${threadId}`,
+                        );
+                        setThreadId(threadId);
+                        setIsNewThread(false);
+                      }}
                       onSubmit={handleSubmit}
                       onStop={handleStop}
                       canStopStreaming={canStopStreaming}
+                      canCreateRuns={canCreateRuns}
                     />
                   ) : (
                     <div

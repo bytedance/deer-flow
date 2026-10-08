@@ -3,7 +3,7 @@ import copy
 
 import pytest
 from deerflow_extension_api import ExtensionData
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.base import empty_checkpoint, uuid6
 from langgraph.checkpoint.memory import InMemorySaver
 
@@ -196,7 +196,7 @@ async def test_goal_worker_returns_hidden_continuation_when_goal_is_unmet(monkey
 
 
 @pytest.mark.asyncio
-async def test_goal_worker_clears_goal_when_evaluator_is_satisfied(monkeypatch):
+async def test_goal_worker_defers_satisfied_goal_completion_until_run_finalization(monkeypatch):
     checkpointer = InMemorySaver()
     thread_id = "done-goal-thread"
     await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish all tests")
@@ -222,9 +222,9 @@ async def test_goal_worker_clears_goal_when_evaluator_is_satisfied(monkeypatch):
         app_config=None,
     )
 
-    assert continuation is None
-    assert await read_thread_goal(checkpointer, thread_id) is None
-    assert bridge.events[0][0] == "values"
+    assert isinstance(continuation, worker._GoalCompletionCandidate)
+    assert await read_thread_goal(checkpointer, thread_id) == continuation.goal
+    assert bridge.events == []
 
 
 @pytest.mark.asyncio
@@ -307,6 +307,186 @@ async def test_goal_worker_stands_down_for_non_continuable_blocker(monkeypatch):
     assert latest_goal["continuation_count"] == 0
     assert latest_goal["last_evaluation"]["blocker"] == "missing_evidence"
     assert latest_goal["last_evaluation"]["stand_down_reason"] == "blocked:missing_evidence"
+
+
+@pytest.mark.asyncio
+async def test_goal_worker_stands_down_after_the_run_hit_its_token_budget(monkeypatch):
+    checkpointer = InMemorySaver()
+    thread_id = "token-capped-goal-thread"
+    await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish all tests")
+    bridge = _CollectingBridge()
+
+    async def fake_evaluate_goal_completion(_goal, _messages, **_kwargs):
+        return GoalEvaluation(
+            satisfied=False,
+            blocker="goal_not_met_yet",
+            reason="Tests have not passed yet.",
+            evidence_summary="Implementation is incomplete.",
+        )
+
+    monkeypatch.setattr(worker, "evaluate_goal_completion", fake_evaluate_goal_completion)
+
+    continuation = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(checkpointer),
+        bridge=bridge,
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        run_id="run-capped",
+        model_name="test-model",
+        app_config=None,
+        run_stop_reason="token_capped",
+    )
+
+    assert continuation is None
+    latest_goal = await read_thread_goal(checkpointer, thread_id)
+    assert latest_goal is not None
+    assert latest_goal["continuation_count"] == 0
+    assert latest_goal["last_evaluation"]["blocker"] == "goal_not_met_yet"
+    assert latest_goal["last_evaluation"]["stand_down_reason"] == "token_capped"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("assistant_text", ["Let me check one thing first.", ""])
+@pytest.mark.parametrize("with_parallel_tool_result", [False, True])
+async def test_goal_worker_waits_for_an_unanswered_clarification(monkeypatch, assistant_text, with_parallel_tool_result):
+    """The clarification question lives in a ToolMessage the evaluator never reads."""
+    checkpointer = InMemorySaver()
+    thread_id = "clarification-goal-thread"
+    ask = {"name": "ask_clarification", "args": {"question": "Drop the legacy table?"}, "id": "call-ask"}
+    look = {"name": "bash", "args": {"command": "ls"}, "id": "call-ls"}
+    messages = [
+        HumanMessage(content="Migrate the orders database."),
+        AIMessage(content=assistant_text, tool_calls=[look, ask] if with_parallel_tool_result else [ask]),
+        ToolMessage(
+            content="Drop the legacy table?",
+            tool_call_id="call-ask",
+            name="ask_clarification",
+            artifact={"human_input": {"version": 1, "kind": "human_input_request", "source": "ask_clarification", "request_id": "req-1", "question": "Drop the legacy table?"}},
+        ),
+    ]
+    if with_parallel_tool_result:
+        messages.append(ToolMessage(content="orders_v1 orders_v2", tool_call_id="call-ls", name="bash"))
+    await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish the migration", messages=messages)
+    evaluator_calls = []
+
+    async def fake_evaluate_goal_completion(_goal, _messages, **_kwargs):
+        evaluator_calls.append(_messages)
+        return GoalEvaluation(satisfied=False, blocker="goal_not_met_yet", reason="Not migrated yet.", evidence_summary="")
+
+    monkeypatch.setattr(worker, "evaluate_goal_completion", fake_evaluate_goal_completion)
+
+    continuation = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(checkpointer),
+        bridge=_CollectingBridge(),
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        run_id="run-clarification",
+        model_name="test-model",
+        app_config=None,
+    )
+
+    assert continuation is None
+    assert evaluator_calls == []
+    latest_goal = await read_thread_goal(checkpointer, thread_id)
+    assert latest_goal is not None
+    assert latest_goal["continuation_count"] == 0
+    assert latest_goal["last_evaluation"]["blocker"] == "needs_user_input"
+    assert latest_goal["last_evaluation"]["stand_down_reason"] == "blocked:needs_user_input"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_later_tool_result", [False, True])
+async def test_goal_worker_resumes_after_the_user_answers_clarification(monkeypatch, with_later_tool_result):
+    """An old card remains in history, but cannot block the answered turn."""
+    checkpointer = InMemorySaver()
+    thread_id = "answered-clarification-goal-thread"
+    messages = [
+        HumanMessage(content="Migrate the orders database."),
+        AIMessage(content="", tool_calls=[{"name": "ask_clarification", "args": {"question": "Keep the legacy table?"}, "id": "call-ask"}]),
+        ToolMessage(
+            content="Keep the legacy table?",
+            tool_call_id="call-ask",
+            name="ask_clarification",
+            artifact={"human_input": {"kind": "human_input_request"}},
+        ),
+    ]
+    await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish the migration", messages=messages)
+    evaluator_calls = []
+
+    async def fake_evaluate_goal_completion(_goal, evaluated_messages, **_kwargs):
+        evaluator_calls.append(evaluated_messages)
+        return GoalEvaluation(satisfied=False, blocker="goal_not_met_yet", reason="Validation remains.", evidence_summary="Migrated while retaining the legacy table.")
+
+    monkeypatch.setattr(worker, "evaluate_goal_completion", fake_evaluate_goal_completion)
+    kwargs = {
+        "accessor": _full_accessor(checkpointer),
+        "bridge": _CollectingBridge(),
+        "checkpointer": checkpointer,
+        "thread_id": thread_id,
+        "model_name": "test-model",
+        "app_config": None,
+    }
+    assert await worker._prepare_goal_continuation_input(**kwargs, run_id="run-question") is None
+    assert evaluator_calls == []
+    waiting_goal = await read_thread_goal(checkpointer, thread_id)
+    assert waiting_goal["last_evaluation"]["stand_down_reason"] == "blocked:needs_user_input"
+
+    messages.extend(
+        [
+            HumanMessage(content="Yes, keep the legacy table."),
+            AIMessage(
+                content="Migrated the schema and kept the legacy table. Validation remains.",
+                tool_calls=[{"name": "bash", "args": {"command": "ls"}, "id": "call-ls"}] if with_later_tool_result else [],
+            ),
+        ]
+    )
+    if with_later_tool_result:
+        messages.append(ToolMessage(content="orders_v1 orders_v2", tool_call_id="call-ls", name="bash"))
+    await _write_messages(checkpointer, thread_id=thread_id, messages=messages)
+
+    continuation = await worker._prepare_goal_continuation_input(**kwargs, run_id="run-answer")
+
+    assert len(evaluator_calls) == 1
+    assert any(isinstance(message, HumanMessage) and message.content == "Yes, keep the legacy table." for message in evaluator_calls[0])
+    assert continuation is not None
+    assert continuation["messages"][0].additional_kwargs["hide_from_ui"] is True
+    latest_goal = await read_thread_goal(checkpointer, thread_id)
+    assert latest_goal["continuation_count"] == 1
+    assert latest_goal["last_evaluation"]["blocker"] == "goal_not_met_yet"
+    assert "stand_down_reason" not in latest_goal["last_evaluation"]
+
+
+@pytest.mark.asyncio
+async def test_goal_worker_defers_satisfied_goal_completion_even_after_token_cap(monkeypatch):
+    checkpointer = InMemorySaver()
+    thread_id = "token-capped-done-goal-thread"
+    await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish all tests")
+    bridge = _CollectingBridge()
+
+    async def fake_evaluate_goal_completion(_goal, _messages, **_kwargs):
+        return GoalEvaluation(
+            satisfied=True,
+            blocker="none",
+            reason="The visible conversation says the task is done.",
+            evidence_summary="Done.",
+        )
+
+    monkeypatch.setattr(worker, "evaluate_goal_completion", fake_evaluate_goal_completion)
+
+    continuation = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(checkpointer),
+        bridge=bridge,
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        run_id="run-capped-done",
+        model_name="test-model",
+        app_config=None,
+        run_stop_reason="token_capped",
+    )
+
+    # A token cap does not veto completion, but delivery must still succeed.
+    assert isinstance(continuation, worker._GoalCompletionCandidate)
+    assert await read_thread_goal(checkpointer, thread_id) == continuation.goal
 
 
 @pytest.mark.asyncio
@@ -578,6 +758,154 @@ async def test_goal_worker_stands_down_without_durable_assistant_receipt():
     assert latest_goal["last_evaluation"]["stand_down_reason"] == "no_durable_end_of_turn"
 
 
+class _FailingEvaluatorModel:
+    """Evaluator chat model whose provider call raises, or whose answer is not valid JSON."""
+
+    def __init__(self, outcome: Exception | str, before=None) -> None:
+        self._outcome = outcome
+        self._before = before
+        self.calls = 0
+
+    async def ainvoke(self, _messages, config=None):
+        self.calls += 1
+        if self._before is not None:
+            await self._before()
+        if isinstance(self._outcome, Exception):
+            raise self._outcome
+        return AIMessage(content=self._outcome)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("after_earlier_evaluation", [False, True])
+@pytest.mark.parametrize(
+    ("outcome", "error_type"),
+    [
+        (ConnectionError("Connection error: request-detail-7f3a"), "ConnectionError"),
+        ('{"satisfied": false "blocker": "request-detail-7f3a"}', "ValueError"),
+    ],
+    ids=["provider-error", "malformed-json"],
+)
+async def test_goal_worker_records_a_failed_evaluator_call(outcome, error_type, after_earlier_evaluation):
+    checkpointer = InMemorySaver()
+    thread_id = "evaluator-failed-thread"
+    await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish all tests")
+    if after_earlier_evaluation:
+        goal = await read_thread_goal(checkpointer, thread_id)
+        unmet = GoalEvaluation(satisfied=False, blocker="goal_not_met_yet", reason="More work remains.", evidence_summary="")
+        await write_thread_goal(checkpointer, thread_id, attach_goal_evaluation(goal, unmet, run_id="run-earlier", continuation_count=1))
+    bridge = _CollectingBridge()
+
+    continuation = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(checkpointer),
+        bridge=bridge,
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        run_id="run-8",
+        model_name="test-model",
+        app_config=None,
+        evaluator_model_factory=lambda: _FailingEvaluatorModel(outcome),
+    )
+
+    assert continuation is None
+    latest_goal = await read_thread_goal(checkpointer, thread_id)
+    assert latest_goal is not None
+    assert latest_goal["continuation_count"] == (1 if after_earlier_evaluation else 0)
+    evaluation = latest_goal["last_evaluation"]
+    assert evaluation["run_id"] == "run-8"
+    assert evaluation["blocker"] == "run_failed"
+    assert evaluation["stand_down_reason"] == "evaluator_failed"
+    assert evaluation["reason"] == f"The goal evaluator did not return a verdict ({error_type})."
+    assert evaluation["evidence_summary"] == ""
+    # Only the exception type: neither a provider's error message nor the model's answer
+    # is stored or streamed, since they can carry request details.
+    assert "request-detail-7f3a" not in repr(latest_goal)
+    assert [event for event, _ in bridge.events] == ["values"]
+    assert "request-detail-7f3a" not in repr(bridge.events)
+
+
+@pytest.mark.asyncio
+async def test_goal_worker_does_not_record_a_failed_evaluator_call_after_abort():
+    checkpointer = InMemorySaver()
+    thread_id = "evaluator-failed-abort-thread"
+    await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish all tests")
+    abort_event = asyncio.Event()
+
+    async def abort():
+        abort_event.set()
+
+    continuation = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(checkpointer),
+        bridge=_CollectingBridge(),
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        run_id="run-abort-failed",
+        model_name="test-model",
+        app_config=None,
+        evaluator_model_factory=lambda: _FailingEvaluatorModel(ConnectionError("Connection error."), before=abort),
+        abort_event=abort_event,
+    )
+
+    assert continuation is None
+    latest_goal = await read_thread_goal(checkpointer, thread_id)
+    assert latest_goal is not None
+    assert "last_evaluation" not in latest_goal
+
+
+@pytest.mark.asyncio
+async def test_goal_worker_does_not_resurrect_a_goal_cleared_during_a_failed_evaluator_call():
+    checkpointer = InMemorySaver()
+    thread_id = "evaluator-failed-clear-thread"
+    await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish all tests")
+
+    async def clear_goal():
+        await write_thread_goal(checkpointer, thread_id, None, as_node="test")
+
+    continuation = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(checkpointer),
+        bridge=_CollectingBridge(),
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        run_id="run-clear-failed",
+        model_name="test-model",
+        app_config=None,
+        evaluator_model_factory=lambda: _FailingEvaluatorModel(ConnectionError("Connection error."), before=clear_goal),
+    )
+
+    assert continuation is None
+    assert await read_thread_goal(checkpointer, thread_id) is None
+
+
+@pytest.mark.asyncio
+async def test_goal_worker_records_nothing_when_the_conversation_cannot_be_read(monkeypatch):
+    checkpointer = InMemorySaver()
+    thread_id = "prepare-failed-thread"
+    await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish all tests")
+    model = _FailingEvaluatorModel("unused")
+
+    async def unreadable_messages(_accessor, _thread_id):
+        raise RuntimeError("checkpoint store unavailable")
+
+    monkeypatch.setattr(worker, "_materialized_checkpoint_messages", unreadable_messages)
+
+    continuation = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(checkpointer),
+        bridge=_CollectingBridge(),
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        run_id="run-unreadable",
+        model_name="test-model",
+        app_config=None,
+        evaluator_model_factory=lambda: model,
+    )
+
+    # A failure before the evaluator is asked is not an evaluator failure: nothing is recorded.
+    assert continuation is None
+    latest_goal = await read_thread_goal(checkpointer, thread_id)
+    assert latest_goal is not None
+    assert "last_evaluation" not in latest_goal
+    assert model.calls == 0
+
+
 def test_stand_down_reason_uses_documented_default_caps_when_missing():
     """_stand_down_reason must fall back to the same default caps as
     should_continue_goal (8 / 2). A bare goal dict missing the cap fields must
@@ -680,6 +1008,97 @@ async def test_run_agent_does_not_stream_continuation_after_abort(monkeypatch):
     assert len(fake_agent.inputs) == 1
     assert fake_agent.inputs[0] == {"messages": [HumanMessage(content="start")]}
     assert record.status == RunStatus.interrupted
+
+
+@pytest.mark.asyncio
+async def test_run_agent_passes_the_run_stop_reason_to_the_goal_loop(monkeypatch):
+    class FakeAgent:
+        def __init__(self) -> None:
+            self.inputs = []
+            self.metadata = {}
+            self.checkpointer = None
+            self.store = None
+            self.interrupt_before_nodes = []
+            self.interrupt_after_nodes = []
+
+        def astream(self, input_payload, **kwargs):
+            self.inputs.append(input_payload)
+            # TokenBudgetMiddleware stamps the cap into the run's runtime context.
+            kwargs["config"]["configurable"]["__pregel_runtime"].context["stop_reason"] = "token_capped"
+
+            async def _gen():
+                yield {"messages": []}
+
+            return _gen()
+
+    class FakeRunManager:
+        async def try_start(self, _run_id):
+            record.status = RunStatus.running
+            return RunStartOutcome.started
+
+        async def set_status(self, _run_id, status, **_kwargs):
+            record.status = status
+
+        async def set_status_if_not_cancelled(self, _run_id, status, **kwargs):
+            await self.set_status(_run_id, status, **kwargs)
+            return None
+
+        async def update_model_name(self, *_args, **_kwargs):
+            return None
+
+        async def update_run_completion(self, *_args, **_kwargs):
+            return None
+
+        async def wait_for_prior_finalizing(self, *_args, **_kwargs):
+            return None
+
+        async def set_finalizing(self, _run_id, finalizing):
+            record.finalizing = finalizing
+
+        async def cleanup(self, *_args, **_kwargs):
+            return None
+
+    class FakeBridge:
+        async def publish(self, *_args, **_kwargs):
+            return None
+
+        async def publish_end(self, *_args, **_kwargs):
+            return None
+
+        async def cleanup(self, *_args, **_kwargs):
+            return None
+
+    stop_reasons = []
+
+    async def fake_prepare(**kwargs):
+        stop_reasons.append(kwargs.get("run_stop_reason"))
+        return None
+
+    monkeypatch.setattr(worker, "_prepare_goal_continuation_input", fake_prepare)
+
+    fake_agent = FakeAgent()
+    record = RunRecord(
+        run_id="run-token-capped",
+        thread_id="thread-token-capped",
+        assistant_id="lead-agent",
+        status=RunStatus.pending,
+        on_disconnect=DisconnectMode.cancel,
+        model_name="test-model",
+    )
+    record.abort_event = asyncio.Event()
+
+    await worker.run_agent(
+        FakeBridge(),
+        FakeRunManager(),
+        record,
+        ctx=worker.RunContext(checkpointer=None),
+        agent_factory=lambda config: fake_agent,
+        graph_input={"messages": [HumanMessage(content="start")]},
+        config={"configurable": {"thread_id": "thread-token-capped"}},
+    )
+
+    assert stop_reasons == ["token_capped"]
+    assert len(fake_agent.inputs) == 1
 
 
 @pytest.mark.asyncio

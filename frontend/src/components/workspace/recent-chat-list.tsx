@@ -45,6 +45,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
+import { ConversationExtensionActions } from "@/components/workspace/conversation-extension-actions";
 import { getAPIClient } from "@/core/api";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { hasPermission, PERMISSIONS } from "@/core/auth/permissions";
@@ -60,6 +61,7 @@ import {
   usePinThread,
   useRenameThread,
 } from "@/core/threads/hooks";
+import { threadOriginOf } from "@/core/threads/origin";
 import {
   flattenThreadBranches,
   type ThreadBranchEntry,
@@ -77,7 +79,11 @@ import { env } from "@/env";
 import { isIMEComposing } from "@/lib/ime";
 
 import { MoveToProjectMenu, NewProjectDialog } from "./move-to-project-menu";
-import { ThreadChannelIcon } from "./thread-channel-source";
+import {
+  ThreadOriginIcon,
+  ThreadUnreadDot,
+  unreadLabelOfThread,
+} from "./thread-channel-source";
 import { useThreadDeleteDialog } from "./thread-delete-dialog";
 import { VirtualThreadList } from "./thread-list-virtualizer";
 import { useThreadArchiveAction } from "./use-thread-archive-action";
@@ -212,22 +218,30 @@ export function ThreadSidebarItem({
     [t, thread],
   );
 
-  const channelSource = channelSourceOfThread(thread);
+  const channelSource = channelSourceOfThread(thread, t);
+  const origin = threadOriginOf(thread);
   const pinned = isThreadPinned(thread);
   const parentTitle = branchEntry?.parentThread
-    ? titleOfThread(branchEntry.parentThread)
+    ? titleOfThread(branchEntry.parentThread, t.pages.untitled)
     : null;
-  const title = titleOfThread(thread);
+  const title = titleOfThread(thread, t.pages.untitled);
   const branchLabel = parentTitle
     ? t.chats.branchLabel(title, parentTitle)
     : undefined;
+  // The open thread is being read, so it never shows the dot (the chat page
+  // clears its server-side unread state).
+  const unread = thread.unread === true && !isActive;
+  const rowLabel = unread
+    ? unreadLabelOfThread(branchLabel ?? title, t, origin)
+    : branchLabel;
 
   return (
     <SidebarMenuItem className="group/side-menu-item">
       <SidebarMenuButton isActive={isActive} asChild>
         <Link
-          aria-label={branchLabel}
+          aria-label={rowLabel}
           className="text-muted-foreground min-w-0 whitespace-nowrap group-hover/side-menu-item:overflow-hidden"
+          data-unread={unread ? "true" : undefined}
           data-branch-depth={
             branchEntry && branchEntry.depth > 0 ? branchEntry.depth : undefined
           }
@@ -247,7 +261,7 @@ export function ThreadSidebarItem({
               {branchEntry.isLastSibling ? "└─" : "├─"}
             </span>
           )}
-          <ThreadChannelIcon source={channelSource} />
+          <ThreadOriginIcon origin={origin} />
           {pinned && (
             <Pin
               aria-hidden="true"
@@ -255,12 +269,17 @@ export function ThreadSidebarItem({
             />
           )}
           <span className="min-w-0 truncate">{title}</span>
-          {channelSource && (
-            <span
-              className="bg-muted text-muted-foreground ml-auto inline-flex h-5 max-w-14 shrink-0 items-center rounded-md px-1.5 text-[10px] font-medium"
-              title={`${channelSource.label} channel`}
-            >
-              <span className="truncate">{channelSource.label}</span>
+          {(channelSource !== null || unread) && (
+            <span className="ml-auto inline-flex shrink-0 items-center gap-1.5">
+              {channelSource && (
+                <span
+                  className="bg-muted text-muted-foreground inline-flex h-5 max-w-14 shrink-0 items-center rounded-md px-1.5 text-[10px] font-medium"
+                  title={t.threads.origin.fromProvider(channelSource.label)}
+                >
+                  <span className="truncate">{channelSource.label}</span>
+                </span>
+              )}
+              {unread && <ThreadUnreadDot />}
             </span>
           )}
         </Link>
@@ -281,6 +300,10 @@ export function ThreadSidebarItem({
             side={"right"}
             align={"start"}
           >
+            <ConversationExtensionActions
+              context={{ thread }}
+              placement="menu"
+            />
             <DropdownMenuItem onSelect={handleTogglePin}>
               {pinned ? (
                 <PinOff className="text-muted-foreground" />
@@ -291,7 +314,7 @@ export function ThreadSidebarItem({
             </DropdownMenuItem>
             <DropdownMenuItem
               onSelect={() => {
-                setRenameValue(titleOfThread(thread));
+                setRenameValue(titleOfThread(thread, t.pages.untitled));
                 setRenameDialogOpen(true);
               }}
             >

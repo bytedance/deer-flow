@@ -90,6 +90,50 @@ class TestShouldIgnoreArchiveEntry:
 
 
 # ---------------------------------------------------------------------------
+# code-file classification shared with SkillScan
+# ---------------------------------------------------------------------------
+
+
+class TestCodeFileClassification:
+    @pytest.mark.parametrize(
+        ("rel_path", "content", "expected"),
+        [
+            ("scripts/data.dat", b"plain", True),
+            ("lib/RUN.PY", b"print()", True),
+            ("bin/tool", b"#!/bin/sh\n", True),
+            ("bin/tool", b"echo", False),
+            ("bin/notes.txt", b"#!/bin/sh\n", False),
+            ("bin/scripts", b"echo", False),
+            ("assets/logo.png", b"\x89PNG", False),
+            ("hooks/install.bat", b"@echo off\r\n", True),
+            ("hooks/install.CMD", b"@echo off\r\n", True),
+            ("hooks/install.vbs", b'CreateObject("WScript.Shell")\r\n', True),
+            ("hooks/install.wsf", b"<job></job>\r\n", True),
+            ("hooks/module.psm1", b"Export-ModuleMember -Function *", True),
+            ("hooks/install.jse", b"plain", True),
+            ("hooks/install.JSE", b"plain", True),
+            ("hooks/install.vbe", b"plain", True),
+            ("hooks/install.VBE", b"plain", True),
+            ("assets/setup.hta", b"<html></html>", True),
+            ("assets/setup.HTA", b"<html></html>", True),
+            ("policy/install.sct", b"<scriptlet></scriptlet>", True),
+            ("policy/install.SCT", b"<scriptlet></scriptlet>", True),
+            ("references/notes.txt", b"plain", False),
+        ],
+    )
+    def test_installer_applies_the_shared_code_file_rule(self, tmp_path, rel_path, content, expected):
+        import deerflow.skills.installer as installer_module
+        from deerflow.skills.package_files import is_code_file
+
+        path = tmp_path / rel_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+        assert asyncio.run(installer_module._is_code_file(path, Path(rel_path))) is expected
+        assert is_code_file(rel_path, content) is expected
+
+
+# ---------------------------------------------------------------------------
 # resolve_skill_dir_from_archive
 # ---------------------------------------------------------------------------
 
@@ -425,7 +469,7 @@ class TestInstallSkillFromArchive:
         skills_root.mkdir()
         calls = []
 
-        async def _scan(content, *, executable, location, static_findings=None):
+        async def _scan(content, *, executable, location, app_config=None, static_findings=None):
             calls.append({"content": content, "executable": executable, "location": location})
             return ScanResult(decision="allow", reason="ok")
 
@@ -455,7 +499,7 @@ class TestInstallSkillFromArchive:
         skills_root.mkdir()
         calls = []
 
-        async def _scan(content, *, executable, location, static_findings=None):
+        async def _scan(content, *, executable, location, app_config=None, static_findings=None):
             calls.append({"content": content, "executable": executable, "location": location})
             return ScanResult(decision="allow", reason="ok")
 
@@ -500,7 +544,7 @@ class TestInstallSkillFromArchive:
         skills_root.mkdir()
         calls = []
 
-        async def _scan(content, *, executable, location, static_findings=None):
+        async def _scan(content, *, executable, location, app_config=None, static_findings=None):
             calls.append({"executable": executable, "location": location})
             return ScanResult(decision="allow", reason="ok")
 
@@ -541,17 +585,20 @@ class TestInstallSkillFromArchive:
 
         assert sniffed == ["tool"]
 
-    def test_code_file_outside_scripts_warn_prevents_install(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("rel_path", ["lib/run.py", "hooks/install.jse", "hooks/install.vbe", "assets/setup.hta", "policy/install.sct"])
+    def test_code_file_outside_scripts_warn_prevents_install(self, tmp_path, monkeypatch, rel_path):
         zip_path = tmp_path / "test-skill.skill"
         with zipfile.ZipFile(zip_path, "w") as zf:
             zf.writestr("test-skill/SKILL.md", "---\nname: test-skill\ndescription: A test skill\n---\n\n# test-skill\n")
             # Benign payload on purpose: the native scanner must stay quiet so the
             # test exercises the LLM executable policy (warn != allow) on its own.
-            zf.writestr("test-skill/lib/run.py", "print('needs human review')\n")
+            zf.writestr(f"test-skill/{rel_path}", "print('needs human review')\n")
         skills_root = tmp_path / "skills"
         skills_root.mkdir()
+        calls = []
 
         async def _scan(*args, executable, **kwargs):
+            calls.append((kwargs["location"], executable))
             if executable:
                 return ScanResult(decision="warn", reason="code needs review")
             return ScanResult(decision="allow", reason="ok")
@@ -561,6 +608,7 @@ class TestInstallSkillFromArchive:
         with pytest.raises(SkillSecurityScanError, match="rejected executable.*code needs review"):
             get_or_new_skill_storage(skills_path=skills_root).install_skill_from_archive(zip_path)
 
+        assert (f"test-skill/{rel_path}", True) in calls
         assert not (skills_root / "custom" / "test-skill").exists()
 
     def test_executable_binary_prevents_install(self, tmp_path):

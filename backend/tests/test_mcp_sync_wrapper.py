@@ -289,7 +289,12 @@ def test_func_patched_mcp_tool_keeps_toolnode_runtime_injection(tmp_path):
             graph.compile().ainvoke(
                 {"messages": [ai]},
                 config={"configurable": {"thread_id": "T"}},
-                context={"thread_id": "T", "run_id": "run-1", "user_id": "alice"},
+                context={
+                    "thread_id": "T",
+                    "thread_incarnation": "incarnation-1",
+                    "run_id": "run-1",
+                    "user_id": "alice",
+                },
             )
         )
 
@@ -318,9 +323,9 @@ def test_sync_wrapped_builtin_tools_still_resolve_runtime():
         cancel_background_task,
         list_background_tasks,
     )
-    from deerflow.tools.builtins.batch_task_tool import batch_status, cancel_batch
+    from deerflow.tools.builtins.batch_task_tool import batch_status, cancel_batch, read_batch_result
 
-    for tool in (list_background_tasks, cancel_background_task, batch_status, cancel_batch):
+    for tool in (list_background_tasks, cancel_background_task, batch_status, cancel_batch, read_batch_result):
         patched = copy.copy(tool)
         # _ensure_sync_invocable_tool does exactly this to async-only tools.
         patched.func = make_sync_tool_wrapper(patched.coroutine, patched.name)

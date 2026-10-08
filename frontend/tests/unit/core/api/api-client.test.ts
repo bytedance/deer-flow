@@ -1,3 +1,4 @@
+import type { Message } from "@langchain/langgraph-sdk";
 import { afterEach, expect, test, rs } from "@rstest/core";
 
 import {
@@ -7,6 +8,7 @@ import {
   isRunNotCancellableError,
   StreamReplayGapError,
 } from "@/core/api/api-client";
+import { getMessageGroups } from "@/core/messages/utils";
 
 function makeSessionStorage() {
   const values = new Map<string, string>();
@@ -82,6 +84,182 @@ test("ignores reconnect metadata storage access failures", () => {
   });
 
   expect(() => clearReconnectRun("thread-1", "run-1")).not.toThrow();
+});
+
+test.each(["http", "network"])(
+  "does not retry run creation after an ambiguous %s failure",
+  async (failure) => {
+    const sessionStorage = makeSessionStorage();
+    let attempts = 0;
+    const fetchFn = rs.fn(async () => {
+      attempts += 1;
+      if (failure === "network") {
+        throw new TypeError("connection interrupted");
+      }
+      const status = attempts === 1 ? 504 : 400;
+      return new Response(JSON.stringify({ detail: "request failed" }), {
+        status,
+      });
+    });
+    rs.stubGlobal("window", {
+      location: { origin: "http://localhost:2026" },
+      sessionStorage,
+    });
+    rs.stubGlobal("fetch", fetchFn);
+
+    const consume = async () => {
+      for await (const entry of getAPIClient(true).runs.stream(
+        "thread-no-retry",
+        "lead_agent",
+        { input: { messages: [] } },
+      )) {
+        void entry;
+      }
+    };
+
+    await expect(consume()).rejects.toThrow(
+      failure === "http" ? "HTTP 504" : "connection interrupted",
+    );
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  },
+);
+
+test.each([0, 1, 4, 5])(
+  "preserves the recovery GET retry budget without recreating the run (%s failures)",
+  async (recoveryFailures) => {
+    const sessionStorage = makeSessionStorage();
+    const encoder = new TextEncoder();
+    let interruptStream: (() => void) | undefined;
+    const interruptedBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            'id: 1-0\nevent: custom\ndata: {"phase":"started"}\n\n',
+          ),
+        );
+        interruptStream = () => {
+          controller.error(new TypeError("connection interrupted"));
+        };
+      },
+    });
+    const requests: Array<{
+      url: string;
+      method: string | undefined;
+      lastEventId: string | null;
+    }> = [];
+    const fetchFn = rs.fn(async (_url: string | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      requests.push({
+        url: String(_url),
+        method: init?.method,
+        lastEventId: headers.get("Last-Event-ID"),
+      });
+      if (requests.length === 1) {
+        return new Response(interruptedBody, {
+          status: 200,
+          headers: {
+            "Content-Type": "text/event-stream",
+            "Content-Location": "/threads/thread-reconnect/runs/run-reconnect",
+            Location:
+              "/threads/thread-reconnect/runs/run-reconnect/stream?stream_mode=custom",
+          },
+        });
+      }
+      if (requests.length <= recoveryFailures + 1) {
+        return new Response(JSON.stringify({ detail: "gateway timeout" }), {
+          status: 504,
+        });
+      }
+      return makeSSEResponse("id: 2-0\nevent: end\ndata: null\n\n");
+    });
+    rs.stubGlobal("window", {
+      location: { origin: "http://localhost:2026" },
+      sessionStorage,
+    });
+    rs.stubGlobal("fetch", fetchFn);
+    rs.stubGlobal("setTimeout", (callback: () => void) => {
+      callback();
+      return 0;
+    });
+
+    const received: Array<{ id?: string; event: string; data: unknown }> = [];
+    const consume = async () => {
+      for await (const entry of getAPIClient(true).runs.stream(
+        "thread-reconnect",
+        "lead_agent",
+        { input: { messages: [] } },
+      )) {
+        received.push(entry);
+        if ("id" in entry && entry.id === "1-0") {
+          interruptStream?.();
+        }
+      }
+    };
+    // The SDK retries four times after the initial HTTP attempt. Exhaustion
+    // must surface the error instead of starting a new run or retrying forever.
+    if (recoveryFailures === 5) {
+      await expect(consume()).rejects.toThrow("HTTP 504");
+    } else {
+      await consume();
+    }
+
+    expect(received).toEqual([
+      { id: "1-0", event: "custom", data: { phase: "started" } },
+      ...(recoveryFailures === 5
+        ? []
+        : [{ id: "2-0", event: "end", data: null }]),
+    ]);
+    expect(requests).toEqual([
+      {
+        url: "http://localhost:2026/mock/api/threads/thread-reconnect/runs/stream",
+        method: "POST",
+        lastEventId: null,
+      },
+      ...Array.from({ length: Math.min(recoveryFailures + 1, 5) }, () => ({
+        url: "http://localhost:2026/mock/api/threads/thread-reconnect/runs/run-reconnect/stream?stream_mode=custom",
+        method: "GET",
+        lastEventId: "1-0",
+      })),
+    ]);
+  },
+);
+
+test("keeps retries for reads and explicit stream joins", async () => {
+  const attempts = new Map<string, number>();
+  const fetchFn = rs.fn(async (url: string | URL) => {
+    const path = new URL(url).pathname;
+    const attempt = (attempts.get(path) ?? 0) + 1;
+    attempts.set(path, attempt);
+    if (attempt === 1) {
+      return new Response("gateway timeout", { status: 504 });
+    }
+    return path.endsWith("/stream")
+      ? makeSSEResponse("event: end\ndata: null\n\n")
+      : Response.json({ status: "running" });
+  });
+  rs.stubGlobal("window", {
+    location: { origin: "http://localhost:2026" },
+    sessionStorage: makeSessionStorage(),
+  });
+  rs.stubGlobal("fetch", fetchFn);
+  rs.stubGlobal("setTimeout", (callback: () => void) => {
+    callback();
+    return 0;
+  });
+
+  const received: Array<{ event: string; data: unknown }> = [];
+  for await (const entry of getAPIClient(true).runs.joinStream(
+    "thread-read-retry",
+    "run-read-retry",
+  )) {
+    received.push(entry);
+  }
+
+  expect(received).toEqual([{ event: "end", data: null }]);
+  expect([...attempts.entries()]).toEqual([
+    ["/mock/api/threads/thread-read-retry/runs/run-read-retry", 2],
+    ["/mock/api/threads/thread-read-retry/runs/run-read-retry/stream", 2],
+  ]);
 });
 
 test("clears stale reconnect metadata when join stream cannot be resumed", async () => {
@@ -240,6 +418,198 @@ test("short-circuits reconnect to a terminal run", async () => {
   // Preflight only — no stream/join request beyond the GET.
   expect(fetchFn).toHaveBeenCalledTimes(1);
   expect(sessionStorage.removeItem).toHaveBeenCalledWith("lg:stream:thread-1");
+});
+
+test("hydrates the active run input before replaying an incremental stream", async () => {
+  const sessionStorage = makeSessionStorage();
+  const fetchFn = rs.fn(async (url: string | URL) => {
+    const path = new URL(url.toString()).pathname;
+    if (path.endsWith("/runs/run-input")) {
+      return new Response(
+        JSON.stringify({
+          status: "running",
+          kwargs: {
+            input: {
+              messages: [
+                { id: "human-2", type: "human", content: "Second question" },
+              ],
+            },
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    if (path.endsWith("/threads/thread-input/state")) {
+      return new Response(
+        JSON.stringify({
+          values: {
+            messages: [
+              { id: "human-1", type: "human", content: "First question" },
+              { id: "human-2", type: "human", content: "Second question" },
+            ],
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    if (path.endsWith("/runs/run-input/stream")) {
+      return makeSSEResponse("event: end\ndata: null\n\n");
+    }
+    return new Response(JSON.stringify({ detail: "unexpected request" }), {
+      status: 500,
+    });
+  });
+  rs.stubGlobal("window", {
+    location: { origin: "http://localhost:2026" },
+    sessionStorage,
+  });
+  rs.stubGlobal("fetch", fetchFn);
+
+  const entries: Array<{ event: string; data: unknown }> = [];
+  for await (const entry of getAPIClient(true).runs.joinStream(
+    "thread-input",
+    "run-input",
+  )) {
+    entries.push(entry);
+  }
+
+  expect(entries[0]).toMatchObject({
+    event: "values",
+    data: {
+      messages: [
+        { id: "human-1", content: "First question" },
+        { id: "human-2", content: "Second question" },
+      ],
+    },
+  });
+  expect(
+    (entries[0]?.data as { messages: Array<{ id: string }> }).messages,
+  ).toHaveLength(2);
+});
+
+test("rejoining a scheduled run shows its launch once", async () => {
+  const origin = {
+    task_id: "task-1",
+    task_run_id: "task-run-x",
+    trigger: "scheduled",
+    run_number: 2,
+    scheduled_for: "2026-10-05T12:21:53+00:00",
+    timezone: "Asia/Shanghai",
+    task_title: "Release checklist",
+    instructions: "Check the list.",
+    stop_condition: null,
+    standing_notes: [],
+  };
+  const launched = {
+    id: "scheduled-x",
+    type: "human",
+    content: "Check the list.",
+    additional_kwargs: { deerflow_scheduled_origin: origin },
+  };
+  const fetchFn = rs.fn(async (url: string | URL) => {
+    const path = new URL(url.toString()).pathname;
+    if (path.endsWith("/runs/run-scheduled")) {
+      return new Response(
+        JSON.stringify({
+          status: "running",
+          kwargs: { input: { messages: [launched] } },
+        }),
+        { status: 200 },
+      );
+    }
+    if (path.endsWith("/threads/thread-scheduled/state")) {
+      return new Response(
+        JSON.stringify({
+          values: {
+            messages: [
+              {
+                id: "scheduled-x",
+                type: "system",
+                content: "<system-reminder>date</system-reminder>",
+                additional_kwargs: { hide_from_ui: true },
+              },
+              { ...launched, id: "scheduled-x__user" },
+            ],
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    if (path.endsWith("/runs/run-scheduled/stream")) {
+      return makeSSEResponse("event: end\ndata: null\n\n");
+    }
+    return new Response(JSON.stringify({ detail: "unexpected request" }), {
+      status: 500,
+    });
+  });
+  rs.stubGlobal("window", {
+    location: { origin: "http://localhost:2026" },
+    sessionStorage: makeSessionStorage(),
+  });
+  rs.stubGlobal("fetch", fetchFn);
+
+  const entries: Array<{ event: string; data: unknown }> = [];
+  for await (const entry of getAPIClient(true).runs.joinStream(
+    "thread-scheduled",
+    "run-scheduled",
+  )) {
+    entries.push(entry);
+  }
+
+  const messages = (entries[0]?.data as { messages: Message[] }).messages;
+  expect(messages.map((message) => message.id)).toEqual([
+    "scheduled-x",
+    "scheduled-x__user",
+  ]);
+  const humans = getMessageGroups(messages).filter(
+    (group) => group.type === "human",
+  );
+  expect(humans).toHaveLength(1);
+  expect(
+    humans[0]?.type === "human" && humans[0].scheduledOrigin?.task_id,
+  ).toBe("task-1");
+});
+
+test("continues reconnect when durable state hydration fails", async () => {
+  const fetchFn = rs.fn(async (url: string | URL) => {
+    const path = new URL(url.toString()).pathname;
+    if (path.endsWith("/runs/run-no-state")) {
+      return new Response(
+        JSON.stringify({
+          status: "running",
+          kwargs: {
+            input: {
+              messages: [{ id: "human-2", type: "human", content: "Second" }],
+            },
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    if (path.endsWith("/threads/thread-no-state/state")) {
+      return new Response(JSON.stringify({ detail: "state unavailable" }), {
+        status: 404,
+      });
+    }
+    if (path.endsWith("/runs/run-no-state/stream")) {
+      return makeSSEResponse("event: end\ndata: null\n\n");
+    }
+    return new Response(JSON.stringify({ detail: "unexpected request" }), {
+      status: 500,
+    });
+  });
+  rs.stubGlobal("fetch", fetchFn);
+
+  const entries: Array<{ event: string; data: unknown }> = [];
+  for await (const entry of getAPIClient(true).runs.joinStream(
+    "thread-no-state",
+    "run-no-state",
+  )) {
+    entries.push(entry);
+  }
+
+  expect(entries).toEqual([{ event: "end", data: null }]);
+  expect(fetchFn).toHaveBeenCalledTimes(3);
 });
 
 test("falls back to join when preflight cannot resolve the run", async () => {
@@ -437,9 +807,25 @@ test("recovers a join stream gap from durable state and resumes after the retain
   const fetchFn = rs.fn(async (url: string | URL, init?: RequestInit) => {
     const path = url.toString();
     if (path.endsWith("/runs/run-1")) {
-      return new Response(JSON.stringify({ status: "running" }), {
-        status: 200,
-      });
+      return new Response(
+        JSON.stringify({
+          status: "running",
+          kwargs: {
+            input: {
+              messages: [
+                {
+                  id: "human-2",
+                  type: "human",
+                  content: "Second question",
+                },
+              ],
+            },
+          },
+        }),
+        {
+          status: 200,
+        },
+      );
     }
     if (path.includes("/runs/run-1/stream")) {
       recoveryRequests.push(init ?? {});
@@ -451,7 +837,11 @@ test("recovers a join stream gap from durable state and resumes after the retain
     if (path.includes("/threads/thread-1/state")) {
       return new Response(
         JSON.stringify({
-          values: { messages: [{ type: "ai", content: "durable" }] },
+          values: {
+            messages: [
+              { id: "human-1", type: "human", content: "First question" },
+            ],
+          },
           next: [],
           tasks: [],
           metadata: {},
@@ -483,12 +873,26 @@ test("recovers a join stream gap from durable state and resumes after the retain
 
   expect(received).toEqual([
     {
+      event: "values",
+      data: {
+        messages: [
+          { id: "human-1", type: "human", content: "First question" },
+          { id: "human-2", type: "human", content: "Second question" },
+        ],
+      },
+    },
+    {
       event: "custom",
       data: { type: "stream_replay_gap", ...gap },
     },
     {
       event: "values",
-      data: { messages: [{ type: "ai", content: "durable" }] },
+      data: {
+        messages: [
+          { id: "human-1", type: "human", content: "First question" },
+          { id: "human-2", type: "human", content: "Second question" },
+        ],
+      },
     },
     { event: "end", data: null },
   ]);

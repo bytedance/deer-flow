@@ -106,7 +106,7 @@ LLM-powered persistent context retention across conversations:
 - **System prompt injection**: Top facts + context injected into agent prompts
 - **Run-level memory identity**: `GET /api/threads/{thread_id}/runs/{run_id}/events?event_types=context:memory` returns the SHA-256 identity of the effective hidden memory block without copying memory text into the event store
 - **Read failures**: Strict backend policies (including legacy `fail_closed`) stop the turn, including at the 5-second async injection deadline. Fail-open reads continue without new context. Timeout handling does not wait for a free worker; a timed-out read may still occupy its worker until the backend returns.
-- **Storage**: JSON file with mtime-based cache invalidation
+- **Storage**: JSON file with mtime-based cache invalidation and canonical normalization for legacy sections/fact metadata
 
 ### Tool Ecosystem
 
@@ -118,16 +118,29 @@ LLM-powered persistent context retention across conversations:
 | **MCP** | Any Model Context Protocol server (stdio, SSE, HTTP transports) |
 | **Skills** | Domain-specific workflows injected via system prompt |
 
+### Run Event Storage
+
+For direct `RunEventStore.list_messages` callers, `after_seq` and `before_seq`
+bound an exclusive message window. With both cursors, reads return the first
+`limit` messages inside that window in ascending sequence order across memory,
+JSONL, and database backends. Keep `before_seq` fixed and advance `after_seq`
+to the last returned sequence to page forward through a bounded history range.
+
 ### Gateway API
 
 FastAPI application providing REST endpoints for frontend integration:
+
+Integer metadata filters match exact JSON integers, including signed-64-bit
+boundaries. Stored integers outside that range are ignored rather than rounded
+to a boundary (SQLite) or causing the search to fail (PostgreSQL).
 
 | Route | Purpose |
 |-------|---------|
 | `GET /api/models` | List available LLM models |
 | `GET/PUT /api/mcp/config` | Manage MCP server configurations |
 | `POST /api/mcp/cache/reset` | Reset cached MCP tools so they reload on next use |
-| `GET/PUT /api/skills` | List and manage skills |
+| `GET /api/skills` | List skills visible to the caller |
+| `PUT /api/skills/{skill_name}` | Enable or disable a skill (admin only) |
 | `POST /api/skills/install` | Install skill from `.skill` archive |
 | `GET /api/memory` | Retrieve memory data |
 | `POST /api/memory/reload` | Force memory reload |
@@ -138,6 +151,17 @@ FastAPI application providing REST endpoints for frontend integration:
 | `GET /api/threads/{id}/uploads/list` | List uploaded files |
 | `DELETE /api/threads/{id}` | Delete DeerFlow-managed local thread data after LangGraph thread deletion; unexpected failures are logged server-side and return a generic 500 detail |
 | `GET /api/threads/{id}/artifacts/{path}` | Serve generated artifacts |
+
+Cancelling an upload waits for an already-running document conversion worker to
+finish before removing its temporary source. This prevents cleanup from deleting
+a file that the converter is still reading; cancellation can therefore take as
+long as that conversion.
+
+Converted-upload ownership records live in each thread's `upload-companions/`
+directory, outside the sandbox-mounted `user-data/` tree. Older conversions
+without a record remain separate Markdown uploads and no longer provide an
+inferred outline for their source document; see [file upload storage and upgrade
+behavior](docs/FILE_UPLOAD.md#支持的文档格式).
 
 ### IM Channels
 
@@ -497,8 +521,11 @@ the only execution path, which keeps operational mistakes off the table. See
 ### Testing
 
 ```bash
-# Default offline backend suite (live external-API and blocking-I/O tests are excluded)
+# Default offline backend suite (four parallel shards; excludes live and blocking-I/O tests)
 make test
+
+# Run the same shards sequentially
+make test TEST_JOBS=1
 
 # Strict blocking-I/O suite
 make test-blocking-io

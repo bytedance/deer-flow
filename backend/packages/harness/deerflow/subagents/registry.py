@@ -138,8 +138,8 @@ def _build_agent_store_subagent_config(
     if record is None:
         return None
     agent, soul = record
-    system_prompt = (soul.strip() or None) if isinstance(soul, str) else None
-    # P2 fix: non-interactive tools are not safe in the subagent chain because
+    user_soul = (soul.strip() or None) if isinstance(soul, str) else None
+    # Non-interactive tools are not safe in the subagent chain because
     # SubagentExecutor lacks ClarificationMiddleware; ask_clarification would
     # return a placeholder instead of reaching the user, and present_files is
     # a lead-only tool. Deny these unconditionally for store-backed subagents.
@@ -148,7 +148,7 @@ def _build_agent_store_subagent_config(
     return SubagentConfig(
         name=name,
         description=agent.description or "",
-        system_prompt=system_prompt,
+        user_soul=user_soul,
         tools=_expand_tool_groups(agent.tool_groups, app_config=app_config),
         disallowed_tools=_non_interactive_tool_denylist,
         skills=agent.skills,
@@ -256,6 +256,10 @@ def get_subagent_config(
     agent_override = subagents_config.agents.get(name)
 
     overrides = {}
+    if agent_override is not None:
+        overlay = agent_override.prompt_overlay
+        if overlay.prepend or overlay.append:
+            overrides["prompt_overlay"] = overlay
 
     # Timeout: per-agent override > global default (builtins + user agents) > config's own value
     if agent_override is not None and agent_override.timeout_seconds is not None:

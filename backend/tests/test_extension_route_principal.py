@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from deerflow_extension_api import (
     EXTENSION_PRINCIPAL_RESOLVER_KEY,
+    RUN_EVIDENCE_READER_RESOLVER_KEY,
     ExtensionPrincipal,
     require_admin,
     resolve_principal,
@@ -87,6 +88,7 @@ def test_host_installs_a_resolver_on_app_state(_stub_app_config):
 
     app = create_app()
     assert callable(getattr(app.state, EXTENSION_PRINCIPAL_RESOLVER_KEY, None))
+    assert callable(getattr(app.state, RUN_EVIDENCE_READER_RESOLVER_KEY, None))
 
 
 def test_the_installed_resolver_projects_system_role_into_roles(_stub_app_config):

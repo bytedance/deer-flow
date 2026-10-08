@@ -100,6 +100,8 @@ database:
 
 旧的 `checkpointer` 配置仍然兼容，用于 LangGraph 状态持久化；如果配置了它，会优先于 `database` 的检查点设置。新的部署应优先使用 `database`。
 
+线程状态在该后端中以何种形式存储——整份快照，还是 LangGraph 的 `DeltaChannel` 增量——由另一个开关 `database.checkpoint_channel_mode` 控制，见[检查点与增量通道](/docs/harness/checkpoints)。
+
 ### 线程数据目录
 
 每个线程在 `.deer-flow/threads/{thread_id}/` 下有一个专用目录：

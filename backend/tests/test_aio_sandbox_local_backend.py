@@ -1,16 +1,20 @@
+import ast
 import json
 import logging
 import os
 import socket
 import subprocess
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from deerflow.community.aio_sandbox import local_backend as local_backend_module
 from deerflow.community.aio_sandbox.local_backend import (
     LocalContainerBackend,
     _ContainerInspection,
+    _docker_server_is_desktop,
     _format_container_command_for_log,
     _format_container_mount,
     _NetworkInspection,
@@ -185,9 +189,36 @@ def test_docker_desktop_detection_uses_daemon_operating_system(monkeypatch, oper
         assert cmd == ["docker", "info", "--format", "{{json .OperatingSystem}}"]
         return SimpleNamespace(stdout=operating_system, stderr="", returncode=0)
 
+    _docker_server_is_desktop.cache_clear()
     monkeypatch.setattr("subprocess.run", fake_run)
 
-    assert backend._docker_server_is_desktop() is expected
+    try:
+        assert backend._docker_server_is_desktop() is expected
+    finally:
+        _docker_server_is_desktop.cache_clear()
+
+
+def test_docker_desktop_detection_retries_after_transient_failure(monkeypatch):
+    """A transient probe failure is not cached; subsequent call can detect Desktop."""
+    attempts = 0
+
+    def fake_run(cmd, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return SimpleNamespace(stdout="", stderr="daemon starting", returncode=1)
+        return SimpleNamespace(stdout='"Docker Desktop"', stderr="", returncode=0)
+
+    _docker_server_is_desktop.cache_clear()
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    try:
+        assert _docker_server_is_desktop() is False
+        assert _docker_server_is_desktop() is True
+        assert _docker_server_is_desktop() is True
+        assert attempts == 2
+    finally:
+        _docker_server_is_desktop.cache_clear()
 
 
 def test_darwin_open_keeps_docker_to_reconcile_restricted_sandbox(monkeypatch):
@@ -652,6 +683,10 @@ def test_resolve_docker_bind_host_follows_host_gateway_mapping_for_dood(monkeypa
     monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
     monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
     monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._docker_server_is_desktop",
+        lambda: False,
+    )
+    monkeypatch.setattr(
         "deerflow.community.aio_sandbox.local_backend._resolve_sandbox_host_address",
         lambda host: "192.168.64.1",
     )
@@ -659,10 +694,68 @@ def test_resolve_docker_bind_host_follows_host_gateway_mapping_for_dood(monkeypa
     assert _resolve_docker_bind_host() == "192.168.64.1"
 
 
+@pytest.mark.parametrize(
+    "sandbox_host",
+    [
+        "host.docker.internal",
+        "gateway.docker.internal",
+        "Host.Docker.Internal.",
+        "docker.for.mac.host.internal",
+        "docker.for.win.localhost",
+    ],
+)
+def test_resolve_docker_bind_host_uses_loopback_on_docker_desktop(monkeypatch, sandbox_host):
+    """Docker Desktop cannot bind to internal VM gateway IPs, so default to 127.0.0.1."""
+    monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", sandbox_host)
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._docker_server_is_desktop",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._resolve_sandbox_host_address",
+        lambda host: "192.168.65.254",
+    )
+
+    assert _resolve_docker_bind_host() == "127.0.0.1"
+
+
+def test_resolve_docker_bind_host_preserves_custom_host_on_docker_desktop(monkeypatch):
+    """Custom non-loopback sandbox host on Docker Desktop binds the resolved address."""
+    monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "desktop-box")
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._docker_server_is_desktop",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._resolve_sandbox_host_address",
+        lambda host: "192.0.2.55",
+    )
+
+    assert _resolve_docker_bind_host() == "192.0.2.55"
+
+
+def test_resolve_docker_bind_host_explicit_override_precedes_desktop_detection(monkeypatch):
+    """Explicit DEER_FLOW_SANDBOX_BIND_HOST takes precedence even on Docker Desktop."""
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_BIND_HOST", "192.0.2.10")
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._docker_server_is_desktop",
+        lambda: True,
+    )
+
+    assert _resolve_docker_bind_host() == "192.0.2.10"
+
+
 def test_resolve_docker_bind_host_brackets_ipv6_host_gateway(monkeypatch):
     """An IPv6 host-gateway mapping binds the bracketed IPv6 address."""
     monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
     monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._docker_server_is_desktop",
+        lambda: False,
+    )
     monkeypatch.setattr(
         "deerflow.community.aio_sandbox.local_backend._resolve_sandbox_host_address",
         lambda host: "[fd00::1]",
@@ -716,6 +809,10 @@ def test_resolve_docker_bind_host_uses_discovered_bridge_gateway_when_resolution
     monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
     monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
     monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._docker_server_is_desktop",
+        lambda: False,
+    )
+    monkeypatch.setattr(
         "deerflow.community.aio_sandbox.local_backend._resolve_sandbox_host_address",
         lambda host: None,
     )
@@ -730,6 +827,10 @@ def test_resolve_docker_bind_host_uses_discovered_bridge_gateway_when_resolution
 def test_resolve_docker_bind_host_falls_back_to_static_bridge_gateway(monkeypatch):
     monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
     monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._docker_server_is_desktop",
+        lambda: False,
+    )
     monkeypatch.setattr(
         "deerflow.community.aio_sandbox.local_backend._resolve_sandbox_host_address",
         lambda host: None,
@@ -1174,6 +1275,73 @@ def test_discover_returns_none_when_runtime_check_times_out(monkeypatch):
     monkeypatch.setattr("subprocess.run", fake_run)
 
     assert backend.discover("sandbox-timeout") is None
+
+
+def test_discover_replaces_container_with_insufficient_shell_capacity(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    backend._environment["MAX_SHELL_SESSIONS"] = "13"
+    container_name = "sandbox-existing"
+    monkeypatch.setattr(backend, "_is_container_running", lambda _name: True)
+    monkeypatch.setattr(
+        backend,
+        "_batch_inspect",
+        lambda *_args, **_kwargs: {
+            container_name: _ContainerInspection(
+                created_at=1.0,
+                host_port=18080,
+                labels={
+                    "deerflow.role": "sandbox",
+                    "deerflow.sandbox_id": "existing",
+                    "deerflow.network_mode": "open",
+                },
+                image="sandbox:latest",
+                networks=frozenset({"bridge"}),
+                max_shell_sessions=10,
+            )
+        },
+    )
+
+    info = backend.discover("existing")
+
+    assert info is not None
+    assert info.requires_replacement is True
+    assert info.sandbox_url == ""
+
+
+def test_list_running_marks_insufficient_shell_capacity_for_fenced_replacement(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    backend._environment["MAX_SHELL_SESSIONS"] = "13"
+    container_name = "sandbox-existing"
+
+    def fake_run(cmd, **kwargs):
+        assert cmd[:2] == ["docker", "ps"]
+        return SimpleNamespace(stdout=f"{container_name}\n", stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(
+        backend,
+        "_batch_inspect",
+        lambda *_args, **_kwargs: {
+            container_name: _ContainerInspection(
+                created_at=1.0,
+                host_port=18080,
+                labels={
+                    "deerflow.role": "sandbox",
+                    "deerflow.sandbox_id": "existing",
+                    "deerflow.network_mode": "open",
+                },
+                image="sandbox:latest",
+                networks=frozenset({"bridge"}),
+                max_shell_sessions=10,
+            )
+        },
+    )
+
+    infos = backend.list_running()
+
+    assert len(infos) == 1
+    assert infos[0].requires_replacement is True
+    assert infos[0].sandbox_url == ""
 
 
 def test_restricted_discovery_uses_proxy_relay_port(monkeypatch):
@@ -2184,3 +2352,57 @@ def test_start_container_preinitialized_image_can_drop_startup_caps(monkeypatch)
     assert not [arg for arg in captured_cmd if arg.startswith("--cap-add=")]
     security_opts = [captured_cmd[i + 1] for i, arg in enumerate(captured_cmd) if arg == "--security-opt"]
     assert "no-new-privileges" in security_opts
+
+
+def test_docker_subprocess_calls_pin_utf8_decoding(monkeypatch):
+    """Locale-default text decoding silently loses docker CLI output on hosts
+    whose ANSI code page is not UTF-8 (e.g. cp936 Chinese Windows): the decode
+    error surfaces inside subprocess's reader thread, so ``stdout``/``stderr``
+    come back ``None``, and JSON-parsing call sites either crash on ``None``
+    or silently mis-parse. Every text-mode call in this module must therefore
+    pin ``encoding="utf-8"`` with ``errors="replace"``.
+    """
+    seen: list[dict] = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(kwargs)
+        return SimpleNamespace(stdout='"Debian GNU/Linux 15"\n', stderr="", returncode=0)
+
+    _docker_server_is_desktop.cache_clear()
+    monkeypatch.setattr("subprocess.run", fake_run)
+    try:
+        backend = LocalContainerBackend(
+            image="sandbox:latest",
+            base_port=8080,
+            container_prefix="sandbox",
+            config_mounts=[],
+            environment={},
+        )
+        assert backend._docker_server_is_desktop() is False
+    finally:
+        _docker_server_is_desktop.cache_clear()
+
+    assert seen, "expected the docker detection path to shell out"
+    for kwargs in seen:
+        assert kwargs.get("encoding") == "utf-8", kwargs
+        assert kwargs.get("errors") == "replace", kwargs
+
+
+def test_every_text_mode_subprocess_call_pins_utf8():
+    """Check each text-mode subprocess call's encoding and error handling.
+
+    A text-mode call without ``encoding=`` decodes with the platform's
+    preferred encoding, which loses output entirely on non-UTF-8 locales.
+    ``errors="replace"`` also keeps malformed bytes from discarding a stream.
+    """
+    source = Path(local_backend_module.__file__).read_text(encoding="utf-8")
+    calls = [node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) and node.func.value.id == "subprocess" and node.func.attr == "run"]
+    assert calls, "expected subprocess.run calls in the local backend"
+    for call in calls:
+        keywords = {keyword.arg: keyword.value for keyword in call.keywords}
+        text_mode = keywords.get("text")
+        if not isinstance(text_mode, ast.Constant) or text_mode.value is not True:
+            continue
+        for name, expected in (("encoding", "utf-8"), ("errors", "replace")):
+            value = keywords.get(name)
+            assert isinstance(value, ast.Constant) and value.value == expected, f"line {call.lineno}: text-mode subprocess.run must pass {name}={expected!r}"

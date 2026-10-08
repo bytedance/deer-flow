@@ -1,8 +1,8 @@
 """Tests for authentication module: JWT, password hashing, AuthContext, and authz decorators."""
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import bcrypt
 import pytest
@@ -421,6 +421,42 @@ def test_sqlite_round_trip_new_fields():
                 assert refetched.token_version == 4
             finally:
                 await close_engine()
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    ("second_created_delta", "expected_ids"),
+    [
+        pytest.param(timedelta(seconds=1), (UUID(int=2), UUID(int=1)), id="creation-time-first"),
+        pytest.param(timedelta(0), (UUID(int=1), UUID(int=2)), id="id-breaks-time-tie"),
+    ],
+)
+def test_user_repository_lists_registered_user_ids(tmp_path, second_created_delta, expected_ids):
+    import asyncio
+
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+
+    async def _run() -> None:
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+
+        await init_engine(
+            "sqlite",
+            url=f"sqlite+aiosqlite:///{tmp_path}/scratch.db",
+            sqlite_dir=str(tmp_path),
+        )
+        try:
+            repo = SQLiteUserRepository(get_session_factory())
+            assert await repo.list_user_ids() == []
+            created_at = datetime(2026, 1, 1, tzinfo=UTC)
+            # Reverse stored UUID string order relative to insertion order so both sort keys matter.
+            # The ID tie-break is lexical; canonical UUID strings preserve UUID integer order.
+            await repo.create_user(User(id=UUID(int=2), email="first@test.com", password_hash="hash", created_at=created_at))
+            await repo.create_user(User(id=UUID(int=1), email="second@test.com", password_hash="hash", created_at=created_at + second_created_delta))
+
+            assert await repo.list_user_ids() == [str(user_id) for user_id in expected_ids]
+        finally:
+            await close_engine()
 
     asyncio.run(_run())
 

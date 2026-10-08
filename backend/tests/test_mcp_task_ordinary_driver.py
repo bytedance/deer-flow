@@ -1,3 +1,4 @@
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -28,6 +29,7 @@ def _request() -> TaskSubmitRequest:
     return TaskSubmitRequest(
         user_id="user-1",
         thread_id="thread-1",
+        thread_incarnation="incarnation-1",
         run_id="run-1",
         tool_call_id="call-1",
         server_name="reports",
@@ -47,6 +49,7 @@ def _reference() -> TaskReference:
         local_task_id="local-1",
         user_id="user-1",
         thread_id="thread-1",
+        thread_incarnation="incarnation-1",
         server_name="reports",
         remote_task_id="remote-1",
         driver_data={
@@ -74,11 +77,43 @@ async def test_submit_uses_structured_content_and_keeps_remote_id_out_of_driver_
             "arguments": {"topic": "MCP"},
             "user_id": "user-1",
             "thread_id": "thread-1",
+            "thread_incarnation": "incarnation-1",
             # Submit is the one durable-task call awaited inside the Agent run,
             # so it is the only one that may carry request-scoped credentials.
             "request_scoped_headers": True,
+            "connection_scope": "deployment",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_personal_connection_scope_survives_submit_status_and_cancel() -> None:
+    caller = FakeCaller(
+        _result({"task_id": "remote-1", "status": "running"}),
+        _result({"task_id": "remote-1", "status": "completed"}),
+        _result({"task_id": "remote-1", "status": "cancelled"}),
+    )
+    driver = OrdinaryMcpTaskDriver(caller)
+    request = _request()
+    request = replace(request, driver_data={**request.driver_data, "connection_scope": "personal"})
+    submission = await driver.submit(request)
+    reference = replace(_reference(), driver_data=submission.driver_data)
+
+    await driver.get_status(reference)
+    await driver.cancel(reference)
+
+    assert submission.driver_data["connection_scope"] == "personal"
+    assert [call["connection_scope"] for call in caller.calls] == ["personal"] * 3
+
+
+@pytest.mark.asyncio
+async def test_unknown_task_connection_scope_fails_closed() -> None:
+    driver = OrdinaryMcpTaskDriver(FakeCaller())
+    reference = _reference()
+    reference = replace(reference, driver_data={**reference.driver_data, "connection_scope": "unknown"})
+
+    with pytest.raises(McpTaskProtocolError, match="connection scope"):
+        await driver.get_status(reference)
 
 
 @pytest.mark.asyncio

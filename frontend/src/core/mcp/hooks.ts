@@ -6,6 +6,8 @@ import {
 } from "@tanstack/react-query";
 import { toast } from "sonner";
 
+import { useAuth } from "@/core/auth/AuthProvider";
+
 import {
   createMCPServers,
   deleteMCPServer,
@@ -14,12 +16,15 @@ import {
   updateMCPServer,
   updateMCPServerState,
 } from "./api";
+import type { MCPScope } from "./api";
 import type { MCPServerConfig } from "./types";
 
-export function useMCPConfig() {
+export function useMCPConfig(scope: MCPScope = "user") {
+  const { user } = useAuth();
   const { data, isLoading, error } = useQuery({
-    queryKey: ["mcpConfig"],
-    queryFn: () => loadMCPConfig(),
+    queryKey: ["mcpConfig", scope, user?.id],
+    queryFn: () => loadMCPConfig(scope),
+    enabled: !!user && (scope === "user" || user.system_role === "admin"),
     retry: (count, error) =>
       !(error instanceof MCPConfigRequestError) && count < 3,
   });
@@ -31,20 +36,28 @@ interface EnableMCPServerVariables {
   enabled: boolean;
 }
 
-export function getEnableMCPServerMutationOptions(queryClient: QueryClient) {
+export function getEnableMCPServerMutationOptions(
+  queryClient: QueryClient,
+  scope: MCPScope,
+) {
   return {
     mutationFn: ({ serverName, enabled }: EnableMCPServerVariables) =>
-      updateMCPServerState(serverName, enabled),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["mcpConfig"] }),
+      updateMCPServerState(serverName, enabled, scope),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["mcpConfig"] }),
+        queryClient.invalidateQueries({ queryKey: ["capabilities"] }),
+      ]);
+    },
     onError: (error: Error) => {
       toast.error(error.message);
     },
   };
 }
 
-export function useEnableMCPServer() {
+export function useEnableMCPServer(scope: MCPScope = "user") {
   const queryClient = useQueryClient();
-  return useMutation(getEnableMCPServerMutationOptions(queryClient));
+  return useMutation(getEnableMCPServerMutationOptions(queryClient, scope));
 }
 
 export type MCPServerMutationVariables =
@@ -62,26 +75,34 @@ export type MCPServerMutationVariables =
       serverName: string;
     };
 
-export function getMCPServerMutationOptions(queryClient: QueryClient) {
+export function getMCPServerMutationOptions(
+  queryClient: QueryClient,
+  scope: MCPScope,
+) {
   return {
     mutationFn: (variables: MCPServerMutationVariables) => {
       switch (variables.operation) {
         case "create":
-          return createMCPServers(variables.servers);
+          return createMCPServers(variables.servers, scope);
         case "update":
-          return updateMCPServer(variables.serverName, variables.server);
+          return updateMCPServer(variables.serverName, variables.server, scope);
         case "delete":
-          return deleteMCPServer(variables.serverName);
+          return deleteMCPServer(variables.serverName, scope);
       }
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["mcpConfig"] }),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["mcpConfig"] }),
+        queryClient.invalidateQueries({ queryKey: ["capabilities"] }),
+      ]);
+    },
     onError: (error: Error) => {
       toast.error(error.message);
     },
   };
 }
 
-export function useMCPServerMutation() {
+export function useMCPServerMutation(scope: MCPScope = "user") {
   const queryClient = useQueryClient();
-  return useMutation(getMCPServerMutationOptions(queryClient));
+  return useMutation(getMCPServerMutationOptions(queryClient, scope));
 }

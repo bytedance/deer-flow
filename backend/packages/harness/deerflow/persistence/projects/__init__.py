@@ -1,8 +1,8 @@
-"""Project persistence — ORM model and SQL repository."""
+"""Project persistence — ORM models and SQL repositories."""
 
 from __future__ import annotations
 
-from deerflow.persistence.projects.model import ProjectRow
-from deerflow.persistence.projects.sql import ProjectNotAssignableError, ProjectRepository
+from deerflow.persistence.projects.model import ProjectDocumentRow, ProjectRow
+from deerflow.persistence.projects.sql import ProjectDocumentRepository, ProjectNotAssignableError, ProjectRepository
 
-__all__ = ["ProjectNotAssignableError", "ProjectRepository", "ProjectRow"]
+__all__ = ["ProjectDocumentRepository", "ProjectDocumentRow", "ProjectNotAssignableError", "ProjectRepository", "ProjectRow"]

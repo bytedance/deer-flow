@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -1770,6 +1771,47 @@ class TestCardMode:
         _run(go())
 
 
+class TestStop:
+    def test_stop_retains_live_stream_thread_after_join_timeout(self):
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={})
+            thread = MagicMock()
+            thread.is_alive.return_value = True
+            channel._thread = thread
+            channel._running = True
+
+            with pytest.raises(RuntimeError, match="still running after stop timeout"):
+                await channel.stop()
+
+            thread.join.assert_called_once_with(timeout=5)
+            assert channel._thread is thread
+
+        _run(go())
+
+    def test_stop_joins_stream_thread_off_the_event_loop(self):
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={})
+            release = threading.Event()
+            # dingtalk-stream's start_forever() never returns, so the join in
+            # stop() waits out its timeout; this thread blocks the same way,
+            # bounded so a join run on the event loop fails the assertion
+            # below instead of hanging the test.
+            stream_thread = threading.Thread(target=release.wait, args=(2,), daemon=True)
+            stream_thread.start()
+            channel._thread = stream_thread
+            channel._running = True
+
+            stop_task = asyncio.create_task(channel.stop())
+            await asyncio.sleep(0.05)
+            assert not stop_task.done()
+
+            release.set()
+            await stop_task
+            assert channel._thread is None
+
+        _run(go())
+
+
 # ---------------------------------------------------------------------------
 # Inbound file support
 # ---------------------------------------------------------------------------
@@ -2608,3 +2650,33 @@ class TestHandlerStashesRawData:
             assert DingTalkChannel._extract_files(msg) == [{"type": "file", "download_code": "dc_doc", "filename": "a.xlsx"}]
 
         _run(go())
+
+
+class TestDingTalkDownloadGuardLogging:
+    """A None (or empty) download result used to drop the attachment with
+    zero log lines at the receive level — the accurate reason lines inside
+    _download_by_code fired, but nothing tied them to the file being
+    received. The caller now logs a neutral guard line, mirroring the
+    wechat channel's callers and the manager reader."""
+
+    def test_none_download_logs_neutral_guard_line(self, caplog):
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={})
+            channel._download_by_code = AsyncMock(return_value=None)
+            with caplog.at_level(logging.WARNING, logger="app.channels.dingtalk"):
+                result = await channel._receive_single_file("dc1", "file", "report.pdf", "t1", user_id="default")
+            assert result == ""
+
+        _run(go())
+        assert any("inbound file download returned no content" in r.message and "report.pdf" in r.message for r in caplog.records)
+
+    def test_empty_download_logs_neutral_guard_line(self, caplog):
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={})
+            channel._download_by_code = AsyncMock(return_value=b"")
+            with caplog.at_level(logging.WARNING, logger="app.channels.dingtalk"):
+                result = await channel._receive_single_file("dc2", "image", "photo.png", "t1", user_id="default")
+            assert result == ""
+
+        _run(go())
+        assert any("inbound file download returned no content" in r.message and "photo.png" in r.message for r in caplog.records)

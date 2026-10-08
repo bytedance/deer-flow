@@ -99,6 +99,31 @@ def test_matching_uses_latest_real_human_message_only():
     assert middleware._matched_names({"messages": [HumanMessage(content="metrics", name="summary"), HumanMessage(content="orders", additional_kwargs={"hide_from_ui": True})]}) == []
 
 
+def test_matching_uses_a_hidden_human_input_card_reply_as_the_latest_message():
+    """A card reply is hidden from the UI but is still the user's current request."""
+    middleware = McpRoutingMiddleware(
+        {"postgres_query": {"priority": 100, "keywords": ["orders"]}},
+        "hash1",
+        3,
+    )
+    reply = HumanMessage(
+        content='For your clarification "Which dataset?", my answer is: orders',
+        additional_kwargs={
+            "hide_from_ui": True,
+            "human_input_response": {
+                "version": 1,
+                "kind": "human_input_response",
+                "source": "ask_clarification",
+                "request_id": "clarification:call-abc",
+                "response_kind": "text",
+                "value": "orders",
+            },
+        },
+    )
+
+    assert middleware._matched_names({"messages": [HumanMessage(content="no match now"), reply]}) == ["postgres_query"]
+
+
 def test_matching_supports_casefold_chinese_priority_tiebreak_and_top_k():
     middleware = McpRoutingMiddleware(
         {

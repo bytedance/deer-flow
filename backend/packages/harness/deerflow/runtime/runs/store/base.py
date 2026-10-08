@@ -67,6 +67,14 @@ def normalize_run_created_at_iso(value: str) -> str:
     return value
 
 
+def canonical_run_created_at(value: str) -> str:
+    """Canonical UTC microseconds for durable goal-instance matching."""
+    parsed = datetime.fromisoformat(normalize_run_created_at_iso(value))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC).isoformat(timespec="microseconds")
+
+
 def format_run_cursor_created_at(value: str) -> str:
     """UTC keyset cursor using ``Z`` so ``+`` is not decoded as space in query strings."""
     dt = datetime.fromisoformat(normalize_run_created_at_iso(value))
@@ -110,6 +118,17 @@ def run_is_before_cursor(
 
 
 class RunStore(abc.ABC):
+    async def list_changed(
+        self,
+        *,
+        after_change_seq: int,
+        after_run_id: str,
+        user_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """List public run-record changes in stable ascending cursor order."""
+        raise NotImplementedError
+
     @abc.abstractmethod
     async def put(
         self,
@@ -127,6 +146,7 @@ class RunStore(abc.ABC):
         error: str | None = None,
         stop_reason: str | None = None,
         created_at: str | None = None,
+        goal_verdict: dict[str, Any] | None = None,
         owner_worker_id: str | None = None,
         lease_expires_at: str | None = None,
         idempotency_key: str | None = None,
@@ -153,6 +173,14 @@ class RunStore(abc.ABC):
         before_run_id: str | None = None,
     ) -> list[dict[str, Any]]:
         pass
+
+    async def list_by_thread_created_at(self, thread_id: str, *, user_id: str, created_at: str) -> list[dict[str, Any]]:
+        """Return all exact owner/thread/timestamp matches, without pagination.
+
+        Used to identify a worker-installed scheduled goal after a restart.
+        Missing support must fail closed rather than guess from bounded history.
+        """
+        raise NotImplementedError
 
     async def list_successful_regenerate_sources(
         self,
@@ -194,6 +222,7 @@ class RunStore(abc.ABC):
         *,
         error: str | None = None,
         stop_reason: str | None = None,
+        goal_verdict: dict[str, Any] | None = None,
     ) -> bool | None:
         """Update a run status.
 
@@ -250,6 +279,7 @@ class RunStore(abc.ABC):
         last_ai_message: str | None = None,
         first_human_message: str | None = None,
         error: str | None = None,
+        goal_verdict: dict[str, Any] | None = None,
     ) -> bool | None:
         """Persist final completion fields.
 
@@ -288,7 +318,7 @@ class RunStore(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False) -> dict[str, Any]:
+    async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False, user_id: str | None = None) -> dict[str, Any]:
         """Aggregate token usage for completed runs in a thread.
 
         Returns a dict with keys: total_tokens, total_input_tokens,
@@ -345,6 +375,7 @@ class RunStore(abc.ABC):
         status: str,
         error: str | None = None,
         stop_reason: str | None = None,
+        goal_verdict: dict[str, Any] | None = None,
     ) -> StatusFinalization:
         """Atomically finalize an active run unless cancellation won.
 
@@ -356,6 +387,7 @@ class RunStore(abc.ABC):
             status,
             error=error,
             stop_reason=stop_reason,
+            **({"goal_verdict": goal_verdict} if goal_verdict is not None else {}),
         )
         return StatusFinalization(finalized=updated is not False)
 

@@ -57,6 +57,58 @@ def test_strip_leading_mentions_only_drops_flush_leading_mentions():
     assert not is_known_channel_command("@bot /goal")
 
 
+@pytest.mark.parametrize("mode", ["interactive", "autonomous", "webhook", "scheduled"])
+def test_channel_policy_explicit_interaction_mode_overrides_legacy_flag(tmp_path, mode):
+    from app.channels.manager import ChannelManager
+    from app.channels.run_policy import CHANNEL_RUN_POLICY, ChannelRunPolicy
+
+    channel_name = "policy-explicit-interactive"
+    previous = CHANNEL_RUN_POLICY.get(channel_name)
+    CHANNEL_RUN_POLICY[channel_name] = ChannelRunPolicy(is_interactive=False, interaction_mode=mode)
+    try:
+        manager = ChannelManager(bus=MessageBus(), store=ChannelStore(path=tmp_path / "store.json"))
+        msg = InboundMessage(channel_name=channel_name, chat_id="chat", user_id="user", text="hello")
+        context: dict[str, object] = {}
+        asyncio.run(manager._apply_channel_policy(msg, context))
+        from app.gateway.services import merge_run_context_overrides
+        from deerflow.agents.interaction_policy import resolve_run_interaction_policy
+
+        config = {}
+        merge_run_context_overrides(config, context, internal=True)
+        assert resolve_run_interaction_policy(config).mode.value == mode
+        assert context["interaction_mode"] == mode
+        if mode == "interactive":
+            assert "disable_clarification" not in context
+        else:
+            assert context["disable_clarification"] is True
+    finally:
+        if previous is None:
+            CHANNEL_RUN_POLICY.pop(channel_name, None)
+        else:
+            CHANNEL_RUN_POLICY[channel_name] = previous
+
+
+def test_channel_policy_legacy_noninteractive_remains_supported(tmp_path):
+    from app.channels.manager import ChannelManager
+    from app.channels.run_policy import CHANNEL_RUN_POLICY, ChannelRunPolicy
+
+    channel_name = "policy-legacy-noninteractive"
+    previous = CHANNEL_RUN_POLICY.get(channel_name)
+    CHANNEL_RUN_POLICY[channel_name] = ChannelRunPolicy(is_interactive=False)
+    try:
+        manager = ChannelManager(bus=MessageBus(), store=ChannelStore(path=tmp_path / "store.json"))
+        msg = InboundMessage(channel_name=channel_name, chat_id="chat", user_id="user", text="hello")
+        context: dict[str, object] = {}
+        asyncio.run(manager._apply_channel_policy(msg, context))
+        assert context["disable_clarification"] is True
+        assert "interaction_mode" not in context
+    finally:
+        if previous is None:
+            CHANNEL_RUN_POLICY.pop(channel_name, None)
+        else:
+            CHANNEL_RUN_POLICY[channel_name] = previous
+
+
 def _make_channel_skill(tmp_path: Path, name: str, *, enabled: bool = True) -> Skill:
     skill_dir = tmp_path / name
     skill_dir.mkdir(parents=True, exist_ok=True)
@@ -445,6 +497,7 @@ class TestChannelBase:
         from app.channels.feishu import FeishuChannel
         from app.channels.github import GitHubChannel
         from app.channels.manager import CHANNEL_CAPABILITIES
+        from app.channels.qq import QQChannel
         from app.channels.slack import SlackChannel
         from app.channels.telegram import TelegramChannel
         from app.channels.wechat import WechatChannel
@@ -457,6 +510,7 @@ class TestChannelBase:
             "discord": DiscordChannel(bus=bus, config={}).supports_streaming,
             "feishu": FeishuChannel(bus=bus, config={}).supports_streaming,
             "github": GitHubChannel(bus=bus, config={}).supports_streaming,
+            "qq": QQChannel(bus=bus, config={}).supports_streaming,
             "slack": SlackChannel(bus=bus, config={}).supports_streaming,
             "telegram": TelegramChannel(bus=bus, config={}).supports_streaming,
             "wechat": WechatChannel(bus=bus, config={}).supports_streaming,
@@ -768,6 +822,105 @@ class TestChannelManager:
 
         _run(go())
 
+    @pytest.mark.parametrize("first_exit", ["error", "cancel"])
+    def test_thread_create_waiters_keep_one_lock_generation_after_first_aborts(self, first_exit):
+        """A queued creator must remain visible after the first creator aborts.
+
+        The first creator used to remove the conversation's lock entry in its
+        ``finally`` block even while a second creator was queued on that lock.
+        A late third caller could then install a new lock and create a second
+        thread concurrently with the queued caller.
+        """
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+            first_create_started = asyncio.Event()
+            release_first_with_error = asyncio.Event()
+            second_lookup_started = asyncio.Event()
+            second_create_started = asyncio.Event()
+            third_lookup_started = asyncio.Event()
+            allow_third_lookup = asyncio.Event()
+            third_create_started = asyncio.Event()
+            release_later_creates = asyncio.Event()
+            lookup_counts: dict[str, int] = {}
+            create_calls = 0
+            active_later_creates = 0
+            max_active_later_creates = 0
+
+            async def lookup_thread_id(msg):
+                lookup_counts[msg.text] = lookup_counts.get(msg.text, 0) + 1
+                if msg.text == "second" and lookup_counts[msg.text] == 1:
+                    second_lookup_started.set()
+                if msg.text == "third" and lookup_counts[msg.text] == 1:
+                    third_lookup_started.set()
+                    await allow_third_lookup.wait()
+                return None
+
+            async def create_thread(_client, _msg):
+                nonlocal create_calls, active_later_creates, max_active_later_creates
+                create_calls += 1
+                call_number = create_calls
+                if call_number == 1:
+                    first_create_started.set()
+                    await release_first_with_error.wait()
+                    raise RuntimeError("synthetic first-create failure")
+
+                active_later_creates += 1
+                max_active_later_creates = max(max_active_later_creates, active_later_creates)
+                if call_number == 2:
+                    second_create_started.set()
+                else:
+                    third_create_started.set()
+                try:
+                    await release_later_creates.wait()
+                finally:
+                    active_later_creates -= 1
+                return f"thread-{call_number}"
+
+            manager._lookup_thread_id = lookup_thread_id
+            manager._create_thread = create_thread
+            client = MagicMock()
+            first_msg = InboundMessage(channel_name="slack", chat_id="C1", user_id="U1", text="first")
+            second_msg = InboundMessage(channel_name="slack", chat_id="C1", user_id="U1", text="second")
+            third_msg = InboundMessage(channel_name="slack", chat_id="C1", user_id="U1", text="third")
+
+            first = asyncio.create_task(manager._get_or_create_thread(client, first_msg))
+            await first_create_started.wait()
+            second = asyncio.create_task(manager._get_or_create_thread(client, second_msg))
+            await second_lookup_started.wait()
+
+            if first_exit == "cancel":
+                first.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await first
+            else:
+                release_first_with_error.set()
+                with pytest.raises(RuntimeError, match="synthetic first-create failure"):
+                    await first
+
+            await second_create_started.wait()
+            third = asyncio.create_task(manager._get_or_create_thread(client, third_msg))
+            await third_lookup_started.wait()
+            allow_third_lookup.set()
+            turn_complete = asyncio.get_running_loop().create_future()
+            asyncio.get_running_loop().call_soon(turn_complete.set_result, None)
+            await turn_complete
+
+            bypassed_lock_generation = third_create_started.is_set()
+            max_active_before_release = max_active_later_creates
+            release_later_creates.set()
+            await asyncio.gather(second, third)
+
+            assert not bypassed_lock_generation, "late caller bypassed the queued creator through a new lock generation"
+            assert max_active_before_release == 1
+            assert max_active_later_creates == 1
+            assert not manager._thread_create_locks._entries_by_loop
+
+        _run(go())
+
     def test_fetch_gateway_includes_internal_auth_headers(self, monkeypatch):
         from app.channels.manager import ChannelManager
 
@@ -1045,6 +1198,59 @@ class TestChannelManager:
             assert outbound_received[0].text == "Hello from agent!"
 
         _run(go())
+
+    def test_run_input_message_has_a_unique_id(self):
+        """Each run's human message carries its own id.
+
+        The Gateway stores run input as sent, while ``add_messages`` gives an
+        id-less message a fresh uuid in the checkpoint. A web client that
+        reconnects to a running channel thread rebuilds the input from both
+        copies and can only match them by id.
+        """
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            await manager.start()
+            for text in ("first", "second"):
+                await bus.publish_inbound(InboundMessage(channel_name="test", chat_id="chat1", user_id="user1", text=text))
+            await _wait_for(lambda: len(outbound_received) >= 2)
+            await manager.stop()
+
+            ids = [call.kwargs["input"]["messages"][0].get("id") for call in mock_client.runs.wait.call_args_list]
+            assert len(ids) == 2
+            assert all(isinstance(message_id, str) and message_id for message_id in ids)
+            assert ids[0] != ids[1]
+
+        _run(go())
+
+    def test_run_input_message_id_matches_its_checkpoint_copy(self):
+        """The id a channel sends survives run admission into both copies."""
+        from langgraph.graph.message import add_messages
+
+        from app.channels.manager import _human_input_message
+        from app.gateway.services import _canonical_run_record_input, normalize_input
+
+        raw_input = {"messages": [_human_input_message("hello", original_content="/skill hello")]}
+        graph_input = normalize_input(raw_input, trusted_internal=True)
+
+        record = _canonical_run_record_input(raw_input, graph_input)
+        checkpoint_messages = add_messages([], graph_input["messages"])
+
+        assert record["messages"][0]["id"] == checkpoint_messages[0].id == raw_input["messages"][0]["id"]
 
     def test_worker_pool_dedupes_stable_provider_message_id(self, tmp_path):
         from app.channels.manager import ChannelManager
@@ -1796,7 +2002,7 @@ class TestChannelManager:
 
             history_by_checkpoint: dict[tuple[str, str], list[str]] = {}
 
-            async def _runs_wait(thread_id, assistant_id, *, input, config, context, multitask_strategy=None):
+            async def _runs_wait(thread_id, assistant_id, *, input, config, context, multitask_strategy=None, metadata=None):
                 del assistant_id, context  # unused in this test, kept for signature parity
 
                 checkpoint_ns = config.get("configurable", {}).get("checkpoint_ns")
@@ -2977,10 +3183,70 @@ class TestChannelManager:
 
         expected_owner = manager._resolve_run_params(msg, "")[2].get("user_id")
 
-        manager._resolve_available_skill_names(msg)
+        manager._resolve_available_skill_names(msg, "")
 
         assert expected_owner and expected_owner != "default"
         assert captured["user_id"] == expected_owner
+
+    def test_slash_skill_whitelist_for_a_bound_message_ignores_the_json_store_mapping(self, monkeypatch, tmp_path):
+        """A bound message's thread lives in the connection repository only
+        (``lookup_thread_id``). When the repository has no mapping yet, the whitelist
+        pre-check used to fall back to reading the JSON ``ChannelStore`` itself, so a
+        legacy unbound mapping for the same chat — here a thread pinned to a
+        frontend-only custom agent — decided which skills the bound user could run.
+        """
+        from app.channels.manager import ChannelManager
+
+        loaded_agents: list[str] = []
+
+        def spy_load_agent_config(name, *, user_id=None):
+            loaded_agents.append(name)
+            return SimpleNamespace(skills=["frontend-design"])
+
+        monkeypatch.setattr("app.channels.manager.load_agent_config", spy_load_agent_config)
+
+        class EmptyConnectionRepo:
+            async def get_thread_id(self, connection_id, external_conversation_id, external_topic_id=None):
+                return None
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+            store.set_thread_id("test", "chat1", "legacy-thread", user_id="platform-user")
+            manager = ChannelManager(bus=bus, store=store, connection_repo=EmptyConnectionRepo())
+            manager._remember_thread_agent("legacy-thread", "frontend-only")
+            manager._skill_storage = _make_channel_skill_storage([_make_channel_skill(tmp_path, "data-analysis")])
+
+            routed_to_chat: list[InboundMessage] = []
+
+            async def record_chat(msg, **kwargs):
+                routed_to_chat.append(msg)
+
+            manager._handle_chat = record_chat
+            outbound_received: list[OutboundMessage] = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            await manager._handle_command(
+                InboundMessage(
+                    channel_name="test",
+                    chat_id="chat1",
+                    user_id="platform-user",
+                    connection_id="conn-1",
+                    owner_user_id="owner-alice",
+                    text="/data-analysis go",
+                    msg_type=InboundMessageType.COMMAND,
+                )
+            )
+
+            assert outbound_received == []
+            assert len(routed_to_chat) == 1
+            assert loaded_agents == []
+
+        _run(go())
 
     def test_handle_command_slash_skill_reports_disabled_skill(self, tmp_path):
         from app.channels.manager import ChannelManager
@@ -4599,7 +4865,9 @@ class TestGithubFollowupBuffer:
             await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
 
             mock_client.runs.create.assert_called_once()
-            drained_text = mock_client.runs.create.call_args[1]["input"]["messages"][0]["content"]
+            drained_message = mock_client.runs.create.call_args[1]["input"]["messages"][0]
+            drained_text = drained_message["content"]
+            assert isinstance(drained_message.get("id"), str) and drained_message["id"]
             for i in range(FOLLOWUP_DRAIN_BATCH_SIZE):
                 assert f"comment {i}" in drained_text
             for i in range(FOLLOWUP_DRAIN_BATCH_SIZE, 15):
@@ -5980,13 +6248,37 @@ class TestHandleChatWithArtifacts:
 
 
 class TestDiscordChannel:
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "x" * 1990 + "\n\n" + "y" * 30,
+            "x" * 2000 + "\n\n\n" + "y" * 30,
+            "x" * 2000 + "\n" + "y" * 2000,
+            ("第一段\n\n" + "句" * 1990 + "\n\n最后一段") * 3,
+            "x" * 4500,
+        ],
+    )
+    def test_split_text_preserves_content_within_discord_limit(self, text: str):
+        from app.channels.discord import _DISCORD_MAX_MESSAGE_LEN, DiscordChannel
+
+        chunks = DiscordChannel._split_text(text)
+
+        assert all(0 < len(chunk) <= _DISCORD_MAX_MESSAGE_LEN for chunk in chunks)
+        assert "".join(chunks) == text
+
+    def test_split_text_preserves_empty_and_short_messages(self):
+        from app.channels.discord import DiscordChannel
+
+        assert DiscordChannel._split_text("") == [""]
+        assert DiscordChannel._split_text("hello\n\nworld") == ["hello\n\nworld"]
+
     def test_stop_prevents_queued_typing_starter_from_creating_task(self):
         from app.channels.discord import DiscordChannel
 
         async def go():
             channel = DiscordChannel(MessageBus(), config={})
             channel._running = True
-            typing_target = SimpleNamespace(trigger_typing=AsyncMock())
+            typing_target = SimpleNamespace(typing=AsyncMock())
 
             # Queue the starter without yielding to it.  stop() therefore runs
             # first and must form a boundary that the delayed starter cannot
@@ -6028,7 +6320,7 @@ class TestDiscordChannel:
         async def go():
             channel = DiscordChannel(MessageBus(), config={})
             channel._running = True
-            typing_target = SimpleNamespace(trigger_typing=AsyncMock())
+            typing_target = SimpleNamespace(typing=AsyncMock())
 
             discord_loop = asyncio.new_event_loop()
             loop_ready = threading.Event()
@@ -6103,7 +6395,7 @@ class TestDiscordChannel:
         async def go():
             channel = DiscordChannel(MessageBus(), config={})
             channel._running = True
-            typing_target = SimpleNamespace(trigger_typing=AsyncMock())
+            typing_target = SimpleNamespace(typing=AsyncMock())
 
             discord_loop = asyncio.new_event_loop()
             loop_ready = threading.Event()
@@ -6156,7 +6448,7 @@ class TestDiscordChannel:
 
         channel = DiscordChannel(MessageBus(), config={})
         channel._running = True
-        typing_target = SimpleNamespace(trigger_typing=AsyncMock())
+        typing_target = SimpleNamespace(typing=AsyncMock())
 
         class FailingClient:
             def __init__(self):
@@ -7019,6 +7311,72 @@ class TestWeComChannel:
             assert manager.heartbeat_stopped
             assert manager.pending_messages_cleared
             assert not client._started
+            assert channel._ws_client is None
+            assert channel._ws_task is None
+            assert channel._ws_shutdown_task is None
+
+        _run(go())
+
+    def test_stop_uses_sync_disconnect_fallback_without_sdk_async_helpers(self):
+        """A client that exposes neither ``_ws_manager`` (and therefore no
+        ``_async_disconnect`` / ``_stop_heartbeat`` / ``_clear_pending_messages``)
+        nor an awaitable ``disconnect()`` takes the compatibility fallback:
+        ``disconnect()`` is invoked once and ``stop()`` still clears its
+        lifecycle references."""
+        from app.channels.wecom import WeComChannel
+
+        async def go():
+            channel = WeComChannel(MessageBus(), config={})
+            disconnect_called = asyncio.Event()
+            ws_task = asyncio.create_task(asyncio.sleep(0))
+            await ws_task
+
+            class LegacySyncSDKClient:
+                def disconnect(self) -> None:
+                    disconnect_called.set()
+
+            client = LegacySyncSDKClient()
+            channel._running = True
+            channel._ws_client = client
+            channel._ws_task = ws_task
+
+            await channel.stop()
+
+            assert disconnect_called.is_set()
+            assert channel._ws_client is None
+            assert channel._ws_task is None
+            assert channel._ws_shutdown_task is None
+
+        _run(go())
+
+    def test_stop_awaits_awaitable_disconnect_fallback(self):
+        """A client whose ``disconnect()`` returns an awaitable (but has no
+        ``_ws_manager``) takes the fallback path and ``stop()`` waits for that
+        awaitable to finish before clearing its lifecycle references."""
+        from app.channels.wecom import WeComChannel
+
+        async def go():
+            channel = WeComChannel(MessageBus(), config={})
+            disconnect_called = asyncio.Event()
+            disconnect_finished = asyncio.Event()
+            ws_task = asyncio.create_task(asyncio.sleep(0))
+            await ws_task
+
+            class AwaitableSDKClient:
+                async def disconnect(self):
+                    disconnect_called.set()
+                    await asyncio.sleep(0)
+                    disconnect_finished.set()
+
+            client = AwaitableSDKClient()
+            channel._running = True
+            channel._ws_client = client
+            channel._ws_task = ws_task
+
+            await channel.stop()
+
+            assert disconnect_called.is_set()
+            assert disconnect_finished.is_set()
             assert channel._ws_client is None
             assert channel._ws_task is None
             assert channel._ws_shutdown_task is None
@@ -8459,6 +8817,186 @@ class TestChannelService:
         assert stopped  # old channel was stopped
         assert not started  # _start_channel was NOT called
 
+    def test_concurrent_restart_channel_serializes(self):
+        """Concurrent restart_channel calls serialize per channel rather than racing stop/start."""
+        from app.channels.service import ChannelService
+
+        service = ChannelService(channels_config={"telegram": {"enabled": True, "token": "test"}})
+        service._running = True
+
+        class FakeChannel:
+            def __init__(self):
+                self.is_running = True
+                self.stop_count = 0
+
+            async def stop(self):
+                self.stop_count += 1
+                self.is_running = False
+
+        current_instance = FakeChannel()
+        service._channels["telegram"] = current_instance
+
+        starts = 0
+        active_starts = 0
+        max_concurrent_starts = 0
+
+        async def mock_start(name, config):
+            nonlocal starts, active_starts, max_concurrent_starts
+            active_starts += 1
+            max_concurrent_starts = max(max_concurrent_starts, active_starts)
+            await asyncio.sleep(0.02)
+            service._channels[name] = FakeChannel()
+            active_starts -= 1
+            starts += 1
+            return True
+
+        service._start_channel = mock_start
+
+        async def go():
+            results = await asyncio.gather(
+                service.restart_channel("telegram", reload_config=False),
+                service.restart_channel("telegram", reload_config=False),
+            )
+            assert all(results)
+
+        _run(go())
+
+        assert max_concurrent_starts == 1
+        assert starts == 2
+
+    def test_concurrent_ensure_channel_ready_and_restart(self):
+        """ensure_channel_ready and restart_channel serialize without collision."""
+        from app.channels.service import ChannelService
+
+        service = ChannelService(channels_config={"telegram": {"enabled": True, "token": "test"}})
+        service._running = True
+
+        class FakeChannel:
+            def __init__(self):
+                self.is_running = True
+
+            async def stop(self):
+                # Suspend in stop to yield control to concurrent coroutines
+                await asyncio.sleep(0.02)
+                self.is_running = False
+
+        service._channels["telegram"] = FakeChannel()
+
+        starts = 0
+        active_starts = 0
+        max_concurrent_starts = 0
+
+        async def mock_start(name, config):
+            nonlocal starts, active_starts, max_concurrent_starts
+            active_starts += 1
+            max_concurrent_starts = max(max_concurrent_starts, active_starts)
+            await asyncio.sleep(0.03)
+            service._channels[name] = FakeChannel()
+            active_starts -= 1
+            starts += 1
+            return True
+
+        service._start_channel = mock_start
+
+        async def go():
+            # restart_channel suspends in stop(), so ensure_channel_ready must wait on
+            # _channel_lock rather than observing is_running=False and racing _start_channel.
+            results = await asyncio.gather(
+                service.restart_channel("telegram", reload_config=False),
+                service.ensure_channel_ready("telegram"),
+            )
+            assert all(results)
+
+        _run(go())
+
+        assert max_concurrent_starts == 1
+        assert starts == 1
+
+    def test_concurrent_remove_and_ensure_channel_ready(self):
+        """remove_channel and ensure_channel_ready serialize cleanly without zombie respawns."""
+        from app.channels.service import ChannelService
+
+        service = ChannelService(channels_config={"telegram": {"enabled": True, "token": "test"}})
+        service._running = True
+
+        class FakeChannel:
+            def __init__(self):
+                self.is_running = True
+
+            async def stop(self):
+                await asyncio.sleep(0.02)
+                self.is_running = False
+
+        service._channels["telegram"] = FakeChannel()
+
+        starts = 0
+
+        async def mock_start(name, config):
+            nonlocal starts
+            starts += 1
+            await asyncio.sleep(0.02)
+            service._channels[name] = FakeChannel()
+            return True
+
+        service._start_channel = mock_start
+
+        async def go():
+            # Pass config to ensure_channel_ready (the router pattern) while remove_channel is in flight.
+            results = await asyncio.gather(
+                service.remove_channel("telegram"),
+                service.ensure_channel_ready("telegram", config={"enabled": True, "token": "test"}),
+            )
+            return results
+
+        results = _run(go())
+        # remove_channel succeeds; ensure_channel_ready serialized after it returns False
+        # because the channel was removed and the stale pre-wait config snapshot is discarded.
+        assert results == [True, False]
+        assert starts == 0
+        assert "telegram" not in service._channels
+        assert "telegram" not in service._config
+
+    def test_concurrent_configure_and_ensure_channel_ready_keeps_authoritative_config(self):
+        """ensure_channel_ready does not overwrite authoritative credentials from configure_channel."""
+        from app.channels.service import ChannelService
+
+        service = ChannelService(channels_config={"telegram": {"enabled": True, "token": "old"}})
+        service._running = True
+
+        class FakeChannel:
+            def __init__(self):
+                self.is_running = True
+
+            async def stop(self):
+                await asyncio.sleep(0.01)
+                self.is_running = False
+
+        service._channels["telegram"] = FakeChannel()
+
+        started_configs = []
+
+        async def mock_start(name, config):
+            started_configs.append(dict(config))
+            await asyncio.sleep(0.02)
+            service._channels[name] = FakeChannel()
+            return True
+
+        service._start_channel = mock_start
+
+        async def go():
+            # configure_channel applies new credentials. A concurrent readiness check
+            # carrying a stale snapshot must not revert self._config to "stale".
+            results = await asyncio.gather(
+                service.configure_channel("telegram", {"enabled": True, "token": "new"}),
+                service.ensure_channel_ready("telegram", config={"enabled": True, "token": "stale"}),
+            )
+            return results
+
+        results = _run(go())
+        assert results == [True, True]
+        assert service._config["telegram"]["token"] == "new"
+        assert all(c["token"] == "new" for c in started_configs)
+
 
 # ---------------------------------------------------------------------------
 # Slack send retry tests
@@ -8637,6 +9175,49 @@ class TestSlackAllowedUsers:
         inbound = bus.get_inbound_nowait()
         assert inbound.text == "/help"
         assert inbound.msg_type == InboundMessageType.COMMAND
+
+    def _inbound_text_for(self, event: dict) -> str:
+        from app.channels.slack import SlackChannel
+
+        bus = MessageBus()
+        bus.publish_inbound = AsyncMock()
+        channel = SlackChannel(bus=bus, config={"bot_user_id": "UBOT"})
+        channel._loop = self._immediate_loop()
+        channel._add_reaction = MagicMock()
+        channel._send_running_reply = MagicMock()
+
+        with patch(
+            "app.channels.slack.asyncio.run_coroutine_threadsafe",
+            side_effect=self._submit_coro,
+        ):
+            channel._handle_message_event({"user": "U123456", "channel": "C123", "ts": "1710000000.000100", **event})
+
+        return bus.get_inbound_nowait().text
+
+    def test_inbound_text_decodes_slack_entity_escapes(self):
+        # Slack delivers a user-typed &, < and > as &amp;, &lt; and &gt;.
+        text = self._inbound_text_for(
+            {
+                "type": "app_mention",
+                "text": '<@UBOT> if a &lt; b &amp;&amp; c &gt; d: print("R&amp;D")',
+            }
+        )
+
+        assert text == 'if a < b && c > d: print("R&D")'
+
+    def test_inbound_text_decodes_an_escaped_entity_only_once(self):
+        # The user literally typed "&lt;", which Slack sends as "&amp;lt;".
+        assert self._inbound_text_for({"text": "write &amp;lt; in HTML"}) == "write &lt; in HTML"
+
+    def test_inbound_text_keeps_slack_control_sequences(self):
+        text = self._inbound_text_for({"text": "ask <@U999> about <https://example.com|the doc> &gt; now"})
+
+        assert text == "ask <@U999> about <https://example.com|the doc> > now"
+
+    def test_inbound_text_decodes_entities_inside_slack_link_labels(self):
+        text = self._inbound_text_for({"text": "see <https://x.com|a&amp;b>"})
+
+        assert text == "see <https://x.com|a&b>"
 
     def test_app_mention_strips_labelled_leading_bot_mention(self):
         from app.channels.slack import SlackChannel
@@ -8879,6 +9460,97 @@ class TestSlackAllowedUsers:
             msg = OutboundMessage(channel_name="slack", chat_id="C123", thread_id="t1", text="hello")
             with pytest.raises(RuntimeError, match="without an exception"):
                 await ch.send(msg, _max_retries=0)
+
+        _run(go())
+
+
+# ---------------------------------------------------------------------------
+# Telegram allowed_users tests
+# ---------------------------------------------------------------------------
+
+
+class TestTelegramAllowedUsers:
+    """An allowlist the operator configured must never silently open the bot."""
+
+    @staticmethod
+    def _channel(config_extra: dict):
+        from app.channels.telegram import TelegramChannel
+
+        return TelegramChannel(bus=MessageBus(), config={"bot_token": "test-token", **config_extra})
+
+    @pytest.mark.parametrize(
+        "config_extra",
+        [{}, {"allowed_users": None}, {"allowed_users": []}, {"allowed_users": ()}, {"allowed_users": set()}, {"allowed_users": frozenset()}, {"allowed_users": " "}],
+    )
+    def test_unset_or_empty_allowlist_allows_everyone_without_warning(self, config_extra, caplog):
+        with caplog.at_level(logging.WARNING, logger="app.channels.telegram"):
+            ch = self._channel(config_extra)
+
+        assert ch._check_user(42)
+        assert caplog.records == []
+
+    @pytest.mark.parametrize(
+        "allowed_users",
+        [[123456, 7], ["123456", " 7 "], (123456, 7), {123456, 7}, frozenset({123456, 7})],
+    )
+    def test_numeric_ids_are_allowed_and_others_denied(self, allowed_users):
+        ch = self._channel({"allowed_users": allowed_users})
+
+        assert ch._check_user(123456)
+        assert ch._check_user(7)
+        assert not ch._check_user(42)
+
+    @pytest.mark.parametrize("allowed_users", ["123456", 123456], ids=["str", "int"])
+    def test_scalar_id_is_one_entry_not_its_digits(self, allowed_users):
+        # Iterating the string "123456" used to allow users 1..6 and block 123456.
+        ch = self._channel({"allowed_users": allowed_users})
+
+        assert ch._check_user(123456)
+        assert not ch._check_user(1)
+
+    @pytest.mark.parametrize("bad_entry", ["@alice", 0, -5])
+    def test_unparseable_entry_is_dropped_with_warning(self, bad_entry, caplog):
+        with caplog.at_level(logging.WARNING, logger="app.channels.telegram"):
+            ch = self._channel({"allowed_users": [123456, bad_entry]})
+
+        assert ch._check_user(123456)
+        assert not ch._check_user(42)
+        assert repr(bad_entry) in caplog.text
+        # 0 and -5 are numeric, so the hint has to say what they are missing.
+        assert "positive numeric" in caplog.text
+
+    def test_frozen_allowlist_drops_invalid_entries_without_blocking_valid_ids(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="app.channels.telegram"):
+            ch = self._channel({"allowed_users": frozenset({123456, "@alice"})})
+
+        assert ch._check_user(123456)
+        assert not ch._check_user(42)
+        assert "'@alice'" in caplog.text
+        assert not any(record.levelno == logging.ERROR for record in caplog.records)
+
+    @pytest.mark.parametrize(
+        "allowed_users",
+        # "123456,789" is what a ``$ENV`` reference to a comma-separated value resolves to.
+        [["@alice", "bob"], "@alice", "123456,789", [True], [4.2], {"id": 42}],
+    )
+    def test_allowlist_without_a_parseable_entry_denies_everyone(self, allowed_users, caplog):
+        with caplog.at_level(logging.WARNING, logger="app.channels.telegram"):
+            ch = self._channel({"allowed_users": allowed_users})
+
+        assert not ch._check_user(42)
+        assert not ch._check_user(1)
+        assert any(record.levelno == logging.ERROR for record in caplog.records)
+
+    @pytest.mark.parametrize(("allowed_users", "admitted"), [(["@alice"], False), ([42], True)])
+    def test_on_text_applies_the_allowlist(self, allowed_users, admitted):
+        async def go():
+            ch = self._channel({"allowed_users": allowed_users})
+            ch._main_loop = asyncio.get_running_loop()
+            ch._reserve_inbound = MagicMock(return_value=None)
+
+            await ch._on_text(_make_telegram_update("private", message_id=10), None)
+
+            assert ch._reserve_inbound.called is admitted
 
         _run(go())
 
@@ -9255,7 +9927,7 @@ class TestTelegramInboundMessages:
             downloaded = bytearray(b"data")
             telegram_file = SimpleNamespace(file_size=4, download_as_bytearray=AsyncMock(return_value=downloaded))
             bot = SimpleNamespace(get_file=AsyncMock(return_value=telegram_file))
-            ch._application = SimpleNamespace(bot=bot)
+            ch._download_bot = bot
             msg = InboundMessage(
                 channel_name="telegram",
                 chat_id="100",
@@ -9324,7 +9996,7 @@ class TestTelegramInboundMessages:
                         return LoopBoundFile()
 
                 ch._tg_loop = telegram_loop
-                ch._application = SimpleNamespace(bot=LoopBoundBot())
+                ch._download_bot = LoopBoundBot()
                 msg = InboundMessage(
                     channel_name="telegram",
                     chat_id="100",
@@ -9383,7 +10055,7 @@ class TestTelegramInboundMessages:
                 ch._tg_loop = telegram_loop
                 ch._thread = loop_thread
                 ch._running = True
-                ch._application = SimpleNamespace(bot=LoopBoundBot())
+                ch._download_bot = LoopBoundBot()
                 msg = InboundMessage(
                     channel_name="telegram",
                     chat_id="100",
@@ -9468,7 +10140,7 @@ class TestTelegramInboundMessages:
             stopped_loop = asyncio.new_event_loop()
             bot = SimpleNamespace(get_file=AsyncMock())
             ch._tg_loop = stopped_loop
-            ch._application = SimpleNamespace(bot=bot)
+            ch._download_bot = bot
             msg = InboundMessage(
                 channel_name="telegram",
                 chat_id="100",
@@ -9496,7 +10168,7 @@ class TestTelegramInboundMessages:
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
             bot = SimpleNamespace(get_file=AsyncMock())
-            ch._application = SimpleNamespace(bot=bot)
+            ch._download_bot = bot
             msg = InboundMessage(
                 channel_name="telegram",
                 chat_id="100",
@@ -9530,7 +10202,7 @@ class TestTelegramInboundMessages:
             bus = MessageBus()
             ch = telegram.TelegramChannel(bus=bus, config={"bot_token": "test-token"})
             telegram_file = SimpleNamespace(file_size=2, download_as_bytearray=AsyncMock(return_value=bytearray(b"four")))
-            ch._application = SimpleNamespace(bot=SimpleNamespace(get_file=AsyncMock(return_value=telegram_file)))
+            ch._download_bot = SimpleNamespace(get_file=AsyncMock(return_value=telegram_file))
             msg = InboundMessage(
                 channel_name="telegram",
                 chat_id="100",
@@ -9556,7 +10228,7 @@ class TestTelegramInboundMessages:
             ch = telegram.TelegramChannel(bus=bus, config={"bot_token": "test-token"})
             download = AsyncMock(return_value=bytearray(b"four"))
             telegram_file = SimpleNamespace(file_size=4, download_as_bytearray=download)
-            ch._application = SimpleNamespace(bot=SimpleNamespace(get_file=AsyncMock(return_value=telegram_file)))
+            ch._download_bot = SimpleNamespace(get_file=AsyncMock(return_value=telegram_file))
             msg = InboundMessage(
                 channel_name="telegram",
                 chat_id="100",
@@ -9581,7 +10253,7 @@ class TestTelegramInboundMessages:
             bus = MessageBus()
             ch = telegram.TelegramChannel(bus=bus, config={"bot_token": "test-token"})
             telegram_file = SimpleNamespace(file_size=4, download_as_bytearray=AsyncMock(return_value=bytearray(b"four")))
-            ch._application = SimpleNamespace(bot=SimpleNamespace(get_file=AsyncMock(return_value=telegram_file)))
+            ch._download_bot = SimpleNamespace(get_file=AsyncMock(return_value=telegram_file))
             msg = InboundMessage(
                 channel_name="telegram",
                 chat_id="100",
@@ -9603,7 +10275,7 @@ class TestTelegramInboundMessages:
         async def go():
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
-            ch._application = SimpleNamespace(bot=SimpleNamespace(get_file=AsyncMock(side_effect=RuntimeError("GET https://api.telegram.org/bottest-token/getFile failed"))))
+            ch._download_bot = SimpleNamespace(get_file=AsyncMock(side_effect=RuntimeError("GET https://api.telegram.org/bottest-token/getFile failed")))
             msg = InboundMessage(
                 channel_name="telegram",
                 chat_id="100",
@@ -9796,6 +10468,354 @@ class TestTelegramInboundMessages:
             assert msg.msg_type == InboundMessageType.COMMAND
 
         _run(go())
+
+    def test_get_download_bot_returns_none_without_telegram_loop(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            assert ch._tg_loop is None
+
+            result = await ch._get_download_bot()
+
+            assert result is None
+            assert ch._download_bot is None
+
+        _run(go())
+
+    def test_get_download_bot_creates_loop_bound_bot_and_caches_it(self):
+        from app.channels import telegram as telegram_module
+
+        async def go():
+            bus = MessageBus()
+            ch = telegram_module.TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            telegram_loop = asyncio.new_event_loop()
+            loop_started: Future[None] = Future()
+
+            def run_telegram_loop():
+                asyncio.set_event_loop(telegram_loop)
+                telegram_loop.call_soon(loop_started.set_result, None)
+                telegram_loop.run_forever()
+
+            loop_thread = threading.Thread(target=run_telegram_loop, daemon=True)
+            loop_thread.start()
+            try:
+                loop_started.result(timeout=2)
+                ch._tg_loop = telegram_loop
+
+                created_tokens: list[str] = []
+                init_loops: list[asyncio.AbstractEventLoop] = []
+
+                class FakeBot:
+                    def __init__(self, token: str) -> None:
+                        created_tokens.append(token)
+
+                    async def initialize(self) -> None:
+                        init_loops.append(asyncio.get_running_loop())
+
+                with patch("telegram.Bot", FakeBot):
+                    first = await ch._get_download_bot()
+                    second = await ch._get_download_bot()
+
+                # One Bot, built with the configured token and initialized on the
+                # Telegram loop; the second call reuses the cached instance.
+                assert first is second
+                assert first is ch._download_bot
+                assert created_tokens == ["test-token"]
+                assert init_loops == [telegram_loop]
+            finally:
+                if telegram_loop.is_running():
+                    telegram_loop.call_soon_threadsafe(telegram_loop.stop)
+                await asyncio.to_thread(loop_thread.join, 2)
+                if loop_thread.is_alive():
+                    pytest.fail("Telegram test event loop did not stop")
+                telegram_loop.close()
+
+        _run(go())
+
+    def test_receive_file_uses_download_bot_not_application_bot(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            # The Application's Bot is main-loop-bound; the download must never
+            # route through it.
+            app_bot = SimpleNamespace(get_file=AsyncMock())
+            download_bot = SimpleNamespace(
+                get_file=AsyncMock(
+                    return_value=SimpleNamespace(
+                        file_size=2,
+                        download_as_bytearray=AsyncMock(return_value=bytearray(b"data")),
+                    )
+                )
+            )
+            ch._application = SimpleNamespace(bot=app_bot)
+            ch._download_bot = download_bot
+            msg = InboundMessage(
+                channel_name="telegram",
+                chat_id="100",
+                user_id="42",
+                text="caption",
+                files=[{"type": "file", "file_id": "document-id", "filename": "report.pdf", "size": 2}],
+            )
+
+            result = await ch.receive_file(msg, "thread-1")
+
+            download_bot.get_file.assert_awaited_once_with("document-id")
+            app_bot.get_file.assert_not_awaited()
+            assert result.files[0]["_content"] == b"data"
+
+        _run(go())
+
+    def test_stop_shuts_down_download_bot_on_telegram_loop(self):
+        """Regression: stop() must close the download Bot's HTTPX clients.
+
+        python-telegram-bot 22.7 has no ``Bot.session``; the old code called
+        ``bot.session.close()`` (always an AttributeError, suppressed), leaving
+        both request clients open. shutdown() now runs on the Telegram loop.
+        Uses the real Bot so the client-close assertion is meaningful.
+        """
+        import httpx
+        from telegram import Bot
+        from telegram.request import HTTPXRequest
+
+        from app.channels.telegram import TelegramChannel
+
+        def ok_get_me(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"ok": True, "result": {"id": 1, "is_bot": True, "first_name": "b", "username": "b"}})
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            telegram_loop = asyncio.new_event_loop()
+            loop_started: Future[None] = Future()
+
+            def run_telegram_loop():
+                asyncio.set_event_loop(telegram_loop)
+                telegram_loop.call_soon(loop_started.set_result, None)
+                telegram_loop.run_forever()
+
+            loop_thread = threading.Thread(target=run_telegram_loop, daemon=True)
+            loop_thread.start()
+            try:
+                loop_started.result(timeout=2)
+                ch._tg_loop = telegram_loop
+                ch._thread = loop_thread
+                ch._running = True
+
+                # A real, initialized Bot (offline via MockTransport) whose
+                # HTTPX clients are bound to the Telegram loop; both open.
+                real_bot = Bot(token="test-token", request=HTTPXRequest(httpx_kwargs={"transport": httpx.MockTransport(ok_get_me)}))
+                await ch._run_on_telegram_loop(real_bot.initialize())
+                ch._download_bot = real_bot
+                assert real_bot._request[0]._client.is_closed is False
+                assert real_bot._request[1]._client.is_closed is False
+
+                await ch.stop()
+
+                # Shut down on the Telegram loop (before it stops): both HTTPX
+                # clients are closed and the reference is cleared.
+                assert ch._download_bot is None
+                assert real_bot._request[0]._client.is_closed is True
+                assert real_bot._request[1]._client.is_closed is True
+            finally:
+                if telegram_loop.is_running():
+                    telegram_loop.call_soon_threadsafe(telegram_loop.stop)
+                await asyncio.to_thread(loop_thread.join, 2)
+                if loop_thread.is_alive():
+                    pytest.fail("Telegram test event loop did not stop")
+                telegram_loop.close()
+
+        _run(go())
+
+    def test_get_download_bot_cleans_up_on_init_failure(self):
+        """A bot whose getMe fails is never cached and its clients are closed."""
+        import httpx
+        from telegram import Bot
+        from telegram.error import TimedOut
+        from telegram.request import HTTPXRequest
+
+        from app.channels import telegram as telegram_module
+
+        async def go():
+            bus = MessageBus()
+            ch = telegram_module.TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            telegram_loop = asyncio.new_event_loop()
+            loop_started: Future[None] = Future()
+
+            def run_telegram_loop():
+                asyncio.set_event_loop(telegram_loop)
+                telegram_loop.call_soon(loop_started.set_result, None)
+                telegram_loop.run_forever()
+
+            loop_thread = threading.Thread(target=run_telegram_loop, daemon=True)
+            loop_thread.start()
+            try:
+                loop_started.result(timeout=2)
+                ch._tg_loop = telegram_loop
+
+                def timeout_handler(request: httpx.Request) -> httpx.Response:
+                    raise httpx.ReadTimeout("read timed out")
+
+                real_bot = Bot(token="test-token", request=HTTPXRequest(httpx_kwargs={"transport": httpx.MockTransport(timeout_handler)}))
+
+                with patch("telegram.Bot", lambda token: real_bot):
+                    with pytest.raises(TimedOut):
+                        await ch._get_download_bot()
+
+                # A bot that failed to initialize is never cached, and its
+                # partially-open HTTPX clients are closed.
+                assert ch._download_bot is None
+                assert real_bot._request[0]._client.is_closed is True
+                assert real_bot._request[1]._client.is_closed is True
+            finally:
+                if telegram_loop.is_running():
+                    telegram_loop.call_soon_threadsafe(telegram_loop.stop)
+                await asyncio.to_thread(loop_thread.join, 2)
+                if loop_thread.is_alive():
+                    pytest.fail("Telegram test event loop did not stop")
+                telegram_loop.close()
+
+        _run(go())
+
+    def test_receive_file_init_timeout_does_not_abort_message(self):
+        """A first-time getMe timeout is contained to one attachment.
+
+        The old code awaited _get_download_bot() outside the per-attachment
+        handler, so a TimedOut escaped receive_file() and the manager aborted
+        the whole message. Now the caption is preserved and only the
+        attachment is reported unavailable.
+        """
+        import httpx
+        from telegram import Bot
+        from telegram.request import HTTPXRequest
+
+        from app.channels import telegram as telegram_module
+
+        async def go():
+            bus = MessageBus()
+            ch = telegram_module.TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            telegram_loop = asyncio.new_event_loop()
+            loop_started: Future[None] = Future()
+
+            def run_telegram_loop():
+                asyncio.set_event_loop(telegram_loop)
+                telegram_loop.call_soon(loop_started.set_result, None)
+                telegram_loop.run_forever()
+
+            loop_thread = threading.Thread(target=run_telegram_loop, daemon=True)
+            loop_thread.start()
+            try:
+                loop_started.result(timeout=2)
+                ch._tg_loop = telegram_loop
+
+                def timeout_handler(request: httpx.Request) -> httpx.Response:
+                    raise httpx.ReadTimeout("read timed out")
+
+                real_bot = Bot(token="test-token", request=HTTPXRequest(httpx_kwargs={"transport": httpx.MockTransport(timeout_handler)}))
+                msg = InboundMessage(
+                    channel_name="telegram",
+                    chat_id="100",
+                    user_id="42",
+                    text="caption",
+                    files=[{"type": "file", "file_id": "document-id", "filename": "report.pdf", "size": 10}],
+                )
+
+                with patch("telegram.Bot", lambda token: real_bot):
+                    result = await ch.receive_file(msg, "thread-1")
+
+                # No exception escapes; the caption survives and the attachment
+                # is reported unavailable.
+                assert result.files == []
+                assert result.text.startswith("caption")
+                assert "report.pdf" in result.text
+                assert "download failed" in result.text
+                # And the partially-initialized bot was cleaned up, not cached.
+                assert ch._download_bot is None
+                assert real_bot._request[1]._client.is_closed is True
+            finally:
+                if telegram_loop.is_running():
+                    telegram_loop.call_soon_threadsafe(telegram_loop.stop)
+                await asyncio.to_thread(loop_thread.join, 2)
+                if loop_thread.is_alive():
+                    pytest.fail("Telegram test event loop did not stop")
+                telegram_loop.close()
+
+        _run(go())
+
+    def test_receive_file_download_failure_logs_cause_chain_without_token(self, caplog):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+
+            def boom(file_id: str) -> None:
+                raise RuntimeError("download aborted") from ConnectionResetError("GET https://api.telegram.org/file/bottest-token/ABC123/photo.jpg")
+
+            ch._download_bot = SimpleNamespace(get_file=AsyncMock(side_effect=boom))
+            msg = InboundMessage(
+                channel_name="telegram",
+                chat_id="100",
+                user_id="42",
+                text="caption",
+                files=[{"type": "file", "file_id": "document-id", "filename": "report.pdf", "size": 10}],
+            )
+
+            with caplog.at_level(logging.ERROR):
+                result = await ch.receive_file(msg, "thread-1")
+
+            assert result.files == []
+            assert "report.pdf" in result.text
+            # The cause chain is surfaced for diagnosis...
+            assert "caused_by=" in caplog.text
+            assert "ConnectionResetError" in caplog.text
+            # ...with the token-bearing Bot API file URL masked (host kept for
+            # diagnosis; the exact redaction marker varies by which pass handled
+            # it — our own vs the global UrlRedactionFilter).
+            assert "api.telegram.org" in caplog.text
+            assert "ABC123" not in caplog.text
+            assert "test-token" not in caplog.text
+
+        _run(go())
+
+    def test_describe_download_cause_redacts_bot_api_urls(self):
+        """Both Bot API URL forms carry the token; neither may publish it.
+
+        PTB builds the file download URL as ``/file/bot<token>/…`` and the
+        method URLs (getMe, getFile) as ``/bot<token>/<method>`` — the token is
+        in the path in every form. The helper redacts the configured token and
+        collapses any remaining Bot API URL so a chained HTTP exception cannot
+        leak it, while keeping the method name for diagnosis.
+        """
+        from app.channels.telegram import TelegramChannel
+
+        ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "test-token"})
+
+        def with_cause(cause: BaseException) -> BaseException:
+            exc = RuntimeError("x")
+            exc.__cause__ = cause
+            return exc
+
+        file_exc = with_cause(ConnectionResetError("GET https://api.telegram.org/file/bottest-token/ABC123/photo.jpg"))
+        getme_exc = with_cause(ConnectionResetError("GET https://api.telegram.org/bottest-token/getMe"))
+        getfile_exc = with_cause(ConnectionResetError("GET https://api.telegram.org/bottest-token/getFile"))
+
+        for exc in (file_exc, getme_exc, getfile_exc):
+            cause = ch._describe_download_cause(exc)
+            assert "test-token" not in cause
+            assert "bottest-token" not in cause
+
+        # The file URL is fully collapsed; the method URLs keep their method
+        # name for diagnosis with the token redacted.
+        assert "api.telegram.org/file/[redacted]" in ch._describe_download_cause(file_exc)
+        assert "bot[redacted]/getMe" in ch._describe_download_cause(getme_exc)
+        assert "bot[redacted]/getFile" in ch._describe_download_cause(getfile_exc)
+
+        # A cause with no URL passes through untouched.
+        assert ch._describe_download_cause(with_cause(TimeoutError("read timed out"))) == " caused_by=TimeoutError:read timed out"
 
 
 class TestTelegramProcessingOrder:
@@ -10314,6 +11334,76 @@ class TestTelegramStreaming:
                 )
             ]
             assert bot.sent == []
+
+        _run(go())
+
+    def test_plain_command_reply_stays_plain_when_enabled(self):
+        """A plain command/error reply (no rich construct) must stay plain text
+        even when rich_messages is on, so newlines and <placeholder> tokens
+        survive. The text deliberately carries a bracketed-pipe token
+        ([condition|clear]) to prove the construct detector stays well-formed."""
+
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+            ch.config["rich_messages"] = True
+            help_text = "Available commands:\n/goal [condition|clear] — Set or clear a goal\n/agent use <name> — Start with an agent"
+
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text=help_text, is_final=True))
+
+            assert bot.rich == []
+            assert [message["text"] for message in bot.sent] == [help_text]
+
+        _run(go())
+
+    def test_plain_flag_list_stays_plain_when_enabled(self):
+        """A reply whose lines merely *start* with ``--`` (CLI flag lists,
+        signature separators) must stay plain: a table-separator row needs a
+        pipe, so a bare ``--verbose`` line is not a GFM delimiter row."""
+
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+            ch.config["rich_messages"] = True
+            flag_list = "Options:\n--verbose\n--help"
+
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text=flag_list, is_final=True))
+
+            assert bot.rich == []
+            assert [message["text"] for message in bot.sent] == [flag_list]
+
+        _run(go())
+
+    def test_plain_arithmetic_stays_plain_when_enabled(self):
+        """A reply with spaced asterisks used as multiplication (``2 * 3 * 4``)
+        must stay plain: italic emphasis needs tight, non-space delimiters, so
+        the spans between the asterisks are not handed to the rich parser."""
+
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+            ch.config["rich_messages"] = True
+            arithmetic = "Compute: 2 * 3 * 4 = 24"
+
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text=arithmetic, is_final=True))
+
+            assert bot.rich == []
+            assert [message["text"] for message in bot.sent] == [arithmetic]
+
+        _run(go())
+
+    def test_plain_command_reply_stays_plain_on_stream_edit(self, monkeypatch):
+        """A streamed-then-final plain reply (no rich construct) must not be
+        replaced by a rich edit of the in-flight placeholder."""
+
+        async def go():
+            ch, bot = self._make_channel_with_bot()
+            ch.config["rich_messages"] = True
+            monkeypatch.setattr("app.channels.telegram._monotonic", lambda: 1000.0)
+
+            await ch._send_running_reply("12345", 42)
+            await ch.send(OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="t1", text="Available commands:\n/new — new", is_final=True, thread_ts="42"))
+
+            assert bot.rich == []
+            # Final text is applied as a plain edit of the streamed placeholder.
+            assert [message["text"] for message in bot.edited] == ["Available commands:\n/new — new"]
 
         _run(go())
 

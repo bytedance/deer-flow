@@ -110,7 +110,7 @@ async def test_task_tool_assembles_off_loop(monkeypatch, tmp_path):
     monkeypatch.setattr(
         task_tool_module,
         "get_subagent_config",
-        lambda _name: SubagentConfig(
+        lambda _name, **_kwargs: SubagentConfig(
             name="general-purpose",
             description="General helper",
             system_prompt="Base system prompt",
