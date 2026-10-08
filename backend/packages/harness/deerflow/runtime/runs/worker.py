@@ -1285,7 +1285,6 @@ async def run_agent(
                 try:
                     rollback_point = await _capture_rollback_point(accessor, checkpointer, checkpoint_config)
                 except Exception:
-                    snapshot_capture_failed = True
                     logger.warning("Could not capture pre-run checkpoint snapshot for run %s", run_id, exc_info=True)
                 else:
                     # Only a completed capture proves what the pre-run state was.
