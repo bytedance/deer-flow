@@ -102,6 +102,34 @@ def test_malformed_server_settings_do_not_block_an_enabled_web_profile(store):
     assert effective_image_generation_source(invalid_server) == "managed"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid_environment",
+    [
+        {"IMAGE_GENERATION_PROVIDER": "unknown-provider"},
+        {"IMAGE_GENERATION_PROVIDER": "openai", "IMAGE_GENERATION_BASE_URL": "not-a-url"},
+    ],
+)
+async def test_invalid_legacy_settings_with_stale_default_keep_profiles_visible(store, monkeypatch, invalid_environment):
+    from app.gateway.routers import image_generation as router
+    from deerflow.config.image_generation import ImageGenerationDefaultStore, image_profile_identity
+
+    saved = store.save(profile(), expected_revision=None)
+    ImageGenerationDefaultStore().save("managed", target_identity=image_profile_identity(saved), expected_revision=None, environment={})
+    store.save(profile(enabled=False, api_key=None), expected_revision=saved.revision)
+    config = AppConfig.model_validate({"sandbox": {"use": "test", "environment": invalid_environment}})
+    monkeypatch.setattr(router, "get_app_config", lambda: config)
+    admin = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
+
+    assert (await router.image_generation_status(admin))["status"] == "invalid_config"
+    listed = await router.list_image_profiles(admin)
+
+    assert listed["status"]["status"] == "invalid_config"
+    assert listed["status"]["default_revision"] is not None
+    assert listed["status"]["default_active"] is False
+    assert [(item["source"], item["enabled"]) for item in listed["profiles"]] == [("managed", False)]
+
+
 def test_profile_catalog_marks_the_effective_source_when_server_and_web_both_exist(store, monkeypatch):
     from app.gateway.routers import image_generation as router
 
