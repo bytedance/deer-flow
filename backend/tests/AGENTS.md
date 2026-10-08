@@ -193,7 +193,9 @@ never project credential values.
 
 `test_deploy_home_writability.py` covers the production deploy permission
 preflight. It runs the complete script with a recording Docker stub and
-isolated runtime paths. Permission cases remove directory write bits and
-restore them during teardown; they skip on Windows, as root, or when the
-filesystem does not enforce those bits. Writable-directory cases remain
-portable.
+isolated runtime paths. Permission cases remove directory write bits or secret
+file read bits and restore them during teardown; they skip on Windows, as root,
+or when the filesystem does not enforce those bits. Cover both persisted
+secrets, shell/Compose dotenv overrides, readable read-only secrets, and teardown
+without secret exports. `down` must not probe, read, or generate secrets.
+Writable-directory cases remain portable.

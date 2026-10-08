@@ -128,11 +128,15 @@ mkdir -p "$DEER_FLOW_HOME"
 # this script as the invoking user and only fails deep into the run with a bare
 # "Permission denied" while persisting generated secrets. Detect it up front and
 # print the exact recovery command instead.
-if [ "$CMD" != "down" ] && [ ! -w "$DEER_FLOW_HOME" ]; then
-    echo -e "${RED}✗ $DEER_FLOW_HOME is not writable by '$(id -un)'.${NC}" >&2
+fail_home_permission() {
+    echo -e "${RED}✗ $1 is not $2 by '$(id -un)'.${NC}" >&2
     echo -e "${RED}  This usually happens when the dev stack (make docker-start) created it as root.${NC}" >&2
     echo -e "${YELLOW}  Recover with: sudo chown -R $(id -u):$(id -g) '$DEER_FLOW_HOME'${NC}" >&2
     exit 1
+}
+
+if [ "$CMD" != "down" ] && [ ! -w "$DEER_FLOW_HOME" ]; then
+    fail_home_permission "$DEER_FLOW_HOME" writable
 fi
 
 # ── DEER_FLOW_REPO_ROOT (for skills host path in DooD) ───────────────────────
@@ -223,10 +227,15 @@ dotenv_provides_secret() {
 # sessions survive container restarts.
 
 _secret_file="$DEER_FLOW_HOME/.better-auth-secret"
-if [ -z "$BETTER_AUTH_SECRET" ] && dotenv_provides_secret BETTER_AUTH_SECRET; then
+if [ "$CMD" != "down" ] && [ -z "$BETTER_AUTH_SECRET" ] && dotenv_provides_secret BETTER_AUTH_SECRET; then
     echo -e "${GREEN}✓ BETTER_AUTH_SECRET loaded from $ENV_FILE${NC}"
-elif [ -z "$BETTER_AUTH_SECRET" ]; then
+elif [ "$CMD" != "down" ] && [ -z "$BETTER_AUTH_SECRET" ]; then
     if [ -f "$_secret_file" ]; then
+        # A writable directory can still contain a root-owned, unreadable file.
+        # Persisted secrets are only read; read-only files and overrides are valid.
+        if [ ! -r "$_secret_file" ]; then
+            fail_home_permission "$_secret_file" readable
+        fi
         export BETTER_AUTH_SECRET
         BETTER_AUTH_SECRET="$(cat "$_secret_file")"
         echo -e "${GREEN}✓ BETTER_AUTH_SECRET loaded from $_secret_file${NC}"
@@ -261,6 +270,9 @@ if [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_INTERNAL_AUTH_TOKEN" ] && dotenv_pro
     echo -e "${GREEN}✓ DEER_FLOW_INTERNAL_AUTH_TOKEN loaded from $ENV_FILE${NC}"
 elif [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_INTERNAL_AUTH_TOKEN" ]; then
     if [ -f "$_internal_auth_token_file" ]; then
+        if [ ! -r "$_internal_auth_token_file" ]; then
+            fail_home_permission "$_internal_auth_token_file" readable
+        fi
         export DEER_FLOW_INTERNAL_AUTH_TOKEN
         DEER_FLOW_INTERNAL_AUTH_TOKEN="$(cat "$_internal_auth_token_file")"
         echo -e "${GREEN}✓ DEER_FLOW_INTERNAL_AUTH_TOKEN loaded from $_internal_auth_token_file${NC}"

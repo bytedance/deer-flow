@@ -34,10 +34,14 @@ def deploy_fixture(tmp_path: Path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     docker = bin_dir / "docker"
-    docker.write_text('#!/usr/bin/env sh\nprintf "%s\\n" "$@" >> "$CAPTURE_DOCKER_ARGS"\n', encoding="utf-8")
+    docker.write_text(
+        '#!/usr/bin/env sh\nprintf "%s\\n" "$@" >> "$CAPTURE_DOCKER_ARGS"\ncase " $* " in\n  *" config "*) printf "      DEER_FLOW_PROBE_VALUE: %s\\n" "${PERMISSION_TEST_COMPOSE_SECRET:-\\"\\"}" ;;\nesac\n',
+        encoding="utf-8",
+    )
     docker.chmod(0o755)
 
     env = os.environ.copy()
+    env.pop("PERMISSION_TEST_COMPOSE_SECRET", None)
     env.update(
         PATH=f"{bin_dir}{os.pathsep}{env['PATH']}",
         DEER_FLOW_HOME=str(home),
@@ -69,6 +73,36 @@ def unwritable_home(deploy_fixture):
         yield home
     finally:
         home.chmod(original_mode)
+
+
+@pytest.fixture(
+    params=[("BETTER_AUTH_SECRET", ".better-auth-secret"), ("DEER_FLOW_INTERNAL_AUTH_TOKEN", ".internal-auth-token")],
+    ids=["better-auth", "internal-auth"],
+)
+def persisted_secret(request, deploy_fixture):
+    _, _, home, _ = deploy_fixture
+    key, filename = request.param
+    secret_file = home / filename
+    secret_file.write_text("persisted-test-secret\n", encoding="utf-8")
+    return key, secret_file
+
+
+@pytest.fixture
+def unreadable_secret(persisted_secret):
+    if os.name != "posix":
+        pytest.skip("file read permissions require a POSIX filesystem")
+    if os.geteuid() == 0:
+        pytest.skip("root can read files despite removed read permissions")
+
+    _, secret_file = persisted_secret
+    original_mode = secret_file.stat().st_mode
+    secret_file.chmod(0o000)
+    try:
+        if os.access(secret_file, os.R_OK):
+            pytest.skip("filesystem does not enforce file read permissions")
+        yield secret_file
+    finally:
+        secret_file.chmod(original_mode)
 
 
 def _run_deploy(deploy_fixture, command: str):
@@ -113,10 +147,91 @@ def test_deploy_allows_writable_home(deploy_fixture, command, compose_command):
 
 
 def test_deploy_down_allows_unwritable_home(deploy_fixture, unwritable_home):
-    _, _, _, capture = deploy_fixture
+    _, env, _, capture = deploy_fixture
+    env.pop("BETTER_AUTH_SECRET")
+    env.pop("DEER_FLOW_INTERNAL_AUTH_TOKEN")
 
     result = _run_deploy(deploy_fixture, "down")
 
     assert result.returncode == 0, result.stderr
     assert "is not writable" not in result.stderr
     assert capture.read_text(encoding="utf-8").splitlines()[-1] == "down"
+    assert not list(unwritable_home.iterdir()), "Stopping must not generate secrets"
+
+
+@pytest.mark.parametrize("command", ["", "build", "start"], ids=["up", "build", "start"])
+def test_deploy_rejects_unreadable_persisted_secret_before_starting_compose(deploy_fixture, persisted_secret, unreadable_secret, command):
+    _, env, home, capture = deploy_fixture
+    key, _ = persisted_secret
+    env.pop(key)
+
+    result = _run_deploy(deploy_fixture, command)
+
+    assert result.returncode == 1
+    assert f"{unreadable_secret} is not readable by '" in result.stderr
+    assert "make docker-start" in result.stderr
+    assert f"sudo chown -R {os.geteuid()}:{os.getegid()} '{home}'" in result.stderr
+    assert "persisted-test-secret" not in result.stdout + result.stderr
+    args = capture.read_text(encoding="utf-8").splitlines()
+    assert "config" in args
+    assert not {"up", "build"}.intersection(args), "Only the dotenv probe may run before a secret preflight fails"
+
+
+@pytest.mark.parametrize("source", ["shell", "dotenv"])
+def test_deploy_allows_override_of_unreadable_persisted_secret(deploy_fixture, persisted_secret, unreadable_secret, source):
+    worktree, env, _, capture = deploy_fixture
+    key, _ = persisted_secret
+    if source == "dotenv":
+        env.pop(key)
+        (worktree / ".env").write_text(f"{key}=override-from-dotenv\n", encoding="utf-8")
+        env["PERMISSION_TEST_COMPOSE_SECRET"] = "override-from-dotenv"
+
+    result = _run_deploy(deploy_fixture, "build")
+
+    assert result.returncode == 0, result.stderr
+    assert "is not readable" not in result.stderr
+    assert unreadable_secret.stat().st_mode & 0o777 == 0
+    assert "build" in capture.read_text(encoding="utf-8").splitlines()
+    if source == "dotenv":
+        assert f"{key} loaded from {worktree / '.env'}" in result.stdout
+
+
+def test_deploy_allows_readonly_persisted_secret(deploy_fixture, persisted_secret):
+    if os.name != "posix":
+        pytest.skip("file write permissions require a POSIX filesystem")
+    if os.geteuid() == 0:
+        pytest.skip("root can write files despite removed write permissions")
+
+    _, env, _, capture = deploy_fixture
+    key, secret_file = persisted_secret
+    env.pop(key)
+    original_mode = secret_file.stat().st_mode
+    secret_file.chmod(0o400)
+    try:
+        if os.access(secret_file, os.W_OK):
+            pytest.skip("filesystem does not enforce file write permissions")
+
+        result = _run_deploy(deploy_fixture, "build")
+
+        assert result.returncode == 0, result.stderr
+        assert f"{key} loaded from {secret_file}" in result.stdout
+        assert secret_file.read_text(encoding="utf-8") == "persisted-test-secret\n"
+        assert secret_file.stat().st_mode & 0o777 == 0o400
+        assert "build" in capture.read_text(encoding="utf-8").splitlines()
+    finally:
+        secret_file.chmod(original_mode)
+
+
+def test_deploy_down_allows_unreadable_persisted_secret(deploy_fixture, unreadable_secret):
+    _, env, home, capture = deploy_fixture
+    env.pop("BETTER_AUTH_SECRET")
+    env.pop("DEER_FLOW_INTERNAL_AUTH_TOKEN")
+
+    result = _run_deploy(deploy_fixture, "down")
+
+    assert result.returncode == 0, result.stderr
+    assert "is not readable" not in result.stderr
+    args = capture.read_text(encoding="utf-8").splitlines()
+    assert args[-1] == "down"
+    assert "config" not in args, "Stopping must not resolve secrets"
+    assert list(home.iterdir()) == [unreadable_secret], "Stopping must not generate secrets"
