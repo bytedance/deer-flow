@@ -234,8 +234,15 @@ helm install deer-flow deploy/helm/deer-flow \
 ```bash
 kubectl -n deer-flow get pods
 kubectl -n deer-flow port-forward svc/nginx 2026:2026
-curl http://localhost:2026/health          # gateway health via nginx
+curl http://localhost:2026/health          # gateway liveness via nginx
+curl http://localhost:2026/health/ready    # readiness: database, checkpointer, stream_bridge, provisioner
 ```
+
+`/health/ready` is what the gateway `readinessProbe` hits. It answers 503 while
+Postgres or the Redis stream bridge is unreachable (`stream_bridge: unreachable`),
+so those pods leave the Service instead of accepting runs they cannot stream.
+The `provisioner` field reports the provisioner's own `/health` but never
+changes the status code: every gateway pod shares that one provisioner.
 
 Hit the Ingress host (map it in `/etc/hosts` for local clusters) to load the UI.
 
@@ -270,7 +277,7 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   `%40`). The chart uses an external `databaseUrl` verbatim and does not
   rewrite the DSN in a user-managed Secret.
 
-- **Graceful shutdown & memory drain.** The gateway pod sets `terminationGracePeriodSeconds` (default 90s, overridable via `gateway.terminationGracePeriodSeconds`) plus an optional `preStop` sleep (`gateway.preStopSleepSeconds`, default 5s), and bounds uvicorn's `--timeout-graceful-shutdown` (`gateway.uvicornGracefulShutdownSeconds`, default 10s) so an idle SSE connection cannot hold up lifespan shutdown indefinitely. The grace period MUST exceed the Gateway's graceful-shutdown work — the preStop sleep, the uvicorn timeout, and the lifespan's worst case: six hooks bounded at 5s each (startup trash sweep, notification delivery worker, channel service, scheduled task service, browser sessions, MCP session pool), the 1s retrieval-warm wait, the in-flight run drain (5s) and the memory-queue drain (`memory.shutdown_flush_timeout_seconds`, default 30s), about 66s in total, plus a buffer — because the drain runs on a daemon thread and K8s SIGKILLs anything still running at the end of the grace window. K8s defaults to 30s, which SIGKILLs the drain mid-flight and silently re-introduces the memory loss the drain is fixing. `backend/tests/_gateway_shutdown_budget.py` reads these bounds from the Gateway and pins the chart and compose budgets against them. **When you raise `memory.shutdown_flush_timeout_seconds`, raise `gateway.terminationGracePeriodSeconds` to match** (preStop + uvicorn timeout + ~36s of bounded hooks and drains + memory drain + buffer).
+- **Graceful shutdown & memory drain.** The gateway pod sets `terminationGracePeriodSeconds` (default 90s, overridable via `gateway.terminationGracePeriodSeconds`) plus an optional `preStop` sleep (`gateway.preStopSleepSeconds`, default 5s), and bounds uvicorn's `--timeout-graceful-shutdown` (`gateway.uvicornGracefulShutdownSeconds`, default 10s) so an idle SSE connection cannot hold up lifespan shutdown indefinitely. The grace period MUST exceed the Gateway's graceful-shutdown work — the preStop sleep, the uvicorn timeout, and the lifespan's worst case: seven hooks bounded at 5s each (startup trash sweep, notification delivery worker, channel service, scheduled task service, subagent batch service, browser sessions, MCP session pool), the 1s retrieval-warm wait, the in-flight run drain (5s) and the memory-queue drain (`memory.shutdown_flush_timeout_seconds`, default 30s), about 71s in total, plus a buffer — because the drain runs on a daemon thread and K8s SIGKILLs anything still running at the end of the grace window. K8s defaults to 30s, which SIGKILLs the drain mid-flight and silently re-introduces the memory loss the drain is fixing. `backend/tests/_gateway_shutdown_budget.py` reads these bounds from the Gateway and pins the chart and compose budgets against them. **When you raise `memory.shutdown_flush_timeout_seconds`, raise `gateway.terminationGracePeriodSeconds` to match** (preStop + uvicorn timeout + ~41s of bounded hooks and drains + memory drain + buffer).
 - **Gateway replicas.** Run control is cross-pod-safe since the work tracked
   by [issue #3948](https://github.com/bytedance/deer-flow/issues/3948) landed
   (#4003, #4064, #4500): admission is a durable one-active-run-per-thread
@@ -354,7 +361,10 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   `DEER_FLOW_STREAM_BRIDGE_REDIS_URL`; `config.yaml` sets `stream_bridge.type:
   redis` by default. No-auth by default (ClusterIP isolation, matching compose);
   set `redis.auth.password` to enable AUTH. For a managed Redis, disable the
-  bundled instance and point at it via `redis.external`.
+  bundled instance and point at it via `redis.external`. The gateway readiness
+  probe pings this Redis on every check and reports the pod unready while it
+  is unreachable, since without the bridge no run can publish, stream or be
+  cancelled from a peer pod.
 - **Persistence.** A PVC (`<release>-home`) backs `/app/backend/.deer-flow`
   (sqlite DB, memory, custom agents, per-thread user-data). The gateway mounts
   it with `subPath: deer-flow` so the layout matches the provisioner's PVC

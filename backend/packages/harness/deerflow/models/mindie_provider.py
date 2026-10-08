@@ -217,6 +217,62 @@ def _decode_escaped_newlines_outside_fences(content: str) -> str:
     return "".join(parts)
 
 
+class _EscapedNewlineStreamDecoder:
+    """Decode literal `\\n` outside fenced code blocks across streamed chunks.
+
+    `_decode_escaped_newlines_outside_fences` needs the whole reply to pair
+    ``` delimiters, and a token-sized chunk almost never contains both, so
+    decoding chunks independently would also decode escapes inside fences.
+    This decoder carries the fence state between chunks and holds back a
+    trailing partial ```/`\\n` sequence, so the joined stream equals the
+    one-shot decode of the same reply. A fence the stream never closes keeps
+    its escapes: an unterminated fence still renders as code.
+    """
+
+    def __init__(self) -> None:
+        self._inside_fence = False
+        self._pending = ""
+
+    def push(self, text: str) -> str:
+        """Return the text decodable so far, holding back an undecided tail."""
+        data = self._pending + text
+        self._pending = ""
+        out = []
+        while data:
+            fence = data.find("```")
+            if self._inside_fence:
+                if fence == -1:
+                    # The closing ``` may be split across chunks: emit the
+                    # fenced code verbatim and keep a partial closer pending.
+                    hold = len(data) - len(data.rstrip("`"))
+                    out.append(data[: len(data) - hold])
+                    self._pending = data[len(data) - hold :]
+                    break
+                # Fenced code up to and including its closing ``` stays verbatim.
+                out.append(data[: fence + 3])
+                data = data[fence + 3 :]
+                self._inside_fence = False
+                continue
+            if fence == -1:
+                # Outside a fence the tail may still grow into ``` or into an
+                # escape split across the boundary; hold it back, decode the rest.
+                hold = len(data) - len(data.rstrip("`\\"))
+                out.append(_decode_escaped_newlines_outside_fences(data[: len(data) - hold]))
+                self._pending = data[len(data) - hold :]
+                break
+            # Prose before the opening ``` decodes; the fence itself does not.
+            out.append(_decode_escaped_newlines_outside_fences(data[:fence]))
+            out.append(data[fence : fence + 3])
+            data = data[fence + 3 :]
+            self._inside_fence = True
+        return "".join(out)
+
+    def flush(self) -> str:
+        """Return text held back for a partial ```/`\\n` at the end of the stream."""
+        pending, self._pending = self._pending, ""
+        return pending
+
+
 class MindIEChatModel(ChatOpenAI):
     """Chat model adapter for MindIE engine.
 
@@ -277,10 +333,15 @@ class MindIEChatModel(ChatOpenAI):
     async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
         # Route standard queries to native streaming for lower TTFB
         if not kwargs.get("tools"):
+            decoder = _EscapedNewlineStreamDecoder()
             async for chunk in super()._astream(_fix_messages(messages), stop=stop, run_manager=run_manager, **kwargs):
                 if isinstance(chunk.message.content, str):
-                    chunk.message.content = _decode_escaped_newlines_outside_fences(chunk.message.content)
+                    chunk.message.content = decoder.push(chunk.message.content)
                 yield chunk
+            # A partial ```/`\n` at the very end must still reach the consumer.
+            tail = decoder.flush()
+            if tail:
+                yield ChatGenerationChunk(message=AIMessageChunk(content=tail))
             return
 
         # Fallback for tool-enabled requests:
