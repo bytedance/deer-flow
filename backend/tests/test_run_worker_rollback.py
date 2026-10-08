@@ -5540,3 +5540,81 @@ async def test_edit_replay_failed_restore_does_not_release_admission(monkeypatch
     row = await run_store.get(record.run_id)
     assert row["status"] == "running", f"a failed edit-replay restore must not release the durable admission slot: row status is {row['status']!r}"
     assert record.status == RunStatus.interrupted
+
+
+@pytest.mark.anyio
+async def test_edit_replay_failed_restore_without_durable_cancel_keeps_admission(monkeypatch):
+    """A failed edit-replay restore must not be terminalized by the CAS either.
+
+    With no durable cancel, ``set_status_if_not_cancelled`` commits the local
+    ``error`` directly — that CAS is itself a persist, so it can release the
+    thread's admission slot even though the restore never completed. The run must
+    stay active for lease/orphan recovery instead.
+    """
+    run_store = MemoryRunStore()
+    run_manager = RunManager(
+        store=run_store,
+        run_ownership_config=RunOwnershipConfig(lease_seconds=30, grace_seconds=10, heartbeat_enabled=True),
+    )
+    record = await run_manager.create(
+        "thread-1",
+        metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-run"},
+    )
+
+    class DummyCheckpointer:
+        async def aget_tuple(self, _config):
+            return SimpleNamespace(
+                config={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "checkpoint-1"}},
+                checkpoint={"id": "checkpoint-1", "channel_values": {}},
+                metadata={"source": "loop"},
+                pending_writes=[],
+            )
+
+    class DummyAgent:
+        async def aget_state(self, _config):
+            return SimpleNamespace(
+                values={"messages": []},
+                config={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "checkpoint-1"}},
+                parent_config=None,
+                metadata={},
+                next=(),
+                tasks=(),
+                created_at=None,
+            )
+
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            raise RuntimeError("edit replay failed")
+            if False:  # pragma: no cover - keep this an async generator
+                yield
+
+    async def failing_restore(**_kwargs):
+        return False
+
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+    monkeypatch.setattr("deerflow.runtime.runs.worker._rollback_to_pre_run_checkpoint", failing_restore)
+    monkeypatch.setattr("deerflow.runtime.runs.worker._publish_restored_checkpoint_values", AsyncMock())
+
+    await asyncio.wait_for(
+        run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=DummyCheckpointer(), event_store=MemoryRunEventStore()),
+            agent_factory=lambda *, config: DummyAgent(),
+            graph_input={},
+            config={},
+        ),
+        timeout=10,
+    )
+
+    row = await run_store.get(record.run_id)
+    assert row["status"] == "running", f"a failed edit-replay restore must not be terminalized: row status is {row['status']!r}"
+    assert record.terminal_committed is False
+    # The durable admission slot is still held: a peer cannot start a run here.
+    peer = RunManager(
+        store=run_store,
+        worker_id="peer",
+        run_ownership_config=RunOwnershipConfig(lease_seconds=30, grace_seconds=10, heartbeat_enabled=True),
+    )
+    with pytest.raises(ConflictError):
+        await peer.create_or_reject("thread-1", user_id=record.user_id)

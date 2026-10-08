@@ -2009,34 +2009,47 @@ async def run_agent(
                             record.abort_action,
                             restore_checkpoint=not checkpoint_rollback_completed,
                         )
-                    # Then let the durable cancel arbitrate the terminal commit.
-                    # ``persist_current_status`` is never used to bypass the CAS: a
-                    # durable rollback the heartbeat has not yet delivered (or one
-                    # shutdown provisionally mislabelled ``interrupt``) must still
-                    # win, and an accepted interrupt must beat a staged success.
-                    cancel_action = await run_manager.set_status_if_not_cancelled(
-                        run_id,
-                        record.status,
-                        error=record.error,
-                        stop_reason=record.stop_reason,
-                        goal_verdict=record.goal_verdict,
-                    )
-                    if cancel_action is not None:
-                        await _finish_cancellation(cancel_action)
-                        # An edit replay must complete its owned checkpoint restore
-                        # BEFORE the terminal row is written: committing the row
-                        # frees the thread's durable admission slot, which a peer
-                        # could otherwise claim while the old snapshot is still
-                        # being restored. Non-restoring runs keep the previous
-                        # order, and an accepted rollback already ran the single
-                        # owned restore inside ``_finish_cancellation``.
-                        if _is_edit_replay_run(record) and not checkpoint_rollback_completed:
-                            await _ensure_edit_replay_restored()
-                        # Never release admission on a fenced worker or an
-                        # incomplete restore: a failure is reported, not turned
-                        # into a terminal row a peer could mistake for success.
-                        if _admission_releasable():
-                            await run_manager.persist_current_status(run_id)
+                    # The terminal CAS is itself a durable write: it commits the
+                    # row and frees the thread's admission slot, so it must obey
+                    # the same predicate as ``persist_current_status`` and
+                    # ``update_run_completion``. A run that still owes an
+                    # edit-replay restore (or already lost its lease) defers to
+                    # lease/orphan recovery instead.
+                    if not _admission_releasable():
+                        logger.warning(
+                            "Run %s terminal CAS deferred: edit-replay restore incomplete (ownership_lost=%s, restored=%s)",
+                            run_id,
+                            record.ownership_lost,
+                            checkpoint_rollback_completed,
+                        )
+                    else:
+                        # Let the durable cancel arbitrate the terminal commit: a
+                        # durable rollback the heartbeat has not yet delivered (or
+                        # one shutdown provisionally mislabelled ``interrupt``)
+                        # must still win, and an accepted interrupt must beat a
+                        # staged success.
+                        cancel_action = await run_manager.set_status_if_not_cancelled(
+                            run_id,
+                            record.status,
+                            error=record.error,
+                            stop_reason=record.stop_reason,
+                            goal_verdict=record.goal_verdict,
+                        )
+                        if cancel_action is not None:
+                            await _finish_cancellation(cancel_action)
+                            # An edit replay must complete its owned checkpoint
+                            # restore BEFORE the terminal row is written. A
+                            # non-restoring run keeps the previous order, and an
+                            # accepted rollback already ran the single owned
+                            # restore inside ``_finish_cancellation``.
+                            if _is_edit_replay_run(record) and not checkpoint_rollback_completed:
+                                await _ensure_edit_replay_restored()
+                            # Never release admission on a fenced worker or an
+                            # incomplete restore: a failure is reported, not
+                            # turned into a terminal row a peer could mistake for
+                            # success.
+                            if _admission_releasable():
+                                await run_manager.persist_current_status(run_id)
                 except Exception:
                     logger.warning("Failed to persist terminal status for run %s after delivery receipt attempts", run_id, exc_info=True)
             # The deferred commit has been attempted. A failed write is left to
@@ -2064,7 +2077,7 @@ async def run_agent(
                     logger.warning("Failed to persist run completion for %s (non-fatal)", run_id, exc_info=True)
 
             if scheduled_goal is not None and not record.ownership_lost:
-                if not await run_manager.persist_current_status(run_id):
+                if _admission_releasable() and not await run_manager.persist_current_status(run_id):
                     await run_manager._mark_ownership_lost(record, reason="Scheduled run terminal status could not be confirmed after goal cleanup.", require_active=False)
                 # Late cancellation can still drain a rollback after goal
                 # cleanup. Retain admission/heartbeat protection through that
