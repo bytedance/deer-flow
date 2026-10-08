@@ -476,9 +476,7 @@ class LocalSandboxProvider(SandboxProvider):
                 if self._generic_sandbox is None:
                     mappings = list(self._path_mappings)
                     self._append_public_skill_mapping(mappings, skill_projection)
-                    self._generic_sandbox = LocalSandbox(
-                        "local", path_mappings=mappings, environment=self._environment
-                    )
+                    self._generic_sandbox = LocalSandbox("local", path_mappings=mappings, environment=self._environment)
                     _singleton = self._generic_sandbox
                 return self._generic_sandbox.id
 
