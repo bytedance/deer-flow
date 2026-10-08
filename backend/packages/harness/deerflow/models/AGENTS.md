@@ -129,6 +129,13 @@ Offline HTTP-stream coverage: `tests/test_codex_stream_terminal_events.py`.
 - `ClaudeChatModel.model_post_init` calls `load_claude_code_credential()` for every instance, and `create_chat_model` builds fresh instances per run (lead agent, title, summarization, subagents)
 - `$CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` is a one-shot handoff: a pipe returns EOF and a file keeps its advanced offset. `_read_secret_from_file_descriptor` therefore caches a non-empty secret per `(env_var, fd)` under a lock held across the read. Do not drop the cache or the lock — later instances would get no credential, and the Anthropic SDK raises `TypeError: Could not resolve authentication method` before sending. Empty reads, `OSError`, and UTF-8 decode failures are not cached; unreadable handoffs return `None` so the loader can try credential files. Warnings must not include token contents. The key is the descriptor number on purpose — a closed handoff keeps serving its token, and a secret placed on a recycled number in-process is not re-read unless the cache is cleared. The cache is per process, so a new process (e.g. a uvicorn `--reload` worker) cannot recover a drained descriptor. Pinned by `tests/test_credential_loader.py` and `tests/test_claude_fd_encoding.py`, including two-instance `ClaudeChatModel` tests
 
+### Claude Retry Delays (`claude_provider.py`)
+
+`_calc_backoff_ms` uses `utils.retry_after.bounded_retry_after_ms` for integer-second
+provider hints. Invalid or over-24-hour values retain local exponential backoff;
+finite negative values clamp to zero. Sync/async 429/500 regressions live in
+`tests/test_claude_provider_retry_after.py` and use offline provider doubles.
+
 ### Claude Prompt Caching (`packages/harness/deerflow/models/claude_provider.py`)
 
 - The request payload shares objects with the caller: langchain-anthropic forwards Claude-native blocks (an image or document with a `source`, search results) and list-form system blocks by reference, and a reused tool binding passes its own tool dicts (the lead agent re-binds per call, so its tool dicts are fresh). Writing `cache_control` in place checkpointed the markers with the thread's messages, and the stale ones pushed every later request past the 4-breakpoint limit
@@ -151,6 +158,13 @@ Offline HTTP-stream coverage: `tests/test_codex_stream_terminal_events.py`.
 - `cumulative_stream_usage` is an opt-in model setting (default `false`) for endpoints that repeat cumulative token totals on each streaming chunk. The provider converts snapshots to deltas only when a stable completion id is present, isolates interleaved streams by id, and leaves the original usage untouched otherwise. Per-model tracking is lock-protected and cleared on the trailing empty-`choices` frame whether or not that frame carries usage. A soft cap of 1024 ids evicts only entries idle for at least one hour; active streams may temporarily exceed the cap so eviction cannot corrupt their deltas. Regression coverage lives in `tests/test_vllm_provider.py`.
 
 ### MindIE Provider (`packages/harness/deerflow/models/mindie_provider.py`)
+
+Public sync and async streams use the same message normalization. No-tool native
+streams share the fence-stateful newline decoder; tool-enabled streams explicitly
+request `stream=False`, including with `streaming=True` model defaults, then use
+the shared simulated chunker. Preserve terminal usage exactly once, XML/native
+tool calls, invalid calls, and the original messages. Offline SDK boundary tests:
+`tests/test_mindie_provider.py::test_public_stream_compatibility_through_sdk`.
 
 `_fix_messages` converts tool results to the XML text format expected by MindIE.
 Only tool-message `type=json` payloads join the text channel; other non-text
