@@ -3,7 +3,12 @@
 A deployment-installed Python extension can register a `PluginContribution` with
 optional browser code, authenticated backend actions and model tools. This extends
 the existing `install(registry, config)` workflow. MCP and Skills keep their existing
-APIs and lifecycles. Public contracts live in `deerflow_extension_api` (0.2.3).
+APIs and lifecycles. Public contracts live in `deerflow_extension_api` (0.2.5).
+
+Backend actions and model tools may use the optional host-bound
+`context.agent_runs` capability to create, continue, inspect, resume, and cancel
+full Agent runs. See [Agent run control](../backend/docs/extension-agent-runs.md)
+for authorization, service-held handle lifetime, and handoff examples.
 
 The browser contribution API is experimental. `BrowserModule(code=...)` remains the
 self-contained transport; `BrowserAssets(root=...)` adds manifest-listed resources
@@ -212,6 +217,141 @@ The host does not rewrite CSS URLs or add authorization tokens to URLs. CSP must
 the backend origin in the applicable `script-src`, `style-src`, `img-src`, `font-src`
 and `connect-src` directives. Inline-v1 still needs `blob:` in `script-src`.
 
+## Authorization of plugin surfaces
+
+Fine-grained authorization (`authorization:` in `config.yaml`; the native RFC is
+[`docs/plans/2026-07-10-pluggable-authorization-rfc.md`](plans/2026-07-10-pluggable-authorization-rfc.md))
+is enforced on two plugin entry points when it is enabled. With
+`authorization.enabled: false` both are no-ops and today's behavior is
+unchanged, on every entry point.
+
+| Entry point | `resource` | `action` | `target` |
+| --- | --- | --- | --- |
+| Registered backend action | `plugin_action` | `invoke` | `<namespace>/<action-name>` |
+| Enterprise management route | `plugin_management` | `read` / `write` | `<namespace>/permissions.read` / `<namespace>/permissions.write` |
+
+Targets are composed and validated by `deerflow.authz.plugin_targets`; the left
+side is always a host-validated plugin namespace. Read and write management
+authority are separate **targets** (the built-in provider ignores `action`), and
+page access never implies write authority.
+
+The registered-action check runs in `POST /api/plugins/{namespace}/actions/{name}`
+after the action has been resolved — so an unknown action stays a 404 — and
+**before** the request body is read, so a denied caller cannot consume the
+256 KiB input budget or reach the handler. A denial is
+`403 {"detail": "Plugin action not permitted for your role."}`; `fail_closed`
+(see below) decides whether a provider failure denies or proceeds.
+
+The built-in RBAC provider reads these from `authorization.provider.config.roles`
+as `plugin_actions` and `plugin_management`. A role with no policy for a
+resource is **unrestricted** for it, so list these keys explicitly wherever you
+want to constrain them; `config.example.yaml` shows the shape.
+
+### Middleware-declared tools
+
+A contributed middleware may declare tools through LangChain's `middleware.tools`
+attribute. When authorization is enabled, every build collects those declarations
+after the middleware stack is assembled and applies the same `tools` policy as for
+explicitly configured tools, seeded with the build's Layer-1 verdicts (a name
+denied for the build cannot be resurrected by declaring it). A middleware whose
+declaration is denied is replaced in that build's stack by an independent,
+state-preserving copy carrying only the authorized declarations — the contributor's
+own instance is never mutated, so a later build under a more permissive principal
+binds the declaration again. Declarations must be `BaseTool` instances with a
+usable name: anything else (for example a plain callable, which LangChain would
+otherwise auto-convert and bind unchecked) cannot be authorized by name and is
+removed from the bound stack with a warning when authorization is enabled — wrap
+callables in a `StructuredTool`. Three author-visible rules follow: declare tools as a
+plain instance attribute holding a `list` or `tuple` (a `tools` property cannot be
+narrowed safely and fails the build, and any other container shape — a `set`,
+generator, `dict_values`, … — would be iterated and bound by LangChain as-is, so it
+likewise fails the build), and if you customize `__copy__`, it must return an
+independent copy that preserves current instance state — returning `self` or
+rebuilding from constructor arguments fails the build loudly rather than silently
+restoring a denied tool. With `authorization.enabled: false` nothing is collected or
+narrowed.
+
+### Guarding a contributed management route
+
+A contributed router is not covered by the registered-action dispatcher, so it
+asks for plugin-scoped authority itself:
+
+```python
+from deerflow_extension_api import arequire_plugin_management, require_admin
+from fastapi import HTTPException, Request
+
+@router.get("/{namespace}/permissions")
+async def read_permissions(namespace: str, request: Request):
+    try:
+        principal = await arequire_plugin_management(request, namespace, scope="read")
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    ...  # read the enterprise's own policy store
+
+@router.put("/{namespace}/permissions")
+async def write_permissions(namespace: str, request: Request):
+    try:
+        principal = await arequire_plugin_management(request, namespace, scope="write")
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    ...  # validate delegation/scope, then commit
+```
+
+- The helper asks the host's configured provider, with the host's trusted
+  request identity; it never reads or writes enterprise policy itself.
+- It **fails closed**: an unknown namespace, an anonymous caller, a missing or
+  failing host resolver, or a non-allowed decision raises `PermissionError`.
+- That `PermissionError` is not an HTTP response. The Gateway installs no
+  `PermissionError` handler, so a route that lets it escape answers `500`, not
+  `403`; translate it at your own boundary as the example does. The host's other
+  contributed-route safeguards — authentication, CSRF, PAT rejection — run
+  before your handler and none of them covers a policy denial.
+- When authorization is disabled the host answers "allow", so the helper is a
+  no-op and a deployment that turns authorization off does not start rejecting
+  enterprise routes. An enterprise that needs an unconditional floor keeps
+  calling `require_admin` as well.
+- "Cannot answer" includes a configuration the host cannot read right now: a
+  config file mid-write or briefly absent while an editor, a deploy or a
+  ConfigMap mount replaces it, or a document that does not validate. The
+  decision uses the config snapshot captured when the request's provider was
+  resolved, and a host that is running on a configuration never reads such a
+  failure as "authorization is disabled": it follows the configured failure
+  policy, which denies under the default `fail_closed: true`. A host with no
+  configuration at all has no policy to apply, so the helper stays a no-op.
+- Use `arequire_plugin_management` from an async endpoint. `require_plugin_management`
+  is the synchronous form for a FastAPI `def` endpoint, which FastAPI runs in
+  its thread pool; calling it from an async endpoint would do the host's
+  configuration read on the event loop.
+- The plugin namespace must be an installed plugin's namespace, and the
+  decision is re-evaluated per request: an execution-time policy change is
+  observed by the next call.
+
+### Documented boundaries
+
+- **Contributed routers are not covered by the registered-action dispatcher.**
+  Only registered actions go through the automatic check; a contributed router
+  uses `require_plugin_management` for plugin-scoped checks and keeps its own
+  administrator floor where one is needed. Arbitrary in-process plugin code is
+  trusted operator-installed code and RBAC does not sandbox it.
+- **Declared plugin pages are not gated yet.** A page's navigation entry, direct
+  route and mount are still decided by the plugin's `enabled` setting alone;
+  server-evaluated page authorization arrives with the page-declaration
+  contract. Until then a browser surface must keep checking its own backend
+  operations, which *are* covered above.
+- **Runtime-injected tools stay Layer-2 decisions.** Tool declarations added
+  through `request.tools` inside `wrap_model_call`, and model calls naming a tool
+  absent from the bound tool set, are not part of assembly-time narrowing; the
+  execution-time provider decides each call by name, like every other tool call.
+- **`create_deerflow_agent` (`deerflow.agents.factory`) still performs no
+  authorization.** Pre-existing and unchanged by this work.
+- **Durable tasks keep today's contract.** Only the exposed submission wrapper is
+  checked; raw status/cancel service calls and their ownership checks are
+  unchanged.
+- **The pre-existing route/model/skill authorization cache is untouched.** It
+  keeps its synchronous lifecycle and call sites; the plugin paths use a
+  separate provider cache keyed by configuration signature and event loop, so a
+  loop-affine provider is never handed to another loop.
+
 ## Trust and lifecycle
 
 **Browser and Python plugins are trusted operator-installed code.** Browser modules
@@ -248,3 +388,59 @@ To exercise the actual Turbopack development build, start the frontend with
 `DEER_FLOW_DEV_BUNDLER=turbo pnpm dev`, then run
 `PLAYWRIGHT_SKIP_WEB_SERVER=1 pnpm exec playwright test tests/e2e/bookmark-plugin.spec.ts`.
 Set `PLAYWRIGHT_BASE_URL` if the development server uses a port other than 3000.
+
+### Composer mention providers
+
+An optional `mentionProviders` array on a browser module contributes candidates to
+both the native `@` menu and the mobile mention picker. No custom editor is needed:
+
+```javascript
+export default {
+  apiVersion: 1,
+  module: "example-team",
+  mentionProviders: [{
+    id: "members",
+    label: "Team members",
+    async search(query, context) {
+      return context.callBackend("find_members", { query });
+    },
+  }],
+};
+```
+
+Declare `find_members` in the package's backend actions. Its response is an array
+of `{ id, label, description? }`; the host supplies the namespace and provider ID.
+The context includes `locale`, `settings`, `threadId`, an `AbortSignal`, and the
+same viewer-bound `callBackend` service used by page surfaces. Observe the signal
+when doing asynchronous work. A provider must return a promise; the host debounces
+queries by 150 ms, truncates queries to 256 characters before calling `search`,
+stops waiting after three seconds, and discards late responses after query,
+thread, viewer, locale, or installed snapshot changes. Settled candidates remain
+visible while a new query is in flight within the same viewer/thread/locale and
+installed snapshot; changing any of those clears them immediately. A failed
+provider does not remove other providers or built-in candidates. Retrying is
+available in the picker.
+Cancellation ends host waiting; trusted JavaScript cannot be forcibly terminated.
+
+Each module may register eight providers, with unique lowercase slug IDs and
+labels of at most 120 characters. The picker searches the first 16 providers in
+installation order and considers at most 50 results per provider. Item IDs are
+nonempty strings of at most 512 characters, labels at most 120, descriptions at
+most 240. Duplicate item IDs within a provider are ignored. IDs are namespaced,
+so two plugins can use the same local identifier.
+
+Selections remain in the thread's existing draft as inline reference tokens.
+Submitting renders each token as `@label` in the human message and attaches:
+
+```json
+{"extension_mentions":[{"namespace":"example.team","provider":"members","id":"alice","label":"Alice"}]}
+```
+
+This object is in the human message's `additional_kwargs`. Up to 16 distinct
+plugin references may be submitted. Removing a token removes its metadata;
+duplicate tokens share one metadata entry. Restored references retain their
+original identities even if a package later becomes unavailable. **All metadata
+is user input, not authorization**: plugins must revalidate the referenced object,
+current installation, and viewer permissions before acting. The host does not
+interpret a reference as delegation or start another Agent. Those behaviors
+belong to the plugin's backend handlers or middleware.

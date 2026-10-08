@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import re
 import subprocess
@@ -168,7 +169,7 @@ def _read_json(path: Path) -> Any:
     if not path.exists():
         return {"present": False}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception as exc:
         return {"present": True, "error": f"{type(exc).__name__}: {exc}"}
 
@@ -180,6 +181,12 @@ def _run_command(args: list[str], cwd: Path, timeout_s: int = 10) -> dict[str, A
             cwd=cwd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            # Python helpers (doctor, pnpm) must emit the encoding we capture,
+            # even when the host or inherited stdio setting is not UTF-8.
+            # Escape surrogate characters rather than aborting diagnostics.
+            env={**os.environ, "PYTHONIOENCODING": "utf-8:backslashreplace"},
             timeout=timeout_s,
             check=False,
         )

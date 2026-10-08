@@ -13,8 +13,8 @@ def is_eval_fixture_path(path: str | PurePosixPath) -> bool:
     """Return whether a path is under an eval fixture directory."""
     parts = _parts(path)
     for index, part in enumerate(parts[:-1]):
-        if part == "evals" and len(parts) > index + 2:
-            return parts[index + 1] == "fixtures"
+        if part == "evals" and len(parts) > index + 2 and parts[index + 1] == "fixtures":
+            return True
     return False
 
 

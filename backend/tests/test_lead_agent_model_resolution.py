@@ -859,7 +859,7 @@ def test_build_middlewares_passes_explicit_app_config_to_shared_factory(monkeypa
     monkeypatch.setattr(
         lead_agent_module,
         "MemoryMiddleware",
-        lambda agent_name=None, *, memory_config: captured.setdefault("memory_config", memory_config) or "memory-middleware",
+        lambda agent_name=None, *, memory_config, pii_redaction_config=None: captured.setdefault("memory_config", memory_config) or "memory-middleware",
     )
 
     middlewares = lead_agent_module.build_middlewares(
@@ -900,7 +900,7 @@ def test_build_middlewares_passes_run_model_name_to_summarization(monkeypatch):
     )
     monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
     monkeypatch.setattr(lead_agent_module, "TitleMiddleware", lambda *, app_config, extensions: "title-middleware")
-    monkeypatch.setattr(lead_agent_module, "MemoryMiddleware", lambda agent_name=None, *, memory_config: "memory-middleware")
+    monkeypatch.setattr(lead_agent_module, "MemoryMiddleware", lambda agent_name=None, *, memory_config, pii_redaction_config=None: "memory-middleware")
 
     lead_agent_module.build_middlewares(
         {"configurable": {"is_plan_mode": False, "subagent_enabled": False}},
@@ -1178,6 +1178,58 @@ def test_build_middlewares_allows_runtime_subagent_total_limit_override(monkeypa
 
     limit = next(m for m in middlewares if isinstance(m, SubagentLimitMiddleware))
     assert limit.max_total == 5
+
+
+def test_build_middlewares_falls_back_to_app_config_for_null_subagent_total_limit(monkeypatch):
+    # API clients may send ``"max_total_subagents": null``; the key is present,
+    # so ``dict.get(key, default)`` alone would hand ``None`` to the middleware.
+    app_config = _make_app_config(
+        [_make_model("safe-model", supports_thinking=False)],
+        loop_detection=LoopDetectionConfig(enabled=False),
+    )
+    app_config.subagents = SubagentsAppConfig(max_total_per_run=7)
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda **_kwargs: None)
+    monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
+
+    middlewares = lead_agent_module.build_middlewares(
+        {
+            "configurable": {
+                "is_plan_mode": False,
+                "subagent_enabled": True,
+                "max_total_subagents": None,
+            }
+        },
+        model_name="safe-model",
+        app_config=app_config,
+    )
+
+    limit = next(m for m in middlewares if isinstance(m, SubagentLimitMiddleware))
+    assert limit.max_total == 7
+
+
+def test_make_lead_agent_falls_back_to_app_config_for_null_subagent_total_limit(monkeypatch):
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
+    app_config.subagents = SubagentsAppConfig(max_total_per_run=7)
+
+    import deerflow.tools as tools_module
+
+    monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda config, model_name, agent_name=None, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    prompt_calls: list[dict] = []
+    monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **kwargs: prompt_calls.append(kwargs) or "system prompt")
+
+    lead_agent_module._make_lead_agent(
+        {"configurable": {"model_name": "safe-model", "subagent_enabled": True, "max_total_subagents": None}},
+        app_config=app_config,
+    )
+
+    assert prompt_calls[0]["max_total_subagents"] == 7
 
 
 def test_build_middlewares_rejects_invalid_configured_extension_middleware(monkeypatch):

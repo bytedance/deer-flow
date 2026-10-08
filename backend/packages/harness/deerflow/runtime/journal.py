@@ -6,9 +6,10 @@ handles token usage accumulation.
 
 Key design decisions:
 - on_llm_new_token is NOT implemented -- only complete messages via on_llm_end
-- on_chat_model_start captures the first user-visible prompt as llm.human.input and
-  extracts the first human message for run.input, because it is more reliable than
-  on_chain_start (fires on every node) — messages here are fully structured.
+- on_chat_model_start reconciles consumed middleware tool results and captures the
+  first user-visible prompt as llm.human.input. It extracts the first human message
+  for run.input because it is more reliable than on_chain_start (fires on every
+  node) — messages here are fully structured.
 - on_chain_start with parent_run_id=None emits a run.start trace marking root invocation.
 - on_llm_end emits llm.ai.response in checkpoint-aligned AIMessage.model_dump() format
 - Token usage accumulated in memory, written to RunRow on run completion
@@ -98,6 +99,7 @@ from deerflow.runtime.events.catalog import (
     RUN_START_EVENT,
 )
 from deerflow.runtime.events.store.base import RunEventWriteNotCommittedError
+from deerflow.utils.llm_text import strip_leading_think_blocks
 from deerflow.utils.messages import message_to_text, restore_original_human_message
 
 if TYPE_CHECKING:
@@ -111,6 +113,77 @@ _CANCELLATION_DRAIN_TIMEOUT_SECONDS = 5.0
 _cancelling_progress_tasks: set[asyncio.Future[Any]] = set()
 _retained_cleanup_tasks: set[asyncio.Future[Any]] = set()
 _MAX_RUN_SKILL_SNAPSHOTS = 64
+
+
+def _content_chars(content: Any) -> int:
+    """Characters in the string leaves and mapping keys of ``content``.
+
+    Walks the structure without serializing it, so cost scales with the number of
+    nodes rather than the byte size (base64 image payloads are counted by ``len``).
+    """
+    total = 0
+    stack = [content]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            total += len(item)
+        elif isinstance(item, Mapping):
+            for key, value in item.items():
+                total += len(key) if isinstance(key, str) else 0
+                stack.append(value)
+        elif isinstance(item, (list, tuple)):
+            stack.extend(item)
+    return total
+
+
+def _rendered_request_size(messages: Sequence[Sequence[BaseMessage]], invocation_params: Any) -> dict[str, Any]:
+    """Measure the request as rendered at ``on_chat_model_start`` (read-only).
+
+    Sizes are characters of string content (see ``_content_chars``), not serialized
+    bytes. Token counts for the rendered request are not available without an extra
+    model/tokenizer call, so ``input_tokens`` from the provider's usage metadata
+    (recorded at ``on_llm_end``) is the token figure. ``request_tools_chars`` is
+    ``None`` when the callback carries no bound-tool schema.
+    """
+    message_chars = 0
+    message_count = 0
+    for batch in messages:
+        for message in batch:
+            message_count += 1
+            message_chars += _content_chars(getattr(message, "content", ""))
+            tool_calls = getattr(message, "tool_calls", None)
+            if tool_calls:
+                message_chars += _content_chars(tool_calls)
+    tools = invocation_params.get("tools") if isinstance(invocation_params, Mapping) else None
+    tools_chars = _content_chars(tools) if tools else None
+    return {
+        "request_chars": message_chars + (tools_chars or 0),
+        "request_message_chars": message_chars,
+        "request_tools_chars": tools_chars,
+        "request_message_count": message_count,
+    }
+
+
+def _llm_caller_category(caller: str, *, error_fallback: bool) -> str:
+    if error_fallback:
+        return "fallback"
+    if caller.startswith("middleware:"):
+        return "middleware"
+    if caller.startswith("subagent:"):
+        return "subagent"
+    if caller == "lead_agent":
+        return "lead_agent"
+    return "other"
+
+
+def _first_str(mapping: Any, *keys: str) -> str | None:
+    if not isinstance(mapping, Mapping):
+        return None
+    for key in keys:
+        value = mapping.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 @dataclass
@@ -528,12 +601,16 @@ class RunJournal(BaseCallbackHandler):
         # Convenience fields
         self._last_ai_msg: str | None = None
         self._first_human_msg: str | None = None
+        self._first_human_message_captured = False
         self._msg_count = 0
         self._had_llm_error_fallback = False
         self._llm_error_fallback_message: str | None = None
 
         # Latency tracking
         self._llm_start_times: dict[str, float] = {}  # langchain run_id -> start time
+        # P0 telemetry: per-call request measurement captured at start, merged into
+        # the llm.ai.response / llm.error metadata at end. Observation only.
+        self._llm_start_telemetry: dict[str, dict[str, Any]] = {}
 
         # LLM request/response tracking
         self._llm_call_index = 0
@@ -565,7 +642,7 @@ class RunJournal(BaseCallbackHandler):
         is_ai_message = isinstance(message, AIMessage) or getattr(message, "type", None) == "ai"
         if not is_ai_message or (caller is not None and caller != "lead_agent"):
             return None
-        text = self._message_text(message).strip()
+        text = strip_leading_think_blocks(self._message_text(message))
         return text[:2000] if text else None
 
     def _record_message_summary(self, message: BaseMessage, *, caller: str | None = None) -> None:
@@ -646,7 +723,7 @@ class RunJournal(BaseCallbackHandler):
         tags: list[str] | None = None,
         **kwargs: Any,
     ) -> None:
-        """Capture the first user-visible prompt as llm.human.input.
+        """Capture consumed tool results and the first user-visible prompt.
 
         This is also the canonical place to extract the first human message:
         messages are fully structured here, it fires only on real LLM calls,
@@ -658,6 +735,7 @@ class RunJournal(BaseCallbackHandler):
         self._llm_start_times[rid] = time.monotonic()
         self._llm_call_index += 1
         self._seen_llm_starts.add(rid)
+        self._capture_start_telemetry(rid, serialized, messages, kwargs)
 
         logger.debug(
             "on_chat_model_start %s: tags=%s num_batches=%d message_counts=%s",
@@ -669,7 +747,10 @@ class RunJournal(BaseCallbackHandler):
 
         # Capture the first user message sent to the lead agent in this run.
         caller = self._identify_caller(tags)
-        if caller == "lead_agent" and not self._first_human_msg and messages:
+        if caller == "lead_agent":
+            for batch in messages:
+                self._reconcile_consumed_tool_messages(batch)
+        if caller == "lead_agent" and not self._first_human_message_captured and messages:
             for batch in reversed(messages):
                 for m in reversed(batch):
                     if _should_persist_human_input_message(m):
@@ -683,7 +764,7 @@ class RunJournal(BaseCallbackHandler):
                         )
                         self._record_message_summary(persisted_message, caller=caller)
                         break
-                if self._first_human_msg:
+                if self._first_human_message_captured:
                     break
 
     def on_llm_start(self, serialized: dict, prompts: list[str], *, run_id: UUID, parent_run_id: UUID | None = None, tags: list[str] | None = None, metadata: dict[str, Any] | None = None, **kwargs: Any) -> None:
@@ -768,6 +849,7 @@ class RunJournal(BaseCallbackHandler):
                         "usage": usage_dict,
                         "latency_ms": latency_ms,
                         "llm_call_index": call_index,
+                        **self._end_telemetry(rid, message, usage_dict, caller, parent_run_id),
                     },
                 )
             )
@@ -803,6 +885,8 @@ class RunJournal(BaseCallbackHandler):
 
                     should_schedule_progress = True
 
+        self._llm_start_telemetry.pop(rid, None)
+
         if messages:
             self._queue_llm_response_events(
                 str(run_id),
@@ -815,12 +899,74 @@ class RunJournal(BaseCallbackHandler):
             self._schedule_progress_flush()
 
     def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
-        self._llm_start_times.pop(str(run_id), None)
+        rid = str(run_id)
+        self._llm_start_times.pop(rid, None)
+        error_metadata = self._error_telemetry(rid, error, kwargs.get("tags"), kwargs.get("parent_run_id"))
         self._put(
             event_type=LLM_ERROR_EVENT.event_type,
             category=LLM_ERROR_EVENT.category,
             content=str(error),
+            metadata=error_metadata or None,
         )
+
+    # -- P0 per-call telemetry (observation only; every helper fails soft) --
+
+    def _capture_start_telemetry(self, rid: str, serialized: Any, messages: list[list[BaseMessage]], kwargs: dict[str, Any]) -> None:
+        try:
+            start_metadata = kwargs.get("metadata")
+            telemetry = _rendered_request_size(messages, kwargs.get("invocation_params"))
+            telemetry["request_started_at"] = datetime.now(UTC).isoformat()
+            telemetry["provider"] = _first_str(start_metadata, "ls_provider")
+            telemetry["requested_model"] = _first_str(start_metadata, "ls_model_name")
+            if telemetry["provider"] is None and isinstance(serialized, Mapping):
+                serialized_id = serialized.get("id")
+                if isinstance(serialized_id, list) and serialized_id:
+                    telemetry["provider"] = str(serialized_id[-1])
+            self._llm_start_telemetry[rid] = telemetry
+        except Exception:
+            logger.warning("LLM start telemetry capture failed for %s", rid, exc_info=True)
+
+    def _end_telemetry(self, rid: str, message: Any, usage: Mapping[str, Any], caller: str, parent_run_id: UUID | None) -> dict[str, Any]:
+        try:
+            start = self._llm_start_telemetry.get(rid) or {}
+            response_metadata = getattr(message, "response_metadata", None) or {}
+            additional_kwargs = getattr(message, "additional_kwargs", None) or {}
+            error_fallback = isinstance(additional_kwargs, Mapping) and bool(additional_kwargs.get("deerflow_error_fallback"))
+            return {
+                "langchain_run_id": rid,
+                "langchain_parent_run_id": str(parent_run_id) if parent_run_id else None,
+                "caller_category": _llm_caller_category(caller, error_fallback=error_fallback),
+                "provider": start.get("provider"),
+                "model": _first_str(response_metadata, "model_name", "model") or start.get("requested_model"),
+                "stop_reason": _first_str(response_metadata, "stop_reason", "finish_reason", "finishReason"),
+                "status": "fallback" if error_fallback else "ok",
+                "input_tokens": usage.get("input_tokens"),
+                "output_tokens": usage.get("output_tokens"),
+                "total_tokens": usage.get("total_tokens"),
+                **{k: v for k, v in start.items() if k.startswith("request_")},
+            }
+        except Exception:
+            logger.warning("LLM end telemetry build failed for %s", rid, exc_info=True)
+            return {}
+
+    def _error_telemetry(self, rid: str, error: BaseException, tags: list[str] | None, parent_run_id: UUID | None) -> dict[str, Any]:
+        try:
+            start = self._llm_start_telemetry.pop(rid, None) or {}
+            return {
+                "langchain_run_id": rid,
+                "langchain_parent_run_id": str(parent_run_id) if parent_run_id else None,
+                "caller_category": _llm_caller_category(self._identify_caller(tags), error_fallback=False),
+                "caller": self._identify_caller(tags),
+                "provider": start.get("provider"),
+                "model": start.get("requested_model"),
+                "status": "error",
+                "stop_reason": None,
+                "error_type": type(error).__name__,
+                **{k: v for k, v in start.items() if k.startswith("request_")},
+            }
+        except Exception:
+            logger.warning("LLM error telemetry build failed for %s", rid, exc_info=True)
+            return {}
 
     def on_tool_start(self, serialized, input_str, *, run_id, parent_run_id=None, tags=None, metadata=None, inputs=None, **kwargs):
         """Cache the executing tool name for artifact attribution."""
@@ -916,11 +1062,23 @@ class RunJournal(BaseCallbackHandler):
             return tool_call.get(key)
         return getattr(tool_call, key, None)
 
+    @staticmethod
+    def _is_ai_message(message: Any) -> bool:
+        return isinstance(message, AIMessage) or getattr(message, "type", None) == "ai"
+
+    def _has_current_run_tool_call(self, message: Any) -> bool:
+        if not self._is_ai_message(message):
+            return False
+        for tool_call in getattr(message, "tool_calls", None) or []:
+            tool_call_id = self._tool_call_value(tool_call, "id")
+            if isinstance(tool_call_id, str) and tool_call_id in self._current_run_tool_call_names:
+                return True
+        return False
+
     def _remember_current_run_tool_calls(self, message: AnyMessage, *, caller: str) -> None:
         if caller != "lead_agent":
             return
-        is_ai_message = isinstance(message, AIMessage) or getattr(message, "type", None) == "ai"
-        if not is_ai_message:
+        if not self._is_ai_message(message):
             return
         tool_calls = getattr(message, "tool_calls", None) or []
         if not isinstance(tool_calls, list):
@@ -975,12 +1133,41 @@ class RunJournal(BaseCallbackHandler):
         identity = self._message_identity(message)
         return identity is not None and identity not in self._persisted_tool_message_identities
 
-    def _reconcile_final_tool_messages(self, outputs: Any) -> None:
-        for message in self._final_output_messages(outputs):
+    def _reconcile_tool_messages(self, messages: Iterable[Any]) -> None:
+        for message in messages:
             if not isinstance(message, ToolMessage):
                 continue
             if self._should_reconcile_tool_message(message):
                 self._persist_tool_result_message(message)
+
+    def _reconcile_consumed_tool_messages(self, messages: Iterable[Any]) -> None:
+        """Reconcile results after the latest current-run tool call."""
+        suffix = self._current_run_tool_call_suffix(messages)
+        if suffix is not None:
+            self._reconcile_tool_messages(suffix)
+
+    def _current_run_tool_call_suffix(self, messages: Iterable[Any]) -> list[Any] | None:
+        """Return messages after the latest current-run AI tool-call boundary."""
+        batch = list(messages)
+        boundary = None
+        has_ai_message = False
+        for index, message in enumerate(batch):
+            if not self._is_ai_message(message):
+                continue
+            has_ai_message = True
+            if self._has_current_run_tool_call(message):
+                boundary = index
+        if boundary is not None:
+            return batch[boundary + 1 :]
+        # Some callback fixtures provide only the tool result. Preserve that
+        # fallback, but never scan a history containing AI messages without a
+        # current-run boundary.
+        return batch if not has_ai_message else None
+
+    def _reconcile_final_tool_messages(self, outputs: Any) -> None:
+        suffix = self._current_run_tool_call_suffix(self._final_output_messages(outputs))
+        if suffix is not None:
+            self._reconcile_tool_messages(suffix)
 
     def _make_event(self, *, event_type: str, category: str, content: str | dict = "", metadata: dict | None = None) -> dict:
         return {
@@ -1034,7 +1221,10 @@ class RunJournal(BaseCallbackHandler):
             if isinstance(replay_metadata, Mapping):
                 replay_usage = replay_metadata.get("usage")
                 if isinstance(replay_usage, Mapping):
-                    canonical["metadata"]["usage"] = deepcopy(dict(replay_usage))
+                    canonical_metadata = canonical["metadata"]
+                    canonical_metadata["usage"] = deepcopy(dict(replay_usage))
+                    for key in ("input_tokens", "output_tokens", "total_tokens"):
+                        canonical_metadata[key] = canonical_metadata["usage"].get(key)
 
             canonical_content = canonical.get("content")
             replay_content = replay.get("content")
@@ -1484,6 +1674,8 @@ class RunJournal(BaseCallbackHandler):
             output_tokens: Output token count
             total_tokens: Total token count (computed from input+output if 0/missing)
             cache_read_tokens: Optional prompt-cache-hit input tokens
+            count_call: Optional 1 to count this distinct external invocation
+            usage_missing: Optional 1 when token totals cannot fully price it
         """
         if not self._track_tokens:
             return
@@ -1495,6 +1687,8 @@ class RunJournal(BaseCallbackHandler):
                 continue
             if source_id in self._counted_external_source_ids:
                 continue
+            count_call = record.get("count_call") == 1
+            usage_missing = record.get("usage_missing") == 1
 
             total_tk = record.get("total_tokens", 0) or 0
             if total_tk <= 0:
@@ -1502,12 +1696,18 @@ class RunJournal(BaseCallbackHandler):
                 output_tk = record.get("output_tokens", 0) or 0
                 total_tk = input_tk + output_tk
             if total_tk <= 0:
-                continue
+                if not count_call and not usage_missing:
+                    continue
 
             input_tk = record.get("input_tokens", 0) or 0
             output_tk = record.get("output_tokens", 0) or 0
 
             self._counted_external_source_ids.add(source_id)
+            if count_call:
+                self._llm_call_count += 1
+            if usage_missing:
+                bucket = self._tokens_by_model.setdefault(record.get("model_name") or "unknown", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+                bucket["missing_usage_calls"] = bucket.get("missing_usage_calls", 0) + 1
             self._total_input_tokens += input_tk
             self._total_output_tokens += output_tk
             self._total_tokens += total_tk
@@ -1527,6 +1727,8 @@ class RunJournal(BaseCallbackHandler):
 
     def set_first_human_message(self, content: str) -> None:
         """Record the first human message for convenience fields."""
+        # Media-only input is still captured even when it has no display text.
+        self._first_human_message_captured = True
         self._first_human_msg = content[:2000] if content else None
 
     def _admissions_open_locked(self) -> bool:

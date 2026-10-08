@@ -2,6 +2,82 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+Channel reload cancellation regressions must assert the worker returned the
+stale snapshot before checking that newer runtime config survived. Completion
+alone cannot prove the race: loader exceptions are caught and return `None`.
+
+Browser egress session-close tests retain the real listener and its sockets,
+verify a SOCKS handshake, then check listener shutdown, closed socket descriptors
+and EOF on the established client. A new connection to the old port is not a
+reliable ownership assertion on hosts with loopback forwarding or port reuse.
+Keep ownership assertions inside the teardown-protected block; always drain
+the client writer and close the saved proxy during teardown.
+
+Read-before-write hash fixtures pin `newline=""` when writing LF/CRLF test
+content, so native Windows cannot translate the bytes before the real read.
+
+Browser-asset confinement tests use `support.symlinks.symlink_or_skip` for real
+file and directory symlinks. Keep missing-file, duplicate-key, and size-limit
+checks separate so they still run when the host cannot create symlinks.
+
+`blocking_io/test_web_tool_url_validation.py` resolves a synthetic `.invalid`
+hostname to loopback by patching `_socket.getaddrinfo`, below the real
+`socket.getaddrinfo` wrapper. Do not replace that wrapper or the production URL
+guard: the strict gate must still reject on-loop resolution. Assert each tool
+path reaches the native fixture so an unresolved-host rejection cannot mask it.
+The IPv4 fixture accepts only `AF_UNSPEC` and `AF_INET`; unsupported families
+must fail rather than receive a fabricated IPv4 answer.
+
+The local sandbox's UTF-8 subprocess guard inspects each text-mode call with
+`ast`, checking both `encoding` and `errors`; module-wide literal counts can
+hide unpinned calls behind unrelated settings.
+
+## PostgreSQL batch fixtures
+
+Batch fixtures use `support.postgres.asyncpg_test_url` to map libpq `sslmode`
+to asyncpg `ssl` and remove unsupported `channel_binding` before constructing
+database config. Preserve TLS modes, credentials and other query options;
+reject conflicting `ssl`/`sslmode` values. CI uses `?sslmode=disable`; validate
+that URI shape against a real test database, not only a parameter-free local
+URI. Reuse the normalized config for reopening and teardown, and drop only the
+fixture's UUID schema. This is test-only handling; production connection and
+TLS policy are unchanged.
+
+The 0033 batch-evidence migration fixture uses the same adapter. Its connection
+contract probes execute the actual migration test setup through SQLAlchemy's
+dialect argument conversion, stopping before database acquisition; the real
+SQLite/PostgreSQL cases still exercise upgrade, downgrade and re-upgrade.
+
+## Real Compose tests
+
+`support/compose.py` probes `docker compose version --short` and requires Compose
+2.24+ for optional `env_file` syntax. Skip missing, old or unreadable clients with
+an actionable reason; cover version detection offline in `test_support_compose.py`.
+Real rendering and production entry-point tests use only read-only Compose calls.
+Never start or stop a stack from these tests.
+
+## Claude provider tests
+
+`test_claude_provider_prompt_caching.py` exercises real Anthropic SDK serialization
+through offline HTTP transports. Keep its directly imported `anthropic` SDK in
+the backend `dev` dependency group rather than relying on `langchain-anthropic`
+to supply it transitively.
+
+## Router auth fixtures
+
+For owner-scoped route assertions, pass a stable `user_factory` and
+`bind_current_user=True` to `make_authed_test_app`. The default stub stamps
+request state but leaves the ambient user context unchanged; the opt-in binding
+uses the stub user during the request and restores the previous context after it.
+
+## Lark CLI blocking-I/O fixtures
+
+`blocking_io/test_integrations_router.py` uses a real local CLI stub: a `.cmd`
+script on Windows and an executable shell script on POSIX. Resolve it through
+the production PATH lookup, including a directory containing spaces. Seed fake
+app credentials so auth completion reaches the CLI instead of returning early,
+and keep fixture filesystem work behind `asyncio.to_thread`.
+
 ## Shared sandbox search contracts
 
 `test_sandbox_search_contract.py` runs shared `ls`/`glob`/`grep` scenarios through
@@ -46,6 +122,12 @@ the old operation starts does not catch SQLite SELECT/ORM-flush races. Keep the
 old completion timestamp within its original lease so expiry cannot mask a
 missing token fence; always drain paused tasks and restore session patches.
 
+## Project document cache
+
+`test_project_document_char_cache.py` pauses real file-IO workers between cache
+lookup and promotion to exercise concurrent eviction. Keep cache metadata
+operations atomic, and verify that a full scan does not hold the cache lock.
+
 ## Executor starvation tests
 
 `test_executor_starvation.py` covers the deterministic starvation semantics from RFC #4560:
@@ -75,3 +157,23 @@ Cover UTF-8 text and JSON embedded in chat messages, including escaping-heavy
 inputs that fit the host's separate input limit. Use offline transports.
 Check the host's JSON output bound with the maximum item count and keys that
 expand when escaped; preserving raw UTF-8 limits alone does not cover it.
+
+## Advisory fetched-content screening example
+
+Load the example through `load_extensions()` and the host isolation wrapper, as a
+`plugins:` entry is loaded; never instantiate the middleware directly.
+`test_jev_result_screening_extension.py` checks install/config diagnostics, bounded
+requests, the task-store handover between the tool wrapper and `before_model`, copy
+semantics, fail-open provider errors and isolation diagnostics for local bugs. It
+also pins per-message classification: a benign first message in a `Command` must
+not take the flag of an injected later one, and a malformed, compressed or slow
+answer for one message must not cancel or hide another's flag. The loopback test
+uses a real local server behind an unreachable proxy variable.
+`test_jev_screening_pipeline.py` runs real lead/subagent graphs to a recording model
+with a task store bound under the runtime-context key the Gateway worker uses; cover
+the redacted excerpt, error metadata/receipts, budget, one-time warnings including
+valid empty-string message IDs, and runs without a task store. Only `None` awaits ID
+assignment. Use offline transports. Detection is not behavioral defense; do not infer
+the final model input from an isolated hook test. `test_jev_screening_policy.py` uses
+the host descriptor builder to pin policy identity; hash endpoint/prompt text and
+never project credential values.

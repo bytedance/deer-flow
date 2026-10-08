@@ -33,10 +33,12 @@ from datetime import datetime
 from functools import lru_cache
 from typing import Any, Final, Literal, cast
 
+from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.types import Overwrite
 
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
+from deerflow.agents.interaction_policy import RunInteractionPolicy, resolve_run_interaction_policy
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.config.app_config import AppConfig
 from deerflow.config.database_config import CheckpointChannelMode
@@ -73,6 +75,7 @@ from deerflow.runtime.goal import (
     _is_visible_message,
     _message_type,
     attach_goal_evaluation,
+    build_goal_state,
     compute_no_progress_count,
     create_goal_evaluator_model,
     evaluate_goal_completion,
@@ -91,6 +94,7 @@ from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.stream_modes import normalize_stream_modes, to_langgraph_stream_modes
 from deerflow.runtime.user_context import get_current_user, get_effective_user_id, resolve_runtime_user_id
 from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
+from deerflow.scheduler.runtime import SCHEDULER_CAPABILITY_CONTEXT_KEY, SchedulerRunCapability
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_id
 from deerflow.tracing import inject_langfuse_metadata
 from deerflow.utils.assembly_io import run_assembly
@@ -98,12 +102,32 @@ from deerflow.utils.messages import message_to_text
 from deerflow.workspace_changes import capture_workspace_snapshot, get_changed_output_paths, record_workspace_changes
 from deerflow.workspace_changes.types import WorkspaceSnapshot
 
-from .manager import RunManager, RunRecord, RunStartOutcome
+from .manager import ConflictError, RunManager, RunRecord, RunStartOutcome
 from .naming import resolve_root_run_name
-from .schemas import RunStatus
+from .schemas import RunStatus, ThreadOperationKind
+from .store.base import canonical_run_created_at
 
 logger = logging.getLogger(__name__)
 _THREAD_INCARNATION_UNSET = object()
+
+
+def _log_cancelled_stream_close_failure(
+    exc: asyncio.CancelledError,
+    *,
+    run_id: str,
+    abort_requested: bool,
+) -> None:
+    close_failure = exc.__cause__
+    if not isinstance(close_failure, Exception):
+        return
+    log = logger.warning if abort_requested else logger.debug
+    message = "Could not close aborted agent stream for run %s" if abort_requested else "Could not close agent stream for run %s"
+    log(
+        message,
+        run_id,
+        exc_info=(type(close_failure), close_failure, close_failure.__traceback__),
+    )
+
 
 _checkpoint_locks = AsyncKeyedLockTable[str]()
 
@@ -199,6 +223,8 @@ def _release_run_scoped_references(
         "__run_journal",
         CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
         CONVERSATION_READER_CONTEXT_KEY,
+        SCHEDULER_CAPABILITY_CONTEXT_KEY,
+        AGENT_RUNS_CONTEXT_KEY,
     }
     try:
         from deerflow.extensions import EXTENSION_SNAPSHOT_CONTEXT_KEY
@@ -223,6 +249,8 @@ def _release_run_scoped_references(
         if isinstance(configurable, dict):
             configurable.pop("__pregel_runtime", None)
             configurable.pop(CONVERSATION_READER_CONTEXT_KEY, None)
+            configurable.pop(SCHEDULER_CAPABILITY_CONTEXT_KEY, None)
+            configurable.pop(AGENT_RUNS_CONTEXT_KEY, None)
         context = runnable_config.get("context")
         if isinstance(context, dict):
             for key in internal_context_keys:
@@ -520,6 +548,8 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
             CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
             DEERFLOW_TRACE_METADATA_KEY,
             CONVERSATION_READER_CONTEXT_KEY,
+            SCHEDULER_CAPABILITY_CONTEXT_KEY,
+            AGENT_RUNS_CONTEXT_KEY,
             THREAD_INCARNATION_CONTEXT_KEY,
             THREAD_INCARNATION_METADATA_GUARD_KEY,
             "is_subagent",
@@ -546,8 +576,10 @@ def _build_runtime_context(
     task_store: Any | None = None,
     extensions: Any | None = None,
     conversation_reader: Any | None = None,
+    agent_runs: Any | None = None,
     *,
     thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
+    scheduler_capability: SchedulerRunCapability | None = None,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
@@ -571,8 +603,12 @@ def _build_runtime_context(
             runtime_ctx.setdefault(key, value)
     if app_config is not None:
         runtime_ctx["app_config"] = app_config
+    if agent_runs is not None:
+        runtime_ctx[AGENT_RUNS_CONTEXT_KEY] = agent_runs
     if conversation_reader is not None:
         runtime_ctx[CONVERSATION_READER_CONTEXT_KEY] = conversation_reader
+    if scheduler_capability is not None:
+        runtime_ctx[SCHEDULER_CAPABILITY_CONTEXT_KEY] = scheduler_capability
     if task_store is not None:
         from deerflow_extension_api import EXTENSION_TASK_STORE_KEY
 
@@ -632,6 +668,10 @@ class RunContext:
     on_run_completed: Any | None = field(default=None)
     # The host binds this capability to one run's authenticated reader and references.
     conversation_reader: Any | None = field(default=None)
+    agent_runs: Any | None = field(default=None)
+    scheduler_capability: SchedulerRunCapability | None = field(default=None)
+    # Server-selected occurrence identity. Metadata alone never activates a goal.
+    scheduled_task_runtime: Mapping[str, Any] | None = field(default=None)
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
@@ -640,6 +680,8 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
     configurable = config.get("configurable")
     if isinstance(configurable, dict):
         configurable.pop(CONVERSATION_READER_CONTEXT_KEY, None)
+        configurable.pop(SCHEDULER_CAPABILITY_CONTEXT_KEY, None)
+        configurable.pop(AGENT_RUNS_CONTEXT_KEY, None)
     existing_context = config.get("context")
     if isinstance(existing_context, dict):
         existing_context.setdefault("thread_id", runtime_context["thread_id"])
@@ -689,6 +731,17 @@ def _agent_graph(agent_result: Any) -> Any:
         # assembly type fails.
         return agent_result
     return unwrap_agent_graph(agent_result)
+
+
+def _assembled_model_name(agent_result: Any) -> str | None:
+    """Return the selected model only for the trusted lead assembly result."""
+    try:
+        from deerflow.agents.lead_agent.agent import LeadAgentAssembly
+    except Exception:
+        return None
+    if isinstance(agent_result, LeadAgentAssembly):
+        return agent_result.effective_model
+    return None
 
 
 class _SubagentEventBuffer:
@@ -744,13 +797,40 @@ class _SubagentEventBuffer:
             return
         batch = self._pending
         self._pending = []
-        try:
-            await self._event_store.put_batch(batch)
-        except Exception:
+        write_task = asyncio.create_task(self._event_store.put_batch(batch))
+        cancellation: asyncio.CancelledError | None = None
+        failure: Exception | None = None
+        while True:
+            try:
+                await asyncio.shield(write_task)
+                break
+            except asyncio.CancelledError as exc:
+                host_task = asyncio.current_task()
+                if host_task is None or not host_task.cancelling():
+                    # The store task itself was cancelled. It did not confirm
+                    # durability, so retain the batch for a later flush.
+                    self._pending = batch + self._pending
+                    raise
+                if cancellation is None:
+                    cancellation = exc
+                while host_task.cancelling():
+                    host_task.uncancel()
+            except Exception as exc:
+                failure = exc
+                break
+
+        if failure is not None:
             # Re-buffer the failed batch (ahead of any events queued since) so a
             # transient store error does not silently drop subagent step events.
             self._pending = batch + self._pending
-            logger.warning("Run %s: failed to persist %d subagent step event(s)", self._run_id, len(batch), exc_info=True)
+            logger.warning(
+                "Run %s: failed to persist %d subagent step event(s)",
+                self._run_id,
+                len(batch),
+                exc_info=(type(failure), failure, failure.__traceback__),
+            )
+        if cancellation is not None:
+            raise cancellation
 
 
 def _bind_trace_id(config: dict[str, Any], runtime_ctx: dict[str, Any]) -> str:
@@ -834,6 +914,9 @@ async def run_agent(
     run_events_config = ctx.run_events_config
     thread_store = ctx.thread_store
     terminal_status_kwargs = {"persist": False} if event_store is not None else {}
+    # Staged terminal statuses commit only after receipt and duration writes;
+    # keep the still-active durable row's lease renewed until then.
+    record.terminal_commit_pending = event_store is not None
 
     run_id = record.run_id
     thread_id = record.thread_id
@@ -877,6 +960,9 @@ async def run_agent(
     runnable_configs: list[dict[str, Any]] = [config]
     goal_evaluator_model: Any | None = None
     delivery_content: dict[str, Any] | None = None
+    goal_completion: _GoalCompletionCandidate | None = None
+    scheduled_goal: GoalState | None = None
+    final_goal_verdict: dict[str, Any] | None = None
     produced_output_paths: list[str] | None = None
     # Journal construction moved ahead of preflight so every terminal run can
     # emit a receipt. Completion persistence keeps its prior boundary: before
@@ -1248,7 +1334,9 @@ async def run_agent(
             task_store,
             extensions,
             ctx.conversation_reader,
+            ctx.agent_runs,
             thread_incarnation=thread_incarnation,
+            scheduler_capability=ctx.scheduler_capability,
         )
         # Bind every checkpoint produced by this run to the effective agent
         # identity that produced its state. Manual compaction uses only this
@@ -1284,20 +1372,6 @@ async def run_agent(
         if journal is not None:
             config.setdefault("callbacks", []).append(journal)
 
-        # Inject Langfuse trace-attribute metadata so the langchain CallbackHandler
-        # can lift session_id / user_id / trace_name / tags onto the root trace.
-        # Shared helper with ``DeerFlowClient.stream`` so both entry points stay
-        # in sync; caller-provided metadata wins via setdefault inside the helper.
-        inject_langfuse_metadata(
-            config,
-            thread_id=thread_id,
-            user_id=resolve_runtime_user_id(runtime),
-            assistant_id=record.assistant_id,
-            model_name=record.model_name,
-            environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
-            deerflow_trace_id=deerflow_trace_id,
-        )
-
         # Resolve after runtime context installation so context/configurable reflect
         # the agent name that this run will actually execute.
         config.setdefault("run_name", resolve_root_run_name(config, record.assistant_id))
@@ -1325,7 +1399,22 @@ async def run_agent(
             # get_available_tools(), which may block on MCP cache
             # initialization — it must not stall the calling event loop
             # (issue #5172).
-            agent = _agent_graph(await run_assembly(agent_factory, **agent_factory_kwargs))
+            agent_result = await run_assembly(agent_factory, **agent_factory_kwargs)
+            agent = _agent_graph(agent_result)
+
+        # Assembly resolves request, agent, and authorization fallbacks. Trace the
+        # model that will run, rather than the model name originally requested.
+        effective_model = _assembled_model_name(agent_result) or record.model_name
+        for trace_config in (config, initial_runnable_config):
+            inject_langfuse_metadata(
+                trace_config,
+                thread_id=thread_id,
+                user_id=resolve_runtime_user_id(runtime),
+                assistant_id=record.assistant_id,
+                model_name=effective_model,
+                environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+                deerflow_trace_id=deerflow_trace_id,
+            )
 
         accessor = CheckpointStateAccessor.bind(
             agent,
@@ -1378,6 +1467,27 @@ async def run_agent(
 
         runtime_ctx[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = frozenset(pre_existing_message_ids)
         _install_runtime_context(config, runtime_ctx)
+
+        scheduled_objective = _scheduled_goal_objective(record, ctx.scheduled_task_runtime)
+        if scheduled_objective is not None:
+            # Track the instance before admitting the write: synchronous saver
+            # commits are drained even if host cancellation arrives mid-write.
+            scheduled_goal = build_goal_state(scheduled_objective, now=canonical_run_created_at(record.created_at))
+            record.scheduled_goal_cleanup_pending = True
+            terminal_status_kwargs["persist"] = False
+            try:
+                await _install_scheduled_goal(checkpointer=checkpointer, accessor=accessor, thread_id=thread_id, goal=scheduled_goal)
+            except GoalWriteConflict:
+                # Rejected before the write was admitted. Even an equal goal
+                # snapshot belongs to its original writer, never this run.
+                scheduled_goal = None
+                record.scheduled_goal_cleanup_pending = False
+                if event_store is None:
+                    terminal_status_kwargs.pop("persist", None)
+                raise
+
+        if scheduled_goal is None:
+            await _clear_stale_scheduled_goal(record=record, run_manager=run_manager, bridge=bridge, checkpointer=checkpointer)
 
         # Capture the effective (resolved) model name from the agent's metadata.
         # _resolve_model_name in agent.py may return the default model if the
@@ -1453,6 +1563,13 @@ async def run_agent(
                             close_error = sys.exception()
                             try:
                                 await close_agent_stream(stream)
+                            except asyncio.CancelledError as exc:
+                                _log_cancelled_stream_close_failure(
+                                    exc,
+                                    run_id=run_id,
+                                    abort_requested=broke_on_abort or record.abort_event.is_set(),
+                                )
+                                raise
                             except Exception:
                                 abort_requested = broke_on_abort or record.abort_event.is_set()
                                 if close_error is None and not abort_requested:
@@ -1502,6 +1619,13 @@ async def run_agent(
                         close_error = sys.exception()
                         try:
                             await close_agent_stream(stream)
+                        except asyncio.CancelledError as exc:
+                            _log_cancelled_stream_close_failure(
+                                exc,
+                                run_id=run_id,
+                                abort_requested=broke_on_abort or record.abort_event.is_set(),
+                            )
+                            raise
                         except Exception:
                             abort_requested = broke_on_abort or record.abort_event.is_set()
                             if close_error is None and not abort_requested:
@@ -1528,6 +1652,20 @@ async def run_agent(
         # turns complete cleanly afterward (#4176 review).
         if isinstance(runtime.context, dict):
             runtime.context.pop("stop_reason", None)
+
+        def capture_goal_verdict(evaluated_goal: GoalState, evaluation: GoalEvaluation, stand_down_reason: str | None) -> None:
+            nonlocal final_goal_verdict
+            if scheduled_goal is not None and not _goal_instance_matches(scheduled_goal, evaluated_goal):
+                return
+            final_goal_verdict = dict(evaluation)
+            final_goal_verdict["relied_on_assumption"] = bool(evaluation.get("relied_on_assumption", False)) if evaluation["satisfied"] else False
+            # Hidden goal turns this run took; the task page shows the count.
+            final_goal_verdict["continuations"] = int(evaluated_goal.get("continuation_count", 0))
+            if stand_down_reason:
+                final_goal_verdict["stand_down_reason"] = stand_down_reason
+                if stand_down_reason.startswith("thread_changed"):
+                    final_goal_verdict.update(satisfied=False, blocker="missing_evidence", relied_on_assumption=False)
+
         await _stream_once(graph_input, initial_runnable_config)
         while not record.abort_event.is_set() and not llm_error_fallback_message and (journal is None or not journal.had_llm_error_fallback):
             continuation_input = await _prepare_goal_continuation_input(
@@ -1545,10 +1683,19 @@ async def run_agent(
                 task_store=task_store,
                 extensions=extensions,
                 run_stop_reason=runtime.context.get("stop_reason") if isinstance(runtime.context, dict) else None,
+                interaction_policy=resolve_run_interaction_policy(config),
+                expected_goal=scheduled_goal,
+                verdict_callback=capture_goal_verdict,
+                usage_callback=journal.record_external_llm_usage_records if journal is not None else None,
             )
+            if isinstance(continuation_input, _GoalCompletionCandidate):
+                goal_completion = continuation_input
+                break
             if continuation_input is None or record.abort_event.is_set():
                 break
             await _stream_once(continuation_input, _continuation_runnable_config())
+
+        record.goal_verdict = final_goal_verdict
 
         # 8. Final status
         if record.abort_event.is_set():
@@ -1600,6 +1747,7 @@ async def run_agent(
                 RunStatus.error if delivery_error else RunStatus.success,
                 error=delivery_error,
                 stop_reason=stop_reason,
+                goal_verdict=record.goal_verdict,
                 **terminal_status_kwargs,
             )
             if cancel_action is not None:
@@ -1791,30 +1939,58 @@ async def run_agent(
                 except Exception:
                     logger.debug("Failed to persist run duration for thread %s run %s (non-fatal)", thread_id, run_id)
 
-            if not record.ownership_lost and event_store is not None:
+            if scheduled_goal is not None and not record.ownership_lost and checkpointer is not None:
+                if record.abort_event.is_set() and record.abort_action == "rollback" and not checkpoint_rollback_completed:
+                    await _finish_cancellation("rollback")
+                # Scheduled goals are occurrence-scoped. Keep the real run slot
+                # active through cleanup so a peer's next user turn cannot
+                # inherit this goal. Ordinary goals retain terminal-first cleanup.
+                cleanup_task = asyncio.create_task(
+                    _clear_scheduled_goal(goal=scheduled_goal, record=record, run_manager=run_manager, bridge=bridge, checkpointer=checkpointer, owned_admission=True),
+                    name=f"scheduled-goal-cleanup-{run_id}",
+                )
+                try:
+                    deferred_finalization_interrupt = await _await_task_stop_after_host_cancellation(cleanup_task, deferred_finalization_interrupt)
+                except Exception:
+                    logger.warning("Could not remove scheduled goal for run %s", run_id, exc_info=True)
+                    await run_manager.set_status(run_id, RunStatus.error, error="Scheduled goal cleanup failed", persist=False)
+
+            if not record.ownership_lost and (event_store is not None or scheduled_goal is not None):
                 try:
                     # Even after bounded receipt retries are exhausted, persist the
                     # real worker outcome. Leaving a successful row inflight would
                     # let lease recovery rewrite it as an error with a synthetic
                     # zero receipt.
-                    # Always consult the durable cancel before persisting the
-                    # staged status: an accepted cancellation must beat a
-                    # locally staged success, and only
-                    # ``set_status_if_not_cancelled`` performs that CAS. A run
-                    # whose ``abort_event`` is set from a heartbeat-observed
-                    # cancel still carries the staged status here, so persisting
-                    # it verbatim could commit a cancelled run as success.
-                    cancel_action = await run_manager.set_status_if_not_cancelled(
-                        run_id,
-                        record.status,
-                        error=record.error,
-                        stop_reason=record.stop_reason,
-                    )
-                    if cancel_action is not None:
-                        await _finish_cancellation(cancel_action)
+                    if record.abort_event.is_set() and scheduled_goal is not None:
+                        # A cancel may arrive while scheduled cleanup was
+                        # awaiting its saver. The local status may still be
+                        # staged success; apply the accepted action, including
+                        # rollback, before committing any terminal outcome.
+                        await _finish_cancellation(record.abort_action, restore_checkpoint=not checkpoint_rollback_completed)
                         await run_manager.persist_current_status(run_id)
+                    else:
+                        # Always consult the durable cancel before persisting the
+                        # staged status: an accepted cancellation must beat a
+                        # locally staged success, and only
+                        # ``set_status_if_not_cancelled`` performs that CAS. A run
+                        # whose ``abort_event`` is set from a heartbeat-observed
+                        # cancel still carries the staged status here, so persisting
+                        # it verbatim could commit a cancelled run as success.
+                        cancel_action = await run_manager.set_status_if_not_cancelled(
+                            run_id,
+                            record.status,
+                            error=record.error,
+                            stop_reason=record.stop_reason,
+                            goal_verdict=record.goal_verdict,
+                        )
+                        if cancel_action is not None:
+                            await _finish_cancellation(cancel_action)
+                            await run_manager.persist_current_status(run_id)
                 except Exception:
                     logger.warning("Failed to persist terminal status for run %s after delivery receipt attempts", run_id, exc_info=True)
+            # The deferred commit has been attempted. A failed write is left to
+            # completion fallback or lease recovery, as before.
+            record.terminal_commit_pending = False
 
             # The durable CAS above can still change the local outcome (an
             # accepted interrupt/rollback that no heartbeat had signalled yet),
@@ -1832,6 +2008,32 @@ async def run_agent(
                     await run_manager.update_run_completion(run_id, status=record.status.value, **completion_data)
                 except Exception:
                     logger.warning("Failed to persist run completion for %s (non-fatal)", run_id, exc_info=True)
+
+            if scheduled_goal is not None and not record.ownership_lost:
+                if not await run_manager.persist_current_status(run_id):
+                    await run_manager._mark_ownership_lost(record, reason="Scheduled run terminal status could not be confirmed after goal cleanup.", require_active=False)
+                # Late cancellation can still drain a rollback after goal
+                # cleanup. Retain admission/heartbeat protection through that
+                # rollback and the actual durable terminal acknowledgement.
+                record.scheduled_goal_cleanup_pending = False
+
+            # A satisfied evaluator is only a candidate until artifact delivery,
+            # receipt persistence and durable cancellation arbitration have ended.
+            # Status writes are best-effort in single-worker mode: confirm the
+            # existing outcome before deleting recoverable goal state.
+            if scheduled_goal is None and goal_completion is not None and record.status == RunStatus.success and not record.abort_event.is_set() and not record.ownership_lost:
+                try:
+                    if await run_manager.persist_current_status(run_id):
+                        await _clear_completed_goal(
+                            candidate=goal_completion,
+                            record=record,
+                            run_manager=run_manager,
+                            bridge=bridge,
+                            accessor=accessor,
+                            checkpointer=checkpointer,
+                        )
+                except Exception:
+                    logger.warning("Could not finalize satisfied goal for thread %s", thread_id, exc_info=True)
 
             if started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.interrupted and not _is_edit_replay_run(record):
                 try:
@@ -1961,12 +2163,14 @@ async def run_agent(
                 # Drop graph and per-run payload references before the terminal
                 # worker task itself becomes collectable.
                 agent = None
+                agent_result = None
                 accessor = None
                 runtime = None
                 runtime_ctx = None
                 rollback_point = None
                 subagent_events = None
                 goal_evaluator_model = None
+                goal_completion = None
                 task_store = None
                 task_info = None
                 pre_run_workspace_snapshot = None
@@ -1976,6 +2180,7 @@ async def run_agent(
 
                 # Durable finalization and terminal publication may depend on
                 # external backends, but local housekeeping must always run.
+                record.scheduled_goal_cleanup_pending = False
                 _create_contextless_task(bridge.cleanup(run_id, delay=60))
                 # Preserve the existing five-minute grace period for local
                 # join/status paths, then release the terminal record, completed
@@ -1991,6 +2196,168 @@ async def run_agent(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _GoalCompletionCandidate:
+    goal: GoalState
+    conversation_signature: str
+    evaluation: GoalEvaluation | None = None
+
+
+def _scheduled_goal_objective(record: RunRecord, scheduled_runtime: Mapping[str, Any] | None) -> str | None:
+    if scheduled_runtime is None or scheduled_runtime.get("goal_objective") is None:
+        return None
+    metadata = record.metadata or {}
+    if not record.user_id or scheduled_runtime.get("user_id") != record.user_id or scheduled_runtime.get("task_id") != metadata.get("scheduled_task_id") or scheduled_runtime.get("occurrence_id") != metadata.get("scheduled_task_run_id"):
+        raise ValueError("Scheduled goal authority does not match the admitted occurrence")
+    objective = metadata.get("scheduled_goal_objective")
+    if not isinstance(objective, str) or objective != scheduled_runtime.get("goal_objective"):
+        raise ValueError("Scheduled goal snapshot does not match the admitted objective")
+    return objective
+
+
+async def _install_scheduled_goal(*, checkpointer: Any, accessor: CheckpointStateAccessor, thread_id: str, goal: GoalState) -> None:
+    if checkpointer is None:
+        raise RuntimeError("Scheduled goals require a checkpointer")
+    async with goal_thread_lock(thread_id), _checkpoint_thread_lock(thread_id):
+        checkpoint = await _call_checkpointer_method(checkpointer, "aget_tuple", "get_tuple", {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
+        if checkpoint is not None:
+            if _read_checkpoint_goal(checkpoint) is not None or any(_is_visible_message(message) for message in await _materialized_checkpoint_messages(accessor, thread_id)):
+                raise GoalWriteConflict("A scheduled goal requires a fresh conversation")
+        await write_thread_goal(checkpointer, thread_id, goal, as_node="scheduled_goal", create_if_missing=True, expected_checkpoint_id=_checkpoint_id(checkpoint))
+
+
+async def _clear_scheduled_goal(*, goal: GoalState, record: RunRecord, run_manager: RunManager, bridge: StreamBridge | None, checkpointer: Any, owned_admission: bool = False) -> None:
+    """Release only this occurrence's goal under a real run/checkpoint slot."""
+    try:
+        reservation = _checkpoint_thread_lock(record.thread_id) if owned_admission else run_manager.reserve_thread_operation(record.thread_id, kind=ThreadOperationKind.checkpoint_write, user_id=record.user_id)
+        async with goal_thread_lock(record.thread_id), reservation:
+            if owned_admission and not await run_manager.owns_active_admission(record):
+                return
+            checkpoint = await _call_checkpointer_method(checkpointer, "aget_tuple", "get_tuple", {"configurable": {"thread_id": record.thread_id, "checkpoint_ns": ""}})
+            if checkpoint is None or not _goal_instance_matches(goal, _read_checkpoint_goal(checkpoint)) or record.ownership_lost:
+                return
+            values = await write_thread_goal(checkpointer, record.thread_id, None, as_node="scheduled_goal", expected_checkpoint_id=_checkpoint_id(checkpoint))
+            if bridge is not None:
+                await bridge.publish(record.run_id, "values", serialize(values, mode="values"))
+    except (GoalWriteConflict, ConflictError):
+        return
+
+
+async def clear_recovered_scheduled_goal(record: RunRecord, *, run_manager: RunManager, checkpointer: Any) -> None:
+    """Clean an idle recovered occurrence; an admitted new run wins safely.
+
+    Verify durable owner/thread/timestamp/objective identity before acquiring
+    the existing checkpoint reservation. Busy threads defer to worker preflight.
+    No ORM writer transaction spans a checkpointer write.
+    """
+    metadata = record.metadata or {}
+    objective = metadata.get("scheduled_goal_objective")
+    if checkpointer is None or not record.user_id or not isinstance(objective, str):
+        return
+    try:
+        timestamp = canonical_run_created_at(record.created_at)
+        expected = build_goal_state(objective, now=timestamp)
+        source = await run_manager.scheduled_goal_source(record.thread_id, user_id=record.user_id, created_at=timestamp, objective=expected["objective"])
+        if source is None or source.run_id != record.run_id:
+            return
+        await _clear_scheduled_goal(goal=expected, record=record, run_manager=run_manager, bridge=None, checkpointer=checkpointer)
+    except Exception:
+        logger.warning("Unable to remove recovered scheduled goal for run %s; preserving it for guarded worker preflight", record.run_id, exc_info=True)
+
+
+async def _clear_stale_scheduled_goal(*, record: RunRecord, run_manager: RunManager, bridge: StreamBridge, checkpointer: Any) -> None:
+    """Before a new turn, remove a provably terminal predecessor's goal only."""
+    if checkpointer is None or not record.user_id:
+        return
+    async with goal_thread_lock(record.thread_id), _checkpoint_thread_lock(record.thread_id):
+        checkpoint = await _call_checkpointer_method(checkpointer, "aget_tuple", "get_tuple", {"configurable": {"thread_id": record.thread_id, "checkpoint_ns": ""}})
+        current = _read_checkpoint_goal(checkpoint) if checkpoint is not None else None
+        if current is None:
+            return
+        try:
+            created_at = canonical_run_created_at(current.get("created_at", ""))
+        except (TypeError, ValueError):
+            return
+        if current.get("created_at") != created_at:
+            # Only this canonical representation is emitted by the scheduled
+            # installer; equivalent user timestamps are not provenance.
+            return
+        try:
+            source = await run_manager.scheduled_goal_source(record.thread_id, user_id=record.user_id, created_at=created_at, objective=current["objective"])
+        except Exception as exc:
+            # Idle recovery can defer cleanup, but a new run must not inherit
+            # an unverified goal. Keep cancellation and the checkpoint intact.
+            raise RuntimeError("Scheduled goal recovery could not verify the existing goal's ownership. Agent execution did not start; the goal was preserved.") from exc
+        if source is None or not await run_manager.owns_active_admission(record):
+            return
+        try:
+            values = await write_thread_goal(checkpointer, record.thread_id, None, as_node="scheduled_goal_recovery", expected_checkpoint_id=_checkpoint_id(checkpoint))
+            await bridge.publish(record.run_id, "values", serialize(values, mode="values"))
+        except GoalWriteConflict:
+            return
+
+
+async def _clear_completed_goal(
+    *,
+    candidate: _GoalCompletionCandidate,
+    record: RunRecord,
+    run_manager: RunManager,
+    bridge: StreamBridge,
+    accessor: CheckpointStateAccessor,
+    checkpointer: Any,
+) -> None:
+    """Clear only the evaluated goal after the run has successfully finalized."""
+    try:
+        # Terminal status has released the run's admission. Use the same durable
+        # reservation as other out-of-run checkpoint writers; a peer that already
+        # admitted a new run wins, even before it has written any checkpoint.
+        async with (
+            goal_thread_lock(record.thread_id),
+            run_manager.reserve_thread_operation(record.thread_id, kind=ThreadOperationKind.checkpoint_write, user_id=record.user_id),
+        ):
+            checkpoint_tuple = await _call_checkpointer_method(
+                checkpointer,
+                "aget_tuple",
+                "get_tuple",
+                {"configurable": {"thread_id": record.thread_id, "checkpoint_ns": ""}},
+            )
+            if checkpoint_tuple is None:
+                logger.debug("Skipping goal completion for run %s: checkpoint is unavailable", record.run_id)
+                return
+            # Full equality is intentional: even same-instance goal updates must win over clearing.
+            if _read_checkpoint_goal(checkpoint_tuple) != candidate.goal:
+                logger.debug("Skipping goal completion for run %s: goal snapshot changed", record.run_id)
+                return
+            messages = await _materialized_checkpoint_messages(accessor, record.thread_id)
+            if visible_conversation_signature(messages) != candidate.conversation_signature:
+                logger.debug("Skipping goal completion for run %s: visible conversation changed", record.run_id)
+                return
+            if record.status != RunStatus.success or record.abort_event.is_set() or record.ownership_lost:
+                logger.debug(
+                    "Skipping goal completion for run %s: status=%s, aborted=%s, ownership_lost=%s",
+                    record.run_id,
+                    record.status.value,
+                    record.abort_event.is_set(),
+                    record.ownership_lost,
+                )
+                return
+            # Duration bookkeeping may advance the checkpoint after evaluation.
+            # Compare goal/conversation above, then guard against stale writes.
+            values = await write_thread_goal(
+                checkpointer,
+                record.thread_id,
+                None,
+                as_node="goal_evaluator",
+                expected_checkpoint_id=_checkpoint_id(checkpoint_tuple),
+            )
+            await bridge.publish(record.run_id, "values", serialize(values, mode="values"))
+    except GoalWriteConflict:
+        logger.debug("Skipping goal completion for run %s: checkpoint changed before the goal write", record.run_id)
+        return
+    except ConflictError:
+        return
 
 
 def _checkpoint_id(checkpoint_tuple: Any) -> str | None:
@@ -2059,7 +2426,8 @@ def _ends_on_human_input_request(messages: list[Any]) -> bool:
 
     ``ask_clarification`` and the sandbox network prompt put the request in a
     ToolMessage artifact and end the graph there, so it sits in the trailing run of
-    tool results. The goal evaluator only reads human and AI text and never sees it.
+    tool results. Continuing would tell the agent to keep going while the question is
+    still open, so the evaluator is not asked.
     """
     for message in reversed(messages):
         if _message_type(message) != "tool":
@@ -2171,8 +2539,12 @@ async def _prepare_goal_continuation_input(
     task_store: Any | None = None,
     extensions: Any | None = None,
     run_stop_reason: str | None = None,
-) -> dict[str, Any] | None:
-    """Evaluate the active goal and return a hidden continuation input if needed.
+    interaction_policy: RunInteractionPolicy | None = None,
+    expected_goal: GoalState | None = None,
+    verdict_callback: Callable[[GoalState, GoalEvaluation, str | None], None] | None = None,
+    usage_callback: Callable[[list[dict[str, int | str | None]]], None] | None = None,
+) -> dict[str, Any] | _GoalCompletionCandidate | None:
+    """Return a continuation input or a completion candidate for finalization.
 
     NOTE: The re-reads below catch a racing user message or ``/goal clear``
     before we queue a continuation. Goal writes then serialize per thread and
@@ -2191,6 +2563,8 @@ async def _prepare_goal_continuation_input(
         return None
     if not goal or goal.get("status") != "active":
         return None
+    if expected_goal is not None and not _goal_instance_matches(expected_goal, goal):
+        return None
 
     async def _persist(
         goal: GoalState,
@@ -2201,7 +2575,7 @@ async def _prepare_goal_continuation_input(
         continuation_count: int | None = None,
     ) -> GoalState | None:
         """Record the evaluation against the still-current goal instance."""
-        return await _persist_goal_evaluation(
+        updated = await _persist_goal_evaluation(
             bridge=bridge,
             checkpointer=checkpointer,
             thread_id=thread_id,
@@ -2213,6 +2587,9 @@ async def _prepare_goal_continuation_input(
             stand_down_reason=stand_down_reason,
             evidence_signature=evidence_signature,
         )
+        if updated is not None and verdict_callback is not None:
+            verdict_callback(updated, evaluation, stand_down_reason)
+        return updated
 
     try:
         checkpoint_tuple = await _call_checkpointer_method(
@@ -2254,6 +2631,11 @@ async def _prepare_goal_continuation_input(
 
         if abort_event is not None and abort_event.is_set():
             return None
+    except Exception:
+        logger.warning("Could not prepare goal evaluation for thread %s after run %s", thread_id, run_id, exc_info=True)
+        return None
+
+    try:
         evaluator_model = evaluator_model_factory() if evaluator_model_factory is not None else None
         evaluation = await evaluate_goal_completion(
             goal,
@@ -2266,11 +2648,26 @@ async def _prepare_goal_continuation_input(
             deerflow_trace_id=deerflow_trace_id,
             task_store=task_store,
             extensions=extensions,
+            interaction_policy=interaction_policy,
+            usage_callback=usage_callback,
         )
+    except Exception as exc:
+        logger.warning("Goal evaluator failed for thread %s after run %s", thread_id, run_id, exc_info=True)
         if abort_event is not None and abort_event.is_set():
             return None
-    except Exception:
-        logger.warning("Goal evaluator failed for thread %s after run %s", thread_id, run_id, exc_info=True)
+        # Record the failure like the other stand-downs; otherwise the goal keeps the
+        # previous run's verdict, or none. Only the exception type is stored: a provider's
+        # error message can carry request details, and the traceback is logged above.
+        evaluation = GoalEvaluation(
+            satisfied=False,
+            blocker="run_failed",
+            reason=f"The goal evaluator did not return a verdict ({type(exc).__name__}).",
+            evidence_summary="",
+        )
+        no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature)
+        await _persist(goal, evaluation, no_progress_count, stand_down_reason="evaluator_failed")
+        return None
+    if abort_event is not None and abort_event.is_set():
         return None
 
     no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature)
@@ -2293,32 +2690,9 @@ async def _prepare_goal_continuation_input(
         return None
 
     if evaluation["satisfied"]:
-        try:
-            async with goal_thread_lock(thread_id):
-                latest_checkpoint_tuple = await _call_checkpointer_method(
-                    checkpointer,
-                    "aget_tuple",
-                    "get_tuple",
-                    {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
-                )
-                if latest_checkpoint_tuple is None:
-                    return None
-                latest_goal = _read_checkpoint_goal(latest_checkpoint_tuple)
-                if latest_goal is None or not _goal_instance_matches(goal, latest_goal):
-                    return None
-                values = await write_thread_goal(
-                    checkpointer,
-                    thread_id,
-                    None,
-                    as_node="goal_evaluator",
-                    expected_checkpoint_id=_checkpoint_id(latest_checkpoint_tuple),
-                )
-            await bridge.publish(run_id, "values", serialize(values, mode="values"))
-        except GoalWriteConflict:
-            return None
-        except Exception:
-            logger.warning("Could not clear satisfied goal for thread %s", thread_id, exc_info=True)
-        return None
+        if verdict_callback is not None:
+            verdict_callback(current_goal, evaluation, None)
+        return _GoalCompletionCandidate(copy.deepcopy(current_goal), conversation_signature_before, evaluation)
 
     stand_down_reason = _stand_down_reason(goal, evaluation, no_progress_count)
     if stand_down_reason is None and run_stop_reason == "token_capped":

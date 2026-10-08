@@ -115,17 +115,25 @@ sandbox:
 通过实现 `MemoryStorage` 将基于文件的记忆替换为任何持久化存储：
 
 ```python
-from deerflow.agents.memory.storage import MemoryStorage
 from typing import Any
 
+from deerflow.agents.memory.backends.deermem.deermem.core.storage import MemoryStorage
+
+
 class RedisMemoryStorage(MemoryStorage):
-    def load(self, agent_name: str | None = None) -> dict[str, Any]:
+    # `create_storage()` 以 `cls(config)` 构造存储类，因此必须接收 backend config。
+    def __init__(self, config) -> None:
         ...
 
-    def reload(self, agent_name: str | None = None) -> dict[str, Any]:
+    # memory updater 调用这些方法时始终带上 `user_id=`，`save()` 还会带上
+    # `expected_revision=`，所以这两个参数必须保留在签名里。
+    def load(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
         ...
 
-    def save(self, memory_data: dict[str, Any], agent_name: str | None = None) -> bool:
+    def reload(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
+        ...
+
+    def save(self, memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None, expected_revision: int | None = None) -> bool:
         ...
 ```
 
@@ -133,8 +141,11 @@ class RedisMemoryStorage(MemoryStorage):
 
 ```yaml
 memory:
-  storage_class: mypackage.storage:RedisMemoryStorage
+  backend_config:
+    storage_class: mypackage.storage.RedisMemoryStorage
 ```
+
+与上面的 `sandbox.use:` 不同，`storage_class` 按 `module.Class` 点号路径解析——类名取自最后一个点号之后，所以写成 `module:Class` 会导入失败。
 
 ## 自定义技能
 

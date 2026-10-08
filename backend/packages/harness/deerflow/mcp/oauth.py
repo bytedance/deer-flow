@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -24,12 +24,22 @@ class _OAuthToken:
     expires_at: datetime
 
 
+@dataclass
+class _OAuthState:
+    """One connection's mutable tokens and cross-loop refresh lock."""
+
+    config: McpOAuthConfig
+    token: _OAuthToken | None = None
+    # Sync tool wrappers and the Gateway can refresh from different loops.
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
 class OAuthTokenManager:
     """Acquire/cache/refresh OAuth tokens for MCP servers."""
 
     def __init__(self, oauth_by_server: dict[str, McpOAuthConfig]):
-        self._oauth_by_server = oauth_by_server
-        self._tokens: dict[str, _OAuthToken] = {}
+        # Refresh-token rotation belongs to runtime state, not the parsed config
+        # used by cache/snapshot validation or custom interceptor builders.
         # A plain threading.Lock, not asyncio.Lock: the embedded/TUI sync tool-call
         # path (DeerFlowClient.stream() -> LangGraph ToolNode._func -> a
         # ThreadPoolExecutor -> deerflow.tools.sync.make_sync_tool_wrapper's
@@ -40,32 +50,47 @@ class OAuthTokenManager:
         # either deadlocks silently or raises "bound to a different event loop".
         # threading.Lock has no loop affinity, so it is safe to share across
         # however many event loops/threads call into the same server's lock.
-        self._locks: dict[str, threading.Lock] = {name: threading.Lock() for name in oauth_by_server}
+        self._states = {name: _OAuthState(config=oauth.model_copy(deep=True)) for name, oauth in oauth_by_server.items()}
 
     @classmethod
-    def from_extensions_config(cls, extensions_config: ExtensionsConfig) -> OAuthTokenManager:
+    def from_extensions_config(
+        cls,
+        extensions_config: ExtensionsConfig,
+        *,
+        shared_manager: OAuthTokenManager | None = None,
+    ) -> OAuthTokenManager:
+        """Build a manager, optionally reusing already-validated connection state.
+
+        The durable runtime supplies ``shared_manager`` only after validating
+        the deployment snapshot. Personal connections must never use it.
+        """
         oauth_by_server: dict[str, McpOAuthConfig] = {}
         for server_name, server_config in extensions_config.get_enabled_mcp_servers().items():
             if server_config.oauth and server_config.oauth.enabled:
                 oauth_by_server[server_name] = server_config.oauth
-        return cls(oauth_by_server)
+        manager = cls(oauth_by_server)
+        if shared_manager is not None:
+            for name in manager._states.keys() & shared_manager._states.keys():
+                manager._states[name] = shared_manager._states[name]
+        return manager
 
     def has_oauth_servers(self) -> bool:
-        return bool(self._oauth_by_server)
+        return bool(self._states)
 
     def oauth_server_names(self) -> list[str]:
-        return list(self._oauth_by_server.keys())
+        return list(self._states)
 
     async def get_authorization_header(self, server_name: str) -> str | None:
-        oauth = self._oauth_by_server.get(server_name)
-        if not oauth:
+        state = self._states.get(server_name)
+        if state is None:
             return None
 
-        token = self._tokens.get(server_name)
+        oauth = state.config
+        token = state.token
         if token and not self._is_expiring(token, oauth):
             return self._authorization_value(token, server_name)
 
-        lock = self._locks[server_name]
+        lock = state.lock
         # Acquire the OS-level lock off-thread so a blocking wait never blocks this
         # event loop, then release it synchronously (release() never blocks). This
         # keeps the de-duplication behavior of the old `async with lock:` (only one
@@ -100,12 +125,12 @@ class OAuthTokenManager:
             lock.release()
             raise
         try:
-            token = self._tokens.get(server_name)
+            token = state.token
             if token and not self._is_expiring(token, oauth):
                 return self._authorization_value(token, server_name)
 
             fresh = await self._fetch_token(oauth)
-            self._tokens[server_name] = fresh
+            state.token = fresh
             logger.info(f"Refreshed OAuth access token for MCP server: {server_name}")
             return self._authorization_value(fresh, server_name)
         finally:
@@ -188,8 +213,8 @@ class OAuthTokenManager:
             raise ValueError(f"OAuth token response missing '{oauth.token_field}'")
 
         # Persist a rotated refresh_token so subsequent refreshes use the latest
-        # value. This is an in-process update only — it is intentionally NOT
-        # written back to extensions_config.json. Providers that rotate refresh
+        # value. This updates our private runtime copy only — neither the parsed
+        # extensions config nor extensions_config.json. Providers that rotate refresh
         # tokens (Auth0, Okta, Google, etc.) return a new refresh_token on each
         # refresh; discarding it makes the next refresh fail with invalid_grant.
         if oauth.grant_type == "refresh_token":
@@ -239,9 +264,13 @@ def build_oauth_tool_interceptor(
     return oauth_interceptor
 
 
-async def get_initial_oauth_headers(extensions_config: ExtensionsConfig) -> dict[str, str]:
+async def get_initial_oauth_headers(
+    extensions_config: ExtensionsConfig,
+    *,
+    token_manager: OAuthTokenManager | None = None,
+) -> dict[str, str]:
     """Get initial OAuth Authorization headers for MCP server connections."""
-    token_manager = OAuthTokenManager.from_extensions_config(extensions_config)
+    token_manager = token_manager or OAuthTokenManager.from_extensions_config(extensions_config)
     if not token_manager.has_oauth_servers():
         return {}
 

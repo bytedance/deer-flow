@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import zipfile
 
@@ -13,6 +14,69 @@ import support_bundle
 def _zip_text(zip_path, name: str) -> str:
     with zipfile.ZipFile(zip_path) as zf:
         return zf.read(name).decode("utf-8")
+
+
+@pytest.mark.parametrize("host_encoding", ["ascii", "cp936"])
+@pytest.mark.parametrize("returncode", [0, 7])
+def test_run_command_decodes_utf8_independently_of_host_locale(tmp_path, monkeypatch, host_encoding, returncode):
+    monkeypatch.setattr(support_bundle.subprocess, "_text_encoding", lambda: host_encoding)
+    stdout = "✓ 检查通过 Bearer fake.stdout.secret"
+    stderr = "✗ 检查失败 Bearer fake.stderr.secret"
+    code = f"import sys; sys.stdout.buffer.write({stdout.encode('utf-8')!r}); sys.stderr.buffer.write({stderr.encode('utf-8')!r}); sys.exit({returncode})"
+
+    result = support_bundle._run_command([sys.executable, "-c", code], cwd=tmp_path)
+
+    assert result == {
+        "ok": returncode == 0,
+        "returncode": returncode,
+        "stdout": "✓ 检查通过 Bearer <redacted>",
+        "stderr": "✗ 检查失败 Bearer <redacted>",
+    }
+
+
+def test_run_command_gives_python_children_utf8_stdio_without_mutating_parent(tmp_path, monkeypatch):
+    monkeypatch.setenv("PYTHONIOENCODING", "ascii")
+    monkeypatch.setenv("PYTHONUTF8", "0")
+    monkeypatch.setenv("DEER_SUPPORT_TEST_MARKER", "inherited")
+    monkeypatch.setattr(support_bundle.subprocess, "_text_encoding", lambda: "ascii")
+    parent_env = dict(os.environ)
+    code = f"import os, sys; assert os.environ['DEER_SUPPORT_TEST_MARKER'] == 'inherited'; assert os.getcwd() == {str(tmp_path)!r}; sys.stdout.write({ascii('✓ 检查通过')}); sys.stderr.write({ascii('✗ 检查失败')})"
+
+    result = support_bundle._run_command([sys.executable, "-c", code], cwd=tmp_path)
+
+    assert result == {"ok": True, "returncode": 0, "stdout": "✓ 检查通过", "stderr": "✗ 检查失败"}
+    assert dict(os.environ) == parent_env
+
+
+@pytest.mark.parametrize("returncode", [0, 7])
+def test_run_command_preserves_diagnostics_with_invalid_utf8(tmp_path, returncode):
+    code = f"import sys; sys.stdout.buffer.write(b'out \\xff Bearer fake.stdout.secret'); sys.stderr.buffer.write(b'err \\xff Bearer fake.stderr.secret'); sys.exit({returncode})"
+
+    result = support_bundle._run_command([sys.executable, "-c", code], cwd=tmp_path)
+
+    assert result == {
+        "ok": returncode == 0,
+        "returncode": returncode,
+        "stdout": "out \ufffd Bearer <redacted>",
+        "stderr": "err \ufffd Bearer <redacted>",
+    }
+
+
+@pytest.mark.parametrize("returncode", [0, 7])
+def test_run_command_preserves_diagnostics_with_surrogate_characters(tmp_path, monkeypatch, returncode):
+    monkeypatch.setenv("PYTHONIOENCODING", "ascii:strict")
+    stdout = "✓ path \udcff Bearer fake.stdout.secret\ncontinued stdout"
+    stderr = "✗ path \udcff Bearer fake.stderr.secret\ncontinued stderr"
+    code = f"import sys; sys.stdout.write({ascii(stdout)}); sys.stderr.write({ascii(stderr)}); sys.exit({returncode})"
+
+    result = support_bundle._run_command([sys.executable, "-c", code], cwd=tmp_path)
+
+    assert result == {
+        "ok": returncode == 0,
+        "returncode": returncode,
+        "stdout": "✓ path \\udcff Bearer <redacted>\ncontinued stdout",
+        "stderr": "✗ path \\udcff Bearer <redacted>\ncontinued stderr",
+    }
 
 
 def test_collect_environment_routes_pnpm_through_shared_runner(tmp_path, monkeypatch):
@@ -399,7 +463,8 @@ def test_create_support_bundle_masks_hardcoded_env_secret(tmp_path):
     assert env["PROJECT_REF"] == "$SUPABASE_PROJECT_REF"
 
 
-def test_create_support_bundle_writes_sanitized_zip(tmp_path):
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"])
+def test_create_support_bundle_writes_sanitized_zip(tmp_path, encoding):
     project_root = tmp_path / "project"
     project_root.mkdir()
     (project_root / "config.yaml").write_text(
@@ -439,7 +504,7 @@ channels:
                 },
             }
         ),
-        encoding="utf-8",
+        encoding=encoding,
     )
 
     output_path = tmp_path / "support.zip"
@@ -467,6 +532,13 @@ channels:
     assert "brave-secret" not in all_text
     assert "xoxb-secret" not in all_text
     assert "mcp-secret" not in all_text
+
+    extensions_summary = json.loads(_zip_text(bundle_path, "extensions-summary.json"))
+    assert extensions_summary["mcpServers"]["private"]["env"]["PRIVATE_TOKEN"] == "<redacted>"
+
+    triage = json.loads(_zip_text(bundle_path, "triage.json"))
+    assert triage["signals"]["extensions_config_error"] is False
+    assert not any("fix `extensions_config.json` syntax" in step for step in triage["maintainer_next_steps"])
 
     config_summary = json.loads(_zip_text(bundle_path, "config-summary.json"))
     assert config_summary["models"][0]["api_key"] == "<redacted>"

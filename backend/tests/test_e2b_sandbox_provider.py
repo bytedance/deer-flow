@@ -8,6 +8,7 @@ import importlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -278,6 +279,7 @@ def _make_provider(
     provider._transitioning_slots = 0
     provider._capacity_cond = threading.Condition(provider._lock)
     provider._shutdown_called = False
+    provider._shutdown_cleanup_pending = False
     provider._owner_id = "owner-a"
     provider._ownership = FakeOwnershipStore({}, owner_id=provider._owner_id)
     provider._ownership_config = SimpleNamespace(
@@ -3175,6 +3177,107 @@ def test_release_skips_warm_pool_when_sync_reveals_dead_vm(monkeypatch, tmp_path
     assert client.killed is True
 
 
+@pytest.mark.anyio
+async def test_shutdown_defers_teardown_and_fences_cached_acquire_while_maintenance_thread_is_alive():
+    p = _make_provider()
+    p._acquire_executor = ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="e2b-shutdown-acquire-test",
+    )
+    client = FakeClient(sandbox_id="sb-owned")
+    sandbox = _make_sandbox(client, sandbox_id="sb-owned")
+    p._sandboxes = {"sb-owned": sandbox}
+    p._owned_sandbox_ids = {"sb-owned"}
+    p._thread_sandboxes[p._thread_key("thread-owned", "user-owned")] = "sb-owned"
+
+    class JoinControlledThread:
+        def __init__(self) -> None:
+            self.alive = True
+            self.join_timeout: float | None = None
+
+        def join(self, timeout: float | None = None) -> None:
+            self.join_timeout = timeout
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+    lease_thread = JoinControlledThread()
+    p._lease_thread = lease_thread
+
+    with pytest.raises(RuntimeError, match="lease renewal"):
+        p.shutdown()
+
+    assert p._shutdown_called is True
+    assert p._shutdown_cleanup_pending is True
+    assert p._maintenance_stop.is_set()
+    assert p._sandboxes == {"sb-owned": sandbox}
+    assert p._thread_sandboxes[p._thread_key("thread-owned", "user-owned")] == "sb-owned"
+    assert client.killed is False
+    assert lease_thread.join_timeout == 11.0
+
+    with pytest.raises(SandboxCapacityExceededError) as sync_exc:
+        p.acquire("thread-owned", user_id="user-owned")
+    assert sync_exc.value.reason == "shutdown"
+
+    with pytest.raises(SandboxCapacityExceededError) as async_exc:
+        await p.acquire_async("thread-owned", user_id="user-owned")
+    assert async_exc.value.reason == "shutdown"
+
+    lease_thread.alive = False
+    p.shutdown()
+
+    assert p._shutdown_called is True
+    assert p._shutdown_cleanup_pending is False
+    assert p._sandboxes == {}
+    assert client.killed is True
+
+
+def test_atexit_shutdown_logs_pending_cleanup_without_raising(monkeypatch, caplog):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    p = _make_provider()
+
+    def blocked_shutdown() -> None:
+        with p._lock:
+            p._shutdown_called = True
+            p._shutdown_cleanup_pending = True
+        raise mod._E2BMaintenanceShutdownTimeout("E2B maintenance thread shutdown timed out: lease renewal")
+
+    monkeypatch.setattr(p, "shutdown", blocked_shutdown)
+
+    p._shutdown_at_exit()
+
+    assert p._shutdown_cleanup_pending is True
+    assert "still pending at interpreter exit" in caplog.text
+
+
+def test_signal_handler_forwards_original_action_when_shutdown_cleanup_is_pending(monkeypatch):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    p = _make_provider()
+    registered: dict[int, Any] = {}
+    forwarded: list[tuple[int, Any]] = []
+
+    def original_handler(signum, frame):
+        forwarded.append((signum, frame))
+
+    monkeypatch.setattr(signal, "getsignal", lambda _signum: original_handler)
+    monkeypatch.setattr(signal, "signal", lambda signum, handler: registered.__setitem__(signum, handler))
+
+    def blocked_shutdown() -> None:
+        with p._lock:
+            p._shutdown_called = True
+            p._shutdown_cleanup_pending = True
+        raise mod._E2BMaintenanceShutdownTimeout("E2B maintenance thread shutdown timed out: lease renewal")
+
+    monkeypatch.setattr(p, "shutdown", blocked_shutdown)
+    p._register_signal_handlers()
+
+    frame = object()
+    registered[signal.SIGTERM](signal.SIGTERM, frame)
+
+    assert forwarded == [(signal.SIGTERM, frame)]
+    assert p._shutdown_cleanup_pending is True
+
+
 def test_shutdown_only_kills_sandboxes_owned_by_current_instance(monkeypatch):
     p = _make_provider()
     owned_client = FakeClient(sandbox_id="sb-owned")
@@ -3550,6 +3653,11 @@ def test_read_file_supports_bounded_ranges():
     assert sb.read_file("/mnt/user-data/workspace/range.txt", start_line=2, end_line=4) == "line 2\nline 3\nline 4"
     assert sb.read_file("/mnt/user-data/workspace/range.txt", start_line=4) == "line 4\nline 5"
     assert sb.read_file("/mnt/user-data/workspace/range.txt", end_line=2) == "line 1\nline 2"
+    # A start past EOF comes back empty rather than raising, and a negative
+    # start reads from the first line instead of wrapping around.
+    assert sb.read_file("/mnt/user-data/workspace/range.txt", start_line=99) == ""
+    assert sb.read_file("/mnt/user-data/workspace/range.txt", start_line=-1) == "line 1\nline 2\nline 3\nline 4\nline 5"
+    assert sb.read_file("/mnt/user-data/workspace/range.txt", end_line=-1) == ""
 
     resolved_path = "/home/user/workspace/range.txt"
     assert all(path == resolved_path for path, _fmt in files.read_calls), files.read_calls

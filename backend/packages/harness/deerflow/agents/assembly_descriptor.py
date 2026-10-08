@@ -34,6 +34,7 @@ from deerflow_extension_api import (
 
 from deerflow.sandbox.env_policy import is_blocked_env_name
 from deerflow.tools.mcp_metadata import get_mcp_source, is_mcp_tool
+from deerflow.tools.tool_provenance import resolve_tool_provenance
 
 logger = logging.getLogger(__name__)
 
@@ -211,21 +212,13 @@ def _tool_schema(tool: object) -> dict[str, object]:
 
 
 def _tool_source(tool: object) -> str:
-    if is_mcp_tool(tool):
-        source = get_mcp_source(tool)
-        return f"mcp:{source['server_name']}" if source is not None else "mcp:unknown"
-    metadata = getattr(tool, "metadata", None)
-    if isinstance(metadata, dict):
-        declared = metadata.get("deerflow_tool_source")
-        if isinstance(declared, str) and declared:
-            return declared
-    callable_object = getattr(tool, "func", None) or getattr(tool, "coroutine", None)
-    module = getattr(callable_object, "__module__", "") or ""
-    if module.startswith("deerflow.tools.builtins") or module.startswith("deerflow.agents.memory"):
-        return "builtin"
-    if "skill" in module:
-        return "skill"
-    return "community" if module else "builtin"
+    """Project the tool's display attribution (see `deerflow.tools.tool_provenance`).
+
+    Delegates so the descriptor identity and the execution-time label cannot
+    disagree. Labels for sources that carry no host-written tag are unchanged.
+    """
+    provenance = resolve_tool_provenance(tool)
+    return provenance.source if provenance is not None else "builtin"
 
 
 def describe_tool(tool: object) -> ToolDescriptor:

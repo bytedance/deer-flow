@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import get_type_hints
 
 import pytest
@@ -726,6 +727,65 @@ def test_before_agent_applies_network_approval_to_same_sandbox() -> None:
         reset_sandbox_provider()
 
     assert provider.decisions == [("existing", "req-1", "allow_temporary")]
+
+
+@pytest.mark.anyio
+async def test_abefore_agent_drains_started_network_approval_across_cancellation() -> None:
+    provider = _NetworkPolicyProvider()
+    started = threading.Event()
+    release = threading.Event()
+
+    def decide(sandbox_id: str, request_id: str, decision: str) -> bool:
+        started.set()
+        assert release.wait(timeout=2)
+        provider.decisions.append((sandbox_id, request_id, decision))
+        return True
+
+    provider.decide_network_policy_request = decide  # type: ignore[method-assign]
+    response = HumanMessage(
+        content="Allow network access for 5 minutes",
+        additional_kwargs={
+            "hide_from_ui": True,
+            "human_input_response": {
+                "version": 1,
+                "kind": "human_input_response",
+                "source": "sandbox_network",
+                "request_id": "req-cancel",
+                "response_kind": "option",
+                "option_id": "allow_temporary",
+                "value": "Allow network access for 5 minutes",
+            },
+        },
+    )
+    state = {"sandbox": {"sandbox_id": "existing"}, "messages": [response]}
+    task = None
+    set_sandbox_provider(provider)
+    try:
+        task = asyncio.create_task(
+            SandboxMiddleware().abefore_agent(
+                state,
+                Runtime(context={"thread_id": "thread-cancel"}),
+            )
+        )
+        assert await asyncio.to_thread(started.wait, 2)
+
+        task.cancel()
+        await asyncio.sleep(0.05)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        reset_sandbox_provider()
+
+    assert provider.decisions == [("existing", "req-cancel", "allow_temporary")]
 
 
 def test_before_agent_does_not_reapply_network_approval_after_new_user_turn() -> None:

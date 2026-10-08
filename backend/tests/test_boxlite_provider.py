@@ -18,9 +18,11 @@ import time
 import types
 
 import pytest
+from pydantic import ValidationError
 
 from deerflow.community.boxlite.box import BoxliteBox
 from deerflow.community.boxlite.provider import BoxliteProvider, _import_simplebox
+from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.trace_context import get_current_trace_id, request_trace_context
 
 _LEGACY_COLLIDING_IDENTITIES = (
@@ -204,6 +206,11 @@ def test_read_file_supports_optional_line_ranges(monkeypatch: pytest.MonkeyPatch
     assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=2, end_line=4) == "line 2\nline 3\nline 4"
     assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=4) == "line 4\nline 5"
     assert box.read_file("/mnt/user-data/workspace/range.txt", end_line=2) == "line 1\nline 2"
+    # A start past EOF comes back empty rather than raising, and a negative
+    # start reads from the first line instead of wrapping around.
+    assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=99) == ""
+    assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=-1) == "line 1\nline 2\nline 3\nline 4\nline 5"
+    assert box.read_file("/mnt/user-data/workspace/range.txt", end_line=-1) == ""
     assert all(call == ("cat", "--", "/mnt/user-data/workspace/range.txt") for call in calls)
 
 
@@ -536,6 +543,25 @@ async def test_acquire_async_propagates_request_trace_context(monkeypatch):
         # _fake_run uses asyncio.run, which cannot run inside this test's event
         # loop thread; shut down on a worker thread so box close() completes.
         await asyncio.to_thread(provider.shutdown)
+
+
+@pytest.mark.parametrize("value", [float("inf"), "1e999"])
+def test_sandbox_config_rejects_non_finite_health_check_skip_seconds(value):
+    """`ge=0` alone lets a non-finite skip window through.
+
+    `health_check_skip_seconds: 1e999` in config.yaml loads as the string
+    "1e999" and pydantic's float coercion turns it into inf; `ge=0` accepts
+    inf (inf >= 0). At the warm-reuse site the check `skip_seconds > 0 and
+    (now - released_at) < skip_seconds` then holds forever, so recently
+    released boxes are promoted without the health check permanently instead
+    of failing fast at config load. `allow_inf_nan=False` (as already set on
+    the sibling sandbox float fields) makes the config layer reject it.
+    """
+    with pytest.raises(ValidationError):
+        SandboxConfig(
+            use="deerflow.community.boxlite.provider:BoxliteProvider",
+            health_check_skip_seconds=value,
+        )
 
 
 def test_explicit_recent_reclaim_skip_avoids_health_check(monkeypatch):
@@ -1106,6 +1132,185 @@ def test_replica_enforcement_counts_active_and_warm(monkeypatch):
 # ── Task 8: Shutdown and reset including warm pool ────────────────────
 
 
+@pytest.mark.parametrize("thread_id", [None, "thread-late"])
+def test_shutdown_rejects_and_closes_box_created_by_inflight_acquire(monkeypatch, thread_id):
+    monkeypatch.setattr("deerflow.community.boxlite.provider.get_app_config", lambda: _stub_config({"idle_timeout": 0}))
+    monkeypatch.setattr("deerflow.community.boxlite.provider._import_simplebox", lambda: _FakeBox)
+    provider = BoxliteProvider()
+    created = threading.Event()
+    resume_create = threading.Event()
+    shutdown_started = threading.Event()
+    boxes = []
+    acquired = []
+    acquire_errors = []
+    shutdown_errors = []
+    closed_before_loop = []
+    original_create = provider._create_box
+    original_stop = provider._stop_idle_checker
+    original_close_loop = provider._loop.close
+
+    def paused_create(sandbox_id):
+        box = original_create(sandbox_id)
+        boxes.append(box)
+        created.set()
+        assert resume_create.wait(10)
+        return box
+
+    def signal_shutdown():
+        original_stop()
+        shutdown_started.set()
+
+    def close_loop():
+        closed_before_loop.append(boxes[0]._box._stopped)
+        original_close_loop()
+
+    def acquire():
+        try:
+            acquired.append(provider.acquire(thread_id, user_id="u1"))
+        except Exception as error:
+            acquire_errors.append(error)
+
+    def shutdown():
+        try:
+            provider.shutdown()
+        except Exception as error:
+            shutdown_errors.append(error)
+
+    monkeypatch.setattr(provider, "_create_box", paused_create)
+    monkeypatch.setattr(provider, "_stop_idle_checker", signal_shutdown)
+    monkeypatch.setattr(provider._loop, "close", close_loop)
+    acquirer = threading.Thread(target=acquire)
+    closer = threading.Thread(target=shutdown)
+    try:
+        acquirer.start()
+        assert created.wait(5)
+        closer.start()
+        assert shutdown_started.wait(5)
+        resume_create.set()
+        acquirer.join(5)
+        closer.join(5)
+        assert not acquirer.is_alive()
+        assert not closer.is_alive()
+        assert acquired == []
+        assert len(acquire_errors) == 1
+        assert isinstance(acquire_errors[0], RuntimeError)
+        assert "shutting down" in str(acquire_errors[0])
+        assert shutdown_errors == []
+        assert boxes[0].is_closed
+        assert boxes[0]._box._stopped
+        assert closed_before_loop == [True]
+        assert provider._boxes == {}
+        assert provider._thread_boxes == {}
+        assert provider._active_box_identity == {}
+        assert provider._warm_pool == {}
+        assert provider._loop._loop.is_closed()
+        provider.shutdown()
+        assert closed_before_loop == [True]
+    finally:
+        resume_create.set()
+        acquirer.join(5)
+        if closer.ident is not None:
+            closer.join(5)
+        provider.shutdown()
+
+
+def test_shutdown_acquire_drain_timeout_keeps_resources_owned_for_retry(monkeypatch):
+    monkeypatch.setattr("deerflow.community.boxlite.provider.get_app_config", lambda: _stub_config({"idle_timeout": 0}))
+    monkeypatch.setattr("deerflow.community.boxlite.provider._import_simplebox", lambda: _FakeBox)
+    provider = BoxliteProvider()
+    existing_id = provider.acquire("thread-existing", user_id="u1")
+    existing_box = provider.get(existing_id)
+    created = threading.Event()
+    resume_create = threading.Event()
+    acquired = []
+    errors = []
+    original_create = provider._create_box
+
+    def paused_create(sandbox_id):
+        box = original_create(sandbox_id)
+        created.set()
+        assert resume_create.wait(10)
+        return box
+
+    def acquire():
+        try:
+            acquired.append(provider.acquire("thread-late", user_id="u1"))
+        except Exception as error:
+            errors.append(error)
+
+    monkeypatch.setattr(provider, "_create_box", paused_create)
+    acquirer = threading.Thread(target=acquire)
+    try:
+        acquirer.start()
+        assert created.wait(5)
+        with monkeypatch.context() as timeout:
+            timeout.setattr(threading.Condition, "wait_for", lambda self, predicate, timeout=None: False)
+            with pytest.raises(RuntimeError, match="in-flight acquisitions"):
+                provider.shutdown()
+        assert not provider._shutdown_called
+        assert provider.get(existing_id) is existing_box
+        assert not existing_box.is_closed
+        assert provider._loop._loop.is_running()
+        resume_create.set()
+        acquirer.join(5)
+        assert not acquirer.is_alive()
+        assert errors == []
+        assert len(acquired) == 1
+        late_box = provider.get(acquired[0])
+        assert late_box is not None
+        provider.shutdown()
+        assert existing_box._box._stopped
+        assert late_box._box._stopped
+        assert provider._boxes == {}
+        assert provider._loop._loop.is_closed()
+    finally:
+        resume_create.set()
+        acquirer.join(5)
+        provider.shutdown()
+
+
+def test_shutdown_retries_only_private_loop_cleanup_after_join_timeout(monkeypatch):
+    from deerflow.community.boxlite.provider import _BoxliteLoopShutdownTimeout
+
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config({"idle_timeout": 0}),
+    )
+
+    provider = BoxliteProvider()
+    provider._loop.close()
+
+    class RetryLoop:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+            if self.close_calls == 1:
+                raise _BoxliteLoopShutdownTimeout("BoxLite event-loop thread is still running after stop timeout")
+
+    retry_loop = RetryLoop()
+    provider._loop = retry_loop
+
+    with pytest.raises(_BoxliteLoopShutdownTimeout, match="still running"):
+        provider.shutdown()
+
+    assert provider._shutdown_called is True
+    assert provider._loop_cleanup_pending is True
+    assert retry_loop.close_calls == 1
+
+    with pytest.raises(RuntimeError, match="shutting down"):
+        provider.acquire()
+
+    provider.shutdown()
+
+    assert provider._loop_cleanup_pending is False
+    assert retry_loop.close_calls == 2
+
+    provider.shutdown()
+    assert retry_loop.close_calls == 2
+
+
 def test_shutdown_stops_idle_reaper_and_destroys_all_boxes(monkeypatch):
     """shutdown stops the idle reaper thread and destroys all active + warm boxes."""
     monkeypatch.setattr(
@@ -1506,6 +1711,67 @@ def test_grep_single_file_path_with_matching_glob(tmp_path, monkeypatch) -> None
     assert [m.path for m in matches] == [str(target)]
     assert truncated is False
     assert box.grep(str(target), "needle", glob="*.md") == ([], False)
+
+
+def test_event_loop_thread_close_rejects_live_thread_after_timeout() -> None:
+    from deerflow.community.boxlite.provider import (
+        _BoxliteLoopShutdownTimeout,
+        _EventLoopThread,
+    )
+
+    class FakeLoop:
+        def __init__(self) -> None:
+            self.running = True
+            self.closed = False
+            self.stop_calls = 0
+            self.close_calls = 0
+
+        def is_closed(self) -> bool:
+            return self.closed
+
+        def stop(self) -> None:
+            self.stop_calls += 1
+
+        def call_soon_threadsafe(self, callback) -> None:
+            callback()
+
+        def _write_to_self(self) -> None:
+            return None
+
+        def is_running(self) -> bool:
+            return self.running
+
+        def close(self) -> None:
+            self.close_calls += 1
+            self.closed = True
+
+    class JoinControlledThread:
+        def __init__(self) -> None:
+            self.alive = True
+            self.join_timeout: float | None = None
+
+        def join(self, timeout: float | None = None) -> None:
+            self.join_timeout = timeout
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+    loop_thread = _EventLoopThread.__new__(_EventLoopThread)
+    loop_thread._loop = FakeLoop()
+    loop_thread._thread = JoinControlledThread()
+
+    with pytest.raises(_BoxliteLoopShutdownTimeout, match="still running"):
+        loop_thread.close()
+
+    assert loop_thread._thread.join_timeout == 5
+    assert loop_thread._loop.close_calls == 0
+
+    loop_thread._thread.alive = False
+    loop_thread._loop.running = False
+    loop_thread.close()
+
+    assert loop_thread._loop.closed is True
+    assert loop_thread._loop.close_calls == 1
 
 
 def test_event_loop_thread_timeout_cancels_submitted_coroutine() -> None:

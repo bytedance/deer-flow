@@ -1,14 +1,41 @@
 import ast
 import html
 import json
+import math
 import re
 import uuid
 from collections.abc import Iterator
+from decimal import Decimal, InvalidOperation
 
 import httpx
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from langchain_openai import ChatOpenAI
+
+_JSON_NUMBER_RE = re.compile(r"^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$")
+
+
+def _parse_json_float(value: str) -> float:
+    """Parse a JSON float without silently overflowing or underflowing."""
+    try:
+        precise = Decimal(value)
+    except InvalidOperation as exc:
+        raise ValueError(f"invalid JSON number: {value}") from exc
+    converted = float(precise)
+    if not math.isfinite(converted) or (precise != 0 and converted == 0.0):
+        raise ValueError(f"JSON number is outside the representable float range: {value}")
+    return converted
+
+
+def _safe_literal(value: object) -> bool:
+    """Reject non-finite floats nested in an AST fallback value."""
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return all(_safe_literal(item) for item in value)
+    if isinstance(value, dict):
+        return all(_safe_literal(item) for item in value.values())
+    return True
 
 
 def _fix_messages(messages: list) -> list:
@@ -29,6 +56,20 @@ def _fix_messages(messages: list) -> list:
                     parts.append(block)
                 elif isinstance(block, dict) and block.get("type") == "text":
                     parts.append(block.get("text", ""))
+                elif isinstance(msg, ToolMessage) and isinstance(block, dict) and block.get("type") == "json" and "json" in block:
+                    # Structured tool results ride the same text channel; serialize
+                    # them or the model sees an empty <tool_response>. ToolMessage
+                    # only: InputSanitizationMiddleware scans just strings and text
+                    # blocks, so a json block smuggled into a genuine user message
+                    # would reach the model unescaped if it were rendered here.
+                    # Those keep the old drop behavior, as does a block with no
+                    # "json" key (rather than emitting a literal "null"). Circular
+                    # payloads raise ValueError, other non-serializable values
+                    # TypeError; degrade both to str().
+                    try:
+                        parts.append(json.dumps(block["json"], ensure_ascii=False))
+                    except (TypeError, ValueError):
+                        parts.append(str(block["json"]))
             text = "".join(parts)
         else:
             text = msg.content or ""
@@ -108,14 +149,26 @@ def _parse_xml_tool_call_to_dict(content: str) -> tuple[str, list[dict]]:
             # Attempt to deserialize string values into native Python types
             # to satisfy downstream Pydantic validation.
             parsed_value = raw_value
-            if raw_value.startswith(("[", "{")) or raw_value in ("true", "false", "null") or raw_value.isdigit():
+            if raw_value.startswith(("[", "{")) or raw_value in ("true", "false", "null") or _JSON_NUMBER_RE.fullmatch(raw_value):
                 try:
-                    parsed_value = json.loads(raw_value)
+                    parsed_value = json.loads(raw_value, parse_float=_parse_json_float)
                 except json.JSONDecodeError:
                     try:
-                        parsed_value = ast.literal_eval(raw_value)
+                        candidate = ast.literal_eval(raw_value)
+                        if _safe_literal(candidate):
+                            parsed_value = candidate
                     except (ValueError, SyntaxError):
-                        pass
+                        # Raw strings retain the gateway's multiline compatibility.
+                        # Structured arguments must be parsed before this decode.
+                        parsed_value = _decode_escaped_newlines_outside_fences(raw_value).strip()
+                except ValueError:
+                    # Preserve the entire argument when JSON numeric conversion
+                    # rejects overflow, underflow, or the integer digit limit.
+                    # Retrying containers with literal_eval would turn nested
+                    # underflowing numbers into zero and bypass this validation.
+                    pass
+            else:
+                parsed_value = _decode_escaped_newlines_outside_fences(raw_value).strip()
 
             args[key] = parsed_value
 
@@ -199,17 +252,18 @@ class MindIEChatModel(ChatOpenAI):
             msg = gen.message
 
             if isinstance(msg.content, str):
-                # Keep escaped newlines inside fenced code blocks untouched.
-                msg.content = _decode_escaped_newlines_outside_fences(msg.content)
+                # Parse the original payload before display-only newline fixes:
+                # replacing escapes inside JSON can corrupt its syntax or values.
+                clean_content, extracted_tools = _parse_xml_tool_call_to_dict(msg.content)
 
-                if "<tool_call>" in msg.content:
-                    clean_content, extracted_tools = _parse_xml_tool_call_to_dict(msg.content)
-
-                    if extracted_tools:
-                        msg.content = clean_content
-                        if getattr(msg, "tool_calls", None) is None:
-                            msg.tool_calls = []
-                        msg.tool_calls.extend(extracted_tools)
+                if extracted_tools:
+                    msg.content = _decode_escaped_newlines_outside_fences(clean_content).strip()
+                    if getattr(msg, "tool_calls", None) is None:
+                        msg.tool_calls = []
+                    msg.tool_calls.extend(extracted_tools)
+                else:
+                    # Preserve unparseable XML and the existing prose/code behavior.
+                    msg.content = _decode_escaped_newlines_outside_fences(msg.content)
         return result
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):

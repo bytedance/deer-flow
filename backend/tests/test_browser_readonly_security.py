@@ -223,3 +223,138 @@ async def test_browser_stream_rechecks_policy_on_new_connection(monkeypatch):
     await browser.browser_stream(websocket, "test-thread")
     websocket.close.assert_awaited_once_with(code=4403)
     negotiate.assert_awaited_once()  # Second connection never gets this far.
+
+
+@pytest.mark.asyncio
+async def test_browser_stream_cancellation_during_disconnect_cleanup_releases_session_lease(monkeypatch):
+    config = AuthorizationConfig(enabled=False)
+    monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: config)
+    user = get_auth_disabled_user()
+    monkeypatch.setattr(browser, "_authenticate_ws", AsyncMock(return_value=user))
+    monkeypatch.setattr(browser, "_browser_tools_enabled", lambda: True)
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: SimpleNamespace(get_tool_config=lambda _: None))
+    monkeypatch.setattr(browser, "_negotiate_browser_frame_format", AsyncMock(return_value=False))
+
+    stop_entered = asyncio.Event()
+    stop_release = asyncio.Event()
+    lease_released = asyncio.Event()
+
+    async def stop_screencast(_on_frame):
+        stop_entered.set()
+        await stop_release.wait()
+
+    session = SimpleNamespace(
+        start_screencast=AsyncMock(),
+        stop_screencast=stop_screencast,
+        current_url=AsyncMock(return_value=None),
+        tabs=AsyncMock(return_value=[]),
+        dispatch_input=AsyncMock(),
+    )
+
+    @contextmanager
+    def acquire_session(_thread_id, **_kwargs):
+        try:
+            yield session
+        finally:
+            lease_released.set()
+
+    monkeypatch.setattr(
+        "deerflow.community.browser_automation.get_browser_session_manager",
+        lambda: SimpleNamespace(acquire_session=acquire_session),
+    )
+
+    websocket = MagicMock()
+    websocket.headers = {}
+    websocket.query_params = {}
+    websocket.send_text = AsyncMock()
+    websocket.close = AsyncMock()
+    websocket.receive_text = AsyncMock(side_effect=WebSocketDisconnect())
+    websocket.app.state.thread_store.get = AsyncMock(return_value={"user_id": user.id})
+
+    stream_task = asyncio.create_task(browser.browser_stream(websocket, "test-thread"))
+    await asyncio.wait_for(stop_entered.wait(), timeout=1)
+
+    stream_task.cancel("gateway shutdown")
+    await asyncio.sleep(0)
+
+    assert not stream_task.done(), "Live cleanup returned before its owned screencast teardown drained"
+    assert not lease_released.is_set()
+
+    stream_task.cancel("forced shutdown")
+    await asyncio.sleep(0)
+    assert not stream_task.done(), "Repeated cancellation abandoned Live cleanup"
+
+    stop_release.set()
+    with pytest.raises(asyncio.CancelledError, match="gateway shutdown"):
+        await stream_task
+
+    assert lease_released.is_set()
+
+
+@pytest.mark.asyncio
+async def test_browser_stream_preserves_first_cancellation_across_cleanup_cancellation(monkeypatch):
+    config = AuthorizationConfig(enabled=False)
+    monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: config)
+    user = get_auth_disabled_user()
+    monkeypatch.setattr(browser, "_authenticate_ws", AsyncMock(return_value=user))
+    monkeypatch.setattr(browser, "_browser_tools_enabled", lambda: True)
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: SimpleNamespace(get_tool_config=lambda _: None))
+    monkeypatch.setattr(browser, "_negotiate_browser_frame_format", AsyncMock(return_value=False))
+
+    start_entered = asyncio.Event()
+    stop_entered = asyncio.Event()
+    stop_release = asyncio.Event()
+    lease_released = asyncio.Event()
+
+    async def start_screencast(_on_frame):
+        start_entered.set()
+        await asyncio.Future()
+
+    async def stop_screencast(_on_frame):
+        stop_entered.set()
+        await stop_release.wait()
+
+    session = SimpleNamespace(
+        start_screencast=start_screencast,
+        stop_screencast=stop_screencast,
+        current_url=AsyncMock(return_value=None),
+        tabs=AsyncMock(return_value=[]),
+        dispatch_input=AsyncMock(),
+    )
+
+    @contextmanager
+    def acquire_session(_thread_id, **_kwargs):
+        try:
+            yield session
+        finally:
+            lease_released.set()
+
+    monkeypatch.setattr(
+        "deerflow.community.browser_automation.get_browser_session_manager",
+        lambda: SimpleNamespace(acquire_session=acquire_session),
+    )
+
+    websocket = MagicMock()
+    websocket.headers = {}
+    websocket.query_params = {}
+    websocket.send_text = AsyncMock()
+    websocket.close = AsyncMock()
+    websocket.receive_text = AsyncMock(side_effect=WebSocketDisconnect())
+    websocket.app.state.thread_store.get = AsyncMock(return_value={"user_id": user.id})
+
+    stream_task = asyncio.create_task(browser.browser_stream(websocket, "test-thread"))
+    await asyncio.wait_for(start_entered.wait(), timeout=1)
+
+    stream_task.cancel("gateway shutdown")
+    await asyncio.wait_for(stop_entered.wait(), timeout=1)
+
+    stream_task.cancel("forced shutdown")
+    await asyncio.sleep(0)
+    assert not stream_task.done(), "Repeated cancellation abandoned Live cleanup"
+    assert not lease_released.is_set()
+
+    stop_release.set()
+    with pytest.raises(asyncio.CancelledError, match="gateway shutdown"):
+        await stream_task
+
+    assert lease_released.is_set()

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import tempfile
+import threading
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -77,6 +78,54 @@ def _feishu_file_channel(*responses):
     return channel
 
 
+@pytest.mark.parametrize("failure", [None, "sync", "release"])
+def test_feishu_receive_single_file_releases_sandbox_after_sync(tmp_path, monkeypatch, failure):
+    async def go():
+        from deerflow.config.paths import Paths
+
+        channel = _feishu_file_channel(_feishu_file_response("note.txt", b"hello uploads"))
+        provider = MagicMock()
+        provider.uses_thread_data_mounts = False
+        provider.acquire_async = AsyncMock(return_value="aio-1")
+        sandbox = provider.get.return_value
+        if failure == "sync":
+            sandbox.update_file.side_effect = RuntimeError("sync failed")
+        elif failure == "release":
+            provider.release.side_effect = RuntimeError("release failed")
+        monkeypatch.setattr(feishu_module, "get_paths", lambda: Paths(base_dir=tmp_path))
+        monkeypatch.setattr(feishu_module, "get_sandbox_provider", lambda: provider)
+
+        result = await channel._receive_single_file("message-1", "file-key", "file", "thread-a", user_id="owner-upload")
+
+        assert result == ("Failed to obtain the [file]" if failure == "sync" else "/mnt/user-data/uploads/note.txt")
+        provider.acquire_async.assert_awaited_once_with("thread-a", user_id="owner-upload")
+        sandbox.update_file.assert_called_once_with("/mnt/user-data/uploads/note.txt", b"hello uploads")
+        provider.release.assert_called_once_with("aio-1")
+
+    _run(go())
+
+
+def test_feishu_receive_single_file_skips_release_for_mounted_sandbox(tmp_path, monkeypatch):
+    async def go():
+        from deerflow.config.paths import Paths
+
+        channel = _feishu_file_channel(_feishu_file_response("note.txt", b"hello uploads"))
+        provider = MagicMock()
+        provider.uses_thread_data_mounts = True
+        monkeypatch.setattr(feishu_module, "get_paths", lambda: Paths(base_dir=tmp_path))
+        monkeypatch.setattr(feishu_module, "get_sandbox_provider", lambda: provider)
+
+        result = await channel._receive_single_file("message-1", "file-key", "file", "thread-a", user_id="owner-upload")
+
+        assert result == "/mnt/user-data/uploads/note.txt"
+        provider.acquire.assert_not_called()
+        provider.acquire_async.assert_not_called()
+        provider.get.assert_not_called()
+        provider.release.assert_not_called()
+
+    _run(go())
+
+
 def test_feishu_on_message_plain_text():
     bus = MessageBus()
     config = {"app_id": "test", "app_secret": "test"}
@@ -115,6 +164,47 @@ def test_feishu_is_not_running_when_ws_thread_exits():
     channel._thread.is_alive.return_value = False
 
     assert channel.is_running is False
+
+
+def test_feishu_stop_joins_ws_thread_off_the_event_loop():
+    async def go():
+        channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+        release = threading.Event()
+        # lark's ws client never returns from start(), so the join in stop()
+        # waits out its timeout; this thread blocks the same way, bounded so a
+        # join run on the event loop fails the assertion below instead of
+        # hanging the test.
+        ws_thread = threading.Thread(target=release.wait, args=(2,), daemon=True)
+        ws_thread.start()
+        channel._thread = ws_thread
+        channel._running = True
+
+        stop_task = asyncio.create_task(channel.stop())
+        await asyncio.sleep(0.05)
+        assert not stop_task.done()
+
+        release.set()
+        await stop_task
+        assert channel._thread is None
+
+    asyncio.run(go())
+
+
+def test_feishu_stop_retains_live_ws_thread_after_join_timeout():
+    async def go():
+        channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+        thread = MagicMock()
+        thread.is_alive.return_value = True
+        channel._thread = thread
+        channel._running = True
+
+        with pytest.raises(RuntimeError, match="still running after stop timeout"):
+            await channel.stop()
+
+        thread.join.assert_called_once_with(timeout=5)
+        assert channel._thread is thread
+
+    asyncio.run(go())
 
 
 def test_feishu_event_handler_ignores_non_content_message_events():
@@ -563,6 +653,8 @@ def _make_file_event(
 def test_feishu_batches_top_level_file_messages_from_same_user(monkeypatch):
     async def go():
         monkeypatch.setattr("app.channels.feishu.FEISHU_INBOUND_BATCH_WINDOW_SECONDS", 0.01)
+        # Keep both callbacks inside the batch window even on a busy CI runner.
+        monkeypatch.setattr("app.channels.feishu.time.time", lambda: 1_000.0)
         bus = MessageBus()
         channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
         channel._main_loop = asyncio.get_running_loop()

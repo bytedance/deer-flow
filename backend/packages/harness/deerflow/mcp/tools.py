@@ -21,11 +21,16 @@ from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT, MCP_TMP_SUBDIR
 from deerflow.mcp.client import build_servers_config
 from deerflow.mcp.headers import apply_header_overrides
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors, compose_tool_interceptors
-from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
-from deerflow.mcp.session_pool import call_pooled_session_tool, get_session_pool
+from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor, get_initial_oauth_headers
+from deerflow.mcp.session_pool import (
+    MCPPoolDomain,
+    call_pooled_session_tool,
+    get_session_pool,
+)
 from deerflow.mcp.tasks import ORDINARY_MCP_TASK_DRIVER, TaskSubmitRequest
 from deerflow.mcp.tasks.runtime import (
     McpTaskConfigurationError,
+    get_mcp_task_oauth_token_manager,
     get_mcp_task_submitter,
     validate_mcp_task_config_snapshot,
 )
@@ -275,9 +280,9 @@ def _rewrite_unique_bare_filenames(
 
     rewritten = text
     for name in sorted(unique, key=len, reverse=True):
-        # Do not rewrite inside longer paths/words. A final sentence period is
-        # allowed, but ".bak" or another path segment is not.
-        pattern = re.compile(rf"(?<![\w./-]){re.escape(name)}(?!(?:[\w/-]|\.[\w]))")
+        # Do not rewrite inside longer paths/words, with either path separator.
+        # A final sentence period is allowed, but ".bak" or another segment is not.
+        pattern = re.compile(rf"(?<![\w./\\-]){re.escape(name)}(?!(?:[\w/\\-]|\.[\w]))")
         # A callable replacement, not a template: the virtual path is built from
         # the real file's relative path, where a backslash is an ordinary
         # character, so it must never be read as a regex escape.
@@ -539,11 +544,12 @@ def _make_session_pool_tool(
     tool_call_timeout: float | None = None,
     session_init_timeout: float | None = None,
     tool_name_prefix: bool = True,
+    ownership_domain: MCPPoolDomain = "deployment",
 ) -> BaseTool:
     """Wrap an MCP tool so it reuses a persistent session from the pool.
 
     Replaces the per-call session creation with pool-managed sessions scoped
-    by ``(server_name, user/thread/incarnation)``. This ensures stateful MCP servers
+    by ``(server_name, user/thread/incarnation, ownership_domain)``. This ensures stateful MCP servers
     (e.g. Playwright) keep their state across tool calls within the same thread
     while staying isolated per user.
 
@@ -607,6 +613,16 @@ def _make_session_pool_tool(
             session_env.setdefault("TMP", str(tmp_dir))
             session_env.setdefault("TEMP", str(tmp_dir))
             session_connection["env"] = session_env
+        session_request = (
+            pool.get_session(server_name, scope_key, session_connection)
+            if ownership_domain == "deployment"
+            else pool.get_session(
+                server_name,
+                scope_key,
+                session_connection,
+                domain=ownership_domain,
+            )
+        )
         if session_init_timeout is not None:
             # Cancellation here is safe: MCPSessionPool.get_session owns the
             # teardown of a session stuck mid-creation (it signals close and
@@ -614,7 +630,7 @@ def _make_session_pool_tool(
             # so a hung server cannot leak a session or block the turn.
             try:
                 session = await asyncio.wait_for(
-                    pool.get_session(server_name, scope_key, session_connection),
+                    session_request,
                     timeout=session_init_timeout,
                 )
             except TimeoutError:
@@ -629,7 +645,9 @@ def _make_session_pool_tool(
                 )
                 raise
         else:
-            session = await pool.get_session(server_name, scope_key, session_connection)
+            session = await session_request
+
+        domain_kwargs = {"domain": ownership_domain} if ownership_domain != "deployment" else {}
 
         # Build common call_tool kwargs once — only add keys when needed so
         # existing call-sites that assert on exact arguments are not affected.
@@ -657,6 +675,7 @@ def _make_session_pool_tool(
                     tool_name=request.name,
                     arguments=request.args,
                     call_kwargs=kwargs,
+                    **domain_kwargs,
                 )
 
             handler = compose_tool_interceptors(tool_interceptors, base_handler)
@@ -677,6 +696,7 @@ def _make_session_pool_tool(
                 tool_name=original_name,
                 arguments=arguments,
                 call_kwargs=call_kwargs,
+                **domain_kwargs,
             )
 
         # The after-call snapshot diff only feeds bare-filename correlation in
@@ -726,6 +746,7 @@ def _make_background_submit_tool(
     submit_tool: str,
     status_tool: str,
     cancel_tool: str,
+    connection_scope: str,
 ) -> BaseTool:
     background_contract = f"Submitted as durable background task {task_name!r}; returns a DeerFlow task ID immediately and status polling is handled automatically."
 
@@ -755,6 +776,7 @@ def _make_background_submit_tool(
                     "submit_tool": submit_tool,
                     "status_tool": status_tool,
                     "cancel_tool": cancel_tool,
+                    "connection_scope": connection_scope,
                 },
             ),
         )
@@ -780,6 +802,7 @@ def _configure_task_tools_for_server(
     server_name: str,
     server_config: McpServerConfig,
     tool_name_prefix: bool,
+    connection_scope: str = "deployment",
 ) -> list[BaseTool]:
     """Hide driver-only tools and replace submit with a durable wrapper."""
     if not server_config.task_toolsets:
@@ -829,12 +852,13 @@ def _configure_task_tools_for_server(
                 submit_tool=toolset.submit_tool,
                 status_tool=toolset.status_tool,
                 cancel_tool=toolset.cancel_tool,
+                connection_scope=connection_scope,
             )
         )
     return configured
 
 
-async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None) -> list[BaseTool]:
+async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, personal_user_id: str | None = None) -> list[BaseTool]:
     """Get all tools from enabled MCP servers.
 
     Tools using stdio transport are wrapped with persistent-session logic so
@@ -864,7 +888,19 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None) -> li
         # reflected when initializing MCP tools. Callers that need to prove which
         # revision produced these tools pass the instance they snapshotted instead.
         extensions_config = ExtensionsConfig.from_file()
-    validate_mcp_task_config_snapshot(extensions_config)
+    if personal_user_id is None:
+        validate_mcp_task_config_snapshot(extensions_config)
+    else:
+        from deerflow.mcp.personal_access import authorized_personal_config
+        from deerflow.mcp.tasks.runtime import is_mcp_task_runtime_available
+        from deerflow.mcp.user_config import load_user_mcp_config
+
+        current = await asyncio.to_thread(load_user_mcp_config, personal_user_id)
+        if current != extensions_config:
+            raise McpTaskConfigurationError("Personal MCP configuration changed during discovery; retry the run")
+        extensions_config = current = await authorized_personal_config(personal_user_id, current)
+        if any(server.task_toolsets for server in current.mcp_servers.values()) and not is_mcp_task_runtime_available():
+            raise McpTaskConfigurationError("Personal MCP task toolsets require the platform's durable task runtime")
     servers_config = build_servers_config(extensions_config)
 
     if not servers_config:
@@ -876,7 +912,8 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None) -> li
         logger.info(f"Initializing MCP client with {len(servers_config)} server(s)")
 
         # Inject initial OAuth headers for server connections (tool discovery/session init)
-        initial_oauth_headers = await get_initial_oauth_headers(extensions_config)
+        oauth_token_manager = OAuthTokenManager.from_extensions_config(extensions_config) if personal_user_id is not None else get_mcp_task_oauth_token_manager(extensions_config)
+        initial_oauth_headers = await get_initial_oauth_headers(extensions_config, token_manager=oauth_token_manager)
         for server_name, auth_header in initial_oauth_headers.items():
             if server_name not in servers_config:
                 continue
@@ -890,7 +927,7 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None) -> li
 
         tool_interceptors = build_mcp_tool_interceptors(
             extensions_config,
-            oauth_builder=build_oauth_tool_interceptor,
+            oauth_builder=lambda config: build_oauth_tool_interceptor(config, token_manager=oauth_token_manager),
             resolver=resolve_variable,
             target_logger=logger,
         )
@@ -1005,6 +1042,7 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None) -> li
                             tool_call_timeout=_timeout,
                             session_init_timeout=_init_timeout,
                             tool_name_prefix=tool_name_prefix,
+                            ownership_domain=("personal" if personal_user_id is not None else "deployment"),
                         )
                     )
                 else:
@@ -1022,6 +1060,7 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None) -> li
                     server_name=source_name,
                     server_config=server_cfg,
                     tool_name_prefix=tool_name_prefix,
+                    connection_scope="personal" if personal_user_id is not None else "deployment",
                 )
             wrapped_tools.extend(current_server_tools)
 

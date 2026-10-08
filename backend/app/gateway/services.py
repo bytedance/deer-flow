@@ -13,6 +13,7 @@ import json
 import logging
 import re
 import threading
+import uuid
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -25,8 +26,8 @@ from langchain_core.messages import BaseMessage, ChatMessage, HumanMessage, Syst
 from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 
-from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
-from app.gateway.authz import require_cancel_permission_if
+from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_INTERNAL, get_auth_disabled_user, is_auth_disabled
+from app.gateway.authz import require_cancel_permission_if, resolve_route_permissions
 from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_manager, get_stream_bridge
 from app.gateway.internal_auth import (
     INTERNAL_OWNER_USER_ID_HEADER_NAME,
@@ -36,13 +37,16 @@ from app.gateway.internal_auth import (
 )
 from app.gateway.knowledge_scope_admission import admit_message_knowledge_scope
 from app.gateway.run_models import RunCreateRequest
+from app.gateway.run_origin import resolve_request_origin
 from app.gateway.utils import sanitize_log_param
 from app.mcp_tasks.errors import PermanentNotificationError
 from deerflow.agents.human_input import read_human_input_response
+from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
 from deerflow.agents.middlewares.message_utils import _SUMMARY_MESSAGE_NAME, is_genuine_user_message
 from deerflow.agents.middlewares.skill_usage import SKILL_USAGE_KEY, SKILL_USAGES_KEY
+from deerflow.agents.middlewares.tool_output_budget_middleware import TOOL_OUTPUT_BLOB_KEY
 from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY, TOOL_RECEIPT_LEDGER_KEY
 from deerflow.agents.middlewares.tool_transform_meta import TOOL_TRANSFORMS_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
@@ -85,6 +89,7 @@ from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
 from deerflow.runtime.keyed_lock import KeyedLockTable
+from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY, make_origin
 from deerflow.runtime.runs.naming import resolve_root_run_name
 from deerflow.runtime.secret_context import (
     LegacyRunMetadataSecretError,
@@ -94,13 +99,23 @@ from deerflow.runtime.secret_context import (
 from deerflow.runtime.stream_modes import normalize_stream_modes
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
+from deerflow.scheduler.runtime import scheduler_tools_enabled
+from deerflow.scheduler.schedules import validate_timezone
 from deerflow.subagents.status_contract import SUBAGENT_ACCEPTANCE_VERDICT_KEY, SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_TOOL_RECEIPTS_KEY
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_context, ensure_trace_id
 from deerflow.utils.assembly_io import run_assembly
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
+
+
+class BusyThreadConflict(HTTPException):
+    """A retryable run-manager admission conflict exposed as HTTP 409."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(status_code=409, detail=detail)
 
 
 @asynccontextmanager
@@ -130,15 +145,25 @@ _TERMINAL_RUN_STATUSES = {
 
 _THREAD_METADATA_SETUP_TIMEOUT_SECONDS = 5.0
 
+# Message metadata a scheduled launch puts on its prompt: the task, run and the
+# user-language parts (instructions, stop condition, notes) the run thread shows
+# instead of the launched text. A cross-language contract
+# (contracts/scheduled_goal_notes_contract.json "scheduled_origin_key").
+SCHEDULED_ORIGIN_KEY = "deerflow_scheduled_origin"
+
 _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
     frozenset(
         {
+            # Only the scheduler's internal launch may mark a message as a
+            # scheduled run prompt.
+            SCHEDULED_ORIGIN_KEY,
             _DYNAMIC_CONTEXT_REMINDER_KEY,
             _REMINDER_DATE_KEY,
             _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
             KNOWLEDGE_SCOPE_RUNTIME_KEY,
             TOOL_RECEIPT_KEY,
             TOOL_RECEIPT_LEDGER_KEY,
+            TOOL_OUTPUT_BLOB_KEY,
             TOOL_TRANSFORMS_KEY,
             SKILL_USAGE_KEY,
             SKILL_USAGES_KEY,
@@ -238,9 +263,15 @@ async def _ensure_thread_metadata(
             # /threads/{id}/move — so the key must not persist either.
             if key not in (DEERFLOW_TRACE_METADATA_KEY, THREAD_PROJECT_METADATA_KEY)
         }
+        # A run that names its thread in the input (a scheduled run) creates it
+        # named: the worker copies the title to the thread list only when the
+        # run ends, and a server-created thread is listed as soon as it exists.
+        run_input = (record.kwargs or {}).get("input")
+        title = run_input.get("title") if isinstance(run_input, dict) else None
         existing = await thread_store.create(
             record.thread_id,
             assistant_id=record.assistant_id,
+            display_name=title if isinstance(title, str) and title.strip() else None,
             metadata=metadata,
         )
     return existing
@@ -1672,6 +1703,44 @@ async def _validate_scope_thread_binding(
 # Run lifecycle
 # ---------------------------------------------------------------------------
 
+_SCHEDULER_METADATA_KEYS = frozenset(
+    {"scheduled_task_id", "scheduled_task_run_id", "scheduled_trigger", "scheduled_goal_objective", "scheduled_previous_thread_id", "scheduled_context_mode", "scheduled_tool_created", "__scheduler_capability"}
+)
+
+
+_MAX_CLIENT_TIMEZONE_CHARS = 64
+
+
+async def _client_timezone_from_context(context: Mapping[str, Any] | None) -> str | None:
+    """The browser timezone the web client sent in ``body.context``, if valid.
+
+    Read only for the schedule capability (default zone for new tasks). It is
+    not a ``_CONTEXT_CONFIGURABLE_KEYS`` entry, so it never reaches the run
+    config, the checkpoint or the prompt.
+    """
+    raw = context.get("client_timezone") if isinstance(context, Mapping) else None
+    if raw is None:
+        return None
+    if not isinstance(raw, str) or not raw or len(raw) > _MAX_CLIENT_TIMEZONE_CHARS:
+        logger.debug("Ignoring a malformed client_timezone in the run context")
+        return None
+    try:
+        return await asyncio.to_thread(validate_timezone, raw)
+    except (ValueError, OSError):
+        logger.debug("Ignoring an unknown client_timezone %s", sanitize_log_param(raw))
+        return None
+
+
+def _admit_scheduler_metadata(value: object, *, trusted: bool) -> dict[str, Any]:
+    """Keep scheduler snapshots only on the private scheduler launch path."""
+    result = dict(value) if isinstance(value, Mapping) else {}
+    if not trusted:
+        for key in _SCHEDULER_METADATA_KEYS:
+            result.pop(key, None)
+    # A serialized value can never recover an execution capability.
+    result.pop("__scheduler_capability", None)
+    return result
+
 
 async def start_run(
     body: RunCreateRequest,
@@ -1680,6 +1749,7 @@ async def start_run(
     *,
     idempotency_key: str | None = None,
     require_existing_thread: bool = False,
+    scheduled_task_runtime: Mapping[str, Any] | None = None,
 ) -> RunRecord:
     """Create a RunRecord and launch the background agent task.
 
@@ -1703,6 +1773,8 @@ async def start_run(
     # multitask_strategy="reject" and are unaffected. Requests without a
     # stamped auth context (internal/test compositions) skip the gate.
     require_cancel_permission_if(request, body.multitask_strategy != "reject")
+    if scheduled_task_runtime is not None and getattr(request.state, "auth_source", None) != AUTH_SOURCE_INTERNAL:
+        raise HTTPException(status_code=403, detail="Scheduled runtime authority requires an internal launcher")
 
     try:
         validate_thread_id(thread_id)
@@ -1785,7 +1857,10 @@ async def start_run(
         # Validate even when resume takes precedence, so ignored input cannot
         # appear to have been admitted or persist as unchecked run audit data.
         normalized_input = normalize_input(body.input, trusted_internal=is_internal_caller)
-        agent_factory = resolve_agent_factory(body.assistant_id)
+        # Cold resolution imports the lead-agent stack. Use the assembly pool
+        # so import-lock waiters cannot starve unrelated default-executor work.
+        # Keep this before admission so import failures cannot create a run.
+        agent_factory = await run_assembly(resolve_agent_factory, body.assistant_id)
         command = getattr(body, "command", None)
         if command and command.get("resume") is not None:
             graph_input = Command(resume=command["resume"])
@@ -1799,10 +1874,24 @@ async def start_run(
         # without this the run record is the one surface that persists a forged
         # id, disagreeing with the response header, the logs, and the
         # checkpoint. The caller's own metadata keys are preserved.
-        run_metadata = dict(body.metadata) if isinstance(body.metadata, dict) else {}
+        # deerflow_origin is server-owned as well: only a server-side launcher
+        # (request.state.run_origin) or the internal channel caller may set it,
+        # and both metadata forks drop any client copy. build_run_config merges
+        # body.config["metadata"] into the live config, so the second pop below
+        # is what keeps a forged value out of the live run config.
+        origin = resolve_request_origin(request, body.metadata)
+        run_metadata = _admit_scheduler_metadata(body.metadata, trusted=scheduled_task_runtime is not None)
+        run_metadata.pop(DEERFLOW_ORIGIN_KEY, None)
+        if origin is not None:
+            run_metadata[DEERFLOW_ORIGIN_KEY] = origin
         run_metadata[DEERFLOW_TRACE_METADATA_KEY] = ensure_trace_id()
 
         config = build_run_config(thread_id, body.config, run_metadata, assistant_id=body.assistant_id)
+        if isinstance(config.get("metadata"), dict):
+            config["metadata"] = _admit_scheduler_metadata(config["metadata"], trusted=scheduled_task_runtime is not None)
+            config["metadata"].pop(DEERFLOW_ORIGIN_KEY, None)
+            if origin is not None:
+                config["metadata"][DEERFLOW_ORIGIN_KEY] = origin
         await apply_checkpoint_to_run_config(config, body=body, thread_id=thread_id, request=request)
 
         # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
@@ -1877,6 +1966,8 @@ async def start_run(
         run_record_input = _canonical_run_record_input(body.input, graph_input)
 
         internal_owner_user = await resolve_trusted_internal_owner_for_attribution(request, owner_user_id)
+        if internal_owner_user is None and owner_user_id == AUTH_DISABLED_USER_ID and is_auth_disabled():
+            internal_owner_user = get_auth_disabled_user()
         inject_authenticated_user_context(
             config,
             request,
@@ -1884,6 +1975,8 @@ async def start_run(
             request_context=getattr(body, "context", None),
         )
 
+        if scheduled_task_runtime is not None:
+            run_ctx = replace(run_ctx, scheduled_task_runtime=dict(scheduled_task_runtime))
         conversation_references = list(getattr(body, "conversation_references", None) or [])
         if conversation_references:
             from app.gateway.conversation_access import prepare_conversation_reader
@@ -1921,6 +2014,27 @@ async def start_run(
                         ),
                     ],
                 }
+        elif scheduled_task_runtime is not None and isinstance(run_metadata.get("scheduled_previous_thread_id"), str):
+            from app.gateway.conversation_access import prepare_scheduled_conversation_reader
+
+            owner = internal_owner_user
+            if owner is not None and "runs:read" in await resolve_route_permissions(owner, is_internal=False):
+                prepared = prepare_scheduled_conversation_reader([run_metadata["scheduled_previous_thread_id"]], owner_user_id=str(owner.id), run_context=run_ctx, run_manager=run_mgr, app_config=run_ctx.app_config or get_app_config())
+                if prepared is not None:
+                    reader, source_ids = prepared
+
+                    async def scheduled_reader(*args, **kwargs):
+                        current_owner = get_auth_disabled_user() if str(owner.id) == AUTH_DISABLED_USER_ID and is_auth_disabled() else await get_local_provider().get_user(str(owner.id))
+                        if current_owner is None or "runs:read" not in await resolve_route_permissions(current_owner, is_internal=False):
+                            return json.dumps({"status": "unavailable", "messages": [], "next_cursor": None, "has_more": False})
+                        return await reader(*args, **kwargs)
+
+                    run_ctx = replace(run_ctx, conversation_reader=scheduled_reader)
+                    if isinstance(graph_input, dict):
+                        graph_input = {
+                            **graph_input,
+                            "messages": [*(graph_input.get("messages") or []), HumanMessage(content="Read-only conversation references for this run: " + json.dumps(source_ids), additional_kwargs={"hide_from_ui": True})],
+                        }
         # Resolve and pin the thread's project context once per run (spec
         # §7.1): middlewares and tools read only this server-owned snapshot —
         # nothing re-resolves membership mid-run, and admission never writes
@@ -2034,11 +2148,38 @@ async def start_run(
                             "Thread metadata for %s has an invalid incarnation; MCP access will fail closed",
                             sanitize_log_param(thread_id),
                         )
+            from app.gateway.scheduled_task_access import prepare_scheduler_capability
+
+            human_text = ""
+            if current_human_message is not None:
+                original = current_human_message.additional_kwargs.get("original_user_content", current_human_message.content)
+                if isinstance(original, str):
+                    human_text = original
+                elif isinstance(original, list):
+                    human_text = "\n".join(block["text"] for block in original if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str))
+            scheduler_capability = None
+            if scheduler_tools_enabled(getattr(run_ctx, "app_config", None)):
+                client_timezone = await _client_timezone_from_context(body.context)
+                try:
+                    scheduler_capability = await prepare_scheduler_capability(
+                        request,
+                        user=internal_owner_user or user,
+                        thread_id=thread_id,
+                        run_id=record.run_id,
+                        assistant_id=scope_assistant_id,
+                        original_user_text=human_text,
+                        interaction_policy=resolve_run_interaction_policy(config),
+                        scheduled_task_runtime=scheduled_task_runtime,
+                        client_timezone=client_timezone,
+                    )
+                except Exception:
+                    logger.warning("Scheduler tool capability is unavailable for this run", exc_info=True)
+            execution_context = replace(run_ctx, scheduler_capability=scheduler_capability) if scheduler_capability is not None else run_ctx
             await run_agent(
                 bridge,
                 run_mgr,
                 record,
-                ctx=run_ctx,
+                ctx=execution_context,
                 agent_factory=agent_factory,
                 graph_input=graph_input,
                 config=config,
@@ -2124,7 +2265,7 @@ async def start_run(
                     )
                     raise
         except ConflictError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            raise BusyThreadConflict(str(exc)) from exc
         except UnsupportedStrategyError as exc:
             raise HTTPException(status_code=501, detail=str(exc)) from exc
 
@@ -2147,7 +2288,16 @@ async def launch_scheduled_thread_run(
     app: Any | None = None,
     owner_user_id: str | None = None,
     metadata: dict[str, Any] | None = None,
+    origin: dict[str, Any] | None = None,
+    title: str | None = None,
 ) -> dict[str, Any]:
+    """Start one scheduled occurrence as an internal run.
+
+    The prompt message gets a stable id per occurrence (retried launches and
+    reconnect hydration see one message) and, with ``origin``, the
+    ``SCHEDULED_ORIGIN_KEY`` metadata the run thread renders. ``title``
+    pre-sets a fresh run thread's title, so no title is generated.
+    """
     if request is None:
         if app is None:
             raise ValueError("launch_scheduled_thread_run requires request or app")
@@ -2157,12 +2307,25 @@ async def launch_scheduled_thread_run(
             state=SimpleNamespace(
                 user=get_internal_user(),
                 auth_source=AUTH_SOURCE_INTERNAL,
+                # Every trigger (schedule or "Run now") is server-started.
+                run_origin=make_origin("schedule"),
             ),
             cookies={},
         )
+    scheduled_task_run_id = (metadata or {}).get("scheduled_task_run_id")
+    message: dict[str, Any] = {
+        "role": "user",
+        "content": prompt,
+        "id": f"scheduled-{scheduled_task_run_id}" if isinstance(scheduled_task_run_id, str) else f"scheduled-{uuid.uuid4().hex}",
+    }
+    if origin:
+        message["additional_kwargs"] = {SCHEDULED_ORIGIN_KEY: origin}
+    graph_input: dict[str, Any] = {"messages": [message]}
+    if title:
+        graph_input["title"] = title
     body = RunCreateRequest(
         assistant_id=assistant_id,
-        input={"messages": [{"role": "user", "content": prompt}]},
+        input=graph_input,
         command=None,
         metadata=metadata or {},
         config={"recursion_limit": _resolve_scheduler_recursion_limit()},
@@ -2186,7 +2349,12 @@ async def launch_scheduled_thread_run(
         if_not_exists="create",
         feedback_keys=None,
     )
-    scheduled_task_run_id = (metadata or {}).get("scheduled_task_run_id")
+    scheduled_task_runtime = None
+    task_id = (metadata or {}).get("scheduled_task_id")
+    if owner_user_id and isinstance(task_id, str) and isinstance(scheduled_task_run_id, str):
+        scheduled_task_runtime = {"task_id": task_id, "occurrence_id": scheduled_task_run_id, "user_id": owner_user_id}
+        if (metadata or {}).get("scheduled_context_mode") == "fresh_thread_per_run" and isinstance((metadata or {}).get("scheduled_goal_objective"), str):
+            scheduled_task_runtime["goal_objective"] = metadata["scheduled_goal_objective"]
     idempotency_key = f"scheduled-task:{scheduled_task_run_id}" if isinstance(scheduled_task_run_id, str) else None
     # Non-HTTP entry point: the lifespan scheduler calls this with a synthetic
     # request, so TraceMiddleware never runs. The scope is opened per launch,
@@ -2200,6 +2368,7 @@ async def launch_scheduled_thread_run(
             thread_id,
             request,
             idempotency_key=idempotency_key,
+            scheduled_task_runtime=scheduled_task_runtime,
         )
     return {"run_id": record.run_id, "thread_id": record.thread_id}
 
@@ -2232,7 +2401,7 @@ async def launch_mcp_task_notification_run(
     request = SimpleNamespace(
         app=app,
         headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: owner_user_id},
-        state=SimpleNamespace(user=get_internal_user(), auth_source=AUTH_SOURCE_INTERNAL),
+        state=SimpleNamespace(user=get_internal_user(), auth_source=AUTH_SOURCE_INTERNAL, run_origin=make_origin("mcp_notification")),
         cookies={},
     )
     body = RunCreateRequest(
@@ -2285,9 +2454,9 @@ async def launch_mcp_task_notification_run(
                 require_existing_thread=True,
             )
     except HTTPException as exc:
-        if exc.status_code == 409:
+        if isinstance(exc, BusyThreadConflict):
             raise ConflictError(str(exc.detail)) from exc
-        if exc.status_code == 404:
+        if exc.status_code in {400, 401, 403, 404, 409, 422, 501}:
             raise PermanentNotificationError(str(exc.detail)) from exc
         raise
     return {"run_id": record.run_id, "thread_id": record.thread_id}
@@ -2344,9 +2513,12 @@ async def sse_consumer(
         return
 
     gap_emitted = False
+    terminal_emitted = False
+    disconnect_observed = False
     try:
         async for entry in bridge.subscribe(record.run_id, last_event_id=last_event_id):
             if await request.is_disconnected():
+                disconnect_observed = True
                 break
 
             if isinstance(entry, StreamGap):
@@ -2366,26 +2538,44 @@ async def sse_consumer(
 
             if entry is HEARTBEAT_SENTINEL:
                 if await _orphan_recovery_observed_after_heartbeat(record, run_mgr):
+                    terminal_emitted = True
                     yield format_sse("end", None)
                     return
                 yield ": heartbeat\n\n"
                 continue
 
             if entry is END_SENTINEL:
+                terminal_emitted = True
                 yield format_sse("end", None, event_id=entry.id or None)
                 return
 
             yield format_sse(entry.event, entry.data, event_id=entry.id or None)
 
+        if not disconnect_observed:
+            raise RuntimeError("stream bridge subscription ended before a terminal event")
+    except (GeneratorExit, asyncio.CancelledError):
+        # Starlette closes the response generator or cancels its request task
+        # when the creator connection disappears. Ordinary bridge exceptions
+        # must not be mistaken for that client-owned lifecycle signal.
+        disconnect_observed = True
+        raise
     finally:
         # store_only records are cross-worker observation handles. An explicit
         # cancel-then-stream action has already persisted its request before
         # subscribing; a plain join disconnect must not invent a new
         # cancellation request. Only apply on_disconnect to locally-owned runs,
         # and only on the creator's own stream — never on an observer join.
-        if apply_on_disconnect and not gap_emitted and not record.store_only and record.status in (RunStatus.pending, RunStatus.running):
+        if disconnect_observed and apply_on_disconnect and not gap_emitted and not terminal_emitted and not record.store_only and record.status in (RunStatus.pending, RunStatus.running):
             if record.on_disconnect == DisconnectMode.cancel:
-                await run_mgr.cancel(record.run_id)
+                await await_drained(run_mgr.cancel(record.run_id))
+
+
+def serialize_wait_run_status(record: RunRecord) -> dict[str, Any]:
+    """Return durable status and the error envelope recognized by the SDK."""
+    result: dict[str, Any] = {"status": record.status.value, "error": record.error}
+    if record.status == RunStatus.error:
+        result["__error__"] = {"error": "RunError", "message": record.error or "Run failed."}
+    return result
 
 
 async def wait_for_run_completion(
@@ -2422,8 +2612,13 @@ async def wait_for_run_completion(
         disconnected.  Callers must skip checkpoint serialization on
         ``False`` so a partial checkpoint is not returned as a normal
         response.
+
+    Raises:
+        RuntimeError: The bridge subscription ended without a terminal event.
+        Other bridge failures propagate unchanged.
     """
     completed = False
+    disconnect_observed = False
     if await _terminal_record_stream_missing(bridge, record):
         return True
 
@@ -2449,11 +2644,17 @@ async def wait_for_run_completion(
                     completed = True
                     return True
                 if await request.is_disconnected():
+                    disconnect_observed = True
                     return False
                 # Heartbeats and regular events: keep waiting for END_SENTINEL.
             if not gap_seen:
-                return completed
+                raise RuntimeError("stream bridge subscription ended before a terminal event")
+    except asyncio.CancelledError:
+        # Request-task cancellation is the non-streaming equivalent of
+        # Starlette closing an SSE response generator.
+        disconnect_observed = True
+        raise
     finally:
-        if not completed and record.status in (RunStatus.pending, RunStatus.running):
+        if disconnect_observed and not completed and record.status in (RunStatus.pending, RunStatus.running):
             if record.on_disconnect == DisconnectMode.cancel:
-                await run_mgr.cancel(record.run_id)
+                await await_drained(run_mgr.cancel(record.run_id))

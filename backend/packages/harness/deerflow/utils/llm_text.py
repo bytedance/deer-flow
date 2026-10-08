@@ -4,10 +4,31 @@ from __future__ import annotations
 
 import re
 
-# Matches a complete <think>...</think> block (case-insensitive, spans newlines).
-_THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.IGNORECASE | re.DOTALL)
-# Matches a dangling, unclosed <think> (model truncated at max_tokens mid-thought).
-_OPEN_THINK_RE = re.compile(r"<think\b[^>]*>", re.IGNORECASE)
+_THINK_OPEN_PREFIX_RE = re.compile(r"<think\b", re.IGNORECASE)
+_THINK_CLOSE_PREFIX_RE = re.compile(r"</think", re.IGNORECASE)
+
+
+def _find_think_open(text: str, start: int) -> tuple[int, int] | None:
+    """Find the next complete opening tag without retrying its suffix at each prefix."""
+    match = _THINK_OPEN_PREFIX_RE.search(text, start)
+    if match is None:
+        return None
+    end = text.find(">", match.end())
+    if end < 0:
+        return None
+    return match.start(), end + 1
+
+
+def _find_think_close(text: str, start: int) -> tuple[int, int] | None:
+    """Find the first closing tag, allowing whitespace before its final ``>``."""
+    while match := _THINK_CLOSE_PREFIX_RE.search(text, start):
+        end = match.end()
+        while end < len(text) and text[end].isspace():
+            end += 1
+        if end < len(text) and text[end] == ">":
+            return match.start(), end + 1
+        start = match.end()
+    return None
 
 
 def strip_think_blocks(text: str, *, truncate_unclosed: bool = True) -> str:
@@ -22,12 +43,45 @@ def strip_think_blocks(text: str, *, truncate_unclosed: bool = True) -> str:
     draft that mentions the tag) pass ``truncate_unclosed=False`` so the tag is
     preserved instead of silently discarding the rest of the text.
     """
-    text = _THINK_BLOCK_RE.sub("", text)
-    if truncate_unclosed:
-        open_match = _OPEN_THINK_RE.search(text)
-        if open_match:
-            text = text[: open_match.start()]
-    return text.strip()
+    parts: list[str] = []
+    start = 0
+    while (opening := _find_think_open(text, start)) is not None:
+        closing = _find_think_close(text, opening[1])
+        if closing is None:
+            if truncate_unclosed:
+                return ("".join(parts) + text[start : opening[0]]).strip()
+            break
+        parts.append(text[start : opening[0]])
+        start = closing[1]
+    parts.append(text[start:])
+    return "".join(parts).strip()
+
+
+def strip_leading_think_blocks(text: str) -> str:
+    """Remove leading reasoning for display summaries, leaving tags in the answer intact.
+
+    Unlike structured-response parsing, a displayed answer may explain the
+    tag in prose or code. Only a leading XML-style reasoning section is
+    removed; an unfinished section has no answer to summarize.
+    """
+    start = 0
+    while True:
+        whitespace_start = start
+        while start < len(text) and text[start].isspace():
+            start += 1
+        newline = text.rfind("\n", whitespace_start, start)
+        indent = text[max(newline + 1, whitespace_start) : start]
+        if (whitespace_start == 0 or newline >= 0) and ("\t" in indent or indent.startswith("    ")):
+            break  # Root-level indented Markdown code is a literal example.
+        opening = _THINK_OPEN_PREFIX_RE.match(text, start)
+        if opening is None or (opening.end() < len(text) and not (text[opening.end()].isspace() or text[opening.end()] == ">")):
+            break
+        end = text.find(">", opening.end())
+        closing = _find_think_close(text, end + 1) if end >= 0 else None
+        if closing is None:
+            return ""
+        start = closing[1]
+    return text[start:].strip()
 
 
 def strip_markdown_code_fence(text: str) -> str:
