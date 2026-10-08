@@ -468,6 +468,11 @@ async def test_scheduled_cleanup_barrier_keeps_lease_renewal_and_remote_cancel_a
     record = await manager.create_or_reject("result", user_id="alice")
     record.scheduled_goal_cleanup_pending = True
     await manager.set_status(record.run_id, RunStatus.success, persist=False)
+    # Keep the confirmed deadline well inside the 30-second lease window.
+    # Renewal computes a fresh now+lease value; Windows' coarse clock can
+    # otherwise make two immediate samples identical and defeat a strict >
+    # assertion without changing the behavior under test.
+    record.lease_expires_at = (datetime.now(UTC) + timedelta(seconds=10)).isoformat()
     original_deadline = record.lease_expires_at
     await store.request_cancel(record.run_id, action="rollback")
     await manager._renew_leases()
