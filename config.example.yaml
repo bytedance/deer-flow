@@ -1626,6 +1626,17 @@ uploads:
 # or BoxLite micro-VM sandbox
 # Option 1: Local Sandbox (Default)
 # Executes commands directly on the host machine
+# Optional server-owned image model, separate from chat models and web profiles.
+# Configure one provider here. It appears as a read-only, testable choice in
+# Settings > Models > Image models; a web profile may coexist with it.
+# Do not also set image provider variables in sandbox.environment.
+# image_generation:
+#   provider: openai               # openai, gemini, or minimax
+#   model: gpt-image-1
+#   base_url: https://api.openai.com/v1  # Required for openai
+#   api_key: $IMAGE_GENERATION_API_KEY
+#   size: 1024x1024               # Optional; OpenAI-compatible provider only
+
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
   # Host bash execution is disabled by default because LocalSandboxProvider is
@@ -1684,6 +1695,13 @@ sandbox:
 #   # or implement the same AIO sandbox HTTP API used by agent-sandbox. See
 #   # backend/docs/CONFIGURATION.md.
 #   # image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0
+#   # Local AIO probes the image API for web-managed image providers. A 1.9.3+
+#   # image receives the key for one command. An older image is automatically
+#   # recreated with the key in its startup environment while retaining the
+#   # same thread workspace/uploads/outputs mounts. Active runs finish before
+#   # a changed web profile gets a new container. Remote/provisioner AIO still
+#   # needs /v1/bash/exec. Legacy keys in sandbox.environment are passed at
+#   # startup and require container recreation after a Gateway config change.
 #
 #   # Optional: Base port for sandbox containers (default: 8080)
 #   # port: 8080
@@ -1745,7 +1763,7 @@ sandbox:
 #   #   DEBUG: "false"
 #   #   API_KEY: $MY_API_KEY        # Reads from host's MY_API_KEY env var
 #   #   DATABASE_URL: $DATABASE_URL  # Reads from host's DATABASE_URL env var
-#   #   # Required when using the OpenAI-compatible image-generation provider:
+#   #   # Legacy image configuration, used only without top-level image_generation:
 #   #   IMAGE_GENERATION_PROVIDER: $IMAGE_GENERATION_PROVIDER
 #   #   IMAGE_GENERATION_API_KEY: $IMAGE_GENERATION_API_KEY
 #   #   IMAGE_GENERATION_BASE_URL: $IMAGE_GENERATION_BASE_URL

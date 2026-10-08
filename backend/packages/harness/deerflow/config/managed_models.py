@@ -6,9 +6,6 @@ Writers are serialized across threads/processes; readers see atomic snapshots.
 
 from __future__ import annotations
 
-import json
-import os
-import tempfile
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -17,6 +14,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
+from deerflow.config.encrypted_catalog import EncryptedCatalog
 from deerflow.config.extensions_config import extensions_config_file_lock
 from deerflow.config.file_signature import get_config_signature
 from deerflow.config.managed_model_providers import resolve_managed_model_provider
@@ -75,23 +73,16 @@ class ManagedModel(BaseModel):
 
 class ManagedModelStore:
     def __init__(self):
-        self.path = runtime_home() / "managed-models" / "catalog.enc"
-        self.key_path = self.path.with_name("key")
+        self._catalog = EncryptedCatalog(runtime_home() / "managed-models" / "catalog.enc")
+        self.path = self._catalog.path
+        self.key_path = self._catalog.key_path
 
     def _cipher(self, *, create: bool = False):
-        from cryptography.fernet import Fernet
-
-        if not self.key_path.exists():
-            if not create or self.path.exists():
-                raise ValueError("Managed model encryption key is missing; restore it from backup")
-            self._write(self.key_path, Fernet.generate_key())
-        return Fernet(self.key_path.read_bytes())
+        return self._catalog._cipher(create=create)
 
     def list(self) -> list[ManagedModel]:
-        if not self.path.exists():
-            return []
         try:
-            raw = json.loads(self._cipher().decrypt(self.path.read_bytes()))
+            raw = self._catalog.read()
             return [ManagedModel.model_validate(item) for item in raw]
         except Exception:
             # Never include provider secrets or decrypted validation inputs.
@@ -109,24 +100,12 @@ class ManagedModelStore:
             saved = config.model_copy(update={"api_key": secret, "revision": uuid4().hex})
             records = [saved if item.name == saved.name else item for item in records] if previous else [*records, saved]
             payload = [{**item.model_dump(exclude={"api_key"}), "api_key": item.api_key.get_secret_value() if item.api_key else None} for item in records]
-            cipher = self._cipher(create=True)
-            self._write(self.path, cipher.encrypt(json.dumps(payload).encode("utf-8")))
+            self._catalog.write(payload)
             return saved
 
     @staticmethod
     def _write(path: Path, content: bytes) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary: Path | None = None
-        try:
-            with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
-                temporary = Path(handle.name)
-                handle.write(content)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, path)
-        finally:
-            if temporary is not None:
-                temporary.unlink(missing_ok=True)
+        EncryptedCatalog.write_bytes(path, content)
 
 
 def merge_managed_models(config: AppConfig) -> AppConfig:

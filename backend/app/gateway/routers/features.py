@@ -17,6 +17,7 @@ from app.gateway.knowledge_scope_admission import RAGFLOW_KNOWLEDGE_SEARCH_PROVI
 from app.gateway.routers.thread_activity import thread_activity_available
 from app.gateway.run_models import MAX_CONVERSATION_REFERENCES
 from deerflow.config.app_config import AppConfig
+from deerflow.config.image_generation import managed_image_profiles_enabled
 from deerflow.scheduler.runtime import scheduler_tools_enabled
 from deerflow.subagents.capacity import configured_subagent_max_running
 
@@ -81,6 +82,12 @@ class ThreadActivityFeature(BaseModel):
     available: bool = Field(..., description="Whether GET /api/thread-activity, POST /api/threads/{thread_id}/read and the thread search `unread` field work (SQL persistence)")
 
 
+class ImageGenerationManagementFeature(BaseModel):
+    """Availability of the web-managed image catalog and its API."""
+
+    enabled: bool = Field(..., description="Whether web-managed image profiles are enabled")
+
+
 class FeaturesResponse(BaseModel):
     """Frontend-facing feature availability flags."""
 
@@ -92,6 +99,7 @@ class FeaturesResponse(BaseModel):
     knowledge_base: KnowledgeBaseFeature
     scheduled_tasks: ScheduledTasksFeature
     thread_activity: ThreadActivityFeature
+    image_generation_management: ImageGenerationManagementFeature
 
 
 @router.get(
@@ -104,6 +112,9 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
     """Return availability of optional frontend features."""
     browser = browser_capability(config)
     subagent_batch_worker_running = bool(getattr(request.app.state, "subagent_batches_available", False))
+    image_management_enabled = getattr(request.app.state, "image_generation_management_enabled", None)
+    if image_management_enabled is None:
+        image_management_enabled = managed_image_profiles_enabled()
     return FeaturesResponse(
         agents_api=AgentsApiFeature(enabled=config.agents_api.enabled),
         browser_control=BrowserControlFeature(enabled=browser.available),
@@ -133,6 +144,9 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
         scheduled_tasks=_scheduled_tasks_feature(request, config),
         # Startup-scoped: the read repository exists only with SQL persistence.
         thread_activity=ThreadActivityFeature(available=thread_activity_available(request.app.state)),
+        image_generation_management=ImageGenerationManagementFeature(
+            enabled=image_management_enabled,
+        ),
     )
 
 

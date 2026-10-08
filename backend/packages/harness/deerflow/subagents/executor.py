@@ -12,6 +12,7 @@ import uuid
 from collections.abc import Callable, Coroutine, Mapping
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FuturesTimeoutError
+from contextlib import ExitStack
 from contextvars import Context, copy_context
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -1689,7 +1690,19 @@ class SubagentExecutor:
                 return None
             return _harvest_bash_executions(final_state)
 
+        image_scope = ExitStack()
         try:
+            from deerflow.config.image_generation import bind_image_generation_source, image_generation_source_for_run, selected_image_generation_source
+
+            try:
+                environment = getattr(self._get_resolved_app_config(), "image_generation_environment", None)
+                image_source = image_generation_source_for_run(environment, allows_clarification=False) if environment is not None else selected_image_generation_source()
+            except (OSError, ValueError):
+                # An unavailable catalog cannot select a provider; the image
+                # tool reports that error if this subagent needs image output.
+                image_source = None
+            image_scope.enter_context(bind_image_generation_source(image_source))
+
             if task_info is not None and task_store is not None:
                 await notify_task_start(
                     loaded_extensions,
@@ -1790,6 +1803,7 @@ class SubagentExecutor:
             if self.knowledge_scope is not None:
                 context[KNOWLEDGE_SCOPE_RUNTIME_KEY] = dict(self.knowledge_scope)
             context["is_subagent"] = True
+            context["interaction_mode"] = "autonomous"
             context[_SANDBOX_LEASE_OWNER_CONTEXT_KEY] = sandbox_lease_owner_id
             context[_SANDBOX_COMMAND_SCOPE_CONTEXT_KEY] = sandbox_lease_owner_id
             execution_context = context
@@ -2057,6 +2071,7 @@ class SubagentExecutor:
                         self.config.name,
                         exc_info=True,
                     )
+            image_scope.close()
 
         return result
 
