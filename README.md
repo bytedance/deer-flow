@@ -1280,9 +1280,13 @@ The built-in `image-generation` skill supports Gemini, MiniMax, and
 OpenAI-compatible Images APIs. Select the latter with
 `IMAGE_GENERATION_PROVIDER=openai`, then configure
 `IMAGE_GENERATION_API_KEY`, `IMAGE_GENERATION_BASE_URL`, and
-`IMAGE_GENERATION_MODEL`. For a containerized sandbox, expose these variables
-through `sandbox.environment`; sandbox commands intentionally do not inherit
-API keys from the Gateway process.
+`IMAGE_GENERATION_MODEL`. For a containerized sandbox or an explicitly enabled
+local host shell, expose these variables through `sandbox.environment`; sandbox
+commands intentionally do not inherit API keys from the Gateway process.
+The local provider uses the resolved configuration values unchanged, and
+request-scoped secrets override operator values. Local bash output and command
+errors redact credential values while leaving benign settings such as model
+names and base URLs readable.
 
 For `LocalSandboxProvider`, this is a managed tool-path boundary rather than host filesystem isolation. Explicit per-Agent skill policies are accepted only while host bash is disabled (the default), because a host subprocess can address canonical paths without using the provider's virtual-path mappings. Use Docker/AIO, the Kubernetes provisioner, or E2B when the filesystem boundary must remain enforceable alongside shell access.
 
