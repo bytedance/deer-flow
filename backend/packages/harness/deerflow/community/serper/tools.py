@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+from collections.abc import Mapping
 from ipaddress import IPv4Address, ip_address
 from urllib.parse import urlparse
 
@@ -32,12 +33,14 @@ _SERPER_TBS_BY_TIME_RANGE: dict[SearchTimeRange, str] = {
 _api_key_warned: set[str] = set()
 
 
-def _get_api_key(tool_name: str) -> str | None:
-    config = get_app_config().get_tool_config(tool_name)
-    if config is not None:
-        api_key = config.model_extra.get("api_key")
-        if isinstance(api_key, str) and api_key.strip():
-            return api_key.strip()
+def _get_api_key(tool_name: str, *, extras: Mapping[str, object] | None = None) -> str | None:
+    """Resolve a key using captured tool settings, then the environment."""
+    if extras is None:
+        config = get_app_config().get_tool_config(tool_name)
+        extras = config.model_extra if config is not None else {}
+    api_key = extras.get("api_key")
+    if isinstance(api_key, str) and api_key.strip():
+        return api_key.strip()
     env_key = os.getenv("SERPER_API_KEY")
     if isinstance(env_key, str) and env_key.strip():
         return env_key.strip()
@@ -246,10 +249,14 @@ def _safe_public_url(value: object) -> str:
     return url if ip.is_global else ""
 
 
-def _serper_post(endpoint: str, api_key: str, query: str, max_results: int, *, time_range: SearchTimeRange | None = None) -> tuple[dict | None, str | None]:
+def _serper_post(endpoint: str, api_key: str, query: str, max_results: int, *, time_range: SearchTimeRange | None = None, base_url: object | None = None) -> tuple[dict | None, str | None]:
     """Send a POST request to a Serper endpoint.
 
     ``query`` is expected to already be normalized via :func:`_clean_query`.
+    A non-blank string ``base_url`` overrides ``SERPER_BASE_URL``; other raw
+    tool-config values fall back to the environment and then the default endpoint.
+    Overrides must be absolute HTTP(S) URLs with a host and no query or fragment.
+    The API key is sent only via ``X-API-KEY`` to the resolved endpoint.
 
     Returns a ``(data, error_json)`` tuple: on success ``data`` is the parsed
     JSON response and ``error_json`` is ``None``; on failure ``data`` is ``None``
@@ -264,6 +271,28 @@ def _serper_post(endpoint: str, api_key: str, query: str, max_results: int, *, t
         payload["tbs"] = _SERPER_TBS_BY_TIME_RANGE[time_range]
 
     try:
+        # Resolve once before transport setup so retries can reuse this endpoint.
+        if not isinstance(base_url, str) or not base_url.strip():
+            base_url = os.getenv("SERPER_BASE_URL") or ""
+        base_url = base_url.strip()
+        if base_url:
+            try:
+                parsed_base = urlparse(base_url)
+                valid_base = parsed_base.scheme in {"http", "https"} and bool(parsed_base.netloc and parsed_base.hostname) and "?" not in base_url and "#" not in base_url
+                # Accessing port also rejects invalid and out-of-range ports.
+                parsed_base.port
+            except ValueError:
+                valid_base = False
+            if not valid_base:
+                raise ValueError("Invalid Serper base_url/SERPER_BASE_URL: use an absolute HTTP(S) URL with a host, a valid port, and no query or fragment")
+            endpoint = base_url.rstrip("/") + "/" + endpoint.rsplit("/", 1)[-1]
+            parsed_endpoint = urlparse(endpoint)
+            logger.debug(
+                "Serper endpoint from base_url/SERPER_BASE_URL: %s://%s%s",
+                parsed_endpoint.scheme,
+                parsed_endpoint.netloc.rsplit("@", 1)[-1],
+                parsed_endpoint.path,
+            )
         with httpx.Client(timeout=30) as client:
             response = client.post(endpoint, headers=headers, json=payload)
         response.raise_for_status()
@@ -308,11 +337,12 @@ def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRang
         logger.error("Invalid Serper domain filters: %s", exc)
         return json.dumps({"error": str(exc), "query": query}, ensure_ascii=False)
 
-    api_key = _get_api_key("web_search")
+    api_key = _get_api_key("web_search", extras=extra)
     if not api_key:
         return _missing_key_error(query, "web_search")
 
-    data, error_json = _serper_post(_SERPER_SEARCH_ENDPOINT, api_key, search_query, max_results, time_range=time_range)
+    base_url = extra.get("base_url")
+    data, error_json = _serper_post(_SERPER_SEARCH_ENDPOINT, api_key, search_query, max_results, time_range=time_range, base_url=base_url)
     if error_json is not None:
         error = json.loads(error_json)
         error["query"] = query
@@ -363,11 +393,13 @@ def image_search_tool(query: str, max_results: int = 5) -> str:
     max_results = _coerce_max_results(max_results)
     query = _clean_query(query)
 
-    api_key = _get_api_key("image_search")
+    extra = config.model_extra if config is not None else {}
+    api_key = _get_api_key("image_search", extras=extra)
     if not api_key:
         return _missing_key_error(query, "image_search")
 
-    data, error_json = _serper_post(_SERPER_IMAGES_ENDPOINT, api_key, query, max_results)
+    base_url = extra.get("base_url")
+    data, error_json = _serper_post(_SERPER_IMAGES_ENDPOINT, api_key, query, max_results, base_url=base_url)
     if error_json is not None:
         return error_json
 

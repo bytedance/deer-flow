@@ -729,6 +729,10 @@
   同步检查点保存器定义了异步方法，但调用时会抛出 `NotImplementedError`，而目标读写只要异步方法存在就会调用它，因此
   `/goal` 只会显示 "Could not set goal."，`get_goal`/`set_goal`/`clear_goal` 则直接抛出异常。现在目标读写在这类保存器上
   会改用同步方法。Web UI 不受影响。([#6448])
+- **community：** Browserless 的 `web_fetch` 提供方现在可以通过认证。此前它把配置的令牌放在 `/content` 请求的 JSON 正文里，
+  而 Browserless 只从 `token` 查询参数或 `Authorization` 请求头读取令牌，并在读取正文之前完成校验。按照配置指南设置
+  `BROWSERLESS_TOKEN` 后，每次 `web_fetch` 都返回 `Browserless HTTP 401`（对未设置 `TOKEN` 启动的实例则因正文模式拒绝
+  未知字段而返回 HTTP 400），而使用同一令牌的 `web_capture` 正常工作。现在两个工具都以查询参数发送令牌。([#6484])
 - **mcp：** 配置了 `task_toolsets` 的 MCP 服务器在工具发现时无法连接或超时，不再导致所有 MCP 工具丢失。此前发现阶段以空
   工具列表跳过失败的服务器，随后任务工具集检查把它的 submit、status、cancel 工具报告为缺失，抛出的错误连同所有正常服务器
   的工具一起丢弃；由于缓存从未发布，每次构建智能体都会重新发现全部服务器，重启 stdio 服务器并重新请求 OAuth 令牌。现在发现
@@ -7536,5 +7540,6 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6448]: https://github.com/bytedance/deer-flow/pull/6448
 [#6450]: https://github.com/bytedance/deer-flow/pull/6450
 [#6481]: https://github.com/bytedance/deer-flow/pull/6481
+[#6484]: https://github.com/bytedance/deer-flow/pull/6484
 [#6506]: https://github.com/bytedance/deer-flow/pull/6506
 [#6512]: https://github.com/bytedance/deer-flow/pull/6512
