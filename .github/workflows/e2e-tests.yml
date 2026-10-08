@@ -6,6 +6,7 @@ on:
     paths:
       - 'frontend/**'
       - 'backend/app/gateway/routers/plugins.py'
+      - 'backend/app/gateway/extension_batch_results.py'
       - 'backend/extension_test_fixtures/bookmark_plugin_gateway.py'
       - 'backend/extension_test_fixtures/batch_review_gateway.py'
       - 'backend/extension_test_fixtures/browser_asset_gateway.py'
@@ -22,6 +23,7 @@ on:
     paths:
       - 'frontend/**'
       - 'backend/app/gateway/routers/plugins.py'
+      - 'backend/app/gateway/extension_batch_results.py'
       - 'backend/extension_test_fixtures/bookmark_plugin_gateway.py'
       - 'backend/extension_test_fixtures/batch_review_gateway.py'
       - 'backend/extension_test_fixtures/browser_asset_gateway.py'
