@@ -812,7 +812,7 @@ This release closes that milestone with **439 merged pull requests**.
   Appends now insert a separator when the existing file does not end in a
   newline, reads decode each physical line on its own and skip only the broken
   one, and a failed batch append still truncates back to the original size.
-  ([#6001])
+  ([#6520])
 - **memory:** DeerMem's derived SQLite FTS5 retrieval index can now live
   outside the memory root, and a Gateway instance now notices facts another
   instance wrote. The index for every user was one SQLite database in WAL mode
@@ -9075,7 +9075,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5994]: https://github.com/bytedance/deer-flow/pull/5994
 [#5998]: https://github.com/bytedance/deer-flow/pull/5998
 [#5999]: https://github.com/bytedance/deer-flow/pull/5999
-[#6001]: https://github.com/bytedance/deer-flow/pull/6001
 [#6009]: https://github.com/bytedance/deer-flow/pull/6009
 [#6013]: https://github.com/bytedance/deer-flow/pull/6013
 [#6015]: https://github.com/bytedance/deer-flow/pull/6015
@@ -9270,3 +9269,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6494]: https://github.com/bytedance/deer-flow/pull/6494
 [#6495]: https://github.com/bytedance/deer-flow/pull/6495
 [#6506]: https://github.com/bytedance/deer-flow/pull/6506
+[#6520]: https://github.com/bytedance/deer-flow/pull/6520
