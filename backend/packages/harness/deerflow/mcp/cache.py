@@ -666,61 +666,66 @@ async def initialize_mcp_tools() -> list[BaseTool]:
         # singleton after the reset: that would install its stale fingerprint
         # into the replacement pool the successor initializer runs on.
         retired_before_claim = None
-        with _init_condition:
-            if _cache_generation != claim_generation:
-                logger.info("MCP cache was reset before tool discovery; discarding superseded initialization")
-                return []
+        # The retired pool is always torn down, even when the validation further
+        # down fails: reset_session_pool() only fences and unlinks the singleton,
+        # so skipping close_all_sync() would leave that pool's owners running
+        # without ever receiving a close signal. The teardown itself stays
+        # outside every lock.
+        try:
+            with _init_condition:
+                if _cache_generation != claim_generation:
+                    logger.info("MCP cache was reset before tool discovery; discarding superseded initialization")
+                    return []
 
-            claimed_pool = get_session_pool()
-            if loaded_reset_signature != _cache_reset_marker_signature and _shared_reset_has_local_state_locked(claimed_pool):
-                # A shared reset published after the last staleness check but
-                # before this claim must retire local MCP state: adopting its
-                # marker here would swallow the reset and keep serving pooled
-                # sessions created before it. Retire first, then re-own this
-                # claim under the new generation on the replacement pool. A
-                # process with no local MCP state — not even a durable-task
-                # caller's deployment binding — has nothing to retire, so it
-                # adopts the current generation instead: that is how a restart
-                # picks up an existing marker without a needless reset, and why
-                # personal-domain-only state keeps its domain boundary.
-                logger.info("Shared MCP cache reset generation changed before this claim; retiring local MCP state")
-                retired_before_claim = _reset_mcp_tools_cache_state_and_retire_pool_locked()
-                claim_generation = _cache_generation
-                _initializing_generation = claim_generation
                 claimed_pool = get_session_pool()
-            # Claim the revision by *installing* it, not merely recording it, and
-            # do so before discovery runs: the applied baseline then really means
-            # "these deployment epochs are in place". A later observation must be
-            # classifiable against this revision even when nothing was ever
-            # published (failed/cancelled discovery), so a residual stdio binding
-            # from this revision can still be retired. An unbuildable revision
-            # clears the baseline instead, keeping the next change conservative
-            # rather than diffing against state we cannot trust.
-            # Record the marker this claim observed before anything can fail
-            # below: if it differed, the reset above already retired the state
-            # that generation required, so it must not be re-applied on retry.
-            _cache_reset_marker_signature = loaded_reset_signature
-            previous_revision = _applied_mcp_revision
-            loaded_revision = _derived_applied_revision(loaded_config)
-            if loaded_revision is None:
-                _applied_mcp_revision = None
-            else:
-                rejection = _frozen_task_snapshot_rejects(loaded_config)
-                if rejection is not None:
-                    # Fail exactly as get_mcp_tools() would, but before any epoch
-                    # is installed, so the durable callers that still use the
-                    # frozen startup configuration keep working.
-                    logger.warning(
-                        "MCP configuration revision is rejected by the frozen durable-task snapshot (%s); no binding epoch installed",
-                        type(rejection).__name__,
-                    )
-                    raise rejection
-                _install_claimed_revision_locked(claimed_pool, loaded_revision, previous=previous_revision)
-                _applied_mcp_revision = loaded_revision
-
-        if retired_before_claim is not None:
-            # Blocking teardown of the retired pool stays outside every lock.
-            retired_before_claim.close_all_sync()
+                if loaded_reset_signature != _cache_reset_marker_signature and _shared_reset_has_local_state_locked(claimed_pool):
+                    # A shared reset published after the last staleness check but
+                    # before this claim must retire local MCP state: adopting its
+                    # marker here would swallow the reset and keep serving pooled
+                    # sessions created before it. Retire first, then re-own this
+                    # claim under the new generation on the replacement pool. A
+                    # process with no local MCP state — not even a durable-task
+                    # caller's deployment binding — has nothing to retire, so it
+                    # adopts the current generation instead: that is how a restart
+                    # picks up an existing marker without a needless reset, and why
+                    # personal-domain-only state keeps its domain boundary.
+                    logger.info("Shared MCP cache reset generation changed before this claim; retiring local MCP state")
+                    retired_before_claim = _reset_mcp_tools_cache_state_and_retire_pool_locked()
+                    claim_generation = _cache_generation
+                    _initializing_generation = claim_generation
+                    claimed_pool = get_session_pool()
+                # Claim the revision by *installing* it, not merely recording it, and
+                # do so before discovery runs: the applied baseline then really means
+                # "these deployment epochs are in place". A later observation must be
+                # classifiable against this revision even when nothing was ever
+                # published (failed/cancelled discovery), so a residual stdio binding
+                # from this revision can still be retired. An unbuildable revision
+                # clears the baseline instead, keeping the next change conservative
+                # rather than diffing against state we cannot trust.
+                # Record the marker this claim observed before anything can fail
+                # below: if it differed, the reset above already retired the state
+                # that generation required, so it must not be re-applied on retry.
+                _cache_reset_marker_signature = loaded_reset_signature
+                previous_revision = _applied_mcp_revision
+                loaded_revision = _derived_applied_revision(loaded_config)
+                if loaded_revision is None:
+                    _applied_mcp_revision = None
+                else:
+                    rejection = _frozen_task_snapshot_rejects(loaded_config)
+                    if rejection is not None:
+                        # Fail exactly as get_mcp_tools() would, but before any epoch
+                        # is installed, so the durable callers that still use the
+                        # frozen startup configuration keep working.
+                        logger.warning(
+                            "MCP configuration revision is rejected by the frozen durable-task snapshot (%s); no binding epoch installed",
+                            type(rejection).__name__,
+                        )
+                        raise rejection
+                    _install_claimed_revision_locked(claimed_pool, loaded_revision, previous=previous_revision)
+                    _applied_mcp_revision = loaded_revision
+        finally:
+            if retired_before_claim is not None:
+                retired_before_claim.close_all_sync()
 
         try:
             loaded_tools = await get_mcp_tools(

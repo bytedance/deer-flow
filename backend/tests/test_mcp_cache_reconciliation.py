@@ -1842,3 +1842,60 @@ async def test_unrelated_server_change_stays_selective_while_a_task_server_is_fr
     assert _binding(pool, "B") is not binding_b
     assert _binding(pool, "B").fingerprint == _fingerprint({"B": _stdio("cmd-B2")}, "B")
     assert log["exited"].get("cmd-A1") is None
+
+
+@pytest.mark.asyncio
+async def test_rejected_revision_still_tears_down_the_pool_a_shared_reset_retired(reconciler, monkeypatch, tmp_path):
+    """A claim that fails after retiring a pool must still tear that pool down.
+
+    ``reset_session_pool()`` only fences and unlinks the singleton; the owners
+    are signalled by ``close_all_sync()``. A claim that retires the pool for a new
+    shared-reset generation and *then* rejects the loaded revision must not skip
+    that teardown, or the retired pool's sessions keep running without ever
+    receiving a close signal.
+    """
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    log = _session_log()
+    _record_sessions(monkeypatch, log)
+    startup = {"A": _task_server("cmd-A1")}
+    _freeze_task_snapshot(startup)
+    startup_connection, startup_fingerprint = _startup_connection(startup, "A")
+
+    durable = pool.ensure_binding("A", startup_fingerprint, domain="deployment")
+    await pool.get_session("A", "task:1", startup_connection, binding=durable)
+    assert log["created"]["cmd-A1"] == 1
+
+    # A shared reset retires the pool, and the revision loaded right after it is
+    # rejected by the frozen task snapshot.
+    _write_config(cfg, {"A": _task_server("cmd-A2")})
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+    marker_path = _write_remote_marker(cfg, "reset-then-rejected-revision")
+    _install_discovery(monkeypatch)
+
+    with pytest.raises(McpTaskConfigurationError):
+        await cache_module.initialize_mcp_tools()
+
+    replacement = session_pool_module.get_session_pool()
+    assert replacement is not pool
+    assert pool._retired is True
+    assert cache_module._initializing_generation is None
+    assert cache_module._cache_reset_marker_signature == get_config_signature(marker_path)
+
+    # The retired pool's owner observes exactly one close signal.
+    await _wait_until(
+        lambda: log["exited"].get("cmd-A1") == 1,
+        message="the retired pool's owner must still be torn down",
+    )
+    assert log["exit_started"]["cmd-A1"] == 1
+    assert log["exited"]["cmd-A1"] == 1
+
+    # The rejected revision was never installed in the replacement pool.
+    assert ("deployment", "A") not in replacement._bindings
+
+    # Restoring the startup configuration initializes normally.
+    _write_config(cfg, startup)
+    published = await cache_module.initialize_mcp_tools()
+    assert [tool.name for tool in published] == ["A"]
+    assert cache_module._cache_initialized is True
