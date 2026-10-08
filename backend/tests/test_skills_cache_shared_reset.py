@@ -15,6 +15,7 @@ The prompt-layer tests play "process B" with the real module state and
 
 from __future__ import annotations
 
+import asyncio
 import json
 import zipfile
 from pathlib import Path
@@ -530,3 +531,174 @@ def test_reload_marker_publication_failure_is_a_generic_server_error(shared_conf
     assert response.status_code == 500
     assert response.json() == {"detail": "Failed to invalidate skills cache."}
     assert "/srv/company/minio" not in response.text
+
+
+# --------------------------------------------------------------------------- #
+# Review follow-ups: cancellation drains the reload tail; publication errors
+# are never reported as 404
+# --------------------------------------------------------------------------- #
+
+
+def _admin_request() -> SimpleNamespace:
+    return SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
+
+
+@pytest.mark.asyncio
+async def test_reload_drains_refresh_and_publish_across_cancellation(shared_config, monkeypatch) -> None:
+    """A caller cancelled after the local refresh must not skip the shared marker.
+
+    ``/skills/reload`` is the operator hook for external mount writes: if the
+    cancellation unwound between the refresh and the publish, every peer
+    replica would keep the old skill set, the one outcome the endpoint exists
+    to prevent. Mirrors the drained-tail tests of the other mutation routes.
+    """
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _blocked_refresh() -> None:
+        started.set()
+        await release.wait()
+
+    monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _blocked_refresh)
+    assert not _marker_path(shared_config).exists()
+
+    task = asyncio.create_task(skills_router.reload_skills(_admin_request()))
+    try:
+        await asyncio.wait_for(started.wait(), 5)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done(), "the drained tail must keep running until it settles"
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    assert _marker_path(shared_config).exists(), "the shared marker must be published even though the caller was cancelled"
+    assert "user_id" not in _marker_payload(shared_config)
+
+
+def _marker_write_raises_file_not_found(monkeypatch: pytest.MonkeyPatch, shared_config) -> str:
+    """Simulate the config directory vanishing between path resolution and the atomic write."""
+    missing = str(_marker_path(shared_config))
+
+    def _publish(config_path, *, user_id=None):
+        raise FileNotFoundError(2, "No such file or directory", missing)
+
+    monkeypatch.setattr(prompt_module.SKILLS_CACHE_RESET_MARKER, "publish", _publish)
+    return missing
+
+
+def test_install_marker_publication_failure_is_500_not_404(shared_config, custom_skill_app, monkeypatch, tmp_path: Path) -> None:
+    """A FileNotFoundError from the marker write must not borrow the 'archive not found' status."""
+    missing = _marker_write_raises_file_not_found(monkeypatch, shared_config)
+    archive = tmp_path / "install-skill.skill"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("install-skill/SKILL.md", _skill_content("install-skill"))
+    storage = UserScopedSkillStorage("default", host_path=str(custom_skill_app.skills_root))
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: storage)
+    monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _allow_scan)
+    monkeypatch.setattr(skills_router, "resolve_thread_virtual_path", lambda thread_id, path: archive)
+
+    with TestClient(custom_skill_app.app) as client:
+        response = client.post("/api/skills/install", json={"thread_id": "thread-1", "path": "mnt/user-data/outputs/install-skill.skill"})
+
+    assert response.status_code == 500, response.text
+    assert response.json()["detail"].startswith("Failed to install skill:")
+    assert missing not in response.text
+    # The install itself succeeded; only the cross-replica publication failed.
+    assert (_user_custom_dir(custom_skill_app.base_dir) / "install-skill").exists()
+    assert custom_skill_app.events == [("refresh", "default"), ("publish", "default")]
+
+
+def test_edit_marker_publication_failure_is_500_not_404(shared_config, custom_skill_app, monkeypatch) -> None:
+    missing = _marker_write_raises_file_not_found(monkeypatch, shared_config)
+
+    with TestClient(custom_skill_app.app) as client:
+        response = client.put("/api/skills/custom/demo-skill", json={"content": _skill_content("demo-skill", "Edited skill")})
+
+    assert response.status_code == 500, response.text
+    assert response.json()["detail"].startswith("Failed to update custom skill:")
+    assert missing not in response.text
+    assert "Edited skill" in (custom_skill_app.custom_dir / "SKILL.md").read_text(encoding="utf-8")
+
+
+def test_delete_marker_publication_failure_is_500_not_404(shared_config, custom_skill_app, monkeypatch) -> None:
+    missing = _marker_write_raises_file_not_found(monkeypatch, shared_config)
+
+    with TestClient(custom_skill_app.app) as client:
+        response = client.delete("/api/skills/custom/demo-skill")
+
+    assert response.status_code == 500, response.text
+    assert response.json()["detail"].startswith("Failed to delete custom skill:")
+    assert missing not in response.text
+
+
+def test_rollback_marker_publication_failure_is_500_not_404(shared_config, custom_skill_app, monkeypatch) -> None:
+    with TestClient(custom_skill_app.app) as client:
+        assert client.put("/api/skills/custom/demo-skill", json={"content": _skill_content("demo-skill", "Edited skill")}).status_code == 200
+        missing = _marker_write_raises_file_not_found(monkeypatch, shared_config)
+        response = client.post("/api/skills/custom/demo-skill/rollback", json={"history_index": -1})
+
+    assert response.status_code == 500, response.text
+    assert response.json()["detail"].startswith("Failed to roll back custom skill:")
+    assert missing not in response.text
+
+
+def test_public_toggle_marker_publication_failure_is_500(shared_config, monkeypatch) -> None:
+    missing = _marker_write_raises_file_not_found(monkeypatch, shared_config)
+    skill = Skill(
+        name="public-skill",
+        description="Description for public-skill",
+        license="MIT",
+        skill_dir=Path("/tmp/public-skill"),
+        skill_file=Path("/tmp/public-skill/SKILL.md"),
+        relative_path=Path("public-skill"),
+        category="public",
+        enabled=True,
+    )
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: SimpleNamespace(load_skills=lambda *, enabled_only: [skill]))
+    monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "default")
+    monkeypatch.setattr(skills_router, "clear_skills_system_prompt_cache", lambda: None)
+
+    with TestClient(_make_test_app(SimpleNamespace())) as client:
+        response = client.put("/api/skills/public-skill", json={"enabled": False})
+
+    assert response.status_code == 500, response.text
+    assert response.json()["detail"].startswith("Failed to update skill:")
+    assert missing not in response.text
+    assert json.loads(shared_config.path.read_text(encoding="utf-8"))["skills"]["public-skill"]["enabled"] is False
+
+
+def test_reload_marker_write_file_not_found_is_a_generic_server_error(shared_config, monkeypatch) -> None:
+    missing = _marker_write_raises_file_not_found(monkeypatch, shared_config)
+
+    async def _refresh() -> None:
+        return None
+
+    monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
+
+    with TestClient(_make_reload_app()) as client:
+        response = client.post("/api/skills/reload")
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Failed to invalidate skills cache."}
+    assert missing not in response.text
+
+
+def test_publish_skills_cache_reset_wraps_filesystem_errors(shared_config, monkeypatch) -> None:
+    """The dedicated error type is not an OSError, so no handler can map it to 404/400."""
+    missing = _marker_write_raises_file_not_found(monkeypatch, shared_config)
+
+    with pytest.raises(prompt_module.SkillCacheResetPublishError) as excinfo:
+        prompt_module.publish_skills_cache_reset(user_id="alice")
+
+    assert not isinstance(excinfo.value, OSError)
+    assert isinstance(excinfo.value.__cause__, FileNotFoundError)
+    assert missing not in str(excinfo.value)

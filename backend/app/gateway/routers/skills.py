@@ -18,7 +18,13 @@ from app.gateway.authz import (
 from app.gateway.deps import get_config, get_optional_user_from_request, require_admin_user
 from app.gateway.path_utils import resolve_thread_virtual_path
 from app.gateway.skill_export import ExportClientDisconnected, SkillExportManifestResponse, SkillExportResponse, export_http_error, run_export_work
-from deerflow.agents.lead_agent.prompt import clear_skills_system_prompt_cache, publish_skills_cache_reset, refresh_skills_system_prompt_cache_async, refresh_user_skills_system_prompt_cache_async
+from deerflow.agents.lead_agent.prompt import (
+    SkillCacheResetPublishError,
+    clear_skills_system_prompt_cache,
+    publish_skills_cache_reset,
+    refresh_skills_system_prompt_cache_async,
+    refresh_user_skills_system_prompt_cache_async,
+)
 from deerflow.config.app_config import AppConfig
 from deerflow.config.extensions_config import (
     ExtensionsConfig,
@@ -215,12 +221,21 @@ async def _drain_skill_mutation[T](op: str, persist: Callable[[], Coroutine[Any,
 async def _publish_skills_cache_reset(user_id: str | None) -> str | None:
     """Publish the shared skills cache reset marker off the event loop.
 
-    Called at the end of every skill-mutation tail, after the change is durable
-    on disk and this process has refreshed its own prompt caches, so a cancelled
-    caller cannot leave peer Gateway processes serving the previous skill set.
-    ``user_id`` scopes the reset to one user's custom skills; ``None`` retires
-    every user's caches (public-skill state and whole-catalog reloads). Path
-    resolution, the sidecar lock and the atomic replace are filesystem work.
+    Every caller runs this at the end of a tail wrapped in
+    ``await_drained(_drain_skill_mutation(...))`` -- the install, edit, delete,
+    rollback and toggle tails, and the ``/skills/reload`` refresh -- after the
+    change is durable on disk and this process has refreshed its own prompt
+    caches. The drain is what keeps a cancelled caller from skipping this step
+    and leaving peer Gateway processes serving the previous skill set; a call
+    outside such a tail would not have that guarantee. ``user_id`` scopes the
+    reset to one user's custom skills; ``None`` retires every user's caches
+    (public-skill state and whole-catalog reloads). Path resolution, the
+    sidecar lock and the atomic replace are filesystem work.
+
+    Failures surface as :class:`SkillCacheResetPublishError` (never an
+    ``OSError``), so the handlers' ``FileNotFoundError -> 404`` and
+    ``ValueError -> 400`` mappings cannot claim a successfully applied change
+    was not found; every handler reports it through its generic 500 branch.
     """
     return await asyncio.to_thread(publish_skills_cache_reset, user_id=user_id)
 
@@ -311,6 +326,13 @@ async def _install_skill_archive(archive_path: Path, config: AppConfig) -> Skill
 
     try:
         return await await_drained(_drain_skill_mutation("install", _persist_install))
+    except SkillCacheResetPublishError as e:
+        # The skill is installed; only the cross-replica publication failed.
+        # Not an OSError, so it would reach the generic 500 below anyway; the
+        # explicit clause pins that contract next to the 404/400 mappings and
+        # records that the install itself succeeded.
+        logger.error("Skill installed but the shared cache reset could not be published", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to install skill: {str(e)}") from e
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     except SkillAlreadyExistsError as e:
@@ -482,14 +504,22 @@ async def reload_skills(request: Request) -> SkillReloadResponse:
 
     The local refresh runs first; the shared marker is published only once it
     succeeded, and a publication failure is a server error. A ``200`` therefore
-    never means that only the handling process was refreshed. Without a
-    resolvable extensions config path there is no shared directory to publish
-    into and the response reports ``scope="process"``.
+    never means that only the handling process was refreshed. The refresh and
+    the publication run as one drained tail, like every other mutation in this
+    router: a caller that disconnects between the two cannot leave peer
+    processes serving the old skill set -- the one outcome this operator hook
+    for external mount writes exists to prevent. Without a resolvable
+    extensions config path there is no shared directory to publish into and
+    the response reports ``scope="process"``.
     """
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
-    try:
+
+    async def _refresh_and_publish() -> str | None:
         await refresh_skills_system_prompt_cache_async()
-        generation = await _publish_skills_cache_reset(None)
+        return await _publish_skills_cache_reset(None)
+
+    try:
+        generation = await await_drained(_drain_skill_mutation("reload", _refresh_and_publish))
     except Exception as exc:
         logger.exception("Failed to invalidate skills cache")
         raise HTTPException(status_code=500, detail="Failed to invalidate skills cache.") from exc

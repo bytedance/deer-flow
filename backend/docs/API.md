@@ -1000,7 +1000,9 @@ serves a cached skill list, so one request reaches every replica sharing the
 volume; it does not claim a deployment-wide broadcast when replicas use
 independent filesystems. The skill install, edit, delete, rollback and
 enable/disable endpoints publish the same marker after their own change is
-durable, scoped to the calling user for custom skills. When no extensions
+durable, scoped to the calling user for custom skills; if that publication
+fails after the change was applied, they return their generic `500` (never
+`404`), and a client that disconnects mid-request does not skip it. When no extensions
 config path can be resolved there is no shared directory to publish into; the
 request still refreshes the current process and returns `"scope": "process"`
 with the message `Skill caches invalidated; subsequent runs in this Gateway

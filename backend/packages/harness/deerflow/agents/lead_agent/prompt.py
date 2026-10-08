@@ -105,6 +105,19 @@ def _apply_shared_skills_cache_reset(change: SharedResetChange) -> None:
         invalidate_user_skill_cache(user_id)
 
 
+class SkillCacheResetPublishError(RuntimeError):
+    """The shared skills cache reset marker could not be published.
+
+    Deliberately not an ``OSError`` subclass. The Gateway skill handlers map
+    ``FileNotFoundError`` to HTTP 404 ("archive/skill not found") and
+    ``ValueError`` to 400, and a marker that could not be written *after* a
+    skill was installed or edited successfully must not borrow either status;
+    this type falls through to their generic 500 branch instead. The original
+    filesystem error is chained as ``__cause__`` for logs; the message names
+    only its type, never a server path.
+    """
+
+
 def publish_skills_cache_reset(*, user_id: str | None = None) -> str | None:
     """Publish a skills cache reset to every Gateway process sharing the config directory.
 
@@ -122,11 +135,22 @@ def publish_skills_cache_reset(*, user_id: str | None = None) -> str | None:
     Returns:
         The published generation, or ``None`` when no extensions config path
         can be resolved and the reset therefore stayed process-local.
+
+    Raises:
+        SkillCacheResetPublishError: the config directory, lock file or marker
+            could not be written (an ``OSError`` such as the directory
+            vanishing between path resolution and the atomic replace), or the
+            project root the path resolution depends on is misconfigured
+            (``ValueError``). A missing explicit config *path* is not an
+            error: :func:`resolve_shared_config_path` maps it to ``None``.
     """
-    config_path = resolve_shared_config_path()
-    if config_path is None:
-        return None
-    generation = SKILLS_CACHE_RESET_MARKER.publish(config_path, user_id=user_id)
+    try:
+        config_path = resolve_shared_config_path()
+        if config_path is None:
+            return None
+        generation = SKILLS_CACHE_RESET_MARKER.publish(config_path, user_id=user_id)
+    except (OSError, ValueError) as exc:
+        raise SkillCacheResetPublishError(f"Could not publish the shared skills cache reset marker ({type(exc).__name__})") from exc
     _skills_cache_reset_tracker.note_own_publication(generation)
     return generation
 
