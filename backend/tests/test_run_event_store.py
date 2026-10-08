@@ -725,6 +725,7 @@ class TestDbRunEventStore:
         assert session.execute_calls
         assert "pg_advisory_xact_lock" in str(session.execute_calls[0][0])
         assert session.execute_calls[0][1] == {"thread_id": "thread-1"}
+        assert sum("pg_advisory_xact_lock" in str(call[0]) for call in session.execute_calls) == 1
 
     @pytest.mark.anyio
     async def test_basic_crud(self, tmp_path):

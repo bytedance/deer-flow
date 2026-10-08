@@ -579,7 +579,6 @@ class DbRunEventStore(RunEventStore):
         async with self._get_write_lock(thread_id):
             async with self._sf() as session:
                 async with session.begin():
-                    await self._acquire_thread_mutation_fence(session, thread_id)
                     max_seq = await self._max_seq_for_thread(session, thread_id)
                     count_conditions = [RunEventRow.thread_id == thread_id, RunEventRow.run_id == run_id]
                     if resolved_user_id is not None:
