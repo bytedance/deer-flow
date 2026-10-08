@@ -344,7 +344,11 @@ class MessageBus:
         self._outbound_listeners = [cb for cb in self._outbound_listeners if cb != callback]
 
     async def publish_outbound(self, msg: OutboundMessage) -> None:
-        """Dispatch an outbound message to the listeners present at admission."""
+        """Dispatch to listeners registered when dispatch begins.
+
+Unsubscribing during an in-flight dispatch affects subsequent messages,
+not callbacks already captured for the current message.
+        """
         listeners = tuple(self._outbound_listeners)
         logger.info(
             "[Bus] outbound dispatching: channel=%s, chat_id=%s, listeners=%d, text_len=%d",
