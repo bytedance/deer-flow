@@ -94,7 +94,9 @@ for (const custom of [false, true]) {
       .getByRole("button", { name: "Batch reports", exact: true })
       .click();
     await testInfo.attach("conversation-entry", {
-      body: await page.screenshot(),
+      body: await page.screenshot({
+        path: testInfo.outputPath("conversation-entry.png"),
+      }),
       contentType: "image/png",
     });
     await page
@@ -126,7 +128,9 @@ for (const custom of [false, true]) {
       "Original source <script>window.PWNED = true</script>",
     );
     await testInfo.attach("saved-report-and-evidence", {
-      body: await page.screenshot(),
+      body: await page.screenshot({
+        path: testInfo.outputPath("saved-report-and-evidence.png"),
+      }),
       contentType: "image/png",
     });
     expect(
@@ -311,11 +315,16 @@ test("browser code boundaries, malformed/legacy evidence and read-error recovery
   );
   await page.getByRole("button", { name: "Refresh selected result" }).click();
   await refreshed;
-  const citations = page
-    .getByTestId("batch-saved-report")
-    .getByRole("button", { name: "citation:1", exact: true });
+  const citations = page.getByTestId("batch-saved-report").locator("button");
   // A maximal single line must still support source interaction and refresh.
+  // Count the complete DOM without computing 16k accessible names on each poll.
   await expect(citations).toHaveCount(citationCount);
+  expect(
+    await citations.evaluateAll((nodes) =>
+      nodes.every((node) => node.textContent === "citation:1"),
+    ),
+  ).toBe(true);
+  await expect(citations.last()).toHaveAccessibleName("citation:1");
   await citations.last().click();
   await expect(page.getByRole("dialog")).toContainText("Original source");
   await page.getByRole("button", { name: "Close source" }).click();
