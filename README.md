@@ -185,6 +185,11 @@ For MindIE XML tool calls, see the
    only, and does not include `.env`, raw conversation messages, or user file
    contents. Subprocess diagnostics are captured as UTF-8, with Python helpers
    emitting UTF-8 even on non-UTF-8 hosts and escaping unencodable characters.
+   Thread manifests follow the local launcher's runtime paths: checkout `.env`
+   values override shell exports, and a project-root override alone still uses
+   `backend/.deer-flow` first. For standalone Gateway launches using `backend/.env`
+   or `DEER_FLOW_ENV_FILE`, export the effective `DEER_FLOW_HOME` when collecting
+   the bundle and ensure the checkout `.env` does not override it.
    Doctor's internal tool probes also decode UTF-8 with replacement for invalid
    bytes so the remaining diagnostic output stays available.
 

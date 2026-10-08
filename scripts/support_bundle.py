@@ -265,25 +265,49 @@ def _validate_thread_id(thread_id: str) -> None:
 def _thread_data_roots(project_root: Path) -> list[tuple[Path, str]]:
     """Resolve launcher-relative runtime paths without exporting .env secrets."""
     env_file = project_root / ".env"
-    values = {}
+    names = ("DEER_FLOW_HOME", "DEER_FLOW_PROJECT_ROOT")
+    values = {name: os.environ.get(name) for name in names}
     if env_file.is_file():
-        from dotenv import dotenv_values
-
-        values = dotenv_values(env_file, encoding="utf-8-sig")
-    home = os.environ.get("DEER_FLOW_HOME", values.get("DEER_FLOW_HOME"))
-    runtime_project = os.environ.get("DEER_FLOW_PROJECT_ROOT", values.get("DEER_FLOW_PROJECT_ROOT"))
+        try:
+            from dotenv import dotenv_values
+            from dotenv.parser import parse_stream
+        except ImportError:
+            # Diagnostics must still work in an incomplete backend environment.
+            pass
+        else:
+            with env_file.open(encoding="utf-8-sig") as stream:
+                unquoted = {binding.key for binding in parse_stream(stream) if binding.key and binding.original.string.split("=", 1)[-1].lstrip()[:1] not in ("'", '"')}
+            for name, value in dotenv_values(env_file, encoding="utf-8-sig").items():
+                if name in names and value is not None:
+                    # serve.sh sources .env over inherited exports, even empty ones.
+                    values[name] = os.path.expanduser(value) if name in unquoted else value
+    home = values["DEER_FLOW_HOME"]
+    runtime_project = values["DEER_FLOW_PROJECT_ROOT"]
     if home:
         return [((project_root / home).resolve(), "{DEER_FLOW_HOME}")]
     if runtime_project:
-        return [((project_root / runtime_project).resolve() / ".deer-flow", "{DEER_FLOW_PROJECT_ROOT}/.deer-flow")]
-    return [(project_root / ".deer-flow", ""), (project_root / "backend" / ".deer-flow", "")]
+        # The local launcher pins this home independently of the project root.
+        # Keep the standalone harness location as a second candidate.
+        return [
+            (project_root / "backend" / ".deer-flow", ""),
+            (
+                (project_root / runtime_project).resolve() / ".deer-flow",
+                "{DEER_FLOW_PROJECT_ROOT}/.deer-flow",
+            ),
+        ]
+    return [
+        (project_root / ".deer-flow", ""),
+        (project_root / "backend" / ".deer-flow", ""),
+    ]
 
 
 def _candidate_thread_data_dirs(project_root: Path, thread_id: str) -> list[Path]:
     _validate_thread_id(thread_id)
     roots = _thread_data_roots(project_root)
-    candidates = [root / "threads" / thread_id / "user-data" for root, _ in roots]
-    for base in (root / "users" for root, _ in roots):
+    candidates = []
+    for root, _ in roots:
+        candidates.append(root / "threads" / thread_id / "user-data")
+        base = root / "users"
         if base.exists():
             candidates.extend(user_dir / "threads" / thread_id / "user-data" for user_dir in base.iterdir() if user_dir.is_dir())
     return candidates
