@@ -442,13 +442,7 @@ for (const locale of ["en-US", "zh-CN"]) {
         exact: true,
       }),
     ).toBeVisible();
-    await expect(page.getByRole("article")).toHaveCount(7);
-    await expect(
-      page.getByRole("button", {
-        name: zh ? "查看 批任务报告" : "View Batch reports",
-        exact: true,
-      }),
-    ).toBeVisible();
+    await expect(page.getByRole("article")).toHaveCount(6);
     await expect(
       page.getByRole("button", {
         name: zh ? "查看 会话书签" : "View Bookmarks",
@@ -553,8 +547,8 @@ test("catalog remains discoverable when runtime discovery fails", async ({
   await expect(
     page.getByRole("alert").filter({ hasText: "Extensions unavailable." }),
   ).toBeVisible();
-  await expect(page.getByRole("article")).toHaveCount(7);
+  await expect(page.getByRole("article")).toHaveCount(6);
   await expect(
     page.getByRole("article").filter({ hasText: "Catalog extension" }),
-  ).toHaveCount(7);
+  ).toHaveCount(6);
 });

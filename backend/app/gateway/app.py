@@ -1114,10 +1114,6 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     setattr(app.state, RUN_EVIDENCE_READER_RESOLVER_KEY, _resolve_extension_run_evidence_reader)
 
-    from app.gateway.extension_batch_results import install_batch_result_reader
-
-    install_batch_result_reader(app, _resolve_extension_principal)
-
     from deerflow_extension_api.agent_runs import AGENT_RUNS_RESOLVER_KEY
 
     def _resolve_extension_agent_runs(request):

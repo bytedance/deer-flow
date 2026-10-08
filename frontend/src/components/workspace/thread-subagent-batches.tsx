@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 
+
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -37,6 +38,8 @@ import {
   useSubagentBatchItems,
   useSubagentBatches,
 } from "@/core/subagent-batches";
+
+import { BatchItemReport } from "./batch-item-report";
 
 export function ThreadSubagentBatches({ threadId }: { threadId: string }) {
   const { t } = useI18n();
@@ -284,6 +287,8 @@ function BatchItems({
         <BatchItemRow
           key={item.id}
           item={item}
+          threadId={threadId}
+          batchId={batch.id}
           workerRunning={workerRunning}
           retrying={retry.isPending && retry.variables === item.id}
           onRetry={() => retry.mutate(item.id)}
@@ -310,11 +315,15 @@ function BatchItems({
 
 function BatchItemRow({
   item,
+  threadId,
+  batchId,
   workerRunning,
   retrying,
   onRetry,
 }: {
   item: SubagentBatchItem;
+  threadId: string;
+  batchId: string;
   workerRunning: boolean;
   retrying: boolean;
   onRetry: () => void;
@@ -336,6 +345,12 @@ function BatchItemRow({
       {item.error && (
         <p className="text-destructive mt-1 break-words">{item.error}</p>
       )}
+      <BatchItemReport
+        threadId={threadId}
+        batchId={batchId}
+        item={item}
+        workerRunning={workerRunning}
+      />
       {item.status === "failed" && (
         <Button
           type="button"

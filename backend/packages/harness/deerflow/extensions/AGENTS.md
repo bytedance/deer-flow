@@ -436,29 +436,3 @@ and revoked before host shutdown; PAT/internal grants remain unsupported.
 Unstamped internal launches receive no handle and must still start normally.
 Action/tool dispatch scopes handles to each registered plugin namespace for
 idempotency isolation; request-resolved handles use `for_plugin` explicitly.
-
-Extension-api 0.2.6 adds request-bound `BatchResultReader`, consumed by the optional
-`examples/deerflow-extension-batch-review` package. Host storage/authorization and
-package presentation stay separate; the package has no private host imports,
-storage or writes. Keep API_VERSION, package version, the harness's exact contract
-dependency and workspace lock metadata synchronized; default-install collection
-must remain import-light.
-
-Gateway binds the middleware-stamped principal and threads:read through
-`BATCH_RESULTS_RESOLVER_KEY`; never accept payload owner IDs or grant global access
-to admin/internal callers. Public admission errors retain their HTTP status.
-Unavailable SQL storage is unsupported; a stopped worker still permits reads.
-`app.gateway.extension_batch_results.install_batch_result_reader` is shared by
-the production app factory and isolated HTTP/browser fixtures; it takes the
-host's principal projector without importing unrelated Gateway routers. Fixtures
-replace only that identity source with explicitly synthetic authentication.
-The native adapter checks thread access before batch metadata, then exact
-owner/thread scope. Fixed
-compact projections exclude full results; detail reads take report/verdict/evidence
-from one row and hash that public projection for revision. Never publish execution
-specs, prompts or arbitrary artifacts. Worker availability is not a read gate.
-Detail copying, evidence projection and revision hashing run off the event loop;
-permission, owner and repository reads remain on the request's async path.
-`ActionContext.batch_results` is a lazy request callback, so unrelated actions do
-not acquire a new threads:read requirement. It cannot be serialized or treated as
-an app-global capability. Model-facing `read_batch_item` remains independent.

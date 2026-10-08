@@ -1,11 +1,5 @@
 import { afterEach, beforeEach, expect, rs, test } from "@rstest/core";
-import {
-  act,
-  cleanup,
-  fireEvent,
-  render,
-  screen,
-} from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ConversationExtensionActions } from "@/components/workspace/conversation-extension-actions";
@@ -14,19 +8,7 @@ import type { LoadedContribution } from "@/core/extensions/registry";
 import { enUS } from "@/core/i18n";
 import type { AgentThread } from "@/core/threads/types";
 
-const state = rs.hoisted(() => ({
-  entries: [] as LoadedContribution[],
-  user: "alice",
-  navigate: rs.fn(),
-  notify: rs.fn(),
-}));
-rs.mock("next/navigation", () => ({
-  useRouter: () => ({ push: state.navigate }),
-}));
-rs.mock("@/core/auth/AuthProvider", () => ({
-  useAuth: () => ({ user: { id: state.user } }),
-}));
-rs.mock("sonner", () => ({ toast: { error: state.notify } }));
+const state = rs.hoisted(() => ({ entries: [] as LoadedContribution[] }));
 rs.mock("@/core/extensions/hooks", () => ({
   useFrontendExtensions: () => ({ data: state.entries }),
   useFrontendServices: () => ({}),
@@ -61,77 +43,8 @@ function entry(namespace: string, factory: () => unknown): LoadedContribution {
   };
 }
 beforeEach(() => {
-  state.user = "alice";
-  state.navigate.mockClear();
-  state.notify.mockClear();
   rs.spyOn(console, "warn").mockImplementation(() => undefined);
 });
-
-for (const transition of ["unmount", "account", "thread", "active"] as const) {
-  test(`pending conversation action respects ${transition} lifetime`, async () => {
-    let release!: () => void;
-    const pending = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    let completed!: Promise<void>;
-    const execute = rs.fn((_context, services) => {
-      completed = pending.then(() =>
-        services.openPluginPage("results", "old-thread"),
-      );
-      return completed;
-    });
-    const loaded = entry("healthy", () => ({
-      ...group,
-      actions: [{ ...action, execute }],
-    }));
-    loaded.extension!.surfaces = [
-      {
-        id: "results",
-        slot: "page",
-        title: "Results",
-        mount: () => ({ dispose: () => undefined }),
-      },
-    ];
-    state.entries = [loaded];
-    const view = (thread = "old-thread") => (
-      <TooltipProvider>
-        <ConversationExtensionActions
-          context={{ thread: { thread_id: thread } as AgentThread }}
-        />
-      </TooltipProvider>
-    );
-    const component = render(view());
-    fireEvent.pointerDown(
-      screen.getByRole("button", { name: "Healthy actions" }),
-      { button: 0, ctrlKey: false },
-    );
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Save" }));
-    expect(execute).toHaveBeenCalledOnce();
-    if (transition === "unmount") component.unmount();
-    if (transition === "account") {
-      state.user = "bob";
-      component.rerender(view());
-    }
-    if (transition === "thread") component.rerender(view("new-thread"));
-    const available =
-      transition === "unmount" ||
-      !screen
-        .getByRole("button", { name: "Healthy actions" })
-        .hasAttribute("disabled");
-    await act(async () => {
-      release();
-      await completed.catch(() => undefined);
-    });
-    if (transition === "account" || transition === "thread")
-      expect(available).toBe(true);
-    expect(state.notify).not.toHaveBeenCalled();
-    if (transition === "active") {
-      expect(state.navigate).toHaveBeenCalledWith(
-        "/workspace/extensions/healthy/results?thread=old-thread",
-      );
-    } else expect(state.navigate).not.toHaveBeenCalled();
-  });
-}
 afterEach(() => {
   cleanup();
   rs.restoreAllMocks();

@@ -1,4 +1,4 @@
-"""Loopback-only real plugin/SQL/action preview, with explicitly synthetic auth."""
+"""Loopback-only native batch/SQL report preview, with explicitly synthetic auth."""
 
 import asyncio
 import sys
@@ -9,15 +9,13 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
 import uvicorn
-from deerflow_extension_api.auth import EXTENSION_PRINCIPAL_RESOLVER_KEY, ExtensionPrincipal
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 
-from app.gateway.extension_batch_results import install_batch_result_reader
-from app.gateway.routers.plugins import router
+from app.gateway.authz import AuthContext
+from app.gateway.routers.subagent_batches import router
 from deerflow.community.ragflow.formatting import format_retrieval_sources
 from deerflow.community.ragflow.sources import durable_source_artifact
 from deerflow.config.database_config import DatabaseConfig
-from deerflow.extensions.loader import ExtensionSpec, load_extensions
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.subagent_batches import SubagentBatchRepository
 from deerflow.persistence.thread_meta import make_thread_store
@@ -27,9 +25,6 @@ THREAD = "00000000-0000-0000-0000-000000000001"
 
 
 async def create_app(directory):
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "examples/deerflow-extension-batch-review"))
-    extensions, diagnostics = load_extensions([ExtensionSpec(use="deerflow_extension_batch_review:install", config={"enabled": True}, required=True)])
-    assert not diagnostics
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(Path(directory))))
     repository = SubagentBatchRepository(get_session_factory())
     await repository.create_batch(
@@ -41,7 +36,7 @@ async def create_app(directory):
         submission_key="preview",
         title="Historical research",
         subagent_type="general-purpose",
-        items=[{"key": f"topic-{i}", "prompt": "Research"} for i in range(51)],
+        items=[{"key": f"topic-{i}", "prompt": "Research"} for i in range(101)],
         max_live_items=1,
         max_running_items=1,
         max_attempts=2,
@@ -54,7 +49,8 @@ async def create_app(directory):
         max_chars_per_chunk=2000,
         max_total_chars=3000,
     )
-    report = "Full saved report\n" + report + "\n<script>window.PWNED = true</script>"
+    source_id = artifact["knowledge_sources"]["sources"][0]["id"]
+    report = f"- ~~~\n  [citation:1](#knowledge-{source_id})\n  ~~~\n\nFull saved report\n" + report.replace("[citation:1]", "[citation:2]") + "\n<script>window.PWNED = true</script>"
     snapshot = durable_source_artifact([{"type": "tool", "name": "knowledge_search", "artifact": artifact}], report, max_chars=100_000)
     await repository.finalize_item(
         claimed[0]["id"],
@@ -81,22 +77,17 @@ async def create_app(directory):
             await close_engine()
 
     app = FastAPI(lifespan=lifespan)
-    app.state.extensions = extensions
     app.state.subagent_batch_repo = repository
     app.state.thread_store = app.state.preview_thread_store = thread_store
     app.state.subagent_batches_available = False
 
-    def principal_resolver(request: Request) -> ExtensionPrincipal:
-        return ExtensionPrincipal(request.state.user.id, roles=("user",))
-
-    setattr(app.state, EXTENSION_PRINCIPAL_RESOLVER_KEY, principal_resolver)
-    install_batch_result_reader(app, principal_resolver)
-
     @app.middleware("http")
     async def identity(request, call_next):
         request.state.user = SimpleNamespace(id=request.headers.get("x-test-user", "alice"), system_role="user")
+        if request.headers.get("x-test-anonymous") == "1":
+            request.state.user = None
         request.state.auth_source = "session"
-        request.state.auth = SimpleNamespace(has_permission=lambda resource, action: request.headers.get("x-test-denied") != "1")
+        request.state.auth = AuthContext(request.state.user, [] if request.headers.get("x-test-denied") == "1" else ["threads:read"])
         return await call_next(request)
 
     app.include_router(router)

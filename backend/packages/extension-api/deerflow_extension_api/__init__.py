@@ -24,7 +24,6 @@ from deerflow_extension_api.auth import (
     require_plugin_management,
     resolve_principal,
 )
-from deerflow_extension_api.batch_results import BATCH_RESULTS_RESOLVER_KEY, BatchResultError, BatchResultReader, require_batch_results, resolve_batch_results
 from deerflow_extension_api.compaction import (
     CompactionEvent,
     ContextCompactionObserver,
@@ -100,14 +99,9 @@ from deerflow_extension_api.state import ExtensionData
 
 #: Contract version. Before 1.0, minors may break and patches are additive.
 #: From 1.0 on, bump the major for breaking changes.
-API_VERSION = "0.2.6"
+API_VERSION = "0.2.5"
 
 __all__ = [
-    "BATCH_RESULTS_RESOLVER_KEY",
-    "BatchResultError",
-    "BatchResultReader",
-    "require_batch_results",
-    "resolve_batch_results",
     "AGENT_RUNS_CONTEXT_KEY",
     "AGENT_RUNS_RESOLVER_KEY",
     "AgentRun",

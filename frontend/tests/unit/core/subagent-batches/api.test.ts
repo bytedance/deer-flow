@@ -7,6 +7,7 @@ import { fetch } from "@/core/api/fetcher";
 import {
   controlSubagentBatch,
   fetchSubagentBatchItems,
+  fetchSubagentBatchResult,
   fetchSubagentBatches,
   retrySubagentBatchItem,
   subagentBatchResultsUrl,
@@ -67,4 +68,19 @@ describe("subagent batch API", () => {
       "/api/threads/thread-1/subagent-batches/batch-1/results.jsonl",
     );
   });
+});
+
+it("reads only a selected result and forwards cancellation to the gateway", async () => {
+  mockedFetch.mockResolvedValueOnce(jsonResponse({ result: "saved" }));
+  const controller = new AbortController();
+  await fetchSubagentBatchResult(
+    "thread / 1",
+    "batch / 1",
+    50,
+    controller.signal,
+  );
+  expect(mockedFetch).toHaveBeenLastCalledWith(
+    "/api/threads/thread%20%2F%201/subagent-batches/batch%20%2F%201/items/50/result",
+    { signal: controller.signal },
+  );
 });

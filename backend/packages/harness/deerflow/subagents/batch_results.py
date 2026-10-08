@@ -1,28 +1,15 @@
-"""Native storage adapter for the optional public batch result reader."""
+"""Bounded native report projection; never expose arbitrary persisted artifacts."""
 
-import asyncio
 import copy
 import hashlib
 import json
 import re
-from collections.abc import Awaitable, Callable
 from typing import Any
 
-_BATCH_FIELDS = ("id", "title", "subagent_type", "status", "total_items", "counts", "created_at", "updated_at", "completed_at")
 _ITEM_FIELDS = ("id", "item_key", "position", "status", "attempt", "result_preview", "result_truncated", "error", "stop_reason", "acceptance_criteria", "acceptance_verdict", "started_at", "completed_at", "updated_at")
 _SOURCE_ID = re.compile(r"[a-f0-9]{32}-[1-9][0-9]{0,2}\Z")
 _SOURCE_FIELDS = ("id", "provider", "dataset_id", "document_id", "chunk_id", "dataset_name", "document_name", "text", "pages", "truncated")
 MAX_RESULT_CHARS = 1_000_000  # Native configuration/schema ceiling, not current submission settings.
-
-
-def _identifier(value: str) -> None:
-    if not isinstance(value, str) or not value or value != value.strip() or len(value) > 256:
-        raise ValueError("Invalid resource identity")
-
-
-def _integer(value: int, lower: int, upper: int) -> None:
-    if type(value) is not int or not lower <= value <= upper:
-        raise ValueError("Invalid result window")
 
 
 def _evidence(value: object, report: str) -> dict[str, Any] | None:
@@ -48,6 +35,8 @@ def _evidence(value: object, report: str) -> dict[str, Any] | None:
             continue
         if any(not 0 < len(raw[key]) <= 256 for key in ("dataset_id", "document_id", "chunk_id")) or any(len(raw[key]) > 512 for key in ("dataset_name", "document_name")):
             continue
+        if len(raw["text"]) > 200_000:
+            continue
         pages = raw.get("pages")
         if not isinstance(pages, list) or len(pages) > 100 or any(type(page) is not int or not 1 <= page <= 1_000_000 for page in pages) or type(raw.get("truncated")) is not bool:
             continue
@@ -61,7 +50,7 @@ def _evidence(value: object, report: str) -> dict[str, Any] | None:
     return result
 
 
-def _result_projection(row: dict[str, Any]) -> dict[str, Any]:
+def project_batch_result(row: dict[str, Any]) -> dict[str, Any]:
     result = row.get("result")
     result = result if isinstance(result, str) else None
     projection = copy.deepcopy({key: row.get(key) for key in _ITEM_FIELDS})
@@ -70,46 +59,3 @@ def _result_projection(row: dict[str, Any]) -> dict[str, Any]:
     projection["evidence"] = _evidence(row.get("result_artifact"), projection["result"] or "") if row.get("status") == "succeeded" else None
     projection["revision"] = hashlib.sha256(json.dumps(projection, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
     return projection
-
-
-class RepositoryBatchResultReader:
-    """No app dependency: the host supplies its principal and thread admission."""
-
-    def __init__(self, repository: Any, *, user_id: str, check_thread: Callable[[str], Awaitable[bool]]) -> None:
-        _identifier(user_id)
-        self._repository = repository
-        self._user_id = user_id
-        self._check_thread = check_thread
-
-    async def _owned_batch(self, thread_id: str, batch_id: str) -> bool:
-        _identifier(thread_id)
-        _identifier(batch_id)
-        if not await self._check_thread(thread_id):
-            return False
-        batch = await self._repository.get_batch(batch_id, user_id=self._user_id)
-        return batch is not None and batch.get("thread_id") == thread_id
-
-    async def list_batches(self, *, thread_id: str, limit: int = 20) -> list[dict[str, Any]]:
-        _identifier(thread_id)
-        _integer(limit, 1, 100)
-        if not await self._check_thread(thread_id):
-            return []
-        rows = await self._repository.list_by_thread(thread_id, user_id=self._user_id, limit=limit)
-        return [copy.deepcopy({key: row.get(key) for key in _BATCH_FIELDS}) for row in rows]
-
-    async def list_items(self, *, thread_id: str, batch_id: str, offset: int = 0, limit: int = 50) -> list[dict[str, Any]] | None:
-        _integer(offset, 0, 100_000)
-        _integer(limit, 1, 100)
-        if not await self._owned_batch(thread_id, batch_id):
-            return None
-        rows = await self._repository.list_items(batch_id, user_id=self._user_id, offset=offset, limit=limit)
-        return None if rows is None else [copy.deepcopy({key: row.get(key) for key in _ITEM_FIELDS}) for row in rows]
-
-    async def read_item(self, *, thread_id: str, batch_id: str, position: int) -> dict[str, Any] | None:
-        _integer(position, 0, 99_999)
-        if not await self._owned_batch(thread_id, batch_id):
-            return None
-        rows = await self._repository.list_items(batch_id, user_id=self._user_id, offset=position, limit=1, include_result=True)
-        if not rows or rows[0].get("position") != position:
-            return None
-        return await asyncio.to_thread(_result_projection, rows[0])

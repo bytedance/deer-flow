@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Path, Query, Request
 from fastapi.responses import StreamingResponse
 
 from app.gateway.authz import require_permission
@@ -14,6 +15,7 @@ from app.gateway.deps import (
     get_subagent_batch_repo,
     get_subagent_batch_service,
 )
+from deerflow.subagents.batch_results import project_batch_result
 from deerflow.utils.thread_id import ThreadId
 
 router = APIRouter(prefix="/api/threads/{thread_id}/subagent-batches", tags=["subagent-batches"])
@@ -64,6 +66,23 @@ async def list_batch_items(
         raise HTTPException(status_code=422, detail="Unknown batch item status")
     repo, user_id, _batch = await _owned_batch(request, thread_id, batch_id)
     return await repo.list_items(batch_id, user_id=user_id, offset=offset, limit=limit, status=status) or []
+
+
+@router.get("/{batch_id}/items/{position}/result")
+@require_permission("threads", "read", owner_check=True)
+async def get_batch_item_result(
+    thread_id: ThreadId,
+    batch_id: str,
+    request: Request,
+    position: int = Path(ge=0, le=99_999),
+) -> dict:
+    repo, user_id, _batch = await _owned_batch(request, thread_id, batch_id)
+    # Positions are immutable submission order. Status filtering would change
+    # the meaning of this offset and could return a different item's report.
+    rows = await repo.list_items(batch_id, user_id=user_id, offset=position, limit=1, include_result=True)
+    if not rows or rows[0].get("position") != position:
+        raise HTTPException(status_code=404, detail="Subagent batch item not found")
+    return await asyncio.to_thread(project_batch_result, rows[0])
 
 
 @router.post("/{batch_id}/pause")

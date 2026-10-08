@@ -97,11 +97,6 @@ optional `navigation: { label, labelZh?, icon? }`. The host generates the URL
 `/workspace/extensions/{namespace}/{id}` and mounts only that registered page.
 `mount` runs synchronously and returns an object `{ dispose }`, whose `dispose()` is called on unmount. The context includes locale,
 public settings, an abort signal and a namespace-bound `callBackend` helper.
-`callBackend(action, payload, { signal })` optionally cancels a single selection
-request while retaining page-lifetime cancellation and viewer/CSRF fencing.
-Conversation action services can use `openPluginPage(surfaceId, threadId?)` to
-open a page declared by their installed plugin; the host owns namespace and URL.
-The optional thread query becomes page context, not a read authorization grant.
 The optional `openConversation(threadId)` host helper reads current conversation
 metadata through the authenticated API and uses the host's normal/custom-agent
 routing rules. Missing or inaccessible conversations reject without navigating;

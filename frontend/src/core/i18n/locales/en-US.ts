@@ -40,11 +40,6 @@ export const enUS: Translations = {
       "This entry comes from the repository extension catalog. Ask your deployment administrator to confirm its installation and activation status.",
     installationGuide: "Installation guide",
     catalog: {
-      batchReview: {
-        title: "Batch reports",
-        description:
-          "Review saved batch reports, acceptance results and captured knowledge excerpts without rerunning work.",
-      },
       agentTeams: {
         title: "Agent teams",
         description:
@@ -787,6 +782,18 @@ export const enUS: Translations = {
     exportResults: "Export JSONL",
     viewItems: "View items",
     hideItems: "Hide items",
+    viewReport: "View report",
+    savedReport: "Saved report",
+    execution: "Execution",
+    acceptance: "Acceptance",
+    accepted: "Passed",
+    unmet: "Unmet",
+    unverified: "Unverified",
+    noReport: "No report saved for this item.",
+    reportTruncated: "This saved report was truncated.",
+    evidenceUnavailable: "Captured evidence is unavailable for this report.",
+    evidenceOmitted: "Some cited sources were omitted from the saved evidence.",
+    reportFailed: "Couldn’t load the saved report",
     itemsFailed: "Couldn't load batch items",
     progress: (completed, total) => `${completed} of ${total} terminal`,
     limits: (live, running) => `Live ${live} · running ${running}`,

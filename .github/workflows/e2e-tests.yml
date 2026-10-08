@@ -6,9 +6,10 @@ on:
     paths:
       - 'frontend/**'
       - 'backend/app/gateway/routers/plugins.py'
-      - 'backend/app/gateway/extension_batch_results.py'
+      - 'backend/app/gateway/routers/subagent_batches.py'
+      - 'backend/packages/harness/deerflow/subagents/batch_results.py'
+      - 'backend/extension_test_fixtures/batch_results_gateway.py'
       - 'backend/extension_test_fixtures/bookmark_plugin_gateway.py'
-      - 'backend/extension_test_fixtures/batch_review_gateway.py'
       - 'backend/extension_test_fixtures/browser_asset_gateway.py'
       - 'backend/packages/extension-api/**'
       - 'backend/packages/harness/deerflow/extensions/**'
@@ -16,16 +17,16 @@ on:
       - 'backend/pyproject.toml'
       - 'backend/uv.lock'
       - 'examples/deerflow-extension-bookmarks/**'
-      - 'examples/deerflow-extension-batch-review/**'
       - '.github/workflows/e2e-tests.yml'
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'frontend/**'
       - 'backend/app/gateway/routers/plugins.py'
-      - 'backend/app/gateway/extension_batch_results.py'
+      - 'backend/app/gateway/routers/subagent_batches.py'
+      - 'backend/packages/harness/deerflow/subagents/batch_results.py'
+      - 'backend/extension_test_fixtures/batch_results_gateway.py'
       - 'backend/extension_test_fixtures/bookmark_plugin_gateway.py'
-      - 'backend/extension_test_fixtures/batch_review_gateway.py'
       - 'backend/extension_test_fixtures/browser_asset_gateway.py'
       - 'backend/packages/extension-api/**'
       - 'backend/packages/harness/deerflow/extensions/**'
@@ -33,7 +34,6 @@ on:
       - 'backend/pyproject.toml'
       - 'backend/uv.lock'
       - 'examples/deerflow-extension-bookmarks/**'
-      - 'examples/deerflow-extension-batch-review/**'
       - '.github/workflows/e2e-tests.yml'
 
 concurrency:

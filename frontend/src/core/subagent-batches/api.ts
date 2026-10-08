@@ -2,7 +2,11 @@ import { throwGatewayApiError } from "@/core/api/errors";
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
-import type { SubagentBatch, SubagentBatchItem } from "./types";
+import type {
+  SubagentBatch,
+  SubagentBatchItem,
+  SubagentBatchResult,
+} from "./types";
 
 function batchUrl(threadId: string, path = ""): string {
   return `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/subagent-batches${path}`;
@@ -80,4 +84,22 @@ export function subagentBatchResultsUrl(
   batchId: string,
 ): string {
   return batchUrl(threadId, `/${encodeURIComponent(batchId)}/results.jsonl`);
+}
+
+export async function fetchSubagentBatchResult(
+  threadId: string,
+  batchId: string,
+  position: number,
+  signal?: AbortSignal,
+): Promise<SubagentBatchResult> {
+  return json(
+    await fetch(
+      batchUrl(
+        threadId,
+        `/${encodeURIComponent(batchId)}/items/${position}/result`,
+      ),
+      { signal },
+    ),
+    "Failed to load saved batch report",
+  );
 }

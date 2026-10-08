@@ -27,7 +27,6 @@ export interface Translations {
     catalogHint: string;
     installationGuide: string;
     catalog: Record<
-      | "batchReview"
       | "agentTeams"
       | "bookmarks"
       | "context"
@@ -631,6 +630,18 @@ export interface Translations {
     exportResults: string;
     viewItems: string;
     hideItems: string;
+    viewReport: string;
+    savedReport: string;
+    execution: string;
+    acceptance: string;
+    accepted: string;
+    unmet: string;
+    unverified: string;
+    noReport: string;
+    reportTruncated: string;
+    evidenceUnavailable: string;
+    evidenceOmitted: string;
+    reportFailed: string;
     itemsFailed: string;
     progress: (completed: number, total: number) => string;
     limits: (live: number, running: number) => string;

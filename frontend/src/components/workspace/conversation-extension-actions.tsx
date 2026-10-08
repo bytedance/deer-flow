@@ -1,7 +1,6 @@
 "use client";
 
-import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -14,13 +13,11 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { useAuth } from "@/core/auth/AuthProvider";
 import { resolveConversationActions } from "@/core/extensions/actions";
 import type {
   ConversationAction,
   ConversationActionContext,
   FrontendContribution,
-  FrontendExtension,
 } from "@/core/extensions/contracts";
 import {
   useFrontendServices,
@@ -36,20 +33,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import { Tooltip } from "./tooltip";
 
 /** Shared host slot used by the chat toolbar AND every sidebar conversation. */
-export function ConversationExtensionActions(props: {
-  context: ConversationActionContext;
-  placement?: "toolbar" | "menu";
-}) {
-  const { user } = useAuth();
-  return (
-    <ScopedConversationActions
-      key={JSON.stringify([user?.id, props.context.thread.thread_id])}
-      {...props}
-    />
-  );
-}
-
-function ScopedConversationActions({
+export function ConversationExtensionActions({
   context,
   placement = "toolbar",
 }: {
@@ -59,41 +43,23 @@ function ScopedConversationActions({
   const { t, locale } = useI18n();
   const query = useFrontendExtensions();
   const services = useFrontendServices();
-  const router = useRouter();
   const [busy, setBusy] = useState(false);
-  const pending = useRef(new Set<AbortController>());
-  useEffect(() => {
-    const tasks = pending.current;
-    return () => {
-      for (const task of tasks) task.abort();
-      tasks.clear();
-    };
-  }, []);
   const entries = query.isError ? [] : (query.data ?? []);
 
   async function execute(
     action: ConversationAction,
     contribution: FrontendContribution,
-    extension: FrontendExtension,
   ) {
-    const controller = new AbortController();
-    pending.current.add(controller);
     setBusy(true);
     try {
       await action.execute(
         context,
-        bindFrontendServices(services, contribution, controller.signal, {
-          pageIds: (extension.surfaces ?? [])
-            .filter((surface) => surface.slot === "page")
-            .map((surface) => surface.id),
-          navigate: (path) => router.push(path),
-        }),
+        bindFrontendServices(services, contribution),
       );
     } catch {
-      if (!controller.signal.aborted) toast.error(t.extensions.actionFailed);
+      toast.error(t.extensions.actionFailed);
     } finally {
-      pending.current.delete(controller);
-      if (!controller.signal.aborted) setBusy(false);
+      setBusy(false);
     }
   }
 
@@ -115,7 +81,7 @@ function ScopedConversationActions({
           <DropdownMenuItem
             key={action.id}
             disabled={busy}
-            onSelect={() => void execute(action, contribution, extension)}
+            onSelect={() => void execute(action, contribution)}
           >
             <Icon className="text-muted-foreground" />
             <span>{action.label}</span>

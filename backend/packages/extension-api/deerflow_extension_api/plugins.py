@@ -13,7 +13,6 @@ from typing import Any
 
 from deerflow_extension_api.agent_runs import AgentRuns
 from deerflow_extension_api.auth import ExtensionPrincipal
-from deerflow_extension_api.batch_results import BatchResultReader
 from deerflow_extension_api.settings import FrontendBinding, SettingsContribution, SettingsField, SettingValue
 
 
@@ -22,8 +21,6 @@ class ActionContext:
     principal: ExtensionPrincipal
     settings: Mapping[str, SettingValue]
     agent_runs: AgentRuns | None = field(default=None, kw_only=True)
-    # Lazy request binding: unrelated actions must not require threads:read.
-    batch_results: Callable[[], BatchResultReader] | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)

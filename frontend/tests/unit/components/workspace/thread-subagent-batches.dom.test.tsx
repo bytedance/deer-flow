@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, rs } from "@rstest/core";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
+rs.mock("@/components/workspace/batch-item-report", () => ({
+  BatchItemReport: () => null,
+}));
+
 const featureState = rs.hoisted(() => ({
   repositoryAvailable: true,
   workerRunning: false,

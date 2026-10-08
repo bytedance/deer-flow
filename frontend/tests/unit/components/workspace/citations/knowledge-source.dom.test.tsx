@@ -128,3 +128,36 @@ for (const [surface, Link] of [
     });
   });
 }
+
+describe("saved batch evidence", () => {
+  it("uses an explicit saved snapshot without borrowing conversation sources", () => {
+    const evidence = Reflect.get(messages[0]!, "artifact").knowledge_sources;
+    const view = render(
+      <I18nProvider initialLocale="en-US">
+        <KnowledgeSourcesProvider messages={messages}>
+          <KnowledgeSourcesProvider savedEvidence={evidence}>
+            <KnowledgeCitationLink href={href}>1</KnowledgeCitationLink>
+          </KnowledgeSourcesProvider>
+        </KnowledgeSourcesProvider>
+      </I18nProvider>,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "View source: Manual.pdf" }),
+    );
+    expect(screen.getByRole("dialog").textContent).toContain(
+      "The limit is 42.",
+    );
+    view.rerender(
+      <I18nProvider initialLocale="en-US">
+        <KnowledgeSourcesProvider messages={messages}>
+          <KnowledgeSourcesProvider savedEvidence={null}>
+            <KnowledgeCitationLink href={href}>1</KnowledgeCitationLink>
+          </KnowledgeSourcesProvider>
+        </KnowledgeSourcesProvider>
+      </I18nProvider>,
+    );
+    expect(
+      screen.queryByRole("button", { name: "View source: Manual.pdf" }),
+    ).toBeNull();
+  });
+});

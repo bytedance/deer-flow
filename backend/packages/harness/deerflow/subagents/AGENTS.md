@@ -13,11 +13,18 @@ Durable batch specs store overlays as JSON and restore them before execution.
 `read_batch_item` projects only report/state/acceptance fields after owner and current-thread checks. Positions are immutable submission order; no status filtering. The bounded tool hashes that projection for continuation, detecting completion/retry/cancel changes. It does not persist snapshots, schedule work or expose execution specs; HTTP bulk export stays independent.
 
 Batch evidence uses nullable `result_artifact` (migration 0033), persisted with
-successful results under the same lease fence. Only full-result exports expose
-bounded, cited RAG snapshots; compact item projections omit them. Cancelled,
+successful results under the same lease fence. Full-result exports and the selected
+native result endpoint expose bounded, cited RAG snapshots; compact item projections
+omit them. `batch_results.project_batch_result` allowlists report/state/acceptance
+fields and validated saved evidence, excludes raw artifacts and execution metadata,
+and hashes the detached projection. The HTTP router runs projection off the request
+loop after its existing thread permission and batch ownership checks. Read exactly
+one immutable position with no status filter; a mismatched or absent row is 404. Cancelled,
 failed and stale attempts cannot publish evidence; retry clears it. Cover the
 formatter/step capture -> worker -> reopened SQLite -> authorized export chain
-in `tests/test_batch_rag_evidence.py`; no provider fetch or preview UI is added.
+in `tests/test_batch_rag_evidence.py` and selected reads in
+`tests/test_batch_results_acceptance.py`; historical inspection never fetches
+the provider again.
 Explicitly enabled nested tasks propagate report-bound omission IDs; filter and
 deduplicate at each forwarding boundary before publishing the durable count.
 

@@ -10,40 +10,18 @@ import type {
   FrontendContribution,
   FrontendServices,
 } from "./contracts";
-import { pluginPagePath } from "./pages";
 
-export type HostServices = Omit<
-  FrontendServices,
-  "callBackend" | "openPluginPage"
->;
+export type HostServices = Omit<FrontendServices, "callBackend">;
 
 /** Namespace comes from the installed page snapshot, never from action input. */
 export function bindFrontendServices(
   base: HostServices,
   entry: FrontendContribution,
   signal?: AbortSignal,
-  navigation?: { pageIds: readonly string[]; navigate: (path: string) => void },
 ): FrontendServices {
   return {
     ...base,
-    ...(navigation
-      ? {
-          openPluginPage(surfaceId: string, threadId?: string) {
-            signal?.throwIfAborted();
-            if (!navigation.pageIds.includes(surfaceId))
-              throw new Error("Page not declared by this plugin");
-            if (threadId !== undefined && (!threadId || threadId.length > 128))
-              throw new Error("Invalid conversation context");
-            const query = threadId
-              ? `?${new URLSearchParams({ thread: threadId })}`
-              : "";
-            navigation.navigate(
-              pluginPagePath(entry.namespace, surfaceId) + query,
-            );
-          },
-        }
-      : {}),
-    async callBackend(action, payload, options) {
+    async callBackend(action, payload) {
       if (!entry.backend_actions?.includes(action))
         throw new Error("Backend action not declared by this plugin");
       const response = await fetch(
@@ -57,14 +35,7 @@ export function bindFrontendServices(
               : {}),
           },
           body: JSON.stringify(payload),
-          ...(signal || options?.signal
-            ? {
-                signal:
-                  signal && options?.signal
-                    ? AbortSignal.any([signal, options.signal])
-                    : (signal ?? options?.signal),
-              }
-            : {}),
+          ...(signal ? { signal } : {}),
         },
       );
       if (!response.ok)

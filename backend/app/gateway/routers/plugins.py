@@ -95,7 +95,6 @@ async def invoke_plugin_action(request: Request, namespace: str, action_name: st
     """Invoke an installed action with the authenticated viewer and deployment settings."""
     from deerflow_extension_api.agent_runs import AgentRunError, resolve_agent_runs
     from deerflow_extension_api.auth import resolve_principal
-    from deerflow_extension_api.batch_results import BatchResultError, require_batch_results
     from deerflow_extension_api.plugins import ActionContext
 
     from deerflow.extensions.plugin_tools import plugin_settings
@@ -139,11 +138,7 @@ async def invoke_plugin_action(request: Request, namespace: str, action_name: st
     try:
         async with asyncio.timeout(30):
             runs = resolve_agent_runs(request)
-            return await action.handler(
-                MappingProxyType(payload), ActionContext(principal, MappingProxyType(settings), agent_runs=runs.for_plugin(namespace) if runs is not None else None, batch_results=lambda: require_batch_results(request))
-            )
-    except BatchResultError as exc:
-        raise HTTPException(exc.status_code, str(exc)) from exc
+            return await action.handler(MappingProxyType(payload), ActionContext(principal, MappingProxyType(settings), agent_runs=runs.for_plugin(namespace) if runs is not None else None))
     except AgentRunError as exc:
         raise HTTPException(exc.status_code, str(exc)) from exc
     except TimeoutError as exc:

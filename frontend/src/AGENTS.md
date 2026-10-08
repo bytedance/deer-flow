@@ -98,7 +98,13 @@ Language-map membership checks only own properties; inherited names such as
    disabled in read-only history mode, and persisted progress is normalized to
    a bounded percentage before reaching the UI primitive. Item pagination uses a
    fixed page size and an explicit load-more control; full results remain available
-   only through JSONL export. The panel must not infer batch mode from prompt text
+   through JSONL export or a selected item’s View report dialog. The latter reads
+   one immutable position through the native owner-scoped result endpoint; it never
+   downloads a result page. Result queries consume AbortSignals, include the current
+   principal in their keys, and discard cached reports on close. Thread/item/account
+   changes remove report and source dialogs. Retry invalidates result queries along
+   with batch progress. Execution and deterministic acceptance are separate states.
+   The panel must not infer batch mode from prompt text
    or inject the complete result set into chat state.
    Capability Center > Plugins > Lark uses a local generation only to suppress stale React
    callbacks; server-issued Lark flow generations must be passed through every
@@ -209,18 +215,14 @@ clarification references from full grouping.
 
 ### Knowledge source citations
 
-Plugin conversation actions can optionally use host-bound `openPluginPage` to
-navigate only to surfaces declared by their installed namespace. The page carries
-an optional thread query into SurfaceContext; this is display context, not a grant.
-The host action component is keyed by authenticated user and conversation; unmount
-aborts its pending actions and fences late navigation, errors and busy updates.
-`callBackend` accepts an optional selection AbortSignal, combined with the page
-lifetime signal; preserve viewer fencing and CSRF/credential handling. Packaged
-batch-review evidence remains scoped to its selected saved result, not the
-conversation KnowledgeSourcesProvider. Replacing a selection closes its old
-source dialog and cancels obsolete reads.
-
-`KnowledgeSourcesProvider` scopes source records to the current message list.
+`KnowledgeSourcesProvider` scopes source records to either the current message list
+or an explicit saved-evidence payload, never both. Saved batch reports use their
+own provider and the existing static SafeStreamdown/CitationLink path without raw
+HTML parsing; code fences are handled by Markdown, not a second citation scanner.
+Normalize both artifact sources through the same validator and first-seen dedup.
+An unavailable saved snapshot cannot fall back to surrounding conversation sources.
+Browser regressions exercise nested list-contained tilde fences, source dialogs and
+return focus in the native panel.
 Only versioned native `knowledge_search`/`task` tool artifacts supply evidence;
 AI/human text and metadata cannot create a source. `CitationLink` resolves
 `#knowledge-…` citations through that context and renders unavailable text when

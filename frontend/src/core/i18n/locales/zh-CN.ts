@@ -40,11 +40,6 @@ export const zhCN: Translations = {
       "此条目来自仓库扩展目录；实际安装和启用状态请由部署管理员确认。",
     installationGuide: "查看安装说明",
     catalog: {
-      batchReview: {
-        title: "批任务报告",
-        description:
-          "查看已保存的批任务报告、验收结果和检索原文，无需重新执行任务。",
-      },
       agentTeams: {
         title: "Agent 团队",
         description: "让完整 Custom Agent 通过 @成员、共享记录与任务交接协作。",
@@ -731,6 +726,18 @@ export const zhCN: Translations = {
     exportResults: "导出 JSONL",
     viewItems: "查看条目",
     hideItems: "收起条目",
+    viewReport: "查看报告",
+    savedReport: "已保存报告",
+    execution: "执行状态",
+    acceptance: "验收结果",
+    accepted: "已通过",
+    unmet: "未满足",
+    unverified: "未验证",
+    noReport: "该条目尚未保存报告。",
+    reportTruncated: "已保存的报告存在截断。",
+    evidenceUnavailable: "该报告的历史来源证据不可用。",
+    evidenceOmitted: "保存的证据中省略了部分引用来源。",
+    reportFailed: "无法加载已保存报告",
     itemsFailed: "无法加载批处理条目",
     progress: (completed, total) => `${completed}/${total} 已结束`,
     limits: (live, running) => `存活 ${live} · 运行 ${running}`,
