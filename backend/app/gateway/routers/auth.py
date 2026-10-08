@@ -231,6 +231,10 @@ _HOSTNAME_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
 # hostname -> (monotonic expiry, resolved addresses). Failed lookups are cached
 # as an empty set too, so unauthenticated requests cannot drive a lookup storm.
 _trusted_proxy_host_cache: dict[str, tuple[float, frozenset]] = {}
+# hostname -> the lookup in progress. Concurrent cache misses (a burst of
+# setup-status / login requests when the entry expires) join it, so a refresh
+# costs one resolver call however many requests arrive while DNS is slow.
+_trusted_proxy_host_inflight: dict[str, asyncio.Task[frozenset]] = {}
 
 
 def _is_hostname(entry: str) -> bool:
@@ -269,16 +273,8 @@ def _trusted_proxies() -> tuple[list, list[str]]:
     return nets, hostnames
 
 
-async def _trusted_proxy_host_addresses(hostname: str) -> frozenset:
-    """Addresses ``hostname`` resolves to, cached for ``_TRUSTED_PROXY_HOST_TTL_SECONDS``.
-
-    The lookup runs in the loop's executor (``getaddrinfo`` blocks). A failed
-    lookup trusts nothing until the entry expires, which is the direct-mode
-    behavior, not an error for the request.
-    """
-    cached = _trusted_proxy_host_cache.get(hostname)
-    if cached is not None and time.monotonic() < cached[0]:
-        return cached[1]
+async def _resolve_trusted_proxy_host(hostname: str) -> frozenset:
+    """Resolve ``hostname`` in the loop's executor and cache the result (or the failure)."""
     try:
         infos = await asyncio.get_running_loop().getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
         addresses = frozenset(ip_address(info[4][0]) for info in infos)
@@ -287,6 +283,34 @@ async def _trusted_proxy_host_addresses(hostname: str) -> frozenset:
         addresses = frozenset()
     _trusted_proxy_host_cache[hostname] = (time.monotonic() + _TRUSTED_PROXY_HOST_TTL_SECONDS, addresses)
     return addresses
+
+
+async def _trusted_proxy_host_addresses(hostname: str) -> frozenset:
+    """Addresses ``hostname`` resolves to, cached for ``_TRUSTED_PROXY_HOST_TTL_SECONDS``.
+
+    The lookup runs in the loop's executor (``getaddrinfo`` blocks). A failed
+    lookup trusts nothing until the entry expires, which is the direct-mode
+    behavior, not an error for the request. One lookup per hostname runs at a
+    time: the cache check and the in-flight registration happen without a
+    yield in between, and later callers join that task. Callers wait through
+    ``asyncio.shield``, so one cancelled request (a client disconnect) cannot
+    cancel the lookup the others joined; the task caches its own result, so
+    it is kept even if every caller went away.
+    """
+    cached = _trusted_proxy_host_cache.get(hostname)
+    if cached is not None and time.monotonic() < cached[0]:
+        return cached[1]
+    task = _trusted_proxy_host_inflight.get(hostname)
+    if task is None:
+        task = asyncio.get_running_loop().create_task(_resolve_trusted_proxy_host(hostname))
+        _trusted_proxy_host_inflight[hostname] = task
+
+        def _release(done: asyncio.Task[frozenset]) -> None:
+            if _trusted_proxy_host_inflight.get(hostname) is done:
+                del _trusted_proxy_host_inflight[hostname]
+
+        task.add_done_callback(_release)
+    return await asyncio.shield(task)
 
 
 async def _is_trusted_proxy(peer_ip) -> bool:

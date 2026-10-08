@@ -1898,8 +1898,10 @@ def _proxy_host_cache():
     from app.gateway.routers import auth as auth_router
 
     auth_router._trusted_proxy_host_cache.clear()
+    auth_router._trusted_proxy_host_inflight.clear()
     yield auth_router._trusted_proxy_host_cache
     auth_router._trusted_proxy_host_cache.clear()
+    auth_router._trusted_proxy_host_inflight.clear()
 
 
 def _fake_getaddrinfo(monkeypatch, answers):
@@ -1965,6 +1967,65 @@ async def test_get_client_ip_hostname_is_re_resolved_after_its_ttl(monkeypatch, 
     _proxy_host_cache["nginx"] = (0.0, addresses)  # TTL elapsed
     assert await _get_client_ip(_proxied_request("172.18.0.9")) == "203.0.113.42"
     assert calls == ["nginx", "nginx"]
+
+
+def _gated_getaddrinfo(monkeypatch, address: str):
+    """A resolver that blocks in its executor thread until released, like DNS timing out."""
+    import socket
+    import threading
+
+    calls = []
+    entered, release = threading.Event(), threading.Event()
+
+    def getaddrinfo(host, *args, **kwargs):
+        calls.append(host)
+        entered.set()
+        assert release.wait(5), "the gated resolver was never released"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    return calls, entered, release
+
+
+@pytest.mark.asyncio
+async def test_concurrent_cache_misses_share_one_lookup(monkeypatch, _proxy_host_cache):
+    """A burst on an expired entry while DNS is slow costs one resolver call, not one per request."""
+    import asyncio
+
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "nginx")
+    calls, entered, release = _gated_getaddrinfo(monkeypatch, "172.18.0.5")
+    from app.gateway.routers.auth import _get_client_ip
+
+    burst = [asyncio.create_task(_get_client_ip(_proxied_request("172.18.0.5"))) for _ in range(20)]
+    assert await asyncio.to_thread(entered.wait, 5)
+    release.set()
+
+    assert await asyncio.gather(*burst) == ["203.0.113.42"] * 20
+    assert calls == ["nginx"]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_request_does_not_cancel_the_shared_lookup(monkeypatch, _proxy_host_cache):
+    """The request that started the lookup disconnecting must not fail the requests that joined it."""
+    import asyncio
+    from ipaddress import ip_address
+
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "nginx")
+    calls, entered, release = _gated_getaddrinfo(monkeypatch, "172.18.0.5")
+    from app.gateway.routers.auth import _get_client_ip
+
+    owner = asyncio.create_task(_get_client_ip(_proxied_request("172.18.0.5")))
+    assert await asyncio.to_thread(entered.wait, 5)
+    joiner = asyncio.create_task(_get_client_ip(_proxied_request("172.18.0.5")))
+    await asyncio.sleep(0)  # the joiner is now waiting on the same lookup
+    owner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await owner
+    release.set()
+
+    assert await joiner == "203.0.113.42"
+    assert calls == ["nginx"]
+    assert _proxy_host_cache["nginx"][1] == frozenset({ip_address("172.18.0.5")})
 
 
 @pytest.mark.asyncio

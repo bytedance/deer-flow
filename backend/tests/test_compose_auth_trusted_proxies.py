@@ -70,7 +70,13 @@ def _render(tmp_path: Path, variant: str, env_file: str | None) -> dict:
 
 @requires_docker_compose
 @pytest.mark.parametrize("variant", sorted(COMPOSE_PATHS))
-@pytest.mark.parametrize(("env_file", "expected"), [(None, "nginx"), ("AUTH_TRUSTED_PROXIES=10.0.0.0/8,edge-proxy\n", "10.0.0.0/8,edge-proxy")], ids=["default", "operator-override"])
+@pytest.mark.parametrize(
+    ("env_file", "expected"),
+    [(None, "nginx"), ("AUTH_TRUSTED_PROXIES=\n", "nginx"), ("AUTH_TRUSTED_PROXIES=10.0.0.0/8,edge-proxy\n", "10.0.0.0/8,edge-proxy")],
+    # An explicitly empty value is not direct mode here: every browser request
+    # comes through nginx, so it would only bring back the shared lockout.
+    ids=["default", "explicitly-empty", "operator-override"],
+)
 def test_real_compose_renders_the_default_and_keeps_an_operator_override(tmp_path, variant: str, env_file: str | None, expected: str):
     assert _render(tmp_path, variant, env_file)["AUTH_TRUSTED_PROXIES"] == expected
 

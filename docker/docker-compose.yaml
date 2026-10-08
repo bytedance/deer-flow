@@ -172,6 +172,9 @@ services:
       # request reaches the Gateway from nginx. Trust nginx's X-Real-IP (it
       # overwrites the header on every Gateway route) so one client's wrong
       # passwords cannot lock everyone out. Hostname, re-resolved every 10s.
+      # `:-` on purpose: an empty value also means nginx, because every browser
+      # request arrives through it, so direct mode would only bring back the
+      # shared lockout. Set another list in .env to change whom to trust.
       - AUTH_TRUSTED_PROXIES=${AUTH_TRUSTED_PROXIES:-nginx}
       # Proxy values (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY) are inherited from ../.env via env_file.
       # Only NO_PROXY is declared here so internal service hostnames are always exempt from the proxy.
