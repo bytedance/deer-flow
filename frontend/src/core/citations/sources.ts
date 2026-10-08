@@ -157,6 +157,9 @@ function fenceOpener(line: string): FenceOpener | null {
 
 const BLOCKQUOTE_PREFIX_RE = /^(?:[ \t]*>)+/;
 const LIST_ITEM_RE = /^(?:[-+*]|\d{1,9}[.)])[ \t]+/;
+// The digits of an ordered marker, so the scanner can tell a `1.` item (which
+// may interrupt a paragraph) from a `2.` item (which may not).
+const ORDERED_MARKER_DIGITS_RE = /^(\d{1,9})[.)][ \t]+/;
 
 // A closing fence is indentation and a marker and nothing else, so it cannot
 // reuse `fenceOpener`: that scan also accepts list markers, which are plain
@@ -333,12 +336,24 @@ function maskFencedCodeBlocks(markdown: string): string {
   // Set when a fence ends because its quote did, on a line too blank to tell
   // an indented code block from ordinary structure.
   let pendingQuoteExit = false;
+  // The open paragraph a line may or may not interrupt: -1 when the last
+  // structural line ended a block, otherwise the container column its text sits
+  // at and the block quote depth it was read at. A container only starts where
+  // a paragraph may be interrupted, and an ordered item that does not start at 1
+  // may not be: `Intro` then `2. ~~~md` stays one paragraph, so the tilde run on
+  // that line opens no fence. The column is what keeps the rule container-aware —
+  // after `- item` a `2.` at column zero has dedented out of the item's paragraph
+  // and starts a real list — and the depth keeps a line that left the quote (or
+  // never carried its marker) out of it.
+  let paragraphColumn = -1;
+  let paragraphQuote = 0;
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i]!;
     const position = linePosition(line);
     const opener = fenceOpener(line);
     if (pendingQuoteExit) {
       if (position.quoteDepth === 0 && position.body === "") {
+        paragraphColumn = -1;
         continue;
       }
       pendingQuoteExit = false;
@@ -347,6 +362,7 @@ function maskFencedCodeBlocks(markdown: string): string {
         if (position.indent - base >= INDENTED_CODE_COLUMNS) {
           runBase = base;
           indentedRun = true;
+          paragraphColumn = -1;
           lines[i] = maskKeepingNewlines(line);
           continue;
         }
@@ -358,6 +374,7 @@ function maskFencedCodeBlocks(markdown: string): string {
         (position.body === "" ||
           position.indent - runBase >= INDENTED_CODE_COLUMNS)
       ) {
+        paragraphColumn = -1;
         if (position.body !== "") {
           lines[i] = maskKeepingNewlines(line);
         }
@@ -398,6 +415,7 @@ function maskFencedCodeBlocks(markdown: string): string {
         }
       } else {
         lines[i] = maskKeepingNewlines(line);
+        paragraphColumn = -1;
         // A closer is only a closer when nothing but whitespace follows the
         // marker: ` ```text ` inside a ` ``` ` block is literal content, so
         // blanking it as a fence end would let a citation on the following
@@ -419,10 +437,19 @@ function maskFencedCodeBlocks(markdown: string): string {
     // Outside a fence the line is structure again, so it can open or close a
     // list item. Blank lines neither end an item nor start one.
     if (position.quoteDepth !== itemsQuoteDepth) {
-      if (itemsQuoteDepth === 0 && position.quoteDepth > 0) {
-        outerItems = items;
+      if (position.quoteDepth === 0 && outerItems !== null) {
+        // The quote that held the list items has ended but the items outlive it,
+        // so the stack parked on entry measures the lines after the exit: a
+        // fence opened behind the ending quote still belongs to the item, and a
+        // line that drops to column zero leaves it instead of hiding until EOF.
+        items = outerItems;
+        outerItems = null;
+      } else {
+        if (itemsQuoteDepth === 0 && position.quoteDepth > 0) {
+          outerItems = items;
+        }
+        items = [];
       }
-      items = [];
       itemsQuoteDepth = position.quoteDepth;
     }
     if (position.body !== "") {
@@ -434,17 +461,42 @@ function maskFencedCodeBlocks(markdown: string): string {
     // rejected a valid fence as four columns past its container.
     let markerColumn = position.indent;
     let markerRest = position.body;
+    let markersPushed = 0;
+    let lazyContinuation = false;
     for (
       let item = LIST_ITEM_RE.exec(markerRest);
       item && markerColumn - (items[items.length - 1] ?? 0) <= 3;
       item = LIST_ITEM_RE.exec(markerRest)
     ) {
+      // Only the line's first marker competes with an open paragraph, and only a
+      // bullet or a `1.` item may interrupt one: `Intro` followed by `2. ~~~md`
+      // is a single paragraph, so the marker is text and the tilde run on that
+      // line opens no fence. After a block boundary the same item is a real
+      // container again.
+      if (
+        markersPushed === 0 &&
+        position.indent >= paragraphColumn &&
+        position.quoteDepth >= paragraphQuote &&
+        paragraphColumn >= 0
+      ) {
+        const digits = ORDERED_MARKER_DIGITS_RE.exec(item[0])?.[1];
+        if (digits !== undefined && digits !== "1") {
+          lazyContinuation = true;
+          break;
+        }
+      }
       // The item's content column is where its marker text ends in columns, not
       // in characters: `-\t` reaches column four, and reading it as two would
       // keep a citation two spaces in inside a fence the reader already left.
       markerColumn = advanceColumns(markerColumn, item[0]);
       items.push(markerColumn);
       markerRest = markerRest.slice(item[0].length);
+      markersPushed += 1;
+    }
+    if (lazyContinuation) {
+      // The line is paragraph text, so the same paragraph is still open for the
+      // next line to be measured against.
+      continue;
     }
     // The opener gets the same three-column budget as the closer: four columns
     // past the container's content column is an indented code block, so a marker
@@ -482,7 +534,23 @@ function maskFencedCodeBlocks(markdown: string): string {
         // escape below has nothing else to measure its four columns against.
         outerItems = [...items];
       }
+      paragraphColumn = -1;
       lines[i] = maskKeepingNewlines(line);
+    } else {
+      // Everything else that carries text keeps the paragraph open, which is the
+      // state the next line's first container marker has to interrupt. Headings
+      // and thematic breaks (including a setext underline) are leaf blocks, and
+      // a blank line ends the paragraph.
+      if (
+        position.body !== "" &&
+        !ATX_HEADING_RE.test(line) &&
+        !THEMATIC_BREAK_RE.test(line)
+      ) {
+        paragraphColumn = containerColumn;
+        paragraphQuote = position.quoteDepth;
+      } else {
+        paragraphColumn = -1;
+      }
     }
   }
   return lines.join("\n");

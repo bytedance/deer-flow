@@ -762,6 +762,108 @@ describe("extractCitationSources", () => {
     ]);
   });
 
+  it("restores the enclosing list when an ordinary quote ends", () => {
+    // The blank line ends `> note`, but the list item outlives the quote, so the
+    // two-space fence still belongs to an item whose content column is two. The
+    // citation at column zero leaves that item and ends the unclosed fence with
+    // it, which makes it a rendered link.
+    const markdown = [
+      "- item",
+      "  > note",
+      "",
+      "  ~~~md",
+      "  [citation:Fake](https://example.com/fake)",
+      "  sample",
+      "[citation:Real](https://example.com/real)",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
+  it("restores the enclosing list when a quote ends at the fence line", () => {
+    // The same exit without a blank line: a fence cannot be lazily continued by
+    // a block quote, so `~~~md` already left the quote and the item's column is
+    // what the following lines measure against.
+    const markdown = [
+      "- item",
+      "  > note",
+      "  ~~~md",
+      "  [citation:Fake](https://example.com/fake)",
+      "  sample",
+      "[citation:Real](https://example.com/real)",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
+  it("restores the enclosing list after a two-deep quote ends", () => {
+    const markdown = [
+      "- item",
+      "  >> note",
+      "",
+      "  ~~~md",
+      "  [citation:Fake](https://example.com/fake)",
+      "[citation:Real](https://example.com/real)",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
+  it("does not open a fence from an ordered marker that cannot interrupt a paragraph", () => {
+    // An ordered list that does not start at 1 cannot interrupt a paragraph, so
+    // all three lines are one paragraph and its citation renders.
+    const markdown = [
+      "Intro",
+      "2. ~~~md",
+      "   [citation:Real](https://example.com/real)",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
+  it("does not open a fence from a non-interrupting marker inside an item paragraph", () => {
+    const markdown = [
+      "- item",
+      "  2. ~~~md",
+      "     [citation:Real](https://example.com/real)",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
+  it("still opens a fence from a `1.` marker that does interrupt the paragraph", () => {
+    const markdown = [
+      "Intro",
+      "1. ~~~md",
+      "   [citation:Fake](https://example.com/fake)",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown)).toEqual([]);
+  });
+
+  it("still opens a fence from a `2.` marker after a block boundary", () => {
+    // The blank line closes the paragraph, so the ordered item starts a real
+    // container and its fence hides the citation again.
+    const markdown = [
+      "Intro",
+      "",
+      "2. ~~~md",
+      "   [citation:Fake](https://example.com/fake)",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown)).toEqual([]);
+  });
+
   it("uses the source domain when the citation label is generic", () => {
     const markdown = "See [citation:Source](https://www.example.com/path).";
 
