@@ -122,6 +122,8 @@ that read's digest rather than an earlier probe's. Freshness reloads read the
 probed path explicitly; a missing or invalid revision keeps the last-known-good
 cache, including AppConfig's middleware snapshot, until a readable revision returns.
 
+**Shared Reset Markers** (`shared_reset_marker.py`): caches derived from the extensions config can go stale without a byte of it changing (a remote MCP server's `tools/list`, a skill installed or edited on the shared volume by another process). `SharedResetMarker(suffix)` owns one hidden JSON file beside the resolved config, `.<config name>.<suffix>.json`; `publish()` replaces it atomically with a random generation under `extensions_config_write_lock` + `extensions_config_file_lock` (`publish_locked()` when the caller already holds both), chaining `previous_generation` and an optional `user_id`. `SharedResetMarkerTracker.poll()` re-reads the marker at most once per second (monotonic clock, never blocking behind a concurrent poller), adopts the current state silently on its first poll, and reports a `SharedResetChange`: `user_ids={user}` only when exactly one publication carrying that user happened since the last poll, otherwise `None` (retire everything), including deleted/unreadable markers and config-path switches. `note_own_publication()` lets the writer skip the redundant self-invalidation. `resolve_shared_config_path()` maps a missing explicit path to `None` (no shared directory: callers answer `scope=process`). Consumers: `mcp/cache.py` (`mcp-cache-reset`) and `agents/lead_agent/prompt.py` (`skills-cache-reset`). Tests: `tests/test_shared_reset_marker.py`.
+
 ### Config Schema
 
 **`config.yaml`** key sections:

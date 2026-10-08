@@ -18,7 +18,7 @@ from app.gateway.authz import (
 from app.gateway.deps import get_config, get_optional_user_from_request, require_admin_user
 from app.gateway.path_utils import resolve_thread_virtual_path
 from app.gateway.skill_export import ExportClientDisconnected, SkillExportManifestResponse, SkillExportResponse, export_http_error, run_export_work
-from deerflow.agents.lead_agent.prompt import clear_skills_system_prompt_cache, refresh_skills_system_prompt_cache_async, refresh_user_skills_system_prompt_cache_async
+from deerflow.agents.lead_agent.prompt import clear_skills_system_prompt_cache, publish_skills_cache_reset, refresh_skills_system_prompt_cache_async, refresh_user_skills_system_prompt_cache_async
 from deerflow.config.app_config import AppConfig
 from deerflow.config.extensions_config import (
     ExtensionsConfig,
@@ -120,10 +120,13 @@ class SkillInstallResponse(BaseModel):
 
 
 class SkillReloadResponse(BaseModel):
-    """Response model for process-local skill cache invalidation."""
+    """Response model for skill cache invalidation."""
 
     success: bool = Field(..., description="Whether the skill caches were invalidated")
-    scope: Literal["process"] = Field(..., description="Reload scope; only the current Gateway process is affected")
+    scope: Literal["shared_config", "process"] = Field(
+        ...,
+        description="Whether the reset was published through the shared extensions-config directory (every Gateway process mounting it rescans on its next prompt build) or only reached this process",
+    )
     message: str = Field(..., description="Human-readable reload status")
 
 
@@ -209,6 +212,19 @@ async def _drain_skill_mutation[T](op: str, persist: Callable[[], Coroutine[Any,
         raise
 
 
+async def _publish_skills_cache_reset(user_id: str | None) -> str | None:
+    """Publish the shared skills cache reset marker off the event loop.
+
+    Called at the end of every skill-mutation tail, after the change is durable
+    on disk and this process has refreshed its own prompt caches, so a cancelled
+    caller cannot leave peer Gateway processes serving the previous skill set.
+    ``user_id`` scopes the reset to one user's custom skills; ``None`` retires
+    every user's caches (public-skill state and whole-catalog reloads). Path
+    resolution, the sidecar lock and the atomic replace are filesystem work.
+    """
+    return await asyncio.to_thread(publish_skills_cache_reset, user_id=user_id)
+
+
 def _load_user_skills(config: AppConfig) -> list[Skill]:
     """Load every skill visible to the caller's storage, enabled or not.
 
@@ -284,10 +300,13 @@ async def _install_skill_archive(archive_path: Path, config: AppConfig) -> Skill
         # absolute paths on construction: blocking filesystem IO.
         storage = await asyncio.to_thread(_get_user_skill_storage, config)
         result = await storage.ainstall_skill_from_archive(archive_path)
-        # The install and its prompt-cache refresh settle as one drained unit:
-        # a cancelled caller must not leave the freshly installed skill absent
-        # from (or a stale one still present in) the skills prompt cache.
-        await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
+        # The install, its prompt-cache refresh and the shared reset marker
+        # settle as one drained unit: a cancelled caller must not leave the
+        # freshly installed skill absent from (or a stale one still present in)
+        # the skills prompt cache of this or any peer Gateway process.
+        user_id = get_effective_user_id()
+        await refresh_user_skills_system_prompt_cache_async(user_id)
+        await _publish_skills_cache_reset(user_id)
         return SkillInstallResponse(**result)
 
     try:
@@ -453,21 +472,38 @@ async def upload_and_install_skill(
     "/skills/reload",
     response_model=SkillReloadResponse,
     summary="Reload Skills",
-    description=("Invalidate skill prompt caches for all users in the current Gateway process. Subsequent runs rescan the configured skill directories; running tasks and other Gateway processes are unaffected."),
+    description=(
+        "Invalidate skill prompt caches for all users, then publish a reset marker beside the shared extensions config so every Gateway process "
+        "mounting that directory rescans the configured skill directories before its next prompt build. Running tasks are unaffected."
+    ),
 )
 async def reload_skills(request: Request) -> SkillReloadResponse:
-    """Invalidate process-local skill prompt caches after external file changes."""
+    """Invalidate skill prompt caches after external file changes.
+
+    The local refresh runs first; the shared marker is published only once it
+    succeeded, and a publication failure is a server error. A ``200`` therefore
+    never means that only the handling process was refreshed. Without a
+    resolvable extensions config path there is no shared directory to publish
+    into and the response reports ``scope="process"``.
+    """
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         await refresh_skills_system_prompt_cache_async()
+        generation = await _publish_skills_cache_reset(None)
     except Exception as exc:
         logger.exception("Failed to invalidate skills cache")
         raise HTTPException(status_code=500, detail="Failed to invalidate skills cache.") from exc
 
+    if generation is None:
+        return SkillReloadResponse(
+            success=True,
+            scope="process",
+            message="Skill caches invalidated; subsequent runs in this Gateway process will rescan the latest skills.",
+        )
     return SkillReloadResponse(
         success=True,
-        scope="process",
-        message="Skill caches invalidated; subsequent runs in this Gateway process will rescan the latest skills.",
+        scope="shared_config",
+        message="Skill cache reset published through the shared config directory; subsequent runs in every Gateway process sharing it will rescan the latest skills.",
     )
 
 
@@ -612,7 +648,9 @@ async def update_custom_skill(skill_name: str, body: CustomSkillUpdateRequest, r
                     "scanner": {"decision": scan.decision, "reason": scan.reason, "static_findings": static_findings},
                 },
             )
-            await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
+            user_id = get_effective_user_id()
+            await refresh_user_skills_system_prompt_cache_async(user_id)
+            await _publish_skills_cache_reset(user_id)
 
         await await_drained(_drain_skill_mutation("edit", _persist_edit))
         return await _read_custom_skill_response(skill_name, config)
@@ -653,7 +691,9 @@ async def delete_custom_skill(skill_name: str, request: Request, config: AppConf
                     "scanner": {"decision": "allow", "reason": "Deletion requested."},
                 },
             )
-            await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
+            user_id = get_effective_user_id()
+            await refresh_user_skills_system_prompt_cache_async(user_id)
+            await _publish_skills_cache_reset(user_id)
 
         await await_drained(_drain_skill_mutation("delete", _persist_delete))
         return {"success": True}
@@ -746,7 +786,9 @@ async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, req
             # cancelled caller unwinds.
             await asyncio.to_thread(storage.write_custom_skill, skill_name, SKILL_MD_FILE, target_content)
             await asyncio.to_thread(storage.append_history, skill_name, history_entry)
-            await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
+            user_id = get_effective_user_id()
+            await refresh_user_skills_system_prompt_cache_async(user_id)
+            await _publish_skills_cache_reset(user_id)
 
         await await_drained(_drain_skill_mutation("rollback", _persist_rollback))
         return await _read_custom_skill_response(skill_name, config)
@@ -906,17 +948,21 @@ async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Reque
             # and affects every user, so the prompt cache for ALL users must be
             # invalidated. CUSTOM/LEGACY drops only the caller's cache, including the
             # non-user-scoped fallback above, where other users' entries may stay stale.
-            # The state write and its cache
-            # invalidation settle as one drained unit: a cancelled caller must
-            # not leave the prompt cache serving the previous enablement.
+            # The state write, its cache invalidation and the shared reset marker
+            # (same scope: global for PUBLIC, the caller for CUSTOM/LEGACY) settle
+            # as one drained unit: a cancelled caller must not leave this or a
+            # peer process serving the previous enablement.
             if skill.category == SkillCategory.PUBLIC:
                 # clear_skills_system_prompt_cache is sync; run it in a worker
                 # thread to avoid blocking the event loop. The lock inside it is
                 # cheap, but the async drop also keeps the test mock surface
                 # consistent (tests patch the async variant).
                 await asyncio.to_thread(clear_skills_system_prompt_cache)
+                await _publish_skills_cache_reset(None)
             else:
-                await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
+                user_id = get_effective_user_id()
+                await refresh_user_skills_system_prompt_cache_async(user_id)
+                await _publish_skills_cache_reset(user_id)
 
         await await_drained(_drain_skill_mutation("state update", _persist_state))
 
