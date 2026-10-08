@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+import yaml
 from pydantic import BaseModel
 
 from deerflow.config.app_config import AppConfig, ModelConfig, SandboxConfig, ToolConfig
@@ -70,6 +71,14 @@ def test_extract_max_tokens_various_inputs():
     assert _extract_max_tokens(mock_with) == 8000
 
 
+@pytest.mark.parametrize("max_tokens", [float("inf"), float("-inf"), float("nan")], ids=["inf", "negative-inf", "nan"])
+def test_extract_max_tokens_rejects_non_finite_values(max_tokens):
+    """Non-finite caps are unusable for every supported config representation."""
+    assert _extract_max_tokens({"max_tokens": max_tokens}) is None
+    assert _extract_max_tokens(SimpleNamespace(max_tokens=max_tokens)) is None
+    assert _extract_max_tokens(ModelConfig(name="test", model="m", use="u", max_tokens=max_tokens)) is None
+
+
 def test_clone_tool_with_description_preserves_singleton():
     """Verify _clone_tool_with_description returns an isolated copy and keeps original unchanged."""
     original_desc = write_file_tool.description
@@ -105,6 +114,24 @@ def test_get_available_tools_with_model_config_lacking_max_tokens():
     write_tool = next((t for t in tools if t.name == "write_file"), None)
     assert write_tool is not None
     assert "PER-RESPONSE BUDGET:" not in write_tool.description
+
+
+@pytest.mark.parametrize("yaml_max_tokens", [".inf", "-.inf", ".nan"])
+@pytest.mark.parametrize("use_chat_model", [False, True], ids=["profile", "constructed-model"])
+def test_get_available_tools_omits_non_finite_budget(yaml_max_tokens, use_chat_model):
+    """YAML non-finite caps must not abort assembly or produce a budget hint."""
+    baseline_desc = write_file_tool.description
+    max_tokens = yaml.safe_load(f"max_tokens: {yaml_max_tokens}")["max_tokens"]
+    model = ModelConfig(name="budget-model", model="m", use="u", max_tokens=4096 if use_chat_model else max_tokens)
+    config = _build_minimal_app_config([model])
+    chat_model = SimpleNamespace(max_tokens=max_tokens) if use_chat_model else None
+
+    tools = get_available_tools(model_name="budget-model", app_config=config, include_mcp=False, chat_model=chat_model)
+    write_tool = next(t for t in tools if t.name == "write_file")
+
+    assert "PER-RESPONSE BUDGET:" not in write_tool.description
+    assert write_tool.description == baseline_desc
+    assert write_file_tool.description == baseline_desc
 
 
 def test_write_file_singleton_remains_unmutated_across_assemblies():
