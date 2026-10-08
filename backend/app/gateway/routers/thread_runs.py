@@ -38,6 +38,8 @@ from app.gateway.checkpoint_lineage import (
     history_parent_index,
     is_duration_only_checkpoint,
     parent_from_history_index,
+    resolve_channel_versions,
+    resolve_history_versions,
 )
 from app.gateway.context_usage import build_context_usage
 from app.gateway.conversation_reader import (
@@ -134,8 +136,8 @@ async def _refresh_store_backed_run(run_mgr: Any, record: Any) -> Any:
     return record
 
 
-def _is_duration_only_checkpoint(checkpoint_tuple: Any, history_index: dict[tuple[str, str], Any]) -> bool:
-    return is_duration_only_checkpoint(checkpoint_tuple, parent=parent_from_history_index(checkpoint_tuple, history_index))
+def _is_duration_only_checkpoint(checkpoint_tuple: Any, history_index: dict[tuple[str, str], Any], versions=None, parent_versions=None) -> bool:
+    return is_duration_only_checkpoint(checkpoint_tuple, parent=parent_from_history_index(checkpoint_tuple, history_index), versions=versions, parent_versions=parent_versions)
 
 
 def compute_run_durations(runs) -> dict[str, int]:
@@ -666,12 +668,16 @@ async def _find_base_checkpoint_before_human(
     try:
         raw_checkpoints = await accessor.ahistory(base_config, limit=REGENERATE_HISTORY_RAW_SCAN_LIMIT)
         history_index = history_parent_index(raw_checkpoints)
-        checkpoints = [item for item in raw_checkpoints if not _is_duration_only_checkpoint(item, history_index)]
+        checkpoints = []
+        for item in raw_checkpoints:
+            parent = parent_from_history_index(item, history_index)
+            if not _is_duration_only_checkpoint(item, history_index, versions=await resolve_channel_versions(accessor, item), parent_versions=await resolve_channel_versions(accessor, parent) if parent is not None else None):
+                checkpoints.append(item)
     except Exception as exc:
         logger.exception("Failed to list checkpoints for regenerate thread %s", thread_id)
         raise HTTPException(status_code=500, detail="Failed to inspect checkpoint history") from exc
 
-    previous_checkpoint, target_found = find_checkpoint_before_message_chronologically(raw_checkpoints, human_message_id)
+    previous_checkpoint, target_found = find_checkpoint_before_message_chronologically(raw_checkpoints, human_message_id, history_versions=await resolve_history_versions(accessor, raw_checkpoints))
     if target_found:
         if previous_checkpoint is None:
             raise HTTPException(

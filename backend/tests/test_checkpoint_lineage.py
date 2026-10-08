@@ -18,6 +18,7 @@ from app.gateway.checkpoint_lineage import (
     find_checkpoint_before_message,
     find_checkpoint_before_message_chronologically,
     is_duration_only_checkpoint,
+    resolve_channel_versions,
 )
 
 THREAD_ID = "thread-1"
@@ -406,3 +407,118 @@ def test_stamp_fallback_disabled_requires_the_writes_marker():
 
     assert is_duration_only_checkpoint(postgres_shaped, parent=parent, stamp_fallback=False) is False
     assert is_duration_only_checkpoint(marker_backed, parent=parent, stamp_fallback=False) is True
+
+
+async def _post_strip_writes(saver, tup) -> None:
+    """Rewrite *tup*'s persisted metadata without ``writes``, in place."""
+
+    checkpoint = dict(getattr(tup, "checkpoint", {}) or {})
+    metadata = dict(getattr(tup, "metadata", {}) or {})
+    metadata.pop("writes", None)
+    parent_config = getattr(tup, "parent_config", None)
+    write_config = parent_config if isinstance(parent_config, dict) else {"configurable": {"thread_id": tup.config["configurable"]["thread_id"], "checkpoint_ns": "", "checkpoint_id": None}}
+    await saver.aput(write_config, checkpoint, metadata, {})
+
+
+async def _seed_lineage(mode: str):
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.types import Overwrite
+
+    from deerflow.runtime.checkpoint_state import CheckpointStateAccessor, build_state_mutation_graph
+
+    saver = InMemorySaver()
+    accessor = CheckpointStateAccessor.bind(build_state_mutation_graph("seed", mode), saver, mode=mode)
+    config = {"configurable": {"thread_id": THREAD_ID, "checkpoint_ns": ""}}
+    await accessor.aupdate(config, {"messages": Overwrite([HumanMessage(content="q", id="h1"), AIMessage(content="a", id="ai-1")])}, as_node="seed")
+    return saver, accessor, config
+
+
+async def _stamp_duration(saver, accessor, config):
+    from deerflow.runtime.runs.worker import persist_run_history_metadata
+
+    await persist_run_history_metadata(checkpointer=saver, thread_id=THREAD_ID, durations={"run-1": 12}, message_run_ids={"ai-1": "run-1"})
+
+
+def test_classifier_uses_accessor_snapshots_in_full_mode() -> None:
+    """Real ``StateSnapshot`` objects must classify Postgres duration leaves (full)."""
+
+    async def scenario() -> None:
+        saver, accessor, config = await _seed_lineage("full")
+        await _stamp_duration(saver, accessor, config)
+        head = await saver.aget_tuple(config)
+        await _post_strip_writes(saver, head)
+
+        history = await accessor.ahistory(config)
+        leaf = history[0]
+        parent = history[1] if len(history) > 1 else None
+        assert is_duration_only_checkpoint(leaf, parent=parent, versions=await resolve_channel_versions(accessor, leaf), parent_versions=await resolve_channel_versions(accessor, parent) if parent is not None else None) is True
+
+    asyncio.run(scenario())
+
+
+def test_classifier_uses_accessor_snapshots_in_delta_mode() -> None:
+    """Same integration gap exists on the delta read path; both must be covered."""
+
+    async def scenario() -> None:
+        saver, accessor, config = await _seed_lineage("delta")
+        await _stamp_duration(saver, accessor, config)
+        head = await saver.aget_tuple(config)
+        await _post_strip_writes(saver, head)
+
+        history = await accessor.ahistory(config)
+        leaf = history[0]
+        parent = history[1] if len(history) > 1 else None
+        assert is_duration_only_checkpoint(leaf, parent=parent, versions=await resolve_channel_versions(accessor, leaf), parent_versions=await resolve_channel_versions(accessor, parent) if parent is not None else None) is True
+
+    asyncio.run(scenario())
+
+
+def test_goal_leaf_stays_addressable_with_accessor_snapshots() -> None:
+    """A goal write stacked on a stamped head bumps the goal version and must stay."""
+
+    async def scenario() -> None:
+        saver, accessor, config = await _seed_lineage("full")
+        await _stamp_duration(saver, accessor, config)
+
+        from deerflow.runtime.goal import write_thread_goal
+
+        await write_thread_goal(saver, THREAD_ID, {"objective": "ship", "continuation_count": 0, "no_progress_count": 0, "updated_at": "2026-10-08T00:00:00Z"})
+        goal_tup = await saver.aget_tuple(config)
+        await _post_strip_writes(saver, goal_tup)
+
+        history = await accessor.ahistory(config)
+        leaf = history[0]
+        parent = history[1] if len(history) > 1 else None
+        assert is_duration_only_checkpoint(leaf, parent=parent, versions=await resolve_channel_versions(accessor, leaf), parent_versions=await resolve_channel_versions(accessor, parent) if parent is not None else None) is False
+
+    asyncio.run(scenario())
+
+
+def test_degraded_raw_read_accessor_classifies_via_carried_versions() -> None:
+    """The degraded full-mode accessor ships channel versions on its snapshots."""
+
+    async def scenario() -> None:
+        saver, accessor, config = await _seed_lineage("full")
+        await _stamp_duration(saver, accessor, config)
+        head = await saver.aget_tuple(config)
+        await _post_strip_writes(saver, head)
+
+        from app.gateway.services import _RawCheckpointReadAccessor
+
+        raw = _RawCheckpointReadAccessor(saver, "full")
+        leaf_snap = await raw.aget(config)
+        parent_config = getattr(leaf_snap, "parent_config", None)
+        parent_snap = await raw.aget(parent_config) if isinstance(parent_config, dict) else None
+        assert leaf_snap.channel_versions is not None
+        assert is_duration_only_checkpoint(leaf_snap, parent=parent_snap, versions=_snapshot_versions_of(leaf_snap), parent_versions=_snapshot_versions_of(parent_snap)) is True
+
+    asyncio.run(scenario())
+
+
+def _snapshot_versions_of(obj):
+    checkpoint = getattr(obj, "checkpoint", None)
+    if isinstance(checkpoint, dict):
+        versions = checkpoint.get("channel_versions")
+        if isinstance(versions, dict):
+            return versions
+    return getattr(obj, "channel_versions", None)

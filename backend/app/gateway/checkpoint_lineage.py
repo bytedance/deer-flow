@@ -56,7 +56,7 @@ def _has_postgres_stamps(metadata: dict[str, Any]) -> bool:
     return "run_durations" in metadata or "run_message_ids" in metadata
 
 
-def is_duration_only_checkpoint(checkpoint_tuple: Any, *, parent: Any | None = None, stamp_fallback: bool = True) -> bool:
+def is_duration_only_checkpoint(checkpoint_tuple: Any, *, parent: Any | None = None, stamp_fallback: bool = True, versions: dict[str, Any] | None = None, parent_versions: dict[str, Any] | None = None) -> bool:
     """Return whether the tuple is a metadata-only run-duration checkpoint.
 
     ``persist_run_history_metadata`` (``deerflow.runtime.runs.worker``) is the
@@ -104,7 +104,7 @@ def is_duration_only_checkpoint(checkpoint_tuple: Any, *, parent: Any | None = N
         return False
     if not _has_postgres_stamps(metadata):
         return False
-    return _copies_parent_verbatim(checkpoint_tuple, parent)
+    return _copies_parent_verbatim(checkpoint_tuple, parent, versions=versions, parent_versions=parent_versions)
 
 
 def has_duration_stamps_without_marker(checkpoint_tuple: Any) -> bool:
@@ -123,7 +123,83 @@ def has_duration_stamps_without_marker(checkpoint_tuple: Any) -> bool:
     return _has_postgres_stamps(metadata)
 
 
-def _copies_parent_verbatim(checkpoint_tuple: Any, parent: Any) -> bool:
+def _sync_versions(checkpointer: Any | None, snapshot: Any) -> dict[str, Any] | None:
+    """Versions for *snapshot*, re-reading the raw tuple when it lacks them."""
+
+    if snapshot is None:
+        return None
+    versions = _snapshot_versions(snapshot)
+    if versions is not None:
+        return versions
+    getter = getattr(checkpointer, "get_tuple", None)
+    config = getattr(snapshot, "config", None)
+    if callable(getter) and isinstance(config, dict):
+        try:
+            return _snapshot_versions(getter(config))
+        except Exception:
+            return None
+    return None
+
+
+def _snapshot_versions(obj: Any) -> dict[str, Any] | None:
+    """Channel versions persisted on a tuple or snapshot, when exposed.
+
+    Raw checkpoint tuples carry ``checkpoint.channel_versions``; the degraded
+    ``_RawCheckpointSnapshot`` exposes the same map as ``channel_versions``;
+    langgraph's materialized ``StateSnapshot`` exposes neither, so the walk
+    falls back to the persisted raw tuple.
+    """
+
+    checkpoint = getattr(obj, "checkpoint", None)
+    if isinstance(checkpoint, dict):
+        versions = checkpoint.get("channel_versions")
+        if isinstance(versions, dict):
+            return versions
+    versions = getattr(obj, "channel_versions", None)
+    if isinstance(versions, dict):
+        return versions
+    return None
+
+
+def _history_identity(checkpoint_tuple: Any) -> tuple[str, str, str] | None:
+    return _config_identity(getattr(checkpoint_tuple, "config", {}) or {})
+
+
+async def resolve_history_versions(accessor: Any, checkpoints: Sequence[Any]) -> dict[tuple[str, str, str], Any]:
+    """Persisted channel versions for a history window, keyed by config identity."""
+
+    versions: dict[tuple[str, str, str], Any] = {}
+    for checkpoint_tuple in checkpoints:
+        identity = _history_identity(checkpoint_tuple)
+        if identity is not None and identity not in versions:
+            versions[identity] = await resolve_channel_versions(accessor, checkpoint_tuple)
+    return versions
+
+
+async def resolve_channel_versions(accessor: Any, snapshot: Any) -> dict[str, Any] | None:
+    """Persisted ``channel_versions`` for *snapshot*, fetching raw when absent.
+
+    Materialized accessor snapshots (``StateSnapshot``) do not carry the
+    checkpoint payload, so the version maps the Postgres stamp fallback needs
+    are re-read from the raw checkpoint tuple. The degraded raw read path
+    already exposes the same map, so it never needs the extra read.
+    """
+
+    versions = _snapshot_versions(snapshot)
+    if versions is not None:
+        return versions
+    getter = getattr(accessor, "aget_tuple", None)
+    config = getattr(snapshot, "config", None)
+    if callable(getter) and isinstance(config, dict):
+        try:
+            tup = await getter(config)
+        except Exception:
+            return None
+        return _snapshot_versions(tup)
+    return None
+
+
+def _copies_parent_verbatim(checkpoint_tuple: Any, parent: Any, *, versions: dict[str, Any] | None = None, parent_versions: dict[str, Any] | None = None) -> bool:
     """Whether the leaf cloned its parent's ``channel_versions`` unchanged.
 
     Same rule as ``checkpoint_retention``'s shape check: the duration writer
@@ -131,10 +207,8 @@ def _copies_parent_verbatim(checkpoint_tuple: Any, parent: Any) -> bool:
     least one channel version.
     """
 
-    checkpoint = getattr(checkpoint_tuple, "checkpoint", None) or {}
-    parent_checkpoint = getattr(parent, "checkpoint", None) or {}
-    versions = checkpoint.get("channel_versions") if isinstance(checkpoint, dict) else None
-    parent_versions = parent_checkpoint.get("channel_versions") if isinstance(parent_checkpoint, dict) else None
+    versions = versions if isinstance(versions, dict) else _snapshot_versions(checkpoint_tuple)
+    parent_versions = parent_versions if isinstance(parent_versions, dict) else _snapshot_versions(parent)
     if not isinstance(versions, dict) or not isinstance(parent_versions, dict) or not versions:
         return False
     return frozenset(versions.values()) == frozenset(parent_versions.values())
@@ -286,7 +360,7 @@ async def find_checkpoint_before_message(
                 candidate = await accessor.aget(gp_config)
                 if _checkpoint_exists(candidate):
                     grandparent = candidate
-        if is_duration_only_checkpoint(parent, parent=grandparent):
+        if is_duration_only_checkpoint(parent, parent=grandparent, versions=await resolve_channel_versions(accessor, parent), parent_versions=await resolve_channel_versions(accessor, grandparent) if grandparent is not None else None):
             prefetched_parent = grandparent
             current = parent
             continue
@@ -302,6 +376,9 @@ async def find_checkpoint_before_message(
 def find_checkpoint_before_message_chronologically(
     checkpoints: Sequence[Any],
     message_id: str,
+    *,
+    history_versions: dict[tuple[str, str, str], Any] | None = None,
+    checkpointer: Any | None = None,
 ) -> tuple[Any | None, bool]:
     """Return ``(replay_base, target_found)`` from newest-first history.
 
@@ -316,7 +393,10 @@ def find_checkpoint_before_message_chronologically(
     previous_checkpoint = None
     history_index = history_parent_index(checkpoints)
     for checkpoint_tuple in reversed(checkpoints):
-        if is_duration_only_checkpoint(checkpoint_tuple, parent=parent_from_history_index(checkpoint_tuple, history_index)):
+        parent = parent_from_history_index(checkpoint_tuple, history_index)
+        versions = history_versions.get(_history_identity(checkpoint_tuple)) if history_versions is not None else _sync_versions(checkpointer, checkpoint_tuple)
+        parent_versions = history_versions.get(_history_identity(parent)) if (history_versions is not None and parent is not None) else _sync_versions(checkpointer, parent)
+        if is_duration_only_checkpoint(checkpoint_tuple, parent=parent, versions=versions, parent_versions=parent_versions):
             continue
         message_ids = {_message_id(message) for message in checkpoint_messages(checkpoint_tuple)}
         if message_id in message_ids:
