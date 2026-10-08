@@ -112,6 +112,10 @@ export function shouldRestartSpeechRecognition(
 const NO_SPACE_SCRIPT_BOUNDARY =
   /[\u3000-\u303f\u3040-\u30ff\u31f0-\u31ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uff9f]/;
 
+// These leading marks attach to the preceding text. Keep the rule directional:
+// a sentence-ending mark on the left still needs a space before the next word.
+const NO_SPACE_BEFORE_PUNCTUATION = /[,.;:!?%…)\]}]/;
+
 function joinTranscriptSegments(left: string, right: string): string {
   if (!left) {
     return right;
@@ -129,7 +133,8 @@ function joinTranscriptSegments(left: string, right: string): string {
     !lastChar ||
     !firstChar ||
     NO_SPACE_SCRIPT_BOUNDARY.test(lastChar) ||
-    NO_SPACE_SCRIPT_BOUNDARY.test(firstChar)
+    NO_SPACE_SCRIPT_BOUNDARY.test(firstChar) ||
+    NO_SPACE_BEFORE_PUNCTUATION.test(firstChar)
   ) {
     return `${left}${right}`;
   }

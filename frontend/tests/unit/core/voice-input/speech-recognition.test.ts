@@ -87,6 +87,110 @@ describe("speech recognition helpers", () => {
     });
   });
 
+  it("adds no separator when the provider already emitted boundary space", () => {
+    expect(
+      readSpeechRecognitionTranscript({
+        length: 2,
+        0: { isFinal: true, length: 1, 0: { transcript: "hello world " } },
+        1: { isFinal: false, length: 1, 0: { transcript: "today" } },
+      }).text,
+    ).toBe("hello world today");
+  });
+
+  it("keeps CJK segments glued when the provider emits no spaces", () => {
+    expect(
+      readSpeechRecognitionTranscript({
+        length: 2,
+        0: { isFinal: true, length: 1, 0: { transcript: "你好世界" } },
+        1: { isFinal: false, length: 1, 0: { transcript: "今天" } },
+      }).text,
+    ).toBe("你好世界今天");
+  });
+
+  it("separates consecutive trimmed finals accumulated over a session", () => {
+    expect(
+      readSpeechRecognitionTranscript({
+        length: 3,
+        0: { isFinal: true, length: 1, 0: { transcript: "hello" } },
+        1: { isFinal: true, length: 1, 0: { transcript: "world" } },
+        2: { isFinal: false, length: 1, 0: { transcript: "today" } },
+      }),
+    ).toEqual({
+      finalText: "hello world",
+      interimText: "today",
+      text: "hello world today",
+    });
+  });
+
+  it.each(["cet été", "cafe\u0301"])(
+    "separates accented Latin words after %s",
+    (finalText) => {
+      expect(
+        readSpeechRecognitionTranscript({
+          length: 2,
+          0: { isFinal: true, length: 1, 0: { transcript: finalText } },
+          1: { isFinal: false, length: 1, 0: { transcript: "demain" } },
+        }).text,
+      ).toBe(`${finalText} demain`);
+    },
+  );
+
+  it("keeps digit and symbol boundaries glued", () => {
+    expect(
+      readSpeechRecognitionTranscript({
+        length: 2,
+        0: { isFinal: true, length: 1, 0: { transcript: "up to 50" } },
+        1: { isFinal: false, length: 1, 0: { transcript: "%" } },
+      }).text,
+    ).toBe("up to 50%");
+  });
+
+  it("attaches leading punctuation across final and interim segments", () => {
+    expect(
+      readSpeechRecognitionTranscript({
+        length: 4,
+        0: { isFinal: true, length: 1, 0: { transcript: "done" } },
+        1: { isFinal: true, length: 1, 0: { transcript: ", maybe" } },
+        2: { isFinal: false, length: 1, 0: { transcript: "next" } },
+        3: { isFinal: false, length: 1, 0: { transcript: ", please" } },
+      }),
+    ).toEqual({
+      finalText: "done, maybe",
+      interimText: "next, please",
+      text: "done, maybe next, please",
+    });
+  });
+
+  it.each([
+    ["Done.", "Next", "Done. Next"],
+    ["Hello,", "world", "Hello, world"],
+    ["she said", '"hello"', 'she said "hello"'],
+    ['"hello"', "again", '"hello" again'],
+  ])("separates phrases at %s / %s", (left, right, text) => {
+    expect(
+      readSpeechRecognitionTranscript({
+        length: 2,
+        0: { isFinal: true, length: 1, 0: { transcript: left } },
+        1: { isFinal: false, length: 1, 0: { transcript: right } },
+      }).text,
+    ).toBe(text);
+  });
+
+  it("preserves separation across whitespace-only final segments", () => {
+    expect(
+      readSpeechRecognitionTranscript({
+        length: 3,
+        0: { isFinal: true, length: 1, 0: { transcript: "hello" } },
+        1: { isFinal: true, length: 1, 0: { transcript: " " } },
+        2: { isFinal: true, length: 1, 0: { transcript: "world" } },
+      }),
+    ).toEqual({
+      finalText: "hello world",
+      interimText: "",
+      text: "hello world",
+    });
+  });
+
   it("keeps no-space scripts concatenated without inserting separators", () => {
     expect(
       readSpeechRecognitionTranscript({
