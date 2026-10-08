@@ -10,17 +10,19 @@ def extended_length_path(path: Path) -> Path:
     """Use Windows' extended namespace for local filesystem access.
 
     Prefix before appending children: even a short root can contain a long
-    document filename. Normalize relative segments before adding the prefix;
+    document filename. Normalize ordinary paths before adding the prefix;
     extended paths bypass Win32's ordinary path normalization. This is lexical
     only: callers must still resolve symlinks and enforce their own confinement.
+    Existing extended/device namespaces (including named pipes) are returned
+    unchanged, without normalizing their segments.
     POSIX paths are unchanged. Do not use this spelling for Docker mount sources
     or persisted relative paths.
     """
     if os.name != "nt":
         return path
+    if str(path).startswith(("\\\\?\\", "\\\\.\\")):
+        return path
     absolute = os.path.abspath(path)
-    if absolute.startswith("\\\\?\\"):
-        return Path(absolute)
     if absolute.startswith("\\\\"):
         return Path("\\\\?\\UNC\\" + absolute[2:])
     return Path("\\\\?\\" + absolute)

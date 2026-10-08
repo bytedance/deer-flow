@@ -19,6 +19,9 @@ from deerflow.utils import host_paths
         (r"\\server\share\shelf", r"\\?\UNC\server\share\shelf"),
         (r"\\?\C:\shelf", r"\\?\C:\shelf"),
         (r"\\?\UNC\server\share\shelf", r"\\?\UNC\server\share\shelf"),
+        (r"\\.\C:\shelf", r"\\.\C:\shelf"),
+        (r"\\.\pipe\deerflow", r"\\.\pipe\deerflow"),
+        (r"\\?\C:\shelf\..\documents", r"\\?\C:\shelf\..\documents"),
     ],
 )
 def test_windows_extended_spelling(monkeypatch, raw, expected):
