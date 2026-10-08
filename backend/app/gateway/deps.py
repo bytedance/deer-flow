@@ -258,6 +258,39 @@ def _validate_agent_storage(config: AppConfig) -> None:
         )
 
 
+def _validate_login_throttle_storage(config: AppConfig) -> None:
+    """Warn when a multi-process deployment counts login failures per process.
+
+    ``auth.local.throttle_storage`` resolves to the shared ``login_throttle``
+    table whenever an application database exists, so under the multi-process
+    gate (which already requires Postgres) only an explicit ``memory`` lands
+    here. That is not fatal — the throttle still works on every replica — but
+    with N replicas behind one load balancer an attacker gets N x
+    ``max_login_attempts`` guesses and a lockout on one replica is invisible
+    to the others, exactly the gap the shared table closes. Mirrors the
+    ``agent_storage.backend='file'`` divergence warning above.
+    """
+    signal = _multi_process_signal(config)
+    if signal is None:
+        return
+    local = getattr(getattr(config, "auth", None), "local", None)
+    if local is None:
+        return
+    from deerflow.config.auth_config import LocalAuthConfig, resolve_login_throttle_storage
+
+    selector = getattr(local, "throttle_storage", LocalAuthConfig.model_fields["throttle_storage"].default)
+    db_backend = getattr(getattr(config, "database", None), "backend", None)
+    if resolve_login_throttle_storage(selector, db_backend) == "memory":
+        logger.warning(
+            "%s with auth.local.throttle_storage=%s: failed-login counters and lockouts are kept per Gateway process, "
+            "so an attacker behind the load balancer gets N x max_login_attempts guesses and a lockout on one replica "
+            "is invisible to the others. Set auth.local.throttle_storage='auto' (or 'db') so the shared login_throttle "
+            "table in the application database enforces one limit per IP.",
+            signal[0],
+            str(getattr(selector, "value", selector)),
+        )
+
+
 async def _drain_inflight_runs(run_manager: RunManager) -> None:
     """Drain in-flight runs before the checkpointer is torn down (issue #3373).
 
@@ -526,6 +559,8 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
     # Reject agent_storage.backend='db' on a non-durable database, and warn on
     # node-divergent file storage under multi-worker Postgres.
     _validate_agent_storage(startup_config)
+    # Warn when login lockouts stay per-process under several Gateway processes.
+    _validate_login_throttle_storage(startup_config)
 
     async with AsyncExitStack() as stack:
         # Lifecycle and system-model hooks can originate on isolated subagent
@@ -594,6 +629,15 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         # Initialize repositories — one get_session_factory() call for all.
         sf = get_session_factory()
+
+        # The login throttle store is resolved once per process from the startup
+        # snapshot and the engine above (auth.local.throttle_storage is
+        # startup-only); the router reads it through the same hook tests use.
+        from app.gateway.auth.login_throttle import install_login_throttle_store, reset_login_throttle_store, resolve_login_throttle_store
+
+        install_login_throttle_store(resolve_login_throttle_store(config, session_factory=sf))
+        stack.callback(reset_login_throttle_store)
+
         if sf is not None:
             from deerflow.persistence.feedback import FeedbackRepository
             from deerflow.persistence.personal_access_tokens import PersonalAccessTokenRepository

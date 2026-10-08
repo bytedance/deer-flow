@@ -110,7 +110,7 @@ enum UserScope:
 - 成功后签发 JWT，放入 `access_token` HttpOnly cookie。
 - 响应体只返回 `expires_in` 和 `needs_setup`，不返回 token。
 
-登录失败会按客户端 IP 计数。IP 解析只在 TCP peer 属于 `AUTH_TRUSTED_PROXIES` 时信任 `X-Real-IP`，不使用 `X-Forwarded-For`。阈值与锁定时长可通过 `auth.local.max_login_attempts`（默认 5）和 `auth.local.lockout_seconds`（默认 300 秒）配置，按次实时读取，改配置后下一次登录即生效，无需重启 Gateway（`max_login_attempts` 最小为 2：单次失败不得锁定 IP。时长热改按方向生效：下调可提前释放进行中的锁定、收紧阈值会保留已计数的失败；上调只延长仍在锁定期内的锁定，不会复活已服满原时长的锁定）。
+登录失败会按客户端 IP 计数。IP 解析只在 TCP peer 属于 `AUTH_TRUSTED_PROXIES` 时信任 `X-Real-IP`，不使用 `X-Forwarded-For`。阈值与锁定时长可通过 `auth.local.max_login_attempts`（默认 5）和 `auth.local.lockout_seconds`（默认 300 秒）配置，按次实时读取，改配置后下一次登录即生效，无需重启 Gateway（`max_login_attempts` 最小为 2：单次失败不得锁定 IP。时长热改按方向生效：下调可提前释放进行中的锁定、收紧阈值会保留已计数的失败；上调只延长仍在锁定期内的锁定，不会复活已服满原时长的锁定）。计数器的存放位置由 `auth.local.throttle_storage` 决定（启动时解析一次，改动需重启）：默认 `auto` 在 `database.backend` 为 `sqlite` / `postgres` 时使用应用数据库中的 `login_throttle` 表，所有共享该数据库的 Gateway 副本对同一 IP 执行同一份限制；`memory` 退回进程内计数器（N 个副本意味着攻击者有 N × `max_login_attempts` 次机会，且一个副本上的锁定对其他副本不可见，多实例部署会在启动时打 WARNING）；`db` 强制使用共享表，数据库为 `memory` 时降级为进程内计数器并打 WARNING。
 
 ### 注册
 
@@ -442,7 +442,7 @@ thread 归属读取 Gateway 所配置数据库（`config.yaml` 的 `database`）
 | 边界 | 当前行为 | 后续方向 |
 |---|---|---|
 | 无 admin 时注册普通用户 | 允许注册普通 `user` | 如产品要求先初始化 admin，给 `/register` 加 gate |
-| 登录限速 | 进程内 dict，单 worker 精确，多 worker 近似 | Redis / DB-backed rate limiter |
+| 登录限速 | 默认存放在应用数据库的 `login_throttle` 表（`auth.local.throttle_storage: auto`），多副本共享同一份计数；`memory` 为进程内计数器，多 worker 近似 | Redis-backed rate limiter；按账号而非仅按 IP 限速 |
 | OAuth / OIDC | 已实现通用 OIDC SSO（Keycloak, Google, Azure AD, Okta 等），支持 PKCE + nonce、auto-provisioning、email domain 限制（详见 [SSO.md](SSO.md)） | 支持 RP-initiated logout、自定义 scope 映射 |
 | IM 用户隔离 | `channel_connections` 绑定到 `users.id`；未绑定消息在 `require_bound_identity: true` 时被拒绝 | 更多渠道与审计能力 |
 | Internal Auth 终端直持 token | 平台可把共享密钥下发给终端，导致 `Owner-User-Id` 可伪造 | 仅平台后端持 token；终端走平台自己的认证 |

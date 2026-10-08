@@ -804,6 +804,23 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **auth:** Login lockouts are now counted once per client IP across every
+  Gateway replica. `POST /api/v1/auth/login/local` kept its failed-login
+  counter in a per-process dict, so with N replicas behind one load balancer an
+  attacker got N × `max_login_attempts` guesses and a lockout on one replica
+  was invisible to the others. The counter now lives behind a
+  `LoginThrottleStore`: the new `auth.local.throttle_storage` selector
+  (default `auto`) keeps it in the shared `login_throttle` table (migration
+  `0034_login_throttle`) whenever `database.backend` is `sqlite` or
+  `postgres`, falling back to the in-process counter only on a `memory`
+  database; `memory` forces the historical per-process behavior and `db`
+  forces the table. Failures are counted with one atomic upsert, the lock
+  duration committed at lock time is still honored when the policy changes
+  mid-lock, a successful login clears the IP everywhere, served locks and
+  idle counters are swept in bounded batches, and a declared multi-instance
+  deployment that keeps `memory` logs a startup warning. Status codes and
+  messages of the login endpoint are unchanged; `max_login_attempts` and
+  `lockout_seconds` stay live-read.
 - **persistence:** `scripts/migrate_user_isolation.py` now moves each legacy
   thread to the user who owns it. It looked for thread owners in
   `{base_dir}/deer-flow.db`, a file DeerFlow never creates (the database is
