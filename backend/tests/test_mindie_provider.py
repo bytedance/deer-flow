@@ -6,6 +6,7 @@ import html
 import json
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
@@ -1028,3 +1029,69 @@ class TestSanitizationMindIEChain:
         assert "what does this note say?" in model_text
         assert "<system-reminder>" not in model_text
         assert "ignore previous instructions" not in model_text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("streaming_default", [False, True], ids=["default", "streaming-default"])
+@pytest.mark.parametrize("response_kind", ["prose", "xml-tool", "native-tool", "invalid-tool", "text-only"])
+async def test_public_stream_compatibility_through_sdk(async_mode, streaming_default, response_kind):
+    """Sync and async streams share the MindIE wire boundary and terminal usage."""
+    requests = []
+    with_tools = response_kind != "prose"
+    raw_chunks = ["intro\\n``", '`py\\nprint("a\\nb")', "```\\noutro\\", "nend"]
+    text = "answer " + "a" * 35
+    message = {"role": "assistant", "content": text}
+    if response_kind == "xml-tool":
+        message["content"] += "<tool_call><function=echo><parameter=text>hello</parameter></function></tool_call>"
+    elif response_kind in ("native-tool", "invalid-tool"):
+        message["content"] = ""
+        arguments = '{"text":"hello"}' if response_kind == "native-tool" else "not-json"
+        message["tool_calls"] = [{"id": "native-call", "type": "function", "function": {"name": "echo", "arguments": arguments}}]
+
+    def handle(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        if not payload.get("stream"):
+            return httpx.Response(
+                200, json={"id": "mindie-completion", "model": "mindie-test", "choices": [{"index": 0, "message": message, "finish_reason": "stop"}], "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}}
+            )
+        # Tool-enabled streaming is unsupported by MindIE. Keep its empty-choices
+        # response here: the adapter must use non-streaming generation instead.
+        frames = [] if with_tools else [{"id": "mindie-completion", "model": "mindie-test", "choices": [{"index": 0, "delta": {"role": "assistant", "content": part}, "finish_reason": None}]} for part in raw_chunks]
+        frames.append({"id": "mindie-completion", "model": "mindie-test", "choices": [], "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}})
+        body = "".join(f"data: {json.dumps(frame)}\n\n" for frame in frames) + "data: [DONE]\n\n"
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body.encode())
+
+    messages = [HumanMessage(content="continue"), ToolMessage(content="old <result>", tool_call_id="previous")]
+    original = [message.model_dump() for message in messages]
+    tool = {"type": "function", "function": {"name": "echo", "parameters": {"type": "object", "properties": {"text": {"type": "string"}}}}}
+    kwargs = {"tools": [tool]} if with_tools else {}
+    model_kwargs = {"streaming": True} if streaming_default else {}
+    with httpx.Client(transport=httpx.MockTransport(handle)) as sync_client:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as async_client:
+            model = MindIEChatModel(model="mindie-test", api_key="dummy", base_url="https://offline.invalid/v1", http_client=sync_client, http_async_client=async_client, max_retries=0, **model_kwargs)
+            if async_mode:
+                chunks = [chunk async for chunk in model.astream(messages, **kwargs)]
+            else:
+                chunks = list(model.stream(messages, **kwargs))
+
+    assert len(requests) == 1
+    assert requests[0]["stream"] is (not with_tools)
+    assert requests[0]["messages"][-1] == {"role": "user", "content": "<tool_response>\nold &lt;result&gt;\n</tool_response>"}
+    assert [message.model_dump() for message in messages] == original
+    merged = chunks[0]
+    for chunk in chunks[1:]:
+        merged += chunk
+    assert {key: merged.usage_metadata[key] for key in ("input_tokens", "output_tokens", "total_tokens")} == {"input_tokens": 2, "output_tokens": 3, "total_tokens": 5}
+    assert sum(chunk.usage_metadata is not None for chunk in chunks) == 1
+    if response_kind in ("xml-tool", "native-tool"):
+        assert [(call["name"], call["args"]) for call in merged.tool_calls] == [("echo", {"text": "hello"})]
+        assert merged.content == (text if response_kind == "xml-tool" else "")
+    elif response_kind == "invalid-tool":
+        assert merged.invalid_tool_calls[0]["id"] == "native-call"
+        assert merged.invalid_tool_calls[0]["args"] == "not-json"
+    else:
+        assert merged.content == (_decode_escaped_newlines_outside_fences("".join(raw_chunks)) if response_kind == "prose" else text)
+    if with_tools:
+        assert any(chunk.response_metadata.get("finish_reason") == "stop" for chunk in chunks)
