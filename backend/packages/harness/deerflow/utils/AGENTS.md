@@ -29,6 +29,11 @@ suffix. Keep its case-insensitive tag handling, optional whitespace before
 the closing `>`, and the `truncate_unclosed` behavior. Regression coverage
 lives in `tests/test_utils_llm_text.py`.
 
+Opening reasoning tags require whitespace or `>` after the exact `think` name;
+punctuated names such as `<think-tank>` and `<think:note>` are ordinary content.
+Keep exact unfinished `<think` prefixes hidden in leading summaries. Coverage:
+`tests/test_think_tag_boundaries.py`.
+
 Display summaries use `strip_leading_think_blocks` before limiting text;
 `test_run_journal_visible_summary.py` preserves literal tags in the answer.
 

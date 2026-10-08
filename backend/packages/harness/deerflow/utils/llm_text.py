@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import re
 
-_THINK_OPEN_PREFIX_RE = re.compile(r"<think\b", re.IGNORECASE)
+# A word boundary also accepts punctuation in unrelated XML/HTML tag names.
+# Keep the exact unfinished prefix for leading-summary cleanup.
+_THINK_OPEN_PREFIX_RE = re.compile(r"<think(?=[\s>]|$)", re.IGNORECASE)
 _THINK_CLOSE_PREFIX_RE = re.compile(r"</think", re.IGNORECASE)
 
 
