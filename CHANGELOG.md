@@ -815,7 +815,7 @@ This release closes that milestone with **439 merged pull requests**.
   nginx overwrites `X-Real-IP` with `$remote_addr` on every Gateway route, so
   a client cannot choose its own address. An `AUTH_TRUSTED_PROXIES` value in
   `.env` still takes precedence. Deployments behind another reverse proxy also
-  need nginx's `real_ip` module for that proxy; see `.env.example`.
+  need nginx's `real_ip` module for that proxy; see `.env.example`. ([#6519])
 - **auth:** Login lockouts are now counted once per client IP across every
   Gateway replica. `POST /api/v1/auth/login/local` kept its failed-login
   counter in a per-process dict, so with N replicas behind one load balancer an
@@ -9296,3 +9296,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6495]: https://github.com/bytedance/deer-flow/pull/6495
 [#6501]: https://github.com/bytedance/deer-flow/pull/6501
 [#6506]: https://github.com/bytedance/deer-flow/pull/6506
+[#6519]: https://github.com/bytedance/deer-flow/pull/6519

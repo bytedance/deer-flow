@@ -699,7 +699,7 @@
   容器到达 Gateway，因此所有登录共用 nginx 的地址和同一个锁定。现在 `AUTH_TRUSTED_PROXIES` 也接受主机名，在事件循环外解析并
   缓存 10 秒（包括解析失败），两个 compose 文件默认将其设为内置的 `nginx` 服务。nginx 在每个转发到 Gateway 的路由上都用
   `$remote_addr` 覆盖 `X-Real-IP`，客户端无法自选地址。`.env` 中设置的 `AUTH_TRUSTED_PROXIES` 仍然优先。位于其他反向代理之后的
-  部署还需要为该代理配置 nginx 的 `real_ip` 模块，详见 `.env.example`。
+  部署还需要为该代理配置 nginx 的 `real_ip` 模块，详见 `.env.example`。([#6519])
 - **技能：** `/技能名` 激活现在在模型调用重试时不再丢失。此前激活在调用模型之前就被标记为已完成，因此调用失败
   （限流、过载、超时）或返回空响应而重试时，重试请求不再包含 `SKILL.md` 正文，而该技能的工具限制仍然生效。现在重试
   会携带与首次尝试相同的激活内容，不会重新读取技能或重复记录激活，重试得到的响应也保留技能使用记录。([#6506])
@@ -7543,3 +7543,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6481]: https://github.com/bytedance/deer-flow/pull/6481
 [#6484]: https://github.com/bytedance/deer-flow/pull/6484
 [#6506]: https://github.com/bytedance/deer-flow/pull/6506
+[#6519]: https://github.com/bytedance/deer-flow/pull/6519
