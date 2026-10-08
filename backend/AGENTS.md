@@ -197,6 +197,8 @@ More specific `AGENTS.md` files in backend code directories contain the subsyste
 
 ## Architecture
 
+- **Native ECS submission scope**: optional `packages/ecs-executor` installs `ecs_executor.interceptor:build_execution_scope_interceptor` through native `mcpInterceptors`, signing only a configured HTTP raw submit tool from trusted current runtime context. It uses `resolve_runtime_user_id` and `runtime_thread_incarnation`, requires explicit runtime user/thread/run/incarnation context (ambient fallback includes current native config solely for incarnation metadata guard checking), and never derives authority from model arguments or a default user. The stdlib verifier binds the authenticated remote owner, audience, operation, expiry, and canonical argument digest. Background status/cancel are unsigned pass-through; the future executor must authorize persisted task owners. No endpoints or execution runtime ship in this foundation. See the package README for deployment prerequisites and bounds.
+
 ### Harness / App Split
 
 The backend is split into two layers with a strict dependency direction:
