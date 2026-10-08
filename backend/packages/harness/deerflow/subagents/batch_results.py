@@ -33,9 +33,9 @@ def _evidence(value: object, report: str) -> dict[str, Any] | None:
             continue
         if raw.get("provider") != "ragflow" or not all(isinstance(raw.get(key), str) for key in _SOURCE_FIELDS[:8]):
             continue
-        if any(not 0 < len(raw[key]) <= 256 for key in ("dataset_id", "document_id", "chunk_id")) or any(len(raw[key]) > 512 for key in ("dataset_name", "document_name")):
+        if any(not 0 < len(raw[key]) <= 256 for key in ("dataset_id", "document_id", "chunk_id")) or any(not raw[key].strip() or len(raw[key]) > 512 for key in ("dataset_name", "document_name")):
             continue
-        if len(raw["text"]) > 200_000:
+        if not raw["text"].strip() or len(raw["text"]) > 200_000:
             continue
         pages = raw.get("pages")
         if not isinstance(pages, list) or len(pages) > 100 or any(type(page) is not int or not 1 <= page <= 1_000_000 for page in pages) or type(raw.get("truncated")) is not bool:

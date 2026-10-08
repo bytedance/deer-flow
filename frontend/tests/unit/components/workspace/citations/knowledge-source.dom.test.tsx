@@ -130,6 +130,29 @@ for (const [surface, Link] of [
 }
 
 describe("saved batch evidence", () => {
+  for (const field of ["dataset_name", "document_name", "text"]) {
+    for (const value of ["", " \n"]) {
+      it(`rejects a blank saved ${field} instead of opening an unnamed or empty source`, () => {
+        const original = Reflect.get(messages[0]!, "artifact").knowledge_sources
+          .sources[0];
+        render(
+          <I18nProvider initialLocale="en-US">
+            <KnowledgeSourcesProvider
+              savedEvidence={{
+                version: 1,
+                sources: [{ ...original, [field]: value }],
+              }}
+            >
+              <KnowledgeCitationLink href={href}>1</KnowledgeCitationLink>
+              <KnowledgeSourcesPanel content={`[citation:1](${href})`} />
+            </KnowledgeSourcesProvider>
+          </I18nProvider>,
+        );
+        expect(screen.queryByRole("button")).toBeNull();
+        expect(screen.queryByRole("dialog")).toBeNull();
+      });
+    }
+  }
   it("uses an explicit saved snapshot without borrowing conversation sources", () => {
     const evidence = Reflect.get(messages[0]!, "artifact").knowledge_sources;
     const view = render(

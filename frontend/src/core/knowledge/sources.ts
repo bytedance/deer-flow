@@ -65,10 +65,13 @@ function appendKnowledgeSources(
       continue;
     if (
       typeof raw.document_name !== "string" ||
+      !raw.document_name.trim() ||
       raw.document_name.length > 1024 ||
       typeof raw.dataset_name !== "string" ||
+      !raw.dataset_name.trim() ||
       raw.dataset_name.length > 1024 ||
       typeof raw.text !== "string" ||
+      !raw.text.trim() ||
       raw.text.length > 200_000 ||
       typeof raw.truncated !== "boolean" ||
       !Array.isArray(raw.pages) ||

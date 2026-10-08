@@ -73,7 +73,25 @@ def test_legacy_and_unsupported_evidence_remains_unavailable(storage, artifact):
     assert result["result"] == storage.row["result"] and result["evidence"] is None
 
 
-@pytest.mark.parametrize("updates", [{"id": "malformed"}, {"provider": "other"}, {"dataset_id": ""}, {"document_name": "a" * 513}, {"pages": [True]}, {"pages": [-1]}, {"truncated": "false"}, {"text": None}])
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"id": "malformed"},
+        {"provider": "other"},
+        {"dataset_id": ""},
+        {"dataset_name": ""},
+        {"document_name": ""},
+        {"text": ""},
+        {"dataset_name": " "},
+        {"document_name": "\n"},
+        {"text": "\t"},
+        {"document_name": "a" * 513},
+        {"pages": [True]},
+        {"pages": [-1]},
+        {"truncated": "false"},
+        {"text": None},
+    ],
+)
 def test_invalid_source_records_are_not_exposed(storage, updates):
     storage.row["result_artifact"]["knowledge_sources"]["sources"] = [source(**updates)]
     result = project_batch_result(storage.row)

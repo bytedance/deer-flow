@@ -138,12 +138,19 @@ for (const custom of [false, true]) {
       const report = page.getByTestId("batch-saved-report");
       await expect(report).toContainText("Full saved report");
       await expect(report).toContainText("Unverified");
-      await expect(report.locator("code")).toContainText("[citation:1]");
-      const citation = page.getByRole("button", {
+      await expect(
+        report.locator("code").filter({ hasText: "[citation:1]" }),
+      ).toHaveCount(1);
+      const citations = page.getByRole("button", {
         name: "View source: Captured.pdf",
       });
-      await expect(citation).toHaveCount(1);
+      await expect(citations).toHaveCount(2);
+      const citation = citations.first();
       await expect(citation).toContainText("2");
+      await expect(citations.last()).toContainText("3");
+      await expect(
+        report.locator("code").filter({ hasText: "quoted example" }),
+      ).toHaveCount(1);
       const dialog = page.getByRole("dialog").last();
       const bounds = await dialog.boundingBox();
       expect(bounds?.width).toBeLessThanOrEqual(mobile ? 390 : 896);
