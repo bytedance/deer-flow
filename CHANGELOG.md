@@ -826,7 +826,7 @@ This release closes that milestone with **439 merged pull requests**.
   swept in bounded batches, and a declared multi-instance deployment that
   keeps `memory` logs a startup warning. Status codes and messages of the
   login endpoint are unchanged; `max_login_attempts` and `lockout_seconds`
-  stay live-read. ([#6501])
+  stay live-read. `config_version` is now 57. ([#6501])
 - **memory:** DeerMem's derived SQLite FTS5 retrieval index can now live
   outside the memory root, and a Gateway instance now notices facts another
   instance wrote. The index for every user was one SQLite database in WAL mode
