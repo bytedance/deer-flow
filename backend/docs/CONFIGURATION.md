@@ -1464,7 +1464,7 @@ models:
 - `GROUNDROUTE_API_KEY` - GroundRoute meta-search API key for `web_search` and `web_fetch` (routes across Serper, Brave, Exa, Tavily, Firecrawl, Perplexity with gain-share pricing)
 - `SOFYA_API_KEY` - [Sofya](https://sofya.co) key for `web_search` and `web_fetch`
 - `UNBROWSE_API_KEY` - [Unbrowse](https://unbrowse.ai) key for `web_fetch`
-- `BROWSERLESS_TOKEN` - Browserless Cloud token for `web_capture` (optional for self-hosted Browserless)
+- `BROWSERLESS_TOKEN` - Browserless token for `web_fetch` (Browserless provider) and `web_capture`, sent as the `token` query parameter (required by Browserless Cloud and by a self-hosted instance started with `TOKEN`)
 - `DEER_FLOW_PROJECT_ROOT` - Project root for relative runtime paths
 - `DEER_FLOW_CONFIG_PATH` - Custom config file path
 - `DEER_FLOW_EXTENSIONS_CONFIG_PATH` - Custom extensions config file path
