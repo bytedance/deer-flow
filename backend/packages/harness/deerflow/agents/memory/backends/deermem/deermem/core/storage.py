@@ -857,12 +857,14 @@ class FileMemoryStorage(MemoryStorage):
         """Notify the optional index only after durable storage locks are released.
 
         ``committed`` is ``(previous_revision, signature)`` of a manifest this
-        process just wrote. Once every notification lands, the user's scopes whose
-        index was in sync at ``previous_revision`` are in sync at ``signature``
-        too: the write was the only change in between and the index carries its
-        delta, so the next search does not rebuild them. A scope synced at an
-        older revision keeps that older signature and is rebuilt, because a peer
-        wrote the manifest in between.
+        process just replaced, with ``previous_revision`` read under the user lock
+        right before the commit; a commit that changed nothing passes ``None``.
+        Once every notification lands, the user's scopes whose index was in sync
+        at ``previous_revision`` are in sync at ``signature`` too: the write was
+        the only change in between and the index carries its delta, so the next
+        search does not rebuild them. A scope synced at an older revision keeps
+        that older signature and is rebuilt, because a peer wrote the manifest
+        in between; a no-op commit leaves every recorded signature as it was.
         """
         if self._retrieval is None:
             return
@@ -1499,6 +1501,7 @@ class FileMemoryStorage(MemoryStorage):
         lock_path = path.parent / ".memory.lock"
         notifications: list[RetrievalNotification] = []
         deleted_metadata_ids: list[str] = []
+        committed: tuple[int, tuple[Any, ...]] | None = None
         try:
             if not isinstance(memory_data, dict):
                 raise ValueError("memory_data must be an object")
@@ -1521,6 +1524,7 @@ class FileMemoryStorage(MemoryStorage):
                 summaries = None
                 if agent_name is None:
                     summaries = {"user": memory_data.get("user", {}), "history": memory_data.get("history", {})}
+                pre_revision = int((self._load_memory_file(path) or {}).get("revision") or 0)
                 memory_file, notifications = self._commit_changes_locked(
                     path,
                     user_id=user_id,
@@ -1532,7 +1536,10 @@ class FileMemoryStorage(MemoryStorage):
                 )
                 document = self._read_document(path, agent_name, user_id=user_id)
                 signature = self._scope_signature(path, agent_name)
-                committed = (int(memory_file.get("revision") or 0) - 1, signature)
+                # A no-op commit hands back the unchanged manifest: nothing was
+                # replaced, so no recorded index signature may move.
+                if int(memory_file.get("revision") or 0) != pre_revision:
+                    committed = (pre_revision, signature)
                 with self._cache_lock:
                     self._memory_cache[key] = (copy.deepcopy(document), signature)
         except MemoryRevisionConflict:
@@ -1718,6 +1725,7 @@ class FileMemoryStorage(MemoryStorage):
             try:
                 with self._scope_lock(key), _process_file_lock(path.parent / ".memory.lock", float(getattr(self._config, "file_lock_timeout_seconds", 10))):
                     self._recover_if_needed(path)
+                    pre_revision = int((self._load_memory_file(path) or {}).get("revision") or 0)
                     memory_file, notifications = self._commit_changes_locked(
                         path,
                         user_id=user_id,
@@ -1729,7 +1737,10 @@ class FileMemoryStorage(MemoryStorage):
                         delete_revisions=copy.deepcopy(delete_revisions),
                         upsert_revisions=normalized_upsert_revisions,
                     )
-                    committed = (int(memory_file.get("revision") or 0) - 1, self._scope_signature(path, agent_name))
+                    # A no-op commit (unchanged values, empty change set) hands back
+                    # the unchanged manifest; only a real replacement may advance
+                    # the recorded index signatures.
+                    committed = (pre_revision, self._scope_signature(path, agent_name)) if int(memory_file.get("revision") or 0) != pre_revision else None
                 break
             except MemoryManifestRevisionConflict as exc:
                 can_rebase = allow_manifest_rebase and has_fact_changes and summaries is None and safe_delete_rebase and safe_upsert_rebase and attempt < 2
@@ -1944,7 +1955,9 @@ class FileMemoryStorage(MemoryStorage):
                 if agent_name is None:
                     continue
                 synced_signatures[self._cache_key(agent_name, user_id=kwargs.get("user_id"))] = self._scope_signature(memory_path, agent_name)
-                for fact in self.list_facts(**kwargs):
+                # The bulk replace below drops every row this rebuild does not
+                # supply, so read the complete scope rather than a list_facts page.
+                for fact in self.load(**kwargs).get("facts", []):
                     try:
                         records.append((fact, _scope_dict(kwargs.get("user_id"), agent_name), str(fact_file_path(memory_path, fact["id"], agent_name=agent_name))))
                     except Exception:

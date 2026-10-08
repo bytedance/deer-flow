@@ -16,6 +16,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from deerflow.agents.memory.backends.deermem.deer_mem import DeerMem
 from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
 from deerflow.agents.memory.backends.deermem.deermem.core.retrieval import FTS5RetrievalAdapter, create_fts5_retrieval
@@ -202,6 +204,72 @@ def test_deermem_instances_with_pod_local_indexes_see_each_other(tmp_path: Path)
         assert (tmp_path / "index-a" / INDEX_FILENAME).is_file()
         assert (tmp_path / "index-b" / INDEX_FILENAME).is_file()
         assert not (storage_root / ".retrieval").exists()
+    finally:
+        pod_a.close()
+        pod_b.close()
+
+
+@pytest.mark.parametrize("no_op", ["unchanged_patch", "identical_save"])
+def test_no_op_commit_after_a_peer_delete_does_not_mask_the_deletion(tmp_path: Path, no_op: str) -> None:
+    """A commit that changes nothing must not advance the synced signature past a peer's write.
+
+    Pod A indexed f1/f2 at revision r; Pod B deleted f2 (r+1); A then applies a
+    supported update to f1 that turns out to be a no-op. The commit helper hands
+    back the unchanged manifest, so inferring "previous revision = r" from it
+    would mark A's stale index as in sync at r+1 and keep returning f2 forever.
+    """
+    storage_root = tmp_path / "home"
+    pod_a = _instance(storage_root, tmp_path / "index-a")
+    pod_b = _instance(storage_root, tmp_path / "index-b")
+    try:
+        pod_a.apply_changes({"upserts": [_fact("f1", "alpha stays"), _fact("f2", "beta goes away")]}, user_id="alice", agent_name="agent-a")
+        assert pod_a.rebuild_index()["failed"] == 0
+        assert _ids(pod_a.search_facts("beta", scopes=[SCOPE])) == ["f2"]
+
+        pod_b.delete_fact("f2", user_id="alice", agent_name="agent-a")
+
+        if no_op == "unchanged_patch":
+            stored = pod_a.get_fact("f1", user_id="alice", agent_name="agent-a")
+            assert stored is not None
+            result = pod_a.upsert_fact(stored, user_id="alice", agent_name="agent-a", expected_fact_revision=stored["revision"])
+            assert result["upsertedFacts"] == [], "the unchanged-value patch must be a no-op commit"
+        else:
+            assert pod_a.save(pod_a.load("agent-a", user_id="alice"), "agent-a", user_id="alice")
+
+        assert pod_a.search_facts("beta", scopes=[SCOPE]) == []
+        assert _ids(pod_a.search_facts("alpha", scopes=[SCOPE])) == ["f1"]
+    finally:
+        pod_a.close()
+        pod_b.close()
+
+
+def test_scoped_resync_indexes_every_fact_of_a_large_scope(tmp_path: Path) -> None:
+    """The re-sync must read the whole scope, not the first page of 100 facts.
+
+    With 150 facts (max_facts allows up to 500) both Pods start complete. A
+    peer's summary-only save changes the manifest signature; A's next search
+    rebuilds the scope and must still hold all 150 facts afterwards.
+    """
+    storage_root = tmp_path / "home"
+    config = DeerMemConfig(storage_path=str(storage_root), max_facts=200)
+    (tmp_path / "index-a").mkdir()
+    (tmp_path / "index-b").mkdir()
+    pod_a = FileMemoryStorage(config, retrieval=FTS5RetrievalAdapter(tmp_path / "index-a" / INDEX_FILENAME))
+    pod_b = FileMemoryStorage(config, retrieval=FTS5RetrievalAdapter(tmp_path / "index-b" / INDEX_FILENAME))
+    try:
+        facts = [_fact(f"fact-{index:03d}", f"zeta common memory number {index:03d} unique{index:03d}") for index in range(1, 151)]
+        pod_a.apply_changes({"upserts": facts}, user_id="alice", agent_name="agent-a")
+        assert pod_a.rebuild_index()["failed"] == 0
+        assert pod_b.rebuild_index()["failed"] == 0
+        assert _ids(pod_a.search_facts("unique150", scopes=[SCOPE])) == ["fact-150"]
+
+        summaries = create_empty_memory()
+        summaries["user"]["workContext"]["summary"] = "peer summary refresh"
+        assert pod_b.save(summaries, user_id="alice")
+
+        assert _ids(pod_a.search_facts("unique150", scopes=[SCOPE])) == ["fact-150"]
+        assert _ids(pod_a.search_facts("unique001", scopes=[SCOPE])) == ["fact-001"]
+        assert len(pod_a.search_facts("zeta", scopes=[SCOPE], top_k=200)) == 150
     finally:
         pod_a.close()
         pod_b.close()

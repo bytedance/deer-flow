@@ -217,11 +217,13 @@ Adapter failures mark the scope dirty.
 Search then uses canonical substring matching until rebuild succeeds.
 
 Cross-process freshness: `rebuild_index` records each agent scope's manifest
-signature `(mtime_ns, size, revision)` before reading its facts; `search_facts`
-rebuilds a scope whose live signature differs (a peer wrote the user's memory).
-A commit advances the recorded signatures of that user's scopes only when they
-were in sync at the previous revision, so own writes never rebuild while an
-interleaved peer write still does.
+signature `(mtime_ns, size, revision)` before reading that scope's complete
+fact list (never a `list_facts` page); `search_facts` rebuilds a scope whose
+live signature differs (a peer wrote the user's memory). A commit that produced
+a new revision advances the recorded signatures of that user's scopes that were
+in sync at the pre-commit revision read under the user lock; a no-op commit
+advances nothing. Own writes therefore never rebuild while an interleaved peer
+write still does.
 
 Gateway startup schedules `DeerMem.warm_retrieval()` without delaying readiness.
 The first search can rebuild its exact scope.
