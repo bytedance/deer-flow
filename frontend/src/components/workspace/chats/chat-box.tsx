@@ -1,7 +1,14 @@
 import { FilesIcon, XIcon } from "lucide-react";
 import dynamic from "next/dynamic";
 import { usePathname } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   type Layout,
   type PanelSize,
@@ -209,6 +216,7 @@ const ChatBoxContent: React.FC<ChatBoxProps> = ({
   }, [pathname]);
 
   const sidePanelRef = usePanelRef();
+  const sidePanelElementRef = useRef<HTMLDivElement | null>(null);
   // Width the panel reopens at: the last size the user dragged it to.
   const openSizeRef = useRef(RIGHT_PANEL_DEFAULT_SIZE);
   // While the panel width animates, the content is held at its final width and
@@ -269,7 +277,7 @@ const ChatBoxContent: React.FC<ChatBoxProps> = ({
     ],
   );
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (rightPanelOpenRef.current === rightPanelOpen) {
       return;
     }
@@ -298,29 +306,39 @@ const ChatBoxContent: React.FC<ChatBoxProps> = ({
       sidePanelRef.current?.collapse();
     }
 
-    const timeout = window.setTimeout(() => {
+    let cancelled = false;
+    let mobileTimeout: number | undefined;
+    const finish = () => {
+      if (cancelled) return;
       setAnimatingRightPanel(false);
       setPinnedContentWidth(null);
-    }, RIGHT_PANEL_ANIMATION_MS);
+      if (!rightPanelOpen) setRenderedRightPanel(null);
+    };
+    // The transition starts at the next rendered frame. A wall-clock timeout
+    // can expire while it is still running and reflow restored messages.
+    const frame = requestAnimationFrame(() => {
+      const panel = sidePanelElementRef.current;
+      if (!panel) {
+        // Mobile uses Sheet rather than a resizable panel; retain its exit.
+        mobileTimeout = window.setTimeout(finish, RIGHT_PANEL_ANIMATION_MS);
+        return;
+      }
+      void Promise.allSettled(
+        panel.getAnimations().map((animation) => animation.finished),
+      ).then(finish);
+    });
 
     return () => {
-      window.clearTimeout(timeout);
+      cancelled = true;
+      cancelAnimationFrame(frame);
+      window.clearTimeout(mobileTimeout);
     };
   }, [rightPanelOpen, sidePanelRef]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (activeRightPanel) {
       setRenderedRightPanel(activeRightPanel);
-      return;
     }
-
-    const timeout = window.setTimeout(() => {
-      setRenderedRightPanel(null);
-    }, RIGHT_PANEL_ANIMATION_MS);
-
-    return () => {
-      window.clearTimeout(timeout);
-    };
   }, [activeRightPanel]);
 
   useEffect(() => {
@@ -496,6 +514,7 @@ const ChatBoxContent: React.FC<ChatBoxProps> = ({
       <ResizablePanel
         id={`${resizableIdBase}-side`}
         panelRef={sidePanelRef}
+        elementRef={sidePanelElementRef}
         collapsible
         collapsedSize="0%"
         defaultSize={initialRightPanelSize}
