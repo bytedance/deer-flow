@@ -234,8 +234,15 @@ helm install deer-flow deploy/helm/deer-flow \
 ```bash
 kubectl -n deer-flow get pods
 kubectl -n deer-flow port-forward svc/nginx 2026:2026
-curl http://localhost:2026/health          # gateway health via nginx
+curl http://localhost:2026/health          # gateway liveness via nginx
+curl http://localhost:2026/health/ready    # readiness: database, checkpointer, stream_bridge, provisioner
 ```
+
+`/health/ready` is what the gateway `readinessProbe` hits. It answers 503 while
+Postgres or the Redis stream bridge is unreachable (`stream_bridge: unreachable`),
+so those pods leave the Service instead of accepting runs they cannot stream.
+The `provisioner` field reports the provisioner's own `/health` but never
+changes the status code: every gateway pod shares that one provisioner.
 
 Hit the Ingress host (map it in `/etc/hosts` for local clusters) to load the UI.
 
@@ -354,7 +361,10 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   `DEER_FLOW_STREAM_BRIDGE_REDIS_URL`; `config.yaml` sets `stream_bridge.type:
   redis` by default. No-auth by default (ClusterIP isolation, matching compose);
   set `redis.auth.password` to enable AUTH. For a managed Redis, disable the
-  bundled instance and point at it via `redis.external`.
+  bundled instance and point at it via `redis.external`. The gateway readiness
+  probe pings this Redis on every check and reports the pod unready while it
+  is unreachable, since without the bridge no run can publish, stream or be
+  cancelled from a peer pod.
 - **Persistence.** A PVC (`<release>-home`) backs `/app/backend/.deer-flow`
   (sqlite DB, memory, custom agents, per-thread user-data). The gateway mounts
   it with `subPath: deer-flow` so the layout matches the provisioner's PVC
