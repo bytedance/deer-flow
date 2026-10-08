@@ -219,6 +219,7 @@ async def test_start_channel_resolves_seen_store_path_off_the_loop(tmp_path: Pat
     # path there. The test mirrors that boundary so only ``_start_channel``'s own
     # resolution is exercised on the loop.
     service = await asyncio.to_thread(ChannelService, channels_config={})
+    service._running = True  # Direct-start fixture models an active service.
     started = await service._start_channel("buzz", {"relay_url": "wss://buzz.example.com", "private_key": "unused-by-this-test"})
 
     # ``_start_channel`` keeps a blanket ``except Exception`` around the whole
