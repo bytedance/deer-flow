@@ -96,6 +96,7 @@ async def test_channel_cannot_publish_after_stop_finishes_during_prestart_io(
     assert await asyncio.wait_for(start_task, timeout=1) is False
     assert service._channels == {}
 
+
 @pytest.mark.asyncio
 async def test_channel_start_finishing_after_service_stop_is_drained(
     monkeypatch: pytest.MonkeyPatch,
