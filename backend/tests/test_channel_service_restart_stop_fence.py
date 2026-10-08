@@ -62,3 +62,37 @@ async def test_restart_is_fenced_while_service_shutdown_is_in_progress(
     assert service._channels == {}
     assert service._running is False
     assert service._stopping is False
+
+
+
+@pytest.mark.asyncio
+async def test_channel_cannot_publish_after_stop_finishes_during_prestart_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ChannelService(channels_config={"buzz": {"enabled": True}})
+    service._running = True
+    entered_io = asyncio.Event()
+    resume_io = asyncio.Event()
+
+    async def held_to_thread(_function: object) -> str:
+        entered_io.set()
+        await resume_io.wait()
+        return "/tmp/buzz_seen_events.json"
+
+    async def manager_stop() -> None:
+        pass
+
+    monkeypatch.setattr(channel_service.asyncio, "to_thread", held_to_thread)
+    monkeypatch.setattr(service.manager, "stop", manager_stop)
+    monkeypatch.setitem(channel_service._CHANNEL_REGISTRY, "buzz", "tests.fake:FakeChannel")
+    monkeypatch.setattr(reflection, "resolve_class", lambda *_args, **_kwargs: _FakeChannel)
+
+    start_task = asyncio.create_task(service._start_channel("buzz", {"enabled": True}))
+    await asyncio.wait_for(entered_io.wait(), timeout=1)
+    await service.stop()
+    assert service._stopping is False
+    assert service._running is False
+
+    resume_io.set()
+    assert await asyncio.wait_for(start_task, timeout=1) is False
+    assert service._channels == {}
