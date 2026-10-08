@@ -34,6 +34,37 @@ afterEach(() => {
 
 describe("MessageGroup", () => {
   it.each(["array", "webz"])(
+    "retains valid search links when %s results contain malformed entries",
+    (shape) => {
+      const results = [
+        { title: "First source", url: "https://example.com/first" },
+        null,
+        "not a result",
+        { title: { text: "Invalid title" }, url: "https://example.com/bad" },
+        { title: "Invalid URL", url: 42 },
+        { url: "https://example.com/missing-title" },
+        { title: "Missing URL" },
+        { title: "Last source", url: "https://example.com/last" },
+        { title: "Unsafe source", url: "javascript:alert(1)" },
+      ];
+      const payload =
+        shape === "webz"
+          ? { query: "news", returned_results: results.length, results }
+          : results;
+      const html = renderToolCall(
+        "web_search",
+        { query: "news" },
+        JSON.stringify(payload),
+      );
+      expect(html).toContain('href="https://example.com/first"');
+      expect(html).toContain('href="https://example.com/last"');
+      expect(anchorCount(html)).toBe(2);
+      expect(unsafeMarkerCount(html)).toBe(1);
+      expect(html).not.toContain("Invalid title");
+    },
+  );
+
+  it.each(["array", "webz"])(
     "renders source links from a %s search response",
     (shape) => {
       const results = [

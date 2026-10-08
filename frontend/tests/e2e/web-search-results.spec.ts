@@ -2,12 +2,12 @@ import { expect, test } from "@playwright/test";
 
 import { mockLangGraphAPI } from "./utils/mock-api";
 
-for (const shape of ["array", "webz"] as const) {
+for (const shape of ["array", "webz", "webz-malformed"] as const) {
   test(`search source links from ${shape} results survive reload`, async ({
     page,
   }) => {
     const threadId = "00000000-0000-0000-0000-000000005880";
-    const results = [
+    const results: unknown[] = [
       {
         title: "Renewable energy news",
         url: "https://example.com/news",
@@ -16,10 +16,21 @@ for (const shape of ["array", "webz"] as const) {
         source: { domain: "example.com", language: "english", country: "US" },
       },
     ];
+    if (shape === "webz-malformed") {
+      results.unshift(null, {
+        title: { text: "Invalid title" },
+        url: "https://example.com/invalid",
+      });
+      results.push({ title: "Invalid URL", url: 42 });
+    }
     const payload =
-      shape === "webz"
-        ? { query: "renewable energy", returned_results: 1, results }
-        : results;
+      shape === "array"
+        ? results
+        : {
+            query: "renewable energy",
+            returned_results: results.length,
+            results,
+          };
     mockLangGraphAPI(page, {
       threads: [
         {
