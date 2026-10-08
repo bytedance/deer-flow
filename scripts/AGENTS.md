@@ -1,3 +1,12 @@
+## Support Bundle Runtime Home
+
+Thread manifests use a nonempty `DEER_FLOW_HOME` exclusively, resolving relative
+values from the caller's current directory like `Paths.base_dir`. Scan both
+legacy threads and user-scoped threads in that root. With no override, retain
+the two checkout layouts. Display an external home as `{DEER_FLOW_HOME}` rather
+than its absolute host path, and never include file contents in the manifest.
+Coverage lives in `backend/tests/test_support_bundle.py`.
+
 ## Manual Claude OAuth Export
 
 `export_claude_code_oauth.py` validates Keychain JSON as an object containing an

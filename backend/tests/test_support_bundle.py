@@ -16,6 +16,52 @@ def _zip_text(zip_path, name: str) -> str:
         return zf.read(name).decode("utf-8")
 
 
+@pytest.mark.parametrize("layout", ["threads/thread-home", "users/alice/threads/thread-home"])
+def test_thread_summary_uses_configured_runtime_home(tmp_path, monkeypatch, layout):
+    project = tmp_path / "checkout"
+    project.mkdir()
+    home = tmp_path / "runtime-data"
+    outputs = home / layout / "user-data" / "outputs"
+    outputs.mkdir(parents=True)
+    (outputs / "report.txt").write_text("private document contents", encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_HOME", str(home))
+
+    summary = support_bundle.collect_thread_summary(project, "thread-home")
+
+    assert summary["found"] is True
+    assert summary["outputs"][0]["path"] == "report.txt"
+    assert "private document contents" not in json.dumps(summary)
+    assert str(home) not in json.dumps(summary)
+    assert summary["layout"].startswith("{DEER_FLOW_HOME}/")
+
+
+def test_configured_home_does_not_fall_back_to_stale_checkout_thread(tmp_path, monkeypatch):
+    project = tmp_path / "checkout"
+    (project / ".deer-flow" / "threads" / "thread-home" / "user-data").mkdir(parents=True)
+    home = tmp_path / "runtime-data"
+    monkeypatch.setenv("DEER_FLOW_HOME", str(home))
+
+    summary = support_bundle.collect_thread_summary(project, "thread-home")
+
+    assert summary["found"] is False
+    assert summary["checked_layouts"] == ["{DEER_FLOW_HOME}/threads/thread-home/user-data"]
+
+
+def test_relative_runtime_home_is_resolved_from_current_directory(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DEER_FLOW_HOME", "runtime-data")
+    data = tmp_path / "runtime-data" / "users" / "alice" / "threads" / "thread-home" / "user-data"
+    data.mkdir(parents=True)
+    assert support_bundle.collect_thread_summary(tmp_path / "checkout", "thread-home")["found"] is True
+
+
+def test_empty_runtime_home_keeps_legacy_lookup(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_HOME", "")
+    data = tmp_path / "backend" / ".deer-flow" / "threads" / "thread-home" / "user-data"
+    data.mkdir(parents=True)
+    assert support_bundle.collect_thread_summary(tmp_path, "thread-home")["found"] is True
+
+
 @pytest.mark.parametrize("host_encoding", ["ascii", "cp936"])
 @pytest.mark.parametrize("returncode", [0, 7])
 def test_run_command_decodes_utf8_independently_of_host_locale(tmp_path, monkeypatch, host_encoding, returncode):

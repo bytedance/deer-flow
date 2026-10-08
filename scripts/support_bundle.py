@@ -264,11 +264,12 @@ def _validate_thread_id(thread_id: str) -> None:
 
 def _candidate_thread_data_dirs(project_root: Path, thread_id: str) -> list[Path]:
     _validate_thread_id(thread_id)
-    candidates = [
-        project_root / ".deer-flow" / "threads" / thread_id / "user-data",
-        project_root / "backend" / ".deer-flow" / "threads" / thread_id / "user-data",
-    ]
-    for base in (project_root / ".deer-flow" / "users", project_root / "backend" / ".deer-flow" / "users"):
+    if env_home := os.getenv("DEER_FLOW_HOME"):
+        data_roots = [Path(env_home).resolve()]
+    else:
+        data_roots = [project_root / ".deer-flow", project_root / "backend" / ".deer-flow"]
+    candidates = [root / "threads" / thread_id / "user-data" for root in data_roots]
+    for base in (root / "users" for root in data_roots):
         if base.exists():
             candidates.extend(user_dir / "threads" / thread_id / "user-data" for user_dir in base.iterdir() if user_dir.is_dir())
     return candidates
@@ -278,6 +279,12 @@ def _display_path(path: Path, project_root: Path) -> str:
     try:
         return path.resolve().relative_to(project_root.resolve()).as_posix()
     except (OSError, ValueError):
+        if env_home := os.getenv("DEER_FLOW_HOME"):
+            try:
+                relative = path.resolve().relative_to(Path(env_home).resolve()).as_posix()
+                return "{DEER_FLOW_HOME}/" + relative
+            except (OSError, ValueError):
+                pass
         return redact_text(path.as_posix())
 
 

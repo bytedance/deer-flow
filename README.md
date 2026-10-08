@@ -188,6 +188,10 @@ For MindIE XML tool calls, see the
    Doctor's internal tool probes also decode UTF-8 with replacement for invalid
    bytes so the remaining diagnostic output stays available.
 
+   When a thread manifest is requested, a nonempty `DEER_FLOW_HOME` selects the
+   runtime data directory instead of stale checkout data. External data paths
+   appear as `{DEER_FLOW_HOME}` in the report; file contents remain excluded.
+
    > **Advanced / manual configuration**: If you prefer to edit `config.yaml` directly, run `make config` instead to copy the full template. Optional dependency auto-detection accepts UTF-8 configuration files with or without a byte-order mark (BOM). See `config.example.yaml` for the complete reference including CLI-backed providers (Codex CLI, Claude Code OAuth), OpenRouter, Responses API, subagent runtime caps such as `subagents.max_total_per_run`, and more.
 
    Optional per-model pricing must use one currency across all priced models.
