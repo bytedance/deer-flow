@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import enum
 import gc
 import inspect
 import logging
@@ -859,6 +860,20 @@ def _bind_trace_id(config: dict[str, Any], runtime_ctx: dict[str, Any]) -> str:
     return trace_id
 
 
+class EditReplayRestoreOutcome(enum.StrEnum):
+    """Result of the edit-replay restore barrier.
+
+    Distinguishes the three cases the terminal-admission decision must tell
+    apart: no restore was required, the restore is confirmed complete, or the
+    restore did not complete (failed, or the worker lost its lease).
+    """
+
+    NOT_REQUIRED = "not_required"
+    RESTORED = "restored"
+    FAILED = "failed"
+    OWNERSHIP_LOST = "ownership_lost"
+
+
 def _defer_finalization_interrupt(
     deferred: BaseException | None,
     interrupt: BaseException,
@@ -1000,6 +1015,7 @@ async def run_agent(
                 run_id=run_id,
                 rollback_point=rollback_point,
                 snapshot_capture_failed=snapshot_capture_failed,
+                is_owned=lambda: not record.ownership_lost,
             )
         except asyncio.CancelledError:
             logger.warning(
@@ -1069,7 +1085,7 @@ async def run_agent(
             checkpoint_restore_task = asyncio.create_task(_owned_checkpoint_restore())
         return checkpoint_restore_task
 
-    async def _ensure_edit_replay_restored() -> None:
+    async def _ensure_edit_replay_restored() -> EditReplayRestoreOutcome:
         """Restore a failed edit replay exactly once, whatever ended it.
 
         Runs from the early failure path and again from the final outcome
@@ -1082,11 +1098,11 @@ async def run_agent(
             # The run never started, so there is nothing to restore. Consuming the
             # rollback intent here would reset (or delete) a thread the replay
             # never touched and would strand a later valid restore.
-            return
+            return EditReplayRestoreOutcome.NOT_REQUIRED
         if record.ownership_lost:
-            return
+            return EditReplayRestoreOutcome.OWNERSHIP_LOST
         if not _is_edit_replay_run(record) or record.status == RunStatus.success:
-            return
+            return EditReplayRestoreOutcome.NOT_REQUIRED
         if not record.finalizing:
             await run_manager.set_finalizing(run_id, True)
         try:
@@ -1134,6 +1150,28 @@ async def run_agent(
                 deferred_finalization_interrupt = exc
         except BaseException:
             logger.warning("Run %s edit replay rollback failed", run_id, exc_info=True)
+
+        # The caller must distinguish success from failure / ownership loss: a
+        # restore that did not complete must never release the durable admission
+        # slot as though it had.
+        if checkpoint_rollback_completed:
+            return EditReplayRestoreOutcome.RESTORED
+        if record.ownership_lost:
+            return EditReplayRestoreOutcome.OWNERSHIP_LOST
+        return EditReplayRestoreOutcome.FAILED
+
+    def _admission_releasable() -> bool:
+        """Whether the durable terminal may be written (admission released).
+
+        A run that still owes an edit-replay restore must stay active: writing
+        its terminal status frees the thread's durable admission slot, which a
+        peer could otherwise claim while the old snapshot is still restoring.
+        """
+        if record.ownership_lost:
+            return False
+        if _is_edit_replay_run(record) and record.status != RunStatus.success and not checkpoint_rollback_completed:
+            return False
+        return True
 
     async def _finish_cancellation(
         action: str,
@@ -1985,7 +2023,20 @@ async def run_agent(
                     )
                     if cancel_action is not None:
                         await _finish_cancellation(cancel_action)
-                        await run_manager.persist_current_status(run_id)
+                        # An edit replay must complete its owned checkpoint restore
+                        # BEFORE the terminal row is written: committing the row
+                        # frees the thread's durable admission slot, which a peer
+                        # could otherwise claim while the old snapshot is still
+                        # being restored. Non-restoring runs keep the previous
+                        # order, and an accepted rollback already ran the single
+                        # owned restore inside ``_finish_cancellation``.
+                        if _is_edit_replay_run(record) and not checkpoint_rollback_completed:
+                            await _ensure_edit_replay_restored()
+                        # Never release admission on a fenced worker or an
+                        # incomplete restore: a failure is reported, not turned
+                        # into a terminal row a peer could mistake for success.
+                        if _admission_releasable():
+                            await run_manager.persist_current_status(run_id)
                 except Exception:
                     logger.warning("Failed to persist terminal status for run %s after delivery receipt attempts", run_id, exc_info=True)
             # The deferred commit has been attempted. A failed write is left to
@@ -1998,7 +2049,10 @@ async def run_agent(
             # persistence and the end frame.
             await _ensure_edit_replay_restored()
 
-            if not record.ownership_lost and journal is not None and persist_completion:
+            # ``update_run_completion`` writes the run status too, so it must not
+            # fire while an edit-replay restore is still owed (that would release
+            # the durable admission slot the restore is meant to hold).
+            if _admission_releasable() and journal is not None and persist_completion:
                 try:
                     # Persist token usage + convenience fields to RunStore. The
                     # journal is detached by now, so reuse the captured terminal
@@ -2949,6 +3003,7 @@ async def _rollback_to_pre_run_checkpoint(
     run_id: str,
     rollback_point: RollbackPoint | None,
     snapshot_capture_failed: bool,
+    is_owned: Callable[[], bool] | None = None,
 ) -> bool:
     """Restore the complete pre-run state and report whether it completed.
 
@@ -2959,6 +3014,14 @@ async def _rollback_to_pre_run_checkpoint(
     use a state-only mutation graph whose synthetic ``rollback_restore`` node
     finishes immediately and schedules no agent work.
     """
+
+    def _still_owned() -> bool:
+        # Re-checked immediately before every checkpoint mutation: a worker that
+        # loses its lease mid-restore must not issue a new write. A refused
+        # mutation is reported as an incomplete restore; an already-started
+        # write is still supervised by the caller's owned restore task.
+        return is_owned is None or bool(is_owned())
+
     if checkpointer is None:
         logger.info("Run %s rollback requested but no checkpointer is configured", run_id)
         return False
@@ -2968,6 +3031,9 @@ async def _rollback_to_pre_run_checkpoint(
         return False
 
     if rollback_point is None:
+        if not _still_owned():
+            logger.warning("Run %s rollback skipped: lease ownership was lost before the reset", run_id)
+            return False
         await _call_checkpointer_method(checkpointer, "adelete_thread", "delete_thread", thread_id)
         logger.info("Run %s rollback reset thread %s to empty state", run_id, thread_id)
         return True
@@ -3014,6 +3080,11 @@ async def _rollback_to_pre_run_checkpoint(
 
     restore_config["metadata"] = checkpoint_agent_binding_metadata(rollback_point.metadata)
 
+    if not _still_owned():
+        # Ownership can be lost while the (non-atomic) read above is in flight;
+        # confirm again as close as possible to the mutation.
+        logger.warning("Run %s rollback skipped: lease ownership was lost before the restore write", run_id)
+        return False
     restored_config = await mutation_accessor.aupdate(
         restore_config,
         replacement_values,
@@ -3042,6 +3113,9 @@ async def _rollback_to_pre_run_checkpoint(
         writes_by_task.setdefault(str(task_id), []).append((channel, value))
 
     for task_id, writes in writes_by_task.items():
+        if not _still_owned():
+            logger.warning("Run %s rollback incomplete: lease ownership was lost before pending writes", run_id)
+            return False
         await _call_checkpointer_method(
             checkpointer,
             "aput_writes",
