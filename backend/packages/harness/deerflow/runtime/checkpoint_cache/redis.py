@@ -75,9 +75,19 @@ class RedisCheckpointHistoryCache:
             if raw is None:
                 self._misses += 1
                 continue
+            try:
+                tag, payload = raw.split(_TAG_SEPARATOR, 1)
+                entry = self._serde.loads_typed((tag.decode(), payload))
+                if not isinstance(entry, dict) or not isinstance(entry.get("writes"), list):
+                    raise ValueError("invalid checkpoint history entry shape")
+            except Exception as exc:
+                # Cached history is optional. A malformed entry must not prevent
+                # rebuilding history from authoritative checkpoints.
+                logger.warning("checkpoint history cache decode failed; treating as miss: %s", type(exc).__name__)
+                self._misses += 1
+                continue
             self._hits += 1
-            tag, payload = raw.split(_TAG_SEPARATOR, 1)
-            found[key] = self._serde.loads_typed((tag.decode(), payload))
+            found[key] = entry
         return found
 
     async def aset_many(self, entries: dict[str, dict[str, Any]]) -> None:
