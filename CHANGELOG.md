@@ -820,7 +820,7 @@ This release closes that milestone with **439 merged pull requests**.
   idle counters are swept in bounded batches, and a declared multi-instance
   deployment that keeps `memory` logs a startup warning. Status codes and
   messages of the login endpoint are unchanged; `max_login_attempts` and
-  `lockout_seconds` stay live-read.
+  `lockout_seconds` stay live-read. ([#6501])
 - **persistence:** `scripts/migrate_user_isolation.py` now moves each legacy
   thread to the user who owns it. It looked for thread owners in
   `{base_dir}/deer-flow.db`, a file DeerFlow never creates (the database is
@@ -9209,3 +9209,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6447]: https://github.com/bytedance/deer-flow/pull/6447
 [#6448]: https://github.com/bytedance/deer-flow/pull/6448
 [#6450]: https://github.com/bytedance/deer-flow/pull/6450
+[#6501]: https://github.com/bytedance/deer-flow/pull/6501
