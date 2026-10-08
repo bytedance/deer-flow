@@ -2889,3 +2889,9 @@ Your unwavering commitment and expertise have been the driving force behind Deer
 ## Star History
 
 [![Star History Chart](https://star-history.dera.page/svg?repos=bytedance/deer-flow&type=Date)](https://star-history.dera.page/#bytedance/deer-flow&Date)
+
+The optional ECS executor includes an internal native run admission seam for
+remote agent placement. It preserves the original native run ID and fences
+startup by worker ownership. The outbound native worker integration and durable
+queue recovery are not yet supplied by this seam; ordinary ECS MCP execution
+continues to use its existing worker path.

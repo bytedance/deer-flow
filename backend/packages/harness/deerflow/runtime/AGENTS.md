@@ -266,3 +266,20 @@ the admitted group keeps its records on success or completes rollback on failure
 This is a store-local guarantee, not a change to RunJournal cancellation policy or
 JSONL's single-process deployment constraint. Regression coverage is in
 `tests/test_jsonl_event_store_cancellation.py`.
+
+### Trusted native admission handoff
+
+`RunManager.handoff_pending` detaches only an unattached pending native run after
+a durable owner/status/thread/user CAS. `adopt_pending` registers the same row
+as an executing local record; both require heartbeat ownership. `try_start`
+passes its worker identity into the pending-to-running CAS, including a durable
+cancellation check. Adoption is an internal execution fence, not authorization:
+its caller must authenticate a scoped launch capability first. Handoff keeps a
+finite native lease; a dispatcher must renew queued ownership and reconcile its
+job ledger before the lease expires. No owner namespace bypasses orphan recovery.
+
+Gateway `app.state.native_run_admission_host` is an operator-installed hook after
+normalization and durable admission, before local native task attachment. Its
+`admit(record)` returns False for the usual local path, or stages durable work
+and calls handoff before returning True. HTTP input cannot install/select this
+hook. The hook alone does not provide remote execution or durable queue recovery.

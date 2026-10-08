@@ -402,8 +402,8 @@ async def test_try_start_respects_durable_and_racing_cancels():
     record = await manager.create_or_reject("thread-2")
     original_start_run = store.start_run
 
-    async def start_then_cancel(run_id):
-        updated = await original_start_run(run_id)
+    async def start_then_cancel(run_id, *, owner_worker_id=None):
+        updated = await original_start_run(run_id, owner_worker_id=owner_worker_id)
         await manager.cancel(record.run_id)
         return updated
 

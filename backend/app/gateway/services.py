@@ -2249,21 +2249,12 @@ async def start_run(
                         )
                     return record
 
-                worker = run_after_metadata(record)
-                try:
-                    # No await is allowed between durable admission and task
-                    # attachment. Metadata setup runs inside the attached
-                    # worker so a pending cancellation can bypass stalled
-                    # thread-store IO and still reach run_agent's startup
-                    # barrier / stream finalization.
-                    record.task = asyncio.create_task(worker)
-                except Exception as exc:
-                    worker.close()
-                    await run_mgr.fail_start_if_pending(
-                        record.run_id,
-                        error=f"Failed to attach run worker: {exc}",
-                    )
-                    raise
+                from app.gateway.native_admission import attach_native_admission
+
+                # The default path attaches without yielding. An operator host
+                # may instead stage and CAS hand off this same pending run.
+                await attach_native_admission(request, run_mgr, record, run_after_metadata)
+
         except ConflictError as exc:
             raise BusyThreadConflict(str(exc)) from exc
         except UnsupportedStrategyError as exc:

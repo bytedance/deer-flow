@@ -218,12 +218,20 @@ class MemoryRunStore(RunStore):
         self._mark_changed(run)
         return True
 
-    async def start_run(self, run_id) -> bool:
+    async def start_run(self, run_id, *, owner_worker_id=None) -> bool:
         run = self._runs.get(run_id)
-        if run is None or run["status"] != "pending":
+        if run is None or run["status"] != "pending" or run.get("cancel_action") is not None or (owner_worker_id is not None and run.get("owner_worker_id") != owner_worker_id):
             return False
         run["status"] = "running"
         run["updated_at"] = datetime.now(UTC).isoformat()
+        self._mark_changed(run)
+        return True
+
+    async def transfer_pending(self, run_id, *, thread_id, user_id, expected_owner_worker_id, owner_worker_id, lease_expires_at):
+        run = self._runs.get(run_id)
+        if run is None or run["thread_id"] != thread_id or run.get("user_id") != user_id or run["status"] != "pending" or run.get("cancel_action") is not None or run.get("owner_worker_id") != expected_owner_worker_id:
+            return False
+        run.update(owner_worker_id=owner_worker_id, lease_expires_at=lease_expires_at, updated_at=datetime.now(UTC).isoformat())
         self._mark_changed(run)
         return True
 

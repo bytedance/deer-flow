@@ -906,6 +906,65 @@ class RunManager:
 
         return self._compute_edit_replay_visibility(list(records_by_id.values()))
 
+    async def handoff_pending(self, run_id: str, *, owner_worker_id: str) -> None:
+        """Detach an unstarted admission after a durable owner CAS.
+
+        This internal API accepts server-chosen dispatcher identity only. A
+        remote dispatcher must durably stage work before calling it.
+        """
+        if self._store is None or not self.heartbeat_enabled or not owner_worker_id or owner_worker_id == self._worker_id:
+            raise RunStartupError("Handoff requires a durable store, heartbeats, and a distinct owner")
+        async with self._lock:
+            record = self._runs.get(run_id)
+        if record is None:
+            raise RunStartupError("Unknown pending run")
+        async with record.start_lock:
+            async with self._lock:
+                if self._runs.get(run_id) is not record or record.task is not None or record.status != RunStatus.pending:
+                    raise RunStartupError("Only an unattached pending run may be handed off")
+                record.ownership_lost = True
+            try:
+                updated = await self._store.transfer_pending(
+                    run_id, thread_id=record.thread_id, user_id=record.user_id, expected_owner_worker_id=self._worker_id, owner_worker_id=owner_worker_id, lease_expires_at=self._compute_lease_expires_at()
+                )
+            except BaseException:
+                # A cancelled/ambiguous CAS cannot safely restore local write
+                # authority. Resolve its durable owner before clearing the fence.
+                row = await self._store.get(run_id, user_id=record.user_id)
+                if row is not None and row.get("owner_worker_id") == self._worker_id:
+                    record.ownership_lost = False
+                raise
+            async with self._lock:
+                if not updated:
+                    record.ownership_lost = False
+                    raise RunStartupError("Pending handoff lost ownership or was cancelled")
+                self._runs.pop(run_id)
+                self._unindex_run_locked(run_id, record.thread_id)
+
+    async def adopt_pending(self, run_id: str, *, thread_id: str, user_id: str, expected_owner_worker_id: str) -> RunRecord:
+        """Adopt an existing admission, without changing its admitted payload.
+
+        The caller must first authenticate the signed launch capability. This
+        CAS is the durable execution fence, not an authentication boundary.
+        """
+        if self._store is None or not self.heartbeat_enabled or not expected_owner_worker_id or expected_owner_worker_id == self._worker_id:
+            raise RunStartupError("Adoption requires a durable store, heartbeats, and a distinct owner")
+        async with self._lock:
+            if run_id in self._runs:
+                raise RunStartupError("Run already registered locally")
+        expiry = self._compute_lease_expires_at()
+        if not await self._store.transfer_pending(run_id, thread_id=thread_id, user_id=user_id, expected_owner_worker_id=expected_owner_worker_id, owner_worker_id=self._worker_id, lease_expires_at=expiry):
+            raise RunStartupError("Pending adoption lost ownership or was cancelled")
+        row = await self._store.get(run_id, user_id=user_id)
+        if row is None or row.get("owner_worker_id") != self._worker_id:
+            raise RunStartupError("Adopted run is unavailable or ownership changed")
+        record = self._record_from_store(row)
+        record.store_only = False
+        async with self._lock:
+            self._runs[run_id] = record
+            self._index_run_locked(record)
+        return record
+
     async def try_start(self, run_id: str) -> RunStartOutcome:
         """Transition an uncancelled pending run to running before building the agent."""
         async with self._lock:
@@ -923,7 +982,7 @@ class RunManager:
                     updated = await self._call_store_with_retry(
                         "start_run",
                         run_id,
-                        lambda: self._store.start_run(run_id),
+                        lambda: self._store.start_run(run_id, owner_worker_id=self._worker_id),
                     )
                 except Exception as exc:
                     raise RunStartupError(f"Failed to start run {run_id}: {exc}") from exc

@@ -346,7 +346,7 @@ class RunRepository(RunStore):
             await session.commit()
             return result.rowcount != 0
 
-    async def start_run(self, run_id: str) -> bool:
+    async def start_run(self, run_id: str, *, owner_worker_id: str | None = None) -> bool:
         """Start only a still-pending run; cancelled rows must not be resurrected."""
         async with self._sf() as session:
             change_seq = await self._next_change_seq(session)
@@ -355,8 +355,22 @@ class RunRepository(RunStore):
                 .where(
                     RunRow.run_id == run_id,
                     RunRow.status == "pending",
+                    RunRow.cancel_action.is_(None),
+                    *([RunRow.owner_worker_id == owner_worker_id] if owner_worker_id is not None else []),
                 )
                 .values(status="running", updated_at=datetime.now(UTC), change_seq=change_seq)
+            )
+            await session.commit()
+            return result.rowcount != 0
+
+    async def transfer_pending(self, run_id: str, *, thread_id: str, user_id: str | None, expected_owner_worker_id: str, owner_worker_id: str, lease_expires_at: str | None) -> bool:
+        """Transfer only the exact uncancelled admission; keep its identity and payload."""
+        async with self._sf() as session:
+            change_seq = await self._next_change_seq(session)
+            result = await session.execute(
+                update(RunRow)
+                .where(RunRow.run_id == run_id, RunRow.thread_id == thread_id, RunRow.user_id == user_id, RunRow.status == "pending", RunRow.cancel_action.is_(None), RunRow.owner_worker_id == expected_owner_worker_id)
+                .values(owner_worker_id=owner_worker_id, lease_expires_at=datetime.fromisoformat(lease_expires_at) if lease_expires_at else None, updated_at=datetime.now(UTC), change_seq=change_seq)
             )
             await session.commit()
             return result.rowcount != 0
