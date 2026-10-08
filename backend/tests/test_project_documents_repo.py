@@ -611,18 +611,18 @@ class TestPurge:
                 assert await docs.get(row["id"], user_id="u1") is not None
 
 
-class TestConvertUnderLiveLock:
-    async def test_runs_convert_under_the_lock_and_returns_the_row(self, repos):
+class TestPublishUnderLiveLock:
+    async def test_runs_publish_under_the_lock_and_returns_the_row(self, repos):
         projects, docs = repos
         project = await _project(projects)
         row = await _insert(docs, project["id"], sha="cf" * 32, doc_id="cv-ok")
         seen: list[str] = []
 
-        async def convert(r: dict) -> str:
+        async def publish(r: dict) -> str:
             seen.append(r["id"])
             return "published"
 
-        result = await docs.convert_under_live_lock(row["id"], project_id=project["id"], convert=convert, user_id="u1")
+        result = await docs.publish_under_live_lock(row["id"], project_id=project["id"], publish=publish, user_id="u1")
         assert result is not None
         locked_row, value = result
         assert locked_row["id"] == row["id"]
@@ -637,21 +637,21 @@ class TestConvertUnderLiveLock:
         trashed_project, trashed = await _trashed(docs, projects, sha="d1" * 32, doc_id="cv-trashed")
         calls: list[str] = []
 
-        async def convert(r: dict) -> None:
+        async def publish(r: dict) -> None:
             calls.append(r["id"])
 
-        assert await docs.convert_under_live_lock("missing", project_id=project["id"], convert=convert, user_id="u1") is None
+        assert await docs.publish_under_live_lock("missing", project_id=project["id"], publish=publish, user_id="u1") is None
         # Foreign owner, sibling project, and trashed rows all decline without
-        # ever invoking the conversion callback.
-        assert await docs.convert_under_live_lock(row["id"], project_id=project["id"], convert=convert, user_id="u2") is None
-        assert await docs.convert_under_live_lock(row["id"], project_id=other["id"], convert=convert, user_id="u1") is None
-        assert await docs.convert_under_live_lock(trashed["id"], project_id=trashed_project["id"], convert=convert, user_id="u1") is None
+        # ever invoking the publish callback.
+        assert await docs.publish_under_live_lock(row["id"], project_id=project["id"], publish=publish, user_id="u2") is None
+        assert await docs.publish_under_live_lock(row["id"], project_id=other["id"], publish=publish, user_id="u1") is None
+        assert await docs.publish_under_live_lock(trashed["id"], project_id=trashed_project["id"], publish=publish, user_id="u1") is None
         assert calls == []
 
-    async def test_concurrent_conversion_vs_purge_purge_commits_first(self, repos):
+    async def test_concurrent_publish_vs_purge_purge_commits_first(self, repos):
         """§13: purge holds its document lock across unlink and commit; a
-        conversion that blocked on the row lock then finds the row gone and
-        converts/publishes nothing."""
+        publish that blocked on the row lock then finds the row gone and
+        publishes nothing."""
         projects, docs = repos
         project = await _project(projects)
         row = await _insert(docs, project["id"], sha="e0" * 32, doc_id="cv-purge-first")
@@ -664,26 +664,26 @@ class TestConvertUnderLiveLock:
             entered.set()
             await asyncio.wait_for(release.wait(), 5)
 
-        async def convert(r: dict) -> str:
+        async def publish(r: dict) -> str:
             calls.append(r["id"])
             return "published"
 
-        async def run_conversion() -> tuple[dict, str] | None:
+        async def run_publish() -> tuple[dict, str] | None:
             await entered.wait()
-            task = asyncio.create_task(docs.convert_under_live_lock(row["id"], project_id=project["id"], convert=convert, user_id="u1"))
+            task = asyncio.create_task(docs.publish_under_live_lock(row["id"], project_id=project["id"], publish=publish, user_id="u1"))
             release.set()
             return await task
 
         purged, result = await asyncio.gather(
             docs.purge(row["id"], remove_files=remove_files, user_id="u1"),
-            run_conversion(),
+            run_publish(),
         )
         assert purged is True
         assert result is None
         assert calls == []
 
-    async def test_concurrent_conversion_vs_trash_conversion_commits_first(self, repos):
-        """§13: conversion holds the document lock through the publish; a
+    async def test_concurrent_publish_vs_trash_publish_commits_first(self, repos):
+        """§13: the publish holds the document lock until it commits; a
         trash arriving meanwhile blocks and then proceeds."""
         projects, docs = repos
         project = await _project(projects)
@@ -691,7 +691,7 @@ class TestConvertUnderLiveLock:
         entered = asyncio.Event()
         release = asyncio.Event()
 
-        async def convert(r: dict) -> str:
+        async def publish(r: dict) -> str:
             entered.set()
             await asyncio.wait_for(release.wait(), 5)
             return "published"
@@ -703,7 +703,7 @@ class TestConvertUnderLiveLock:
             return await task
 
         result, trashed = await asyncio.gather(
-            docs.convert_under_live_lock(row["id"], project_id=project["id"], convert=convert, user_id="u1"),
+            docs.publish_under_live_lock(row["id"], project_id=project["id"], publish=publish, user_id="u1"),
             run_trash(),
         )
         assert result is not None and result[1] == "published"
@@ -765,38 +765,38 @@ class TestLockedOffloadDrain:
         still = await docs.get(row["id"], include_trashed=True, user_id="u1")
         assert still is not None and still["trashed_at"] is not None
 
-    async def test_cancelled_conversion_drains_the_worker_before_unlocking(self, repos):
+    async def test_cancelled_publish_drains_the_worker_before_unlocking(self, repos):
         import threading
 
         projects, docs = repos
         project = await _project(projects)
-        row = await _insert(docs, project["id"], sha="e7" * 32, doc_id="convert-cancel")
+        row = await _insert(docs, project["id"], sha="e7" * 32, doc_id="publish-cancel")
 
         entered = threading.Event()
         finish = threading.Event()
         state = {"published": False}
 
-        def slow_convert() -> None:
+        def slow_publish() -> None:
             entered.set()
             assert finish.wait(10)
             state["published"] = True
 
-        async def convert(r: dict) -> bool:
-            await asyncio.to_thread(slow_convert)
+        async def publish(r: dict) -> bool:
+            await asyncio.to_thread(slow_publish)
             return True
 
-        convert_task = asyncio.create_task(docs.convert_under_live_lock(row["id"], project_id=project["id"], convert=convert, user_id="u1"))
+        publish_task = asyncio.create_task(docs.publish_under_live_lock(row["id"], project_id=project["id"], publish=publish, user_id="u1"))
         await asyncio.to_thread(entered.wait, 10)
-        convert_task.cancel()
-        # The document lock stays held while the conversion worker drains: a
+        publish_task.cancel()
+        # The document lock stays held while the publish worker drains: a
         # trash blocks on it, so the publish never lands after the lock is
         # gone (the round-2 serialization survives cancellation).
         trash_task = asyncio.create_task(docs.trash(row["id"], user_id="u1"))
         await asyncio.sleep(0.3)
-        assert not convert_task.done()
+        assert not publish_task.done()
         assert not trash_task.done()
         finish.set()
         with pytest.raises(asyncio.CancelledError):
-            await convert_task
+            await publish_task
         assert state["published"]
         assert await trash_task is True

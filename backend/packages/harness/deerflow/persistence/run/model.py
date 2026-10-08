@@ -29,6 +29,8 @@ class RunRow(Base):
     kwargs_json: Mapped[dict] = mapped_column(JSON, default=dict)
     error: Mapped[str | None] = mapped_column(Text)
     stop_reason: Mapped[str | None] = mapped_column(String(50))
+    # Final evaluator outcome, written atomically with terminal run status.
+    goal_verdict: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # Convenience fields (for listing pages without querying RunEventStore)
     message_count: Mapped[int] = mapped_column(default=0)
@@ -67,6 +69,10 @@ class RunRow(Base):
     evidence_upper_seq: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     evidence_event_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     evidence_retention_revision: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))
+    # Server-owned origin kind of the run (``deerflow_origin``: schedule,
+    # im_channel, github, extension, mcp_notification). NULL means an
+    # interactive or legacy run; legacy rows are never backfilled.
+    origin_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     __table_args__ = (
         Index("ix_runs_thread_status", "thread_id", "status"),
@@ -74,6 +80,8 @@ class RunRow(Base):
         Index("uq_runs_idempotency_key", "idempotency_key", unique=True),
         Index("ix_runs_change_seq", "change_seq", "run_id"),
         Index("ix_runs_user_change_seq", "user_id", "change_seq", "run_id"),
+        # Per-thread change clock: unread checks seek a thread's newest change.
+        Index("ix_runs_thread_change_seq", "thread_id", "change_seq"),
         # Cross-process atomicity guarantee: at most one pending/running run per
         # thread. Must live in ORM ``__table_args__`` (not just the migration)
         # because the empty-DB bootstrap path runs ``create_all`` + ``stamp head``

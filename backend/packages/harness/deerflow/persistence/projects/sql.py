@@ -477,33 +477,37 @@ class ProjectDocumentRepository:
             await session.commit()
             return row, staged
 
-    async def convert_under_live_lock[T](
+    async def publish_under_live_lock[T](
         self,
         document_id: str,
         *,
         project_id: str,
-        convert: Callable[[dict[str, Any]], Awaitable[T]],
+        publish: Callable[[dict[str, Any]], Awaitable[T]],
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> tuple[dict[str, Any], T] | None:
-        """Run *convert* while holding the owned LIVE document row's lock (§6.3).
+        """Run *publish* while holding the owned LIVE document row's lock (§6.3).
 
         Lazy conversion publishes ``derived/converted.md`` serialized against
         trash and purge: this takes the document row lock inside one
         transaction (``BEGIN IMMEDIATE`` on SQLite, ``SELECT … FOR UPDATE``
         elsewhere), revalidates ownership, shelf membership and active state
-        (``trashed_at IS NULL``) AFTER locking, then invokes *convert* — the
-        offloaded convert-to-temp + atomic ``os.replace`` publish — and
-        commits. A concurrent trash/purge either commits first (the locked
-        re-read finds the row gone/trashed and this returns ``None`` without
-        invoking *convert*, so nothing is published) or blocks until the
-        publish commits — a derived file is never published after purge
-        removed the original (§6.3 lock order, §13). Only the document lock
-        is taken, so no lock-ordering hazard exists against trash's
-        project→document order. ``None`` means missing/foreign/trashed; the
-        caller maps it to its not-on-the-shelf / ``content_missing``
-        semantics.
+        (``trashed_at IS NULL``) AFTER locking, then invokes *publish* — the
+        atomic ``os.replace`` of an already-converted file — and commits. A
+        concurrent trash/purge either commits first (the locked re-read finds
+        the row gone/trashed and this returns ``None`` without invoking
+        *publish*) or blocks until the publish commits — a derived file is
+        never published after purge removed the original (§6.3 lock order,
+        §13). Only the document lock is taken, so no lock-ordering hazard
+        exists against trash's project→document order. ``None`` means
+        missing/foreign/trashed; the caller maps it to its not-on-the-shelf /
+        ``content_missing`` semantics.
+
+        *publish* must stay short: on SQLite ``BEGIN IMMEDIATE`` takes the
+        database-wide write lock, so every unrelated writer (run status,
+        thread metadata, the scheduler) waits for it. Convert BEFORE calling
+        this, never inside *publish*.
         """
-        resolved_user_id = resolve_user_id(user_id, method_name="ProjectDocumentRepository.convert_under_live_lock")
+        resolved_user_id = resolve_user_id(user_id, method_name="ProjectDocumentRepository.publish_under_live_lock")
         async with self._sf() as session:
             await self._begin_immediate_if_sqlite(session)
             locked = (await session.execute(select(ProjectDocumentRow).where(ProjectDocumentRow.id == document_id).with_for_update())).scalar_one_or_none()
@@ -511,9 +515,9 @@ class ProjectDocumentRepository:
                 await session.rollback()
                 return None
             row = self._row_to_dict(locked)
-            # Drained: a cancelled conversion finishes its worker (and any
-            # publish) before the document lock unwinds (§6.3).
-            result = await await_drained(convert(row))
+            # Drained: a cancelled publish finishes its worker before the
+            # document lock unwinds (§6.3).
+            result = await await_drained(publish(row))
             await session.commit()
             return row, result
 

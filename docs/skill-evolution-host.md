@@ -6,7 +6,7 @@ and product UI belong to the extension and are not included in this feature.
 
 ## Enable deliberately
 
-Use `deerflow-extension-api==0.2.5`. Existing extensions need no changes: both
+Use `deerflow-extension-api==0.2.6`. Existing extensions need no changes: both
 `ExtensionRuntimeDeps.completed_run_evidence` and `.skill_mutations` default to
 `None`. The older cross-user `run_evidence_reader` is unchanged.
 
@@ -188,8 +188,17 @@ results alone do not establish PostgreSQL lock behavior.
 
 Back up the application database and user skill directories together. Stop all
 writers, upgrade all Gateway/embedded writer processes and migrate through
-`0028_skill_mutations`, then restart before enabling mutation grants. Do not mix
+`0035_skill_mutations`, then restart before enabling mutation grants. Do not mix
 old and new writers on enrolled assets.
+
+Standalone SDK processes without a Gateway mutation runtime check persisted
+owner/asset enrollment on every managed storage access. Enrolled owners are
+rejected with `MUTATION_RUNTIME_REQUIRED`; use the Gateway for their skill reads
+and writes. Global enable-state writes are also rejected while any owner is
+enrolled, because they affect same-named custom skills. Removing the plugin
+does not remove this barrier. Unavailable enrollment checks fail closed with
+`UNAVAILABLE`; missing/legacy databases and unenrolled owners retain ordinary
+SDK access. Processes sharing a skill home must use the same application DB.
 
 To stop automation, disable the plugin or remove mutation grants and restart;
 keep the upgraded host running so it can reconcile outstanding operations.

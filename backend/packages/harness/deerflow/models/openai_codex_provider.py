@@ -29,6 +29,11 @@ logger = logging.getLogger(__name__)
 CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 
 
+def _is_valid_call_id(call_id: Any) -> bool:
+    """Check call/result correlation IDs without rewriting non-blank values."""
+    return isinstance(call_id, str) and bool(call_id.strip())
+
+
 def _build_usage_metadata(oai_usage: dict) -> dict:
     """Convert Codex/Responses API usage dict to LangChain usage_metadata format.
 
@@ -170,7 +175,7 @@ class CodexChatModel(BaseChatModel):
                     call_id = tc.get("id")
                     if not (isinstance(name, str) and name):
                         continue
-                    if not (isinstance(call_id, str) and call_id):
+                    if not _is_valid_call_id(call_id):
                         continue
                     args = tc.get("args")
                     input_items.append(
@@ -182,11 +187,16 @@ class CodexChatModel(BaseChatModel):
                         }
                     )
             elif isinstance(msg, ToolMessage):
+                content = self._normalize_content(msg.content)
+                # A blank ID cannot identify the call this result answers.
+                if not _is_valid_call_id(msg.tool_call_id):
+                    logger.warning("Dropping tool result with blank call_id (content %d chars)", len(content))
+                    continue
                 input_items.append(
                     {
                         "type": "function_call_output",
                         "call_id": msg.tool_call_id,
-                        "output": self._normalize_content(msg.content),
+                        "output": content,
                     }
                 )
 
@@ -200,23 +210,20 @@ class CodexChatModel(BaseChatModel):
         for tool in tools:
             if tool.get("type") == "function" and "function" in tool:
                 fn = tool["function"]
-                responses_tools.append(
-                    {
-                        "type": "function",
-                        "name": fn["name"],
-                        "description": fn.get("description", ""),
-                        "parameters": fn.get("parameters", {}),
-                    }
-                )
             elif "name" in tool:
-                responses_tools.append(
-                    {
-                        "type": "function",
-                        "name": tool["name"],
-                        "description": tool.get("description", ""),
-                        "parameters": tool.get("parameters", {}),
-                    }
-                )
+                fn = tool
+            else:
+                continue
+            converted = {
+                "type": "function",
+                "name": fn["name"],
+                "description": fn.get("description", ""),
+                "parameters": fn.get("parameters", {}),
+            }
+            # Omitting strict is not equivalent to the caller's explicit False.
+            if fn.get("strict") is not None:
+                converted["strict"] = fn["strict"]
+            responses_tools.append(converted)
         return responses_tools
 
     def _call_codex_api(self, messages: list[BaseMessage], tools: list[dict] | None = None) -> dict:
@@ -283,6 +290,27 @@ class CodexChatModel(BaseChatModel):
                             streamed_output_items[output_index] = output_item
                     elif event_type == "response.completed":
                         completed_response = data["response"]
+                        # A terminal event completes the request even if the server
+                        # keeps the connection open. Do not let a later read timeout
+                        # replace the completed output with a transport error.
+                        break
+                    elif event_type in ("response.failed", "response.incomplete", "error"):
+                        response = data.get("response") or {}
+                        if event_type == "error":
+                            details = data.get("error") or data
+                        elif not isinstance(response, dict):
+                            details = response
+                        elif event_type == "response.failed":
+                            details = response.get("error") or {}
+                        else:
+                            details = response.get("incomplete_details") or {}
+
+                        if not isinstance(details, dict):
+                            details = {"message": str(details)}
+                        code = details.get("code")
+                        reason = details.get("message") or details.get("reason") or "No details provided"
+                        code_suffix = f" ({code})" if code else ""
+                        raise RuntimeError(f"Codex API {event_type}{code_suffix}: {reason}")
 
         if not completed_response:
             raise RuntimeError("Codex API stream ended without response.completed event")
@@ -390,7 +418,7 @@ class CodexChatModel(BaseChatModel):
                     }
                 )
 
-        usage = response.get("usage", {})
+        usage = response.get("usage") or {}
         usage_metadata = _build_usage_metadata(usage) if usage else None
         additional_kwargs = {}
         if reasoning_content:
@@ -443,14 +471,7 @@ class CodexChatModel(BaseChatModel):
             if isinstance(tool, BaseTool):
                 try:
                     fn = convert_to_openai_function(tool)
-                    formatted_tools.append(
-                        {
-                            "type": "function",
-                            "name": fn["name"],
-                            "description": fn.get("description", ""),
-                            "parameters": fn.get("parameters", {}),
-                        }
-                    )
+                    formatted_tools.extend(self._convert_tools([fn]))
                 except Exception:
                     formatted_tools.append(
                         {
@@ -462,15 +483,7 @@ class CodexChatModel(BaseChatModel):
                     )
             elif isinstance(tool, dict):
                 if "function" in tool:
-                    fn = tool["function"]
-                    formatted_tools.append(
-                        {
-                            "type": "function",
-                            "name": fn["name"],
-                            "description": fn.get("description", ""),
-                            "parameters": fn.get("parameters", {}),
-                        }
-                    )
+                    formatted_tools.extend(self._convert_tools([{"type": "function", "function": tool["function"]}]))
                 else:
                     formatted_tools.append(tool)
 

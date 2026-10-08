@@ -3,7 +3,7 @@ import { XIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 /**
- * Shared visual for a `/skill` activation, used both as a removable chip in the
+ * Shared visual for a `@skill` activation, used both as a removable chip in the
  * composer and as a read-only chip in the chat transcript. Keeping a single
  * source of truth means the two stay in lockstep instead of drifting apart in
  * their Tailwind classes.
@@ -16,26 +16,29 @@ export function SlashSkillChip({
   className,
   onRemove,
   removeLabel,
+  disabled = false,
 }: {
   name: string;
   className?: string;
   /** When provided, the chip renders as a removable button with a close icon. */
   onRemove?: () => void;
   removeLabel?: string;
+  disabled?: boolean;
 }) {
   if (onRemove) {
     return (
       <button
-        aria-label={removeLabel ?? `Remove /${name}`}
+        aria-label={removeLabel ?? `Remove @${name}`}
         className={cn(
           CHIP_BASE_CLASS,
           "hover:bg-primary/20 cursor-pointer gap-1 transition-colors",
           className,
         )}
+        disabled={disabled}
         onClick={onRemove}
         type="button"
       >
-        <span className="min-w-0 truncate">/{name}</span>
+        <span className="min-w-0 truncate">@{name}</span>
         <XIcon className="text-primary/70 size-2.5 shrink-0" />
       </button>
     );
@@ -43,7 +46,7 @@ export function SlashSkillChip({
 
   return (
     <span className={cn(CHIP_BASE_CLASS, "max-w-full", className)}>
-      /{name}
+      @{name}
     </span>
   );
 }

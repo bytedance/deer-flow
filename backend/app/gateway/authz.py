@@ -206,6 +206,31 @@ _route_provider_config_id: int | None = None
 _route_provider_config_sig: str | None = None
 
 
+def assignable_role_names() -> set[str]:
+    """Role names an operator may assign via the admin role-assignment API.
+
+    Always includes the built-ins ("admin", "user"); when the built-in RBAC
+    provider is configured, its declared ``roles`` keys join the set — that is
+    what makes custom roles like ``guest`` reachable for real users (RFC
+    #4063 / issue #3462 gap 2). Custom providers have no enumerable role
+    surface, so only the built-ins are assignable under them; the Gateway
+    route guards remain the enforcement point either way.
+    """
+    from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
+
+    names = {"admin", "user"}
+    try:
+        config = _get_route_authorization_config()
+        if config.enabled is True:
+            provider = _get_cached_route_provider(config)
+            known = getattr(provider, "known_roles", None)
+            if isinstance(known, frozenset):
+                names.update(r for r in known if isinstance(r, str) and r and r != INTERNAL_SYSTEM_ROLE)
+    except Exception:
+        logger.warning("Failed to resolve configured role names for assignment", exc_info=True)
+    return names
+
+
 def _get_cached_route_provider(config: AuthorizationConfig) -> AuthorizationProvider | None:
     """Resolve (or reuse) the authorization provider for route permissions.
 

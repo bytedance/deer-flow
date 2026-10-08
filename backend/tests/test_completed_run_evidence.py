@@ -628,8 +628,8 @@ def test_migration_is_additive_current_chain():
     from deerflow.persistence.bootstrap import _MIGRATIONS_DIR
 
     script = ScriptDirectory(str(_MIGRATIONS_DIR))
-    rev = script.get_revision("0027_completed_run_evidence")
-    assert rev.down_revision == "0026_mcp_task_lease_tokens"
+    rev = script.get_revision("0034_completed_run_evidence")
+    assert rev.down_revision == "0033_batch_result_artifact"
 
 
 @pytest.mark.asyncio
@@ -727,8 +727,8 @@ def test_migration_upgrades_real_sqlite_and_preserves_legacy_partial(tmp_path):
             conn.execute(text(f"ALTER TABLE runs DROP COLUMN {name}"))
     config = _get_alembic_config(engine)
     config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{tmp_path / 'migration.db'}")
-    command.stamp(config, "0026_mcp_task_lease_tokens")
-    command.upgrade(config, "0027_completed_run_evidence")
+    command.stamp(config, "0033_batch_result_artifact")
+    command.upgrade(config, "0034_completed_run_evidence")
     with engine.connect() as conn:
         row = conn.execute(text("SELECT evidence_seal_state, evidence_revision, evidence_retention_revision FROM runs WHERE run_id='old'")).one()
         assert tuple(row) == (None, None, 0)

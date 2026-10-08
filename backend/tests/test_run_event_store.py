@@ -393,6 +393,41 @@ class TestListMessagesByRun:
         assert messages[0]["run_id"] == "r1"
         assert messages[0]["category"] == "message"
 
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("backend", ["memory", "jsonl", "db"])
+    async def test_explicit_user_id_follows_list_messages_semantics(self, tmp_path, backend):
+        """Run-scoped Gateway reads pass an explicit data identity on every backend.
+
+        Only the SQL store isolates by user; the others accept and ignore it,
+        as they do for ``list_messages`` and ``list_events``.
+        """
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store.db import DbRunEventStore
+        from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
+        from deerflow.runtime.user_context import reset_current_user, set_current_user
+
+        if backend == "db":
+            await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'test.db'}", sqlite_dir=str(tmp_path))
+            s = DbRunEventStore(get_session_factory())
+        elif backend == "jsonl":
+            s = JsonlRunEventStore(base_dir=tmp_path / "jsonl")
+        else:
+            s = MemoryRunEventStore()
+        try:
+            token = set_current_user(type("Owner", (), {"id": "feishu:owner"})())
+            try:
+                await s.put(thread_id="t1", run_id="r1", event_type="ai_message", category="message")
+            finally:
+                reset_current_user(token)
+
+            assert len(await s.list_messages_by_run("t1", "r1", user_id="feishu:owner")) == 1
+            assert len(await s.list_messages_by_run("t1", "r1", user_id=None)) == 1
+            other = await s.list_messages_by_run("t1", "r1", user_id="someone-else")
+            assert len(other) == (0 if backend == "db" else 1)
+        finally:
+            if backend == "db":
+                await close_engine()
+
 
 # -- count_messages --
 

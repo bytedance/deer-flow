@@ -3,6 +3,7 @@
 import asyncio
 import ipaddress
 import json
+import os
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -48,6 +49,41 @@ def create(client, user, *, name="github", token=None, role="admin"):
     )
 
 
+@pytest.mark.asyncio
+async def test_personal_config_write_drains_started_mutation_across_cancellation(monkeypatch):
+    started = asyncio.Event()
+
+    monkeypatch.setattr(personal_mcp, "_owner", AsyncMock(return_value="alice"))
+    monkeypatch.setattr(personal_mcp, "is_admin_user", AsyncMock(return_value=True))
+
+    def mutate(*_args, **_kwargs):
+        started_loop.call_soon_threadsafe(started.set)
+        release_thread.wait(timeout=5)
+        return {"mcpServers": {}}
+
+    import threading
+
+    started_loop = asyncio.get_running_loop()
+    release_thread = threading.Event()
+    monkeypatch.setattr(personal_mcp, "_mutate", mutate)
+
+    task = asyncio.create_task(personal_mcp._write(SimpleNamespace(), "delete", "missing"))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+
+        release_thread.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release_thread.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
 def test_persistent_same_name_connections_are_owner_only(personal_client):
     client = personal_client
     assert client.get("/api/mcp/personal/config").status_code == 401
@@ -57,7 +93,8 @@ def test_persistent_same_name_connections_are_owner_only(personal_client):
         assert result.json()["mcp_servers"]["github"]["headers"]["Authorization"] == "***"
     assert read_user_mcp_config("alice")["mcpServers"]["github"]["headers"]["Authorization"] == "Bearer alice"
     assert read_user_mcp_config("bob")["mcpServers"]["github"]["headers"]["Authorization"] == "Bearer bob"
-    assert user_mcp_config_path("alice").stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":  # chmod cannot express owner-only modes on Windows
+        assert user_mcp_config_path("alice").stat().st_mode & 0o777 == 0o600
     assert create(client, "alice").status_code == 409
     assert create(client, "alice", name="only-alice").status_code == 200
     assert client.delete("/api/mcp/personal/config/servers/only-alice", headers={"test-user": "bob"}).status_code == 404

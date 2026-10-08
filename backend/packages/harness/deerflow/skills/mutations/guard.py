@@ -8,6 +8,7 @@ from contextlib import ExitStack, contextmanager, nullcontext
 from deerflow_extension_api.host_capabilities import HostCapabilityError
 
 from deerflow.skills.mutations.assets import capture_package
+from deerflow.skills.mutations.enrollment import require_unenrolled
 from deerflow.skills.mutations.repository import revision
 
 _runtime: SkillMutationRuntime | None = None
@@ -21,6 +22,8 @@ def configure_mutation_runtime(runtime: SkillMutationRuntime | None) -> None:
 
 def runtime_for(storage) -> SkillMutationRuntime | None:
     runtime = _runtime
+    if runtime is None:
+        require_unenrolled(storage)
     return runtime if runtime is not None and getattr(storage, "user_id", None) in runtime.owners else None
 
 
@@ -63,6 +66,8 @@ def managed_name_writes(storage, names, *, global_scope=False, timeout=None):
     """Serialize one Skill name across public state and enrolled owner writes."""
     runtime = _runtime
     owner_id = getattr(storage, "user_id", None)
+    if runtime is None:
+        require_unenrolled(storage, global_scope=global_scope)
     if runtime is None or not names or (not global_scope and owner_id not in runtime.owners):
         yield
         return
@@ -86,6 +91,7 @@ def managed_global_state_write(storage, name):
     """
     runtime = _runtime
     if runtime is None:
+        require_unenrolled(storage, global_scope=True)
         yield
         return
     from deerflow.skills.projection import _projection_lock, get_skill_projection_paths, skill_projection_read_lock

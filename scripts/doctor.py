@@ -67,7 +67,7 @@ def _icon(status: Status) -> str:
 
 def _run(cmd: list[str]) -> str | None:
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
         return (r.stdout or r.stderr).strip()
     except Exception:
         return None
@@ -108,7 +108,7 @@ def _load_json_object(path: Path) -> dict | None:
     if not path.is_file():
         return None
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
     except (json.JSONDecodeError, OSError, UnicodeDecodeError):
         return None
     return value if isinstance(value, dict) else None
@@ -217,6 +217,8 @@ def check_pnpm() -> CheckResult:
             cwd=FRONTEND_DIR,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
             shell=False,
         )

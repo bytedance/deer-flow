@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import threading
+import uuid
 from pathlib import Path
 
 from langchain_core.tools import BaseTool
@@ -43,6 +44,29 @@ _mcp_config_snapshot: str | None = None
 # picked up) from "config deleted after a successful load" (fail-soft: keep
 # serving the last-known-good tools).
 _initialized_without_config = False
+
+# Signature of the shared-config reset marker observed by the published
+# cache.  ``POST /api/mcp/cache/reset`` advances this marker even when
+# ``extensions_config.json`` itself is unchanged (the important case is a
+# remote MCP server changing its ``tools/list`` response).  Every worker reads
+# the marker from the same writable config directory before returning cached
+# tools, so a reset initiated in one process retires sessions in the others on
+# their next lookup.
+_cache_reset_marker_signature: _ConfigSignature | None = None
+
+
+def _cache_reset_marker_path(config_path: Path) -> Path:
+    """Return the shared reset marker colocated with the extensions config."""
+    path = Path(config_path)
+    target = path.resolve(strict=False) if path.is_symlink() else path
+    return target.parent / f".{target.name}.mcp-cache-reset.json"
+
+
+def _current_cache_reset_marker_signature(config_path: Path | None) -> _ConfigSignature | None:
+    """Return the current shared-reset marker signature, if one exists."""
+    if config_path is None:
+        return None
+    return _get_config_signature(_cache_reset_marker_path(config_path))
 
 
 def _resolve_config_path() -> Path | None:
@@ -187,6 +211,17 @@ def _is_cache_stale() -> bool:
 
     current_path, current_signature = _current_config_state()
 
+    # A reset marker is independent of configuration bytes.  It exists so an
+    # administrator can refresh a remote server's changed ``tools/list`` in
+    # every Gateway worker without fabricating a config edit.  Missing current
+    # config keeps the existing last-known-good behavior below: there is no
+    # reliable shared directory to consult in that state.
+    if current_path is not None:
+        current_reset_signature = _current_cache_reset_marker_signature(current_path)
+        if current_reset_signature != _cache_reset_marker_signature:
+            logger.info("Shared MCP cache reset generation changed; cache is stale")
+            return True
+
     # Preserve the original "config missing / not yet recorded" behavior: if
     # there was no readable config when the cache was populated, or there is
     # none now, do not invalidate. This also covers the config being deleted
@@ -247,6 +282,7 @@ async def initialize_mcp_tools() -> list[BaseTool]:
     """
     global _mcp_tools_cache, _cache_initialized, _config_path, _config_signature
     global _initializing_generation, _cache_generation, _mcp_config_snapshot, _initialized_without_config
+    global _cache_reset_marker_signature
 
     while True:
         with _init_condition:
@@ -264,6 +300,7 @@ async def initialize_mcp_tools() -> list[BaseTool]:
         await asyncio.to_thread(_wait_for_initialization, waiting_generation)
 
     from deerflow.config.extensions_config import ExtensionsConfig
+    from deerflow.mcp.session_pool import StaleMCPBindingError, get_session_pool
     from deerflow.mcp.tools import get_mcp_tools
 
     loaded_tools = None
@@ -271,6 +308,8 @@ async def initialize_mcp_tools() -> list[BaseTool]:
     post_path = None
     post_sig = None
     post_snapshot = None
+    loaded_reset_signature = None
+    post_reset_signature = None
     init_succeeded = False
     try:
         logger.info("Initializing MCP tools...")
@@ -290,8 +329,38 @@ async def initialize_mcp_tools() -> list[BaseTool]:
             )
             raise RuntimeError("Extensions config could not be loaded for MCP tool discovery") from None
         loaded_snapshot = _effective_mcp_config_snapshot(loaded_config)
-        loaded_tools = await get_mcp_tools(extensions_config=loaded_config)
+        loaded_reset_signature = _current_cache_reset_marker_signature(_resolve_config_path())
+        # Claim the exact pool this generation owns under the same lock the
+        # reset path takes, so verify-generation + capture-pool is one atomic
+        # ownership handoff. A superseded initializer must never resolve the
+        # singleton after the reset: that would install its stale fingerprint
+        # into the replacement pool the successor initializer runs on.
+        with _init_condition:
+            if _cache_generation != claim_generation:
+                logger.info("MCP cache was reset before tool discovery; discarding superseded initialization")
+                return []
+
+            claimed_pool = get_session_pool()
+
+        try:
+            loaded_tools = await get_mcp_tools(
+                extensions_config=loaded_config,
+                session_pool=claimed_pool,
+            )
+        except StaleMCPBindingError:
+            # The pool this claim owns was retired while discovery was running.
+            # That is the same cache race as a generation change, so keep the
+            # existing "discard stale initialization" semantics; a stale binding
+            # on a pool this claim still owns stays a real error.
+            with _init_condition:
+                superseded = _cache_generation != claim_generation
+
+            if superseded:
+                logger.info("MCP cache was reset during binding installation; discarding superseded initialization")
+                return []
+            raise
         post_path, post_sig = _current_config_state()
+        post_reset_signature = _current_cache_reset_marker_signature(post_path)
         if post_path is not None and post_sig is not None:
             post_snapshot = _read_stable_mcp_snapshot(post_path, post_sig)
         elif post_path is not None:
@@ -328,9 +397,9 @@ async def initialize_mcp_tools() -> list[BaseTool]:
                 logger.info("MCP cache was reset during initialization; discarding stale result")
                 return []
 
-            publish = loaded_snapshot is not None and post_snapshot is not None and loaded_snapshot == post_snapshot
+            publish = loaded_snapshot is not None and post_snapshot is not None and loaded_snapshot == post_snapshot and loaded_reset_signature == post_reset_signature
             if not publish:
-                logger.warning("MCP config changed during initialization; discarding stale result")
+                logger.warning("MCP config or shared reset generation changed during initialization; discarding stale result")
                 retired_pool = _reset_mcp_tools_cache_state_and_retire_pool_locked()
             else:
                 _mcp_tools_cache = loaded_tools
@@ -338,6 +407,7 @@ async def initialize_mcp_tools() -> list[BaseTool]:
                 _config_path, _config_signature = post_path, post_sig
                 _mcp_config_snapshot = post_snapshot
                 _initialized_without_config = post_path is None
+                _cache_reset_marker_signature = post_reset_signature
                 logger.info("MCP tools initialized: %d tool(s) loaded (config path: %s)", len(_mcp_tools_cache), _config_path)
                 return _mcp_tools_cache
         finally:
@@ -447,6 +517,7 @@ def _reset_mcp_tools_cache_state() -> None:
     """Reset cache state under ``_init_condition`` / ``_init_lock``."""
     global _mcp_tools_cache, _cache_initialized, _config_path, _config_signature
     global _cache_generation, _mcp_config_snapshot, _initialized_without_config
+    global _cache_reset_marker_signature
 
     _mcp_tools_cache = None
     _cache_initialized = False
@@ -454,6 +525,7 @@ def _reset_mcp_tools_cache_state() -> None:
     _config_signature = None
     _mcp_config_snapshot = None
     _initialized_without_config = False
+    _cache_reset_marker_signature = None
     _cache_generation += 1
     _init_condition.notify_all()
 
@@ -509,3 +581,44 @@ def reset_mcp_tools_cache() -> None:
         logger.debug("Could not close MCP session pool on cache reset", exc_info=True)
 
     logger.info("MCP tools cache reset")
+
+
+def publish_mcp_tools_cache_reset() -> str | None:
+    """Publish a shared-config reset generation, then retire local MCP state.
+
+    The marker is written next to ``extensions_config.json`` because that file
+    is already the runtime-editable directory shared by workers that consume
+    the same config. A random generation avoids read-modify-write counters and
+    cannot lose two concurrent reset requests: the final atomic write still
+    differs from every worker's previously observed signature.
+
+    Returns:
+        The published generation, or ``None`` when no shared config path can be
+        resolved and the operation therefore falls back to a process-local
+        reset.
+    """
+    config_path = _resolve_config_path()
+    if config_path is None:
+        reset_mcp_tools_cache()
+        return None
+
+    from deerflow.config.extensions_config import (
+        atomic_write_extensions_config,
+        extensions_config_file_lock,
+        extensions_config_write_lock,
+    )
+
+    generation = uuid.uuid4().hex
+    marker_path = _cache_reset_marker_path(config_path)
+    with extensions_config_write_lock, extensions_config_file_lock(config_path):
+        atomic_write_extensions_config(
+            marker_path,
+            {"version": 1, "generation": generation},
+        )
+
+    # Publish-before-retire is intentional.  A successful API response must
+    # never mean only the handling worker was refreshed; if publication fails,
+    # the exception propagates and the local cache remains intact for a safe,
+    # idempotent retry.
+    reset_mcp_tools_cache()
+    return generation

@@ -32,6 +32,9 @@ async def accounts(tmp_path, monkeypatch):
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     repository = SQLiteUserRepository(sessions)
     user = await repository.create_user(User(email="admin@example.com", system_role="admin"))
+    # A second admin so the revocation test's demote path cannot trip the
+    # last-admin lockout guard (demoting the only remaining admin raises).
+    await repository.create_user(User(email="second-admin@example.com", system_role="admin"))
     monkeypatch.setattr(gateway_access, "get_local_provider", lambda: LocalAuthProvider(repository))
     monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
     monkeypatch.setattr("deerflow.mcp.user_config.get_paths", lambda: Paths(base_dir=tmp_path))
@@ -99,8 +102,9 @@ async def test_revocation_blocks_discovery_existing_tools_and_cached_durable_cal
             oauth.reset_mock()
 
             if revocation == "demote":
-                user.system_role = "user"
-                await repository.update_user(user)
+                # update_user is field-scoped (roles never written there);
+                # update_system_role is the sole role writer.
+                await repository.update_system_role(str(user.id), "user")
             elif revocation == "delete":
                 async with sessions() as session:
                     await session.execute(delete(UserRow).where(UserRow.id == owner))

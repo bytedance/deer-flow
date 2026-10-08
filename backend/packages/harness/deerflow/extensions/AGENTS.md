@@ -43,6 +43,10 @@ case rather than reviving a record whose package declaration may already be gone
 cancellation skips the recovery sync entirely — the declarations are already restored and
 the next locked startup sync reconciles the environment, whereas blocking an interrupt on a
 full dependency resolve invites a second interrupt that escapes the handler mid-transaction.
+File snapshots capture the original permission bits alongside the bytes; rollback applies
+that mode to a temporary file before atomically replacing the destination, including when
+restoring `config.yaml` after a failed removal. A failed write, chmod, or replace leaves the
+current destination untouched and removes the temporary file.
 Package mutation is deferred from environment mutation: after `uv add/remove`
 updates the declaration and lock, one `uv sync --locked --all-packages` preserves the same
 config-/environment-detected optional extras as normal startup. All three uv calls pin the
@@ -428,4 +432,13 @@ Evolution host grants (`host_access.evidence` / `skill_mutations`) compose with
 unique stable name and entry point; model-only grants retain their per-install
 identity and permit repeated entry points. Keep all granted dependencies when
 wrapping services with `ModelInvocationService`. The additive evolution contracts
-ship in extension API 0.2.5, after 0.2.4's model invocation contract.
+ship in extension API 0.2.6, after 0.2.5's AgentRuns contract.
+Full Agent run control is an optional `deerflow_extension_api.AgentRuns` handle
+on action/tool contexts and the request resolver. Gateway owns principal binding,
+revocation and ordinary route admission in `app/gateway/extension_agent_runs.py`.
+Never replace this with `ModelInvoker`, raw global RunManager access, or a
+caller-supplied user ID. Service-held handles are process-local, permission-capped
+and revoked before host shutdown; PAT/internal grants remain unsupported.
+Unstamped internal launches receive no handle and must still start normally.
+Action/tool dispatch scopes handles to each registered plugin namespace for
+idempotency isolation; request-resolved handles use `for_plugin` explicitly.

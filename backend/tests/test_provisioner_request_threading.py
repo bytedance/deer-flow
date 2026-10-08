@@ -558,6 +558,10 @@ async def test_auth_middleware(monkeypatch: pytest.MonkeyPatch, provisioner_modu
         r = await client.get("/api/sandboxes", headers={"X-API-Key": "wrong-key"})
         assert r.status_code == 401
 
+        # /api/* with a non-ASCII key → 401, not a TypeError from compare_digest
+        r = await client.get("/api/sandboxes", headers={"X-API-Key": "test-secr\xe9t".encode("latin-1")})
+        assert r.status_code == 401
+
         # /api/* with correct key → not 401 (auth passed; handler runs with the K8s mock)
         r = await client.get("/api/sandboxes", headers={"X-API-Key": "test-secret"})
         assert r.status_code != 401

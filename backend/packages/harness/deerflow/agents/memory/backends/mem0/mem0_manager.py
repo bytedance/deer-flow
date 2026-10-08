@@ -72,6 +72,9 @@ class Mem0Manager(MemoryManager):
     # search() is overridden below -> flag must be True (contract invariant);
     # this also enables memory mode="tool".
     supports_search: ClassVar[bool] = True
+    # Mem0 binds management reads/clears to ``agent_id`` in the remote filter.
+    # Fact CRUD remains unsupported and continues to return the base 501.
+    supports_agent_scoped_management: ClassVar[bool] = True
     # mem0 extracts/deduplicates facts from full conversations through add();
     # its fact CRUD hooks are intentionally unsupported, so tool mode retains
     # passive writes while exposing query-aware search.

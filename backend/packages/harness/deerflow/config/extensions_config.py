@@ -14,8 +14,10 @@ from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
+from deerflow.config._boolean_guards import reject_boolean
+from deerflow.config.file_signature import ConfigSignature, get_config_signature, read_config_with_signature
 from deerflow.config.runtime_paths import existing_project_file
 from deerflow.constants import (
     DEFAULT_MCP_SESSION_INIT_TIMEOUT,
@@ -206,10 +208,8 @@ class McpOAuthConfig(BaseModel):
 
     @field_validator("refresh_skew_seconds", mode="before")
     @classmethod
-    def _reject_boolean_refresh_skew(cls, value: object) -> object:
-        if isinstance(value, bool):
-            raise ValueError("must be an integer, not a boolean")
-        return value
+    def _reject_boolean_refresh_skew(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")
 
     extra_token_params: dict[str, str] = Field(default_factory=dict, description="Additional form params sent to token endpoint")
     model_config = ConfigDict(extra="allow")
@@ -262,10 +262,8 @@ class McpServerConfig(BaseModel):
 
     @field_validator("tool_call_timeout", "session_init_timeout", mode="before")
     @classmethod
-    def _reject_boolean_mcp_timeouts(cls, value: object) -> object:
-        if isinstance(value, bool):
-            raise ValueError("must be a number, not a boolean")
-        return value
+    def _reject_boolean_mcp_timeouts(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="a number")
 
     task_toolsets: list[McpTaskToolsetConfig] = Field(
         default_factory=list,
@@ -537,11 +535,16 @@ class ExtensionsConfig(BaseModel):
             # Return empty config if extensions config file is not found
             return cls(mcp_servers={}, skills={})
 
+        return cls._from_path_with_signature(resolved_path)[0]
+
+    @classmethod
+    def _from_path_with_signature(cls, resolved_path: Path) -> tuple["ExtensionsConfig", ConfigSignature]:
+        """Parse the exact bytes whose signature the singleton will record."""
         try:
-            with open(resolved_path, encoding="utf-8-sig") as f:
-                config_data = json.load(f)
+            data, signature = read_config_with_signature(resolved_path)
+            config_data = json.loads(data.decode("utf-8-sig"))
             config_data = cls.resolve_env_variables(config_data)
-            return cls.model_validate(config_data)
+            return cls.model_validate(config_data), signature
         except json.JSONDecodeError as e:
             raise ValueError(f"Extensions config file at {resolved_path} is not valid JSON: {e}") from e
         except Exception as e:
@@ -611,7 +614,38 @@ class ExtensionsConfig(BaseModel):
         return skill_config.enabled
 
 
+# Process-wide cache of the parsed ``extensions_config.json``. The file is
+# edited at runtime (MCP and skill updates through the Gateway API or
+# ``DeerFlowClient``), and in a multi-worker or multi-instance deployment the
+# process that writes it is usually not the one that later reads it: every
+# Gateway process shares one ``extensions_config.json`` on the same volume.
+# Writers reload their own process explicitly; every other process has to
+# notice the change by itself. ``get_extensions_config()`` therefore
+# revalidates the cached instance against the resolved path and the file's
+# ``(mtime, size, sha256)`` signature, the same freshness contract
+# ``get_app_config()`` applies to ``config.yaml`` and ``deerflow.mcp.cache``
+# applies to its tools cache. The local-bash absolute path allowlist is
+# derived from this cache, so a stale copy is a security drift between
+# replicas, not merely a stale tool list.
 _extensions_config: ExtensionsConfig | None = None
+_extensions_config_path: Path | None = None
+_extensions_config_signature: ConfigSignature | None = None
+_extensions_config_is_custom = False
+# The explicit ``config_path`` the cached revision was loaded from, when
+# ``reload_extensions_config(config_path=...)`` chose a file that default
+# resolution would not. The probe and later reloads follow that file until
+# ``reset_extensions_config()`` or an argument-less reload; probing the
+# default resolution instead would either flip the cache back to the default
+# file or pin a stale copy of the explicit one.
+_extensions_config_source: str | None = None
+# ``(path, signature)`` of the on-disk revision that most recently could not
+# be loaded after a successful load (file gone, truncated or invalid). The
+# cache keeps serving the last-known-good configuration and warns once per
+# such revision rather than on every call.
+_extensions_config_rejected: tuple[Path | None, ConfigSignature | None] | None = None
+# Serializes probe-compare-reload so two concurrent reloads cannot leave the
+# cache holding one revision's content under another revision's signature.
+_extensions_config_lock = threading.Lock()
 
 
 def _fsync_directory_best_effort(directory: Path) -> None:
@@ -764,19 +798,126 @@ def set_raw_skill_enabled(raw_data: dict[str, Any], skill_name: str, enabled: bo
         skills[skill_name] = {"enabled": enabled}
 
 
+def _probe_extensions_config_state() -> tuple[Path | None, ConfigSignature | None]:
+    """Return the currently resolved config path and its content signature.
+
+    Only used once a configuration has been loaded. The explicit path the
+    cache was reloaded from, if any, takes precedence over default
+    resolution. An explicit path or ``DEER_FLOW_EXTENSIONS_CONFIG_PATH`` that
+    no longer exists makes
+    ``resolve_config_path`` raise; for a loaded cache that means "no usable
+    file right now" and is reported as ``(None, None)`` so the caller keeps
+    the last-known-good configuration instead of failing a hot path. The
+    first load does not use this probe and still raises for a missing
+    explicit file.
+    """
+    try:
+        path = ExtensionsConfig.resolve_config_path(_extensions_config_source)
+    except FileNotFoundError:
+        return None, None
+    if path is None:
+        return None, None
+    return path, get_config_signature(path)
+
+
+def _load_and_cache_extensions_config(config_path: str | None = None) -> ExtensionsConfig:
+    """Load the config from disk and record the revision it came from.
+
+    The caller holds ``_extensions_config_lock``. Parsing and the recorded
+    digest use one read, so a competing edit or backup restore cannot leave
+    one revision cached under another revision's signature.
+    """
+    global _extensions_config, _extensions_config_path, _extensions_config_signature
+    global _extensions_config_is_custom, _extensions_config_source, _extensions_config_rejected
+
+    resolved_path = ExtensionsConfig.resolve_config_path(config_path)
+    if resolved_path is None:
+        loaded, signature = ExtensionsConfig(), None
+    else:
+        loaded, signature = ExtensionsConfig._from_path_with_signature(resolved_path)
+    _extensions_config = loaded
+    _extensions_config_path = resolved_path
+    _extensions_config_signature = signature
+    _extensions_config_is_custom = False
+    _extensions_config_source = config_path or None
+    _extensions_config_rejected = None
+    return loaded
+
+
+def _describe_load_failure(exc: BaseException) -> str:
+    """Name the failure without its message.
+
+    ``from_file`` resolves ``$VAR`` placeholders before validation, so a
+    validation message can embed resolved credentials; only exception types
+    are safe to log.
+    """
+    cause = exc.__cause__
+    if cause is None:
+        return type(exc).__name__
+    return f"{type(exc).__name__} from {type(cause).__name__}"
+
+
+def _keep_last_known_good(current_path: Path | None, current_signature: ConfigSignature | None, message: str, *args: object) -> None:
+    """Warn once per unusable on-disk revision; the caller keeps the cache."""
+    global _extensions_config_rejected
+
+    rejected = (current_path, current_signature)
+    if _extensions_config_rejected == rejected:
+        return
+    _extensions_config_rejected = rejected
+    logger.warning(message + "; keeping the previously loaded configuration", *args)
+
+
 def get_extensions_config() -> ExtensionsConfig:
     """Get the extensions config instance.
 
-    Returns a cached singleton instance. Use `reload_extensions_config()` to reload
-    from file, or `reset_extensions_config()` to clear the cache.
+    Returns a cached singleton instance and reloads it when the resolved
+    config file path or the file's content signature changes, so a write made
+    by another Gateway worker or instance that shares the file is visible on
+    the next call without an explicit reload. An instance injected with
+    `set_extensions_config()` is pinned until `reload_extensions_config()` or
+    `reset_extensions_config()`.
+
+    Once a configuration has been loaded, a revision that cannot be loaded
+    (the file vanished, or it is truncated or invalid, for example midway
+    through the non-atomic overwrite fallback of
+    :func:`atomic_write_extensions_config`) keeps the last-known-good
+    configuration and is logged once. The first load still raises, so a
+    broken configuration at startup stays loud.
 
     Returns:
         The cached ExtensionsConfig instance.
     """
-    global _extensions_config
-    if _extensions_config is None:
-        _extensions_config = ExtensionsConfig.from_file()
-    return _extensions_config
+    global _extensions_config, _extensions_config_path, _extensions_config_signature, _extensions_config_rejected
+
+    with _extensions_config_lock:
+        if _extensions_config is None:
+            return _load_and_cache_extensions_config()
+        if _extensions_config_is_custom:
+            return _extensions_config
+
+        current_path, current_signature = _probe_extensions_config_state()
+        if current_path == _extensions_config_path and current_signature == _extensions_config_signature:
+            return _extensions_config
+
+        if current_path is None:
+            _keep_last_known_good(current_path, current_signature, "Extensions config at %s is no longer available", _extensions_config_path)
+            return _extensions_config
+
+        try:
+            # Parse the probed file: a second search could publish an empty
+            # config if that file disappeared before parsing.
+            loaded, loaded_signature = ExtensionsConfig._from_path_with_signature(current_path)
+        except Exception as exc:
+            _keep_last_known_good(current_path, current_signature, "Extensions config at %s changed but could not be loaded (%s)", current_path, _describe_load_failure(exc))
+            return _extensions_config
+
+        logger.info("Extensions config at %s changed on disk; reloaded", current_path)
+        _extensions_config = loaded
+        _extensions_config_path = current_path
+        _extensions_config_signature = loaded_signature
+        _extensions_config_rejected = None
+        return loaded
 
 
 #: Serializes read-modify-write cycles on ``extensions_config.json`` across every
@@ -849,12 +990,17 @@ def reload_extensions_config(config_path: str | None = None) -> ExtensionsConfig
         config_path: Optional path to extensions config file. If not provided,
                      uses the default resolution strategy.
 
+    The loaded revision is recorded, so a following `get_extensions_config()`
+    does not reload it again. When *config_path* is given, the cache keeps
+    following that file (its later edits are picked up and default
+    resolution is not consulted) until `reset_extensions_config()` or an
+    argument-less reload.
+
     Returns:
         The newly loaded ExtensionsConfig instance.
     """
-    global _extensions_config
-    _extensions_config = ExtensionsConfig.from_file(config_path)
-    return _extensions_config
+    with _extensions_config_lock:
+        return _load_and_cache_extensions_config(config_path)
 
 
 def reset_extensions_config() -> None:
@@ -864,17 +1010,35 @@ def reset_extensions_config() -> None:
     `get_extensions_config()` to reload from file. Useful for testing
     or when switching between different configurations.
     """
-    global _extensions_config
-    _extensions_config = None
+    global _extensions_config, _extensions_config_path, _extensions_config_signature
+    global _extensions_config_is_custom, _extensions_config_source, _extensions_config_rejected
+
+    with _extensions_config_lock:
+        _extensions_config = None
+        _extensions_config_path = None
+        _extensions_config_signature = None
+        _extensions_config_is_custom = False
+        _extensions_config_source = None
+        _extensions_config_rejected = None
 
 
 def set_extensions_config(config: ExtensionsConfig) -> None:
     """Set a custom extensions config instance.
 
-    This allows injecting a custom or mock config for testing purposes.
+    This allows injecting a custom or mock config for testing purposes. The
+    instance is pinned: `get_extensions_config()` returns it without consulting
+    the file until `reload_extensions_config()` or `reset_extensions_config()`.
 
     Args:
         config: The ExtensionsConfig instance to use.
     """
-    global _extensions_config
-    _extensions_config = config
+    global _extensions_config, _extensions_config_path, _extensions_config_signature
+    global _extensions_config_is_custom, _extensions_config_source, _extensions_config_rejected
+
+    with _extensions_config_lock:
+        _extensions_config = config
+        _extensions_config_path = None
+        _extensions_config_signature = None
+        _extensions_config_is_custom = True
+        _extensions_config_source = None
+        _extensions_config_rejected = None

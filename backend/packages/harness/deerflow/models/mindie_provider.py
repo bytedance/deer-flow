@@ -1,14 +1,41 @@
 import ast
 import html
 import json
+import math
 import re
 import uuid
 from collections.abc import Iterator
+from decimal import Decimal, InvalidOperation
 
 import httpx
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from langchain_openai import ChatOpenAI
+
+_JSON_NUMBER_RE = re.compile(r"^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$")
+
+
+def _parse_json_float(value: str) -> float:
+    """Parse a JSON float without silently overflowing or underflowing."""
+    try:
+        precise = Decimal(value)
+    except InvalidOperation as exc:
+        raise ValueError(f"invalid JSON number: {value}") from exc
+    converted = float(precise)
+    if not math.isfinite(converted) or (precise != 0 and converted == 0.0):
+        raise ValueError(f"JSON number is outside the representable float range: {value}")
+    return converted
+
+
+def _safe_literal(value: object) -> bool:
+    """Reject non-finite floats nested in an AST fallback value."""
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return all(_safe_literal(item) for item in value)
+    if isinstance(value, dict):
+        return all(_safe_literal(item) for item in value.values())
+    return True
 
 
 def _fix_messages(messages: list) -> list:
@@ -29,6 +56,20 @@ def _fix_messages(messages: list) -> list:
                     parts.append(block)
                 elif isinstance(block, dict) and block.get("type") == "text":
                     parts.append(block.get("text", ""))
+                elif isinstance(msg, ToolMessage) and isinstance(block, dict) and block.get("type") == "json" and "json" in block:
+                    # Structured tool results ride the same text channel; serialize
+                    # them or the model sees an empty <tool_response>. ToolMessage
+                    # only: InputSanitizationMiddleware scans just strings and text
+                    # blocks, so a json block smuggled into a genuine user message
+                    # would reach the model unescaped if it were rendered here.
+                    # Those keep the old drop behavior, as does a block with no
+                    # "json" key (rather than emitting a literal "null"). Circular
+                    # payloads raise ValueError, other non-serializable values
+                    # TypeError; degrade both to str().
+                    try:
+                        parts.append(json.dumps(block["json"], ensure_ascii=False))
+                    except (TypeError, ValueError):
+                        parts.append(str(block["json"]))
             text = "".join(parts)
         else:
             text = msg.content or ""
@@ -108,14 +149,26 @@ def _parse_xml_tool_call_to_dict(content: str) -> tuple[str, list[dict]]:
             # Attempt to deserialize string values into native Python types
             # to satisfy downstream Pydantic validation.
             parsed_value = raw_value
-            if raw_value.startswith(("[", "{")) or raw_value in ("true", "false", "null") or raw_value.isdigit():
+            if raw_value.startswith(("[", "{")) or raw_value in ("true", "false", "null") or _JSON_NUMBER_RE.fullmatch(raw_value):
                 try:
-                    parsed_value = json.loads(raw_value)
+                    parsed_value = json.loads(raw_value, parse_float=_parse_json_float)
                 except json.JSONDecodeError:
                     try:
-                        parsed_value = ast.literal_eval(raw_value)
+                        candidate = ast.literal_eval(raw_value)
+                        if _safe_literal(candidate):
+                            parsed_value = candidate
                     except (ValueError, SyntaxError):
-                        pass
+                        # Raw strings retain the gateway's multiline compatibility.
+                        # Structured arguments must be parsed before this decode.
+                        parsed_value = _decode_escaped_newlines_outside_fences(raw_value).strip()
+                except ValueError:
+                    # Preserve the entire argument when JSON numeric conversion
+                    # rejects overflow, underflow, or the integer digit limit.
+                    # Retrying containers with literal_eval would turn nested
+                    # underflowing numbers into zero and bypass this validation.
+                    pass
+            else:
+                parsed_value = _decode_escaped_newlines_outside_fences(raw_value).strip()
 
             args[key] = parsed_value
 
@@ -164,6 +217,62 @@ def _decode_escaped_newlines_outside_fences(content: str) -> str:
     return "".join(parts)
 
 
+class _EscapedNewlineStreamDecoder:
+    """Decode literal `\\n` outside fenced code blocks across streamed chunks.
+
+    `_decode_escaped_newlines_outside_fences` needs the whole reply to pair
+    ``` delimiters, and a token-sized chunk almost never contains both, so
+    decoding chunks independently would also decode escapes inside fences.
+    This decoder carries the fence state between chunks and holds back a
+    trailing partial ```/`\\n` sequence, so the joined stream equals the
+    one-shot decode of the same reply. A fence the stream never closes keeps
+    its escapes: an unterminated fence still renders as code.
+    """
+
+    def __init__(self) -> None:
+        self._inside_fence = False
+        self._pending = ""
+
+    def push(self, text: str) -> str:
+        """Return the text decodable so far, holding back an undecided tail."""
+        data = self._pending + text
+        self._pending = ""
+        out = []
+        while data:
+            fence = data.find("```")
+            if self._inside_fence:
+                if fence == -1:
+                    # The closing ``` may be split across chunks: emit the
+                    # fenced code verbatim and keep a partial closer pending.
+                    hold = len(data) - len(data.rstrip("`"))
+                    out.append(data[: len(data) - hold])
+                    self._pending = data[len(data) - hold :]
+                    break
+                # Fenced code up to and including its closing ``` stays verbatim.
+                out.append(data[: fence + 3])
+                data = data[fence + 3 :]
+                self._inside_fence = False
+                continue
+            if fence == -1:
+                # Outside a fence the tail may still grow into ``` or into an
+                # escape split across the boundary; hold it back, decode the rest.
+                hold = len(data) - len(data.rstrip("`\\"))
+                out.append(_decode_escaped_newlines_outside_fences(data[: len(data) - hold]))
+                self._pending = data[len(data) - hold :]
+                break
+            # Prose before the opening ``` decodes; the fence itself does not.
+            out.append(_decode_escaped_newlines_outside_fences(data[:fence]))
+            out.append(data[fence : fence + 3])
+            data = data[fence + 3 :]
+            self._inside_fence = True
+        return "".join(out)
+
+    def flush(self) -> str:
+        """Return text held back for a partial ```/`\\n` at the end of the stream."""
+        pending, self._pending = self._pending, ""
+        return pending
+
+
 class MindIEChatModel(ChatOpenAI):
     """Chat model adapter for MindIE engine.
 
@@ -199,17 +308,18 @@ class MindIEChatModel(ChatOpenAI):
             msg = gen.message
 
             if isinstance(msg.content, str):
-                # Keep escaped newlines inside fenced code blocks untouched.
-                msg.content = _decode_escaped_newlines_outside_fences(msg.content)
+                # Parse the original payload before display-only newline fixes:
+                # replacing escapes inside JSON can corrupt its syntax or values.
+                clean_content, extracted_tools = _parse_xml_tool_call_to_dict(msg.content)
 
-                if "<tool_call>" in msg.content:
-                    clean_content, extracted_tools = _parse_xml_tool_call_to_dict(msg.content)
-
-                    if extracted_tools:
-                        msg.content = clean_content
-                        if getattr(msg, "tool_calls", None) is None:
-                            msg.tool_calls = []
-                        msg.tool_calls.extend(extracted_tools)
+                if extracted_tools:
+                    msg.content = _decode_escaped_newlines_outside_fences(clean_content).strip()
+                    if getattr(msg, "tool_calls", None) is None:
+                        msg.tool_calls = []
+                    msg.tool_calls.extend(extracted_tools)
+                else:
+                    # Preserve unparseable XML and the existing prose/code behavior.
+                    msg.content = _decode_escaped_newlines_outside_fences(msg.content)
         return result
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
@@ -223,10 +333,15 @@ class MindIEChatModel(ChatOpenAI):
     async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
         # Route standard queries to native streaming for lower TTFB
         if not kwargs.get("tools"):
+            decoder = _EscapedNewlineStreamDecoder()
             async for chunk in super()._astream(_fix_messages(messages), stop=stop, run_manager=run_manager, **kwargs):
                 if isinstance(chunk.message.content, str):
-                    chunk.message.content = _decode_escaped_newlines_outside_fences(chunk.message.content)
+                    chunk.message.content = decoder.push(chunk.message.content)
                 yield chunk
+            # A partial ```/`\n` at the very end must still reach the consumer.
+            tail = decoder.flush()
+            if tail:
+                yield ChatGenerationChunk(message=AIMessageChunk(content=tail))
             return
 
         # Fallback for tool-enabled requests:

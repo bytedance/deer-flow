@@ -140,7 +140,9 @@ async def _skill_manage_impl(
     user_id = resolve_runtime_user_id(runtime)
     lock = _get_lock(user_id, name)
     thread_id = _get_thread_id(runtime)
-    skill_storage = get_or_new_user_skill_storage(user_id)
+    # The lookup resolves the app config (a config.yaml stat on every call)
+    # and, on a cold cache, the project root: blocking filesystem IO.
+    skill_storage = await _to_thread(get_or_new_user_skill_storage, user_id)
 
     async with lock:
         if action == "create":

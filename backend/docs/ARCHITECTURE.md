@@ -83,6 +83,7 @@ FastAPI application providing REST endpoints plus the public LangGraph-compatibl
 
 **Routers**:
 - `models.py` - `/api/models` - Model listing and details
+- `agents.py` - `/api/agents` - User-scoped Custom Agent CRUD and versioned definition import/export
 - `thread_runs.py` / `runs.py` - `/api/threads/{id}/runs`, `/api/runs/*` - LangGraph-compatible runs and streaming
 - `mcp.py` - `/api/mcp` - MCP server configuration
 - `skills.py` - `/api/skills` - Skills management
@@ -102,7 +103,7 @@ The web conversation delete flow first deletes Gateway-managed thread state thro
 
 **Role authority.** Project data rides a user-role request message, never the system prompt: framework rules stay in SystemMessages; user-authored project configuration is data.
 
-**Shelf storage (spec §6.1-6.3).** `project_documents` rows carry a server-generated content address (`stored_relpath` relative to `users/{user_id}/projects/`, embedding the sha256 and the row's own document ID) so rows never share files and re-upload after trash lands in a fresh namespace. Layout: `{sha256[:2]}/{sha256}/{document_id}/original/{name}` plus an optional `derived/converted.md` companion written via temp file and atomic rename on first read. Inserts are atomic with the active-project row lock: stage → hash → dedup among active `(project_id, sha256)` → place bytes → `INSERT` (file-before-row); a dedup hit returns the existing row (first name wins). Document delete and project delete are pure row transitions to a trash tier (`trashed_at`, `trash_origin` snapshot) — no filesystem work; trashed rows are invisible to the index, the tools, and the listing APIs.
+**Shelf storage (spec §6.1-6.3).** `project_documents` rows carry a server-generated content address (`stored_relpath` relative to `users/{user_id}/projects/`, embedding the sha256 and the row's own document ID) so rows never share files and re-upload after trash lands in a fresh namespace. Layout: `{sha256[:2]}/{sha256}/{document_id}/original/{name}` plus an optional `derived/converted.md` companion created on first read: conversion writes into `.staging/` outside any database transaction, then the document-row lock is taken only to revalidate the live row and atomically rename the output into place (a row trashed or purged meanwhile discards it); concurrent first reads of one document share a single conversion. Inserts are atomic with the active-project row lock: stage → hash → dedup among active `(project_id, sha256)` → place bytes → `INSERT` (file-before-row); a dedup hit returns the existing row (first name wins). Document delete and project delete are pure row transitions to a trash tier (`trashed_at`, `trash_origin` snapshot) — no filesystem work; trashed rows are invisible to the index, the tools, and the listing APIs.
 
 **Bounded live reads (spec §7.3).** `list_project_documents` / `read_project_document` (registered only for runs carrying the pinned key) take `project_id` from the pin and read live shelf rows; binaries and conversion-disabled convertibles are declined with an error naming attach-to-thread, and documents trashed mid-run fail with a "no longer on the shelf" error rather than serving stale content.
 
@@ -178,7 +179,7 @@ class ThreadState(AgentState):
               ▼                                         ▼
 ┌─────────────────────────┐              ┌─────────────────────────┐
 │  LocalSandboxProvider   │              │  AioSandboxProvider     │
-│  (packages/harness/deerflow/sandbox/local.py) │              │  (packages/harness/deerflow/community/)       │
+│  (packages/harness/deerflow/sandbox/local/) │              │  (packages/harness/deerflow/community/)       │
 │                         │              │                         │
 │  - Singleton instance   │              │  - Docker-based         │
 │  - Direct execution     │              │  - Isolated containers  │
@@ -228,7 +229,7 @@ class ThreadState(AgentState):
                                    ▼
                       ┌─────────────────────────┐
                       │   get_available_tools() │
-                      │   (packages/harness/deerflow/tools/__init__)  │
+                      │   (packages/harness/deerflow/tools/__init__.py)  │
                       └─────────────────────────┘
 ```
 
@@ -284,7 +285,7 @@ config.yaml:
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                          MCP Integration                                 │
-│                        (packages/harness/deerflow/mcp/manager.py)                              │
+│                        (packages/harness/deerflow/mcp/)                              │
 └─────────────────────────────────────────────────────────────────────────┘
 
 extensions_config.json:
@@ -322,7 +323,7 @@ extensions_config.json:
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                          Skills System                                   │
-│                       (packages/harness/deerflow/skills/loader.py)                             │
+│                       (packages/harness/deerflow/skills/)                             │
 └─────────────────────────────────────────────────────────────────────────┘
 
 Directory Structure:
@@ -448,9 +449,11 @@ SKILL.md Format:
 
 2. Gateway updates runtime state
    - PUT writes extensions_config.json and reloads configuration
-   - Both endpoints reset the MCP tools cache and persistent sessions
+   - Config mutations reset the handling worker; peer workers detect the config signature
+   - Cache reset writes a shared generation marker, then retires the handling worker
 
 3. MCP Manager reloads on next use
+   - Every worker sharing that config directory compares the reset generation before serving cached tools
    - get_cached_mcp_tools() lazily reinitializes MCP tools
    - Loads current server configurations and tool lists
 
