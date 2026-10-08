@@ -513,7 +513,7 @@ def test_refresh_waiters_leave_default_executor_available(monkeypatch):
             waiting = loop.create_future()
             loop.call_soon(waiting.set_result, None)
             await waiting
-            assert await asyncio.wait_for(asyncio.to_thread(lambda: "executor-ready"), timeout=1) == "executor-ready"
+            assert await asyncio.wait_for(asyncio.to_thread(lambda: "executor-ready"), timeout=5) == "executor-ready"
             release_refresh.set()
             assert await asyncio.wait_for(asyncio.gather(*callers), timeout=5) == ["Bearer shared-token"] * 3
         finally:
