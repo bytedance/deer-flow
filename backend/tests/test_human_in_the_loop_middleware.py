@@ -342,6 +342,57 @@ class TestEditRewritesEveryProviderSurface:
         assert [block["input"] for block in revised.content] == [{"command": "ls"}, {"command": "keep-me"}]
         assert [json.loads(raw["function"]["arguments"]) for raw in revised.additional_kwargs["tool_calls"]] == [{"command": "ls"}, {"command": "keep-me"}]
 
+    def test_drops_the_edited_messages_responses_chain_id(self):
+        """The server-side copy behind ``resp_`` still holds the original args."""
+        _original, revised = self._revise(
+            content=[{"type": "function_call", "id": "fc_1", "call_id": "call-1", "name": "bash_tool", "arguments": '{"command": "rm -rf /"}'}],
+            response_metadata={"id": "resp_b", "model_name": "gpt-x"},
+        )
+
+        assert "id" not in revised.response_metadata
+        assert revised.response_metadata["model_name"] == "gpt-x"
+
+    def test_approve_keeps_the_responses_chain_id(self):
+        """Nothing changed, so chaining to the stored copy stays correct and cheap."""
+        original = AIMessage(content="", id="ai-1", tool_calls=[_call()], response_metadata={"id": "resp_b"})
+        state = {"messages": [HumanMessage(content="do it"), original]}
+
+        result, _ = _resume(_middleware(), state, [{"type": "approve"}])
+
+        assert result["messages"][0].response_metadata["id"] == "resp_b"
+
+    def test_chained_responses_request_carries_the_edited_call(self):
+        """End to end through the real OpenAI adapter, with chaining on.
+
+        Before the fix the edited message kept ``resp_b``, so the adapter sent
+        only the tool result and ``previous_response_id=resp_b``: the server
+        rebuilt the call from its stored, unedited copy and the model read
+        ``ls``'s output as ``rm``'s.
+        """
+        from langchain_openai import ChatOpenAI
+
+        earlier = AIMessage(content=[{"type": "text", "text": "earlier"}], id="ai-0", response_metadata={"id": "resp_a"})
+        call = AIMessage(
+            content=[{"type": "function_call", "id": "fc_1", "call_id": "call-1", "name": "bash_tool", "arguments": '{"command": "rm -rf /"}', "status": "completed"}],
+            id="ai-1",
+            tool_calls=[_call()],
+            response_metadata={"id": "resp_b", "output_version": "responses/v1"},
+        )
+        state = {"messages": [HumanMessage(content="hi"), earlier, HumanMessage(content="do it"), call]}
+        result, _ = _resume(_middleware(), state, [self.EDIT])
+        revised = result["messages"][0]
+        tool_result = ToolMessage(content="file-a\nfile-b", tool_call_id="call-1", name="bash_tool")
+
+        model = ChatOpenAI(model="gpt-4.1", api_key="test-key", use_responses_api=True, use_previous_response_id=True)
+        payload = model._get_request_payload([*state["messages"][:3], revised, tool_result])
+
+        # Chains to the response before the edited one, whose history never held ``rm``.
+        assert payload["previous_response_id"] == "resp_a"
+        calls = [item for item in payload["input"] if item.get("type") == "function_call"]
+        assert [json.loads(item["arguments"]) for item in calls] == [{"command": "ls"}]
+        assert "rm -rf" not in json.dumps(payload["input"])
+        assert any(item.get("type") == "function_call_output" for item in payload["input"])
+
     def test_approve_does_not_rewrite_anything(self):
         """No edit means no rewrite: the surfaces pass through by identity."""
         original = AIMessage(

@@ -46,7 +46,7 @@ from langgraph.func import task
 from langgraph.types import interrupt
 
 from deerflow.agents.interaction_policy import resolve_run_interaction_policy
-from deerflow.agents.middlewares.tool_call_args import rewrite_tool_call_args
+from deerflow.agents.middlewares.tool_call_args import rewrite_tool_call_args, without_response_chain_id
 from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.tool_config import NON_APPROVABLE_TOOL_NAMES
@@ -524,8 +524,19 @@ class DeerFlowHumanInTheLoopMiddleware(HumanInTheLoopMiddleware):
         # ``ls``. ``rewrite_tool_call_args`` is the shared helper that rewrites
         # all of those surfaces together; run it first so the clone only has to
         # drop calls, never reconcile args.
+        #
+        # The edit also has to break OpenAI Responses chaining. With
+        # ``use_previous_response_id`` the adapter sends only the messages after
+        # the last AIMessage carrying a ``resp_`` id and lets the server rebuild
+        # the rest from its stored copy — which still holds the original args
+        # and cannot be edited. Left in place, this message's id would make the
+        # next request send just the tool result, so the model would read
+        # ``ls``'s output as ``rm``'s. Dropping the id makes the adapter chain to
+        # the previous response instead (whose history predates this call) and
+        # send the rewritten call explicitly. Only this message needs it: it is
+        # the latest AIMessage, so nothing after it chains back to the stale copy.
         if edited_args:
-            last_ai_msg = rewrite_tool_call_args(last_ai_msg, edited_args)
+            last_ai_msg = without_response_chain_id(rewrite_tool_call_args(last_ai_msg, edited_args))
 
         # Rebuild rather than mutate. Upstream assigns ``last_ai_msg.tool_calls``
         # in place, which rewrites the very object already streamed to clients

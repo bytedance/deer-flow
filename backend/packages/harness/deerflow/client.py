@@ -103,6 +103,23 @@ _EMBEDDED_AUTHORIZATION_CONTEXT_KEYS = frozenset(
 )
 
 
+def _embedded_identity_context(kwargs: Mapping[str, Any]) -> dict[str, Any]:
+    """The caller identity an embedded call hands to agent assembly.
+
+    Every path that builds the graph for a caller must pass this to
+    ``_ensure_agent``: it decides the authorization principal (and so which
+    models and tools are allowed) and is part of the agent cache key. A path
+    that omits it is assembled as the default role.
+
+    ``user_id`` is always materialized, in every auth mode. ContextVars normally
+    propagate, but this explicit channel also survives worker/isolated-loop
+    boundaries and matches the identity used by prompt assembly and the cache.
+    """
+    context = {key: kwargs[key] for key in _EMBEDDED_AUTHORIZATION_CONTEXT_KEYS if key in kwargs}
+    context["user_id"] = context.get("user_id") or get_effective_user_id()
+    return context
+
+
 def _stream_with_sandbox_lease_cleanup(items: Iterator[Any], context: dict[str, Any]) -> Iterator[Any]:
     """Fence an embedded graph iterator with execution-lease cleanup."""
     try:
@@ -945,11 +962,13 @@ class DeerFlowClient:
         """Return the ids of the interrupts the thread's latest checkpoint is parked on.
 
         Empty when nothing is pending. Reads the checkpoint the same way
-        :meth:`get_thread` does, with the overrides the resume will stream with.
+        :meth:`get_thread` does, with the overrides and caller identity the
+        resume will stream with — so the graph is assembled for the same
+        principal, and an authorized non-default role is not refused here.
         """
         checkpointer = self._get_thread_checkpointer()
         config = self._get_runnable_config(thread_id, **kwargs)
-        self._ensure_agent(config)
+        self._ensure_agent(config, context=_embedded_identity_context(kwargs))
         if self._agent is None:
             raise RuntimeError("Agent was not initialized")
 
@@ -1222,17 +1241,10 @@ class DeerFlowClient:
             "run_id": run_id,
             THREAD_INCARNATION_CONTEXT_KEY: thread_incarnation,
         }
-        for key in _EMBEDDED_AUTHORIZATION_CONTEXT_KEYS:
-            if key in kwargs:
-                context[key] = kwargs[key]
+        context.update(_embedded_identity_context(kwargs))
 
         deerflow_trace_id = ensure_trace_id()
-        effective_user_id = context.get("user_id") or get_effective_user_id()
-        # Materialize the storage owner in runtime context in every auth mode.
-        # ContextVars normally propagate, but this explicit channel also
-        # survives worker/isolated-loop boundaries and matches the identity
-        # used by prompt assembly and the agent cache.
-        context["user_id"] = effective_user_id
+        effective_user_id = context["user_id"]
         self._ensure_agent(config, context=context)
         configurable = config.get("configurable") or {}
         effective_model_name = getattr(self, "_effective_model_name", None)

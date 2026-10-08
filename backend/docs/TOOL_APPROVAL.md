@@ -266,6 +266,15 @@ the write still leaves the resume a no-op, but never a wrong execution. Pinned b
 `tests/test_client_tool_approval.py::TestResumeChecksThePark` and, against a real
 compiled graph, `tests/test_human_in_the_loop_middleware.py::TestResumeKeyedByInterruptId`.
 
+The snapshot read assembles the graph, so it has to run as the resuming caller.
+It forwards the same identity keys `_stream_turn` does
+(`_embedded_identity_context`); without them the agent was built as
+`authorization.default_role`, and a role allowed models the default denies
+parked on `stream()` only to have `resume()` fail with "No models are
+authorized" before reading the checkpoint. Sharing the identity also keeps the
+preflight on the cache key the resume streams with, so it does not rebuild the
+agent. Pinned by `tests/test_client.py::TestEnsureAgent::test_resume_preflight_*`.
+
 The Gateway forwards `command.resume` verbatim, so HTTP clients get the same
 guarantee by posting `{"command": {"resume": {"<interrupt_id>":
 {"decisions": [...]}}}}` instead of the bare `{"decisions": [...]}`. The bare
@@ -510,6 +519,21 @@ and rewrite nothing. Pinned by
 `tests/test_human_in_the_loop_middleware.py::TestEditRewritesEveryProviderSurface`,
 which asserts each surface separately — a test that checks only `tool_calls`
 cannot catch this.
+
+Rewriting the local surfaces is not enough under OpenAI Responses chaining.
+With `use_previous_response_id=True`, `ChatOpenAI` sends only the messages after
+the last AIMessage whose `response_metadata["id"]` starts with `resp_`, plus
+`previous_response_id`, and the server rebuilds the rest from its stored copy.
+The edited message still carried its own `resp_` id, so the next request held
+just the tool result: the server reconstructed the *unedited* call from storage
+and the model read `ls`'s output as `rm`'s. Stored responses cannot be edited,
+so an edit also drops that id (`tool_call_args.without_response_chain_id`). The
+adapter then chains to the previous response — whose history predates the
+edited call — and sends the rewritten call explicitly. Only the edited message
+needs it: it is the latest AIMessage, so nothing after it chains back to the
+stale copy. `approve` keeps the id, since the stored copy still matches. Pinned
+by `test_chained_responses_request_carries_the_edited_call`, which builds the
+request through the real adapter with chaining on.
 
 ### An `edit` is checked against the schema the human was shown
 
