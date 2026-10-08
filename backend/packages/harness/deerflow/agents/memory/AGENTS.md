@@ -13,7 +13,7 @@ This directory owns memory capture, storage, retrieval, prompt injection, and mo
 - `manager.py` defines the backend-neutral `MemoryManager` contract.
 - `agents/middlewares/memory_middleware.py` queues filtered conversations for passive capture.
 - `summarization_hook.py` connects memory work to the summarization lifecycle.
-- `tools.py` provides `memory_search`, `memory_add`, `memory_update`, and `memory_delete`.
+- `tools.py` provides `memory_search`, `memory_get`, `memory_add`, `memory_update`, and `memory_delete`.
 - `backends/deermem/` contains the default local backend.
 - `backends/mem0/`, `backends/openviking/`, and `backends/honcho/` contain optional adapters.
 
@@ -97,13 +97,17 @@ Memory enqueue redaction also covers `invalid_tool_calls` arguments/error text
 and legacy `function_call` payloads. Keep sync, async and compaction admission
 aligned; preserve original messages and detector policy.
 
-`memory.mode: tool` registers the four memory tools.
+`memory.mode: tool` registers the five memory tools.
 The model chooses when to search or change facts.
 Tool mode still uses `MemoryMiddleware` for passive writes on supported remote backends.
 
 Middleware injection includes shared summaries and the selected agent's facts.
 Tool-mode injection includes only shared summaries.
-Tool mode leaves agent facts behind `memory_search`.
+Tool mode leaves agent facts behind `memory_search` and `memory_get`.
+`memory_get` matches an exact fact ID inside `MemoryManager.get_memory()` for
+the runtime user and agent. Named-agent reads require
+`supports_agent_scoped_management`; unsupported reads return JSON errors.
+Missing and out-of-scope IDs share the same not-found response.
 `memory.injection_enabled: false` disables the complete injected block.
 
 Per-user lead-agent Custom Agents may set `memory_enabled: false` in their own

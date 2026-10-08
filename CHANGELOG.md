@@ -815,6 +815,18 @@ This release closes that milestone with **439 merged pull requests**.
   `default` instead, for installs that never recorded thread owners. Installs
   that already ran the old script can recover their threads with the steps in
   `docker/provisioner/README.md`. ([#6450])
+- **sandbox:** A failed command in the e2b sandbox now keeps its output and exit
+  code. The e2b SDK raises `CommandExitException` on a nonzero exit instead of
+  returning a result, so `E2BSandbox.execute_command` returned
+  `Error: Command exited with code N and error: ...`: stdout was dropped, the
+  `Exit Code: N` marker was never added, and `_bash_evidence_status` fell back to
+  `deerflow_tool_meta` (`success`), so a failed `pytest` could satisfy a
+  `tests_passed` acceptance criterion. The exception carries the command's
+  stdout, stderr and exit code, and is now formatted like a returned result. A
+  failed command whose stderr mentions "sandbox not found" no longer marks the
+  sandbox as reaped. `list_dir` on e2b handles the same exception, so a missing
+  directory raises `FileNotFoundError` and a listing truncated at 500 entries
+  (SIGPIPE 141) is returned instead of failing with `OSError`. ([#6441])
 - **uploads:** The Gateway's startup sweep of orphaned `.upload-*.part` staging
   files now skips files younger than 24 hours. The sweep removed every staging
   file it found, which was right for one Gateway but not for several replicas
@@ -9175,6 +9187,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6407]: https://github.com/bytedance/deer-flow/pull/6407
 [#6412]: https://github.com/bytedance/deer-flow/pull/6412
 [#6426]: https://github.com/bytedance/deer-flow/pull/6426
+[#6441]: https://github.com/bytedance/deer-flow/pull/6441
 [#6445]: https://github.com/bytedance/deer-flow/pull/6445
 [#6447]: https://github.com/bytedance/deer-flow/pull/6447
 [#6448]: https://github.com/bytedance/deer-flow/pull/6448
