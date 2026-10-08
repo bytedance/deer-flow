@@ -102,8 +102,11 @@ or declared current-thread native references:
 
 References resolve only below the verified owner's native thread user-data
 `uploads`, `workspace` or `outputs` directory on a fixed shared workspace.
-Absolute host paths, traversal, symlinks, special files and hard links are
-rejected. Under a native `threads_meta` owner/incarnation row lock, the executor
+Declared relative input and output paths preserve Unicode names and spaces
+without normalization (for example, `uploads/报告.xlsx` and `sales report.csv`).
+Paths are bounded to 512 UTF-8 bytes total and 255 bytes per component; empty
+or dot components, backslashes and control characters are rejected. Absolute
+host paths, traversal, symlinks, special files and hard links are rejected. Under a native `threads_meta` owner/incarnation row lock, the executor
 checks the supplied digest and persists an immutable snapshot before admission.
 Later source changes do not alter retries or execution. The operator's combined
 input budget defaults to 8 MiB (`max_input_bytes`, 128 KiB–64 MiB). At most 64

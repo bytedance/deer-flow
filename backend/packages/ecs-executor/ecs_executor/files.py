@@ -5,13 +5,20 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
-import re
 import stat
-from pathlib import Path, PurePosixPath
+import unicodedata
+from pathlib import Path
 
 
 def relative_file(name: str) -> str:
-    if not isinstance(name, str) or len(name) > 255 or re.fullmatch(r"[a-zA-Z0-9_./-]+", name) is None or any(part in {"", ".", ".."} for part in name.split("/")) or PurePosixPath(name).is_absolute():
+    if not isinstance(name, str) or not name or name.startswith("/") or "\\" in name or any(unicodedata.category(char) == "Cc" for char in name):
+        raise ValueError("Invalid declared relative file")
+    parts = name.split("/")
+    try:
+        invalid = len(name.encode("utf-8")) > 512 or any(part in {"", ".", ".."} or len(part.encode("utf-8")) > 255 for part in parts)
+    except UnicodeError:
+        raise ValueError("Invalid declared relative file") from None
+    if invalid:
         raise ValueError("Invalid declared relative file")
     return name
 

@@ -514,7 +514,8 @@ def test_operator_network_allowlist_preserves_profile_authority(executor):
         ExecutionJobs(executor.store, secret=SECRET, audience="executor", profiles={"net": ExecutionProfile(image="alpine:3.20", network="host")}, user_profiles={}, artifact_root=executor.artifact_root, allowed_networks={"none", "host"})
 
 
-def test_declared_input_snapshots_reject_host_paths(executor, tmp_path):
+@pytest.mark.asyncio
+async def test_declared_input_snapshots_reject_host_paths(executor, tmp_path, monkeypatch):
     import base64
 
     spec = {**SPEC, "input_files": {"program.py": base64.b64encode(b"print('safe')").decode()}}
@@ -533,18 +534,61 @@ def test_declared_input_snapshots_reject_host_paths(executor, tmp_path):
     with engine.begin() as connection:
         connection.execute(ThreadMetaRow.__table__.insert().values(thread_id="thread", user_id="alice", incarnation="generation", metadata_json={}))
     executor.publication = WorkspacePublication(workspace_root=tmp_path / "native-files", metadata_database_url=url)
-    source = executor.publication.paths.sandbox_uploads_dir("thread", user_id="alice") / "existing.txt"
+    source = executor.publication.paths.sandbox_uploads_dir("thread", user_id="alice") / "报告.xlsx"
     source.parent.mkdir(parents=True)
     source.write_bytes(b"immutable snapshot")
-    refs = {"input.txt": {"path": "uploads/existing.txt", "sha256": hashlib.sha256(source.read_bytes()).hexdigest()}}
+    refs = {"报告.xlsx": {"path": "uploads/报告.xlsx", "sha256": hashlib.sha256(source.read_bytes()).hexdigest()}}
     declared = {**SPEC, "request_key": "native-ref", "input_refs": refs}
     tracked = executor.submit("alice", scope("submit", declared), declared)
     source.write_bytes(b"later edit")
     assert executor.submit("alice", scope("submit", declared), declared) == tracked
-    assert base64.b64decode(executor.store.get(tracked["task_id"])["spec"]["input_files"]["input.txt"]) == b"immutable snapshot"
+    assert base64.b64decode(executor.store.get(tracked["task_id"])["spec"]["input_files"]["报告.xlsx"]) == b"immutable snapshot"
     with pytest.raises(ValueError, match="digest"):
         executor.submit("alice", scope("submit", {**declared, "request_key": "changed-ref"}), {**declared, "request_key": "changed-ref"})
-    for filename in ("/etc/passwd", "../secret", "a/../secret"):
+    from ecs_executor.files import collect, prepare
+
+    job = executor.store.get(tracked["task_id"])
+    boundary_name = "/".join(["a" * 255] * 2)
+    assert len(boundary_name.encode("utf-8")) == 511
+    job["spec"]["input_files"][boundary_name] = base64.b64encode(b"boundary input").decode()
+    inputs, outputs = prepare(tmp_path / "jobs", job)
+    assert (inputs / "报告.xlsx").read_bytes() == b"immutable snapshot"
+    assert (inputs / boundary_name).read_bytes() == b"boundary input"
+    (outputs / boundary_name).parent.mkdir()
+    (outputs / boundary_name).write_bytes(b"boundary output")
+    (outputs / "销售 report.csv").write_bytes(b"sales,total\n1,2\n")
+    files = collect(outputs, limit=1024)
+    assert files == {"销售 report.csv": b"sales,total\n1,2\n", boundary_name: b"boundary output"}
+    uri = executor.publication.publish(job, b"{}", files)
+    assert executor.publication.publish(job, b"{}", files) == uri
+
+    from types import SimpleNamespace
+
+    import httpx
+    from _router_auth_helpers import make_authed_test_app
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.gateway.routers.artifacts import router as artifact_router
+    from deerflow.persistence.thread_meta import ThreadMetaRepository
+
+    owner = "alice"
+    app = make_authed_test_app(user_factory=lambda: SimpleNamespace(id=owner, system_role="user"), bind_current_user=True)
+    native_engine = create_async_engine(url.replace("sqlite://", "sqlite+aiosqlite://"))
+    app.state.thread_store = ThreadMetaRepository(async_sessionmaker(native_engine, expire_on_commit=False))
+    app.include_router(artifact_router)
+    monkeypatch.setattr("app.gateway.path_utils.get_paths", lambda: executor.publication.paths)
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://native-gateway") as client:
+            file_uri = uri.removesuffix("result.json") + "files/销售 report.csv"
+            response = await client.get(file_uri)
+            assert response.status_code == 200, response.text
+            assert response.content == files["销售 report.csv"]
+            owner = "bob"
+            assert (await client.get(file_uri)).status_code == 404
+    finally:
+        await native_engine.dispose()
+
+    for filename in (None, 1, "", "/etc/passwd", "../secret", "a/../secret", "a/./file", "a//file", "a/", "a\\file", "a\x00file", "a\nfile", "a\x7ffile", "a\x85file", "报" * 86, "/".join(["a" * 255] * 3)):
         bad = {**spec, "request_key": "bad", "input_files": {filename: "aGVsbG8="}}
         with pytest.raises(ValueError):
             executor.submit("alice", scope("submit", bad), bad)

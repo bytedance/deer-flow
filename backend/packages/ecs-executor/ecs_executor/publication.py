@@ -127,7 +127,8 @@ class WorkspacePublication:
 
     def publish(self, job, payload: bytes, files: dict[str, bytes]) -> str:
         outputs = self.paths.sandbox_outputs_dir(job["thread_id"], user_id=make_safe_user_id(job["user_id"]))
-        contents = {"result.json": payload, **{"files/" + relative_file(name): content for name, content in files.items()}}
+        for name in files:
+            relative_file(name)
         with self.authorized_root(job, outputs, create=True) as outputs_fd:
             try:
                 os.stat(job["id"], dir_fd=outputs_fd, follow_symlinks=False)
@@ -136,8 +137,12 @@ class WorkspacePublication:
                 os.mkdir(temporary, mode=0o700, dir_fd=outputs_fd)
                 try:
                     with directory_at(outputs_fd, [temporary]) as staged_fd:
-                        for name, content in contents.items():
-                            write_at(staged_fd, name, content)
+                        write_at(staged_fd, "result.json", payload)
+                        if files:
+                            with directory_at(staged_fd, ["files"], create=True) as files_fd:
+                                for name, content in files.items():
+                                    write_at(files_fd, name, content)
+                                os.fsync(files_fd)
                         os.fsync(staged_fd)
                     os.rename(temporary, job["id"], src_dir_fd=outputs_fd, dst_dir_fd=outputs_fd)
                     os.fsync(outputs_fd)
@@ -148,7 +153,11 @@ class WorkspacePublication:
                         pass
             else:
                 with directory_at(outputs_fd, [job["id"]]) as published_fd:
-                    for name, content in contents.items():
-                        if read_at(published_fd, name, len(content)) != content:
-                            raise ValueError("Native publication identity/integrity conflict")
+                    if read_at(published_fd, "result.json", len(payload)) != payload:
+                        raise ValueError("Native publication identity/integrity conflict")
+                    if files:
+                        with directory_at(published_fd, ["files"]) as files_fd:
+                            for name, content in files.items():
+                                if read_at(files_fd, name, len(content)) != content:
+                                    raise ValueError("Native publication identity/integrity conflict")
         return f"/api/threads/{job['thread_id']}/artifacts/mnt/user-data/outputs/{job['id']}/result.json"
