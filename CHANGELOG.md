@@ -813,6 +813,29 @@ This release closes that milestone with **439 merged pull requests**.
   newline, reads decode each physical line on its own and skip only the broken
   one, and a failed batch append still truncates back to the original size.
   ([#6520])
+- **auth:** Login lockouts are now counted once per client IP across every
+  Gateway replica. `POST /api/v1/auth/login/local` kept its failed-login
+  counter in a per-process dict, so with N replicas behind one load balancer an
+  attacker got N × `max_login_attempts` guesses and a lockout on one replica
+  was invisible to the others. The counter now lives behind a
+  `LoginThrottleStore`: the new `auth.local.throttle_storage` selector
+  (default `auto`) keeps it in the shared `login_throttle` table (migration
+  `0035_login_throttle`) whenever `database.backend` is `sqlite` or
+  `postgres`, and falls back to the in-process counter with a warning when
+  there is no database to share (a `memory` database, or a configured database
+  whose engine is not initialised); `memory` forces the historical per-process
+  behavior; `db` forces the table and refuses to start when the configured
+  database's engine is unavailable. The Gateway resolves the store once at
+  startup, right after the persistence engine; a bare app resolves it on the
+  first throttle call. Failures are counted with one atomic upsert that keeps
+  an active lock's start and committed duration (the sentence is "N seconds
+  after the lock started", not "after the last attempt"), the duration
+  committed at lock time is still honored when the policy changes mid-lock, a
+  successful login clears the IP everywhere, served locks and idle counters are
+  swept in bounded batches, and a declared multi-instance deployment that
+  keeps `memory` logs a startup warning. Status codes and messages of the
+  login endpoint are unchanged; `max_login_attempts` and `lockout_seconds`
+  stay live-read. `config_version` is now 57. ([#6501])
 - **memory:** DeerMem's derived SQLite FTS5 retrieval index can now live
   outside the memory root, and a Gateway instance now notices facts another
   instance wrote. The index for every user was one SQLite database in WAL mode
@@ -9268,5 +9291,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6484]: https://github.com/bytedance/deer-flow/pull/6484
 [#6494]: https://github.com/bytedance/deer-flow/pull/6494
 [#6495]: https://github.com/bytedance/deer-flow/pull/6495
+[#6501]: https://github.com/bytedance/deer-flow/pull/6501
 [#6506]: https://github.com/bytedance/deer-flow/pull/6506
 [#6520]: https://github.com/bytedance/deer-flow/pull/6520
