@@ -37,9 +37,9 @@ Files: ecs_executor/mcp_server.py, job_store.py, jobs.py, worker.py; backend/tes
 
 Files: ecs_executor/nodes.py, scheduling.py, dispatch.py and private migrations; backend/tests/test_ecs_executor_dispatch_main.py.
 
-- [ ] Register fixed nodes, health/drain state and node-scoped credentials. Claim/renew/report remain worker outbound. Store one resource ledger for both kinds, subtract resident Gateway overhead.
-- [ ] Admit B/C through one queue/profile budget. Failed/unknown attempts retain reservations until physical reconciliation. Persist handoff and idempotency before contacting execution.
-- [ ] Validate one local multi-process contention path and minimum-pool capacity reuse. Avoid a broad fault matrix.
+- [x] Register fixed nodes, health/drain state and node-scoped credentials. Claim/renew/report remain worker outbound. Store one resource ledger for both kinds, subtract resident Gateway overhead.
+- [x] Admit B/C through one queue/profile budget. Failed/unknown attempts retain reservations until physical reconciliation. Persist handoff and idempotency before contacting execution.
+- [x] Validate one local multi-process contention path and minimum-pool capacity reuse. Avoid a broad fault matrix.
 
 ## Task 4: C native Gateway execution adapter
 

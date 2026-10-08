@@ -65,3 +65,11 @@ Observed: exit 0, **2 passed**, 96 upstream MCP client deprecation warnings,
 19.90 seconds. This reran the real task-owned PostgreSQL/TCP/two-worker/Docker/
 native queue and STOP proof against the bounded SQL implementation. Ruff format
 and lint passed for both modified files. No Task3 commit yet.
+
+Independent SPEC and final quality reviews passed after kind-filter and bounded-SQL
+fixes. Root independently ran the actual pool main once (2 passed, 17.60 seconds);
+the implementation worker's latest SQL-fix main passed 2 tests in 19.90 seconds.
+Root then ran genuine locked-environment repository gates: make test exit 0,
+four shards totaling 26,762 passed / 412 skipped (slowest 221.79 seconds);
+make test-blocking-io exit 0, 229 passed in 12.29 seconds.
+Implementation is saved locally as 5ce7d9f5; no remote update/deployment occurred.
