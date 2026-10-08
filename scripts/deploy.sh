@@ -125,16 +125,39 @@ mkdir -p "$DEER_FLOW_HOME" 2>/dev/null || true
 # root-privileged gateway, which creates backend/.deer-flow root-owned on the
 # host. `make up` then dies with a bare "Permission denied" at the
 # BETTER_AUTH_SECRET persistence step — and so does `make down` when the
-# secret files are missing, because the generation block is not down-guarded
+# secret files are missing, because that generation block is not down-guarded
 # (unlike DEER_FLOW_INTERNAL_AUTH_TOKEN). Fail fast with the exact recovery
-# command instead. When both secret files are already readable no write is
-# pending, so read-only invocations (e.g. `down` with persisted secrets) keep
-# working against a non-writable directory, exactly as before.
-if { [ ! -r "$DEER_FLOW_HOME/.better-auth-secret" ] || [ ! -r "$DEER_FLOW_HOME/.internal-auth-token" ]; } && [ ! -w "$DEER_FLOW_HOME" ]; then
-    echo -e "${RED}✗ $DEER_FLOW_HOME is not writable by $(id -un) — deployment secrets cannot be persisted." >&2
+# commands instead.
+#
+# The writability demand applies only when a secret write is actually pending:
+# one supplied through the shell environment or the repo-root .env (Compose's
+# --env-file interpolation source) is never persisted, and `down` skips the
+# internal-token setup entirely, so those invocations keep working against a
+# non-writable directory exactly as before.
+_secret_write_pending() {
+    # $1 = secret env name, $2 = persisted file name under $DEER_FLOW_HOME
+    [ -n "${!1:-}" ] && return 1
+    if [ -f "$ENV_FILE" ] && grep -qE "^[[:space:]]*${1}[=:]" "$ENV_FILE" 2>/dev/null; then
+        return 1
+    fi
+    [ -r "$DEER_FLOW_HOME/$2" ] && return 1
+    return 0
+}
+
+if [ ! -d "$DEER_FLOW_HOME" ]; then
+    echo -e "${RED}✗ Cannot create the state directory $DEER_FLOW_HOME — check its parent directory's permissions.${NC}" >&2
+    exit 1
+fi
+
+if { _secret_write_pending BETTER_AUTH_SECRET .better-auth-secret ||
+     { [ "${CMD:-}" != "down" ] && _secret_write_pending DEER_FLOW_INTERNAL_AUTH_TOKEN .internal-auth-token; }
+   } && [ ! -w "$DEER_FLOW_HOME" ]; then
+    echo -e "${RED}✗ $DEER_FLOW_HOME is not writable by $(id -un) — deployment secrets cannot be persisted.${NC}" >&2
     echo    "  Typical cause: the dev stack (make docker-start) created this directory as root." >&2
-    echo    "  Recovery:" >&2
+    echo    "  Recovery (fix ownership):" >&2
     echo    "    sudo chown -R $(id -u):$(id -g) \"$DEER_FLOW_HOME\"" >&2
+    echo    "  Recovery (relocate state):" >&2
+    echo    "    DEER_FLOW_HOME=/writable/path make up" >&2
     exit 1
 fi
 

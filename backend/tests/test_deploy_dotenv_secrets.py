@@ -90,6 +90,8 @@ def _run_deploy_build(
     real_docker: str | None = None,
     shell_env: dict[str, str] | None = None,
     check: bool = True,
+    home: Path | None = None,
+    cmd: str = "build",
 ):
     """Run ``deploy.sh build`` against the fake docker and return what it observed."""
     capture_secrets = tmp_path / "secrets.txt"
@@ -105,7 +107,7 @@ def _run_deploy_build(
     env = os.environ.copy()
     for key in (*SECRETS, "UV_EXTRAS", "REAL_DOCKER", "FAKE_COMPOSE_ENVIRONMENT", "FAKE_COMPOSE_CONFIG_RC"):
         env.pop(key, None)
-    env["DEER_FLOW_HOME"] = str(tmp_path / "deer-flow-home")
+    env["DEER_FLOW_HOME"] = str(home if home is not None else tmp_path / "deer-flow-home")
     env["CAPTURE_SECRETS"] = str(capture_secrets)
     env["CAPTURE_DOCKER_ARGS"] = str(capture_args)
     env["CAPTURE_CONFIG_ARGS"] = str(capture_config_args)
@@ -122,7 +124,7 @@ def _run_deploy_build(
     env.update(shell_env or {})
 
     result = subprocess.run(
-        [BASH, str(worktree / "scripts" / "deploy.sh"), "build"],
+        [BASH, str(worktree / "scripts" / "deploy.sh"), cmd],
         cwd=worktree,
         env=env,
         check=check,
@@ -384,3 +386,82 @@ def test_real_compose_empty_shell_export_still_gets_a_generated_secret(tmp_path,
     _, observed, _, _, _, _ = _run_deploy_build(tmp_path, worktree, real_docker=real_docker, shell_env={key: ""})
 
     assert GENERATED.fullmatch(observed[key]), observed[key]
+
+
+def _is_root() -> bool:
+    geteuid = getattr(os, "geteuid", None)
+    return geteuid is not None and geteuid() == 0
+
+
+class TestStateDirWritabilityPreflight:
+    """The #6462 preflight: demand writability only when a secret write is pending.
+
+    CI images often run as root, and root passes -w on any directory, so the
+    unwritable fixtures need the root skip guard or they pass vacuously. The
+    chmod(0o555) trick is also POSIX-only, hence the Windows skip.
+    """
+
+    needs_unprivileged = pytest.mark.skipif(
+        _is_root() or os.name == "nt",
+        reason="needs a non-root user on POSIX for the chmod fixture to bite",
+    )
+
+    @needs_unprivileged
+    def test_pending_secrets_and_unwritable_home_fails_with_recovery(self, tmp_path):
+        worktree = _worktree(tmp_path)
+        home = tmp_path / "locked-home"
+        home.mkdir()
+        home.chmod(0o555)
+        result, _, _, _, _, _ = _run_deploy_build(tmp_path, worktree, home=home, check=False)
+        assert result.returncode == 1
+        assert "not writable" in result.stderr
+        assert "chown" in result.stderr
+        assert "DEER_FLOW_HOME=/writable/path make up" in result.stderr
+
+    def test_shell_env_supplied_secrets_skip_preflight(self, tmp_path):
+        worktree = _worktree(tmp_path)
+        home = tmp_path / "home-envsupplied"
+        home.mkdir()
+        result, _, _, _, _, _ = _run_deploy_build(
+            tmp_path,
+            worktree,
+            home=home,
+            shell_env={"BETTER_AUTH_SECRET": "s1", "DEER_FLOW_INTERNAL_AUTH_TOKEN": "s2"},
+            check=False,
+        )
+        assert result.returncode == 0
+
+    def test_dotenv_supplied_secrets_skip_preflight(self, tmp_path):
+        worktree = _worktree(tmp_path)
+        home = tmp_path / "home-dotenvsupplied"
+        home.mkdir()
+        (worktree / ".env").write_text(
+            "BETTER_AUTH_SECRET=from-dotenv\nDEER_FLOW_INTERNAL_AUTH_TOKEN=from-dotenv\n",
+            encoding="utf-8",
+        )
+        result, _, _, _, _, _ = _run_deploy_build(tmp_path, worktree, home=home, check=False)
+        assert result.returncode == 0
+
+    @needs_unprivileged
+    def test_readable_secrets_and_unwritable_home_down_succeeds(self, tmp_path):
+        """Pins the fail-open behaviour: `down` with persisted, readable secrets
+        keeps working against a non-writable directory."""
+        worktree = _worktree(tmp_path)
+        home = tmp_path / "locked-with-secrets"
+        home.mkdir()
+        (home / ".better-auth-secret").write_text("persisted-secret\n", encoding="utf-8")
+        (home / ".internal-auth-token").write_text("persisted-token\n", encoding="utf-8")
+        home.chmod(0o555)
+        result, _, _, _, _, _ = _run_deploy_build(tmp_path, worktree, home=home, cmd="down", check=False)
+        assert result.returncode == 0
+
+    @pytest.mark.skipif(os.name == "nt", reason="mkdir -p failure mode is POSIX here")
+    def test_uncreatable_home_reports_parent_permissions(self, tmp_path):
+        worktree = _worktree(tmp_path)
+        blocker = tmp_path / "not-a-dir"
+        blocker.write_text("file", encoding="utf-8")
+        home = blocker / "deer-flow-home"
+        result, _, _, _, _, _ = _run_deploy_build(tmp_path, worktree, home=home, check=False)
+        assert result.returncode == 1
+        assert "Cannot create the state directory" in result.stderr
+        assert "parent directory" in result.stderr
