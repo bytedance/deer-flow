@@ -548,8 +548,11 @@ class DbRunEventStore(RunEventStore):
                     count = await session.scalar(count_stmt) or 0
                     if count > 0:
                         await session.execute(delete(RunEventRow).where(*count_conditions))
-                    if resolved_user_id is None:
-                        await session.execute(delete(RunEventThreadSeqRow).where(RunEventThreadSeqRow.thread_id == thread_id))
+                    # Owner-scoped deletion is the Gateway's normal path.
+                    # Reset only an empty thread: surviving events from any
+                    # owner still need the allocation floor for deleted runs.
+                    remaining_events = select(RunEventRow.id).where(RunEventRow.thread_id == thread_id).exists()
+                    await session.execute(delete(RunEventThreadSeqRow).where(RunEventThreadSeqRow.thread_id == thread_id, ~remaining_events))
             # Retire the live-thread pin, but never remove the weak registry
             # entry directly. asyncio.Lock.release() clears ``locked()`` before
             # a queued waiter resumes, so an unlocked check can observe the

@@ -78,7 +78,7 @@ async def test_0034_backfills_and_round_trips(tmp_path, backend):
                         "content": "",
                         "event_metadata": {},
                         "seq": 1,
-                            "created_at": datetime.now(UTC),
+                        "created_at": datetime.now(UTC),
                     },
                     {
                         "thread_id": "t1",
@@ -89,7 +89,7 @@ async def test_0034_backfills_and_round_trips(tmp_path, backend):
                         "content": "",
                         "event_metadata": {},
                         "seq": 2,
-                            "created_at": datetime.now(UTC),
+                        "created_at": datetime.now(UTC),
                     },
                     {
                         "thread_id": "t2",
@@ -100,7 +100,7 @@ async def test_0034_backfills_and_round_trips(tmp_path, backend):
                         "content": "",
                         "event_metadata": {},
                         "seq": 5,
-                            "created_at": datetime.now(UTC),
+                        "created_at": datetime.now(UTC),
                     },
                 ],
             )

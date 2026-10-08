@@ -157,6 +157,12 @@ checkpoint-write admission boundary must repeat the complete audit after
 admission; a pre-admission exact hit can be superseded by a later event just as
 a pre-admission miss can become an exact hit.
 
+**DB run-event sequence watermark:** Run deletion retains `run_event_thread_seq`.
+Thread deletion removes it in the same mutation-fenced transaction only when no
+events remain for the thread, including owner-scoped and zero-row deletions.
+Check all owners and categories; surviving rows retain the allocation floor.
+`tests/test_run_event_store.py` pins cleanup, recreation and cursor visibility.
+
 **Changed-run discovery:** Use the durable `(change_seq, run_id)` cursor and repeat history audits after admission. Details: `backend/docs/runtime-guidance-details.md`.
 
 **Terminal run cleanup:** Close streams, journals, and graph references even on cancellation. Details: `backend/docs/runtime-guidance-details.md`.
