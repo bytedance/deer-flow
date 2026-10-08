@@ -164,6 +164,10 @@ Array previews coalesce consecutive generated markers only at the end into one o
 
 ### Key Patterns
 
+Browser notification construction failures stay inside `useNotification` so they
+cannot escape into chat completion callbacks. Only a successful constructor call
+starts the one-second throttle; failed attempts must allow an immediate retry.
+
 - **Server Components by default**, `"use client"` only for interactive components
 - **Static root boundary** — `src/app/layout.tsx` must not read cookies or import
   chat-only KaTeX/Streamdown styles. Auth and workspace layouts own the cookie-derived

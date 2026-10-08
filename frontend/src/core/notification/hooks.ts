@@ -78,9 +78,15 @@ export function useNotification(): UseNotificationReturn {
         console.warn("Notification sent too soon");
         return;
       }
+      let notification: Notification;
+      try {
+        // Some mobile browsers expose the API but reject its constructor.
+        notification = new Notification(title, options);
+      } catch (error) {
+        console.error("Notification error:", error);
+        return;
+      }
       lastNotificationTime.current = now;
-
-      const notification = new Notification(title, options);
 
       // Optional: Add event listeners
       notification.onclick = () => {

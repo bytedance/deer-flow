@@ -711,6 +711,8 @@ Ordinary `task` subagents retain the parent run's captured thread incarnation fo
 MCP tool names are prefixed with `<server_name>_` by default to prevent collisions across servers. If a server already namespaces its own tools, set `tool_name_prefix: false` on that server in `extensions_config.json` to keep the original names. Disable the prefix only when the resulting names remain unique across all enabled servers.
 Signed-in users' notification toggle, default model, conversation mode, and reasoning effort are saved to their account and restored on other browsers or after clearing browser storage. Browser notification permission still needs to be granted on each device. Changes retry after network failures; unsent changes survive a reload in the same tab. Concurrent edits to different fields are preserved; for the same field, the last server write wins. Existing unscoped browser preferences are not uploaded automatically because they have no account owner; reselect those settings once after upgrading. Static demos and auth-disabled development keep browser-local settings. Thread-specific model overrides and other display preferences remain local.
 
+If the browser rejects desktop notification creation, the error is logged without interrupting the chat completion callback.
+
 In a new chat, the submitted question stays above its streamed reasoning and
 tool steps while the server creates the conversation and confirms the message.
 

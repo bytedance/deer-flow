@@ -13,6 +13,7 @@ async function loadNotificationHook({
   browserPermission?: NotificationPermission;
   hookPermission?: NotificationPermission;
 } = {}) {
+  const constructNotification = rs.fn();
   const notifications: Array<{
     title: string;
     options: NotificationOptions | undefined;
@@ -31,6 +32,7 @@ async function loadNotificationHook({
     close = rs.fn();
 
     constructor(title: string, options?: NotificationOptions) {
+      constructNotification();
       notifications.push({ title, options, instance: this });
     }
   }
@@ -71,12 +73,14 @@ async function loadNotificationHook({
   const { useNotification } = await import("@/core/notification/hooks");
 
   return {
+    constructNotification,
     notifications,
     useNotification,
   };
 }
 
 afterEach(() => {
+  rs.restoreAllMocks();
   rs.doUnmock("react");
   rs.doUnmock("@/core/settings");
   rs.unstubAllGlobals();
@@ -84,6 +88,31 @@ afterEach(() => {
 });
 
 describe("useNotification", () => {
+  test("contains constructor failures and allows an immediate retry", async () => {
+    const { constructNotification, notifications, useNotification } =
+      await loadNotificationHook();
+    const error = new TypeError("Illegal constructor. Use a service worker.");
+    constructNotification.mockImplementationOnce(() => {
+      throw error;
+    });
+    const logError = rs
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    rs.spyOn(Date, "now").mockReturnValue(1000);
+    const { showNotification } = useNotification();
+
+    expect(() => showNotification("Finished")).not.toThrow();
+    expect(notifications).toHaveLength(0);
+    expect(logError).toHaveBeenCalledWith("Notification error:", error);
+
+    showNotification("Retry");
+    showNotification("Rate limited");
+
+    expect(notifications.map((notification) => notification.title)).toEqual([
+      "Retry",
+    ]);
+  });
+
   test("allows the first notification immediately after the hook is created", async () => {
     const { notifications, useNotification } = await loadNotificationHook();
     const { showNotification } = useNotification();
