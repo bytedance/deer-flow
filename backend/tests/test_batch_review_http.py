@@ -1,5 +1,8 @@
 """Actual declared plugin actions/assets with native SQLite and host admission."""
 
+import subprocess
+import sys
+
 import httpx
 import pytest
 import pytest_asyncio
@@ -8,6 +11,16 @@ from deerflow.persistence.engine import close_engine
 from extension_test_fixtures.batch_review_gateway import THREAD, create_app
 
 ACTION = "/api/plugins/community.batch-review/actions/"
+
+
+def test_browser_fixture_import_does_not_load_unrelated_gateway_routes():
+    result = subprocess.run(
+        [sys.executable, "-c", "import extension_test_fixtures.batch_review_gateway; import sys; assert 'app.gateway.app' not in sys.modules"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 @pytest_asyncio.fixture

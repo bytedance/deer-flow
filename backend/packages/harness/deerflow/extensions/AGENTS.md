@@ -448,6 +448,10 @@ Gateway binds the middleware-stamped principal and threads:read through
 `BATCH_RESULTS_RESOLVER_KEY`; never accept payload owner IDs or grant global access
 to admin/internal callers. Public admission errors retain their HTTP status.
 Unavailable SQL storage is unsupported; a stopped worker still permits reads.
+`app.gateway.extension_batch_results.install_batch_result_reader` is shared by
+the production app factory and isolated HTTP/browser fixtures; it takes the
+host's principal projector without importing unrelated Gateway routers. Fixtures
+replace only that identity source with explicitly synthetic authentication.
 The native adapter checks thread access before batch metadata, then exact
 owner/thread scope. Fixed
 compact projections exclude full results; detail reads take report/verdict/evidence

@@ -1114,25 +1114,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     setattr(app.state, RUN_EVIDENCE_READER_RESOLVER_KEY, _resolve_extension_run_evidence_reader)
 
-    from deerflow_extension_api.batch_results import BATCH_RESULTS_RESOLVER_KEY, BatchResultError
+    from app.gateway.extension_batch_results import install_batch_result_reader
 
-    def _resolve_extension_batch_results(request):
-        principal = _resolve_extension_principal(request)
-        auth = getattr(request.state, "auth", None)
-        if principal is None or auth is None or not auth.has_permission("threads", "read"):
-            raise BatchResultError(403, "Batch results require an authenticated user with threads:read")
-        repository = getattr(app.state, "subagent_batch_repo", None)
-        thread_store = getattr(app.state, "thread_store", None)
-        if repository is None or thread_store is None:
-            return None
-        from deerflow.extensions.batch_results import RepositoryBatchResultReader
-
-        async def check_thread(thread_id):
-            return await thread_store.check_access(thread_id, principal.user_id)
-
-        return RepositoryBatchResultReader(repository, user_id=principal.user_id, check_thread=check_thread)
-
-    setattr(app.state, BATCH_RESULTS_RESOLVER_KEY, _resolve_extension_batch_results)
+    install_batch_result_reader(app, _resolve_extension_principal)
 
     from deerflow_extension_api.agent_runs import AGENT_RUNS_RESOLVER_KEY
 

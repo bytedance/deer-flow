@@ -9,11 +9,10 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
 import uvicorn
-from deerflow_extension_api.auth import EXTENSION_PRINCIPAL_RESOLVER_KEY
-from deerflow_extension_api.batch_results import BATCH_RESULTS_RESOLVER_KEY
-from fastapi import FastAPI
+from deerflow_extension_api.auth import EXTENSION_PRINCIPAL_RESOLVER_KEY, ExtensionPrincipal
+from fastapi import FastAPI, Request
 
-from app.gateway.app import create_app as create_host_app
+from app.gateway.extension_batch_results import install_batch_result_reader
 from app.gateway.routers.plugins import router
 from deerflow.community.ragflow.formatting import format_retrieval_sources
 from deerflow.community.ragflow.sources import durable_source_artifact
@@ -71,11 +70,8 @@ async def create_app(directory):
         completed_at=datetime.now(UTC),
         result_artifact=snapshot,
     )
-    host = create_host_app()
-    host.state.subagent_batch_repo = repository
-    host.state.thread_store = make_thread_store(get_session_factory(), None)
-    await host.state.thread_store.create(THREAD, user_id="alice", display_name="Research")
-    host.state.subagent_batches_available = False
+    thread_store = make_thread_store(get_session_factory(), None)
+    await thread_store.create(THREAD, user_id="alice", display_name="Research")
 
     @asynccontextmanager
     async def lifespan(app):
@@ -86,9 +82,15 @@ async def create_app(directory):
 
     app = FastAPI(lifespan=lifespan)
     app.state.extensions = extensions
-    app.state.preview_thread_store = host.state.thread_store
-    for key in (EXTENSION_PRINCIPAL_RESOLVER_KEY, BATCH_RESULTS_RESOLVER_KEY):
-        setattr(app.state, key, getattr(host.state, key))
+    app.state.subagent_batch_repo = repository
+    app.state.thread_store = app.state.preview_thread_store = thread_store
+    app.state.subagent_batches_available = False
+
+    def principal_resolver(request: Request) -> ExtensionPrincipal:
+        return ExtensionPrincipal(request.state.user.id, roles=("user",))
+
+    setattr(app.state, EXTENSION_PRINCIPAL_RESOLVER_KEY, principal_resolver)
+    install_batch_result_reader(app, principal_resolver)
 
     @app.middleware("http")
     async def identity(request, call_next):
