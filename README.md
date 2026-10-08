@@ -819,9 +819,10 @@ DeerFlow can also expose user-owned IM channel connections in the workspace UI. 
 | DingTalk | Stream Push (WebSocket) | Moderate |
 | Buzz | Nostr relay (WebSocket, NIP-42) | Moderate |
 
-Attachments saved by the shared IM ingestion pipeline keep distinct filenames,
-including when concurrent uploads choose the same name. The stored filename is
-passed to the agent; an existing conversation file is not overwritten.
+Attachments saved by the shared IM ingestion pipeline or Feishu/DingTalk's
+embedded downloads keep distinct filenames, including when concurrent uploads
+choose the same name. The final filename is passed to the agent and used for
+sandbox sync; an existing conversation file is not overwritten.
 
 **Configuration in `config.yaml`:**
 

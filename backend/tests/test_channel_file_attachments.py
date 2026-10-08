@@ -1555,3 +1555,78 @@ class TestWeChatDownloadGuardLabels:
             assert channel._stage_downloaded_file("photo.bin", b"x") is None
 
         assert "no state directory configured" in caplog.text
+
+
+@pytest.mark.parametrize("channel_name", ["feishu", "dingtalk"])
+@pytest.mark.parametrize("mounted", [False, True])
+def test_embedded_upload_retries_claim_collision(tmp_path, monkeypatch, channel_name, mounted):
+    """A publisher winning after the filename claim must keep its own bytes."""
+    import importlib
+    from io import BytesIO
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from deerflow.config.paths import Paths
+    from deerflow.uploads.manager import write_upload_file_no_symlink
+
+    paths = Paths(str(tmp_path))
+    paths.ensure_thread_dirs("thread-1", user_id="owner")
+    uploads = paths.sandbox_uploads_dir("thread-1", user_id="owner")
+    module = importlib.import_module(f"app.channels.{channel_name}")
+    monkeypatch.setattr(module, "get_paths", lambda: paths)
+    synced = []
+
+    class Provider:
+        uses_thread_data_mounts = mounted
+
+        async def acquire_async(self, thread_id=None, *, user_id=None):
+            assert not mounted
+            assert (thread_id, user_id) == ("thread-1", "owner")
+            return "remote-sandbox"
+
+        def get(self, sandbox_id):
+            return SimpleNamespace(update_file=lambda path, content: synced.append((path, content)), release_command_scope=lambda scope: None)
+
+        def release(self, sandbox_id):
+            pass
+
+    provider = Provider()
+    monkeypatch.setattr(module, "get_sandbox_provider", lambda: provider)
+    claim = module.claim_unique_filename
+    other_files = {}
+
+    def publish_after_claim(name, seen):
+        chosen = claim(name, seen)
+        if len(other_files) < 2:
+            content = f"other-publisher-{len(other_files)}".encode()
+            write_upload_file_no_symlink(uploads, chosen, content, exclusive=True)
+            other_files[chosen] = content
+        return chosen
+
+    monkeypatch.setattr(module, "claim_unique_filename", publish_after_claim)
+    payload = b"CHANNEL ATTACHMENT"
+    if channel_name == "feishu":
+        channel = module.FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+        channel._GetMessageResourceRequest = MagicMock()
+        response = MagicMock()
+        response.success.return_value = True
+        response.file = BytesIO(payload)
+        response.file_name = "report.pdf"
+        channel._api_client = MagicMock()
+        channel._api_client.im.v1.message_resource.get.return_value = response
+        files = [{"file_key": "file-key"}]
+    else:
+        channel = module.DingTalkChannel(MessageBus(), config={})
+        channel._download_by_code = AsyncMock(return_value=payload)
+        files = [{"type": "file", "download_code": "file-key", "filename": "report.pdf"}]
+    message = InboundMessage(channel_name=channel_name, chat_id="chat-1", user_id="sender", thread_ts="message-1", text="[file]", files=files)
+
+    result = _run(channel.receive_file(message, "thread-1", user_id="owner"))
+
+    for name, content in other_files.items():
+        assert (uploads / name).read_bytes() == content
+    assert set(other_files) == {"report.pdf", "report_1.pdf"}
+    assert (uploads / "report_2.pdf").read_bytes() == payload
+    advertised = "/mnt/user-data/uploads/report_2.pdf"
+    assert advertised in result.text
+    assert synced == ([] if mounted else [(advertised, payload)])
