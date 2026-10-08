@@ -10,6 +10,7 @@ import { DEFAULT_LOCAL_SETTINGS } from "@/core/settings/local";
 import { useThreadStream } from "@/core/threads/hooks";
 
 type StreamOptions = {
+  onCreated?: (meta: { thread_id: string; run_id: string }) => void;
   onError?: (
     error: unknown,
     run?: { thread_id: string; run_id: string },
@@ -173,6 +174,120 @@ test("leaves a matching reconnect pointer to the SDK without joining twice", asy
     "run-active",
   );
 
+  unmount();
+});
+
+test("takes over a failed same-tab reconnect with bounded recovery", async () => {
+  window.sessionStorage.setItem("lg:stream:thread-1", "run-active");
+  const { unmount } = renderThread();
+  await flushFrames();
+  expect(streamMockState.joinStream).not.toHaveBeenCalled();
+
+  // The SDK keeps its pointer when its single reconnect fails.
+  act(() => failActiveRecoveredStream());
+  await flushFrames();
+  expect(streamMockState.joinStream).toHaveBeenCalledTimes(1);
+  expect(streamMockState.joinStream).toHaveBeenCalledWith("run-active");
+  expect(window.sessionStorage.getItem("lg:stream:thread-1")).toBe(
+    "run-active",
+  );
+
+  act(() => failActiveRecoveredStream());
+  await act(async () => {
+    await rs.advanceTimersByTimeAsync(1_000);
+  });
+  expect(streamMockState.joinStream).toHaveBeenCalledTimes(2);
+
+  act(() => failActiveRecoveredStream());
+  await act(async () => {
+    await rs.advanceTimersByTimeAsync(2_000);
+  });
+  expect(streamMockState.joinStream).toHaveBeenCalledTimes(3);
+
+  act(() => failActiveRecoveredStream());
+  await act(async () => {
+    await rs.advanceTimersByTimeAsync(10_000);
+  });
+  expect(streamMockState.joinStream).toHaveBeenCalledTimes(3);
+
+  unmount();
+});
+
+test("recovers a same-tab reconnect that failed before the runs read", async () => {
+  let resolveRuns!: (runs: Run[]) => void;
+  apiMockState.listRuns.mockImplementation(
+    () =>
+      new Promise<Run[]>((resolve) => {
+        resolveRuns = resolve;
+      }),
+  );
+  window.sessionStorage.setItem("lg:stream:thread-1", "run-active");
+  const { unmount } = renderThread();
+  await flushFrames();
+
+  act(() => failActiveRecoveredStream());
+  expect(window.sessionStorage.getItem("lg:stream:thread-1")).toBeNull();
+  expect(streamMockState.joinStream).not.toHaveBeenCalled();
+
+  act(() => resolveRuns([ACTIVE_RUN]));
+  await flushFrames();
+
+  expect(streamMockState.joinStream).toHaveBeenCalledTimes(1);
+  expect(streamMockState.joinStream).toHaveBeenCalledWith("run-active");
+  unmount();
+});
+
+test.each(["success", "error", "timeout", "interrupted"])(
+  "does not rejoin a released same-tab reconnect whose run ended with %s",
+  async (status) => {
+    let resolveRuns!: (runs: Run[]) => void;
+    apiMockState.listRuns.mockImplementation(
+      () =>
+        new Promise<Run[]>((resolve) => {
+          resolveRuns = resolve;
+        }),
+    );
+    window.sessionStorage.setItem("lg:stream:thread-1", "run-active");
+    const { unmount } = renderThread();
+    await flushFrames();
+
+    // This hook never streamed the run, so completedRunIdsRef cannot guard
+    // it; only the server-reported status keeps recovery from rejoining.
+    act(() => failActiveRecoveredStream());
+    act(() => resolveRuns([{ ...ACTIVE_RUN, status } as Run]));
+    await flushFrames();
+    await act(async () => {
+      await rs.advanceTimersByTimeAsync(10_000);
+    });
+
+    expect(streamMockState.joinStream).not.toHaveBeenCalled();
+    expect(window.sessionStorage.getItem("lg:stream:thread-1")).toBeNull();
+    unmount();
+  },
+);
+
+test("leaves a failed submitted run to the submit flow", async () => {
+  apiMockState.listRuns.mockResolvedValue([]);
+  const { queryClient, unmount } = renderThread();
+  await flushFrames();
+
+  act(() => {
+    window.sessionStorage.setItem("lg:stream:thread-1", "run-active");
+    streamMockState.options?.onCreated?.(ACTIVE_RUN_META);
+  });
+  act(() => {
+    queryClient.setQueryData(["thread", "thread-1"], [ACTIVE_RUN]);
+  });
+  await flushFrames();
+  act(() => failActiveRecoveredStream());
+  await act(async () => {
+    await rs.advanceTimersByTimeAsync(10_000);
+  });
+
+  expect(streamMockState.joinStream).not.toHaveBeenCalled();
+  expect(window.sessionStorage.getItem("lg:stream:thread-1")).toBe(
+    "run-active",
+  );
   unmount();
 });
 

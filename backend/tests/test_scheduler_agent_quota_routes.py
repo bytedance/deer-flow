@@ -77,7 +77,9 @@ async def test_terminal_tool_task_quota_is_http_409_and_keeps_task_unchanged(quo
     before = await repo.get("old-terminal", user_id=owner)
     response = await reactivate(client, "old-terminal", action)
     assert response.status_code == 409
-    assert "20 live conversation-created" in response.json()["detail"]
+    assert response.json()["detail"]["code"] == "task_quota_exceeded"
+    assert response.json()["detail"]["params"] == {"limit": 20}
+    assert "20 live conversation-created" in response.json()["detail"]["message"]
     assert await repo.get("old-terminal", user_id=owner) == before
 
 
@@ -113,7 +115,8 @@ async def test_goal_schedule_patch_to_reused_thread_is_422_and_preserves_row(quo
     before = await repo.get("goal-task", user_id=owner)
     response = await client.patch("/api/scheduled-tasks/goal-task", json={"context_mode": "reuse_thread", "thread_id": "reused-thread"})
     assert response.status_code == 422
-    assert "fresh_thread_per_run" in response.json()["detail"]
+    assert response.json()["detail"]["code"] == "goal_requires_fresh_thread"
+    assert "fresh_thread_per_run" in response.json()["detail"]["message"]
     assert await repo.get("goal-task", user_id=owner) == before
 
 
@@ -128,7 +131,9 @@ async def test_schedule_without_goal_can_patch_to_reused_thread(quota_routes):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("live_count", [19, 20])
-async def test_pause_route_cannot_reactivate_terminal_task_beyond_quota(quota_routes, live_count):
+async def test_pause_route_never_reactivates_a_finished_task(quota_routes, live_count):
+    # A finished task has no schedule left to pause; Resume reactivates it.
+    # Pause therefore never moves a terminal task into a live (quota) state.
     client, repo, owner = quota_routes
     await create_task(repo, owner, "terminal")
     await repo.update("terminal", user_id=owner, updates={"status": "completed"})
@@ -136,13 +141,11 @@ async def test_pause_route_cannot_reactivate_terminal_task_beyond_quota(quota_ro
         await create_task(repo, owner, f"live-{index}")
     before = await repo.get("terminal", user_id=owner)
     response = await client.post("/api/scheduled-tasks/terminal/pause")
-    assert response.status_code == (409 if live_count == 20 else 200)
-    if live_count == 20:
-        assert "20 live" in response.json()["detail"]
-        assert await repo.get("terminal", user_id=owner) == before
-    else:
-        assert response.json()["status"] == "paused"
-        assert (await client.post("/api/scheduled-tasks/terminal/pause")).status_code == 200
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "task_finished"
+    assert await repo.get("terminal", user_id=owner) == before
     await create_task(repo, owner, "legacy", tool_created=False)
     await repo.update("legacy", user_id=owner, updates={"status": "completed"})
-    assert (await client.post("/api/scheduled-tasks/legacy/pause")).status_code == 200
+    legacy = await client.post("/api/scheduled-tasks/legacy/pause")
+    assert legacy.status_code == 409
+    assert legacy.json()["detail"]["code"] == "task_finished"

@@ -121,6 +121,8 @@ _TEST_PASS_SHAPE_RE = re.compile(
 #: cannot see: "0 passed", go's no-test markers, unittest "Ran 0 tests".
 _TEST_ZERO_SHAPE_RE = re.compile(r"\b0\s+passed\b|\[no test files\]|\[no tests to run\]|\bRan 0 tests\b", re.IGNORECASE)
 
+_GO_ZERO_TEST_LINE_RE = re.compile(r"^(?:ok|\?)[ \t]+\S+[^\r\n]*\[(?:no test files|no tests to run)\][ \t]*\r?$", re.MULTILINE)
+
 _TEST_FAIL_SHAPE_RE = re.compile(
     r"\b[1-9]\d*\s+failed\b"  # pytest / jest: "1 failed"
     r"|\b[1-9]\d*\s+errors?\b"  # pytest: "1 error" — an errored collection means part of the selection never ran
@@ -1826,7 +1828,9 @@ def _check_tests_passed_leaf(command: str, bash_executions: list[dict[str, Any]]
         base["checked"] = True
         base["detail"] = "recorded output carries a failing test summary"
         return base
-    if _TEST_PASS_SHAPE_RE.search(output_tail) and not _TEST_ZERO_SHAPE_RE.search(output_tail):
+    # Go zero-test markers describe one package; exclude the whole line from pass evidence.
+    summary_tail = _GO_ZERO_TEST_LINE_RE.sub("", output_tail)
+    if _TEST_PASS_SHAPE_RE.search(summary_tail) and not _TEST_ZERO_SHAPE_RE.search(summary_tail):
         base["checked"] = True
         base["holds"] = True
         base["detail"] = "recorded output carries a passing test summary"

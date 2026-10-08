@@ -122,6 +122,16 @@ preference hints for requests that should prefer a specific MCP server or tool.
 See [MCP Server Configuration](MCP_SERVER.md#routing-hints) for the schema,
 example, and soft-vs-hard routing boundary.
 
+Runtime edits to `extensions_config.json` (the MCP and skills APIs, the web UI,
+`DeerFlowClient`, or an editor) are picked up by every Gateway process that reads
+the same file: the process cache revalidates the file's path and content
+signature on each read, so uvicorn workers and multi-instance Pods sharing one
+volume converge without a restart or a per-Pod reload call. A change made through
+an API call on one instance is visible to the others on their next request. A
+missing, partially written or invalid file keeps the previously loaded configuration
+until a complete revision lands, including when it disappears during a reload;
+the Gateway logs one warning per such revision.
+
 ### Recursion Limits
 
 Gateway runs use the top-level `recursion_limit` as their LangGraph super-step
@@ -268,6 +278,29 @@ models:
         thinking:
           type: enabled
 ```
+
+#### MindIE XML tool arguments
+
+The MindIE adapter (`deerflow.models.mindie_provider:MindIEChatModel`) parses XML
+tool calls before decoding escaped newlines in the remaining reply text. JSON
+objects and arrays keep their original escapes during parsing, so `\n` inside a
+JSON string becomes a newline through JSON decoding and `\\n` retains a literal
+backslash. The existing Python-literal fallback also parses the original value.
+
+Non-JSON raw-string parameters retain the gateway's multiline compatibility:
+literal `\n` outside fenced code becomes a real newline, and surrounding
+whitespace is trimmed. Escapes inside fenced code remain unchanged. This keeps
+multi-line file content and commands working. Raw strings cannot distinguish an
+intended literal `\n` from a gateway-escaped newline; structured JSON parameters
+avoid that ambiguity. Numeric conversion failures and unsafe Python-literal
+containers retain the entire original argument rather than rewriting it.
+
+The same behavior applies to synchronous generation, asynchronous generation,
+and both synchronous and asynchronous streaming. Tool-enabled streams use
+non-streaming generation followed by simulated chunks, even with a
+`streaming: true` model default; native no-tool streams carry the fence state
+across chunks. Native tool-call arguments remain unchanged.
+No additional configuration is required.
 
 #### Gemini via Google's OpenAI-compatible endpoint
 
@@ -497,6 +530,7 @@ scheduler:
   poll_interval_seconds: 5
   lease_seconds: 120
   max_concurrent_runs: 3
+  max_concurrent_runs_per_user: 2
   queue_timeout_seconds: 3600
   min_once_delay_seconds: 60
   recursion_limit: 1000
@@ -505,16 +539,20 @@ scheduler:
 Notes:
 
 - `enabled: false` keeps background polling off by default.
-- `tool_enabled: false` keeps conversation schedule tools off. Set it together with `enabled: true` and restart Gateway to offer `schedule_task` in authorized interactive conversations and `stop_scheduled_task` in their scheduled runs (see "Create schedules in a conversation" in the README).
+- `tool_enabled: false` keeps conversation schedule tools off. Set it together with `enabled: true` and restart Gateway to offer `schedule_task` in authorized interactive conversations and `stop_scheduled_task` to every scheduled run of a task, whether a chat or the tasks page created it (see "Create schedules in a conversation" in the README). A run can stop only its own task's schedule. Managing tasks from chat (create, update, resume, pause, delete, trial, notes) is interactive-only: a conversation manages the tasks created in it and, when it is a task's run conversation, that task; scheduled runs get only their own stop. The tools are offered only while this Gateway process's scheduler is running. With `tool_enabled` off, a task's stop condition is still sent to its runs, phrased so the run reports a met rule instead of calling a tool it does not have. Each launch reads `tool_enabled` from the live config, the same value that decides whether the run gets the tool, so the phrasing always matches.
+- The tasks page and REST API have parity with conversations for the per-run goal (`goal_objective`), safety cap (`max_runs`, `end_at`) and stop condition (`stop_condition`, stored in its own column and appended to the run message only at launch). Resume computes the next run from now without a catch-up run and refuses a one-time task whose time passed; reactivating a task whose cap is used up returns `409 limits_exhausted` unless the same request (for example the optional Resume body `{"max_runs", "end_at"}`) renews or clears the cap. Goal-check failures neither count toward nor reset the three-miss automatic pause, and changing the goal, instructions or stop condition, or adding a note, starts a new count (Resume keeps it). Creating a task while this Gateway process's poller is not running returns `409 scheduler_not_running`; `/api/features` reports `scheduled_tasks.running`. See `backend/docs/API.md#scheduled-tasks`.
 - `multi_instance: true` opts into lease-aware scheduler recovery across Gateway instances. It requires Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`; otherwise startup fails fast. Leave it false for the default single-instance scheduler.
 - `max_concurrent_runs` is a shared global execution cap in multi-instance mode. Waiting `queued` rows do not consume capacity; an atomic `queued` → `launching` claim counts `launching`/`running` rows under a Postgres advisory lock so concurrent Pods cannot exceed the cap.
-- `queue_timeout_seconds` limits how long a persisted occurrence may wait for capacity or a reused thread to become available. Expired occurrences are marked `failed`; queued rows otherwise survive Gateway restarts.
+- `max_concurrent_runs_per_user` (default `2`, `0` = off, at most 32) caps how many scheduled runs one task owner may have `launching`/`running` at a time, whatever started them (manual "run now" included). The effective cap is `min(max_concurrent_runs_per_user, max_concurrent_runs)`, so with the defaults one owner holds at most 2 of the 3 global slots and the third stays free for other owners. The check runs in the same atomic claim, under the same database-wide lock, as the global cap, so it holds across workers and Pods. A row rejected by either cap stays `queued`.
+- The waiting queue is drained fairly whatever the per-owner cap: eligible rows are ranked within their owner and the drain batch takes every owner's oldest row before any owner's second one, so one owner's backlog cannot push another owner's run out of the batch. Owners already at their cap drop out of the batch before its size limit applies. Same-thread FIFO and the order within one owner (fewest launch attempts, then oldest) are unchanged; with a single owner the order is the same as before.
+- `queue_timeout_seconds` limits how long a persisted occurrence may wait for capacity or a reused thread to become available. Expired occurrences are marked `failed`; queued rows otherwise survive Gateway restarts. With the per-owner cap on, an owner whose runs take longer than this can see its waiting runs expire: the run history then reads "Skipped: it waited too long for a free slot", and no chat event or IM notice is sent for it. Keep `queue_timeout_seconds` well above an owner's typical run length.
 - A task definition is immutable while an occurrence is `queued`, `launching`, or `running`. This prevents a durable occurrence from mixing its admitted thread with a later prompt or schedule edit. Transitioning a task to paused or deleting it cancels a waiting row; PATCH and resume return a conflict until the active occurrence finishes or is cancelled.
 - A manual trigger remains explicit even while the recurring schedule is paused: it may wait in the durable queue and run later, while the task itself stays paused. Transitioning an enabled task to paused still cancels its waiting occurrence atomically.
 - Queue admission, PATCH/resume, pause, and delete serialize on the parent task row. Per-thread FIFO spans all active states, so an older `launching` or `running` occurrence blocks a newer queued occurrence on the same reused thread as well as an older `queued` occurrence.
 - Multi-instance reconciliation uses the run ownership lease: a live peer run is preserved, an expired lease is atomically taken over before its scheduled row is interrupted, and a stale Pod cannot overwrite a newer Pod's parent-task bookkeeping.
 - `recursion_limit` is the LangGraph super-step cap for scheduler-launched runs (default 1000, matching the web UI's interactive budget). Values above `max_recursion_limit` (default 1000) are clamped. This field is read at dispatch, so a YAML edit applies to the next scheduled run without a Gateway restart.
-- Poller fields (`enabled`, `multi_instance`, `poll_interval_seconds`, `lease_seconds`, `max_concurrent_runs`, `queue_timeout_seconds`, `min_once_delay_seconds`) are restart-required; edits need a Gateway restart.
+- Poller fields (`enabled`, `multi_instance`, `poll_interval_seconds`, `lease_seconds`, `max_concurrent_runs`, `max_concurrent_runs_per_user`, `queue_timeout_seconds`, `min_once_delay_seconds`) are restart-required; edits need a Gateway restart.
+- **Upgrade note (behavior change):** one owner now runs at most 2 scheduled runs at a time by default (before, up to `max_concurrent_runs`). Set `scheduler.max_concurrent_runs_per_user: 0` to restore the old behavior; the drain stays fair to owners either way.
 - **Upgrade note:** before upgrading a deployment with `GATEWAY_WORKERS > 1` and `scheduler.enabled: true`, either run the scheduler on exactly one Gateway worker or enable `scheduler.multi_instance: true` with shared Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`. The startup gate now rejects the unsafe combination instead of allowing it to start silently.
 - **Upgrade note:** in multi-instance mode, `max_concurrent_runs` is cluster-wide rather than per Pod and counts `launching`/`running` occurrences. Waiting `queued` rows remain outside the execution cap; capacity does not multiply with the replica count.
 - **Upgrade note:** `scheduler.multi_instance` and its related scheduler, ownership, and run-event settings are startup-only. Restart all Gateway Pods together after changing them; a ConfigMap update without a coordinated restart leaves the running service on its previous mode.
@@ -524,7 +562,14 @@ Notes:
 - Create/update accept `once`, `cron`, and `interval`. Interval uses `schedule_spec.every_seconds` (UTC `now + N`, no missed-beat catch-up). N is at least `min_once_delay_seconds` (default 60) and at most 30 days.
 - Manual trigger uses the same scheduled-task resource and run lifecycle.
 - Scheduled task definitions and task-run history are persisted in the application database.
-- With `channel_connections.enabled: true`, the scheduler enqueues IM outcome notifications for the task owner's connected identities. A delivery worker (same poll cadence as the scheduler) pushes them. Scheduled runs that finish as success or failed notify. For goal tasks, an `unmet` scheduled occurrence sends a goal-unmet notice instead, and an automatic pause after three unmet occurrences sends an auto-pause notice; a stop requested by the agent adds no separate notice. Manual triggers and interrupts stay silent, and so do occurrences that end without a finished run (launch error, queue timeout, restart recovery). Channel/transport outages park rows without consuming the retry budget, for up to about a day; platform rejections exhaust ~15 minutes of counted retries then settle `failed`. The worker re-checks the binding right before sending: a target the owner has disconnected since enqueue is dropped as `failed`, never pushed. Only WeCom currently implements proactive `send_notification`.
+- With `channel_connections.enabled: true`, the scheduler sends IM notices ("scheduled task updates") to the task owner's connected identities. A delivery worker (same poll cadence as the scheduler) pushes them.
+  - **Which apps:** only providers whose channel implements proactive push get notices; today that is WeCom (`proactive_notifications` in `app/channels/capabilities.py`, also returned by `GET /api/channels/providers`, where Settings shows "sent here" or "not available for this app yet"). Other providers get no outbox rows at all, and rows queued for them before the upgrade end once as `failed` without retries.
+  - **Events:** `run_completed`, `run_failed`, `run_unmet` (goal missed), `task_paused` (automatic pause after three missed goals), `task_stopped` (paused by the agent because its stop condition was met) and `task_finished` (all `max_runs` done or `end_at` reached).
+  - **One message per occurrence:** when one occurrence produces several events, only the first of `task_stopped` > `task_paused` > `task_finished` > `run_failed` > `run_unmet` > `run_completed` is sent, and that message still says how the last run went ("The last run failed." / "didn't meet the goal"). A one-time task sends only its run's outcome, never a separate `task_finished`.
+  - **Transactional:** notices are queued by the finalization observer in the same database transaction that records the outcome and are deduplicated per occurrence (or per end time for a task that ends between runs), so an occurrence finalized by crash or lease recovery notifies exactly once. Plain manual "run now" trials and interrupted runs stay silent; a trial that pauses or finishes the task still sends that notice. Occurrences that end without a finished run (launch error, queue timeout, interrupted by a restart) stay silent.
+  - **Text:** the task title, what happened, a one-line result (the same run summary the tasks page shows, redacted, only when the agent replied) and "Open DeerFlow → Scheduled tasks for details." Notices carry no task, run or thread IDs, no timestamps and no links: most deployments run on localhost or a LAN, where a link would be dead on the phone that receives it.
+  - **Language:** the owner's web UI language (the `locale` user preference, which the web app keeps in sync), else `channel_connections.notification_locale` (`en-US` or `zh-CN`, default `en-US`; startup-scoped). Auth-disabled installs always use the config value.
+  - **Delivery:** channel/transport outages park rows without consuming the retry budget, for up to about a day; platform rejections exhaust ~15 minutes of counted retries then settle `failed`. The worker re-checks the binding right before sending: a target the owner has disconnected since enqueue is dropped as `failed`, never pushed.
 
 ### Deployment topology (multi-instance)
 
@@ -538,6 +583,7 @@ Notes:
 - `GATEWAY_WORKERS` / `WEB_CONCURRENCY` only count the uvicorn workers of one process tree. A Kubernetes Deployment with `replicas > 1` runs one worker per Pod, so every Pod reports a single worker and the multi-worker startup gate stays inert — while each Pod's startup orphan reconciliation still writes the other Pods' lease-less runs off as crashed on every rolling update.
 - Set `multi_instance: true` (or export `DEER_FLOW_MULTI_INSTANCE=1`, which lets deploy tooling such as a Helm chart set it from its replica count) on every instance that shares one database. Startup then enforces the same prerequisites as `GATEWAY_WORKERS > 1`: `database.backend: postgres`, `run_events.backend: db`, `run_ownership.heartbeat_enabled: true`, and a Redis stream bridge (`stream_bridge.type: redis` or `DEER_FLOW_STREAM_BRIDGE_REDIS_URL`). It refuses an explicit `sandbox.ownership.type: memory`, process-local browser tools, and `scheduler.enabled: true` without `scheduler.multi_instance: true`.
 - `DEER_FLOW_MULTI_INSTANCE` treats blank, `0`, `false`, `no` and `off` as "not declared"; any other value declares a multi-instance deployment, so a typo fails closed.
+- `GET /health/ready` pings the Redis stream bridge on every probe and answers 503 (`stream_bridge: unreachable`) while Redis is down, so the orchestrator drains that instance instead of routing it runs it cannot publish or stream; the memory bridge reports `not_configured`. When `sandbox.provisioner_url` is set, the body also carries the provisioner's `/health` verdict (`provisioner: ok|unreachable`), which never changes the status code because every instance shares one provisioner. That probe follows the sandbox clients' proxy policy: loopback, private, link-local and cluster-local provisioner addresses bypass `HTTP_PROXY`, external hosts keep the environment's proxy settings.
 - The declaration also drives the `agent_storage.backend: file` divergence warning, the inbound webhook dedupe warning, and the WeChat QR-login guard, which otherwise only look at the worker count.
 - Restart-required: the gate runs once at startup. Restart all Gateway instances together after changing it.
 
@@ -559,9 +605,19 @@ agent_storage:
 
 Migrating an existing install from `file` to `db`:
 
+Run from the repository root using the backend's `uv` environment. The importer
+depends on the installed workspace packages; using a system `python` without
+an activated backend environment can fail with `ModuleNotFoundError: deerflow`.
+Complete the [backend installation](../../CONTRIBUTING.md#option-2-local-development)
+first, including the `postgres` extra when applicable. Use the same exported
+configuration and runtime selectors as the running Gateway, such as
+`DEER_FLOW_CONFIG_PATH` and `DEER_FLOW_HOME`. `--project backend` selects the
+environment without changing the working directory, so relative paths keep
+their meaning; `--no-sync` preserves installed extras.
+
 ```bash
-python backend/scripts/migrate_agents_to_db.py            # copy on-disk agents into the db
-python backend/scripts/migrate_agents_to_db.py --dry-run  # preview without writing
+uv run --no-sync --project backend python backend/scripts/migrate_agents_to_db.py --dry-run  # preview without writing
+uv run --no-sync --project backend python backend/scripts/migrate_agents_to_db.py            # copy on-disk agents into the db
 ```
 
 The importer is idempotent (already-present agents are skipped) and leaves the source files untouched, so reverting `agent_storage.backend` to `file` is a clean rollback. Agent *memory* (`memory.json`) is unaffected by this switch.
@@ -645,11 +701,78 @@ cannot cancel work already started by Jina. Enabling retries can send up to `1 +
 and incur additional cost. Successful content and final `Error:` results retain
 the existing contract.
 
+#### Jina response byte budget
+
+On the same Jina `web_fetch` tool entry, optionally set `max_response_bytes: 1048576`
+(for example, 1 MiB). This uses existing tool configuration extras; no model-facing
+argument is added. Omitted or `null` preserves the buffered default. An enabled
+value must be a positive integer; booleans, strings, fractions, zero and negative
+values return `Error:` before HTTP client creation or network activity.
+
+Enabled fetches stream and count actual content-decoded bytes (after decompression,
+before text decoding), ignoring `Content-Length`. Exactly the limit is accepted.
+The first chunk exceeding it stops consumption and closes the response, returning
+an explicit size `Error:` without body content, partial success or readability
+extraction. This applies to all statuses, including 502/503/504, and oversize never
+retries. Each retry response has its own counter within the existing shared time
+budget. Streams close on success, errors, cancellation and read failures. Responses
+within the limit retain charset decoding and existing status/retry handling.
+
+This limits response retention/consumption, not wire-byte bandwidth or allocations
+inside HTTPX's decompressor; it is not a hard process-memory bound. The final
+Markdown truncation at 4096 characters is unchanged and independent of this option.
+
 Serper `web_search` also accepts the optional model argument
 `time_range: "day" | "week" | "month" | "year"`. For example,
 `{"query": "Python releases", "time_range": "week"}` sends `tbs: "qdr:w"`
 to Serper. Omitting `time_range` or passing `null` omits the recency constraint from the
 search request. This option does not change Serper `image_search`.
+
+#### Serper endpoints
+
+To use a Serper-compatible provider for web and image search, set
+`SERPER_BASE_URL` to its base URL without `/search` or `/images`, and set
+`SERPER_API_KEY` to that provider's key. The default base URL is
+`https://google.serper.dev`.
+
+Each Serper tool can override the environment independently in `config.yaml`:
+
+```yaml
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.serper.tools:web_search_tool
+    base_url: https://proxy.example/api
+    api_key: $SEARCH_PROVIDER_API_KEY
+  - name: image_search
+    group: web
+    use: deerflow.community.serper.tools:image_search_tool
+    base_url: https://images.example/api
+    api_key: $IMAGE_PROVIDER_API_KEY
+```
+
+A non-empty string `base_url` in the requested tool's entry takes precedence
+over `SERPER_BASE_URL`. Missing, non-string or whitespace-only tool values fall
+back to the environment. An unset, empty or whitespace-only environment value
+keeps the default endpoint. Leading/trailing whitespace and trailing slashes
+are removed before appending `/search` or `/images`. A tool's `api_key` similarly
+overrides `SERPER_API_KEY`; neither tool inherits the other's endpoint or key.
+Both settings are read from the same captured tool configuration, so a hot
+reload cannot pair the old provider's endpoint with the new provider's key.
+
+Overrides must be absolute `http://` or `https://` URLs with a host and valid
+port. Query strings and fragments (including empty `?`/`#` markers) are rejected
+before HTTP. Invalid overrides return a configuration error naming
+`base_url`/`SERPER_BASE_URL` without exposing the configured value; they do not
+fall back to another host.
+
+These are operator-controlled settings, not model-supplied arguments. Choose a
+trusted provider: the key is sent to the configured host in the `X-API-KEY`
+header, never in a query parameter. Endpoint configuration does not change the
+existing validation of returned image URLs or web source filters. The endpoint
+is resolved once before transport so it can remain constant across retry attempts.
+Override debug diagnostics show the effective endpoint without URL credentials,
+query or fragment; result-URL guards do not restrict the operator's API host.
 
 #### Serper source filters
 
@@ -1332,9 +1455,11 @@ models:
 - `DEEPSEEK_API_KEY` - DeepSeek API key
 - `MIMO_API_KEY` - Xiaomi MiMo API key
 - `NOVITA_API_KEY` - Novita API key (OpenAI-compatible endpoint)
+- `OPPER_API_KEY` - Opper API key (OpenAI-compatible endpoint)
 - `TAVILY_API_KEY` - Tavily search API key
 - `BRAVE_SEARCH_API_KEY` - Brave Search API key for `web_search` and `image_search`
 - `SERPER_API_KEY` - Serper (Google Search/Images API) key for `web_search` and `image_search`
+- `SERPER_BASE_URL` - Optional operator-controlled Serper-compatible base URL for both tools; each tool's `base_url` takes precedence. The provider key is sent to the configured host in `X-API-KEY`, never a query parameter. See [Serper endpoints](#serper-endpoints).
 - `SERPLY_API_KEY` - [Serply](https://serply.io) key for `web_search` (Google Search, plus Google News and Google Scholar via `vertical`)
 - `GROUNDROUTE_API_KEY` - GroundRoute meta-search API key for `web_search` and `web_fetch` (routes across Serper, Brave, Exa, Tavily, Firecrawl, Perplexity with gain-share pricing)
 - `SOFYA_API_KEY` - [Sofya](https://sofya.co) key for `web_search` and `web_fetch`

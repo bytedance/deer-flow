@@ -311,7 +311,7 @@ def test_explicit_subagent_runtime_aligns_factory_middleware_and_tools(mock_crea
     assert limit.max_concurrent == 7
     assert limit.max_total == 12
     tool_names = {tool.name for tool in call_kwargs["tools"]}
-    assert {"task", "batch_task", "batch_status", "cancel_batch"} <= tool_names
+    assert {"task", "batch_task", "batch_status", "cancel_batch", "read_batch_result"} <= tool_names
 
 
 def test_explicit_subagent_runtime_requires_the_subagent_feature() -> None:

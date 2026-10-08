@@ -2,6 +2,7 @@
 
 `task` and `batch_task` opt into JSON checks with `file:<path> json-valid`.
 See [subagents/AGENTS.md](../subagents/AGENTS.md) for read limits and UNVERIFIED semantics.
+Batch readers bound by assembly use its AppConfig output budget. Fit the complete escaped response under 10K and active per-tool/fallback limits; too-small envelopes stop reading. Numeric reader inputs are strict integers. Escape `<` in outer JSON to preserve untrusted data without exposing framework tags; decoding restores the document unchanged.
 
 `list_uploaded_files` 的续页契约见 [FILE_UPLOAD.md](../../../../docs/FILE_UPLOAD.md)。
 游标绑定可信用户/线程、规范化过滤条件、本轮上传排除集合和目录元数据；身份与目录
@@ -38,17 +39,20 @@ Only standalone tool discovery without a model falls back to the base profile.
 4. **Subagent tool** (if enabled):
    - `task` - Delegate to subagent (`prompt`, `subagent_type`, optional `acceptance_criteria`, and an optional model-visible `description` used only as a short progress label). Execution never depends on `description`; lifecycle display falls back to `prompt` when a provider omits it. Subagent reports are self-reports: the docstring directs the lead to expect `[rN]` receipt citations and verifiable handles while `verification.receipts_enabled` (and explicitly qualifies that disabled receipts mean no citations and no citation verdict), to read the delegation ledger's citation cross-check as execution evidence only, and to attach `acceptance_criteria` for objectively checkable outcomes (canonical forms `file:<path> exists|non-empty`, `file_written:<path>`, `tests_passed:<command>`); criteria are handed to the executor and appended to the subagent's task message as untrusted data (see `subagents/report_contract.py`).
      Polling safety timeouts carry the latest published tool receipts into the terminal task metadata before requesting background cancellation.
-   - `batch_task`, `batch_status`, `cancel_batch` - Explicit durable batch submission/progress/cancellation. Added only while the startup SQL-backed batch submitter is installed; large results stay in the owner-scoped API/JSONL export rather than the lead context. Items accept optional `acceptance_criteria`; item queries and exports expose the separate `acceptance_verdict`. Progress counts describe execution, not acceptance; unmet and UNVERIFIED conditions never trigger automatic retries.
+   - `batch_task`, `batch_status`, `cancel_batch`, `read_batch_result` - Explicit durable batch operations, added only while the SQL-backed submitter is installed. Bulk results stay in JSONL; explicit reads return one current-user/thread item document window (≤8192 chars, metadata included). Concatenate windows before parsing; nonzero offsets require the previous content revision, changed state requires restart. Serialization/hash run off-loop. Bound SDK tools never fall back to a global worker. Criteria/verdicts describe acceptance separately from execution; reads neither wait nor retry.
    - Direct `create_deerflow_agent` integrations receive cloned tools bound to their explicit `SubagentRuntime`. The bound `task` forwards that runtime's exact execution controller and optional caller-owned `AppConfig` into registry/model/tool resolution and `SubagentExecutor`; bound batch tools use the same config snapshot and resolve only that runtime's submitter before falling back to no other application's active worker. Keep the original tool name/schema unchanged so model contracts and user-tool deduplication remain stable.
 
 The ordinary `task` boundary carries one narrow parent-loop middleware recorder into the isolated subagent runtime under separate loop-detection, tool-promotion, and tool-progress keys. It schedules only `record_middleware` calls back onto the loop that owns `RunJournal`, keeps an execution-local atomic promotion claim so parallel searches do not double-report one new schema, is fenced and drained once before `task` returns, and never exposes the journal or event store to the child loop. Durable batch tasks have no parent run journal and do not use this bridge.
 
 Scheduled-task runtime note:
-- Trial admission matches the entire current user turn against bounded English/Chinese
+- Trial admission matches the entire current user turn, after at most two leading
+  acknowledgements and one trailing particle, against bounded English/Chinese
   direct-run forms. Bare confirmations, task mentions, quotes and conditional or
   compound text do not dispatch. Never interpolate titles into authorization text;
   only fixed commands and opaque task-ID forms are accepted. This host gate is
   deliberately conservative, not a general intent parser.
+- `schedule_task` parameters carry types only; value rules come back as the same
+  coded results as REST (`contracts/scheduled_task_errors_contract.json`).
 - Scheduled background runs resolve to the `scheduled` interaction policy through trusted `context.non_interactive=true` and therefore exclude `ask_clarification` from the lead-agent tool list. The legacy `context.non_interactive=true` key remains accepted only for internally authenticated scheduler calls during migration; arbitrary HTTP/IM clients cannot set it.
 
 Durable MCP task-management tools are added only while the process-local task submitter is installed. They expose bounded local task fields, including whether cancellation was requested, but never the remote handle. Cancellation records that request durably and returns immediately; the background service owns the remote call and retries. These remain ordinary business tools under an active skill's `allowed-tools` policy and must be declared explicitly.
