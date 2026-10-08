@@ -75,9 +75,13 @@ answers for paginated history. See `docs/skill-usage-ui.md`.
 **Deferred terminal commit:** With an event store, the worker stages its terminal
 status locally and commits it only after finalization's receipt and duration
 writes. `RunRecord.terminal_commit_pending` keeps `_renew_leases()` renewing that
-still-active row until the commit is attempted; a renewal rejected by the worker's
-own commit is confirmed by re-reading the row, while a peer claim fences the run.
-Never select runs for renewal by local status alone.
+still-active row until the commit is attempted. A renewal rejected after this
+worker's own terminal commit is reconciled using an attributable local commit
+acknowledgement, either already recorded in `terminal_committed` or obtained by
+joining the specific in-flight persistence attempt within a bounded deadline. A
+matching durable row read-back is never sufficient proof of this worker's commit;
+if no attributable proof is available the worker must fail closed and fence the
+run. Never select runs for renewal by local status alone.
 
 **Journal write outcomes and terminal finalization** (`runtime/journal.py`,
 `runtime/runs/worker.py`, `runtime/runs/manager.py`): a `put_batch` outcome is
