@@ -810,7 +810,7 @@ This release closes that milestone with **439 merged pull requests**.
   retry went out without the `SKILL.md` body while the skill's tool restrictions
   still applied. The retry now carries the same reminder as the first attempt,
   without re-reading the skill or recording a second activation, and the retried
-  response keeps the skill-usage record.
+  response keeps the skill-usage record. ([#6506])
 - **persistence:** `scripts/migrate_user_isolation.py` now moves each legacy
   thread to the user who owns it. It looked for thread owners in
   `{base_dir}/deer-flow.db`, a file DeerFlow never creates (the database is
@@ -9209,3 +9209,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6448]: https://github.com/bytedance/deer-flow/pull/6448
 [#6450]: https://github.com/bytedance/deer-flow/pull/6450
 [#6481]: https://github.com/bytedance/deer-flow/pull/6481
+[#6506]: https://github.com/bytedance/deer-flow/pull/6506
