@@ -33,7 +33,7 @@ from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_h
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
 from deerflow.subagents.acceptance_checks import check_acceptance_criteria, render_acceptance_section
 from deerflow.subagents.capacity import SubagentExecutionCapacity
-from deerflow.subagents.config import resolve_subagent_model_name
+from deerflow.subagents.config import authorize_subagent_model_name, resolve_subagent_model_name
 from deerflow.subagents.context_snapshot import ParentContextSnapshot
 from deerflow.subagents.executor import (
     SubagentStatus,
@@ -921,9 +921,23 @@ async def task_tool(
     # Inherit parent agent's tool_groups so subagents respect the same restrictions
     parent_tool_groups = metadata.get("tool_groups")
     resolved_app_config = runtime_app_config
-    if config.model == "inherit" and parent_model is None and resolved_app_config is None:
-        resolved_app_config = get_app_config()
+    if resolved_app_config is None:
+        resolved_app_config = await asyncio.to_thread(get_app_config)
     effective_model = resolve_subagent_model_name(config, parent_model, app_config=resolved_app_config)
+    effective_model = await asyncio.to_thread(
+        authorize_subagent_model_name,
+        effective_model,
+        context={
+            "user_id": user_id,
+            "user_role": user_role,
+            "oauth_provider": oauth_provider,
+            "oauth_id": oauth_id,
+            "channel_user_id": channel_user_id,
+            "is_internal": is_internal,
+            "authz_attributes": authz_attributes,
+        },
+        app_config=resolved_app_config,
+    )
 
     # Subagents should not have subagent tools enabled (prevent recursive
     # nesting). Ordinary task subagents receive a snapshot of the parent's
@@ -951,6 +965,7 @@ async def task_tool(
         "config": config,
         "tools": tools,
         "parent_model": parent_model,
+        "authorized_model_name": effective_model,
         "sandbox_state": sandbox_state,
         "thread_data": thread_data,
         "uploaded_files": uploaded_files,

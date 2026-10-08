@@ -9,7 +9,7 @@ import time
 import weakref
 from enum import Enum
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock
 
 import pytest
 from langchain_core.messages import ToolMessage
@@ -34,6 +34,12 @@ from deerflow.subagents.status_contract import (
 # NOTE: conftest.py replaces deerflow.subagents.executor with a MagicMock, so the
 # executor-bound names inside task_tool are mocks; tests patch them explicitly.
 task_tool_module = importlib.import_module("deerflow.tools.builtins.task_tool")
+
+
+@pytest.fixture(autouse=True)
+def _dispatch_app_config(monkeypatch):
+    """Legacy callers now resolve one app snapshot before model authorization."""
+    monkeypatch.setattr(task_tool_module, "get_app_config", lambda: SimpleNamespace(authorization=SimpleNamespace(enabled=False)))
 
 
 def test_parent_loop_middleware_recorder_requires_the_journal_owner_loop():
@@ -1014,7 +1020,7 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     # by SubagentExecutor and injected as conversation items (Codex pattern).
     assert captured["executor_kwargs"]["config"].system_prompt == "Base system prompt"
 
-    get_available_tools.assert_called_once_with(model_name="ark-model", groups=None, subagent_enabled=False, include_upload_tool=True)
+    get_available_tools.assert_called_once_with(model_name="ark-model", groups=None, subagent_enabled=False, include_upload_tool=True, app_config=ANY)
 
     event_types = [e["type"] for e in events]
     assert event_types == ["task_started", "task_running", "task_running", "task_completed"]
@@ -1211,7 +1217,7 @@ def test_task_tool_propagates_tool_groups_to_subagent(monkeypatch, mcp_plugins):
     assert _task_tool_message(output).content == "Task Succeeded. Result: done"
     assert captured["uploaded_files"] == []
     # The key assertion: groups should be propagated from parent metadata
-    get_available_tools.assert_called_once_with(model_name="ark-model", groups=parent_tool_groups, subagent_enabled=False, include_upload_tool=True, **({"mcp_plugins": mcp_plugins} if mcp_plugins is not None else {}))
+    get_available_tools.assert_called_once_with(model_name="ark-model", groups=parent_tool_groups, subagent_enabled=False, include_upload_tool=True, app_config=ANY, **({"mcp_plugins": mcp_plugins} if mcp_plugins is not None else {}))
 
 
 def test_task_tool_uses_subagent_model_override_for_tool_loading(monkeypatch):
@@ -1265,6 +1271,7 @@ def test_task_tool_uses_subagent_model_override_for_tool_loading(monkeypatch):
         groups=None,
         subagent_enabled=False,
         include_upload_tool=False,
+        app_config=ANY,
     )
 
 
@@ -1389,7 +1396,7 @@ def test_task_tool_no_tool_groups_passes_none(monkeypatch):
 
     assert _task_tool_message(output).content == "Task Succeeded. Result: ok"
     # No tool_groups in metadata → groups=None (default behavior preserved)
-    get_available_tools.assert_called_once_with(model_name="ark-model", groups=None, subagent_enabled=False, include_upload_tool=False)
+    get_available_tools.assert_called_once_with(model_name="ark-model", groups=None, subagent_enabled=False, include_upload_tool=False, app_config=ANY)
 
 
 def test_task_tool_runtime_none_passes_groups_none(monkeypatch):

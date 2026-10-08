@@ -872,6 +872,7 @@ class SubagentExecutor:
         tool_progress_recorder: Any | None = None,
         context_snapshot: ParentContextSnapshot | None = None,
         thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
+        authorized_model_name: str | None = None,
     ):
         """Initialize the executor.
 
@@ -882,6 +883,8 @@ class SubagentExecutor:
                 back to ``get_app_config()`` (matches the lead-agent factory's
                 pattern).
             parent_model: The parent agent's model name for inheritance.
+            authorized_model_name: Server-side dispatch decision used to assemble
+                ``tools``. Reuse it so model, middleware and deferred state agree.
             sandbox_state: Sandbox state from parent agent.
             thread_data: Thread data from parent agent.
             uploaded_files: Snapshot of files uploaded in the parent's current
@@ -938,8 +941,11 @@ class SubagentExecutor:
         # Resolve eagerly only when it does not require loading config.yaml; otherwise defer
         # to _create_agent (which already loads app_config) so unit tests can construct
         # executors without a config file present.
-        if config.model != "inherit" or parent_model is not None or app_config is not None:
-            self.model_name: str | None = resolve_subagent_model_name(config, parent_model, app_config=app_config)
+        self._model_authorized = authorized_model_name is not None
+        if authorized_model_name is not None:
+            self.model_name: str | None = authorized_model_name
+        elif config.model != "inherit" or parent_model is not None or app_config is not None:
+            self.model_name = resolve_subagent_model_name(config, parent_model, app_config=app_config)
         else:
             self.model_name = None
         self.sandbox_state = sandbox_state
@@ -1056,7 +1062,7 @@ class SubagentExecutor:
         # Enforce model authorization — prevents a user from bypassing model:use
         # restrictions by naming a restricted model on a custom agent and dispatching
         # it as a subagent.
-        if getattr(app_config, "authorization", None) is not None and app_config.authorization.enabled is True:
+        if not self._model_authorized and getattr(app_config, "authorization", None) is not None and app_config.authorization.enabled is True:
             from deerflow.agents.lead_agent.agent import _authorize_model_name
 
             _authz_context: dict[str, Any] = {

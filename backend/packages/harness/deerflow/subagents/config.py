@@ -1,7 +1,7 @@
 """Subagent configuration definitions."""
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from deerflow.config.prompt_overlay import PromptOverlay
 
@@ -74,3 +74,17 @@ def resolve_subagent_model_name(config: SubagentConfig, parent_model: str | None
 
         app_config = get_app_config()
     return _default_model_name(app_config)
+
+
+def authorize_subagent_model_name(model_name: str, *, context: dict[str, Any], app_config: "AppConfig") -> str:
+    """Select an authorized model before assembling model-dependent tools.
+
+    Call off-loop: the shared lead-agent policy may query an external provider.
+    The dispatcher must pass this decision and AppConfig snapshot to the executor.
+    """
+    if getattr(app_config, "authorization", None) is None or app_config.authorization.enabled is not True:
+        return model_name
+
+    from deerflow.agents.lead_agent.agent import _authorize_model_name
+
+    return _authorize_model_name(model_name, context=context, app_config=app_config)
