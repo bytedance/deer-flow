@@ -124,11 +124,12 @@ services:
     # QR login and browser tools stay worker-local, so keep one worker while
     # they are enabled. --timeout-graceful-shutdown bounds how long open SSE
     # connections may delay lifespan shutdown after SIGTERM; stop_grace_period
-    # below must cover that bound plus the lifespan's worst case: five hooks
+    # below must cover that bound plus the lifespan's worst case: seven hooks
     # bounded at 5s each (trash sweep, notification worker, channel service,
-    # browser sessions, MCP session pool), the 1s retrieval-warm wait, the 5s
+    # scheduled task service, subagent batch service, browser sessions,
+    # MCP session pool), the 1s retrieval-warm wait, the 5s
     # run drain and the 30s memory flush (memory.shutdown_flush_timeout_seconds)
-    # -- about 61s -- plus slack. backend/tests/_gateway_shutdown_budget.py
+    # -- about 71s -- plus slack. backend/tests/_gateway_shutdown_budget.py
     # pins the arithmetic.
     command: sh -c "cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${GATEWAY_WORKERS:-1} --timeout-graceful-shutdown 10"
     # Docker's 10s default SIGKILLed the 30s memory queue flush
@@ -180,8 +181,10 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      # /health/ready runs both probes concurrently within a 3s endpoint
-      # deadline; the client timeout must stay above that bound.
+      # /health/ready runs its probes (database, checkpointer, Redis stream
+      # bridge, provisioner) concurrently within a 3s endpoint deadline; the
+      # client timeout must stay above that bound. The gateway is unhealthy
+      # while Redis is unreachable; the provisioner verdict is report-only.
       test: ["CMD", "python", "-c", "import urllib.request; response = urllib.request.urlopen('http://127.0.0.1:8001/health/ready', timeout=5); raise SystemExit(0 if response.status == 200 else 1)"]
       interval: 5s
       timeout: 5s

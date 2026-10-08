@@ -24,8 +24,11 @@ from deerflow.mcp.interceptors import build_mcp_tool_interceptors, compose_tool_
 from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor, get_initial_oauth_headers
 from deerflow.mcp.session_pool import (
     MCPPoolDomain,
+    MCPSessionPool,
+    ServerBinding,
     call_pooled_session_tool,
     get_session_pool,
+    normalized_connection_fingerprint,
 )
 from deerflow.mcp.tasks import ORDINARY_MCP_TASK_DRIVER, TaskSubmitRequest
 from deerflow.mcp.tasks.runtime import (
@@ -545,6 +548,9 @@ def _make_session_pool_tool(
     session_init_timeout: float | None = None,
     tool_name_prefix: bool = True,
     ownership_domain: MCPPoolDomain = "deployment",
+    *,
+    pool: MCPSessionPool | None = None,
+    binding: ServerBinding | None = None,
 ) -> BaseTool:
     """Wrap an MCP tool so it reuses a persistent session from the pool.
 
@@ -563,7 +569,15 @@ def _make_session_pool_tool(
     if tool_name_prefix and original_name.startswith(prefix):
         original_name = original_name[len(prefix) :]
 
-    pool = get_session_pool()
+    if pool is None:
+        pool = get_session_pool()
+    if binding is None and isinstance(pool, MCPSessionPool):
+        binding = pool.ensure_binding(
+            server_name,
+            normalized_connection_fingerprint(connection),
+            domain=ownership_domain,
+        )
+    effective_domain = binding.domain if binding is not None else ownership_domain
 
     async def call_with_persistent_session(
         runtime: Runtime | None = None,
@@ -613,16 +627,25 @@ def _make_session_pool_tool(
             session_env.setdefault("TMP", str(tmp_dir))
             session_env.setdefault("TEMP", str(tmp_dir))
             session_connection["env"] = session_env
-        session_request = (
-            pool.get_session(server_name, scope_key, session_connection)
-            if ownership_domain == "deployment"
-            else pool.get_session(
+        if binding is not None:
+            session_request = pool.get_session(
                 server_name,
                 scope_key,
                 session_connection,
-                domain=ownership_domain,
+                binding=binding,
             )
-        )
+        elif effective_domain == "deployment":
+            # Compatibility for direct unit-test fakes that construct this
+            # wrapper without going through get_mcp_tools(). Production
+            # discovery always supplies the explicit binding above.
+            session_request = pool.get_session(server_name, scope_key, session_connection)
+        else:
+            session_request = pool.get_session(
+                server_name,
+                scope_key,
+                session_connection,
+                domain=effective_domain,
+            )
         if session_init_timeout is not None:
             # Cancellation here is safe: MCPSessionPool.get_session owns the
             # teardown of a session stuck mid-creation (it signals close and
@@ -647,7 +670,7 @@ def _make_session_pool_tool(
         else:
             session = await session_request
 
-        domain_kwargs = {"domain": ownership_domain} if ownership_domain != "deployment" else {}
+        domain_kwargs = {"domain": effective_domain} if effective_domain != "deployment" else {}
 
         # Build common call_tool kwargs once — only add keys when needed so
         # existing call-sites that assert on exact arguments are not affected.
@@ -858,7 +881,12 @@ def _configure_task_tools_for_server(
     return configured
 
 
-async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, personal_user_id: str | None = None) -> list[BaseTool]:
+async def get_mcp_tools(
+    extensions_config: ExtensionsConfig | None = None,
+    *,
+    personal_user_id: str | None = None,
+    session_pool: MCPSessionPool | None = None,
+) -> list[BaseTool]:
     """Get all tools from enabled MCP servers.
 
     Tools using stdio transport are wrapped with persistent-session logic so
@@ -870,6 +898,10 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
         extensions_config: Optional pre-loaded extensions config. Callers that
             must prove which config revision produced these tools pass the exact
             instance they snapshotted; ``None`` loads the latest config from disk.
+        session_pool: Optional session pool captured by the caller. Cache
+            initializers pass the exact pool their generation owns so a
+            superseded claim cannot install bindings into a replacement pool;
+            ``None`` resolves the current singleton.
 
     Returns:
         List of LangChain tools from all enabled MCP servers.
@@ -906,6 +938,22 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
     if not servers_config:
         logger.info("No enabled MCP servers configured")
         return []
+
+    # Capture the exact pool and stdio binding before the first discovery await.
+    # A later reset/reconcile can supersede this capability, but a stale wrapper
+    # can never silently pair its old connection with a replacement pool/epoch.
+    pool = session_pool
+    if pool is None:
+        pool = get_session_pool()
+    ownership_domain: MCPPoolDomain = "personal" if personal_user_id is not None else "deployment"
+    server_bindings: dict[str, ServerBinding] = {}
+    for server_name, server_connection in servers_config.items():
+        if server_connection.get("transport", "stdio") == "stdio":
+            server_bindings[server_name] = pool.ensure_binding(
+                server_name,
+                normalized_connection_fingerprint(server_connection),
+                domain=ownership_domain,
+            )
 
     try:
         # Create the multi-server MCP client
@@ -1042,7 +1090,9 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
                             tool_call_timeout=_timeout,
                             session_init_timeout=_init_timeout,
                             tool_name_prefix=tool_name_prefix,
-                            ownership_domain=("personal" if personal_user_id is not None else "deployment"),
+                            ownership_domain=ownership_domain,
+                            pool=pool,
+                            binding=server_bindings[source_name],
                         )
                     )
                 else:

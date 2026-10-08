@@ -77,15 +77,23 @@ class SubagentBatchService:
         self._stop.set()
         poller = self._poller
         self._poller = None
-        if poller is not None:
-            poller.cancel()
-            await asyncio.gather(poller, return_exceptions=True)
+
+        # Issue every owned-work cancellation before the first await. The
+        # Gateway wraps this stop hook in a deadline; if poller teardown is
+        # slow, cancellation of this coroutine must not prevent native/item
+        # cancellation from being requested.
         execution_ids = list(self._execution_ids.values())
         for execution_id in execution_ids:
             request_cancel_background_task(execution_id)
         tasks = list(self._executions.values())
+
+        if poller is not None:
+            poller.cancel()
         for task in tasks:
             task.cancel()
+
+        if poller is not None:
+            await asyncio.gather(poller, return_exceptions=True)
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._executions.clear()
