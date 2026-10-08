@@ -585,6 +585,13 @@ class FileMemoryStorage(MemoryStorage):
         # index in sync. A different live signature means another process wrote
         # the user's memory, so the scope is rebuilt before it is searched.
         self._retrieval_synced_signatures: dict[tuple[str | None, str | None], tuple[Any, ...]] = {}
+        # Generations bumped (under _cache_lock) whenever rebuild_index publishes
+        # or forgets a scope's rows: per scope for a scoped rebuild, storage-wide
+        # for a full one. Signature promotion after an own commit is fenced on
+        # them, because a rebuild that installed rows in between may have read
+        # its facts before that commit and has recorded its own signature.
+        self._retrieval_index_generation = 0
+        self._retrieval_scope_generations: dict[tuple[str | None, str | None], int] = {}
 
     def close(self) -> None:
         """Release the retrieval adapter owned by this storage instance."""
@@ -865,11 +872,24 @@ class FileMemoryStorage(MemoryStorage):
         search does not rebuild them. A scope synced at an older revision keeps
         that older signature and is rebuilt, because a peer wrote the manifest
         in between; a no-op commit leaves every recorded signature as it was.
+
+        The promotion is generation-fenced: the SQLite lock covers single adapter
+        calls only, so ``rebuild_index`` may replace a scope's rows between the
+        notifications below and the promotion. Such a rebuild can have read its
+        facts before this commit (resurrecting a fact this write deleted) and
+        then records the signature it captured; promoting over it would stamp
+        those stale rows as current. Scopes whose generation moved since the
+        snapshot taken before the first adapter call therefore keep the
+        rebuild's signature, and the next search's comparison decides.
         """
         if self._retrieval is None:
             return
         scope = _scope_dict(user_id, agent_name)
         key = self._cache_key(agent_name, user_id=user_id)
+        fence: tuple[int, dict[tuple[str | None, str | None], int]] | None = None
+        if committed is not None:
+            with self._cache_lock:
+                fence = (self._retrieval_index_generation, dict(self._retrieval_scope_generations))
         failed = False
         for action, value, fact_path in notifications:
             try:
@@ -884,11 +904,15 @@ class FileMemoryStorage(MemoryStorage):
             if failed:
                 self._retrieval_dirty_scopes.add(key)
                 self._retrieval_synced_signatures.pop(key, None)
-            elif committed is not None:
+            elif committed is not None and fence is not None and fence[0] == self._retrieval_index_generation:
                 previous_revision, signature = committed
+                scope_generations = fence[1]
                 for synced_key, synced in list(self._retrieval_synced_signatures.items()):
-                    if synced_key[0] == user_id and (synced[2] or 0) == previous_revision:
-                        self._retrieval_synced_signatures[synced_key] = signature
+                    if synced_key[0] != user_id or (synced[2] or 0) != previous_revision:
+                        continue
+                    if self._retrieval_scope_generations.get(synced_key, 0) != scope_generations.get(synced_key, 0):
+                        continue  # a rebuild republished this scope meanwhile; its own signature stands
+                    self._retrieval_synced_signatures[synced_key] = signature
 
     @staticmethod
     def _validate_loaded_fact(
@@ -1966,8 +1990,17 @@ class FileMemoryStorage(MemoryStorage):
 
         requested_keys = None if scopes is None else {self._cache_key(self._scope_kwargs(scope).get("agent_name"), user_id=self._scope_kwargs(scope).get("user_id")) for scope in scopes}
 
+        def bump_generations() -> None:
+            """Fence in-flight signature promotions off the scopes published here (caller holds _cache_lock)."""
+            if requested_keys is None:
+                self._retrieval_index_generation += 1
+            else:
+                for key in requested_keys:
+                    self._retrieval_scope_generations[key] = self._retrieval_scope_generations.get(key, 0) + 1
+
         def mark_synced() -> None:
             with self._cache_lock:
+                bump_generations()
                 if requested_keys is None:
                     self._retrieval_dirty_scopes.clear()
                     self._retrieval_synced_signatures = synced_signatures
@@ -1977,6 +2010,7 @@ class FileMemoryStorage(MemoryStorage):
 
         def forget_synced() -> None:
             with self._cache_lock:
+                bump_generations()
                 if requested_keys is None:
                     self._retrieval_synced_signatures.clear()
                 else:

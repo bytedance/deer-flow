@@ -13,6 +13,8 @@ without rebuilding a scope this process wrote itself.
 
 from __future__ import annotations
 
+import threading
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import patch
 
@@ -271,5 +273,133 @@ def test_scoped_resync_indexes_every_fact_of_a_large_scope(tmp_path: Path) -> No
         assert _ids(pod_a.search_facts("unique001", scopes=[SCOPE])) == ["fact-001"]
         assert len(pod_a.search_facts("zeta", scopes=[SCOPE], top_k=200)) == 150
     finally:
+        pod_a.close()
+        pod_b.close()
+
+
+class _PausableAdapter:
+    """FTS5 adapter whose next bulk install and every remove can be held at a chosen point.
+
+    With ``pause_next_install`` armed, ``rebuild`` signals ``at_install`` and
+    waits for ``allow_install`` before performing the real install (one call;
+    later rebuilds run unpaused). ``remove`` performs the real removal, signals
+    ``removed`` and waits for ``allow_promote`` before returning, which holds
+    the owning write after its adapter notification and before its signature
+    promotion.
+    """
+
+    def __init__(self, inner: FTS5RetrievalAdapter) -> None:
+        self._inner = inner
+        self.pause_next_install = False
+        self.at_install = threading.Event()
+        self.allow_install = threading.Event()
+        self.removed = threading.Event()
+        self.allow_promote = threading.Event()
+
+    def rebuild(self, records, *, scopes):
+        if self.pause_next_install:
+            self.pause_next_install = False
+            self.at_install.set()
+            assert self.allow_install.wait(10), "test orchestration stalled before the index install"
+        return self._inner.rebuild(records, scopes=scopes)
+
+    def remove(self, fact_id, *, scope):
+        self._inner.remove(fact_id, scope=scope)
+        self.removed.set()
+        assert self.allow_promote.wait(10), "test orchestration stalled before the signature promotion"
+
+    def __getattr__(self, name: str):
+        return getattr(self._inner, name)
+
+
+def _run(target: Callable[[], object], errors: list[BaseException]) -> threading.Thread:
+    def body() -> None:
+        try:
+            target()
+        except BaseException as exc:  # noqa: BLE001 - surfaced through the errors list
+            errors.append(exc)
+
+    thread = threading.Thread(target=body, daemon=True)
+    thread.start()
+    return thread
+
+
+def _join(thread: threading.Thread, errors: list[BaseException]) -> None:
+    thread.join(10)
+    assert not thread.is_alive(), "worker thread did not finish"
+    assert errors == []
+
+
+def _racing_pods(tmp_path: Path) -> tuple[FileMemoryStorage, _PausableAdapter, FileMemoryStorage]:
+    storage_root = tmp_path / "home"
+    (tmp_path / "index-a").mkdir()
+    adapter = _PausableAdapter(FTS5RetrievalAdapter(tmp_path / "index-a" / INDEX_FILENAME))
+    pod_a = FileMemoryStorage(DeerMemConfig(storage_path=str(storage_root)), retrieval=adapter)  # type: ignore[arg-type]
+    pod_b = _instance(storage_root, tmp_path / "index-b")
+    pod_a.apply_changes({"upserts": [_fact("f1", "alpha stays"), _fact("f2", "beta goes away")]}, user_id="alice", agent_name="agent-a")
+    assert pod_a.rebuild_index()["failed"] == 0
+    summaries = create_empty_memory()
+    summaries["user"]["workContext"]["summary"] = "peer summary refresh"
+    assert pod_b.save(summaries, user_id="alice")  # r+1 on the shared manifest: A's next search re-syncs
+    adapter.pause_next_install = True
+    return pod_a, adapter, pod_b
+
+
+def test_promotion_is_fenced_against_a_refresh_that_installs_in_between(tmp_path: Path) -> None:
+    """Reviewer interleaving: refresh reads f1/f2, own delete removes f2, refresh installs, delete promotes.
+
+    The refresh captured the r+1 signature and the facts before the deletion
+    committed r+2. Its install resurrects f2; promoting the deletion's r+2
+    signature afterwards would declare that stale index in sync with the live
+    manifest and keep returning f2 until the next manifest change.
+    """
+    pod_a, adapter, pod_b = _racing_pods(tmp_path)
+    errors: list[BaseException] = []
+    try:
+        refresh = _run(lambda: pod_a.search_facts("alpha", scopes=[SCOPE]), errors)
+        assert adapter.at_install.wait(10)  # refresh holds f1/f2 read at r+1, not yet installed
+
+        deletion = _run(lambda: pod_a.delete_fact("f2", user_id="alice", agent_name="agent-a"), errors)
+        assert adapter.removed.wait(10)  # r+2 committed, index row removed, promotion pending
+
+        adapter.allow_install.set()  # stale install resurrects f2 and records the r+1 signature
+        _join(refresh, errors)
+        adapter.allow_promote.set()  # the deletion must not stamp that index as r+2
+        _join(deletion, errors)
+
+        assert pod_a.search_facts("beta", scopes=[SCOPE]) == []
+        assert _ids(pod_a.search_facts("alpha", scopes=[SCOPE])) == ["f1"]
+    finally:
+        adapter.allow_install.set()
+        adapter.allow_promote.set()
+        pod_a.close()
+        pod_b.close()
+
+
+def test_stale_refresh_installing_after_a_promotion_is_caught_by_the_next_search(tmp_path: Path) -> None:
+    """Mirrored order: the promotion lands first, then a stale refresh installs f1/f2.
+
+    The stale refresh records the r+1 signature it captured, so the next search
+    sees it differ from the live r+2 manifest and rebuilds the scope.
+    """
+    pod_a, adapter, pod_b = _racing_pods(tmp_path)
+    errors: list[BaseException] = []
+    try:
+        stale_refresh = _run(lambda: pod_a.search_facts("alpha", scopes=[SCOPE]), errors)
+        assert adapter.at_install.wait(10)
+        assert pod_a.rebuild_index([SCOPE])["failed"] == 0  # a second, unpaused refresh syncs the scope at r+1
+
+        adapter.allow_promote.set()
+        pod_a.delete_fact("f2", user_id="alice", agent_name="agent-a")  # r+2: removes the row and promotes r+1 -> r+2
+        assert pod_a.search_facts("beta", scopes=[SCOPE]) == []
+
+        adapter.allow_install.set()  # the stale install resurrects f2 under its own r+1 signature
+        _join(stale_refresh, errors)
+
+        assert pod_a.search_facts("beta", scopes=[SCOPE]) == []
+        assert _ids(pod_a.search_facts("alpha", scopes=[SCOPE])) == ["f1"]
+    finally:
+        adapter.allow_install.set()
+        adapter.allow_promote.set()
         pod_a.close()
         pod_b.close()

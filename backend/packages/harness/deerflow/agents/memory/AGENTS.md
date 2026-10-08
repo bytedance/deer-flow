@@ -223,7 +223,11 @@ live signature differs (a peer wrote the user's memory). A commit that produced
 a new revision advances the recorded signatures of that user's scopes that were
 in sync at the pre-commit revision read under the user lock; a no-op commit
 advances nothing. Own writes therefore never rebuild while an interleaved peer
-write still does.
+write still does. Promotion is generation-fenced: `rebuild_index` bumps a
+per-scope (full rebuild: storage-wide) generation under `_cache_lock` when it
+publishes or forgets rows, the dispatcher snapshots them before its first
+adapter call, and a scope whose generation moved keeps the rebuild's own
+signature for the next search to compare.
 
 Gateway startup schedules `DeerMem.warm_retrieval()` without delaying readiness.
 The first search can rebuild its exact scope.
