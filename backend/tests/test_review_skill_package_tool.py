@@ -238,7 +238,7 @@ def test_review_skill_package_rejects_local_directory_without_skill_md(deploymen
 
 
 def test_review_skill_package_rejects_package_under_shared_tmp(deployment):
-    with tempfile.TemporaryDirectory(dir="/tmp") as shared_tmp:
+    with tempfile.TemporaryDirectory(dir=tempfile.gettempdir()) as shared_tmp:
         package = Path(shared_tmp) / "demo"
         _write_package(package, _skill_content())
 
