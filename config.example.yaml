@@ -1474,10 +1474,11 @@ loop_detection:
 # rewritten to keyed, value-derived placeholders like
 # [EMAIL_bdqkxwcfmqvrqzblcchjkqbcdqw] before they reach the model. Tokens are
 # HMAC digests keyed by token_secret, so they cannot be re-derived offline.
+# The hidden /goal continuation is redacted before it is stored.
 # Raw text stays in thread state for the UI; queued memory-extraction
-# payloads are redacted too. Compaction and configured LLM title inputs are
-# redacted as well; placeholders are value-derived, so an identity redacted
-# before compaction renders the same token afterwards.
+# payloads are redacted too. Compaction, configured LLM title and /goal
+# evaluator inputs are redacted as well; placeholders are value-derived, so
+# an identity redacted before compaction renders the same token afterwards.
 pii_redaction:
   enabled: false
   # redact_email: true

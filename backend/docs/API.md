@@ -211,6 +211,17 @@ GET /api/langgraph/threads/{thread_id}/state
 }
 ```
 
+#### Get Thread History
+
+```http
+POST /api/langgraph/threads/{thread_id}/history
+```
+
+Only the newest entry carries `messages`, the `goal` while it is active, and
+`goal_outcome` (the latest met goal, kept until the next goal change). Older
+entries carry only `title` and `thread_data`. `goal_outcome` is server-owned:
+state updates and run input that include it are rejected with 400.
+
 ### Runs
 
 #### Create Run
