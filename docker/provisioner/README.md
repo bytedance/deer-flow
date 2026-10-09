@@ -398,6 +398,37 @@ docker exec deer-flow-gateway curl -s $SANDBOX_URL/v1/sandbox
 - In ClusterIP mode, test from the backend Pod: `curl http://sandbox-XXX-svc.deer-flow.svc.cluster.local:8080/v1/sandbox`
 - Check `NODE_HOST` for NodePort deployments, or cluster DNS / NetworkPolicy / service mesh rules for ClusterIP deployments
 
+## Running several replicas
+
+The provisioner keeps no state of its own between requests, so several
+replicas can serve the same backend behind one load-balanced Service (the Helm
+chart's `provisioner.replicas`; compose runs a single container):
+
+- The sandbox Pods and Services it creates carry the labels it later queries
+  (`app=deer-flow-sandbox`, `sandbox-id`). They are the only registry: create,
+  status, list and delete all read the Kubernetes API, never a process-local
+  table, so any replica can answer for a sandbox another replica created.
+- `POST /api/sandboxes` is idempotent across replicas. Two creates for the same
+  `sandbox_id` that race on different replicas both succeed: the loser's Pod
+  and Service creates return `409 AlreadyExists`, which the handler treats like
+  its own success before reading the winner's objects back (including
+  `MAX_SHELL_SESSIONS`, so a lower-capacity winner is still reported to the
+  Gateway as `409`). Several Gateway Pods already run this race against a
+  single provisioner.
+- `DELETE /api/sandboxes/{sandbox_id}` tolerates `404`, so two replicas
+  deleting the same sandbox both return success.
+- NodePorts are allocated by the API server when the Service is created; the
+  provisioner only reads the assigned port back.
+- No replica runs a background loop (there is no reaper or cache), and
+  `/api/capabilities` is derived from environment variables every replica of
+  one Deployment shares.
+
+The one startup write is `_ensure_namespace()`: when `K8S_NAMESPACE` does not
+exist yet, two replicas starting together can both see `404` and race to create
+it; the loser's `409` is not caught, so that process exits and is restarted into
+the now-existing namespace. Under the Helm chart the provisioner runs inside the
+namespace it manages, so this path never runs there.
+
 ## Security Considerations
 
 1. **HostPath Volumes**: The provisioner mounts host directories into sandbox Pods by default. Ensure these paths contain only trusted data. For production, prefer PVC-based volumes (set `SKILLS_PVC_NAME` and `USERDATA_PVC_NAME`) to avoid node-specific data loss risks.

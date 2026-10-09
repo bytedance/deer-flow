@@ -100,7 +100,10 @@ producers (currently slash-skill activation via `asyncio.to_thread`) schedule
 journal mutation directly onto its owning event loop; they never mutate or
 flush `RunJournal._buffer` from the worker thread. The task-tool subagent proxy
 rejects a loop that differs from the journal owner, so its close fence always
-drains the only scheduling hop.
+drains the only scheduling hop. `flush()` yields to the loop once before
+draining: since Python 3.13 an awaited executor future can complete without a
+loop iteration, so a hop queued by a worker that already returned may still be
+pending when flush starts.
 The persisted projection accepts
 only framework-defined error/action values and strict booleans (using null for
 invalid values) from the producer-supplied tool stamp; tool content, args,
@@ -156,6 +159,12 @@ an ordinary return, never after an exception. A caller that crosses a run or
 checkpoint-write admission boundary must repeat the complete audit after
 admission; a pre-admission exact hit can be superseded by a later event just as
 a pre-admission miss can become an exact hit.
+
+**DB run-event sequence watermark:** Run deletion retains `run_event_thread_seq`.
+Thread deletion removes it in the same mutation-fenced transaction only when no
+events remain for the thread, including owner-scoped and zero-row deletions.
+Check all owners and categories; surviving rows retain the allocation floor.
+`tests/test_run_event_store.py` pins cleanup, recreation and cursor visibility.
 
 **Changed-run discovery:** Use the durable `(change_seq, run_id)` cursor and repeat history audits after admission. Details: `backend/docs/runtime-guidance-details.md`.
 
