@@ -1,24 +1,27 @@
-"""Ownership gate: the bundled search providers share one ``max_results`` bar.
+"""Ownership gate for shared ``max_results`` coercion and deferred patterns.
 
 #5865 audited every bundled provider's ``max_results`` coercion against the
 #5852 rule and found seven copies that diverged on booleans, non-integral
 floats and ``OverflowError``. Those audits had to be read file by file because
 each provider owned its own copy of the answer.
 
-``deerflow.community.search_max_results`` is now that single owner, and the
-providers whose copies were byte-identical have been folded into it. These
-tests pin three things the refactor must not silently give back:
+``deerflow.community.search_max_results`` owns coercion for the four migrated
+providers whose copies were byte-identical. These tests pin three things the
+refactor must not silently give back:
 
 1. the shared function's behaviour, value by value (the bar itself);
 2. that a folded provider does not grow a private copy again, and still warns
    under its own historical label and its own logger;
-3. that the list of providers which *do* still hand-roll a coercer is exactly
-   the declared one — a new provider copying the pattern, or a deferred one
-   being folded away without updating this list, both fail.
+3. that the known local coercion patterns match the declared deferred providers.
+   The AST census recognizes private helpers through their code and call sites,
+   plus inline integer assignments; it ignores documentation. New copies using
+   those patterns and deferred providers migrating away both fail. It is a
+   source-pattern gate, not a semantic proof of arbitrary provider code.
 """
 
 import ast
 import logging
+import sys
 from pathlib import Path
 
 import pytest
@@ -42,14 +45,17 @@ SHARED_OWNER_PROVIDERS = {
     "firecrawl": ("Firecrawl", firecrawl_tools),
 }
 
-# Providers that still own a private ``_coerce_max_results``. Each has a
-# *different* bound or rejection profile, so folding them is a behaviour change
+# Providers that still normalize locally, including Exa's generic helper and
+# SearXNG's inline validation. Their differing bounds or rejection profiles mean
+# folding them is a behaviour change
 # that #5865's follow-up has to settle first. The equality assertion in
 # test_deferral_list_matches_the_providers_that_still_copy is what forces this
 # list to shrink as they land -- see PRs #5866 / #5867.
 DEFERRED_PROVIDERS = {
     "brave",
+    "exa",
     "groundroute",
+    "searxng",
     "serper",
     "serply",
     "sofya",
@@ -62,12 +68,44 @@ def _module_ast(provider: str) -> ast.Module:
     return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
 
 
+def _code_nodes(tree: ast.AST):
+    """Walk executable syntax, excluding module/class/function docstrings."""
+    yield tree
+    docstring = None
+    if isinstance(tree, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and ast.get_docstring(tree) is not None:
+        docstring = tree.body[0]
+    for child in ast.iter_child_nodes(tree):
+        if child is not docstring:
+            yield from _code_nodes(child)
+
+
+def _references_max_results(tree: ast.AST) -> bool:
+    return any(
+        (isinstance(node, ast.Name) and node.id == "max_results") or (isinstance(node, ast.Constant) and isinstance(node.value, str) and "max_results" in node.value) or (isinstance(node, ast.keyword) and node.arg == "max_results")
+        for node in _code_nodes(tree)
+    )
+
+
 def _local_coercer_names(tree: ast.Module) -> set[str]:
-    """Names of module-level functions that coerce ``max_results`` themselves."""
-    owned = set()
-    for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name.startswith("_coerce") and "max_results" in ast.unparse(node):
-            owned.add(node.name)
+    """Find local helpers and inline integer assignments for ``max_results``."""
+    calls = [node for node in _code_nodes(tree) if isinstance(node, ast.Call)]
+    called_for_max_results = {getattr(call.func, "id", None) for call in calls if _references_max_results(call)}
+    owned: set[str] = set()
+    for function in tree.body:
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if function.name.startswith("_coerce") and ("max_results" in function.name or _references_max_results(function) or function.name in called_for_max_results):
+            owned.add(function.name)
+        for node in _code_nodes(function):
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, ast.AnnAssign):
+                targets = [node.target]
+            else:
+                continue
+            if node.value is not None and any(_references_max_results(target) for target in targets):
+                if any(isinstance(call, ast.Call) and getattr(call.func, "id", None) == "int" for call in _code_nodes(node.value)):
+                    owned.add(function.name)
     return owned
 
 
@@ -147,3 +185,51 @@ def test_deferral_list_matches_the_providers_that_still_copy():
         if _local_coercer_names(_module_ast(provider)):
             found.add(provider)
     assert found == DEFERRED_PROVIDERS, f"providers hand-rolling max_results coercion drifted; newly copied: {sorted(found - DEFERRED_PROVIDERS)}, folded but still declared: {sorted(DEFERRED_PROVIDERS - found)}"
+
+
+@pytest.mark.parametrize("provider", ["exa", "searxng"])
+def test_census_includes_generic_and_inline_provider_coercion(provider):
+    assert _local_coercer_names(_module_ast(provider)), f"{provider}'s existing max_results normalization escaped the census"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "def _coerce_max_results(value):\n    return int(value)\n",
+        'def _coerce_positive_int(value, default, option):\n    return int(value)\n\ndef search(config):\n    return _coerce_positive_int(config.get("max_results"), 5, "max_results")\n',
+        'def _coerce_positive_int(value, *, option):\n    return int(value)\n\ndef search(config):\n    return _coerce_positive_int(config["max_results"], option="max_results")\n',
+        (
+            "async def search(config):\n"
+            '    raw = config.get("max_results", 5)\n'
+            "    try:\n"
+            "        max_results = int(raw)\n"
+            "    except ValueError:\n"
+            '        logger.warning("Invalid Search max_results=%r; using default %s", raw, 5)\n'
+            "    return max_results\n"
+        ),
+        "def search(raw):\n    max_results: int = int(raw)\n    return max_results\n",
+    ],
+    ids=["named-helper", "generic-positional", "generic-keyword", "inline-warning", "inline-without-warning"],
+)
+def test_census_rejects_undeclared_coercion_patterns(tmp_path, monkeypatch, source):
+    provider_dir = tmp_path / "copycat"
+    provider_dir.mkdir()
+    (provider_dir / "tools.py").write_text(source, encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "COMMUNITY_ROOT", tmp_path)
+    monkeypatch.setattr(sys.modules[__name__], "DEFERRED_PROVIDERS", set())
+
+    with pytest.raises(AssertionError, match="newly copied:.*copycat"):
+        test_deferral_list_matches_the_providers_that_still_copy()
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'def _coerce_timeout(value):\n    """max_results is normalized elsewhere."""\n    return int(value)\n',
+        'def _coerce_timeout(value):\n    """max_results"""\n    return int(value)\n\ndef search(config):\n    return _coerce_timeout(config.get("timeout", 30))\n',
+        'def search(config):\n    max_results = config.get("max_results", 5)\n    return client.search(max_results=max_results)\n',
+    ],
+    ids=["docstring-mention", "exact-docstring", "pass-through"],
+)
+def test_census_ignores_documentation_and_pass_through(source):
+    assert not _local_coercer_names(ast.parse(source))

@@ -2,6 +2,12 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+Search coercion ownership tests audit executable helper bodies/call sites and
+inline integer assignments. Include Exa and SearXNG in the deferred census;
+pin new-provider copies and docstring false positives with source fixtures.
+This pattern gate does not establish arbitrary provider semantics or change
+deferred providers' validation policy.
+
 Mixed-version resume admission in `test_thread_run_idempotency.py` uses a real
 shared SQL repository and an old-column projection. The frozen pre-6499 helper
 models only null-input resume retry matching from `02ce9ab2`; do not update it

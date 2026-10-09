@@ -1,4 +1,4 @@
-"""Single owner for the bundled web-search providers' ``max_results`` knob.
+"""Shared ``max_results`` coercion for the migrated bundled search providers.
 
 Four providers (``ddg_search``, ``image_search``, ``fastcrw``, ``firecrawl``)
 carried byte-identical copies of this coercion, differing only in the provider
@@ -7,11 +7,14 @@ the #5852 bar; folding the identical copies into one function is what lets the
 remaining providers be brought onto the same bar one at a time without
 re-deciding in each file what "invalid" means.
 
+Other providers retain local normalization, including Exa's generic integer
+helper and SearXNG's inline validation; Tavily passes configured values through.
+``tests/test_search_max_results_single_owner.py`` tracks the known helper and
+inline coercion patterns, rather than proving arbitrary provider semantics.
+
 Deliberately *not* decided here: whether an otherwise-valid value has an upper
-bound. That still differs per provider (six of them clamp, five pass the
-configured number straight to the API), and narrowing or widening it is a
-default-behavior change that needs a maintainer call, not a side effect of a
-de-duplication.
+bound. Providers still differ on clamping versus passing the configured number
+straight to the API. Changing that policy needs a maintainer call.
 
 ``logger`` is a parameter rather than a module-level logger here on purpose:
 callers pass their own logger so a warning keeps its originating module in
