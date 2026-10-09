@@ -21,6 +21,7 @@ export function PluginRow({
   label,
   onDetails,
   detailsLabel,
+  detailsDisabled,
   children,
 }: {
   name: string;
@@ -29,6 +30,7 @@ export function PluginRow({
   label?: ReactNode;
   onDetails?: () => void;
   detailsLabel?: string;
+  detailsDisabled?: boolean;
   children: ReactNode;
 }) {
   return (
@@ -41,6 +43,7 @@ export function PluginRow({
               <button
                 className="text-left underline-offset-4 hover:underline"
                 onClick={onDetails}
+                disabled={detailsDisabled}
                 aria-label={detailsLabel}
               >
                 {name}

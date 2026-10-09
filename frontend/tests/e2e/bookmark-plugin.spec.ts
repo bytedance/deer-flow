@@ -412,6 +412,47 @@ for (const brokenFactory of [
   });
 }
 
+test("catalog actions wait for gallery hydration before accepting a click", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  let releaseScripts!: () => void;
+  const scriptsReady = new Promise<void>((resolve) => {
+    releaseScripts = resolve;
+  });
+  await page.route("**/_next/**/*.js", async (route) => {
+    await scriptsReady;
+    await route.continue();
+  });
+  try {
+    await page.goto("/workspace/capabilities?tab=extensions", {
+      waitUntil: "commit",
+    });
+    await expect(page.getByRole("article")).toHaveCount(6);
+    const view = page.getByRole("button", {
+      name: "View Agent teams",
+      exact: true,
+    });
+    await expect(view).toBeVisible();
+    await expect(view).toBeDisabled();
+    await expect(
+      page.getByRole("button", { name: "Open Agent teams", exact: true }),
+    ).toBeDisabled();
+    releaseScripts();
+    await expect(view).toBeEnabled();
+    await view.click();
+    await expect(page).toHaveURL(/[?&]extension=community\.agent-teams(?:&|$)/);
+    await expect(
+      page.getByRole("heading", { name: "Agent teams", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: "Installation guide" }),
+    ).toHaveAttribute("href", /deerflow-extension-agent-teams#readme$/);
+  } finally {
+    releaseScripts();
+  }
+});
+
 for (const locale of ["en-US", "zh-CN"]) {
   test(`extension host uses ${locale} copy and its own search label`, async ({
     page,

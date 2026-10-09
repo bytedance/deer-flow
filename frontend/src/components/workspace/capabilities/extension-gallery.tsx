@@ -2,6 +2,7 @@
 
 import { ArrowLeftIcon, ChevronRightIcon } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { useSyncExternalStore } from "react";
 
 import { Button } from "@/components/ui/button";
 import { extensionDirectory } from "@/core/extensions/catalog";
@@ -11,7 +12,18 @@ import { useI18n } from "@/core/i18n/hooks";
 
 import { PluginRow } from "./plugin-directory";
 
+const subscribeHydration = () => () => undefined;
+const clientHydrated = () => true;
+const serverHydrated = () => false;
+
 export function ExtensionGallery({ query = "" }: { query?: string }) {
+  // This dynamically loaded gallery can hydrate after its parent. Keep its
+  // SSR buttons inert until its own navigation handlers are connected.
+  const hydrated = useSyncExternalStore(
+    subscribeHydration,
+    clientHydrated,
+    serverHydrated,
+  );
   const { t } = useI18n();
   const publicQuery = useFrontendExtensions();
   const params = useSearchParams();
@@ -35,13 +47,21 @@ export function ExtensionGallery({ query = "" }: { query?: string }) {
   ) : source.isError ? (
     <div role="alert">
       <p>{t.extensions.unavailable}</p>
-      <Button variant="outline" onClick={() => void source.refetch()}>
+      <Button
+        variant="outline"
+        disabled={!hydrated}
+        onClick={() => void source.refetch()}
+      >
         {t.extensions.retry}
       </Button>
     </div>
   ) : null;
   const reload = (
-    <Button variant="outline" onClick={() => window.location.reload()}>
+    <Button
+      variant="outline"
+      disabled={!hydrated}
+      onClick={() => window.location.reload()}
+    >
       {t.extensions.reloadAll}
     </Button>
   );
@@ -51,7 +71,7 @@ export function ExtensionGallery({ query = "" }: { query?: string }) {
       <div className="space-y-6">
         {reload}
         {status}
-        <Button variant="ghost" onClick={() => select()}>
+        <Button variant="ghost" disabled={!hydrated} onClick={() => select()}>
           <ArrowLeftIcon />
           {t.extensions.all}
         </Button>
@@ -119,11 +139,13 @@ export function ExtensionGallery({ query = "" }: { query?: string }) {
               }
               onDetails={() => select(entry.id)}
               detailsLabel={t.extensions.view(entry.title)}
+              detailsDisabled={!hydrated}
             >
               <Button
                 variant="ghost"
                 size="icon"
                 aria-label={t.extensions.open(entry.title)}
+                disabled={!hydrated}
                 onClick={() => select(entry.id)}
               >
                 <ChevronRightIcon />

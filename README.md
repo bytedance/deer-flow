@@ -1643,6 +1643,9 @@ The independent [Agent teams example](examples/deerflow-extension-agent-teams/RE
 lets full Custom Agents collaborate through native `@` mentions, shared messages and
 asynchronous peer requests, with a separate team page and persistent member conversations.
 Capability Center lists the example with localized installation information even before it is installed.
+Extension catalog actions become available once the page is interactive; installation
+guide links remain available while it loads. Reopening a desktop Side Chat keeps
+restored messages at their settled width throughout the panel transition.
 Installation and activation remain deployment-controlled; Capability Center shows plugin
 information and status. Browser code runs as trusted same-origin code.
 The browser API and inline `BrowserModule.code` transport are experimental. The

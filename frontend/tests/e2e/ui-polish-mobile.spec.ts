@@ -11,6 +11,9 @@ test.describe("UI polish mobile regressions", () => {
 
     await page.goto("/workspace/chats/new");
 
+    await expect(
+      page.getByRole("button", { name: /toggle sidebar/i }),
+    ).toBeVisible();
     // SSR starts with the desktop snapshot; wait for mobile hydration before
     // clicking, otherwise the trigger can toggle the hidden desktop sidebar.
     await expect(page.locator('[data-slot="sidebar-container"]')).toHaveCount(
