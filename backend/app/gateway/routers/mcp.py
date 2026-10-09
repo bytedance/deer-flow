@@ -1330,11 +1330,12 @@ def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> dict:
         config_data["skills"] = raw_skills
 
         pending = _commit_mcp_config_write(config_path, config_data)
-        logger.info(f"MCP configuration updated and saved to: {config_path}")
 
-    responses = _mcp_server_responses_from_raw(config_data)
-    finish_mcp_reconciliation(pending)
-    return responses
+    try:
+        logger.info(f"MCP configuration updated and saved to: {config_path}")
+        return _mcp_server_responses_from_raw(config_data)
+    finally:
+        finish_mcp_reconciliation(pending)
 
 
 def _apply_mcp_server_state_update(body: McpServerStateUpdateRequest) -> dict:
@@ -1372,11 +1373,12 @@ def _apply_mcp_server_state_update(body: McpServerStateUpdateRequest) -> dict:
 
         raw_server["enabled"] = body.enabled
         pending = _commit_mcp_config_write(config_path, raw_data)
-        logger.info("MCP server %s enabled state updated to %s", body.server_name, body.enabled)
 
-    responses = _mcp_server_responses_from_raw(raw_data)
-    finish_mcp_reconciliation(pending)
-    return responses
+    try:
+        logger.info("MCP server %s enabled state updated to %s", body.server_name, body.enabled)
+        return _mcp_server_responses_from_raw(raw_data)
+    finally:
+        finish_mcp_reconciliation(pending)
 
 
 def _mcp_config_path(*, create: bool) -> Path:
@@ -1457,11 +1459,12 @@ def _apply_mcp_servers_create(body: McpConfigUpdateRequest) -> dict:
         raw_data["mcpServers"] = raw_servers
         _ensure_skills_key(raw_data)
         pending = _commit_mcp_config_write(config_path, raw_data)
-        logger.info("Added MCP servers: %s", ", ".join(body.mcp_servers))
 
-    responses = _mcp_server_responses_from_raw(raw_data)
-    finish_mcp_reconciliation(pending)
-    return responses
+    try:
+        logger.info("Added MCP servers: %s", ", ".join(body.mcp_servers))
+        return _mcp_server_responses_from_raw(raw_data)
+    finally:
+        finish_mcp_reconciliation(pending)
 
 
 def _apply_mcp_server_config_update(body: McpServerConfigUpdateRequest) -> dict:
@@ -1486,11 +1489,12 @@ def _apply_mcp_server_config_update(body: McpServerConfigUpdateRequest) -> dict:
         raw_servers[body.server_name] = merged.model_dump()
         raw_data["mcpServers"] = raw_servers
         pending = _commit_mcp_config_write(config_path, raw_data)
-        logger.info("Updated MCP server: %s", body.server_name)
 
-    responses = _mcp_server_responses_from_raw(raw_data)
-    finish_mcp_reconciliation(pending)
-    return responses
+    try:
+        logger.info("Updated MCP server: %s", body.server_name)
+        return _mcp_server_responses_from_raw(raw_data)
+    finally:
+        finish_mcp_reconciliation(pending)
 
 
 def _apply_mcp_server_delete(server_name: str) -> dict:
@@ -1514,11 +1518,12 @@ def _apply_mcp_server_delete(server_name: str) -> dict:
             raw_data,
             check_installation_ids=False,
         )
-        logger.info("Deleted MCP server: %s", server_name)
 
-    responses = _mcp_server_responses_from_raw(raw_data)
-    finish_mcp_reconciliation(pending)
-    return responses
+    try:
+        logger.info("Deleted MCP server: %s", server_name)
+        return _mcp_server_responses_from_raw(raw_data)
+    finally:
+        finish_mcp_reconciliation(pending)
 
 
 @router.post(

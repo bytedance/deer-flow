@@ -675,6 +675,50 @@ async def test_repeated_identical_revision_does_not_retire_again(reconciler, mon
 
 
 @pytest.mark.asyncio
+async def test_committed_response_failure_still_finishes_retired_pool(reconciler, monkeypatch, tmp_path):
+    """Response construction must not be able to strand a retired full-reset pool."""
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    log = _session_log()
+    await _initialize(monkeypatch, cfg, {"A": _stdio("cmd-A")}, log)
+
+    close_calls = []
+    real_close = pool.close_all_sync
+
+    def track_close():
+        close_calls.append(True)
+        real_close()
+
+    monkeypatch.setattr(pool, "close_all_sync", track_close)
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda _config_path=None: cfg)
+
+    async def _noop_admin(_request, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(mcp_router, "require_admin_user", _noop_admin)
+
+    def fail_response(*_args, **_kwargs):
+        raise RuntimeError("response boom")
+
+    monkeypatch.setattr(mcp_router, "_mcp_server_responses_from_raw", fail_response)
+
+    # The raw file already carries a changed interceptor chain. The Gateway
+    # write commits that exact revision, forcing a conservative full reset.
+    _write_config(cfg, {"A": _stdio("cmd-A")}, interceptors=["changed.interceptor"])
+
+    with pytest.raises(HTTPException) as exc_info:
+        await mcp_router.update_mcp_server_state(
+            request=None,
+            body=McpServerStateUpdateRequest(server_name="A", enabled=False),
+        )
+
+    assert exc_info.value.status_code == 500
+    assert close_calls == [True]
+    assert pool._retired is True
+
+
+@pytest.mark.asyncio
 async def test_committed_reload_failure_fences_before_config_lock_release(reconciler, monkeypatch, tmp_path):
     """A post-write reload failure must still detach state before releasing the config lock."""
     cfg = tmp_path / "extensions_config.json"
