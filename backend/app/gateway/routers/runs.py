@@ -24,7 +24,7 @@ from app.gateway.services import (
     wait_for_run_completion,
 )
 from app.gateway.sse_headers import sse_response_headers
-from deerflow.runtime import RunStatus, serialize_channel_values_for_api
+from deerflow.runtime import RunStatus, project_snapshot_for_wait
 from deerflow.utils.thread_id import resolve_thread_id
 
 logger = logging.getLogger(__name__)
@@ -89,7 +89,9 @@ async def stateless_wait(body: RunCreateRequest, request: Request) -> dict:
             snapshot = await accessor.aget(config)
             snapshot_config = snapshot.config or {}
             if snapshot_config.get("configurable", {}).get("checkpoint_id"):
-                return serialize_channel_values_for_api(snapshot.values)
+                # A parked approval exits the graph normally, so values-only
+                # here would present a mid-turn approval request as a result.
+                return project_snapshot_for_wait(snapshot)
         except Exception:
             logger.exception("Failed to fetch final state for run %s", record.run_id)
 

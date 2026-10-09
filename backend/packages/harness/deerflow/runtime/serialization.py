@@ -10,6 +10,7 @@ Consumers: ``deerflow.runtime.runs.worker`` (SSE publishing) and
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
 
 
@@ -121,6 +122,97 @@ def serialize_channel_values_for_api(channel_values: dict[str, Any]) -> dict[str
     if isinstance(result.get("messages"), list):
         result["messages"] = strip_data_url_image_blocks(result["messages"])
     return result
+
+
+def serialize_interrupts(raw_interrupts: Any) -> list[dict[str, Any]]:
+    """Reshape LangGraph interrupts into the ``{"id", "value"}`` wire format.
+
+    LangGraph publishes a tuple of ``Interrupt`` objects, both on the
+    ``__interrupt__`` channel and on ``PregelTask.interrupts``. They use
+    ``__slots__``, so they are not dict-like and must be projected field by
+    field. A checkpoint replay can hand back plain dicts instead, so both
+    forms are accepted.
+
+    Args:
+        raw_interrupts: Interrupt objects, dicts, or ``None``.
+
+    Returns:
+        One entry per interrupt, empty when nothing is pending.
+    """
+    if not raw_interrupts:
+        return []
+    if isinstance(raw_interrupts, (str, bytes)) or not isinstance(raw_interrupts, Iterable):
+        raw_interrupts = [raw_interrupts]
+
+    serialized: list[dict[str, Any]] = []
+    for item in raw_interrupts:
+        if isinstance(item, dict):
+            serialized.append({"id": item.get("id"), "value": serialize_lc_object(item.get("value"))})
+            continue
+        if not hasattr(item, "value"):
+            # Not interrupt-shaped; a str would otherwise yield one entry per
+            # character once it reached the iteration above.
+            continue
+        serialized.append({"id": getattr(item, "id", None), "value": serialize_lc_object(item.value)})
+    return serialized
+
+
+def serialize_tasks_for_api(raw_tasks: Any) -> list[dict[str, Any]]:
+    """Project snapshot tasks for REST responses, preserving interrupts.
+
+    ``interrupts`` is included only when a task actually carries one, so an
+    ordinary in-flight task keeps the shape older clients already parse.
+    """
+    tasks: list[dict[str, Any]] = []
+    for task in raw_tasks or ():
+        entry: dict[str, Any] = {"id": getattr(task, "id", ""), "name": getattr(task, "name", "")}
+        if interrupts := serialize_interrupts(getattr(task, "interrupts", None)):
+            entry["interrupts"] = interrupts
+        tasks.append(entry)
+    return tasks
+
+
+def interrupts_by_task(snapshot: Any) -> dict[str, list[dict[str, Any]]]:
+    """Map task id -> pending interrupts, the LangGraph SDK's ``interrupts`` shape.
+
+    A parked run keeps its payload only on ``snapshot.tasks``; the checkpoint's
+    channel values do not carry ``__interrupt__``. Tasks without an interrupt
+    are omitted so an ordinary in-flight run stays an empty mapping.
+    """
+    mapping: dict[str, list[dict[str, Any]]] = {}
+    for task in getattr(snapshot, "tasks", None) or ():
+        if interrupts := serialize_interrupts(getattr(task, "interrupts", None)):
+            mapping[str(getattr(task, "id", ""))] = interrupts
+    return mapping
+
+
+#: Wait-response status for a run parked on tool approval. Deliberately not
+#: ``RunStatus.interrupted``, which the *cancellation* path persists: the wait
+#: endpoints' fallback branch returns that durable status, so one value would
+#: have to mean both "resume this" and "this is over".
+WAIT_STATUS_AWAITING_APPROVAL = "interrupted_for_approval"
+
+
+def project_snapshot_for_wait(snapshot: Any) -> dict[str, Any]:
+    """Project a finished run's snapshot for a blocking ``/wait`` response.
+
+    ``interrupt()`` exits the graph normally, so a run parked on tool approval
+    is indistinguishable from a completion at ``snapshot.values`` alone — a
+    resume that parks again would return a mid-turn approval request as the
+    run's final answer. When interrupts are pending, wrap the values in a
+    :data:`WAIT_STATUS_AWAITING_APPROVAL` envelope carrying the payload;
+    otherwise return the bare values object that clients already parse.
+    """
+    values = serialize_channel_values_for_api(snapshot.values)
+    interrupts = interrupts_by_task(snapshot)
+    if not interrupts:
+        return values
+    return {
+        "status": WAIT_STATUS_AWAITING_APPROVAL,
+        "interrupts": interrupts,
+        "tasks": serialize_tasks_for_api(getattr(snapshot, "tasks", None)),
+        "values": values,
+    }
 
 
 def serialize_messages_tuple(obj: Any) -> Any:

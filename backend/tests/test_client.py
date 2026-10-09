@@ -1712,6 +1712,75 @@ class TestEnsureAgent:
 
         assert mock_create_agent.call_count == 2
 
+    def test_resume_preflight_assembles_for_the_callers_role(self, client, mock_app_config):
+        """The pending-interrupt check must build the graph as the resuming caller.
+
+        ``resume()`` reads the snapshot before sending decisions. Without the
+        caller's identity that read assembled the agent as ``default_role``, so
+        a role allowed models the default denies parked fine on ``stream()``
+        and then failed on ``resume()`` with "No models are authorized" before
+        the checkpoint was ever looked at.
+        """
+        from langgraph.types import Interrupt
+
+        mock_app_config.authorization = AuthorizationConfig(
+            enabled=True,
+            fail_closed=True,
+            default_role="user",
+            provider=AuthorizationProviderConfig(
+                use="deerflow.authz.rbac:RbacAuthorizationProvider",
+                config={"roles": {"user": {"models": {"allow": []}}, "admin": {"models": {"allow": "*"}, "tools": {"allow": "*"}}}},
+            ),
+        )
+        client._app_config = mock_app_config
+        agent = MagicMock()
+        agent.get_state.return_value = SimpleNamespace(interrupts=(Interrupt(value={}, id="int-1"),), metadata={})
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=agent),
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+            patch("deerflow.runtime.checkpointer.provider.get_checkpointer", return_value=MagicMock()),
+        ):
+            assert client._pending_interrupt_ids("t1", user_role="admin") == ["int-1"]
+            # The default role really is refused, so the pass above came from the forwarded role.
+            client._agent = None
+            with pytest.raises(ValueError, match="No models are authorized"):
+                client._pending_interrupt_ids("t1")
+
+    def test_resume_preflight_shares_the_streamed_runs_cache_key(self, client, mock_app_config):
+        """Same caller, same graph: the preflight must not rebuild the agent the resume then uses."""
+        mock_app_config.authorization = AuthorizationConfig(
+            enabled=True,
+            provider=AuthorizationProviderConfig(
+                use="deerflow.authz.rbac:RbacAuthorizationProvider",
+                config={"roles": {"user": {"tools": {"allow": "*"}}, "admin": {"tools": {"allow": "*"}}}},
+            ),
+        )
+        client._app_config = mock_app_config
+        agent = MagicMock()
+        agent.get_state.return_value = SimpleNamespace(interrupts=(), metadata={})
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=agent) as mock_create_agent,
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+            patch("deerflow.runtime.checkpointer.provider.get_checkpointer", return_value=MagicMock()),
+        ):
+            identity = {"user_id": "u1", "user_role": "admin", "authz_attributes": {"team": "ops"}}
+            client._ensure_agent(client._get_runnable_config("t1"), context={"thread_id": "t1", "run_id": "r1", **identity})
+            client._pending_interrupt_ids("t1", **identity)
+
+        assert mock_create_agent.call_count == 1
+
     def test_disabled_authorization_cache_key_still_isolates_effective_users(self, client, mock_app_config):
         """User-bound prompts/middleware must never be reused across embedded callers."""
         mock_app_config.authorization = AuthorizationConfig(enabled=False)

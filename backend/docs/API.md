@@ -207,9 +207,40 @@ GET /api/langgraph/threads/{thread_id}/state
     "title": "Conversation Title"
   },
   "next": [],
-  "config": {...}
+  "config": {...},
+  "tasks": [{"id": "...", "name": "tools"}]
 }
 ```
+
+A run parked on tool approval keeps its payload on the pending task, so each
+entry grows an `interrupts` list: `{"id": "...", "name": "tools", "interrupts":
+[{"id": "...", "value": {"action_requests": [...]}}]}`. The key is absent on an
+ordinary in-flight task. `GET /api/threads/{thread_id}` carries the same
+projection under `interrupts`, keyed by task id, and `POST
+/api/threads/{thread_id}/history` under each entry's `tasks`. Resume the run by
+posting a `Command(resume={"decisions": [...]})` input. See
+[TOOL_APPROVAL.md](TOOL_APPROVAL.md).
+
+A parked run does not block new runs on its thread, so an ordinary run posted in
+between can replace the park. A bare `{"decisions": [...]}` resume then answers
+whatever is pending when it lands — possibly a different tool call. Key the
+resume by the interrupt id the human reviewed, `{"command": {"resume":
+{"<interrupt_id>": {"decisions": [...]}}}}`: LangGraph delivers it only to that
+interrupt, and a superseded id answers nothing instead of the newer request. The
+run still succeeds in that case, so re-read `GET /api/threads/{thread_id}`
+afterwards if you need to confirm the decision was consumed.
+
+The two blocking endpoints carry it as well. `interrupt()` exits the graph
+normally, so a park is indistinguishable from a completion at the checkpoint's
+`values` — a resume that parks again would otherwise return a mid-turn approval
+request as this run's final answer. `POST /api/runs/wait` and `POST
+/api/threads/{thread_id}/runs/wait` therefore return `{"status":
+"interrupted_for_approval", "interrupts": {...}, "tasks": [...], "values":
+{...}}` when the snapshot still holds pending interrupts, and the bare `values`
+object otherwise. `interrupts` uses the same task-id keying as `GET
+/api/threads/{thread_id}`. That status is distinct from the durable
+`"interrupted"` these endpoints return for a cancelled run: the first means post
+`Command(resume={"decisions": [...]})`, the second means the run is over.
 
 ### Runs
 
