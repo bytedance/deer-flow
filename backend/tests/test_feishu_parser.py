@@ -575,14 +575,43 @@ def test_feishu_on_message_extracts_image_and_file_keys():
 
 
 async def _on_message_from_lark_thread(channel: FeishuChannel, event) -> None:
-    """Drive ``_on_message`` the way lark-oapi does: on a worker thread, with the Gateway loop running.
+    """Drive ``_on_message`` from a plain worker thread (no loop of its own) with the Gateway loop running.
 
     The channel store is async, so ``_on_message`` bridges its lookups to
-    ``channel._main_loop``; running the callback on the loop thread itself would
-    be the deadlock the bridge refuses.
+    ``channel._main_loop``; running the callback on the Gateway loop's own
+    thread would be the deadlock the bridge refuses.
     """
     channel._main_loop = asyncio.get_running_loop()
     await asyncio.to_thread(channel._on_message, event)
+
+
+async def _on_message_from_sdk_loop(channel: FeishuChannel, event) -> None:
+    """Drive ``_on_message`` exactly as lark-oapi 1.5.5 does in production.
+
+    ``FeishuChannel._run_ws`` gives the SDK thread its own event loop and
+    ``ws.Client.start()`` runs it; the SDK's async frame handler then calls
+    ``_on_message`` synchronously from inside that *running* loop, while the
+    Gateway loop (``channel._main_loop``) runs in another thread. So
+    ``asyncio.get_running_loop()`` succeeds inside the callback, but the loop it
+    returns is not the one the bridge submits to — blocking it briefly is fine
+    (it is the thread that used to block on the JSON rewrite); only a wait on
+    the Gateway loop itself would deadlock.
+    """
+    channel._main_loop = asyncio.get_running_loop()
+
+    def sdk_thread() -> None:
+        sdk_loop = asyncio.new_event_loop()
+        try:
+
+            async def frame_handler() -> None:
+                assert asyncio.get_running_loop() is sdk_loop
+                channel._on_message(event)  # synchronous call from inside the SDK's running loop
+
+            sdk_loop.run_until_complete(frame_handler())
+        finally:
+            sdk_loop.close()
+
+    await asyncio.to_thread(sdk_thread)
 
 
 def test_feishu_on_message_reuses_stored_parent_topic_for_card_replies():
@@ -636,6 +665,91 @@ def test_feishu_on_message_skips_the_store_lookup_without_a_running_gateway_loop
 
     assert mock_make_inbound.call_args.kwargs["metadata"]["topic_id"] == "om_root"
     assert "main loop not running, cannot resolve_topic_mapping" in caplog.text
+
+
+def test_feishu_sdk_loop_callback_still_consults_the_stored_parent_mapping(caplog):
+    """The production shape (#6558 review): the SDK calls ``_on_message`` from inside its own
+    running loop. The bridge must still look the parent card up on the Gateway loop — otherwise
+    a reply whose parent is mapped but whose root is not falls back to the unknown root (a
+    different DeerFlow conversation) and may consume an unrelated pending clarification."""
+
+    async def go():
+        bus = MessageBus()
+        store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        await store.set_thread_id("feishu", "chat_1", "deer-thread-card", topic_id="om_card", user_id="user_1")
+        channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test", "channel_store": store})
+        key = channel._pending_key("chat_1", "user_1")
+        channel._pending_clarifications[key] = [_pending("om_pending", thread_id="deer-thread-pending")]
+        event = _make_text_event("answer", message_id="msg_reply", root_id="om_unknown_root", parent_id="om_card")
+
+        with pytest.MonkeyPatch.context() as m:
+            mock_make_inbound = MagicMock()
+            m.setattr(channel, "_make_inbound", mock_make_inbound)
+            with caplog.at_level("WARNING", logger="app.channels.feishu"):
+                await _on_message_from_sdk_loop(channel, event)
+
+        metadata = mock_make_inbound.call_args.kwargs["metadata"]
+        assert metadata["topic_id"] == "om_card"  # the persisted parent mapping won, via the bridge
+        assert metadata[RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY] is False
+        assert key in channel._pending_clarifications  # the unrelated clarification was not consumed
+        assert "event-loop thread" not in caplog.text
+        assert "Gateway loop" not in caplog.text
+        assert "main loop not running" not in caplog.text
+
+    _run(go())
+
+
+def test_feishu_sdk_loop_callback_restores_the_pending_mapping_through_the_bridge(caplog):
+    """Same production shape for the bridge's write path: restoring a pending clarification's
+    topic mapping goes through the Gateway loop from inside the SDK's running loop."""
+
+    async def go():
+        bus = MessageBus()
+        store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test", "channel_store": store})
+        key = channel._pending_key("chat_1", "user_1")
+        channel._pending_clarifications[key] = [_pending("om_original", thread_id="deer-thread-1", card_message_id="om_card")]
+
+        with pytest.MonkeyPatch.context() as m:
+            mock_make_inbound = MagicMock()
+            m.setattr(channel, "_make_inbound", mock_make_inbound)
+            with caplog.at_level("WARNING", logger="app.channels.feishu"):
+                await _on_message_from_sdk_loop(channel, _make_text_event("2", message_id="msg_plain_2"))
+
+        metadata = mock_make_inbound.call_args.kwargs["metadata"]
+        assert metadata["topic_id"] == "om_original"
+        assert metadata[RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY] is True
+        assert key not in channel._pending_clarifications
+        assert await store.get_thread_id("feishu", "chat_1", topic_id="om_original") == "deer-thread-1"
+        assert "event-loop thread" not in caplog.text
+        assert "Gateway loop" not in caplog.text
+
+    _run(go())
+
+
+def test_feishu_store_bridge_refuses_to_block_the_gateway_loop_itself(caplog):
+    """Only a wait issued from the Gateway loop itself is refused: it would block the loop
+    that has to run the submitted coroutine. The coroutine factory is never invoked."""
+
+    async def go():
+        store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test", "channel_store": store})
+        channel._main_loop = asyncio.get_running_loop()
+        factory_calls = 0
+
+        def make_coroutine():
+            nonlocal factory_calls
+            factory_calls += 1
+            return store.get_thread_id("feishu", "chat_1", topic_id="om_card")
+
+        with caplog.at_level("WARNING", logger="app.channels.feishu"):
+            result = channel._run_store_call(make_coroutine, name="resolve_topic_mapping", msg_id="msg_1", default="fallback")
+
+        assert result == "fallback"
+        assert factory_calls == 0
+        assert "resolve_topic_mapping requested on the Gateway loop itself" in caplog.text
+
+    _run(go())
 
 
 def _make_text_event(

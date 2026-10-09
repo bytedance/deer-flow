@@ -783,28 +783,35 @@ class FeishuChannel(Channel):
                 logger.exception("[Feishu] failed to remember thread mapping for topic_id=%s", topic_id)
 
     def _run_store_call(self, make_coroutine: Callable[[], Coroutine[Any, Any, _T]], *, name: str, msg_id: Any, default: _T) -> _T:
-        """Run an async ``channel_store`` call from the synchronous lark callback thread.
+        """Run an async ``channel_store`` call from the synchronous lark callback.
 
         The store is async (it may be the shared database table). ``_on_message``
         runs on lark-oapi's thread, so the call is submitted to the Gateway loop
-        through the tracked threadsafe-future helper (``stop()`` drains or
-        cancels it) and awaited here with a bound — this thread already blocked
-        on the JSON file rewrite the store used to do inline. On an event-loop
-        thread (never the production path) a blocking wait would deadlock that
-        loop, and without a running Gateway loop there is nothing to run the
-        call on: both return ``default`` with a warning instead. Exceptions the
-        call raised propagate to the caller's own ``except``.
+        (``_main_loop``) through the tracked threadsafe-future helper (``stop()``
+        drains or cancels it) and awaited here with a bound.
+
+        That callback does run inside an event loop: ``_run_ws`` gives the SDK
+        thread its own loop and lark-oapi 1.5.5 calls ``_on_message``
+        synchronously from its async frame handler, so ``get_running_loop()``
+        succeeds here on every real message. Blocking that loop briefly is fine —
+        it is the SDK's private loop in its own thread, the one that used to block
+        on the JSON file rewrite the store did inline — because the coroutine runs
+        on the Gateway loop, not on it. The only wait that must be refused is one
+        issued from the Gateway loop itself (``get_running_loop() is _main_loop``):
+        it would block the loop that has to execute the submitted coroutine. That
+        case, and a Gateway loop that is not running, return ``default`` with a
+        warning. Exceptions the call raised propagate to the caller's own ``except``.
         """
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            pass
-        else:
-            logger.warning("[Feishu] %s requested on an event-loop thread; skipping the channel store call", name)
-            return default
         loop = self._main_loop
         if loop is None or not loop.is_running():
             logger.warning("[Feishu] main loop not running, cannot %s", name)
+            return default
+        try:
+            current = asyncio.get_running_loop()
+        except RuntimeError:
+            current = None
+        if current is loop:
+            logger.warning("[Feishu] %s requested on the Gateway loop itself; a blocking wait here would deadlock it, skipping the channel store call", name)
             return default
         future = self._submit_threadsafe_coroutine_future(make_coroutine(), loop, name=name, msg_id=msg_id)
         if future is None:
