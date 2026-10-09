@@ -44,7 +44,7 @@ function page(messages: (typeof latest)[], start: number, next: number | null) {
     data: messages.map((content, i) => ({
       content,
       seq: start + i,
-      run_id: "run",
+      run_id: `run-${start}`,
     })),
     has_more: next !== null,
     next_before_seq: next,
@@ -59,30 +59,40 @@ async function selectExport(format = enUS.common.exportAsJSON) {
 }
 beforeEach(() => {
   mocks.isMock = false;
+  rs.spyOn(console, "error").mockImplementation(() => undefined);
 });
 afterEach(() => {
   cleanup();
   rs.resetAllMocks();
+  rs.restoreAllMocks();
 });
 
 test.each([enUS.common.exportAsJSON, enUS.common.exportAsMarkdown])(
-  "exports unloaded history in order for %s",
+  "keeps a repeated human identity before both runs' answers for %s",
   async (format) => {
     mocks.fetch
-      .mockResolvedValueOnce(page([latest], 100, 100))
       .mockResolvedValueOnce(
-        page([earliest, { ...latest, content: "Older copy" }], 1, null),
+        page([{ ...earliest, content: "Updated question" }, latest], 100, 100),
+      )
+      .mockResolvedValueOnce(
+        page([earliest, { ...latest, id: "answer-1" }], 1, null),
       );
     await selectExport(format);
     await waitFor(() => expect(mocks.exportThread).toHaveBeenCalledTimes(1));
     expect(mocks.exportThread.mock.calls[0]?.[1].map((m) => m.id)).toEqual([
       "first",
+      "answer-1",
       "last",
     ]);
-    expect(mocks.exportThread.mock.calls[0]?.[1].at(-1)?.content).toBe(
-      "Final answer",
+    expect(mocks.exportThread.mock.calls[0]?.[1][0]?.content).toBe(
+      "Updated question",
     );
     expect(mocks.fetch.mock.calls[1]?.[0]).toContain("before_seq=100");
+    for (const [url] of mocks.fetch.mock.calls) {
+      expect(new URL(url, "http://localhost").searchParams.get("limit")).toBe(
+        "200",
+      );
+    }
   },
 );
 
@@ -96,6 +106,7 @@ test("does not download a partial transcript when an older page fails", async ()
   );
   expect(mocks.exportThread).not.toHaveBeenCalled();
   expect(toast.success).not.toHaveBeenCalled();
+  expect(console.error).toHaveBeenCalledWith(expect.any(Error));
 });
 
 test("rejects a repeated cursor instead of looping forever", async () => {
@@ -106,6 +117,7 @@ test("rejects a repeated cursor instead of looping forever", async () => {
   );
   expect(mocks.fetch).toHaveBeenCalledTimes(2);
   expect(mocks.exportThread).not.toHaveBeenCalled();
+  expect(console.error).toHaveBeenCalledWith(expect.any(Error));
 });
 
 test("keeps public demo export local", async () => {

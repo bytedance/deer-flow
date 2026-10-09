@@ -51,7 +51,8 @@ export function ExportTrigger({ threadId }: { threadId: string }) {
 
         exportThread(agentThread, exportMessages, format);
         toast.success(t.common.exportSuccess);
-      } catch {
+      } catch (error) {
+        console.error(error);
         toast.error(t.common.exportFailed);
       } finally {
         setExporting(false);

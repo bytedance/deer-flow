@@ -216,7 +216,8 @@ export function ThreadSidebarItem({
         }
         exportThread(thread, messages, format);
         toast.success(t.common.exportSuccess);
-      } catch {
+      } catch (error) {
+        console.error(error);
         toast.error(t.common.exportFailed);
       } finally {
         setExporting(false);

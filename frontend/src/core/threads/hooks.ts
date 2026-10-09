@@ -628,6 +628,7 @@ export function buildThreadMessagesPageUrl(
   baseUrl: string,
   threadId: string,
   beforeSeq?: number,
+  limit?: number,
 ) {
   const normalizedBaseUrl = baseUrl.replace(/\/$/, "");
   const path = `/api/threads/${encodeURIComponent(threadId)}/messages/page`;
@@ -638,6 +639,7 @@ export function buildThreadMessagesPageUrl(
   if (beforeSeq !== undefined) {
     url.searchParams.set("before_seq", String(beforeSeq));
   }
+  if (limit !== undefined) url.searchParams.set("limit", String(limit));
   return normalizedBaseUrl ? url.toString() : `${url.pathname}${url.search}`;
 }
 
@@ -658,7 +660,7 @@ export async function fetchThreadExportMessages(threadId: string) {
   let beforeSeq: number | undefined;
   do {
     const response = await fetch(
-      buildThreadMessagesPageUrl(getBackendBaseURL(), threadId, beforeSeq),
+      buildThreadMessagesPageUrl(getBackendBaseURL(), threadId, beforeSeq, 200),
     );
     if (!response.ok) {
       throw new Error("Failed to load conversation for export.");
@@ -676,9 +678,13 @@ export async function fetchThreadExportMessages(threadId: string) {
     pages.push(page);
     beforeSeq = next;
   } while (beforeSeq !== undefined);
-  return buildVisibleHistoryMessages(
-    flattenThreadHistoryPages(pages),
-    new Set<string>(),
+  return mergeMessages(
+    buildVisibleHistoryMessages(
+      flattenThreadHistoryPages(pages),
+      new Set<string>(),
+    ),
+    [],
+    [],
   );
 }
 
