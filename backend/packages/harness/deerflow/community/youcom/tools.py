@@ -48,11 +48,12 @@ _DEFAULT_MAX_RESULTS = 5
 # You.com clamps `count` to 1-100 server-side; clamp here too to mirror it.
 _MAX_RESULTS_CAP = 100
 _TIMEOUT_S = 30.0
-# Actionable hints for the two failures an operator can actually fix. Any other
+# Actionable hints for the failures an operator can actually fix. Any other
 # status just reports its code.
 _STATUS_HINTS = {
     401: "invalid or expired YDC_API_KEY",
     402: "You.com credit balance depleted",
+    429: "rate limit reached — set YDC_API_KEY for higher limits",
 }
 
 
@@ -86,7 +87,7 @@ def _get_api_key(tool_name: str = "web_search") -> str | None:
 def _coerce_max_results(value: object, *, default: int = _DEFAULT_MAX_RESULTS) -> int:
     try:
         coerced = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         logger.warning("Invalid You.com max_results=%r; using default %s", value, default)
         coerced = default
     return max(1, min(coerced, _MAX_RESULTS_CAP))

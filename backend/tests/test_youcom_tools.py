@@ -316,6 +316,7 @@ class TestWebSearchTool:
         [
             (401, "invalid or expired YDC_API_KEY"),
             (402, "You.com credit balance depleted"),
+            (429, "rate limit reached — set YDC_API_KEY for higher limits"),
             (500, None),
         ],
     )
@@ -349,6 +350,13 @@ class TestWebSearchTool:
             patcher.stop()
 
         assert parsed["error"] == "timeout"
+
+
+def test_coerce_max_results_inf_falls_back_to_default():
+    """A YAML `.inf` max_results must fall back to the default, not crash."""
+    import deerflow.community.youcom.tools as youcom_mod
+
+    assert youcom_mod._coerce_max_results(float("inf")) == youcom_mod._DEFAULT_MAX_RESULTS
 
 
 def test_package_exports_web_search_tool():
