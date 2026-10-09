@@ -441,6 +441,7 @@ test("catalog actions wait for gallery hydration before accepting a click", asyn
       page.getByRole("button", { name: "Open Agent teams", exact: true }),
     ).toBeDisabled();
     await expect.poll(() => blockedScriptRequests).toBeGreaterThan(0);
+    await expect(page).toHaveURL(/\/workspace\/capabilities\?tab=extensions$/);
     releaseScripts();
     await expect(view).toBeEnabled();
     await view.click();
