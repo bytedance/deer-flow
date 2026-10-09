@@ -439,7 +439,8 @@ class E2BSandbox(Sandbox):
         matches: list[str] = []
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
-        for entry in output.text.splitlines():
+        # Records are LF-delimited; other splitlines() boundaries can be path characters.
+        for entry in output.text.split("\n"):
             # Do NOT strip: trailing whitespace can be part of the filename.
             if not entry:
                 continue
@@ -519,7 +520,8 @@ class E2BSandbox(Sandbox):
 
         matches: list[GrepMatch] = []
         truncated = output.truncated
-        for raw in output.text.splitlines():
+        # Keep non-LF separators inside filenames and matched text intact.
+        for raw in output.text.split("\n"):
             try:
                 file_path, match_text = raw.split("\0", 1)
                 line_no_str, line_text = match_text.split(":", 1)

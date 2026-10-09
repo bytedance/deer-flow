@@ -5894,6 +5894,17 @@ _RS_POSIX = pytest.mark.skipif(
     os.name == "nt" or any(shutil.which(tool) is None for tool in ("sh", "head", "grep", "find")),
     reason="POSIX sh, head, grep and find required",
 )
+_RS_NON_LF_SEPARATORS = [
+    pytest.param("\r", id="carriage-return"),
+    pytest.param("\v", id="vertical-tab"),
+    pytest.param("\f", id="form-feed"),
+    pytest.param("\x1c", id="file-separator"),
+    pytest.param("\x1d", id="group-separator"),
+    pytest.param("\x1e", id="record-separator"),
+    pytest.param("\x85", id="next-line"),
+    pytest.param("\u2028", id="line-separator"),
+    pytest.param("\u2029", id="paragraph-separator"),
+]
 
 
 def _rs_env(tmp_path, failing: str | None = None) -> dict[str, str]:
@@ -5918,8 +5929,9 @@ class _RsShellCommands:
     def run(self, cmd: str, envs: dict[str, str] | None = None, **kwargs) -> SimpleNamespace:
         self.calls.append(cmd)
         # ``sh -c`` (not ``-lc``) keeps a login profile from overriding the fake PATH.
-        proc = subprocess.run(["sh", "-c", cmd], capture_output=True, text=True, env=self._env, check=False)
-        return SimpleNamespace(stdout=proc.stdout, stderr=proc.stderr, exit_code=proc.returncode)
+        # Decode bytes ourselves so text-mode universal newlines cannot alter CR in paths/content.
+        proc = subprocess.run(["sh", "-c", cmd], capture_output=True, env=self._env, check=False)
+        return SimpleNamespace(stdout=proc.stdout.decode("utf-8"), stderr=proc.stderr.decode("utf-8"), exit_code=proc.returncode)
 
 
 def _rs_sandbox(tmp_path, failing: str | None = None):
@@ -5943,6 +5955,50 @@ def test_remote_grep_preserves_colons_in_paths(tmp_path, relative_path, search_s
     matches, truncated = _rs_sandbox(tmp_path).grep(str(root), "needle", glob=glob)
 
     assert [(match.path, match.line_number, match.line) for match in matches] == [(str(target), 2, "needle: hello:world")]
+    assert truncated is False
+
+
+@_RS_POSIX
+@pytest.mark.parametrize("separator", _RS_NON_LF_SEPARATORS)
+@pytest.mark.parametrize("path_template", ["report{}2026.txt", "reports{}2026/result.txt"], ids=["filename", "parent-directory"])
+@pytest.mark.parametrize("search_scope", ["directory", "single_file", "filtered_directory"])
+def test_remote_grep_preserves_non_lf_separators_in_paths(tmp_path, separator, path_template, search_scope):
+    target = tmp_path / path_template.format(separator)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("header\nneedle: hello:world\n", encoding="utf-8")
+    root = target if search_scope == "single_file" else tmp_path
+    glob = "*.txt" if search_scope == "filtered_directory" else None
+
+    matches, truncated = _rs_sandbox(tmp_path).grep(str(root), "needle", glob=glob)
+
+    assert [(match.path, match.line_number, match.line) for match in matches] == [(str(target), 2, "needle: hello:world")]
+    assert truncated is False
+
+
+@_RS_POSIX
+@pytest.mark.parametrize("separator", _RS_NON_LF_SEPARATORS)
+def test_remote_grep_preserves_non_lf_separators_in_content(tmp_path, separator):
+    target = tmp_path / "plain.txt"
+    line = f"needle: before{separator}after"
+    target.write_bytes(f"header\n{line}\n".encode())
+
+    matches, truncated = _rs_sandbox(tmp_path).grep(str(tmp_path), "needle")
+
+    assert [(match.path, match.line_number, match.line) for match in matches] == [(str(target), 2, line)]
+    assert truncated is False
+
+
+@_RS_POSIX
+@pytest.mark.parametrize("separator", _RS_NON_LF_SEPARATORS)
+@pytest.mark.parametrize("path_template", ["report{}2026.txt", "reports{}2026/result.txt"], ids=["filename", "parent-directory"])
+def test_remote_glob_preserves_non_lf_separators_in_paths(tmp_path, separator, path_template):
+    target = tmp_path / path_template.format(separator)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("content\n", encoding="utf-8")
+
+    matches, truncated = _rs_sandbox(tmp_path).glob(str(tmp_path), "*.txt")
+
+    assert matches == [str(target)]
     assert truncated is False
 
 
