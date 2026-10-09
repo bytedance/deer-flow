@@ -101,8 +101,12 @@ async def test_gateway_shutdown_timeout_does_not_cancel_batch_cleanup(
     assert "Subagent batch service shutdown exceeded" in caplog.text
 
     await service.start()
-    assert service._poller is not original_poller
-    await service.stop()
+    restarted_poller = service._poller
+    assert restarted_poller is not None
+    assert restarted_poller is not original_poller
+    await asyncio.wait_for(service.stop(), timeout=1)
+    assert restarted_poller.done()
+    assert service._poller is None
 
 
 def test_lifespan_uses_bounded_subagent_batch_shutdown() -> None:

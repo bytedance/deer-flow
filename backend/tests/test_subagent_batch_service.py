@@ -530,8 +530,85 @@ async def test_start_cannot_replace_poller_while_stop_is_draining(monkeypatch: p
     assert not service._stopping
 
     await service.start()
-    assert service._poller is not original_poller
-    await service.stop()
+    restarted_poller = service._poller
+    assert restarted_poller is not None
+    assert restarted_poller is not original_poller
+    await asyncio.wait_for(service.stop(), timeout=1)
+    assert restarted_poller.done()
+    assert service._poller is None
+
+
+@pytest.mark.asyncio
+async def test_restarted_batch_stop_cancels_and_drains_owned_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = SubagentBatchService(
+        repository=SimpleNamespace(),
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(),
+    )
+    poller_entered = asyncio.Event()
+    item_entered = asyncio.Event()
+    requested: list[str] = []
+    owned_tasks: list[asyncio.Task[None]] = []
+
+    async def poller() -> None:
+        poller_entered.set()
+        await asyncio.Future()
+
+    async def item_work() -> None:
+        item_entered.set()
+        await asyncio.Future()
+
+    monkeypatch.setattr(service, "_run", poller)
+    monkeypatch.setattr(service_module, "request_cancel_background_task", requested.append)
+
+    try:
+        await service.start()
+        first_poller = service._poller
+        assert first_poller is not None
+        owned_tasks.append(first_poller)
+        await asyncio.wait_for(poller_entered.wait(), timeout=1)
+        await asyncio.wait_for(service.stop(), timeout=1)
+        first_cleanup = service._stop_cleanup_task
+        assert first_poller.done()
+
+        poller_entered.clear()
+        await service.start()
+        restarted_poller = service._poller
+        assert restarted_poller is not None
+        assert restarted_poller is not first_poller
+        owned_tasks.append(restarted_poller)
+        await asyncio.wait_for(poller_entered.wait(), timeout=1)
+
+        item_task = asyncio.create_task(item_work())
+        owned_tasks.append(item_task)
+        service._executions["item-2"] = item_task
+        service._execution_ids["item-2"] = "execution-2"
+        service._item_batches["item-2"] = "batch-2"
+        await asyncio.wait_for(item_entered.wait(), timeout=1)
+
+        await asyncio.wait_for(service.stop(), timeout=1)
+        assert requested == ["execution-2"]
+        assert restarted_poller.done()
+        assert item_task.done()
+        assert service._poller is None
+        assert service._executions == {}
+        assert service._execution_ids == {}
+        assert service._item_batches == {}
+        assert service._stop.is_set()
+        assert not service._stopping
+        second_cleanup = service._stop_cleanup_task
+        assert second_cleanup is not None
+        assert second_cleanup is not first_cleanup
+        assert second_cleanup.done()
+
+        await asyncio.wait_for(service.stop(), timeout=1)
+        assert service._stop_cleanup_task is second_cleanup
+        assert requested == ["execution-2"]
+    finally:
+        for task in owned_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*owned_tasks, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -642,8 +719,12 @@ async def test_cancelled_batch_stop_allows_successful_retry(monkeypatch: pytest.
     assert not service._stopping
 
     await service.start()
-    assert service._poller is not original_poller
-    await service.stop()
+    restarted_poller = service._poller
+    assert restarted_poller is not None
+    assert restarted_poller is not original_poller
+    await asyncio.wait_for(service.stop(), timeout=1)
+    assert restarted_poller.done()
+    assert service._poller is None
 
 
 @pytest.mark.asyncio

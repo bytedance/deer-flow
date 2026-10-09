@@ -81,6 +81,7 @@ class SubagentBatchService:
         cleanup_task = getattr(self, "_stop_cleanup_task", None)
         if cleanup_task is not None:
             cleanup_task.result()
+            self._stop_cleanup_task = None
         if self._poller is not None:
             return
         self._stop.clear()
