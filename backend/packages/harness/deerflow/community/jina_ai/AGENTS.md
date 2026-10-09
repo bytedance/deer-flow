@@ -11,6 +11,9 @@ returns a body-free terminal Error before extraction. Reset per
 response; never re-decode compression. Decoder/wire bytes are uncapped.
 
 `request_admission.py` owns one immutable process policy. Locked FIFO reserves before loop-safe wakeup. Cancellation/expiry return grants;
-leases cover response stream cleanup, never retry backoff, idle client-pool close, or readability. Reuse one client across retries. Drain stream/client close on cancellation, with cancellation taking precedence over cleanup errors. Null bypasses only before first enablement; afterward all callers reuse the frozen policy until restart.
+leases cover response stream cleanup, never retry backoff, idle client-pool close, or readability. Reuse one client across retries.
+
+`_CleanupStream` replaces `response.stream` and depends on httpx 0.28
+stream-close ordering; re-verify this coupling when upgrading httpx. Drain stream/client close on cancellation, with cancellation taking precedence over cleanup errors. Null bypasses only before first enablement; afterward all callers reuse the frozen policy until restart.
 Config: `backend/docs/CONFIGURATION.md`. Tests:
 `tests/test_jina_{client,retries,retry_after,response_limit,request_admission}.py`.

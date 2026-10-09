@@ -148,8 +148,9 @@ class JinaClient:
 
             admission = get_admission(request_admission)
 
-            # HTTPX timeouts are per network phase, so use an outer deadline to
-            # bound the complete request sequence (including waits and cleanup).
+            # HTTPX timeouts are per network phase. Without admission, the outer
+            # deadline covers requests, waits, and cleanup. With admission,
+            # cleanup may outlast the retry budget and is bounded by cancellation.
             deadline = asyncio.get_running_loop().time() + retry_budget_seconds if max_retries else None
             async with asyncio.timeout_at(None if admission else deadline):
                 client_kwargs: dict[str, object] = {"trust_env": trust_env, "follow_redirects": True}

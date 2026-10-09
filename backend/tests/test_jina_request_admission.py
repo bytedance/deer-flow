@@ -398,6 +398,39 @@ async def test_expired_grant_never_dispatches(install_transport, monkeypatch):
     assert await crawl() == "ok"
 
 
+@pytest.mark.parametrize("expired", [False, True])
+async def test_closed_owner_loop_returns_reserved_permit(expired):
+    budget = admission_module.get_admission(POLICY)
+    main_loop = asyncio.get_running_loop()
+    active = admission_module._Ticket(main_loop, main_loop.create_future(), float("inf"), state="granted")
+
+    def closed_loop_ticket():
+        loop = asyncio.new_event_loop()
+        try:
+            return admission_module._Ticket(loop, loop.create_future(), 0 if expired else float("inf"))
+        finally:
+            loop.close()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        ticket = await asyncio.wrap_future(executor.submit(closed_loop_ticket))
+
+    with budget._lock:
+        budget._active = 1
+        budget._queue.append(ticket)
+
+    budget._finish(active)
+    assert ticket.state == "released"
+    assert budget._active == 0
+    assert not budget._queue
+
+    # Finishing the orphan again must not decrement a granted or expired ticket.
+    budget._finish(ticket)
+    assert budget._active == 0
+    async with budget.attempt(None):
+        assert budget._active == 1
+    assert budget._active == 0
+
+
 async def test_retry_releases_during_backoff_and_rejoins_fifo(install_transport, monkeypatch):
     from deerflow.community.jina_ai import jina_client
 
