@@ -39,9 +39,12 @@ import threading
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 
 import deerflow.mcp.cache as cache_module
-from deerflow.config.extensions_config import ExtensionsConfig, atomic_write_extensions_config
+from app.gateway.routers import mcp as mcp_router
+from app.gateway.routers.mcp import McpServerStateUpdateRequest
+from deerflow.config.extensions_config import ExtensionsConfig, atomic_write_extensions_config, extensions_config_write_lock
 from deerflow.config.file_signature import get_config_signature
 from deerflow.mcp import session_pool as session_pool_module
 from deerflow.mcp.client import build_server_params, build_servers_config
@@ -672,6 +675,68 @@ async def test_repeated_identical_revision_does_not_retire_again(reconciler, mon
 
 
 @pytest.mark.asyncio
+async def test_committed_handoff_failure_fences_before_config_lock_release(reconciler, monkeypatch, tmp_path):
+    """A post-write fallback reset must detach state while the config lock is still held."""
+    cfg = tmp_path / "extensions_config.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "remote": {
+                        "enabled": False,
+                        "type": "http",
+                        "url": "https://example.test/mcp",
+                    }
+                },
+                "skills": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda _config_path=None: cfg)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", lambda: None)
+
+    async def _noop_admin(_request, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(mcp_router, "require_admin_user", _noop_admin)
+    before_generation = cache_module._cache_generation
+    fallback_installed = threading.Event()
+    release_fallback = threading.Event()
+    real_fail = cache_module.fail_mcp_reconciliation
+
+    def fail_prepare(*_args, **_kwargs):
+        raise RuntimeError("prepare boom")
+
+    def fail_and_wait(exc):
+        pending = real_fail(exc)
+        fallback_installed.set()
+        assert release_fallback.wait(timeout=5)
+        return pending
+
+    monkeypatch.setattr(mcp_router, "prepare_mcp_reconciliation", fail_prepare)
+    monkeypatch.setattr(mcp_router, "fail_mcp_reconciliation", fail_and_wait)
+
+    task = asyncio.create_task(
+        mcp_router.update_mcp_server_state(
+            request=None,
+            body=McpServerStateUpdateRequest(server_name="remote", enabled=True),
+        )
+    )
+    try:
+        assert await asyncio.to_thread(fallback_installed.wait, 5)
+        assert extensions_config_write_lock.locked() is True
+        assert cache_module._cache_generation > before_generation
+        assert cache_module._applied_mcp_revision is None
+    finally:
+        release_fallback.set()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await task
+    assert exc_info.value.status_code == 500
+
+
+@pytest.mark.asyncio
 async def test_committed_delete_then_identical_readd_installs_a_new_epoch(reconciler, monkeypatch, tmp_path):
     """The committed handoff must not coalesce a delete/readd back to one revision."""
     cfg = tmp_path / "extensions_config.json"
@@ -686,12 +751,17 @@ async def test_committed_delete_then_identical_readd_installs_a_new_epoch(reconc
     assert old_entry is not None
     old_cm = log["cms"]["cmd-A"][0]
     assert old_cm.closed is False
+    generation_before = cache_module._cache_generation
 
     _write_config(cfg, {})
     deleted = ExtensionsConfig.from_file(str(cfg))
     cache_module.finish_mcp_reconciliation(cache_module.prepare_mcp_reconciliation(deleted, config_path=cfg))
     await _wait_until(lambda: log["exited"].get("cmd-A") == 1)
     assert old_cm.closed is True
+    assert cache_module._cache_generation > generation_before
+    assert cache_module._applied_mcp_revision is not None
+    assert cache_module._applied_mcp_revision.stdio_connections == {}
+    generation_after_delete = cache_module._cache_generation
 
     _write_config(cfg, servers)
     readded = ExtensionsConfig.from_file(str(cfg))
@@ -699,6 +769,9 @@ async def test_committed_delete_then_identical_readd_installs_a_new_epoch(reconc
 
     new_binding = _binding(pool, "A")
     assert new_binding.epoch > old_binding.epoch
+    assert cache_module._cache_generation > generation_after_delete
+    assert cache_module._applied_mcp_revision is not None
+    assert cache_module._applied_mcp_revision.stdio_connections["A"] == new_binding.fingerprint
     with pytest.raises(StaleMCPBindingError):
         await pool.get_session("A", "u:t", servers["A"], binding=old_binding)
 
@@ -1296,6 +1369,33 @@ async def test_shared_reset_outranks_selective_reconciliation(reconciler, monkey
     assert cache_module._applied_mcp_revision is None
     assert cache_module._cache_initialized is False
     assert cache_module._mcp_config_snapshot is None
+
+
+@pytest.mark.asyncio
+async def test_committed_handoff_does_not_swallow_shared_reset(reconciler, monkeypatch, tmp_path):
+    """A committed writer cannot consume a shared reset that already happened."""
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    log = _session_log()
+    await _initialize(monkeypatch, cfg, {"A": _stdio("cmd-A1")}, log)
+
+    _write_remote_marker(cfg, "remote-worker-reset")
+    cache_module.reset_mcp_tools_cache()
+    assert session_pool_module.get_session_pool() is not pool
+    assert cache_module._applied_mcp_revision is None
+
+    _write_config(cfg, {"A": _stdio("cmd-A2")})
+    committed = ExtensionsConfig.from_file(str(cfg))
+    cache_module.finish_mcp_reconciliation(cache_module.prepare_mcp_reconciliation(committed, config_path=cfg))
+    handoff_pool = session_pool_module.get_session_pool()
+    assert handoff_pool is not pool
+    assert cache_module._applied_mcp_revision is not None
+
+    assert cache_module.refresh_mcp_cache_if_active() is True
+    assert session_pool_module.get_session_pool() is not handoff_pool
+    assert handoff_pool._retired is True
+    assert cache_module._applied_mcp_revision is None
 
 
 @pytest.mark.asyncio

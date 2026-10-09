@@ -1983,6 +1983,68 @@ async def test_frozen_task_server_unchanged_allows_regular_server_change(monkeyp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["create", "delete"])
+async def test_committed_write_failure_retry_has_explicit_conflict_or_missing_semantics(
+    operation,
+    monkeypatch,
+    tmp_path,
+):
+    """After a client sees 500 for a committed write, a retry is not a blind repeat."""
+    config_path = tmp_path / "extensions_config.json"
+    original = {
+        "mcpServers": {
+            "existing": {
+                "enabled": True,
+                "type": "http",
+                "url": "https://existing.example/mcp",
+            }
+        },
+        "skills": {},
+    }
+    if operation == "delete":
+        original["mcpServers"]["target"] = {
+            "enabled": True,
+            "type": "http",
+            "url": "https://target.example/mcp",
+        }
+    config_path.write_text(json.dumps(original), encoding="utf-8")
+    recovery_pending = object()
+
+    def fail_prepare(*_args, **_kwargs):
+        raise RuntimeError("prepare boom")
+
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda _config_path=None: config_path)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", lambda: None)
+    monkeypatch.setattr(mcp_router, "prepare_mcp_reconciliation", fail_prepare)
+    monkeypatch.setattr(mcp_router, "fail_mcp_reconciliation", lambda _exc: recovery_pending)
+    monkeypatch.setattr(mcp_router, "finish_mcp_reconciliation", lambda _pending: None)
+
+    with pytest.raises(HTTPException) as first:
+        if operation == "create":
+            await create_mcp_servers(
+                _request_with_role("admin"),
+                McpConfigUpdateRequest(mcp_servers={"target": McpServerConfigResponse(type="http", url="https://target.example/mcp")}),
+            )
+        else:
+            await delete_mcp_server(_request_with_role("admin"), "target")
+
+    assert first.value.status_code == 500
+    with pytest.raises(HTTPException) as retry:
+        if operation == "create":
+            await create_mcp_servers(
+                _request_with_role("admin"),
+                McpConfigUpdateRequest(mcp_servers={"target": McpServerConfigResponse(type="http", url="https://target.example/mcp")}),
+            )
+        else:
+            await delete_mcp_server(_request_with_role("admin"), "target")
+
+    if operation == "create":
+        assert retry.value.status_code == 409
+    else:
+        assert retry.value.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_committed_config_write_reports_reconciliation_failure_after_conservative_reset(
     monkeypatch,
     tmp_path,
