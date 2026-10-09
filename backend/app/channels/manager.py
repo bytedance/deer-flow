@@ -70,6 +70,11 @@ DEFAULT_CHANNEL_SHUTDOWN_GRACE_PERIOD_SECONDS = 3.0
 CUSTOM_AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 CHANNEL_AGENT_METADATA_KEY = "channel_agent_name"
 THREAD_AGENT_METADATA_KEY = "agent_name"
+CHANNEL_MODEL_METADATA_KEY = "channel_model_name"
+# Bound for the manager's in-process per-thread caches (agent/model pins,
+# synced-metadata bookkeeping). One constant so the clear-on-pressure bound
+# cannot drift between call sites.
+IN_PROCESS_CACHE_MAX_ENTRIES = 4096
 MAX_CHANNEL_AGENT_LIST_ITEMS = 50
 MAX_CHANNEL_AGENT_DESCRIPTION_CHARS = 120
 
@@ -544,6 +549,31 @@ def _apply_explicit_agent_choice(
             carrier.pop("agent_name", None)
         else:
             carrier["agent_name"] = agent_name
+
+
+def _apply_explicit_model_choice(
+    run_config: dict[str, Any],
+    run_context: dict[str, Any],
+    model_name: str,
+) -> None:
+    """Pin a ``/model`` selection in every runtime carrier.
+
+    ``merge_run_context_overrides`` fills ``config['configurable']`` and
+    ``config['context']`` from ``body.context`` with ``setdefault``, so a
+    ``model_name`` inherited from channel session config in either carrier
+    would silently win over a pin carried only by ``body.context``. Mirrors
+    ``_apply_explicit_agent_choice``: normalize all three carriers.
+    """
+    carriers = [run_context]
+    for section in ("configurable", "context"):
+        value = run_config.get(section)
+        if isinstance(value, Mapping):
+            copied = dict(value)
+            run_config[section] = copied
+            carriers.append(copied)
+
+    for carrier in carriers:
+        carrier["model_name"] = model_name
 
 
 def _extract_response_text(result: dict | list) -> str:
@@ -1266,6 +1296,17 @@ class ChannelManager:
         # same thread before every turn; None distinguishes a checked default
         # thread from a thread that has not been inspected yet.
         self._thread_agent_names: dict[str, str | None] = {}
+        # Explicit /model selections are pinned to the current thread. Same
+        # cache semantics as _thread_agent_names: None marks a thread that was
+        # checked and has no pin. Unlike agent pins (written only when a
+        # thread is created and immutable afterwards), model pins mutate on
+        # live threads, so this cache is consistent only within one process:
+        # a pod that cached an entry will not see pins set by other pods
+        # until the cache clears or the pod restarts. IM providers hold a
+        # single long-lived connection, so the pin writer and reader run in
+        # the same Gateway process in practice; revisit if pins ever need to
+        # be read across a shared store.
+        self._thread_model_names: dict[str, str | None] = {}
         # Waiter-aware per-conversation locks prevent concurrent inbound messages
         # from creating duplicate threads. Participants are checked out before
         # they wait, so failure or cancellation of the current creator cannot let
@@ -1659,6 +1700,10 @@ class ChannelManager:
         if not isinstance(assistant_id, str) or not assistant_id.strip():
             assistant_id = self._assistant_id
 
+        # Session layer merge order (default -> channel -> user, later wins)
+        # is mirrored by _resolve_configured_model_name, which reports the
+        # effective model for the /model status reply. Keep both in sync when
+        # reordering layers.
         run_config = _merge_dicts(
             DEFAULT_RUN_CONFIG,
             self._default_session.get("config"),
@@ -1705,6 +1750,14 @@ class ChannelManager:
             user_layer.get("context"),
             run_context_identity,
         )
+
+        # An explicit /model pin wins over every session-config layer. A
+        # custom agent's ``model`` still loses to it in the agent factory
+        # (``_resolve_model_name`` prefers the requested name), keeping
+        # explicit choices ahead of implicit configuration.
+        pinned_model_name = self._thread_model_names.get(thread_id)
+        if pinned_model_name:
+            _apply_explicit_model_choice(run_config, run_context, pinned_model_name)
 
         explicit_agent_choice = message_assistant_id is not None or thread_assistant_id is not None
         # Custom agents are implemented as lead_agent + agent_name context.
@@ -2233,7 +2286,7 @@ class ChannelManager:
         )
 
     def _remember_thread_agent(self, thread_id: str, agent_name: str | None) -> None:
-        if len(self._thread_agent_names) > 4096:
+        if len(self._thread_agent_names) > IN_PROCESS_CACHE_MAX_ENTRIES:
             self._thread_agent_names.clear()
         self._thread_agent_names[thread_id] = agent_name
 
@@ -2259,6 +2312,86 @@ class ChannelManager:
                     raise InvalidChannelSessionConfigError("This conversation has an invalid stored agent selection. Use /agent use <name> to start a valid conversation.") from exc
         self._remember_thread_agent(thread_id, agent_name)
         return agent_name
+
+    def _remember_thread_model(self, thread_id: str, model_name: str | None) -> None:
+        if len(self._thread_model_names) > IN_PROCESS_CACHE_MAX_ENTRIES:
+            self._thread_model_names.clear()
+        self._thread_model_names[thread_id] = model_name
+
+    async def _load_thread_model(self, client, msg: InboundMessage, thread_id: str) -> str | None:
+        """Load an explicit /model pin from durable thread metadata.
+
+        Reading is deliberately lenient: a stale pin (a model later removed
+        from the configured allowlist) is left in place and rejected at run
+        admission. That admission failure reaches the user only as the
+        generic "An internal error occurred" fallback in ``_handle_message``,
+        so the documented recovery
+        (``/model default``) is not visible in the error text itself.
+        Anything that is not a non-empty string reads as "no pin".
+        """
+        if thread_id in self._thread_model_names:
+            return self._thread_model_names[thread_id]
+
+        get_kwargs: dict[str, Any] = {}
+        if owner_headers := _owner_headers(msg):
+            get_kwargs["headers"] = owner_headers
+        thread = await client.threads.get(thread_id, **get_kwargs)
+        metadata = thread.get("metadata") if isinstance(thread, Mapping) else None
+        raw_model_name = metadata.get(CHANNEL_MODEL_METADATA_KEY) if isinstance(metadata, Mapping) else None
+        model_name = raw_model_name.strip() if isinstance(raw_model_name, str) and raw_model_name.strip() else None
+        self._remember_thread_model(thread_id, model_name)
+        return model_name
+
+    async def _persist_model_pin(
+        self,
+        client,
+        msg: InboundMessage,
+        thread_id: str,
+        model_name: str | None,
+        failure_reply: str,
+    ) -> str | None:
+        """Persist (or, with ``None``, clear) the ``/model`` pin.
+
+        Returns ``failure_reply`` when the thread update fails so callers can
+        return it verbatim; returns ``None`` on success.
+        """
+        update_kwargs: dict[str, Any] = {"metadata": {CHANNEL_MODEL_METADATA_KEY: model_name}}
+        if owner_headers := _owner_headers(msg):
+            update_kwargs["headers"] = owner_headers
+        try:
+            await client.threads.update(thread_id, **update_kwargs)
+        except Exception:
+            logger.exception(
+                "[Manager] failed to persist model pin (model_name=%s) for thread_id=%s",
+                model_name,
+                thread_id,
+            )
+            return failure_reply
+        return None
+
+    def _resolve_configured_model_name(self, msg: InboundMessage) -> str | None:
+        """Resolve the model a run would use without a ``/model`` pin.
+
+        Single source of truth for the ``/model`` status reply: mirrors
+        ``_resolve_run_params`` (layer merge order default -> channel -> user,
+        later wins) and ``_get_runtime_config`` (the ``context`` carrier wins
+        over ``configurable``). Session layers can carry ``model_name`` under
+        either carrier, and scanning only ``context`` misreports the model a
+        conversation is actually running.
+        """
+        channel_layer, user_layer = self._resolve_session_layer(msg)
+        context_model: str | None = None
+        configurable_model: str | None = None
+        for layer in (self._default_session, channel_layer, user_layer):
+            context = _as_dict(layer.get("context"))
+            raw_context_model = context.get("model_name")
+            if isinstance(raw_context_model, str) and raw_context_model.strip():
+                context_model = raw_context_model.strip()
+            configurable = _as_dict(_as_dict(layer.get("config")).get("configurable"))
+            raw_configurable_model = configurable.get("model_name")
+            if isinstance(raw_configurable_model, str) and raw_configurable_model.strip():
+                configurable_model = raw_configurable_model.strip()
+        return context_model or configurable_model
 
     async def _create_thread(
         self,
@@ -2380,7 +2513,7 @@ class ChannelManager:
         except Exception:
             logger.debug("[Manager] failed to update channel metadata for thread_id=%s", thread_id, exc_info=True)
             return
-        if len(self._channel_metadata_synced) > 4096:
+        if len(self._channel_metadata_synced) > IN_PROCESS_CACHE_MAX_ENTRIES:
             self._channel_metadata_synced.clear()
         self._channel_metadata_synced.add(thread_id)
 
@@ -2411,6 +2544,17 @@ class ChannelManager:
             logger.info("[Manager] reusing thread: thread_id=%s for topic_id=%s", thread_id, msg.topic_id)
             await self._update_thread_channel_metadata(client, msg, thread_id)
             await self._load_thread_agent(client, msg, thread_id)
+            try:
+                await self._load_thread_model(client, msg, thread_id)
+            except Exception:
+                # A transient threads.get failure must not turn an ordinary
+                # chat message into the generic error reply: nothing is cached
+                # on failure, so the pin stays unloaded and is retried next turn.
+                logger.warning(
+                    "[Manager] failed to preload model pin for thread_id=%s; continuing without it",
+                    thread_id,
+                    exc_info=True,
+                )
 
         serial_state, queued = self._begin_serialized_thread_run(
             channel_name=msg.channel_name,
@@ -2796,6 +2940,17 @@ class ChannelManager:
             reply = f"Active thread: {thread_id}" if thread_id else "No active conversation."
         elif reply is None and command == "models":
             reply = await self._fetch_gateway("/api/models", "models", msg=msg)
+            model_thread_id = await self._lookup_thread_id(msg)
+            if model_thread_id:
+                try:
+                    pinned_model = await self._load_thread_model(self._get_client(), msg, model_thread_id)
+                except Exception:
+                    logger.warning("[Manager] failed to load model pin for /models footer (thread_id=%s)", model_thread_id, exc_info=True)
+                    pinned_model = None
+                if pinned_model:
+                    reply += f"\nCurrent conversation model: {pinned_model} (pinned via /model)"
+        elif reply is None and command == "model":
+            reply = await self._handle_model_command(msg, parts[1] if len(parts) > 1 else "")
         elif reply is None and command == "memory":
             reply = await self._fetch_gateway("/api/memory", "memory", msg=msg)
         elif reply is None and command == "agent":
@@ -2812,6 +2967,7 @@ class ChannelManager:
                 "/new — Start a new conversation\n"
                 "/status — Show current thread info\n"
                 "/models — List available models\n"
+                "/model [name|default] — Show or pin this conversation's model\n"
                 "/memory — Show memory status\n"
                 "/agent list — List your Custom Agents\n"
                 "/agent use <name> — Start a new conversation with an agent\n"
@@ -2900,6 +3056,69 @@ class ChannelManager:
 
         return "Usage: /agent list or /agent use <name>"
 
+    async def _handle_model_command(self, msg: InboundMessage, args: str) -> str:
+        """Show, pin, or reset the model used by the current conversation.
+
+        Unlike ``/agent use`` (which starts a fresh conversation because a
+        thread's checkpoint lineage belongs to its original agent), a model
+        pin applies to the *current* conversation from the next message: the
+        model is a per-run context value resolved anew on every turn.
+        """
+        parts = args.split()
+        thread_id = await self._lookup_thread_id(msg)
+
+        if not parts:
+            pinned: str | None = None
+            if thread_id:
+                try:
+                    pinned = await self._load_thread_model(self._get_client(), msg, thread_id)
+                except Exception:
+                    logger.warning("[Manager] failed to load model pin for /model status (thread_id=%s)", thread_id, exc_info=True)
+                    return "Current model: unknown. Use /models to list available models."
+            if pinned:
+                return f"Current model: {pinned} (pinned for this conversation). Use /model default to reset."
+            configured = self._resolve_configured_model_name(msg)
+            if configured:
+                return f"Current model: {configured} (from channel configuration)."
+            return "Current model: server default. Use /models to list available models."
+
+        if len(parts) > 1:
+            return "Usage: /model [<name>|default]"
+
+        if thread_id is None:
+            return "No active conversation. Send a message first, then use /model."
+
+        client = self._get_client()
+        name = parts[0]
+
+        if name.lower() == "default":
+            if failure := await self._persist_model_pin(client, msg, thread_id, None, "Failed to reset the model selection."):
+                return failure
+            self._remember_thread_model(thread_id, None)
+            return "Model selection reset. This conversation now follows the configured default."
+
+        try:
+            data = await self._fetch_gateway_json("/api/models", msg=msg)
+        except Exception:
+            logger.exception("[Manager] failed to fetch the model list for /model")
+            return "Failed to fetch the model list."
+        # /api/models is role-filtered per caller, so list membership doubles
+        # as the authorization check for user-owned connections. Channels
+        # without owner binding (allowed_users mode) fall back to internal
+        # auth, where /api/models returns the full configured list, so the
+        # membership check admits any configured model there. That matches
+        # the pre-existing /models command's exposure, but /model newly turns
+        # it into model *selection* on such channels.
+        names = [m["name"] for m in data.get("models", []) if isinstance(m, Mapping) and isinstance(m.get("name"), str)]
+        if name not in names:
+            listing = "\n".join(f"• {n}" for n in names) if names else "(none)"
+            return f"Unknown model '{name}'. Available models:\n{listing}"
+
+        if failure := await self._persist_model_pin(client, msg, thread_id, name, "Failed to save the model selection."):
+            return failure
+        self._remember_thread_model(thread_id, name)
+        return f"Model '{name}' selected. It applies to this conversation from the next message."
+
     async def _goal_request(
         self,
         method: str,
@@ -2957,20 +3176,26 @@ class ChannelManager:
         await self._handle_chat(chat_msg, bound_identity_checked=True)
         return None
 
+    async def _fetch_gateway_json(self, path: str, *, msg: InboundMessage | None = None) -> dict[str, Any]:
+        """GET a Gateway API path and return the parsed JSON body.
+
+        Raises on transport/HTTP errors; callers rendering user-facing
+        replies should catch and degrade (see ``_fetch_gateway``).
+        """
+        headers = _owner_headers(msg) if msg is not None else None
+        async with httpx.AsyncClient() as http:
+            resp = await http.get(
+                f"{self._gateway_url}{path}",
+                timeout=10,
+                headers=headers or create_internal_auth_headers(),
+            )
+            resp.raise_for_status()
+            return resp.json()
+
     async def _fetch_gateway(self, path: str, kind: str, *, msg: InboundMessage | None = None) -> str:
         """Fetch data from the Gateway API for command responses."""
-        import httpx
-
         try:
-            headers = _owner_headers(msg) if msg is not None else None
-            async with httpx.AsyncClient() as http:
-                resp = await http.get(
-                    f"{self._gateway_url}{path}",
-                    timeout=10,
-                    headers=headers or create_internal_auth_headers(),
-                )
-                resp.raise_for_status()
-                data = resp.json()
+            data = await self._fetch_gateway_json(path, msg=msg)
         except Exception:
             logger.exception("Failed to fetch %s from gateway", kind)
             return f"Failed to fetch {kind} information."
