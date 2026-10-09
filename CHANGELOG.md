@@ -819,7 +819,7 @@ This release closes that milestone with **439 merged pull requests**.
   duplicate a binding) and renamed `store.json.migrated`; a populated table
   leaves the file untouched. The store API is async so the database never
   blocks the Gateway loop; Feishu's synchronous lark callback bridges its
-  lookups to that loop with a bounded wait.
+  lookups to that loop with a bounded wait. ([#6558])
 - **scheduler:** "Run once now" on a one-time task before its run time no longer
   cancels the scheduled run. The trial launched as the task's own run: the task
   was marked `running`, and the trial's outcome then finished it (`completed`,
@@ -9312,3 +9312,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6501]: https://github.com/bytedance/deer-flow/pull/6501
 [#6506]: https://github.com/bytedance/deer-flow/pull/6506
 [#6512]: https://github.com/bytedance/deer-flow/pull/6512
+[#6558]: https://github.com/bytedance/deer-flow/pull/6558
