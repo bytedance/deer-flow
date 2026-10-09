@@ -179,6 +179,21 @@ File storage reads JSON counters only, not fact files.
 Custom `storage_class` providers must override `peek_clear_generation` with an equally cheap read; `create_storage` rejects a provider that leaves the base peek in place.
 Same-key merges keep the earlier token unless a newer clear is already visible.
 A visible newer clear consumes the pre-clear snapshot and starts a fresh fence.
+Emergency (bypass) merges follow the same rule: a pending pre-clear flush is
+consumed, and the replacement messages keep the generation they captured, so
+post-clear turns are not dropped on the stale fence.
+If that consume fails, the queued messages and fence stay in place and the
+incoming messages are queued beside them under the generation they captured.
+A later flush excludes only the stale snapshot; the new snapshot keeps its
+own fence. Later same-key adds merge into that newer snapshot. The failed
+add still unions its signals onto both.
+The new snapshot also drops every message id carried by the stale one and
+keeps filtering those ids on later same-key merges
+(`ConversationContext.excluded_message_ids`). The stale drop runs through the
+same `mark_feed_consumed` path that just failed, and a full-conversation feed
+still carries the cleared turns, so the new snapshot must not depend on that
+drop. The filter lives only on queued work: a turn queued after both
+snapshots are processed relies on the updater's clear-exclusion set.
 An incoming peek older than the queued context cannot inherit the newer token.
 That refused add still unions its signals onto the queued snapshot.
 If consuming the refused snapshot fails, the queued fence stays as-is.

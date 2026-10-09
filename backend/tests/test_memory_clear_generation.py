@@ -1711,6 +1711,115 @@ def test_emergency_flush_after_clear_still_extracts_post_clear_turns(tmp_path: P
     assert "User prefers typed Python" in facts
 
 
+def test_pending_emergency_after_cross_worker_clear_extracts_post_clear_turns(tmp_path: Path) -> None:
+    """A pending add_nowait must not lend its pre-clear fence to a later flush.
+
+    Worker A can hold an emergency flush while it extracts another thread.
+    Worker B then clears shared storage. A's next compaction of post-clear
+    turns captures the new generation. Merging onto the pending emergency item
+    used to keep the old fence, so the stale-generation drop excluded the new
+    message ids and the preference never returned.
+    """
+    host_llm = MagicMock()
+    host_llm.invoke = MagicMock(return_value=MagicMock(content=_extraction_json("User likes Python")))
+    manager_a = _manager(tmp_path, host_llm)
+    pre_clear = _queue_conversation()
+    post_clear = _queue_conversation(
+        human="Also remember that I prefer typed Python.",
+        ai="Noted, I will keep that preference.",
+    )
+
+    with patch.object(manager_a._queue, "_schedule_timer"):
+        manager_a.add_nowait(thread_id="thread-1", messages=pre_clear, agent_name="researcher", user_id="alice")
+        assert manager_a._queue.pending_count == 1
+        assert manager_a._queue._items[0].clear_generation == (0, 0)
+
+    manager_b = _manager(tmp_path)
+    manager_b.clear_memory(agent_name="researcher", user_id="alice")
+    assert manager_b.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+
+    prompts: list[str] = []
+
+    def invoke_post_clear(prompt, config=None):
+        prompts.append(str(prompt))
+        return MagicMock(content=_extraction_json("User prefers typed Python"))
+
+    host_llm.invoke.side_effect = invoke_post_clear
+    with patch.object(manager_a._queue, "_schedule_timer"):
+        manager_a.add_nowait(thread_id="thread-1", messages=post_clear, agent_name="researcher", user_id="alice")
+        assert manager_a._queue.pending_count == 1
+        queued = manager_a._queue._items[0]
+        assert queued.clear_generation == (0, 1)
+        assert [getattr(message, "content", None) for message in queued.messages] == [
+            "Also remember that I prefer typed Python.",
+            "Noted, I will keep that preference.",
+        ]
+    manager_a._queue.flush()
+
+    assert host_llm.invoke.call_count == 1, prompts
+    assert "Remember that I like Python." not in prompts[0]
+    assert "Also remember that I prefer typed Python." in prompts[0]
+    facts = {fact["content"] for fact in manager_b.get_memory(agent_name="researcher", user_id="alice")["facts"]}
+    assert facts == {"User prefers typed Python"}
+
+    prompts.clear()
+    host_llm.invoke.reset_mock()
+    host_llm.invoke.side_effect = invoke_post_clear
+    with patch.object(manager_a._queue, "_schedule_timer"):
+        manager_a.add_nowait(thread_id="thread-1", messages=post_clear, agent_name="researcher", user_id="alice")
+    manager_a._queue.flush()
+    assert host_llm.invoke.call_count == 1, prompts
+
+    host_llm.invoke.reset_mock()
+    with patch.object(manager_a._queue, "_schedule_timer"):
+        manager_a.add_nowait(thread_id="thread-1", messages=pre_clear, agent_name="researcher", user_id="alice")
+    manager_a._queue.flush()
+    host_llm.invoke.assert_not_called()
+    facts = {fact["content"] for fact in manager_b.get_memory(agent_name="researcher", user_id="alice")["facts"]}
+    assert "User likes Python" not in facts
+
+
+def test_failed_pre_clear_consume_does_not_restore_cleared_turns(tmp_path: Path) -> None:
+    """A consume that keeps failing must not let the fresh feed re-extract pre-clear turns.
+
+    Worker B clears while worker A still holds a pre-clear snapshot. A's next
+    full-conversation feed cannot consume that snapshot, and the stale drop
+    fails the same way, so A's updater never learns the pre-clear ids. The
+    fresh snapshot must still leave them out of the extraction prompt.
+    """
+    host_llm = MagicMock()
+    prompts: list[str] = []
+
+    def invoke(prompt, config=None):
+        prompts.append(str(prompt))
+        return MagicMock(content=_extraction_json("User prefers typed Python"))
+
+    host_llm.invoke = MagicMock(side_effect=invoke)
+    manager_a = _manager(tmp_path, host_llm)
+    pre_clear = _queue_conversation()
+    post_clear = _queue_conversation(
+        human="Also remember that I prefer typed Python.",
+        ai="Noted, I will keep that preference.",
+    )
+
+    with patch.object(manager_a._queue, "_schedule_timer"):
+        manager_a.add(thread_id="thread-1", messages=pre_clear, agent_name="researcher", user_id="alice")
+
+    _manager(tmp_path).clear_memory(agent_name="researcher", user_id="alice")
+
+    with (
+        patch.object(manager_a._updater, "_mark_feed_consumed", side_effect=RuntimeError("watermark unavailable")),
+        patch.object(manager_a._queue, "_schedule_timer"),
+    ):
+        manager_a.add(thread_id="thread-1", messages=[*pre_clear, *post_clear], agent_name="researcher", user_id="alice")
+        assert manager_a._queue.pending_count == 2
+        manager_a._queue.flush()
+
+    assert host_llm.invoke.call_count == 1, prompts
+    assert "Remember that I like Python." not in prompts[0]
+    assert "Also remember that I prefer typed Python." in prompts[0]
+
+
 def test_emergency_flush_of_cleared_prefix_does_not_restore_facts(tmp_path: Path) -> None:
     """Summarization that keeps B and only submits A must not rewrite A's facts."""
     host_llm = MagicMock()

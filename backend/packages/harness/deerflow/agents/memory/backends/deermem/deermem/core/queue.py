@@ -51,6 +51,17 @@ def queue_key(
     return (thread_id, user_id, agent_name)
 
 
+def _message_id(message: Any) -> str | None:
+    """Return the message id, or None.
+
+    Only an id proves a message predates a clear: a content match also hits a
+    fresh post-clear turn with the same text (same rule as the updater's
+    clear-exclusion filter).
+    """
+    message_id = getattr(message, "id", None)
+    return message_id if isinstance(message_id, str) and message_id else None
+
+
 @dataclass
 class ConversationContext:
     """Context for a conversation to be processed for memory update."""
@@ -74,12 +85,18 @@ class ConversationContext:
     # lands during debounce would otherwise look current and restore facts.
     # Same-key merges keep the earlier value unless a newer clear is already
     # visible; then the queue consumes the pre-clear snapshot and starts a
-    # fresh fence. An incoming peek older than the queued context is refused
-    # so that snapshot cannot inherit the newer fence, but its signals still
-    # union onto the queued item. A failed consume of that refused snapshot
-    # must not rewrite the queued fence. A missing token and emergency
-    # (bypass) snapshots are never refreshed.
+    # fresh fence; emergency (bypass) merges follow the same rule. An incoming
+    # peek older than the queued context is refused so that snapshot cannot
+    # inherit the newer fence, but its signals still union onto the queued
+    # item. A failed consume of that refused snapshot must not rewrite the
+    # queued fence. A failed refresh consume is handled in ``_enqueue_locked``.
+    # A missing token is never refreshed.
     clear_generation: tuple[int, int] | None = None
+    # Message ids of a same-key pre-clear snapshot whose consume failed. That
+    # snapshot stays queued so its fenced drop can still exclude them, but
+    # this snapshot must not depend on that drop succeeding: the ids are
+    # filtered out here and out of every later same-key merge.
+    excluded_message_ids: frozenset[str] = field(default_factory=frozenset)
     # Monotonic call-arrival order: the value ``_next_sequence()`` returned to
     # ``add``/``add_nowait`` *before that call acquired the queue lock* (like
     # ``captured_clear_generation``'s pre-lock peek). Stamping it here instead,
@@ -347,16 +364,15 @@ class MemoryUpdateQueue:
         # replacing it would drop the normal update's un-extracted tail, which
         # the next turn may not re-feed if the user stops. Both are processed
         # independently instead.
-        existing = next(
-            (c for c in self._items if queue_key(c.thread_id, c.user_id, c.agent_name) == key and c.bypass_watermark == bypass_watermark),
-            None,
-        )
+        existing = self._coalesce_target(key, bypass_watermark)
         # Backpressure: once depth reaches the cap, reject NEW non-signal normal
-        # items. Same-key updates merge (do not grow depth); signal-bearing items
-        # and emergency (bypass) flushes are always admitted. Signals capture
-        # important memories, and the emergency path captures messages about to
-        # be removed by summarization -- neither can be re-fed next turn, so
-        # shedding them under load would lose data rather than merely defer it.
+        # items. Same-key updates merge (do not grow depth), except a failed
+        # refresh consume, which keeps the old snapshot and appends the new one.
+        # Signal-bearing items and emergency (bypass) flushes are always
+        # admitted. Signals capture important memories, and the emergency path
+        # captures messages about to be removed by summarization -- neither can
+        # be re-fed next turn, so shedding them under load would lose data
+        # rather than merely defer it.
         max_depth = self._config.queue_max_depth
         if max_depth > 0 and not bypass_watermark and not signals and existing is None and len(self._items) >= max_depth:
             raise QueueFull(f"memory update queue is full (depth {len(self._items)} >= {max_depth}); non-signal update for thread {thread_id} rejected")
@@ -364,15 +380,25 @@ class MemoryUpdateQueue:
         # Merge by signal union: a signal seen on any update for this key stays.
         merged_signals = signals | (existing.signals if existing is not None else frozenset())
         # First enqueue binds the pre-lock peek. A later same-key merge keeps
-        # that token when the generation is unchanged, missing, or this is an
-        # emergency snapshot. Re-reading after a clear and blindly refreshing
-        # would restore pre-clear facts; a visible newer clear instead consumes
-        # the pre-clear snapshot and starts a fresh fence so post-clear turns
-        # are extracted on this flush. A late add whose peek is older than the
-        # queued context must not replace messages: that would inherit the
-        # newer fence and restore the pre-clear snapshot. Consume of that
-        # refused snapshot is best-effort; failure must leave the queued
-        # fence untouched so the post-clear job still commits.
+        # that token when the generation is unchanged or missing. Re-reading
+        # after a clear and blindly refreshing would restore pre-clear facts;
+        # a visible newer clear instead consumes the pre-clear snapshot (a
+        # pending emergency flush included) and starts a fresh fence, so the
+        # incoming messages keep the generation they captured. Left on the
+        # stale fence they would be dropped before the LLM and their ids
+        # recorded as cleared. A late add whose peek is older than the queued
+        # context must not replace messages: that would inherit the newer
+        # fence and restore the pre-clear snapshot. Consume of that refused
+        # snapshot is best-effort; failure must leave the queued fence
+        # untouched so the post-clear job still commits.
+        #
+        # If the refresh consume fails, the pre-clear snapshot stays queued
+        # with its fence so its drop can still exclude it, and the incoming
+        # messages are queued beside it without that snapshot's message ids.
+        # The drop runs through the same updater call that just failed, and a
+        # full-conversation feed still carries the cleared turns: keeping
+        # their ids would re-extract them under the new generation.
+        detach_from_stale = False
         if existing is None:
             enqueued_clear_generation = captured_clear_generation
         elif existing.clear_generation is not None and is_stale_clear_generation(captured_clear_generation, existing.clear_generation):
@@ -398,12 +424,20 @@ class MemoryUpdateQueue:
             # would drop turns the older, possibly shorter feed never carried.
             existing.signals = merged_signals
             return existing
-        elif existing.bypass_watermark or existing.clear_generation is None:
+        elif existing.clear_generation is None:
             enqueued_clear_generation = existing.clear_generation
-        elif is_stale_clear_generation(existing.clear_generation, captured_clear_generation) and self._consume_pre_clear_feed(existing):
+        elif is_stale_clear_generation(existing.clear_generation, captured_clear_generation):
+            if not self._consume_pre_clear_feed(existing):
+                existing.signals = merged_signals
+                detach_from_stale = True
             enqueued_clear_generation = captured_clear_generation
         else:
             enqueued_clear_generation = existing.clear_generation
+        excluded_message_ids = existing.excluded_message_ids if existing is not None else frozenset()
+        if detach_from_stale:
+            excluded_message_ids |= {message_id for message in existing.messages if (message_id := _message_id(message)) is not None}
+        if excluded_message_ids:
+            messages = [message for message in messages if _message_id(message) not in excluded_message_ids]
         context = ConversationContext(
             thread_id=thread_id,
             messages=messages,
@@ -413,12 +447,36 @@ class MemoryUpdateQueue:
             signals=merged_signals,
             bypass_watermark=bypass_watermark,
             clear_generation=enqueued_clear_generation,
+            excluded_message_ids=excluded_message_ids,
             sequence=call_sequence,
         )
-        if existing is not None:
-            self._items = [c for c in self._items if not (queue_key(c.thread_id, c.user_id, c.agent_name) == key and c.bypass_watermark == bypass_watermark)]
+        if detach_from_stale:
+            logger.info(
+                "Queued post-clear messages separately after the pre-clear snapshot could not be consumed (thread_id=%s)",
+                thread_id,
+            )
+        elif existing is not None:
+            self._items = [c for c in self._items if c is not existing]
         self._items.append(context)
         return context
+
+    def _coalesce_target(
+        self,
+        key: tuple[str, str | None, str | None],
+        bypass_watermark: bool,
+    ) -> ConversationContext | None:
+        """Return the latest same-key snapshot a new add should merge into.
+
+        A failed refresh can leave a pre-clear snapshot queued beside it; that
+        one must keep its stale fence and stay queued until it is dropped.
+        """
+        target: ConversationContext | None = None
+        for candidate in self._items:
+            if queue_key(candidate.thread_id, candidate.user_id, candidate.agent_name) != key or candidate.bypass_watermark != bypass_watermark:
+                continue
+            if target is None or candidate.sequence >= target.sequence:
+                target = candidate
+        return target
 
     def _capture_clear_generation(self, agent_name: str | None, user_id: str | None) -> tuple[int, int]:
         """Read the current scope fence without loading fact files.
@@ -445,9 +503,9 @@ class MemoryUpdateQueue:
     def _consume_pre_clear_feed(self, existing: ConversationContext) -> bool:
         """Mark the stale job's snapshot consumed so it cannot restore after a clear.
 
-        Returns False when the updater cannot advance the watermark. A merge
-        that would refresh the queued token must keep the earlier fence on
-        failure; a refused older add must leave the queued fence unchanged.
+        Returns False when the updater cannot advance the watermark. Callers
+        must then leave the queued snapshot's fence unchanged (see
+        ``_enqueue_locked``).
 
         Forwards ``existing.sequence`` so the updater can refuse to move the
         watermark backward: an in-flight extraction pulled off the queue
@@ -469,7 +527,11 @@ class MemoryUpdateQueue:
                 sequence=existing.sequence,
             )
         except Exception:
-            logger.warning("Failed to consume the pre-clear snapshot after a newer clear; leaving the queued fence unchanged", exc_info=True)
+            logger.warning(
+                "Failed to consume the pre-clear snapshot after a newer clear (thread_id=%s); leaving that snapshot's fence unchanged",
+                existing.thread_id,
+                exc_info=True,
+            )
             return False
         return True
 
