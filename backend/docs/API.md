@@ -1384,7 +1384,7 @@ GET /api/projects/{project_id}/documents?limit=100&offset=0
 
 **Query Parameters:** `limit` (default 100, 1..1000), `offset` (default 0) — out-of-bounds values are `422`.
 
-**Response:** `{"documents": [{"id", "name", "size_bytes", "sha256", "source_thread_id", "source_kind", "source_name", "created_at", "updated_at", "content_missing"}], "total", "limit", "offset"}` in `updated_at DESC, id ASC` order. `content_missing` is read-time truth (never persisted): `true` when the document's immutable original is missing or size-mismatched (external interference); the derived `converted.md` companion is not the integrity anchor.
+**Response:** `{"documents": [{"id", "name", "size_bytes", "sha256", "source_thread_id", "source_kind", "source_name", "created_at", "updated_at", "summary", "content_missing"}], "total", "limit", "offset"}` in `updated_at DESC, id ASC` order. `content_missing` is read-time truth (never persisted): `true` when the document's immutable original is missing or size-mismatched (external interference); the derived `converted.md` companion is not the integrity anchor. `summary` is a best-effort LLM-generated one-line description (nullable; see `projects.summaries_enabled` in `config.example.yaml`) — null when generation is disabled, pending, failed, or the source is ineligible; it is LLM-processed untrusted content and is tag-neutralized at every model-visible exit.
 
 #### Upload Document
 
