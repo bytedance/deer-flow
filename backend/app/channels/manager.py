@@ -1307,6 +1307,11 @@ class ChannelManager:
         # the same Gateway process in practice; revisit if pins ever need to
         # be read across a shared store.
         self._thread_model_names: dict[str, str | None] = {}
+        # Serializes cold pin loads against persist+cache publication: without
+        # it, a slow threads.get that captured pre-pin metadata can land after
+        # a concurrent /model write and overwrite the fresh cache entry with
+        # the stale value (commands are not run-serialized).
+        self._model_pin_lock = asyncio.Lock()
         # Waiter-aware per-conversation locks prevent concurrent inbound messages
         # from creating duplicate threads. Participants are checked out before
         # they wait, so failure or cancellation of the current creator cannot let
@@ -2325,22 +2330,29 @@ class ChannelManager:
         from the configured allowlist) is left in place and rejected at run
         admission. That admission failure reaches the user only as the
         generic "An internal error occurred" fallback in ``_handle_message``,
-        so the documented recovery
-        (``/model default``) is not visible in the error text itself.
-        Anything that is not a non-empty string reads as "no pin".
+        so the documented recovery (``/model default``) is not visible in the
+        error text itself. Anything that is not a non-empty string reads as
+        "no pin".
+
+        The cold path runs under ``_model_pin_lock``: a ``/model`` write that
+        commits while a ``threads.get`` is in flight must win over the older
+        metadata that GET returns, so publication re-checks the cache first.
         """
         if thread_id in self._thread_model_names:
             return self._thread_model_names[thread_id]
 
-        get_kwargs: dict[str, Any] = {}
-        if owner_headers := _owner_headers(msg):
-            get_kwargs["headers"] = owner_headers
-        thread = await client.threads.get(thread_id, **get_kwargs)
-        metadata = thread.get("metadata") if isinstance(thread, Mapping) else None
-        raw_model_name = metadata.get(CHANNEL_MODEL_METADATA_KEY) if isinstance(metadata, Mapping) else None
-        model_name = raw_model_name.strip() if isinstance(raw_model_name, str) and raw_model_name.strip() else None
-        self._remember_thread_model(thread_id, model_name)
-        return model_name
+        async with self._model_pin_lock:
+            if thread_id in self._thread_model_names:
+                return self._thread_model_names[thread_id]
+            get_kwargs: dict[str, Any] = {}
+            if owner_headers := _owner_headers(msg):
+                get_kwargs["headers"] = owner_headers
+            thread = await client.threads.get(thread_id, **get_kwargs)
+            metadata = thread.get("metadata") if isinstance(thread, Mapping) else None
+            raw_model_name = metadata.get(CHANNEL_MODEL_METADATA_KEY) if isinstance(metadata, Mapping) else None
+            model_name = raw_model_name.strip() if isinstance(raw_model_name, str) and raw_model_name.strip() else None
+            self._remember_thread_model(thread_id, model_name)
+            return model_name
 
     async def _persist_model_pin(
         self,
@@ -2353,7 +2365,9 @@ class ChannelManager:
         """Persist (or, with ``None``, clear) the ``/model`` pin.
 
         Returns ``failure_reply`` when the thread update fails so callers can
-        return it verbatim; returns ``None`` on success.
+        return it verbatim; returns ``None`` on success. Callers hold
+        ``_model_pin_lock`` so the durable write and the cache publication
+        stay atomic against a cold load's older ``threads.get`` snapshot.
         """
         update_kwargs: dict[str, Any] = {"metadata": {CHANNEL_MODEL_METADATA_KEY: model_name}}
         if owner_headers := _owner_headers(msg):
@@ -2372,26 +2386,38 @@ class ChannelManager:
     def _resolve_configured_model_name(self, msg: InboundMessage) -> str | None:
         """Resolve the model a run would use without a ``/model`` pin.
 
-        Single source of truth for the ``/model`` status reply: mirrors
-        ``_resolve_run_params`` (layer merge order default -> channel -> user,
-        later wins) and ``_get_runtime_config`` (the ``context`` carrier wins
-        over ``configurable``). Session layers can carry ``model_name`` under
-        either carrier, and scanning only ``context`` misreports the model a
-        conversation is actually running.
+        Single source of truth for the ``/model`` status reply. Replicates
+        the run path's merge shapes exactly — shallow ``_merge_dicts`` of the
+        session ``config`` and ``context`` layers, so a later layer replaces
+        a nested carrier wholesale — then applies the runtime precedence:
+
+        * When the merged session ``config`` carries a ``context`` section,
+          ``build_run_config`` keeps it and *drops* ``configurable``; the
+          setdefault-filled body context cannot override it. Precedence:
+          ``config.context`` > top-level ``context``.
+        * Otherwise ``configurable`` survives and
+          ``_get_runtime_config`` lets the top-level ``context`` carrier win:
+          top-level ``context`` > ``configurable``.
         """
         channel_layer, user_layer = self._resolve_session_layer(msg)
-        context_model: str | None = None
-        configurable_model: str | None = None
-        for layer in (self._default_session, channel_layer, user_layer):
-            context = _as_dict(layer.get("context"))
-            raw_context_model = context.get("model_name")
-            if isinstance(raw_context_model, str) and raw_context_model.strip():
-                context_model = raw_context_model.strip()
-            configurable = _as_dict(_as_dict(layer.get("config")).get("configurable"))
-            raw_configurable_model = configurable.get("model_name")
-            if isinstance(raw_configurable_model, str) and raw_configurable_model.strip():
-                configurable_model = raw_configurable_model.strip()
-        return context_model or configurable_model
+        layers = (self._default_session, channel_layer, user_layer)
+        merged_config = _merge_dicts(*(layer.get("config") for layer in layers))
+        merged_context = _merge_dicts(*(layer.get("context") for layer in layers))
+
+        if "context" in merged_config:
+            candidates = (
+                _as_dict(merged_config.get("context")).get("model_name"),
+                merged_context.get("model_name"),
+            )
+        else:
+            candidates = (
+                merged_context.get("model_name"),
+                _as_dict(merged_config.get("configurable")).get("model_name"),
+            )
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        return None
 
     async def _create_thread(
         self,
@@ -3092,9 +3118,10 @@ class ChannelManager:
         name = parts[0]
 
         if name.lower() == "default":
-            if failure := await self._persist_model_pin(client, msg, thread_id, None, "Failed to reset the model selection."):
-                return failure
-            self._remember_thread_model(thread_id, None)
+            async with self._model_pin_lock:
+                if failure := await self._persist_model_pin(client, msg, thread_id, None, "Failed to reset the model selection."):
+                    return failure
+                self._remember_thread_model(thread_id, None)
             return "Model selection reset. This conversation now follows the configured default."
 
         try:
@@ -3114,9 +3141,10 @@ class ChannelManager:
             listing = "\n".join(f"• {n}" for n in names) if names else "(none)"
             return f"Unknown model '{name}'. Available models:\n{listing}"
 
-        if failure := await self._persist_model_pin(client, msg, thread_id, name, "Failed to save the model selection."):
-            return failure
-        self._remember_thread_model(thread_id, name)
+        async with self._model_pin_lock:
+            if failure := await self._persist_model_pin(client, msg, thread_id, name, "Failed to save the model selection."):
+                return failure
+            self._remember_thread_model(thread_id, name)
         return f"Model '{name}' selected. It applies to this conversation from the next message."
 
     async def _goal_request(

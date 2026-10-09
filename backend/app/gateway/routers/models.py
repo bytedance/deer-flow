@@ -11,6 +11,7 @@ from app.gateway.authz import (
     resolve_model_authorization,
 )
 from app.gateway.deps import get_config, get_optional_user_from_request
+from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.models.reasoning import reasoning_capabilities_payload, resolve_reasoning_contract
@@ -18,6 +19,23 @@ from deerflow.models.reasoning import reasoning_capabilities_payload, resolve_re
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["models"])
+
+
+async def _resolve_bound_owner_for_model_list(request: Request, user) -> object | None:
+    """Resolve the trusted bound owner behind an internal channel call.
+
+    Internal callers (IM channel workers, the scheduler) authenticate as a
+    synthetic user whose role is popped to ``default_role`` when the
+    authorization principal is built, so the filtered list reflects the
+    default role — not the account the conversation actually belongs to.
+    When the call carries a trusted ``X-DeerFlow-Owner-User-Id`` header, the
+    channel acts on behalf of that owner (same identity run admission
+    stamps), and the list must be filtered with the owner's role so commands
+    like ``/model`` gate on the same principal the run would.
+    """
+    from app.gateway.services import resolve_trusted_internal_owner_for_attribution
+
+    return await resolve_trusted_internal_owner_for_attribution(request, get_trusted_internal_owner_user_id(request))
 
 
 class ReasoningEffortCapabilitiesResponse(BaseModel):
@@ -130,8 +148,14 @@ async def list_models(
 
     user = await get_optional_user_from_request(request)
     if user is not None:
+        # Internal channel calls authenticate as a synthetic principal that
+        # falls under default_role; when they carry a trusted bound owner,
+        # filter with the owner's role so the list matches what run admission
+        # would admit for that account.
+        owner = await _resolve_bound_owner_for_model_list(request, user)
+        principal_user = owner if owner is not None else user
         try:
-            provider, principal = resolve_model_authorization(user, is_internal=_is_internal_caller(request, user))
+            provider, principal = resolve_model_authorization(principal_user, is_internal=_is_internal_caller(request, user))
         except _AuthorizationUnavailable as exc:
             if exc.fail_closed:
                 visible_models = []
