@@ -183,6 +183,79 @@ class TestImageBlockSchemeGating:
 
         assert prepared.messages[0].content == blocks
 
+    def test_file_scheme_image_block_omits_host_path(self):
+        """A ``file://`` image URL is downgraded like any other non-fetchable
+        scheme, but the host path is withheld from model-visible text (US-16)."""
+        message = _tool_message([{"type": "image", "url": "file:///Users/ops/deploy-internal/chart.png", "mime_type": "image/png"}])
+        prepared = _run_sync(ModelContentCompatibilityMiddleware(), _model_request([message]))
+
+        assert prepared.messages[0].content == [{"type": "text", "text": "[Resource (image/png)]"}]
+        assert "file://" not in prepared.messages[0].content[0]["text"]
+
+
+class TestLocationSuppression:
+    """The placeholder's location segment goes through the shared
+    ``model_visible_location`` gate, matching the conversion layer: host paths
+    and inline ``data:`` payloads that pre-fix blocks carried must never reach
+    model-visible text — the healing path serves exactly those checkpoints."""
+
+    def test_data_uri_file_block_payload_never_enters_placeholder(self):
+        """A pre-fix block could carry a whole inline base64 payload as the
+        ``data:`` file URL. The rewrite must heal the block without inlining
+        kilobytes (or megabytes) of base64 into the prompt."""
+        payload = "QUFB" + "A" * 5000
+        message = _tool_message([_url_file_block(f"data:application/pdf;base64,{payload}", "application/pdf")])
+        prepared = _run_sync(ModelContentCompatibilityMiddleware(), _model_request([message]))
+
+        assert prepared.messages[0].content == [{"type": "text", "text": "[Resource (application/pdf)]"}]
+        assert all(payload not in str(block) for block in prepared.messages[0].content)
+
+    def test_blob_uri_file_block_omits_location(self):
+        message = _tool_message([_url_file_block("blob:https://example.com/550e8400-e29b-41d4-a716-446655440000", "application/pdf")])
+        prepared = _run_sync(ModelContentCompatibilityMiddleware(), _model_request([message]))
+
+        assert prepared.messages[0].content == [{"type": "text", "text": "[Resource (application/pdf)]"}]
+
+    def test_file_scheme_url_is_withheld_from_placeholder(self):
+        """Pre-fix checkpoints hold unresolved ``file://`` links (resources
+        outside the user-data tree); the host path must not reach the prompt."""
+        message = _tool_message([_url_file_block("file:///Users/ops/deploy-internal/secret.pdf", "application/pdf")])
+        prepared = _run_sync(ModelContentCompatibilityMiddleware(), _model_request([message]))
+
+        assert prepared.messages[0].content == [{"type": "text", "text": "[Resource (application/pdf)]"}]
+        assert all("file://" not in block.get("text", "") for block in prepared.messages[0].content)
+
+    def test_bare_host_path_url_is_withheld_from_placeholder(self):
+        message = _tool_message([_url_file_block("/srv/deploy-internal/secret.pdf", "application/pdf")])
+        prepared = _run_sync(ModelContentCompatibilityMiddleware(), _model_request([message]))
+
+        assert prepared.messages[0].content == [{"type": "text", "text": "[Resource (application/pdf)]"}]
+
+    def test_windows_drive_path_url_is_withheld_from_placeholder(self):
+        # urlparse reads the drive prefix as a single-letter scheme; the host
+        # path must be suppressed all the same.
+        message = _tool_message([_url_file_block("C:\\Users\\ops\\creds.txt", "text/plain")])
+        prepared = _run_sync(ModelContentCompatibilityMiddleware(), _model_request([message]))
+
+        assert prepared.messages[0].content == [{"type": "text", "text": "[Resource (text/plain)]"}]
+        assert all(":\\" not in block.get("text", "") for block in prepared.messages[0].content)
+
+    def test_virtual_and_remote_locations_stay_visible(self):
+        message = _tool_message(
+            [
+                _url_file_block("/mnt/user-data/outputs/notes.txt", "text/plain"),
+                _url_file_block("https://example.com/report.pdf", "application/pdf"),
+                _url_file_block("ui://weather-app/card", "text/html;profile=mcp-app"),
+            ]
+        )
+        prepared = _run_sync(ModelContentCompatibilityMiddleware(), _model_request([message]))
+
+        assert prepared.messages[0].content == [
+            {"type": "text", "text": "[Resource (text/plain) available at /mnt/user-data/outputs/notes.txt]"},
+            {"type": "text", "text": "[Resource (application/pdf) available at https://example.com/report.pdf]"},
+            {"type": "text", "text": "[Resource (text/html;profile=mcp-app) available at ui://weather-app/card]"},
+        ]
+
 
 class TestPassthrough:
     def test_base64_blocks_pass_through(self):
