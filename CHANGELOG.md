@@ -222,7 +222,7 @@ This release closes that milestone with **439 merged pull requests**.
   unchanged. A chat branched from an earlier turn no longer brings back a goal
   or record that turn did not have. `contracts/thread_goal_contract.json` pins
   the stand-down and check-failure codes, the record's keys, the history head
-  keys and the host-written reasons. ([#PR])
+  keys and the host-written reasons. ([#6556])
 
 - **gateway:** Threads the server creates for you can be noticed without a
   reload. Runs started by a schedule, an IM channel, a GitHub agent, an
@@ -829,7 +829,7 @@ This release closes that milestone with **439 merged pull requests**.
   longer stays after a goal met on its first run. While a goal is set, the
   latest turn's edit pencil is shown disabled with a tooltip instead of hidden,
   and the message toolbar also appears on keyboard focus. A `/goal` refused
-  because a run is still going keeps the draft and says so. ([#PR])
+  because a run is still going keeps the draft and says so. ([#6556])
 
 ### Fixed
 
@@ -4192,7 +4192,7 @@ This release closes that milestone with **439 merged pull requests**.
   the assembled input, goal objective included, is redacted again; thread
   state keeps the raw text. A redaction error fails the check
   (`evaluator_failed`) instead of sending raw text. With redaction off, the
-  input is byte-identical. ([#PR])
+  input is byte-identical. ([#6556])
 
 - **authz:** Skill authorization is now enforced at agent assembly and
   activation, so an RBAC policy such as `skills: {allow: ["data-analysis"]}`
@@ -4214,7 +4214,7 @@ This release closes that milestone with **439 merged pull requests**.
   built; the thread keeps the redacted message, which the UI hides, and the
   goal state keeps the raw objective. A redaction error fails the check
   (`evaluator_failed`) before the continuation is counted, instead of
-  sending raw text. With redaction off, the message is byte-identical. ([#PR])
+  sending raw text. With redaction off, the message is byte-identical. ([#6556])
 
 - **lark:** The opt-in Lark broker subcommand denylist
   (`DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS`) can no longer be bypassed by an
@@ -9345,3 +9345,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6501]: https://github.com/bytedance/deer-flow/pull/6501
 [#6506]: https://github.com/bytedance/deer-flow/pull/6506
 [#6512]: https://github.com/bytedance/deer-flow/pull/6512
+[#6556]: https://github.com/bytedance/deer-flow/pull/6556
