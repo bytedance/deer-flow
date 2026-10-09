@@ -1201,6 +1201,23 @@ This release closes that milestone with **439 merged pull requests**.
   Upgrading a release that predates `AUTH_JWT_SECRET` generates a new key and
   signs every browser session out once; the chart README shows how to seed
   the previous key into the Secret first to keep sessions. ([#6347])
+- **deploy:** The Helm chart no longer pins the sandbox provisioner to one Pod.
+  `provisioner.replicas` (default 1, unchanged) sets the replica count, the
+  provisioner Deployment gets the gateway's surge-then-drain rollout strategy
+  (`maxSurge: 1`, `maxUnavailable: 0`), and a `PodDisruptionBudget`
+  (`provisioner.podDisruptionBudget`, `minAvailable: 1`) is rendered while
+  `provisioner.replicas > 1`, so a multi-replica gateway deployment no longer
+  loses sandbox creation whenever its single provisioner Pod restarts or its
+  node drains. The provisioner itself needed no change: the labelled sandbox
+  Pods and Services are its only registry, every handler reads them back from
+  the API server, and create already tolerates the `409 AlreadyExists` a
+  concurrent creator produces. The chart README and the provisioner README
+  record what the replica count rests on and that the budget never renders
+  for a single replica. Both budgets render `minAvailable` through one helper
+  that preserves a percentage such as `"50%"` (the previous `int` cast, also
+  in the pre-existing gateway budget, silently turned it into `0`, a budget
+  that protects nothing) and fails the render for `0`, `"0%"` or any other
+  unsupported value with a message naming the values key. ([#6543])
 - **persistence:** A second Gateway instance no longer fails startup with
   `TimeoutError` while another instance runs a PostgreSQL schema migration. The
   bootstrap advisory lock was taken with a blocking `pg_advisory_lock` on the
@@ -9334,4 +9351,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6512]: https://github.com/bytedance/deer-flow/pull/6512
 [#6519]: https://github.com/bytedance/deer-flow/pull/6519
 [#6537]: https://github.com/bytedance/deer-flow/pull/6537
+[#6543]: https://github.com/bytedance/deer-flow/pull/6543
 [#6558]: https://github.com/bytedance/deer-flow/pull/6558
