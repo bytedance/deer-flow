@@ -21,6 +21,7 @@ _ITEM_STATUSES = {"pending", "queued", "leased", "running", "succeeded", "failed
 
 
 async def _user_id(request: Request) -> str:
+    """Return the authenticated user id, raising HTTP 401 for anonymous requests."""
     user_id = await get_current_user(request)
     if user_id is None:
         raise HTTPException(status_code=401, detail="Authentication required")
@@ -28,6 +29,7 @@ async def _user_id(request: Request) -> str:
 
 
 async def _owned_batch(request: Request, thread_id: str, batch_id: str) -> tuple[object, str, dict]:
+    """Fetch a batch owned by the caller and bound to ``thread_id``, else raise HTTP 404."""
     repo = get_subagent_batch_repo(request)
     user_id = await _user_id(request)
     batch = await repo.get_batch(batch_id, user_id=user_id)
@@ -39,6 +41,7 @@ async def _owned_batch(request: Request, thread_id: str, batch_id: str) -> tuple
 @router.get("")
 @require_permission("threads", "read", owner_check=True)
 async def list_batches(thread_id: ThreadId, request: Request, limit: int = Query(20, ge=1, le=100)) -> list[dict]:
+    """List the caller's subagent batches for a thread, newest first."""
     repo = get_subagent_batch_repo(request)
     return await repo.list_by_thread(thread_id, user_id=await _user_id(request), limit=limit)
 
@@ -46,6 +49,7 @@ async def list_batches(thread_id: ThreadId, request: Request, limit: int = Query
 @router.get("/{batch_id}")
 @require_permission("threads", "read", owner_check=True)
 async def get_batch(thread_id: ThreadId, batch_id: str, request: Request) -> dict:
+    """Return a single owned batch by id."""
     _repo, _user_id_value, batch = await _owned_batch(request, thread_id, batch_id)
     return batch
 
@@ -60,6 +64,7 @@ async def list_batch_items(
     limit: int = Query(100, ge=1, le=500),
     status: str | None = Query(None),
 ) -> list[dict]:
+    """List a batch's items, optionally narrowed to one item status."""
     if status is not None and status not in _ITEM_STATUSES:
         raise HTTPException(status_code=422, detail="Unknown batch item status")
     repo, user_id, _batch = await _owned_batch(request, thread_id, batch_id)
@@ -69,6 +74,7 @@ async def list_batch_items(
 @router.post("/{batch_id}/pause")
 @require_permission("threads", "write", owner_check=True)
 async def pause_batch(thread_id: ThreadId, batch_id: str, request: Request) -> dict:
+    """Pause a batch so no further items are leased until it is resumed."""
     repo, user_id, _batch = await _owned_batch(request, thread_id, batch_id)
     return await repo.pause_batch(batch_id, user_id=user_id)
 
@@ -76,6 +82,7 @@ async def pause_batch(thread_id: ThreadId, batch_id: str, request: Request) -> d
 @router.post("/{batch_id}/resume")
 @require_permission("threads", "write", owner_check=True)
 async def resume_batch(thread_id: ThreadId, batch_id: str, request: Request) -> dict:
+    """Resume a paused batch."""
     repo, user_id, _batch = await _owned_batch(request, thread_id, batch_id)
     return await repo.resume_batch(batch_id, user_id=user_id)
 
@@ -83,6 +90,7 @@ async def resume_batch(thread_id: ThreadId, batch_id: str, request: Request) -> 
 @router.post("/{batch_id}/cancel")
 @require_permission("threads", "write", owner_check=True)
 async def cancel_batch(thread_id: ThreadId, batch_id: str, request: Request) -> dict:
+    """Cancel a batch, returning HTTP 503 when the batch worker is not running."""
     if not getattr(request.app.state, "subagent_batches_available", False):
         raise HTTPException(status_code=503, detail="Subagent batch worker is not running")
     _repo, user_id, _batch = await _owned_batch(request, thread_id, batch_id)
@@ -95,6 +103,7 @@ async def cancel_batch(thread_id: ThreadId, batch_id: str, request: Request) -> 
 @router.post("/{batch_id}/items/{item_id}/retry")
 @require_permission("threads", "write", owner_check=True)
 async def retry_batch_item(thread_id: ThreadId, batch_id: str, item_id: str, request: Request) -> dict:
+    """Re-queue a failed item, returning HTTP 409 when the item cannot be retried."""
     repo, user_id, _batch = await _owned_batch(request, thread_id, batch_id)
     item = await repo.retry_item(batch_id, item_id, user_id=user_id)
     if item is None:
@@ -105,6 +114,7 @@ async def retry_batch_item(thread_id: ThreadId, batch_id: str, item_id: str, req
 @router.get("/{batch_id}/results.jsonl")
 @require_permission("threads", "read", owner_check=True)
 async def export_batch_results(thread_id: ThreadId, batch_id: str, request: Request) -> StreamingResponse:
+    """Stream every item of a batch as newline-delimited JSON, results included."""
     repo, user_id, _batch = await _owned_batch(request, thread_id, batch_id)
 
     async def lines() -> AsyncIterator[bytes]:
