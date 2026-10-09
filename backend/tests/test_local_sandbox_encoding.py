@@ -5,6 +5,7 @@ import subprocess
 import sys
 
 import pytest
+from support.shell import require_posix_sh
 
 import deerflow.sandbox.local.local_sandbox as local_sandbox
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping, _BoundedPipeCapture
@@ -86,6 +87,38 @@ assert output == expected + "\n\nStd Error:\n" + expected + "\n\nExit Code: 3", 
         errors="replace",
         env=env,
         creationflags=subprocess.CREATE_NO_WINDOW if no_console else 0,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Requires a real Windows Git Bash/MSYS shell")
+def test_windows_msys_cjk_roundtrip():
+    """Git Bash/MSYS always emits UTF-8, so the host code page must not decode it."""
+    shell = require_posix_sh()
+    if not LocalSandbox._is_msys_shell(shell):
+        pytest.skip(f"{shell} is not recognised as a Git Bash/MSYS shell")
+    probe = r"""
+import sys
+import deerflow.sandbox.local.local_sandbox as local_sandbox
+from deerflow.sandbox.local.local_sandbox import LocalSandbox
+
+# Keep this regression effective even on an English or UTF-8 Windows runner.
+local_sandbox.locale.getpreferredencoding = lambda _: "cp936"
+LocalSandbox._get_shell = staticmethod(lambda: sys.argv[1])
+expected = "\u4f60\u597d \u65e5\u672c\u8a9e"
+output = LocalSandbox("encoding-probe").execute_command(f"printf '%s\n' '{expected}'", timeout=15)
+assert output == expected + "\n", ascii(output)
+"""
+    env = {**os.environ, "PYTHONUTF8": "0"}
+    result = subprocess.run(
+        [sys.executable, "-c", probe, shell],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
         timeout=30,
         check=False,
     )
@@ -293,10 +326,32 @@ def test_execute_command_forces_utf8_console_for_powershell_cjk_output(monkeypat
     assert calls[0][3] == "utf-8"
 
 
+def test_execute_command_forces_utf8_decoding_for_msys_cjk_output(monkeypatch):
+    """Git Bash/MSYS writes UTF-8 to its pipes; decoding with the host code page
+    (GBK on zh-CN) mangles CJK output silently because the pipe decoder replaces
+    instead of raising."""
+    calls: list[tuple[list[str], float, dict[str, str], str | None]] = []
+
+    def fake_run(args, timeout, env, *, encoding=None):
+        calls.append((args, timeout, env, encoding))
+        return "你好", "", 0, False
+
+    monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": r"C:\Program Files\Git\bin"})
+    monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: r"C:\Program Files\Git\bin\sh.exe"))
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(fake_run))
+
+    output = LocalSandbox("t").execute_command("echo 你好")
+
+    assert output == "你好"
+    assert calls[0][0] == [r"C:\Program Files\Git\bin\sh.exe", "-c", "echo 你好"]
+    assert calls[0][3] == "utf-8"
+
+
 def test_execute_command_keeps_msys_path_conversion_for_host_commands_on_windows(monkeypatch):
     calls: list[tuple[list[str], float, dict[str, str]]] = []
 
-    def fake_run(args, timeout, env):
+    def fake_run(args, timeout, env, *, encoding=None):
         calls.append((args, timeout, env))
         return "ok", "", 0, False
 
@@ -324,7 +379,7 @@ def test_execute_command_keeps_msys_path_conversion_for_host_commands_on_windows
 def test_execute_command_scopes_msys_path_conversion_exclusions_on_windows(monkeypatch):
     calls: list[tuple[list[str], float, dict[str, str]]] = []
 
-    def fake_run(args, timeout, env):
+    def fake_run(args, timeout, env, *, encoding=None):
         calls.append((args, timeout, env))
         return "ok", "", 0, False
 
@@ -346,7 +401,7 @@ def test_execute_command_scopes_msys_path_conversion_exclusions_on_windows(monke
 def test_execute_command_ignores_root_msys_mapping_for_host_commands_on_windows(monkeypatch):
     calls: list[tuple[list[str], float, dict[str, str]]] = []
 
-    def fake_run(args, timeout, env):
+    def fake_run(args, timeout, env, *, encoding=None):
         calls.append((args, timeout, env))
         return "ok", "", 0, False
 

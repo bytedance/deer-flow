@@ -561,7 +561,12 @@ class LocalSandbox(Sandbox):
                             "MSYS2_ARG_CONV_EXCL": exclusions,
                         }
 
-            if self._is_powershell(shell):
+            if self._is_powershell(shell) or self._is_msys_shell(shell):
+                # PowerShell is pinned to UTF-8 by the preamble above and Git
+                # Bash/MSYS always writes UTF-8 to its pipes, so both must be
+                # decoded as UTF-8. Any other code page (GBK on zh-CN) mangles
+                # non-ASCII output silently: the pipe decoder replaces instead
+                # of raising.
                 stdout, stderr, returncode, timed_out = self._run_windows_command(args, timeout, sandbox_env, encoding="utf-8")
             else:
                 stdout, stderr, returncode, timed_out = self._run_windows_command(args, timeout, sandbox_env)
