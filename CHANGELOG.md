@@ -804,6 +804,15 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **runtime:** The JSONL event store no longer loses events after a torn final
+  line. A write interrupted mid-record left the file without a trailing newline,
+  so the next append was glued onto the partial record and both became one
+  unparseable line; a truncated multibyte character also made the whole file
+  fail to decode, hiding every intact record and breaking sequence recovery.
+  Appends now insert a separator when the existing file does not end in a
+  newline, reads decode each physical line on its own and skip only the broken
+  one, and a failed batch append still truncates back to the original size.
+  ([#6520])
 - **channels:** `/goal <objective>` and `/goal clear` from an IM channel work
   again when Gateway auth is enabled (the default). Both sent their write with
   the internal auth token alone, and the Gateway's CSRF check, which does not
@@ -9334,5 +9343,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6506]: https://github.com/bytedance/deer-flow/pull/6506
 [#6512]: https://github.com/bytedance/deer-flow/pull/6512
 [#6519]: https://github.com/bytedance/deer-flow/pull/6519
+[#6520]: https://github.com/bytedance/deer-flow/pull/6520
 [#6537]: https://github.com/bytedance/deer-flow/pull/6537
 [#6543]: https://github.com/bytedance/deer-flow/pull/6543
