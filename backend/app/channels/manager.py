@@ -2253,7 +2253,7 @@ class ChannelManager:
                 exc,
             )
             await self._send_error(msg, str(exc))
-        except Exception as exc:
+        except Exception:
             logger.exception(
                 "Error handling message from %s (chat=%s)",
                 msg.channel_name,
@@ -2261,10 +2261,9 @@ class ChannelManager:
             )
             # Transient/unexpected failure: release the dedupe key so a provider
             # redelivery of the same message can recover instead of being dropped
-            # for the dedupe TTL.
+            # for the dedupe TTL. Stale /model pin admission failures are handled
+            # at the run-creation sites, which know the selection the run used.
             await self._release_inbound_dedupe_key(msg)
-            if await self._recover_stale_model_pin(msg, exc):
-                return
             await self._send_error(msg, "An internal error occurred. Please try again.")
 
     # -- chat handling -----------------------------------------------------
@@ -2401,10 +2400,10 @@ class ChannelManager:
 
         Reading is deliberately lenient: a stale pin (a model later removed
         from the configured allowlist) is left in place and rejected at run
-        admission, where ``_handle_message`` routes the failure to
-        ``_recover_stale_model_pin`` so the user gets an actionable reply
-        instead of the generic fallback. Anything that is not a non-empty
-        string reads as "no pin".
+        admission, where the run-creation paths route the failure to
+        ``_stale_pin_recovery`` so the user gets an actionable reply instead
+        of the generic fallback. Anything that is not a non-empty string reads
+        as "no pin".
 
         The ``threads.get`` deliberately runs *outside* ``_model_pin_lock``:
         a manager-wide lock must not span a network call, or one slow GET
@@ -2742,6 +2741,11 @@ class ChannelManager:
             storage_user_id = _channel_storage_user_id(msg)
 
         assistant_id, run_config, run_context = self._resolve_run_params(msg, thread_id)
+        # The pin this run actually submits — stale-pin recovery compares the
+        # rejected selection against it so a delayed rejection for an old pin
+        # can never erase a newer /model choice committed mid-flight.
+        pinned_model_value = run_context.get("model_name")
+        expected_pin = pinned_model_value.strip() if isinstance(pinned_model_value, str) and pinned_model_value.strip() else None
 
         # Apply per-channel policy: credentials provider (e.g. GitHub
         # installation-token mint) and the non-interactive flag for
@@ -2827,6 +2831,10 @@ class ChannelManager:
                         await self._release_inbound_dedupe_key(msg)
                     await self._send_error(msg, THREAD_BUSY_MESSAGE)
                     return
+                if recovery_text := await self._stale_pin_recovery(msg, exc, expected_pin=expected_pin):
+                    await self._send_error(msg, recovery_text)
+                    await self._release_inbound_dedupe_key(msg)
+                    return
                 raise
             if policy.buffer_followups_on_busy:
                 self._maybe_spawn_followup_watcher(thread_id, result, msg)
@@ -2847,8 +2855,11 @@ class ChannelManager:
                 await self._release_inbound_dedupe_key(msg)
                 await self._send_error(msg, THREAD_BUSY_MESSAGE)
                 return
-            else:
-                raise
+            if recovery_text := await self._stale_pin_recovery(msg, exc, expected_pin=expected_pin):
+                await self._release_inbound_dedupe_key(msg)
+                await self._send_error(msg, recovery_text)
+                return
+            raise
 
         response_text = _extract_response_text(result)
         pending_clarification = _has_current_turn_clarification(result)
@@ -2908,6 +2919,9 @@ class ChannelManager:
         last_published_len = 0
         last_publish_at = 0.0
         stream_error: BaseException | None = None
+        pin_recovery_text: str | None = None
+        pinned_model_value = run_context.get("model_name")
+        expected_pin = pinned_model_value.strip() if isinstance(pinned_model_value, str) and pinned_model_value.strip() else None
         stream_kwargs: dict[str, Any] = {
             "input": {"messages": [human_message]},
             "config": run_config,
@@ -2985,6 +2999,11 @@ class ChannelManager:
                 logger.warning("[Manager] thread busy (concurrent run rejected): thread_id=%s", thread_id)
             else:
                 logger.exception("[Manager] streaming error: thread_id=%s", thread_id)
+                # start_run's 400 surfaces here before any SSE response, so
+                # stale-pin recovery must run in this path — _handle_message's
+                # generic handler never sees streaming failures. The text is
+                # delivered as the single final outbound in the finally block.
+                pin_recovery_text = await self._stale_pin_recovery(msg, exc, expected_pin=expected_pin)
         finally:
             result = last_values if last_values is not None else {"messages": [{"type": "ai", "content": latest_text}]}
             response_text = _extract_response_text(result)
@@ -3002,7 +3021,7 @@ class ChannelManager:
                     if _is_thread_busy_error(stream_error):
                         response_text = THREAD_BUSY_MESSAGE
                     else:
-                        response_text = "An error occurred while processing your request. Please try again."
+                        response_text = pin_recovery_text or "An error occurred while processing your request. Please try again."
                 else:
                     response_text = latest_text or "(No response from agent)"
 
@@ -3197,54 +3216,65 @@ class ChannelManager:
 
         return "Usage: /agent list or /agent use <name>"
 
-    async def _recover_stale_model_pin(self, msg: InboundMessage, exc: BaseException) -> bool:
+    async def _stale_pin_recovery(
+        self,
+        msg: InboundMessage,
+        exc: BaseException,
+        *,
+        expected_pin: str | None,
+    ) -> str | None:
         """Turn a stale ``/model`` pin admission failure into an actionable reply.
 
-        Pins persist in thread metadata across restarts; when a pinned model
-        is later removed from the configured allowlist, run admission rejects
-        every turn and the generic handler would leave the conversation
-        bricked behind "An internal error occurred" with no hint that
-        ``/model default`` is the recovery. Detect the admission error,
-        clear the pin (durable write plus cache, atomically under
-        ``_model_pin_lock``), and tell the user the selection was reset.
-        Returns True when *exc* was handled here.
+        Run admission rejects any run whose carried ``model_name`` is not in
+        the configured allowlist. ``expected_pin`` is the selection the failed
+        run actually submitted (read from its run context), so recovery only
+        ever clears *that* selection: a delayed rejection for an old pin must
+        not erase a newer selection committed while the rejected run was in
+        flight. Returns the reply text when *exc* was handled here (the caller
+        owns outbound delivery); returns None when the error is not the
+        allowlist rejection or no safe recovery exists.
         """
-        if not _is_model_allowlist_error(exc):
-            return False
+        if expected_pin is None or not _is_model_allowlist_error(exc):
+            return None
         thread_id = await self._lookup_thread_id(msg)
         if not thread_id:
-            return False
+            return None
         client = self._get_client()
-        pinned: str | None = self._thread_model_names.get(thread_id)
-        if pinned is None:
+        current: str | None = self._thread_model_names.get(thread_id)
+        if current is None:
             try:
-                pinned = await self._load_thread_model(client, msg, thread_id)
+                current = await self._load_thread_model(client, msg, thread_id)
             except Exception:
                 logger.warning(
                     "[Manager] failed to load model pin while recovering from an admission error (thread_id=%s)",
                     thread_id,
                     exc_info=True,
                 )
-        if not pinned:
-            # The allowlist rejection came from session configuration, not a
-            # /model pin — nothing here to auto-recover.
-            return False
-        async with self._model_pin_lock:
-            # Any truthy return means the durable write failed.
-            persist_failed = await self._persist_model_pin(client, msg, thread_id, None, "__persist_failed__")
-            if not persist_failed:
-                self._remember_thread_model(thread_id, None)
-        if persist_failed:
-            await self._send_error(
-                msg,
-                f"The pinned model '{pinned}' is no longer available, but I could not reset the selection automatically. Send /model default, then pick another model with /model <name>.",
-            )
-        else:
-            await self._send_error(
-                msg,
-                f"The pinned model '{pinned}' is no longer available, so I reset the model selection. This conversation now follows the configured default. Use /model <name> to pick a different model.",
-            )
-        return True
+                return None
+        if current == expected_pin:
+            cleared = False
+            async with self._model_pin_lock:
+                # Re-check under the lock: a /model write may have committed
+                # between the read above and lock acquisition.
+                if self._thread_model_names.get(thread_id) == expected_pin:
+                    # Any truthy return means the durable write failed.
+                    persist_failed = await self._persist_model_pin(client, msg, thread_id, None, "__persist_failed__")
+                    if not persist_failed:
+                        self._remember_thread_model(thread_id, None)
+                        cleared = True
+            if cleared:
+                return f"The model '{expected_pin}' selected for this conversation is no longer available, so I reset the model selection. This conversation now follows the configured default. Use /model <name> to pick a different model."
+            current = self._thread_model_names.get(thread_id)
+            if current == expected_pin:
+                # State unchanged but the durable write failed.
+                return f"The model '{expected_pin}' is no longer available, but I could not reset the selection automatically. Send /model default, then pick another model with /model <name>."
+        # The rejected selection is no longer current (replaced by a newer
+        # /model, already reset, or never pinned — e.g. the rejection came
+        # from session configuration): reassure without touching the current
+        # selection.
+        if current:
+            return f"That message used model '{expected_pin}', which is no longer available. The current selection '{current}' is unchanged."
+        return f"That message used model '{expected_pin}', which is no longer available. This conversation now follows the configured default."
 
     async def _handle_model_command(self, msg: InboundMessage, args: str) -> str:
         """Show, pin, or reset the model used by the current conversation.
