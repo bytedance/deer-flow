@@ -127,21 +127,23 @@ def test_handle_projected_into_model_context():
 
 
 @pytest.mark.parametrize(
-    "url",
+    ("url", "closing_punctuation"),
     [
-        "https://files.example/report.pdf?token=part.csvX",
-        "https://files.example/report.pdf?token=abc&download=copy.csvX#page=2",
-        "https://files.example/report.pdf?token=abc",
+        ("https://files.example/report.pdf?token=part.csvX", "]"),
+        ("https://files.example/report.pdf?token=abc&download=copy.csvX#page=2", "]"),
+        ("https://files.example/report.pdf?token=abc", "]"),
+        pytest.param("https://files.example/report.pdf?token=part.csvX#page=2", "\u3002\u201d\uff09", id="cjk-punctuation"),
+        pytest.param("https://files.example/report.PdF?token=part.csvX#page=2", "]", id="mixed-case-extension"),
     ],
 )
-def test_remote_url_survives_capture_checkpoint_and_resolved_download(url):
+def test_remote_url_survives_capture_checkpoint_and_resolved_download(url, closing_punctuation):
     """Exercise the real agent graph with a fake model and offline HTTP transport."""
     downloaded = []
 
     @tool("make_file")
     def remote_report(name: str) -> str:
         """Create a remotely hosted report."""
-        return f"Download [{url}]"
+        return f"Download [{url}{closing_punctuation}"
 
     def serve_report(request: httpx.Request) -> httpx.Response:
         downloaded.append(request.url)

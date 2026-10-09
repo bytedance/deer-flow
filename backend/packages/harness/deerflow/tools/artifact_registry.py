@@ -33,7 +33,7 @@ _SANDBOX_PATH_PATTERN = re.compile(r"/mnt/user-data/\S+")
 # Scan complete URLs before checking the path, so extensions in query strings
 # cannot truncate a reference or turn a non-file URL into a file artifact.
 _REMOTE_URL_PATTERN = re.compile(r"https?://[^\s\"'`<>]+")
-_REMOTE_FILE_EXTENSION_PATTERN = re.compile(r"\.(?:png|jpg|jpeg|gif|html|pdf|csv|json|txt|log|md|xlsx?|docx?|zip)\Z")
+_REMOTE_FILE_EXTENSION_PATTERN = re.compile(r"\.(?:png|jpg|jpeg|gif|html|pdf|csv|json|txt|log|md|xlsx?|docx?|zip)\Z", re.IGNORECASE)
 
 # Structured-content keys whose string values are treated as concrete
 # references (paths, URLs, remote task ids) rather than opaque payload.
@@ -45,8 +45,9 @@ _STRUCTURED_TASK_KEYS = frozenset({"task_id", "job_id"})
 
 # Characters stripped from detected refs: prose punctuation plus the closing
 # quotes/brackets/backticks that markdown- and JSON-formatted tool output
-# commonly wraps paths in. `\S+` would otherwise consume them into `real_ref`.
-_REF_TRAILING_NOISE_CHARS = ".,;:)]}\"'`"
+# commonly wraps paths in, including CJK punctuation. `\S+` would otherwise
+# consume them into `real_ref`.
+_REF_TRAILING_NOISE_CHARS = ".,;:)]}\"'`\u3002\uff0c\uff1b\uff1a\u3001\uff09\u3011\u300b\u201d\u2019"
 
 # Content-block and structured-key refs are trusted only in these shapes.
 # `data:`/`blob:` URIs can carry arbitrarily large embedded payloads (MCP

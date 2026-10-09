@@ -16,7 +16,9 @@ message history and checkpoints remain unchanged.
 Free-text remote file detection checks the complete URL path for a supported
 file suffix. Query strings and fragments are retained in the reference and do
 not determine its file type; a file-like prefix inside a longer path is not
-registered as a shortened URL.
+registered as a shortened URL. Supported file suffixes are matched without
+case sensitivity. Both URL and sandbox-path text scans strip common trailing
+ASCII/CJK prose punctuation and closing quotes or brackets.
 
 ## Durable projection
 

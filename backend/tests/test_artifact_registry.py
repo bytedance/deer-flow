@@ -50,12 +50,63 @@ def test_generate_handle_format():
         "https://files.example/report.pdf?token=abc&download=copy.csvX#page=2",
         "https://files.example/report.pdf?token=abc",
         "https://files.example/report.pdf#page=2",
+        "https://files.example/report.pdf?token=part%EF%BC%89#section%EF%BC%8C",
     ],
 )
 @pytest.mark.parametrize("content_block", [False, True])
 def test_text_file_urls_preserve_complete_query_and_fragment(url, content_block):
     text = f"Report: [{url}]"
     result = ToolMessage(content=[{"type": "text", "text": text}] if content_block else text, tool_call_id="call_url", name="remote_report")
+
+    entries = extract_artifacts_from_result(result, thread_id="thread-url")
+
+    assert [entry["real_ref"] for entry in entries] == [url]
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        pytest.param("\u3002", id="cjk-period"),
+        pytest.param("\uff0c", id="fullwidth-comma"),
+        pytest.param("\uff1b", id="fullwidth-semicolon"),
+        pytest.param("\uff1a", id="fullwidth-colon"),
+        pytest.param("\u3001", id="ideographic-comma"),
+        pytest.param("\uff09", id="fullwidth-parenthesis"),
+        pytest.param("\u3011", id="cjk-bracket"),
+        pytest.param("\u300b", id="cjk-angle-bracket"),
+        pytest.param("\u201d", id="closing-double-quote"),
+        pytest.param("\u2019", id="closing-single-quote"),
+        pytest.param("\u3002\u201d\uff09", id="combined-closers"),
+    ],
+)
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "https://files.example/report.pdf",
+        "https://files.example/report.pdf?token=part.csvX#page=2",
+        "/mnt/user-data/outputs/report.pdf",
+    ],
+)
+def test_text_refs_followed_by_cjk_punctuation(ref, suffix):
+    assert [entry["ref"] for entry in _detect_refs_in_text(f"Report: {ref}{suffix}")] == [ref]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://files.example/report.PDF",
+        "https://files.example/image.PNG",
+        "https://files.example/report.PdF?token=part.csvX#section.md-more",
+        "https://files.example/image.PnG?token=encoded%EF%BC%89",
+    ],
+)
+def test_text_file_url_extension_case_insensitive_preserves_reference(url):
+    assert [entry["ref"] for entry in _detect_refs_in_text(f"Download [{url}]")] == [url]
+
+
+def test_structured_url_keeps_literal_cjk_punctuation():
+    url = "https://files.example/report.pdf?token=literal\u3011"
+    result = ToolMessage(content="done", tool_call_id="call_url", name="remote_report", artifact={"structured_content": {"url": url}})
 
     entries = extract_artifacts_from_result(result, thread_id="thread-url")
 
@@ -71,6 +122,9 @@ def test_text_file_urls_preserve_complete_query_and_fragment(url, content_block)
         "https://files.example/download?name=report.pdf",
         "https://files.example/download#report.pdf",
         "https://reports.pdf",
+        "https://files.example/report.PDF/download",
+        "https://files.example/report.PDFx",
+        "https://REPORT.PDF",
     ],
 )
 def test_text_urls_require_a_file_extension_in_the_complete_path(url):
