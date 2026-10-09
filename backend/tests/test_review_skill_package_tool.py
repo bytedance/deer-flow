@@ -167,6 +167,27 @@ def test_review_skill_package_rejects_another_users_package(deployment, target_f
     assert "BOB_PRIVATE_BODY" not in message.content
 
 
+@pytest.mark.parametrize("skills_root_for", [lambda home: home, lambda home: home.parent], ids=["deer-flow-home", "ancestor"])
+def test_review_skill_package_ignores_skills_root_that_contains_user_dirs(deployment, monkeypatch, caplog, skills_root_for):
+    storage = LocalSkillStorage(host_path=str(skills_root_for(deployment.base_dir)), container_path="/mnt/skills")
+    monkeypatch.setattr("deerflow.tools.builtins.review_skill_package_tool.get_or_new_skill_storage", lambda: storage)
+    package = deployment.user_custom_skills_dir("bob") / "secret-skill"
+    _write_package(package, _skill_content("secret-skill"))
+
+    with caplog.at_level("WARNING", logger="deerflow.tools.builtins.review_skill_package_tool"):
+        command = review_skill_package.func(
+            target=str(package),
+            runtime=_runtime("alice"),
+            include_content="facts-only",
+        )
+
+    message = command.update["messages"][0]
+    assert message.status == "error"
+    assert "Local review targets must be under" in message.content
+    assert "secret-skill" not in message.content
+    assert "contains per-user directories" in caplog.text
+
+
 def test_review_skill_package_rejects_symlink_planted_in_callers_outputs(deployment):
     """A sandbox can write symlinks into the caller's own outputs; the resolved target decides."""
     victim_package = deployment.user_custom_skills_dir("bob") / "secret-skill"

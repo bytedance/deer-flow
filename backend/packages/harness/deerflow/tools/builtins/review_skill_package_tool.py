@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Literal
 
@@ -17,6 +18,8 @@ from deerflow.skills.review.readers import ArchivePackageReader, InstalledSkillR
 from deerflow.skills.review.renderer import build_static_report, render_report_markdown
 from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
 from deerflow.tools.types import Runtime
+
+logger = logging.getLogger(__name__)
 
 Profile = Literal["deerflow", "agentskills"]
 IncludeContent = Literal["none", "facts-only", "semantic-review"]
@@ -120,12 +123,20 @@ def _ensure_local_target_allowed(path: Path, *, user_id: str) -> None:
     resolved = path.resolve()
     # Never allow the Gateway cwd or /tmp: DEER_FLOW_HOME sits under the cwd in
     # every documented deployment, so those roots expose other users' data.
-    allowed_roots: list[Path] = [get_paths().user_dir(make_safe_user_id(user_id)).resolve()]
+    paths = get_paths()
+    allowed_roots: list[Path] = [paths.user_dir(make_safe_user_id(user_id)).resolve()]
     try:
         storage = get_or_new_skill_storage()
-        allowed_roots.append(storage.get_skills_root_path().resolve())
+        skills_root = storage.get_skills_root_path().resolve()
     except Exception:
-        pass
+        skills_root = None
+    if skills_root is not None:
+        # The same applies to a skills root configured at or above DEER_FLOW_HOME.
+        users_root = (paths.base_dir / "users").resolve()
+        if users_root.is_relative_to(skills_root):
+            logger.warning("Ignoring skills root %s as a review target root: it contains per-user directories", skills_root)
+        else:
+            allowed_roots.append(skills_root)
 
     for root in allowed_roots:
         try:
