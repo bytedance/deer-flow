@@ -26,6 +26,11 @@ rewriting the *request view* at the model boundary:
   placeholder — local images are meant to reach the model through the
   ``view_image`` tool, not as unresolvable URLs.
 
+Placeholder text comes from ``resource_placeholder_text`` in
+``deerflow.tools.resource_placeholder`` — the same formatter the conversion
+layer uses — so a thread healed at read time shows the model the exact
+placeholder shape a fresh conversion would have produced.
+
 The rewrite hooks ``wrap_model_call``/``awrap_model_call`` and hands the
 handler an overridden request, exactly like ``ViewImageMiddleware``: nothing is
 written to state, so checkpoints keep the original blocks (artifact capture and
@@ -34,11 +39,15 @@ next turn with no migration. The placeholder text keeps the location visible to
 the model and to the artifact free-text scan; the original link also survives
 in the tool message's structured artifact channel.
 
-Scope is deliberately narrow: ``ToolMessage`` list-form content only. User
-uploads never produce URL-sourced file blocks (the uploads middleware inlines
-or references host paths), so ``HumanMessage``/``AIMessage`` content is left
-untouched. The rewrite is order-preserving and idempotent — placeholder text
-blocks pass through unchanged on any later application.
+Scope is deliberately role-agnostic: every request message with list-form
+content is rewritten, not just ``ToolMessage`` history. User uploads are
+verified to produce base64 blocks — never URL-sourced file blocks — but
+imported or cross-client history can carry a URL block on any role, and such a
+block is unserializable under Chat Completions regardless of the role carrying
+it. Widening the rule beyond ``ToolMessage`` therefore costs nothing and keeps
+foreign history from bricking a thread. The rewrite is order-preserving and
+idempotent — placeholder text blocks pass through unchanged on any later
+application.
 """
 
 from __future__ import annotations
@@ -51,7 +60,9 @@ from urllib.parse import urlparse
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
-from langchain_core.messages import AnyMessage, ToolMessage
+from langchain_core.messages import AnyMessage
+
+from deerflow.tools.resource_placeholder import resource_placeholder_text
 
 logger = logging.getLogger(__name__)
 
@@ -61,14 +72,8 @@ logger = logging.getLogger(__name__)
 _FETCHABLE_IMAGE_SCHEMES = frozenset({"http", "https", "data"})
 
 
-def _placeholder_text(mime_type: object, url: str) -> str:
-    mime = mime_type if isinstance(mime_type, str) and mime_type else "unknown type"
-    return f"[Resource ({mime}) available at {url}]"
-
-
-def _locationless_placeholder_text(mime_type: object) -> str:
-    mime = mime_type if isinstance(mime_type, str) and mime_type else "unknown type"
-    return f"[Resource ({mime})]"
+def _str_or_none(value: Any) -> str | None:
+    return value if isinstance(value, str) else None
 
 
 def _sanitize_block(block: Any) -> Any:
@@ -88,22 +93,22 @@ def _sanitize_block(block: Any) -> Any:
         # unusable URL ("" / None) gets a location-less placeholder.
         if "url" not in block:
             return block
-        url = block.get("url")
-        if isinstance(url, str) and url:
-            return {"type": "text", "text": _placeholder_text(block.get("mime_type"), url)}
-        return {"type": "text", "text": _locationless_placeholder_text(block.get("mime_type"))}
+        url = _str_or_none(block.get("url"))
+        return {"type": "text", "text": resource_placeholder_text(mime_type=_str_or_none(block.get("mime_type")), url=url)}
     if block_type == "image":
         url = block.get("url")
         if isinstance(url, str) and url and urlparse(url).scheme.lower() not in _FETCHABLE_IMAGE_SCHEMES:
-            return {"type": "text", "text": _placeholder_text(block.get("mime_type"), url)}
+            return {"type": "text", "text": resource_placeholder_text(mime_type=_str_or_none(block.get("mime_type")), url=url)}
         return block
     return block
 
 
 def _sanitize_message(message: AnyMessage) -> AnyMessage:
-    """Return *message* unchanged, or a copy with incompatible blocks replaced."""
-    if not isinstance(message, ToolMessage):
-        return message
+    """Return *message* unchanged, or a copy with incompatible blocks replaced.
+
+    Role-agnostic on purpose: any message with list-form content can carry a
+    persisted or imported URL block that Chat Completions cannot serialize.
+    """
     content = message.content
     if not isinstance(content, list):
         return message

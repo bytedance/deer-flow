@@ -12,15 +12,18 @@ This middleware heals those threads at read time: just before a request reaches
 the model adapter it rewrites, in the request view only (state and checkpoints
 are never touched),
 
-- any ToolMessage ``{"type": "file", "url": ...}`` block into a plain text
-  placeholder ``[Resource ({mime or "unknown type"}) available at {url}]``;
-- any ToolMessage ``{"type": "image", "url": ...}`` block whose URL scheme is
-  not fetchable by the provider (not ``http``/``https``/``data``) into the same
+- any ``{"type": "file", "url": ...}`` block in list-form message content into
+  a plain text placeholder
+  ``[Resource ({mime or "unknown type"}) available at {url}]``;
+- any ``{"type": "image", "url": ...}`` block whose URL scheme is not
+  fetchable by the provider (not ``http``/``https``/``data``) into the same
   placeholder.
 
-Everything else — fetchable image URLs, embedded base64 payloads, text blocks,
-string content, and non-ToolMessage messages — passes through untouched, in
-order, and a second application is a no-op.
+The rules apply to every message role: imported or cross-client history can
+carry URL file blocks on HumanMessage/AIMessage too, and such a block is
+unserializable regardless of the role carrying it. Everything else — fetchable
+image URLs, embedded base64 payloads, text blocks, and string content — passes
+through untouched, in order, and a second application is a no-op.
 """
 
 from __future__ import annotations
@@ -205,15 +208,43 @@ class TestPassthrough:
 
         assert prepared.messages[0].content == "plain string result"
 
-    def test_human_and_ai_messages_are_not_rewritten(self):
-        """Scope is ToolMessage history only; user/assistant blocks pass through."""
-        human = HumanMessage(content=[_url_file_block("https://example.com/upload.pdf", "application/pdf")])
-        ai = AIMessage(content=[{"type": "image", "url": "ui://unfetchable/img", "mime_type": "image/png"}])
-        request = _model_request([human, ai])
-        prepared = _run_sync(ModelContentCompatibilityMiddleware(), request)
+    def test_human_message_base64_file_block_passes_through(self):
+        """Uploads produce base64 blocks; a base64 file block on any role is valid and stays."""
+        blocks = [{"type": "file", "base64": "aGVsbG8=", "mime_type": "application/pdf"}]
+        human = HumanMessage(content=blocks)
+        prepared = _run_sync(ModelContentCompatibilityMiddleware(), _model_request([human]))
 
         assert prepared.messages[0] is human
-        assert prepared.messages[1] is ai
+
+    def test_human_message_string_content_is_untouched(self):
+        human = HumanMessage(content="plain user turn")
+        request = _model_request([human])
+        prepared = _run_sync(ModelContentCompatibilityMiddleware(), request)
+
+        assert prepared is request
+
+
+class TestRoleAgnosticRewriting:
+    """Imported or cross-client history can carry URL file blocks on any role.
+
+    The block is unserializable under Chat Completions regardless of who
+    carries it, so the sanitizer rewrites every message with list-form
+    content — not just checkpointed ToolMessages.
+    """
+
+    def test_human_message_url_file_block_is_rewritten(self):
+        human = HumanMessage(content=[_url_file_block("https://example.com/upload.pdf", "application/pdf")])
+        prepared = _run_sync(ModelContentCompatibilityMiddleware(), _model_request([human]))
+
+        assert prepared.messages[0].content == [{"type": "text", "text": "[Resource (application/pdf) available at https://example.com/upload.pdf]"}]
+        # The rewrite is request-view-only: the input message keeps its block.
+        assert human.content[0]["type"] == "file"
+
+    def test_ai_message_url_file_block_is_rewritten(self):
+        ai = AIMessage(content=[_url_file_block("ui://app/card", "text/html")])
+        prepared = _run_sync(ModelContentCompatibilityMiddleware(), _model_request([ai]))
+
+        assert prepared.messages[0].content == [{"type": "text", "text": "[Resource (text/html) available at ui://app/card]"}]
 
     def test_nothing_to_rewrite_hands_the_same_request_through(self):
         message = _tool_message("plain string result")
