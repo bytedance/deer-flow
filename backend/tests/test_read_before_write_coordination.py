@@ -201,6 +201,91 @@ def test_async_tool_waits_for_sync_tool_on_the_same_path(tmp_path, monkeypatch):
     asyncio.run(scenario())
 
 
+def test_sync_tool_waits_for_async_tool_on_the_same_path(tmp_path, monkeypatch):
+    path = tmp_path / "report.md"
+    path.write_text("shared file", encoding="utf-8")
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        holder_entered = asyncio.Event()
+        release_holder = asyncio.Event()
+        waiter_parked = asyncio.Event()
+        waiter_done = threading.Event()
+        waiter_ran = False
+        sync_results = []
+        sync_errors = []
+        middleware = gate.ReadBeforeWriteMiddleware(content_reader=lambda _runtime, _path: path.read_text(encoding="utf-8"))
+        lock = middleware._lock_for(_request("async-holder"), "/report.md")
+        condition = lock._condition
+        original_wait = condition.wait
+        cleanup_notify = condition.notify_all
+
+        def observed_wait(timeout=None):
+            # Called with the condition held; taking it below confirms that
+            # the real wait has queued this thread and released the mutex.
+            loop.call_soon_threadsafe(waiter_parked.set)
+            return original_wait(timeout)
+
+        monkeypatch.setattr(condition, "wait", observed_wait)
+
+        async def async_handler(request):
+            holder_entered.set()
+            await release_holder.wait()
+            return ToolMessage(content="shared file", tool_call_id=request.tool_call["id"], name="read_file")
+
+        def sync_handler(request):
+            nonlocal waiter_ran
+            waiter_ran = True
+            return ToolMessage(content="shared file", tool_call_id=request.tool_call["id"], name="read_file")
+
+        def sync_call():
+            try:
+                sync_results.append(middleware.wrap_tool_call(_request("sync-waiter"), sync_handler))
+            except BaseException as exc:
+                sync_errors.append(exc)
+            finally:
+                waiter_done.set()
+
+        task = asyncio.create_task(middleware.awrap_tool_call(_request("async-holder"), async_handler))
+        thread = threading.Thread(target=sync_call)
+        started = False
+        woke_after_release = False
+        try:
+            await asyncio.wait_for(holder_entered.wait(), 5)
+            thread.start()
+            started = True
+            await asyncio.wait_for(waiter_parked.wait(), 5)
+            with condition:
+                assert lock._locked
+                assert not waiter_ran
+                assert not waiter_done.is_set()
+            release_holder.set()
+            result = await asyncio.wait_for(task, 5)
+            woke_after_release = await asyncio.to_thread(waiter_done.wait, 5)
+        finally:
+            release_holder.set()
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            # A missing production notify must fail the assertion, not leave
+            # a sleeping non-daemon thread hanging pytest at shutdown.
+            with condition:
+                cleanup_notify()
+            if started:
+                await asyncio.to_thread(thread.join, 5)
+                assert not thread.is_alive()
+
+        assert woke_after_release, "async holder did not wake the synchronous gate waiter"
+        assert not sync_errors
+        assert waiter_ran
+        expected = hashlib.sha256(b"shared file").hexdigest()
+        assert len(sync_results) == 1
+        assert sync_results[0].additional_kwargs[gate.READ_MARK_KEY]["hash"] == expected
+        assert result.additional_kwargs[gate.READ_MARK_KEY]["hash"] == expected
+
+    asyncio.run(scenario())
+
+
 def test_cancelled_waiter_does_not_cancel_another_event_loops_waiter():
     lock = gate._get_gate_lock("gate-cross-loop-cancellation", "/report.md")
     lock.acquire()
