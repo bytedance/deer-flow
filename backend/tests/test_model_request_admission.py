@@ -275,6 +275,87 @@ def test_disabled_factory_preserves_default(monkeypatch, registry):
     assert not admission._registry
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize("status", [429, 500])
+async def test_claude_admission_does_not_retry_inside_provider(registry, mode, status):
+    import anthropic
+    import httpx
+
+    from deerflow.config.app_config import AppConfig
+    from deerflow.models.factory import create_chat_model
+
+    config = AppConfig.model_validate(
+        {
+            "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+            "models": [
+                {
+                    "name": "claude-paced",
+                    "use": "deerflow.models.claude_provider:ClaudeChatModel",
+                    "model": "claude-sonnet-4-6",
+                    "api_key": "offline-test-key",
+                    "request_admission": {"requests_per_minute": 1, "max_wait_seconds": 0.01},
+                    "retry_max_attempts": 7,
+                    "max_retries": 7,
+                }
+            ],
+        }
+    )
+    model = create_chat_model("claude-paced", app_config=config, attach_tracing=False, retry_max_attempts=5, max_retries=5)
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(status, headers={"retry-after": "0"}, json={"type": "error", "error": {"type": "rate_limit_error" if status == 429 else "api_error", "message": "synthetic error"}})
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg-synthetic",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-sonnet-4-6",
+                "content": [{"type": "text", "text": "unexpected retry"}],
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    error = anthropic.RateLimitError if status == 429 else anthropic.InternalServerError
+    if mode == "sync":
+        with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+            model._client._client = client
+            with pytest.raises(error):
+                model.invoke("hello")
+    else:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            model._async_client._client = client
+            with pytest.raises(error):
+                await model.ainvoke("hello")
+    assert len(calls) == 1
+    assert model.max_retries == 0
+    assert model.retry_max_attempts == 1
+    assert config.get_model_config("claude-paced").retry_max_attempts == 7
+
+
+@pytest.mark.parametrize("kwargs,attempts", [({}, 3), ({"retry_max_attempts": 7}, 7)])
+def test_claude_without_admission_preserves_wrapper_retries(kwargs, attempts):
+    from deerflow.models.claude_provider import ClaudeChatModel
+
+    model = ClaudeChatModel(model="claude-sonnet-4-6", api_key="offline-test-key", **kwargs)
+    assert model.retry_max_attempts == attempts
+
+
+def test_claude_custom_rate_limiter_preserves_wrapper_retries():
+    from langchain_core.rate_limiters import InMemoryRateLimiter
+
+    from deerflow.models.claude_provider import ClaudeChatModel
+
+    model = ClaudeChatModel(model="claude-sonnet-4-6", api_key="offline-test-key", rate_limiter=InMemoryRateLimiter(), retry_max_attempts=7)
+    assert model.retry_max_attempts == 7
+
+
 def test_admission_failures_are_not_retried_as_provider_errors(monkeypatch):
     from deerflow.agents.middlewares import llm_error_handling_middleware as errors
     from deerflow.config.app_config import AppConfig

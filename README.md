@@ -140,6 +140,8 @@ literal prepend/append configuration without editing source templates. See
 Optional per-model [`request_admission`](backend/docs/CONFIGURATION.md#model-request-admission)
 paces requests to help stay within provider request-per-minute limits.
 It is disabled by default; see the linked guide to enable it.
+For Claude, enabling it disables both SDK and provider-internal retries so
+middleware retries pass through request admission again.
 
 For Google's official Gemini OpenAI-compatible endpoint, use the
 [Gemini reasoning profile](backend/docs/CONFIGURATION.md#gemini-via-googles-openai-compatible-endpoint).

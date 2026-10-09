@@ -84,8 +84,13 @@ class ClaudeChatModel(ChatAnthropic):
             is_oauth_token,
             load_claude_code_credential,
         )
+        from deerflow.models.request_admission import RequestAdmission
 
         self._validate_retry_config()
+        if isinstance(self.rate_limiter, RequestAdmission):
+            # These wrapper retries, like SDK retries, bypass BaseChatModel's
+            # admission hook. Leave paced retries to the LLM middleware.
+            self.retry_max_attempts = 1
 
         # Extract actual key value (SecretStr.str() returns '**********')
         current_key = ""
