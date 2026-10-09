@@ -416,11 +416,13 @@ test("catalog actions wait for gallery hydration before accepting a click", asyn
   page,
 }) => {
   mockLangGraphAPI(page);
+  let blockedScriptRequests = 0;
   let releaseScripts!: () => void;
   const scriptsReady = new Promise<void>((resolve) => {
     releaseScripts = resolve;
   });
   await page.route("**/_next/**/*.js", async (route) => {
+    blockedScriptRequests += 1;
     await scriptsReady;
     await route.continue();
   });
@@ -438,6 +440,7 @@ test("catalog actions wait for gallery hydration before accepting a click", asyn
     await expect(
       page.getByRole("button", { name: "Open Agent teams", exact: true }),
     ).toBeDisabled();
+    await expect.poll(() => blockedScriptRequests).toBeGreaterThan(0);
     releaseScripts();
     await expect(view).toBeEnabled();
     await view.click();
