@@ -493,7 +493,7 @@ class E2BSandbox(Sandbox):
             # pattern) and enforce the real directory scope below via
             # ``path_matches``, the same helper ``glob()`` uses.
             include_pattern = glob.split("/")[-1] or glob
-            flags.append(f"--include={include_pattern}")
+            flags.append(shlex.quote(f"--include={include_pattern}"))
 
         per_file_cap = max(max_results + 1, 50)
         total_cap = max(max_results * 4, max_results + 50)

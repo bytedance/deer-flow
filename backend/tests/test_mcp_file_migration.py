@@ -143,7 +143,9 @@ class TestLocalUriToVirtualPath:
     @pytest.mark.skipif(os.name != "nt", reason="exercises the file:///C:/... drive-qualified URI form")
     def test_windows_file_uri_translates_to_virtual_path(self, paths: Paths):
         src = _workspace_file(paths, "shot.png")
-        assert src.as_uri().startswith("file:///C:/")
+        # The checkout and temp dirs may live on any drive, so derive the
+        # expected drive instead of hardcoding "C:".
+        assert src.as_uri().startswith(f"file:///{src.drive}/")
 
         with _patch_paths(paths):
             result = mcp_tools._local_uri_to_virtual_path(src.as_uri(), thread_id="t1", user_id="u1")
@@ -372,7 +374,7 @@ class TestRewriteLocalPathsInText:
     def test_windows_two_slash_file_uri_in_text_is_rewritten(self, paths: Paths):
         src = _workspace_file(paths, "shot.png")
         two_slash_uri = src.as_uri().replace("file:///", "file://", 1)
-        assert two_slash_uri.startswith("file://C:")
+        assert two_slash_uri.startswith(f"file://{src.drive}")
 
         with _patch_paths(paths):
             result = mcp_tools._rewrite_local_paths_in_text(f"Saved as {two_slash_uri}", thread_id="t1", user_id="u1")
