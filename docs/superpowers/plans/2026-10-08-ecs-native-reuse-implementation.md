@@ -62,7 +62,7 @@ Files: ecs_executor/dependencies.py, native notification/goal lifecycle adapter 
 
 Files: native deployment/test docs, minimal operator scripts, final migration/integration notes and relevant README/AGENTS.
 
-- [ ] Preserve user fork changes during integration; audit removal/replacement of old Fleet hooks and schema separately. No silent destructive migration.
+- [x] Preserve user fork changes during integration; audit removal/replacement of old Fleet hooks and schema separately. No silent destructive migration.
 - [ ] Produce reproducible start/stop/restart and version rollback instructions using existing Docker build/Compose conventions. Jenkins deployment resumes only when user reopens the cloud test phase.
 - [ ] Record local B/C/BC evidence and unverified cloud requirements. Ask to start ECS only once local main paths and exact cross-host scripts are ready.
 - [ ] After cloud phase authorization, run native baseline → B → C → combination → Jenkins/lifecycle; keep honest passed/pending evidence.
@@ -76,3 +76,5 @@ Task4 configured Scheduler slice accepted: actual authenticated once task automa
 Task4 native memory configuration/acceptance slice accepted: no runtime/storage/protocol changes; native DeerMem canonical shared owner facts and local per-instance FTS indexes. Initial actualmain1passed43.66s, necessary same-case delivery-assertion rerun1passed46.71s; real memory_search/get/add, hidden receipt, peer visibility/other-owner exclusion, original remote Run ownership, no NAS SQLite, successful present_files/state artifacts/HTTP body. Native loader/safe merge verified; prior focused61passed4.59s and identity27passed1.24s, final loader2passed0.95s and root2passed1.02s. Ruff/diff and independent SPEC/quality PASS. Task4 browser and Task6 remain unchecked; no cloud/remotes.
 
 Task4 local contract accepted: native execution, configured Scheduler and native memory slices already accepted; browser final zero-model control1passed19.50s, with actual model/browser/file/delivery steps separately evidenced (original model selector not overall GREEN). Fixed-scoped native tool/Live session, strict physical closure and bounded outbound control passed independent SPEC/quality. Root independently8 focused lifecycle/physical regressions. Full final gates, fork migration/operations and cloudWSS/cgroups/NAS remain Task6; no complete-project marker.
+
+Task6A accepted locally: content dce5d110 and reviewed two-parent cached fork integration ebda3727. All559 paths classified, unrelated behavior preserved, native0035 ancestry/data preservation and independent e0001 admission verified. SPEC/quality findings fixed with narrow constraint/CLI/collation regressions; root independently7PASS across two invocations. No user DB, cloud, model or remote mutation. Exact operations, installed image/startup, final full gates and later cloud acceptance remain Task6B; Task6 remains incomplete.

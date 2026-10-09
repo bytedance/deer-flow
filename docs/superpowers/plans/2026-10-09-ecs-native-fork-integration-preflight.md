@@ -2,8 +2,8 @@
 
 Preflight started read-only; Task6A now prepares reviewed content and additive
 schema compatibility against implementation HEAD 5164c6fc. Tasks1-5, including
-browser local contracts, were accepted at their recorded scopes. No history merge,
-user database operation, cloud operation, fetch or push has been performed.
+browser local contracts, were accepted at their recorded scopes. Reviewed local content/history integration now exists as dce5d110/ebda3727.
+No user database operation, cloud operation, fetch or push has been performed.
 Task6A's owned ephemeral PostgreSQL ancestry main passed fresh/native0034/Fleet0022
 upgrade, row preservation and activation quarantine; this is not cloud acceptance.
 See `docs/ecs-native-fork-integration.md` for current disposition/evidence.

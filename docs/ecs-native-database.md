@@ -111,11 +111,11 @@ Scheduler 复用 scheduled_tasks 与 scheduled_task_runs，active occurrence 的
 
 ## 初始化、迁移与旧版兼容
 
-目前三张 executor 表由各自 SQLAlchemy MetaData.create_all 初始化，原生表由原有数据库迁移管理。create_all 只创建缺失对象，不是生产 schema 升级协议；版本化运维与升级验证属于 Task6 未完成项。
+执行器使用独立数据库和版本表 ecs_executor_alembic_version，当前版本 e0001_execution_ledger 管理三张执行表。生产 B 服务与控制端只读检查兼容性，不自动 create_all；离线升级命令可以创建缺失对象，或接纳经过严格结构核对的旧无版本执行账，保留已有记录、版本和状态。原生 Run、MCP、Scheduler、checkpoint 仍由原生数据库管理，不能与执行账共用一个库。
 
-旧 fork 数据库可能位于 0022_fleet_main_merge，包含 0018_thread_execution_bindings 和 0019_scheduled_execution 以及 scheduled_tasks.execution。必须保留原 revision ID 并提供兼容 merge/upgrade 路径，显式处置旧执行绑定和配置。禁止以新迁移目录覆盖旧库、直接删表或假设旧数据库等于全新数据库。
+原生版本 0035_native_fork_compatibility 合并原生 0034 与旧 fork 0022，保留 0018_thread_execution_bindings、0019_scheduled_execution 的版本和父节点。真实 PostgreSQL 测试已验证全新库、原生 0034 和旧 Fleet 0022 升级及代表性数据保留。发现旧绑定、非 NULL 的 scheduled_tasks.execution 或任意 fleet_* 表时，Gateway 在恢复和调度之前拒绝激活；不自动转换、删除或重放旧执行意图。
 
-依赖等待目前仅新增 JSON 字段和原生仓库合同。版本化迁移脚本仍待 Task6 完成，必须验证全新库与旧 fork 升级。架构入口：[ecs-native-architecture.md](ecs-native-architecture.md)。
+依赖等待使用执行记录的 JSON 字段和原生仓库合同，不新增目标或通知表。离线升级、只读清点、旧数据隔离与完整备份回退步骤见 [fork 兼容文档](ecs-native-fork-integration.md)。实际启停、镜像和云环境验证仍属 Task6B。架构入口：[ecs-native-architecture.md](ecs-native-architecture.md)。
 
 ## 原生记忆数据位置
 

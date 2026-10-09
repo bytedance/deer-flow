@@ -1,6 +1,6 @@
 # Audited native user-fork integration and schema boundary
 
-Task6A prepares content against native `5164c6fc`; this is not a history merge or production activation. Cached fork `96bacf4f42ee1ae24ab988cc369e0720c65f0bd5`, Gitee `a816a744fa8ded80a638c1262384cd2f72124751`, and ancestor `c35022e18bead8aa35020f2ffa31f28dd2ac4622` were read locally. Remote heads were not refreshed. Official origin is never a push target. Disabled Actions preference and previous comparison worktrees/branches remain untouched.
+Task6A content was reviewed against native `5164c6fc` and committed as `dce5d110`. Root subsequently integrated cached user-fork history through reviewed two-parent merge `ebda3727`, retaining that exact native content tree. This is not production activation. Cached fork `96bacf4f42ee1ae24ab988cc369e0720c65f0bd5`, Gitee `a816a744fa8ded80a638c1262384cd2f72124751`, and ancestor `c35022e18bead8aa35020f2ffa31f28dd2ac4622` were read locally. Remote heads were not refreshed. Official origin is never a push target. Disabled Actions preference and previous comparison worktrees/branches remain untouched.
 
 ## Content and behavior disposition
 
@@ -19,7 +19,7 @@ Old `/agent-tasks` PAT read/cancel/resume rights are retired with their routes. 
 
 The cached local persistent ToolNode regression reproduced `runtime=None` in an interceptor. Concrete hidden `Runtime` annotations now preserve server identity for persistent/background adapters; the regression supplies a valid native incarnation. Public model schema is unchanged, no native incarnation guard is weakened, and no old Fleet mutation/workspace plumbing is imported.
 
-Root performs history integration only after fresh SPEC/quality review: a reviewed two-parent content merge retains current native content and explicitly adapted unrelated deltas, while this manifest records rejected/replaced Fleet content and the fork parent preserves history. Do not use an unaudited `-s ours`, wholesale fork checkout, or silently reset a fork branch. Future publishing must compare refreshed user heads and preserve newer deltas; this manifest covers cached refs only. Task6A did not merge, stage, commit, fetch, push or create a PR.
+Root completed local history integration after fresh SPEC/quality PASS: reviewed two-parent merge `ebda37276a3456d84d120bae885113b6581f936a` has parents `dce5d110eeb2b4566414adc147734722e9400fb4` and cached fork `96bacf4f42ee1ae24ab988cc369e0720c65f0bd5`. Its tree is byte-identical to reviewed native content; the cached Gitee head is also an ancestor. The manifest records rejected/replaced Fleet content and the fork parent preserves history. Do not use an unaudited `-s ours`, wholesale fork checkout, or silently reset a fork branch. Future publishing must compare refreshed user heads and preserve newer deltas; this manifest covers cached refs only. The implementer did not stage or commit. Root saved the reviewed local content and history as recorded above; no fetch, push or PR occurred.
 
 ## Real schema upgrade versus legacy activation quarantine
 
@@ -162,3 +162,7 @@ executor-adoption case passed (**1 passed**), preserving its uncertain version11
 reservation under the new catalog check; its container was removed. This was
 only a narrow check of the newly introduced PostgreSQL reflection risk, with no
 ancestry, model, broad gate, deployment or user database repeat.
+
+## Reviewed local integration record
+
+SPEC and quality rechecks passed after constraint/index, CLI redaction and collation fixes. Root independently verified six critical scope/quarantine/CLI/schema regressions (6 passed,2.02s) and the collation regression (1 passed,0.88s). All47 reviewed hashes matched before content commit. The history merge changed no file bytes and a clean worktree plus both cached user-head ancestry checks passed. Full installed startup and final whole-backend/blocking-I/O gates remain Task6B.

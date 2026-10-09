@@ -5,7 +5,7 @@
   "cached_gitee": "a816a744fa8ded80a638c1262384cd2f72124751",
   "native_before": "5164c6fcead82038dc31016f7b6654496e840d15",
   "remote_heads_verified": false,
-  "history_merge_performed": false,
+  "history_merge_performed": true,
   "counts": {
     "adapted": 15,
     "retained_exact": 1,
@@ -7481,5 +7481,7 @@
         "backend/app/gateway/native_admission.py"
       ]
     }
-  ]
+  ],
+  "reviewed_content_commit": "dce5d110eeb2b4566414adc147734722e9400fb4",
+  "history_merge_commit": "ebda37276a3456d84d120bae885113b6581f936a"
 }

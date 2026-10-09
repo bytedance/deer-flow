@@ -99,7 +99,7 @@ flowchart LR
 
 本地原生 C、Scheduler、记忆及浏览器合同已验证。云 NAS 锁、Gateway cgroup、生产 WSS 与受限代理信任仍需真实部署证明；本地共享目录和 loopback 明文例外不能替代。
 
-fork 迁移、旧 Fleet 数据处置、版本回滚、可复用启动/停止脚本和部署/测试记录仍属交付范围。两台上海 ECS 保持用户要求的停机状态；本轮没有部署或推送。
+fork 内容和历史已在本地按 559 路径清单审计整合；原生 0035 与独立执行器 e0001 的升级、保留数据及激活隔离已通过审查和真实 PostgreSQL 验证。旧 Fleet 意图继续隔离，历史执行续接需要显式处置。版本回滚、可复用启动/停止脚本和部署/测试记录仍属交付范围。两台上海 ECS 保持用户要求的停机状态；本轮没有部署或推送。
 
 关联：[库表文档](ecs-native-database.md)、[实现计划](superpowers/plans/2026-10-08-ecs-native-reuse-implementation.md)、[证据与审查记录](superpowers/plans/2026-10-08-ecs-native-reuse-audit-notes.md)。
 
