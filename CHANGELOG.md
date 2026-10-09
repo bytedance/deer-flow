@@ -208,6 +208,22 @@ This release closes that milestone with **439 merged pull requests**.
 
 #### Agents & runtime
 
+- **goal:** A met chat goal is now recorded on the thread, and the history
+  head keeps goal state. When the evaluator finds a goal met, the checkpoint
+  that clears it also writes a new `goal_outcome` channel: the objective, when
+  the goal was set and met, the continuations used and allowed, the
+  evaluator's reason, `relied_on_assumption` and the id of the reply it was
+  judged on. Any later goal write removes it, and scheduled-task goals do not
+  write it. Clients cannot set it: `POST /state` and non-internal run input
+  that carry `goal_outcome` get 400. The
+  `POST /api/threads/{thread_id}/history` head now carries an active `goal`
+  and an achieved `goal_outcome`, so a stopped goal no longer disappears from
+  the web UI after a run ends or the page reloads; older entries are
+  unchanged. A chat branched from an earlier turn no longer brings back a goal
+  or record that turn did not have. `contracts/thread_goal_contract.json` pins
+  the stand-down and check-failure codes, the record's keys, the history head
+  keys and the host-written reasons. ([#6556])
+
 - **gateway:** Threads the server creates for you can be noticed without a
   reload. Runs started by a schedule, an IM channel, a GitHub agent, an
   extension or an MCP notification now carry a server-owned
@@ -802,8 +818,30 @@ This release closes that milestone with **439 merged pull requests**.
   chip is removed, older drafts restore their skill selection as an inline reference,
   and manually typed legacy slash text still submits as a normal message. ([#6154])
 
+- **frontend:** The goal bar above the composer now says what an active
+  `/goal` is doing and why it stopped. It shows "In progress" while a run works
+  on the goal, and after auto-continue stands down "Stopped", "Waiting for
+  you", "Waiting", "Couldn't check the goal" or "Paused" with the reason and
+  the next step on a second line, where it used to keep showing
+  "Continuing 8/8" or look freshly set; "Details" holds the full goal and the
+  checker's own note. A met goal shows "Goal met" (and how many times it
+  auto-continued) until the chat moves on, also after a reload, and the bar no
+  longer stays after a goal met on its first run. While a goal is set, the
+  latest turn's edit pencil is shown disabled with a tooltip instead of hidden,
+  and the message toolbar also appears on keyboard focus. A `/goal` refused
+  because a run is still going keeps the draft and says so. ([#6556])
+
 ### Fixed
 
+- **runtime:** The JSONL event store no longer loses events after a torn final
+  line. A write interrupted mid-record left the file without a trailing newline,
+  so the next append was glued onto the partial record and both became one
+  unparseable line; a truncated multibyte character also made the whole file
+  fail to decode, hiding every intact record and breaking sequence recovery.
+  Appends now insert a separator when the existing file does not end in a
+  newline, reads decode each physical line on its own and skip only the broken
+  one, and a failed batch append still truncates back to the original size.
+  ([#6520])
 - **channels:** `/goal <objective>` and `/goal clear` from an IM channel work
   again when Gateway auth is enabled (the default). Both sent their write with
   the internal auth token alone, and the Gateway's CSRF check, which does not
@@ -1185,6 +1223,23 @@ This release closes that milestone with **439 merged pull requests**.
   Upgrading a release that predates `AUTH_JWT_SECRET` generates a new key and
   signs every browser session out once; the chart README shows how to seed
   the previous key into the Secret first to keep sessions. ([#6347])
+- **deploy:** The Helm chart no longer pins the sandbox provisioner to one Pod.
+  `provisioner.replicas` (default 1, unchanged) sets the replica count, the
+  provisioner Deployment gets the gateway's surge-then-drain rollout strategy
+  (`maxSurge: 1`, `maxUnavailable: 0`), and a `PodDisruptionBudget`
+  (`provisioner.podDisruptionBudget`, `minAvailable: 1`) is rendered while
+  `provisioner.replicas > 1`, so a multi-replica gateway deployment no longer
+  loses sandbox creation whenever its single provisioner Pod restarts or its
+  node drains. The provisioner itself needed no change: the labelled sandbox
+  Pods and Services are its only registry, every handler reads them back from
+  the API server, and create already tolerates the `409 AlreadyExists` a
+  concurrent creator produces. The chart README and the provisioner README
+  record what the replica count rests on and that the budget never renders
+  for a single replica. Both budgets render `minAvailable` through one helper
+  that preserves a percentage such as `"50%"` (the previous `int` cast, also
+  in the pre-existing gateway budget, silently turned it into `0`, a budget
+  that protects nothing) and fails the render for `0`, `"0%"` or any other
+  unsupported value with a message naming the values key. ([#6543])
 - **persistence:** A second Gateway instance no longer fails startup with
   `TimeoutError` while another instance runs a PostgreSQL schema migration. The
   bootstrap advisory lock was taken with a blocking `pg_advisory_lock` on the
@@ -4175,6 +4230,16 @@ This release closes that milestone with **439 merged pull requests**.
   messages are rebuilt via `model_copy` so originals are never mutated. The gate
   stays off by default and behavior is unchanged while unset. ([#5577])
 
+- **goal:** Enabling `pii_redaction` now also redacts the `/goal` evaluator's
+  input. The evaluator calls its model directly, outside
+  `PiiRedactionMiddleware`, so it sent raw user lines, tool arguments, tool
+  results and Human Input Card answers. The messages it reads are now
+  redacted whole before the evidence caps can cut an identifier in two, and
+  the assembled input, goal objective included, is redacted again; thread
+  state keeps the raw text. A redaction error fails the check
+  (`evaluator_failed`) instead of sending raw text. With redaction off, the
+  input is byte-identical. ([#6556])
+
 - **authz:** Skill authorization is now enforced at agent assembly and
   activation, so an RBAC policy such as `skills: {allow: ["data-analysis"]}`
   can actually deny a skill — Phase 2A (#4439) covered Gateway routes, but
@@ -4186,6 +4251,16 @@ This release closes that milestone with **439 merged pull requests**.
   fail-closed/fail-open policy. A denied `read_file` of a `SKILL.md` is
   stamped `skill_context_denied`, so durable context, skill allowed-tools,
   and autonomous secret bindings never activate the denied skill. ([#4541])
+
+- **goal:** Enabling `pii_redaction` now also redacts the hidden `/goal`
+  continuation. `PiiRedactionMiddleware` skips this framework message, so
+  each continuation turn sent the goal objective and the evaluator's reason
+  and evidence summary raw to the agent's model, and they stayed in the
+  thread for later model calls. They are now redacted before the message is
+  built; the thread keeps the redacted message, which the UI hides, and the
+  goal state keeps the raw objective. A redaction error fails the check
+  (`evaluator_failed`) before the continuation is counted, instead of
+  sending raw text. With redaction off, the message is byte-identical. ([#6556])
 
 - **lark:** The opt-in Lark broker subcommand denylist
   (`DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS`) can no longer be bypassed by an
@@ -9317,4 +9392,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6506]: https://github.com/bytedance/deer-flow/pull/6506
 [#6512]: https://github.com/bytedance/deer-flow/pull/6512
 [#6519]: https://github.com/bytedance/deer-flow/pull/6519
+[#6520]: https://github.com/bytedance/deer-flow/pull/6520
 [#6537]: https://github.com/bytedance/deer-flow/pull/6537
+[#6543]: https://github.com/bytedance/deer-flow/pull/6543
+[#6556]: https://github.com/bytedance/deer-flow/pull/6556

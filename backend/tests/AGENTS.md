@@ -2,6 +2,12 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+Search coercion ownership tests audit executable helper bodies/call sites and
+inline integer assignments. Include Exa and SearXNG in the deferred census;
+pin new-provider copies and docstring false positives with source fixtures.
+This pattern gate does not establish arbitrary provider semantics or change
+deferred providers' validation policy.
+
 Mixed-version resume admission in `test_thread_run_idempotency.py` uses a real
 shared SQL repository and an old-column projection. The frozen pre-6499 helper
 models only null-input resume retry matching from `02ce9ab2`; do not update it
@@ -67,6 +73,12 @@ SQLite/PostgreSQL cases still exercise upgrade, downgrade and re-upgrade.
 an actionable reason; cover version detection offline in `test_support_compose.py`.
 Real rendering and production entry-point tests use only read-only Compose calls.
 Never start or stop a stack from these tests.
+
+## Jina client options
+
+Retry/response-budget compatibility tests pin client count and caller-supplied
+`proxy`/`trust_env` settings. Additional provider-owned HTTPX options must not
+break those assertions.
 
 ## Claude provider tests
 

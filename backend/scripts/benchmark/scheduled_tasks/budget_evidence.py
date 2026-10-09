@@ -126,7 +126,7 @@ async def recheck_budget(args: Any) -> dict[str, Any]:
                 "original_results_sha256": hashlib.sha256(original_path.read_bytes()).hexdigest(),
                 "original_failure_preserved": (args.run_output / "failure.json").is_file(),
                 "original_api_goal_history": previous["goal_history"],
-                "reader_correction": "Public history projects title/thread_data/messages and omits goal; native accessor reads the persisted goal channel",
+                "reader_correction": "Older public history entries omit goal (only the head carries an active goal); native accessor reads the persisted goal channel",
             }
     finally:
         await engine.dispose()

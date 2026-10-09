@@ -663,6 +663,23 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # already-started file worker drains before the runtime is torn down.
         app.state.startup_trash_sweep_task = asyncio.create_task(_run_startup_trash_sweep(app, startup_config))
 
+        # Best-effort per-document summary generation.
+        # Workers start only when projects.summaries_enabled is true; the
+        # write routes' enqueue is a no-op otherwise. Needs the session
+        # factory and paths, both ready after langgraph_runtime.
+        try:
+            from deerflow.config.paths import get_paths
+            from deerflow.persistence.engine import get_session_factory
+            from deerflow.projects.summaries import init_summary_generator
+
+            _summary_sf = get_session_factory()
+            if _summary_sf is not None:
+                summary_generator = init_summary_generator(session_factory=_summary_sf, paths=get_paths(), app_config=startup_config)
+                await summary_generator.start()
+                app.state.summary_generator = summary_generator
+        except Exception:
+            logger.exception("Failed to start summary generation workers")
+
         # Enqueue side of the scheduled-run notification outbox (issue #4254).
         # It only needs the durable table, so it is wired with the scheduler;
         # the delivery worker starts after the channel service, further down.
@@ -814,6 +831,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         yield
 
         await _shutdown_startup_trash_sweep(app)
+        try:
+            from deerflow.projects.summaries import get_summary_generator, reset_summary_generator
+
+            _generator = get_summary_generator()
+            if _generator is not None:
+                await _generator.stop()
+            reset_summary_generator()
+        except Exception:
+            logger.exception("Failed to stop summary generation workers")
 
         try:
             await auth.close_oidc_service()
