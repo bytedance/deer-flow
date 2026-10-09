@@ -160,12 +160,17 @@ describe("useActiveGoal", () => {
     expect(result.current.goalOutcome).toBeNull();
   });
 
-  it("drops a status-read goal without created_at once its '' record arrives", () => {
-    // POST /state stored the goal without created_at, so thread values leave
-    // it out, but the status read shows it and the backend still locks edit.
+  it("keeps a thread-value goal stored without timestamps", () => {
+    // POST /state stored it without created_at; the backend still locks edit.
     const bare = { objective: GOAL.objective, status: "active" } as GoalState;
-    const { result, rerender } = renderGoal({ goal: bare });
-    expect(result.current.hasGoal).toBe(false);
+    const { result } = renderGoal({ goal: bare });
+    expect(result.current.hasGoal).toBe(true);
+    expect(result.current.activeGoal).toBe(bare);
+  });
+
+  it("drops a status-read goal without created_at once its '' record arrives", () => {
+    const bare = { objective: GOAL.objective, status: "active" } as GoalState;
+    const { result, rerender } = renderGoal();
     act(() => result.current.setLocalGoal(bare, "status"));
     expect(result.current.activeGoal).toBe(bare);
 
@@ -182,8 +187,14 @@ describe("useActiveGoal", () => {
   });
 
   it("does not treat a malformed goal value as a set goal", () => {
-    const { result } = renderGoal({ goal: { objective: "finish" } });
-    expect(result.current.hasGoal).toBe(false);
-    expect(result.current.activeGoal).toBeNull();
+    for (const goal of [
+      { objective: "finish" },
+      { status: "active" },
+      { ...GOAL, status: "paused" },
+    ]) {
+      const { result } = renderGoal({ goal });
+      expect(result.current.hasGoal).toBe(false);
+      expect(result.current.activeGoal).toBeNull();
+    }
   });
 });

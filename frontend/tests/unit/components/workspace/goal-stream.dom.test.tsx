@@ -341,3 +341,70 @@ describe("a met goal after a reload", () => {
     expect(current().hasGoal).toBe(true);
   });
 });
+
+// POST /state and run input can store an active goal without timestamps. The
+// backend still evaluates it and locks edit, so the bar and `hasGoal` (the
+// chat pages' pencil lock) must show it too.
+describe("an active goal stored without timestamps", () => {
+  const SPARSE = { objective: GOAL.objective, status: "active" };
+
+  it("shows from the history head", async () => {
+    server.historyValues = historyHead({
+      title: "Chat",
+      messages: [HUMAN],
+      goal: SPARSE,
+    });
+
+    const current = await mountHarness();
+    await waitFor(() => expect(current().hasGoal).toBe(true));
+    expect(barState()).toBe("set");
+  });
+
+  it("shows from a live update before the post-run refetch", async () => {
+    server.frames = [
+      { event: "metadata", data: { run_id: "run-1", thread_id: "thread-1" } },
+      { event: "updates", data: { goal_evaluator: { goal: SPARSE } } },
+      { event: "updates", data: { agent: { messages: [AI] } } },
+    ] satisfies Frame[];
+    server.afterRunHistoryValues = historyHead({
+      title: "Chat",
+      messages: [HUMAN, AI],
+      goal: SPARSE,
+    });
+    const seen: { isLoading: boolean; hasGoal: boolean }[] = [];
+    let current!: Exposed;
+    render(
+      <Harness
+        expose={(value) => {
+          seen.push({ isLoading: value.isLoading, hasGoal: value.hasGoal });
+          current = value;
+        }}
+      />,
+      { wrapper },
+    );
+    await settle();
+    expect(current.hasGoal).toBe(false);
+
+    await act(async () => {
+      await current.sendMessage("thread-1", { text: "go", files: [] });
+    });
+    await waitFor(() => expect(current.isLoading).toBe(false));
+    await settle();
+
+    // The history head has no goal while the run streams.
+    expect(seen.some((s) => s.isLoading && s.hasGoal)).toBe(true);
+    expect(current.hasGoal).toBe(true);
+  });
+
+  it("still drops a malformed goal from the history head", async () => {
+    server.historyValues = historyHead({
+      title: "Chat",
+      messages: [HUMAN],
+      goal: { objective: GOAL.objective },
+    });
+
+    const current = await mountHarness();
+    expect(current().hasGoal).toBe(false);
+    expect(barState()).toBeUndefined();
+  });
+});

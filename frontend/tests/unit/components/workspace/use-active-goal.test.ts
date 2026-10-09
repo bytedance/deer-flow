@@ -72,9 +72,14 @@ describe("normalizeServerGoal", () => {
     expect(normalizeServerGoal(undefined)).toBeUndefined();
     expect(normalizeServerGoal(goal)).toBe(goal);
     expect(normalizeServerGoal(null)).toBeNull();
-    // POST /state can store a dict that is not an active goal.
+    // POST /state can store an active goal without timestamps: still a goal.
+    const bare = { objective: "finish", status: "active" };
+    expect(normalizeServerGoal(bare)).toBe(bare);
+    // It can also store a dict that is not an active goal.
     expect(normalizeServerGoal({ objective: "finish" })).toBeNull();
     expect(normalizeServerGoal({ ...goal, status: "paused" })).toBeNull();
+    expect(normalizeServerGoal({ status: "active" })).toBeNull();
+    expect(normalizeServerGoal([goal])).toBeNull();
   });
 });
 

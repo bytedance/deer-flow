@@ -82,16 +82,11 @@ export function normalizeServerGoal(
 }
 
 /**
- * A `/goal` status read, judged like the backend's own active-goal check
- * (`status` "active"), so the bar and the edit lock agree with the server.
- * Unlike thread values it keeps a goal stored without `created_at`; the met
- * record of that goal has `goal_created_at` "".
+ * A `/goal` status read, judged by the same rule as thread values. A goal
+ * stored without `created_at` stays; its met record has `goal_created_at` "".
  */
 export function normalizeGoalStatusRead(value: unknown): GoalState | null {
-  const goal = value as { status?: unknown; objective?: unknown } | null;
-  return goal?.status === "active" && typeof goal.objective === "string"
-    ? (value as GoalState)
-    : null;
+  return isGoalState(value) ? value : null;
 }
 
 /**
