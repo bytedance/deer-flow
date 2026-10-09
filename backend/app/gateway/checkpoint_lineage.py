@@ -123,24 +123,6 @@ def has_duration_stamps_without_marker(checkpoint_tuple: Any) -> bool:
     return _has_postgres_stamps(metadata)
 
 
-def _sync_versions(checkpointer: Any | None, snapshot: Any) -> dict[str, Any] | None:
-    """Versions for *snapshot*, re-reading the raw tuple when it lacks them."""
-
-    if snapshot is None:
-        return None
-    versions = _snapshot_versions(snapshot)
-    if versions is not None:
-        return versions
-    getter = getattr(checkpointer, "get_tuple", None)
-    config = getattr(snapshot, "config", None)
-    if callable(getter) and isinstance(config, dict):
-        try:
-            return _snapshot_versions(getter(config))
-        except Exception:
-            return None
-    return None
-
-
 def _snapshot_versions(obj: Any) -> dict[str, Any] | None:
     """Channel versions persisted on a tuple or snapshot, when exposed.
 
@@ -165,10 +147,20 @@ def _history_identity(checkpoint_tuple: Any) -> tuple[str, str, str] | None:
     return _config_identity(getattr(checkpoint_tuple, "config", {}) or {})
 
 
-async def resolve_history_versions(accessor: Any, checkpoints: Sequence[Any]) -> dict[tuple[str, str, str], Any]:
-    """Persisted channel versions for a history window, keyed by config identity."""
+async def resolve_history_versions(
+    accessor: Any,
+    checkpoints: Sequence[Any],
+    *,
+    cache: dict[tuple[str, str, str], Any] | None = None,
+) -> dict[tuple[str, str, str], Any]:
+    """Persisted channel versions for a history window, keyed by config identity.
 
-    versions: dict[tuple[str, str, str], Any] = {}
+    Pass ``cache`` to share the lookups with an earlier lazy pass over the same
+    window: the dict is filled in place and returned, so a request that has
+    already resolved the stamp candidates pays nothing here.
+    """
+
+    versions: dict[tuple[str, str, str], Any] = cache if cache is not None else {}
     for checkpoint_tuple in checkpoints:
         identity = _history_identity(checkpoint_tuple)
         if identity is not None and identity not in versions:
@@ -197,6 +189,51 @@ async def resolve_channel_versions(accessor: Any, snapshot: Any) -> dict[str, An
             return None
         return _snapshot_versions(tup)
     return None
+
+
+async def resolve_versions_memoized(
+    accessor: Any,
+    checkpoint_tuple: Any,
+    cache: dict[tuple[str, str, str], Any],
+) -> dict[str, Any] | None:
+    """``resolve_channel_versions`` memoized by config identity.
+
+    Newest-first windows make every tuple both a snapshot and its successor's
+    parent, so resolving candidates lazily without this cache still reads each
+    distinct tuple twice. Tuples without a config identity are resolved
+    directly, since there is nothing to key them by.
+    """
+
+    identity = _history_identity(checkpoint_tuple)
+    if identity is None:
+        return await resolve_channel_versions(accessor, checkpoint_tuple)
+    if identity not in cache:
+        cache[identity] = await resolve_channel_versions(accessor, checkpoint_tuple)
+    return cache[identity]
+
+
+async def resolve_stamp_candidate_versions(
+    accessor: Any,
+    checkpoint_tuple: Any,
+    parent: Any | None,
+    cache: dict[tuple[str, str, str], Any],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Resolve the version maps a stamp candidate needs, and nothing else.
+
+    :func:`is_duration_only_checkpoint` reads ``versions`` only at the
+    shape-check tier, so the marker tier (``writes`` present) and the stamp
+    gate must not pay for them: on Postgres every lookup behind a materialized
+    snapshot is a serial raw read. Scanning a window without this gate costs up
+    to two such reads per entry, and the memoized cache keeps a stamp candidate
+    and its parent to one read each even though both are also visited as
+    snapshots.
+    """
+
+    if parent is None or not has_duration_stamps_without_marker(checkpoint_tuple):
+        return None, None
+    versions = await resolve_versions_memoized(accessor, checkpoint_tuple, cache)
+    parent_versions = await resolve_versions_memoized(accessor, parent, cache)
+    return versions, parent_versions
 
 
 def _copies_parent_verbatim(checkpoint_tuple: Any, parent: Any, *, versions: dict[str, Any] | None = None, parent_versions: dict[str, Any] | None = None) -> bool:
@@ -325,20 +362,30 @@ async def find_checkpoint_before_message(
     if current_identity is not None:
         visited.add(current_identity)
 
-    # Each distinct ancestor is read once; a Postgres stamp candidate also
-    # needs its grandparent for the shape check, and that grandparent is the
-    # next iteration's parent, so it is carried over instead of re-read.
+    # Each distinct ancestor is read once: a Postgres stamp candidate also
+    # needs its grandparent for the shape check, and a candidate the shape
+    # check refuses re-reads that grandparent as the next iteration's parent,
+    # so reads are memoized by config identity instead of carried by hand.
     # Normal branch/regenerate histories cross the target boundary within
     # 1–3 reads. Keep max_depth as a conservative safety cap for valid
     # histories with many intermediate or duration-only checkpoints.
-    prefetched_parent = None
+    read_cache: dict[tuple[str, str, str], Any] = {}
+
+    async def read(config: dict[str, Any]) -> Any:
+        identity = _config_identity(config)
+        if identity is not None and identity in read_cache:
+            return read_cache[identity]
+        checkpoint_tuple = await accessor.aget(config)
+        if identity is not None:
+            read_cache[identity] = checkpoint_tuple
+        return checkpoint_tuple
+
     for _ in range(max_depth):
         parent_config = getattr(current, "parent_config", None)
         if not isinstance(parent_config, dict):
             raise CheckpointParentMissingError("Checkpoint lineage ended before the target message")
 
-        parent = prefetched_parent if prefetched_parent is not None else await accessor.aget(parent_config)
-        prefetched_parent = None
+        parent = await read(parent_config)
         parent_identity = _checkpoint_identity(parent)
         requested_parent_identity = _config_identity(parent_config)
         if parent_identity is None or not _checkpoint_exists(parent) or (requested_parent_identity is not None and parent_identity != requested_parent_identity):
@@ -349,19 +396,24 @@ async def find_checkpoint_before_message(
             visited.add(parent_identity)
 
         grandparent = None
+        versions = None
+        parent_versions = None
         if has_duration_stamps_without_marker(parent):
             # Postgres popped the marker; the stamps also sit on title and
             # goal leaves, so confirm the verbatim-copy shape against the
             # grandparent before skipping. An unresolvable grandparent leaves
             # the parent addressable, which only ever costs one extra scanned
-            # state-equivalent copy.
+            # state-equivalent copy. The version maps are read only on this
+            # branch: the marker tier and the stamp gate decide without them.
             gp_config = getattr(parent, "parent_config", None)
             if isinstance(gp_config, dict):
-                candidate = await accessor.aget(gp_config)
+                candidate = await read(gp_config)
                 if _checkpoint_exists(candidate):
                     grandparent = candidate
-        if is_duration_only_checkpoint(parent, parent=grandparent, versions=await resolve_channel_versions(accessor, parent), parent_versions=await resolve_channel_versions(accessor, grandparent) if grandparent is not None else None):
-            prefetched_parent = grandparent
+            versions = await resolve_channel_versions(accessor, parent)
+            if grandparent is not None:
+                parent_versions = await resolve_channel_versions(accessor, grandparent)
+        if is_duration_only_checkpoint(parent, parent=grandparent, versions=versions, parent_versions=parent_versions):
             current = parent
             continue
 
@@ -378,7 +430,6 @@ def find_checkpoint_before_message_chronologically(
     message_id: str,
     *,
     history_versions: dict[tuple[str, str, str], Any] | None = None,
-    checkpointer: Any | None = None,
 ) -> tuple[Any | None, bool]:
     """Return ``(replay_base, target_found)`` from newest-first history.
 
@@ -388,14 +439,20 @@ def find_checkpoint_before_message_chronologically(
     checkpoint branches. Duration-only checkpoints are ignored, and only settled
     checkpoints (see :func:`has_pending_tasks`) with an addressable id can become
     the replay base.
+
+    ``history_versions`` is the only version source: callers that resolved the
+    window share it here, and raw tuples still classify through their own
+    ``checkpoint.channel_versions`` when it is absent. A sync checkpointer
+    parameter used to re-read them, which put a blocking read on the event loop
+    for async callers, so it is gone.
     """
 
     previous_checkpoint = None
     history_index = history_parent_index(checkpoints)
     for checkpoint_tuple in reversed(checkpoints):
         parent = parent_from_history_index(checkpoint_tuple, history_index)
-        versions = history_versions.get(_history_identity(checkpoint_tuple)) if history_versions is not None else _sync_versions(checkpointer, checkpoint_tuple)
-        parent_versions = history_versions.get(_history_identity(parent)) if (history_versions is not None and parent is not None) else _sync_versions(checkpointer, parent)
+        versions = history_versions.get(_history_identity(checkpoint_tuple)) if history_versions is not None else _snapshot_versions(checkpoint_tuple)
+        parent_versions = history_versions.get(_history_identity(parent)) if (history_versions is not None and parent is not None) else _snapshot_versions(parent)
         if is_duration_only_checkpoint(checkpoint_tuple, parent=parent, versions=versions, parent_versions=parent_versions):
             continue
         message_ids = {_message_id(message) for message in checkpoint_messages(checkpoint_tuple)}

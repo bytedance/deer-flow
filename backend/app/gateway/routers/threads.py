@@ -34,8 +34,8 @@ from app.gateway.checkpoint_lineage import (
     history_parent_index,
     is_duration_only_checkpoint,
     parent_from_history_index,
-    resolve_channel_versions,
     resolve_history_versions,
+    resolve_stamp_candidate_versions,
 )
 from app.gateway.deps import get_checkpointer, get_run_event_store, get_run_manager, get_run_store
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
@@ -229,9 +229,11 @@ async def _find_branch_checkpoint(
     try:
         history = await accessor.ahistory(config, limit=_BRANCH_HISTORY_RAW_SCAN_LIMIT)
         history_index = history_parent_index(history)
+        version_cache: dict[tuple[str, str, str], Any] = {}
         for snapshot in history:
             parent = parent_from_history_index(snapshot, history_index)
-            if is_duration_only_checkpoint(snapshot, parent=parent, versions=await resolve_channel_versions(accessor, snapshot), parent_versions=await resolve_channel_versions(accessor, parent) if parent is not None else None):
+            versions, parent_versions = await resolve_stamp_candidate_versions(accessor, snapshot, parent, version_cache)
+            if is_duration_only_checkpoint(snapshot, parent=parent, versions=versions, parent_versions=parent_versions):
                 continue
             if _matches_branch_target(_checkpoint_messages(snapshot), target_message_ids):
                 return snapshot
@@ -253,9 +255,11 @@ async def _branch_targets_latest_turn(
     try:
         history = await accessor.ahistory(config, limit=_BRANCH_HISTORY_RAW_SCAN_LIMIT)
         history_index = history_parent_index(history)
+        version_cache: dict[tuple[str, str, str], Any] = {}
         for snapshot in history:
             parent = parent_from_history_index(snapshot, history_index)
-            if is_duration_only_checkpoint(snapshot, parent=parent, versions=await resolve_channel_versions(accessor, snapshot), parent_versions=await resolve_channel_versions(accessor, parent) if parent is not None else None):
+            versions, parent_versions = await resolve_stamp_candidate_versions(accessor, snapshot, parent, version_cache)
+            if is_duration_only_checkpoint(snapshot, parent=parent, versions=versions, parent_versions=parent_versions):
                 continue
             messages = _checkpoint_messages(snapshot)
             if not messages:

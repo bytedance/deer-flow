@@ -38,8 +38,8 @@ from app.gateway.checkpoint_lineage import (
     history_parent_index,
     is_duration_only_checkpoint,
     parent_from_history_index,
-    resolve_channel_versions,
     resolve_history_versions,
+    resolve_stamp_candidate_versions,
 )
 from app.gateway.context_usage import build_context_usage
 from app.gateway.conversation_reader import (
@@ -668,16 +668,18 @@ async def _find_base_checkpoint_before_human(
     try:
         raw_checkpoints = await accessor.ahistory(base_config, limit=REGENERATE_HISTORY_RAW_SCAN_LIMIT)
         history_index = history_parent_index(raw_checkpoints)
+        version_cache: dict[tuple[str, str, str], Any] = {}
         checkpoints = []
         for item in raw_checkpoints:
             parent = parent_from_history_index(item, history_index)
-            if not _is_duration_only_checkpoint(item, history_index, versions=await resolve_channel_versions(accessor, item), parent_versions=await resolve_channel_versions(accessor, parent) if parent is not None else None):
+            versions, parent_versions = await resolve_stamp_candidate_versions(accessor, item, parent, version_cache)
+            if not _is_duration_only_checkpoint(item, history_index, versions=versions, parent_versions=parent_versions):
                 checkpoints.append(item)
     except Exception as exc:
         logger.exception("Failed to list checkpoints for regenerate thread %s", thread_id)
         raise HTTPException(status_code=500, detail="Failed to inspect checkpoint history") from exc
 
-    previous_checkpoint, target_found = find_checkpoint_before_message_chronologically(raw_checkpoints, human_message_id, history_versions=await resolve_history_versions(accessor, raw_checkpoints))
+    previous_checkpoint, target_found = find_checkpoint_before_message_chronologically(raw_checkpoints, human_message_id, history_versions=await resolve_history_versions(accessor, raw_checkpoints, cache=version_cache))
     if target_found:
         if previous_checkpoint is None:
             raise HTTPException(

@@ -19,6 +19,7 @@ from app.gateway.checkpoint_lineage import (
     find_checkpoint_before_message_chronologically,
     is_duration_only_checkpoint,
     resolve_channel_versions,
+    resolve_stamp_candidate_versions,
 )
 
 THREAD_ID = "thread-1"
@@ -522,3 +523,96 @@ def _snapshot_versions_of(obj):
         if isinstance(versions, dict):
             return versions
     return getattr(obj, "channel_versions", None)
+
+
+class _CountingAccessor(_Accessor):
+    """``_Accessor`` that records every read, pinning the walk's read budget."""
+
+    def __init__(self, snapshots: list[object]) -> None:
+        super().__init__(snapshots)
+        self.reads: list[str] = []
+
+    async def aget(self, config):
+        self.reads.append(config.get("configurable", {}).get("checkpoint_id"))
+        return await super().aget(config)
+
+
+class _RawVersionAccessor:
+    """Accessor whose snapshots hide the payload, like langgraph's materialized ones.
+
+    ``aget_tuple`` is the only way to reach ``channel_versions`` from such a
+    snapshot, so every call models one serial Postgres roundtrip.
+    """
+
+    def __init__(self, tuples: dict[str, object]) -> None:
+        self.tuples = tuples
+        self.raw_reads: list[str] = []
+
+    async def aget_tuple(self, config):
+        checkpoint_id = config.get("configurable", {}).get("checkpoint_id")
+        self.raw_reads.append(checkpoint_id)
+        return self.tuples.get(checkpoint_id)
+
+
+def _hidden_snapshot(checkpoint_id: str, metadata: dict) -> SimpleNamespace:
+    """A snapshot exposing neither ``checkpoint`` nor ``channel_versions``."""
+
+    return SimpleNamespace(
+        config={"configurable": {"thread_id": THREAD_ID, "checkpoint_ns": "", "checkpoint_id": checkpoint_id}},
+        metadata=dict(metadata),
+    )
+
+
+def test_lineage_walk_reads_a_refused_stamp_candidate_grandparent_once():
+    """A refused stamp candidate must not re-read its own parent.
+
+    The goal leaf inherits the duration stamps but bumped a channel version, so
+    the walk reads its parent for the shape check and then continues from the
+    candidate — whose parent link points at that very tuple. Both reads must hit
+    one entry in the walk's read cache.
+    """
+    human = HumanMessage(id="h1", content="question")
+    ai = AIMessage(id="ai-1", content="answer")
+    human2 = HumanMessage(id="h2", content="follow-up")
+    history = [
+        _snapshot("ckpt-head", [human, ai, human2], parent_id="ckpt-goal", channel_versions={"messages": 6}),
+        _snapshot("ckpt-goal", [human, ai, human2], parent_id="ckpt-turn1-tail", metadata=dict(_POSTGRES_INHERITED_STAMPS), channel_versions={"messages": 5, "goal": 3}),
+        _snapshot("ckpt-turn1-tail", [human, ai], channel_versions={"messages": 5}),
+    ]
+    accessor = _CountingAccessor(history)
+
+    base = asyncio.run(find_checkpoint_before_message(accessor, history[0], "h2", max_depth=10))
+
+    assert base.config["configurable"]["checkpoint_id"] == "ckpt-turn1-tail"
+    assert accessor.reads.count("ckpt-turn1-tail") == 1
+
+
+def test_stamp_candidate_versions_are_lazy_and_memoized():
+    """Only stamp candidates pay for version maps, and each tuple pays once.
+
+    Behind a materialized snapshot every lookup is a serial raw read, so a
+    window the marker tier or the stamp gate already decided must issue none,
+    and resolving a candidate must reuse the pass that resolved its parent.
+    """
+    candidate = _hidden_snapshot("ckpt-candidate", _POSTGRES_DURATION_METADATA)
+    parent = _hidden_snapshot("ckpt-parent", _POSTGRES_DURATION_METADATA)
+    marker_decided = _hidden_snapshot("ckpt-marker", {"source": "update", "step": 3, "writes": {"runtime_run_duration": {"run_id": "run-1"}}})
+    accessor = _RawVersionAccessor(
+        {
+            "ckpt-candidate": SimpleNamespace(checkpoint={"channel_versions": {"messages": 5}}),
+            "ckpt-parent": SimpleNamespace(checkpoint={"channel_versions": {"messages": 5}}),
+        }
+    )
+    cache: dict[tuple[str, str, str], object] = {}
+
+    assert asyncio.run(resolve_stamp_candidate_versions(accessor, marker_decided, parent, cache)) == (None, None)
+    assert accessor.raw_reads == []
+
+    assert asyncio.run(resolve_stamp_candidate_versions(accessor, candidate, parent, cache)) == ({"messages": 5}, {"messages": 5})
+    assert accessor.raw_reads == ["ckpt-candidate", "ckpt-parent"]
+
+    assert asyncio.run(resolve_stamp_candidate_versions(accessor, parent, candidate, cache)) == ({"messages": 5}, {"messages": 5})
+    assert accessor.raw_reads == ["ckpt-candidate", "ckpt-parent"]
+
+    assert asyncio.run(resolve_stamp_candidate_versions(accessor, candidate, None, cache)) == (None, None)
+    assert accessor.raw_reads == ["ckpt-candidate", "ckpt-parent"]
