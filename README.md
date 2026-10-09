@@ -2018,6 +2018,44 @@ For example, independent read-only research can run concurrently when the wall-c
 
 ### Sandbox & File System
 
+AIO sandboxes recycle after an uncertain implicit-shell outcome or session
+creation; a confirmed `hard_timeout` remains eligible for warm reuse. The Gateway
+waits for all execution and upload holders to finish, including command-session
+cleanup. An in-flight session creation alone does not trigger recycling or
+interrupt a concurrent run. Before recycling, the Gateway records the container ID or Pod UID under
+`{DEER_FLOW_HOME}/sandbox-quarantine`. These records survive failed stops and
+Gateway restarts. Gateways sharing AIO containers must share this home in
+addition to their ownership store. A new runtime instance can reuse the thread's
+sandbox ID; an unverifiable generation fails closed against existing records.
+Before recreating a quarantined ID, the Gateway retires its old records only
+after the backend confirms that no container or Pod remains, while holding the
+normal teardown fences. This also permits recovery when a runtime cannot report
+a generation. If a partial deletion leaves a container or a Pod behind, the
+Gateway inspects it independently of health checks and Service availability,
+then retries cleanup only for a quarantined generation. A replacement generation
+keeps its resources. A delete acknowledgement or failed health check is
+insufficient to clear the records.
+Recovery also clears leftover local proxy and network resources before recreation.
+
+Lark broker provisioning requires confirmed capabilities. Probe failures cannot
+select credential mounts or overwrite a known broker requirement. Update the
+Gateway and provisioner together: the provisioner reports each Pod's actual
+broker mode, and incompatible Pods are replaced through the normal ownership
+fences before reuse. Lark commands use that admitted mode.
+If an older provisioner omits a Pod's broker mode, the Gateway refuses reuse
+with an explicit upgrade error and preserves the Pod. An omitted mode is not
+evidence that the existing runtime needs replacement.
+Capability probes share one request per provisioner and briefly back off after
+failure. A Pod mode that contradicts the cache triggers a fresh observation
+before replacement. Failed admission after creation uses ownership-fenced cleanup.
+A create request whose lark provisioning mode conflicts with the provisioner's
+current configuration is marked as a capability refresh; the Gateway drops its
+cached observation so the next acquire re-probes instead of repeating the
+failure until the cache entry expires.
+On sandboxes without an attested broker mode, lark-cli
+commands fail with an explicit unverified-mode error instead of running
+against an unauthenticated profile.
+
 Host-externalized tool outputs use the Gateway's normal file-creation umask.
 Host and sandbox outputs use deterministic filenames hashed from the raw tool
 call ID and output content. Missing, colliding, or oversized IDs cannot overwrite
