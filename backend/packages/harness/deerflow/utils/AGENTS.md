@@ -41,6 +41,8 @@ name; punctuated names such as `<think-tank>`, `<think:note>`, and `<think/other
 are ordinary content. The shared prefix regex owns this boundary rule; do not
 duplicate it in a manual re-check. Self-closing `<think/>` and `<think />` tags
 are empty reasoning blocks: remove the tag without consuming subsequent text.
+Both cleanup functions find opening delimiters outside quoted attributes; a
+quoted `>` cannot terminate the tag or hide an answer after a self-closing tag.
 Keep exact unfinished `<think` prefixes hidden in leading summaries. Coverage:
 `tests/test_think_tag_boundaries.py`.
 
