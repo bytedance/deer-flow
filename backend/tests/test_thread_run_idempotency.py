@@ -943,6 +943,91 @@ async def test_start_run_persists_resume_fingerprint_without_payload(_stub_app_c
     assert "idempotency_request" not in record.kwargs
 
 
+async def _pre_6499_resume_retry(session_factory, body, idempotency_key):
+    """Freeze the null-input resume reuse policy from 02ce9ab2, without mapping the new column.
+
+    This intentionally models only the historical resume case exercised below,
+    not an alternative implementation of current Gateway admission.
+    """
+    import sqlalchemy as sa
+
+    assert body.input is None and body.command.get("resume") is not None
+    old_runs = sa.Table(
+        "runs",
+        sa.MetaData(),
+        sa.Column("run_id", sa.String(64), primary_key=True),
+        sa.Column("idempotency_key", sa.String(255)),
+        sa.Column("assistant_id", sa.String(128)),
+        sa.Column("kwargs_json", sa.JSON()),
+    )
+    async with session_factory() as session:
+        row = (await session.execute(sa.select(old_runs).where(old_runs.c.idempotency_key == idempotency_key))).mappings().one()
+    stored = row["kwargs_json"]
+    # Old start_run compares input, assistant and references, ignoring command.resume.
+    if stored.get("input") != body.input or row["assistant_id"] != body.assistant_id or stored.get("conversation_references", []) != list(body.conversation_references or []):
+        raise HTTPException(status_code=409, detail="Idempotency-Key already used with a different request")
+    return row["run_id"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("writer_version", ["pre-6499", "current"])
+async def test_mixed_version_resume_admission_requires_upgraded_routing(tmp_path, _stub_app_config, writer_version):
+    """Read compatibility does not make old workers safe keyed-resume retry targets."""
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+    from deerflow.persistence.run import RunRepository
+
+    await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'mixed-resume.db'}", sqlite_dir=str(tmp_path))
+    try:
+        session_factory = get_session_factory()
+        repo = RunRepository(session_factory)
+        owner = RunManager(store=repo, worker_id="writer")
+        peer = RunManager(store=repo, worker_id="upgraded-reader")
+        approved = RunCreateRequest(command={"resume": {"answer": "approve"}})
+        denied = RunCreateRequest(command={"resume": {"answer": "deny"}})
+        key = "http-run:mixed-resume"
+        with (
+            patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+            patch("app.gateway.services.run_agent", new_callable=AsyncMock) as run_agent,
+        ):
+            if writer_version == "current":
+                first = await services.start_run(approved, "thread-1", _make_start_run_request(owner), idempotency_key=key)
+                assert first.task is not None
+                await first.task
+                assert run_agent.await_args.kwargs["graph_input"].resume == {"answer": "approve"}
+            else:
+                # Pre-6499 writers admit null input and persist no resume identity.
+                first = await owner.create_or_reject("thread-1", approved.assistant_id, user_id=None, idempotency_key=key, kwargs={"input": None, "config": None})
+
+            persisted = await repo.get(first.run_id, user_id=None)
+            assert persisted is not None
+            assert bool(persisted["idempotency_request"]) is (writer_version == "current")
+            assert persisted["kwargs"]["input"] is None
+            assert "idempotency_request" not in persisted["kwargs"]
+
+            # The genuine old-column SQL projection cannot see the private identity:
+            # both decisions reuse the same row under the historical input-only policy.
+            assert await _pre_6499_resume_retry(session_factory, approved, key) == first.run_id
+            assert await _pre_6499_resume_retry(session_factory, denied, key) == first.run_id
+
+            if writer_version == "current":
+                retry = await services.start_run(approved, "thread-1", _make_start_run_request(peer), idempotency_key=key)
+                assert retry.run_id == first.run_id and retry.idempotency_reused
+            else:
+                # Even an identical retry is unverifiable for an identity-less legacy row.
+                with pytest.raises(HTTPException) as error:
+                    await services.start_run(approved, "thread-1", _make_start_run_request(peer), idempotency_key=key)
+                assert error.value.status_code == 409
+
+            with pytest.raises(HTTPException) as error:
+                await services.start_run(denied, "thread-1", _make_start_run_request(peer), idempotency_key=key)
+            assert error.value.status_code == 409
+            assert run_agent.await_count == (1 if writer_version == "current" else 0)
+            assert len(await repo.list_by_thread("thread-1", user_id=None)) == 1
+            assert (await repo.get(first.run_id, user_id=None))["idempotency_request"] == persisted["idempotency_request"]
+    finally:
+        await close_engine()
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("stored_kind", ["input", "resume"])
 async def test_start_run_rejects_input_resume_kind_collision(_stub_app_config, stored_kind):
