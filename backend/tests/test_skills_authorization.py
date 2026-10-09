@@ -3077,7 +3077,7 @@ def test_slash_dominance_anchors_on_path_across_midrun_rename(tmp_path, monkeypa
     assert run_context.get(ACTIVE_SECRETS_CONTEXT_KEY) == {"NEW_KEY": "new-value"}
 
 
-def test_async_batch_miss_never_calls_synchronous_provider(tmp_path, monkeypatch):
+def test_async_batch_miss_never_calls_synchronous_provider():
     """[construction hardening] A name missing from an async batch resolves
     per the provider-error policy WITHOUT consulting the synchronous
     authorize() — the wrong API from a worker thread. Under the old dict
@@ -3103,7 +3103,7 @@ def test_async_batch_miss_never_calls_synchronous_provider(tmp_path, monkeypatch
     assert provider.async_calls == []
 
 
-def test_async_batch_miss_fails_closed_under_default_policy(tmp_path, monkeypatch):
+def test_async_batch_miss_fails_closed_under_default_policy():
     """The production default (fail_closed=True) denies a miss — loudly, and
     still without touching the synchronous provider."""
 

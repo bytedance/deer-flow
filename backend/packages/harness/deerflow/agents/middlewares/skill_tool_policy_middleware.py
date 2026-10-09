@@ -37,9 +37,9 @@ _POLICY_SOURCES = frozenset({_POLICY_SOURCE_PASSIVE, _POLICY_SOURCE_SLASH, _POLI
 _MISSING_POLICY_DECISION = object()
 # Async-prepass registry load already attempted and failed: the async hook must
 # not let the worker-side filter silently retry storage — a successful retry
-# would resolve skills whose names are absent from the (empty) decision map and
-# fall back to the synchronous provider API from the thread, which for a
-# loop-affine provider turns a denial into a fail-open allow. Tri-state marker
+# would resolve skills whose names are absent from the (empty) decision batch —
+# a policy-resolved miss (per the carried fail-closed/fail-open policy, with a
+# WARNING), never a silent fallback. Tri-state marker
 # in the style of _MISSING_POLICY_DECISION.
 # Registry argument handed down the policy-resolution call chain: a loaded
 # snapshot (dict), the load-failure marker, or None ("load it here" — the
@@ -87,9 +87,14 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         Persisted ``skill_context`` entries were authorized when they were
         stamped, but the policy may have changed since — every entry is
         re-authorized before its allowed-tools declaration is applied.
-        *activation_decisions* carries decisions precomputed on the event loop
-        via ``aauthorize()`` (async hooks); names absent from the map fall back
-        to the synchronous check, which is the correct API for the sync hooks.
+        *activation_decisions* carries the per-step
+        :class:`~deerflow.authz.activation_decisions.ActivationDecisions`
+        batch precomputed on the event loop via ``aauthorize()`` (async
+        hooks): a covered name returns the batched decision; a miss inside
+        the batch resolves per the carried provider-error policy with a loud
+        WARNING and never touches a provider. ``None`` (the sync hooks, or
+        authorization disabled) is the only case that takes the synchronous
+        check below — the correct API there.
         """
         if self._skill_authorization is None:
             return True
@@ -111,8 +116,10 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         resolves the policy paths through the live registry off-loop first,
         because the decision consumers (``_active_skills_for_paths``) check
         the registry skill's declared name. Authorizing a path-derived name
-        here would miss the map and fall back to the synchronous provider
-        call from the worker thread (wrong API for loop-affine providers).
+        here would surface as a batch miss at the consumer, which resolves
+        per the carried fail-closed/fail-open policy with a WARNING (denied
+        under the production default; allowed without any provider consult
+        under fail-open) — visible, but still a wiring bug to fix.
         """
         if self._skill_authorization is None:
             return None
@@ -135,8 +142,10 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         marker preserves the failure: the async caller hands it down so
         ``_active_skills_for_paths`` applies its fail-closed treatment instead
         of retrying storage (a transient-failure retry that succeeds would
-        resolve skills missing from the decision map and fall back to the
-        synchronous provider API). Unresolvable paths yield no name:
+        resolve skills whose names are absent from the decision batch — a
+        policy-resolved miss: denied under the production fail-closed
+        default, allowed without any provider consult under fail-open, and
+        logged loudly either way). Unresolvable paths yield no name:
         ``_active_skills_for_paths`` skips them before the activation check,
         so no decision is needed for them.
         """

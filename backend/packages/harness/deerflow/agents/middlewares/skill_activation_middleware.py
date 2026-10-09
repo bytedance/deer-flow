@@ -50,9 +50,9 @@ _SLASH_SKILL_ACTIVATION_TARGET_ID_KEY = "slash_skill_activation_target_id"
 
 # Async-prepass registry load already attempted and failed. Handed down so
 # the secret-binding resolution does not silently recover with a fresh load:
-# entry names resolved from a recovered registry would miss the (empty)
-# decision map and fall back to the synchronous provider API from the worker
-# thread — for a loop-affine provider a denial becomes a fail-open allow.
+# entry names resolved from a recovered registry would surface as batch
+# misses — resolved per the carried fail-closed/fail-open policy with a
+# WARNING, never a silent synchronous fallback.
 # Entries bind nothing for that call instead (fail closed by construction).
 # Same marker pattern as SkillToolPolicyMiddleware._REGISTRY_LOAD_FAILED.
 _REGISTRY_LOAD_FAILED = object()
@@ -136,12 +136,15 @@ class SkillActivationMiddleware(AgentMiddleware):
         Delegates to the shared ``skill_activation_allowed`` so the slash path,
         ``describe_skill``, and the skill-file-load path cannot drift.
 
-        *activation_decisions* carries decisions precomputed on the event loop
-        via ``aauthorize()`` by ``awrap_model_call``: the threaded handler then
-        consults them instead of calling the synchronous ``authorize()`` (wrong
-        API for loop-affine providers). Names absent from the map fall back to
-        the synchronous check, which is the correct API for the sync
-        ``wrap_model_call`` path.
+        *activation_decisions* carries the per-step
+        :class:`~deerflow.authz.activation_decisions.ActivationDecisions`
+        batch precomputed on the event loop via ``aauthorize()``: a covered
+        name returns the batched decision; a miss inside the batch resolves
+        per the carried provider-error policy with a loud WARNING and never
+        touches a provider (wrong API from a worker thread for loop-affine
+        providers). ``None`` (the sync ``wrap_model_call`` chain, or
+        authorization disabled) is the only case that takes the synchronous
+        check below — the correct API there.
         """
         if activation_decisions is not None:
             # Construction-enforced: a miss inside an async batch resolves per
