@@ -135,9 +135,11 @@ async def test_goal_outcome_round_trips_through_the_sync_fallback(saver_kind) ->
             await saver.aget_tuple(config)
         sync_put = saver.put
         put_versions: list[set[str]] = []
+        put_writes: list[object] = []
 
         def recording_put(write_config, checkpoint, metadata, new_versions):
             put_versions.append(set(new_versions))
+            put_writes.append(metadata.get("writes"))
             return sync_put(write_config, checkpoint, metadata, new_versions)
 
         saver.put = recording_put
@@ -148,9 +150,13 @@ async def test_goal_outcome_round_trips_through_the_sync_fallback(saver_kind) ->
         replaced = await asyncio.to_thread(saver.get_tuple, config)
 
     assert put_versions == [set(), {"goal"}, {"goal", "goal_outcome"}, {"goal", "goal_outcome"}]
+    assert put_writes[2] == {"goal_evaluator": {"goal": None, "goal_outcome": record}}
+    assert put_writes[3]["goal"]["goal_outcome"] is None
     assert cleared.checkpoint["channel_values"]["goal_outcome"] == record
     assert "goal" not in cleared.checkpoint["channel_values"]
-    assert cleared.metadata["writes"] == {"goal_evaluator": {"goal": None, "goal_outcome": record}}
     assert replaced.checkpoint["channel_values"]["goal"]["objective"] == "Next goal"
     assert "goal_outcome" not in replaced.checkpoint["channel_values"]
-    assert replaced.metadata["writes"]["goal"]["goal_outcome"] is None
+    # PostgresSaver drops metadata["writes"] on put; the others store it.
+    if saver_kind != "postgres":
+        assert cleared.metadata["writes"] == put_writes[2]
+        assert replaced.metadata["writes"] == put_writes[3]
