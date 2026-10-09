@@ -773,9 +773,12 @@ class TestConvertCallToolResultRewrites:
             content, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
 
         # The URI stays unresolved outside the user-data tree, but the link is
-        # still downgraded — a ``file://`` URL block is equally fatal.
+        # still downgraded — a ``file://`` URL block is equally fatal. The raw
+        # host path is withheld from model-visible text (US-16); it survives
+        # only in the artifact channel, which the model never sees.
         assert content[0]["type"] == "text"
-        assert content[0]["text"] == f"[Resource: page (image/png) available at {uri}]"
+        assert content[0]["text"] == "[Resource: page (image/png)]"
+        assert all("file://" not in block.get("text", "") for block in content)
         assert artifact == {"resource_links": [{"name": "page", "uri": uri, "mime_type": "image/png"}]}
 
     def test_remote_image_resource_link_stays_image_block(self, paths: Paths):
@@ -870,13 +873,32 @@ class TestConvertCallToolResultRewrites:
             content, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
 
         # The URI embeds the whole payload: it must not be inlined into the
-        # model-visible text nor checkpointed inside resource_links.
+        # model-visible text nor checkpointed inside resource_links. The
+        # placeholder is the canonical location-less form.
         assert content[0]["type"] == "text"
-        assert content[0]["text"] == "[Resource: report (application/pdf) embedded inline]"
+        assert content[0]["text"] == "[Resource: report (application/pdf)]"
         assert content[1]["type"] == "text"
-        assert content[1]["text"] == "[Resource: unnamed (unknown type) embedded inline]"
+        assert content[1]["text"] == "[Resource: unnamed (unknown type)]"
         assert all(payload not in block.get("text", "") for block in content)
         assert all("data:" not in block.get("text", "") for block in content)
+        assert artifact is None
+
+    def test_blob_uri_resource_link_never_enters_model_text_or_state(self, paths: Paths):
+        url = "blob:https://example.com/550e8400-e29b-41d4-a716-446655440000"
+        result = CallToolResult(
+            content=[ResourceLink(type="resource_link", name="report", uri=url, mimeType="application/pdf")],
+            isError=False,
+        )
+
+        with _patch_paths(paths):
+            content, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
+
+        # A ``blob:`` URI names a browser-local object nothing else can
+        # dereference: like ``data:`` it never enters checkpointed state, and
+        # the placeholder carries no location segment.
+        assert content[0]["type"] == "text"
+        assert content[0]["text"] == "[Resource: report (application/pdf)]"
+        assert all("blob:" not in block.get("text", "") for block in content)
         assert artifact is None
 
     def test_resource_links_merge_with_structured_content_artifact(self, paths: Paths):
@@ -979,10 +1001,29 @@ class TestConvertCallToolResultRewrites:
             content, artifact = mcp_tools._convert_call_tool_result(result)
 
         # Without thread context the URI is not virtualized, but the downgrade
-        # still applies — a ``file://`` URL image block is not fetchable.
+        # still applies — a ``file://`` URL image block is not fetchable. The
+        # host path stays out of model-visible text (US-16).
         assert content[0]["type"] == "text"
-        assert content[0]["text"] == f"[Resource: x (image/png) available at {uri}]"
+        assert content[0]["text"] == "[Resource: x (image/png)]"
+        assert all("file://" not in block.get("text", "") for block in content)
         assert artifact == {"resource_links": [{"name": "x", "uri": uri, "mime_type": "image/png"}]}
+
+    def test_windows_drive_resource_link_omits_host_path_from_placeholder(self, paths: Paths):
+        uri = "C:\\Users\\shots\\page.png"
+        result = CallToolResult(
+            content=[ResourceLink(type="resource_link", name="page", uri=uri, mimeType="image/png")],
+            isError=False,
+        )
+
+        with _patch_paths(paths):
+            content, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
+
+        # urlparse reads the drive prefix as a single-letter scheme; a bare
+        # Windows host path must not reach model-visible text either.
+        assert content[0]["type"] == "text"
+        assert content[0]["text"] == "[Resource: page (image/png)]"
+        assert all(":\\" not in block.get("text", "") for block in content)
+        assert artifact == {"resource_links": [{"name": "page", "uri": "c:\\Users\\shots\\page.png", "mime_type": "image/png"}]}
 
     def test_text_content_passthrough(self, paths: Paths):
         result = CallToolResult(content=[TextContent(type="text", text="hello")], isError=False)

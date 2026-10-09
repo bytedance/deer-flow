@@ -41,6 +41,7 @@ from deerflow.mcp_scope import mcp_session_scope_key, runtime_thread_incarnation
 from deerflow.reflection import resolve_variable
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.mcp_metadata import tag_mcp_routing, tag_mcp_tool
+from deerflow.tools.resource_placeholder import resource_placeholder_text
 from deerflow.tools.sync import make_sync_tool_wrapper
 from deerflow.tools.types import Runtime
 
@@ -419,6 +420,30 @@ def _extract_thread_id(runtime: Runtime | None) -> str:
         return "default"
 
 
+def _model_visible_link_location(url: str) -> str | None:
+    """Return *url* when it is safe to show in model-visible placeholder text.
+
+    A resolved link URL can still spell out a host filesystem location: the raw
+    reference survives unresolved whenever the link lives outside the thread's
+    user-data tree or no thread context was available to virtualize it. Host
+    paths must never leak into prompts (US-16), so those collapse to ``None``
+    and the placeholder omits the location segment. Virtual paths
+    (``/mnt/user-data/...``) and remote schemes (``http(s)``, ``ui://``,
+    ``s3://``, ...) carry no host-path risk and stay visible.
+    """
+    if url.startswith(VIRTUAL_PATH_PREFIX):
+        return url
+    try:
+        scheme = urlparse(url).scheme
+    except ValueError:
+        return None
+    if not scheme or scheme == "file" or (len(scheme) == 1 and scheme.isalpha()):
+        # Bare host path, ``file://`` URI, or Windows drive path (urlparse
+        # reads the drive letter as a single-character scheme).
+        return None
+    return url
+
+
 def _convert_call_tool_result(
     call_tool_result: Any,
     *,
@@ -447,7 +472,11 @@ def _convert_call_tool_result(
     link stays an image block; every other link (``ui://`` cards, local files
     at virtual paths, remote non-image links, unknown schemes) becomes a short
     text placeholder, and the link is preserved as structured data in the
-    artifact under ``resource_links``.
+    artifact under ``resource_links``. Placeholders never embed host
+    filesystem paths: a link that stays unresolved (outside the thread's
+    user-data tree, or no thread context) omits the location segment rather
+    than leaking a raw ``file://`` URI or bare path, and non-referenceable
+    ``data:``/``blob:`` URIs are dropped from the artifact channel too.
     """
     from langchain_core.messages import ToolMessage
     from langchain_core.messages.content import create_file_block, create_image_block, create_text_block
@@ -501,21 +530,33 @@ def _convert_call_tool_result(
             url = _resolve_link_url(str(item.uri))
             if mime and mime.startswith("image/") and url.lower().startswith(("http://", "https://")):
                 lc_content.append(create_image_block(url=url, mime_type=mime))
-            elif url.lower().startswith("data:"):
-                # A ``data:`` URI embeds the whole payload, so inlining it
-                # would put megabytes of base64 into the model-visible text —
-                # and into ``resource_links``, which is checkpointed state.
-                # Repo policy: ``data:``/``blob:`` URIs never enter state, so
-                # the raw URI is dropped from the artifact channel too.
-                lc_content.append(create_text_block(text=f"[Resource: {item.name or 'unnamed'} ({mime or 'unknown type'}) embedded inline]"))
+            elif url.lower().startswith(("data:", "blob:")):
+                # ``data:``/``blob:`` URIs never enter state: a ``data:`` URI
+                # embeds the whole payload, so inlining it would put megabytes
+                # of base64 into model-visible text and into checkpointed
+                # ``resource_links``; a ``blob:`` URI names a browser-local
+                # object nothing else can dereference. Neither is
+                # referenceable, so the raw URI is dropped from the artifact
+                # channel and the placeholder omits the location segment.
+                lc_content.append(create_text_block(text=resource_placeholder_text(name=item.name or "unnamed", mime_type=mime)))
             else:
                 # URL-sourced file blocks are rejected by Chat Completions
                 # serialization (langchain-core), which bricks the thread once
                 # the result is checkpointed. Downgrade every other link to a
                 # text placeholder and keep the structured link in the artifact
-                # channel. The placeholder carries the already-virtualized URL
-                # only, never a host path.
-                lc_content.append(create_text_block(text=f"[Resource: {item.name or 'unnamed'} ({mime or 'unknown type'}) available at {url}]"))
+                # channel. The placeholder shows the location only when the
+                # resolved URL carries no host-path risk — a raw ``file://``
+                # URI or bare host path is withheld from model-visible text
+                # but still recorded in the artifact channel.
+                lc_content.append(
+                    create_text_block(
+                        text=resource_placeholder_text(
+                            name=item.name or "unnamed",
+                            mime_type=mime,
+                            url=_model_visible_link_location(url),
+                        )
+                    )
+                )
                 resource_links.append({"name": item.name, "uri": url, "mime_type": mime})
         elif isinstance(item, EmbeddedResource):
             from mcp.types import BlobResourceContents
