@@ -341,6 +341,7 @@ async def test_service_registers_starts_and_disposes_qq(tmp_path, monkeypatch):
         AsyncMock(return_value={"url": "wss://api.sgroup.qq.com/websocket/"}),
     )
     monkeypatch.setattr(qq.QQChannel, "_run_connection", connected)
+    service._running = True  # Direct-start fixture models an active service.
     try:
         assert await service._start_channel("qq", config)
         channel = service.get_channel("qq")

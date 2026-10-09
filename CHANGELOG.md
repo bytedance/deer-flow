@@ -804,6 +804,40 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **scheduler:** "Run once now" on a one-time task before its run time no longer
+  cancels the scheduled run. The trial launched as the task's own run: the task
+  was marked `running`, and the trial's outcome then finished it (`completed`,
+  `failed` or `cancelled`), so the poller, which claims only `enabled` tasks,
+  never ran it at `run_at`, although `next_run_at` still showed that time. A
+  trial launched before the run time now leaves the task's status and
+  `next_run_at` unchanged, like a trial on a recurring task; its outcome is kept
+  on the trial's run row. A trial after the run time has passed still counts as
+  the task's run. A trial whose launch bookkeeping lands after the poller has
+  claimed the now-due task no longer clears that claim's lease, which made the
+  claim's admission fail and left the task `running` with nothing scheduled. ([#6512])
+- **auth:** Login lockouts are now counted once per client IP across every
+  Gateway replica. `POST /api/v1/auth/login/local` kept its failed-login
+  counter in a per-process dict, so with N replicas behind one load balancer an
+  attacker got N × `max_login_attempts` guesses and a lockout on one replica
+  was invisible to the others. The counter now lives behind a
+  `LoginThrottleStore`: the new `auth.local.throttle_storage` selector
+  (default `auto`) keeps it in the shared `login_throttle` table (migration
+  `0035_login_throttle`) whenever `database.backend` is `sqlite` or
+  `postgres`, and falls back to the in-process counter with a warning when
+  there is no database to share (a `memory` database, or a configured database
+  whose engine is not initialised); `memory` forces the historical per-process
+  behavior; `db` forces the table and refuses to start when the configured
+  database's engine is unavailable. The Gateway resolves the store once at
+  startup, right after the persistence engine; a bare app resolves it on the
+  first throttle call. Failures are counted with one atomic upsert that keeps
+  an active lock's start and committed duration (the sentence is "N seconds
+  after the lock started", not "after the last attempt"), the duration
+  committed at lock time is still honored when the policy changes mid-lock, a
+  successful login clears the IP everywhere, served locks and idle counters are
+  swept in bounded batches, and a declared multi-instance deployment that
+  keeps `memory` logs a startup warning. Status codes and messages of the
+  login endpoint are unchanged; `max_login_attempts` and `lockout_seconds`
+  stay live-read. `config_version` is now 57. ([#6501])
 - **memory:** DeerMem's derived SQLite FTS5 retrieval index can now live
   outside the memory root, and a Gateway instance now notices facts another
   instance wrote. The index for every user was one SQLite database in WAL mode
@@ -9259,4 +9293,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6484]: https://github.com/bytedance/deer-flow/pull/6484
 [#6494]: https://github.com/bytedance/deer-flow/pull/6494
 [#6495]: https://github.com/bytedance/deer-flow/pull/6495
+[#6501]: https://github.com/bytedance/deer-flow/pull/6501
 [#6506]: https://github.com/bytedance/deer-flow/pull/6506
+[#6512]: https://github.com/bytedance/deer-flow/pull/6512
