@@ -11,12 +11,27 @@ _THINK_OPEN_PREFIX_RE = re.compile(r"<think(?=[\s>]|/>|$)", re.IGNORECASE)
 _THINK_CLOSE_PREFIX_RE = re.compile(r"</think", re.IGNORECASE)
 
 
+def _find_tag_end(text: str, start: int) -> int:
+    """Find the closing delimiter outside single- or double-quoted attributes."""
+    quote = ""
+    for index in range(start, len(text)):
+        char = text[index]
+        if quote:
+            if char == quote:
+                quote = ""
+        elif char in {"'", '"'}:
+            quote = char
+        elif char == ">":
+            return index
+    return -1
+
+
 def _find_think_open(text: str, start: int) -> tuple[int, int] | None:
     """Find the next complete opening tag without retrying its suffix at each prefix."""
     match = _THINK_OPEN_PREFIX_RE.search(text, start)
     if match is None:
         return None
-    end = text.find(">", match.end())
+    end = _find_tag_end(text, match.end())
     if end < 0:
         return None
     return match.start(), end + 1
@@ -99,7 +114,7 @@ def strip_leading_think_blocks(text: str) -> str:
         opening = _THINK_OPEN_PREFIX_RE.match(text, start)
         if opening is None:
             break
-        end = text.find(">", opening.end())
+        end = _find_tag_end(text, opening.end())
         if end >= 0 and _is_self_closing_think_tag(text, start, end + 1):
             start = end + 1
             continue
