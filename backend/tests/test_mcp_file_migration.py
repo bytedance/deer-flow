@@ -4,6 +4,12 @@ Regression coverage for GitHub issue #3597: Playwright MCP (and similar stdio
 servers) write files to a path the sandbox/artifact API cannot resolve. The MCP
 tool wrapper pins stdio cwd/temp under the thread's mounted user-data tree and
 rewrites returned file references to ``/mnt/user-data/...`` virtual paths.
+
+``ResourceLink`` conversion contract: links never become URL-sourced ``file``
+blocks — Chat Completions message serialization rejects those, and a
+checkpointed block would fail every later turn of the thread. ``http(s)``
+image links stay image blocks; every other link becomes a text placeholder,
+with the original link preserved in the artifact under ``resource_links``.
 """
 
 import os
@@ -719,7 +725,7 @@ class TestResultHasTextContent:
 
 
 class TestConvertCallToolResultRewrites:
-    def test_resource_link_image_inside_workspace_rewritten(self, paths: Paths):
+    def test_local_image_resource_link_becomes_text_placeholder(self, paths: Paths):
         src = _workspace_file(paths, "page.png", content=b"png")
         result = CallToolResult(
             content=[ResourceLink(type="resource_link", name="page", uri=src.as_uri(), mimeType="image/png")],
@@ -727,12 +733,16 @@ class TestConvertCallToolResultRewrites:
         )
 
         with _patch_paths(paths):
-            content, _ = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
+            content, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
 
-        assert content[0]["type"] == "image"
-        assert content[0]["url"] == f"{VIRTUAL_PATH_PREFIX}/workspace/page.png"
+        # Local images are downgraded too: the provider cannot fetch virtual
+        # paths — the view-image tool is the intended path for local images.
+        virtual = f"{VIRTUAL_PATH_PREFIX}/workspace/page.png"
+        assert content[0]["type"] == "text"
+        assert content[0]["text"] == f"[Resource: page (image/png) available at {virtual}]"
+        assert artifact == {"resource_links": [{"name": "page", "uri": virtual, "mime_type": "image/png"}]}
 
-    def test_resource_link_file_inside_outputs_rewritten(self, paths: Paths):
+    def test_local_file_resource_link_becomes_text_placeholder(self, paths: Paths):
         outputs = paths.sandbox_outputs_dir("t1", user_id="u1")
         outputs.mkdir(parents=True)
         src = outputs / "doc.pdf"
@@ -743,12 +753,14 @@ class TestConvertCallToolResultRewrites:
         )
 
         with _patch_paths(paths):
-            content, _ = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
+            content, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
 
-        assert content[0]["type"] == "file"
-        assert content[0]["url"] == f"{VIRTUAL_PATH_PREFIX}/outputs/doc.pdf"
+        virtual = f"{VIRTUAL_PATH_PREFIX}/outputs/doc.pdf"
+        assert content[0]["type"] == "text"
+        assert content[0]["text"] == f"[Resource: doc (application/pdf) available at {virtual}]"
+        assert artifact == {"resource_links": [{"name": "doc", "uri": virtual, "mime_type": "application/pdf"}]}
 
-    def test_resource_link_outside_user_data_untouched(self, tmp_path: Path, paths: Paths):
+    def test_resource_link_outside_user_data_becomes_text_placeholder(self, tmp_path: Path, paths: Paths):
         src = tmp_path / "page.png"
         src.write_bytes(b"png")
         uri = src.as_uri()
@@ -758,11 +770,15 @@ class TestConvertCallToolResultRewrites:
         )
 
         with _patch_paths(paths):
-            content, _ = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
+            content, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
 
-        assert content[0]["url"] == uri
+        # The URI stays unresolved outside the user-data tree, but the link is
+        # still downgraded — a ``file://`` URL block is equally fatal.
+        assert content[0]["type"] == "text"
+        assert content[0]["text"] == f"[Resource: page (image/png) available at {uri}]"
+        assert artifact == {"resource_links": [{"name": "page", "uri": uri, "mime_type": "image/png"}]}
 
-    def test_remote_resource_link_untouched(self, paths: Paths):
+    def test_remote_image_resource_link_stays_image_block(self, paths: Paths):
         url = "https://example.com/remote.png"
         result = CallToolResult(
             content=[ResourceLink(type="resource_link", name="r", uri=url, mimeType="image/png")],
@@ -770,9 +786,100 @@ class TestConvertCallToolResultRewrites:
         )
 
         with _patch_paths(paths):
-            content, _ = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
+            content, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
 
+        assert content[0]["type"] == "image"
         assert content[0]["url"] == url
+        assert artifact is None
+
+    def test_ui_resource_link_becomes_text_placeholder(self, paths: Paths):
+        # Regression guard: an MCP Apps UI card must not produce any block the
+        # Chat Completions translator rejects (any URL-sourced file block).
+        url = "ui://app/card.html"
+        mime = "text/html;profile=mcp-app"
+        result = CallToolResult(
+            content=[ResourceLink(type="resource_link", name="card", uri=url, mimeType=mime)],
+            isError=False,
+        )
+
+        with _patch_paths(paths):
+            content, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
+
+        assert content[0]["type"] == "text"
+        assert content[0]["text"] == f"[Resource: card ({mime}) available at {url}]"
+        assert all(not (block.get("type") == "file" and "url" in block) for block in content)
+        assert artifact == {"resource_links": [{"name": "card", "uri": url, "mime_type": mime}]}
+
+    def test_remote_non_image_resource_link_becomes_text_placeholder(self, paths: Paths):
+        url = "https://example.com/report.pdf"
+        result = CallToolResult(
+            content=[ResourceLink(type="resource_link", name="report", uri=url, mimeType="application/pdf")],
+            isError=False,
+        )
+
+        with _patch_paths(paths):
+            content, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
+
+        assert content[0]["type"] == "text"
+        assert content[0]["text"] == f"[Resource: report (application/pdf) available at {url}]"
+        assert artifact == {"resource_links": [{"name": "report", "uri": url, "mime_type": "application/pdf"}]}
+
+    def test_unknown_scheme_resource_link_without_name_or_mime_uses_fallbacks(self, paths: Paths):
+        url = "s3://bucket/report.pdf"
+        result = CallToolResult(
+            content=[ResourceLink(type="resource_link", name="", uri=url, mimeType=None)],
+            isError=False,
+        )
+
+        with _patch_paths(paths):
+            content, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
+
+        assert content[0]["type"] == "text"
+        assert content[0]["text"] == f"[Resource: unnamed (unknown type) available at {url}]"
+        assert artifact == {"resource_links": [{"name": "", "uri": url, "mime_type": None}]}
+
+    def test_resource_links_merge_with_structured_content_artifact(self, paths: Paths):
+        url = "https://example.com/report.pdf"
+        result = CallToolResult(
+            content=[
+                TextContent(type="text", text="done"),
+                ResourceLink(type="resource_link", name="report", uri=url, mimeType="application/pdf"),
+            ],
+            structuredContent={"k": "v"},
+            isError=False,
+        )
+
+        with _patch_paths(paths):
+            _, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
+
+        assert artifact == {
+            "structured_content": {"k": "v"},
+            "resource_links": [{"name": "report", "uri": url, "mime_type": "application/pdf"}],
+        }
+
+    def test_multiple_resource_links_preserve_order(self, paths: Paths):
+        first = "https://example.com/a.pdf"
+        second = "ui://app/card.html"
+        result = CallToolResult(
+            content=[
+                ResourceLink(type="resource_link", name="a", uri=first, mimeType="application/pdf"),
+                ResourceLink(type="resource_link", name="b", uri=second, mimeType="text/html"),
+            ],
+            isError=False,
+        )
+
+        with _patch_paths(paths):
+            content, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
+
+        assert [block["type"] for block in content] == ["text", "text"]
+        assert content[0]["text"] == f"[Resource: a (application/pdf) available at {first}]"
+        assert content[1]["text"] == f"[Resource: b (text/html) available at {second}]"
+        assert artifact == {
+            "resource_links": [
+                {"name": "a", "uri": first, "mime_type": "application/pdf"},
+                {"name": "b", "uri": second, "mime_type": "text/html"},
+            ]
+        }
 
     def test_text_review_case_rewritten(self, paths: Paths):
         workspace = paths.sandbox_work_dir("t1", user_id="u1")
@@ -819,7 +926,7 @@ class TestConvertCallToolResultRewrites:
 
         assert content[0]["text"] == f"Saved as {VIRTUAL_PATH_PREFIX}/workspace/report with spaces.txt"
 
-    def test_no_context_does_not_rewrite(self, paths: Paths):
+    def test_no_context_resource_link_still_becomes_text_placeholder(self, paths: Paths):
         src = _workspace_file(paths, "x.png", content=b"png")
         uri = src.as_uri()
         result = CallToolResult(
@@ -828,9 +935,13 @@ class TestConvertCallToolResultRewrites:
         )
 
         with _patch_paths(paths):
-            content, _ = mcp_tools._convert_call_tool_result(result)
+            content, artifact = mcp_tools._convert_call_tool_result(result)
 
-        assert content[0]["url"] == uri
+        # Without thread context the URI is not virtualized, but the downgrade
+        # still applies — a ``file://`` URL image block is not fetchable.
+        assert content[0]["type"] == "text"
+        assert content[0]["text"] == f"[Resource: x (image/png) available at {uri}]"
+        assert artifact == {"resource_links": [{"name": "x", "uri": uri, "mime_type": "image/png"}]}
 
     def test_text_content_passthrough(self, paths: Paths):
         result = CallToolResult(content=[TextContent(type="text", text="hello")], isError=False)

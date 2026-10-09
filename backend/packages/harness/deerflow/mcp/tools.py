@@ -440,6 +440,14 @@ def _convert_call_tool_result(
     with their cwd/temp pinned inside the mounted tree, so they already live in
     a servable location. Remote URIs and files outside the thread's user-data
     tree are left untouched.
+
+    ``ResourceLink`` items never become URL-sourced ``file`` blocks: Chat
+    Completions message serialization rejects those, and once the result is
+    checkpointed every later turn of the thread fails. An ``http(s)`` image
+    link stays an image block; every other link (``ui://`` cards, local files
+    at virtual paths, remote non-image links, unknown schemes) becomes a short
+    text placeholder, and the link is preserved as structured data in the
+    artifact under ``resource_links``.
     """
     from langchain_core.messages import ToolMessage
     from langchain_core.messages.content import create_file_block, create_image_block, create_text_block
@@ -482,6 +490,7 @@ def _convert_call_tool_result(
 
     # Convert MCP content blocks to LangChain content blocks.
     lc_content = []
+    resource_links: list[dict[str, Any]] = []
     for item in call_tool_result.content:
         if isinstance(item, TextContent):
             lc_content.append(create_text_block(text=_resolve_text(item.text)))
@@ -490,10 +499,17 @@ def _convert_call_tool_result(
         elif isinstance(item, ResourceLink):
             mime = item.mimeType or None
             url = _resolve_link_url(str(item.uri))
-            if mime and mime.startswith("image/"):
+            if mime and mime.startswith("image/") and url.lower().startswith(("http://", "https://")):
                 lc_content.append(create_image_block(url=url, mime_type=mime))
             else:
-                lc_content.append(create_file_block(url=url, mime_type=mime))
+                # URL-sourced file blocks are rejected by Chat Completions
+                # serialization (langchain-core), which bricks the thread once
+                # the result is checkpointed. Downgrade every other link to a
+                # text placeholder and keep the structured link in the artifact
+                # channel. The placeholder carries the already-virtualized URL
+                # only, never a host path.
+                lc_content.append(create_text_block(text=f"[Resource: {item.name or 'unnamed'} ({mime or 'unknown type'}) available at {url}]"))
+                resource_links.append({"name": item.name, "uri": url, "mime_type": mime})
         elif isinstance(item, EmbeddedResource):
             from mcp.types import BlobResourceContents
 
@@ -518,6 +534,10 @@ def _convert_call_tool_result(
     artifact = None
     if call_tool_result.structuredContent is not None:
         artifact = {"structured_content": call_tool_result.structuredContent}
+    if resource_links:
+        if artifact is None:
+            artifact = {}
+        artifact["resource_links"] = resource_links
 
     return lc_content, artifact
 
