@@ -169,14 +169,12 @@ class JinaClient:
                                     reason = "retry_after_unfit"
                                     pending_return = True
                                     return f"Error: Jina API returned status {response.status_code}: {response_text}"
-                            if diagnostic:
-                                wait_started = time.monotonic()
-                                try:
-                                    await asyncio.sleep(wait)
-                                finally:
-                                    backoff_seconds += time.monotonic() - wait_started
-                            else:
+                            wait_started = time.monotonic() if diagnostic else 0.0
+                            try:
                                 await asyncio.sleep(wait)
+                            finally:
+                                if diagnostic:
+                                    backoff_seconds += time.monotonic() - wait_started
                             delay = min(delay * 2, 4.0)
             except Exception as e:
                 # Cleanup may override any pending return, including an Error result.
