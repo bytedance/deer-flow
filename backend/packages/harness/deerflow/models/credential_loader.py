@@ -14,6 +14,7 @@ Implements two credential strategies:
 
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -167,8 +168,8 @@ def _extract_claude_code_credential(data: dict[str, Any], source: str) -> Claude
         return None
 
     expires_at = oauth.get("expiresAt", 0)
-    if not isinstance(expires_at, (int, float)):
-        logger.debug("Claude Code credentials source %s has a non-numeric expiresAt; skipping", source)
+    if isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)) or (isinstance(expires_at, float) and not math.isfinite(expires_at)):
+        logger.debug("Claude Code credentials source %s has an invalid expiresAt; skipping", source)
         return None
 
     refresh_token = oauth.get("refreshToken", "")

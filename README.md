@@ -178,7 +178,9 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
 
    Jina also accepts an opt-in `max_response_bytes` tool setting (positive integer; omitted/null disables it). It stops oversized decoded responses before extraction, with no partial success or retry. This leaves the 4096-character output cap unchanged and does not bound HTTPX decompressor allocations or wire bandwidth; see [response budget](backend/docs/CONFIGURATION.md#jina-response-byte-budget).
 
-   Run `make doctor` at any time to verify your setup and get actionable fix hints.
+   Run `make doctor` at any time to verify your setup and get actionable fix hints. Claude credential files with boolean or non-finite
+   `expiresAt` values are rejected; the runtime continues to the next credential
+   file, and doctor reports the malformed file as unavailable.
    If you are opening a GitHub issue about a local setup or runtime problem, run
    `make support-bundle`. The command prints reporter next steps, writes a
    `*-issue-summary.md` file to paste into the issue, a `*-issue-draft.md` file

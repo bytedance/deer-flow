@@ -12,6 +12,7 @@ Exit codes:
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -140,7 +141,7 @@ def _claude_credentials_file_has_access_token(path: Path) -> bool:
     if not isinstance(oauth, dict) or not _has_non_empty_token(oauth.get("accessToken")):
         return False
     expires_at = oauth.get("expiresAt", 0)
-    if isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)):
+    if isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)) or (isinstance(expires_at, float) and not math.isfinite(expires_at)):
         return False
     return expires_at <= 0 or time.time() * 1000 <= expires_at - 60_000
 

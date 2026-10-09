@@ -411,3 +411,10 @@ Keep exit codes, timeouts and redaction intact; do not rely on the host locale.
 Regressions use real local children, including ASCII/GBK capture defaults,
 nonzero exits, surrogate characters and malformed output, without invoking
 provider diagnostics. Doctor covers both `_run` streams and pnpm runner capture.
+
+### Claude Credential Expiry Validation
+
+Doctor rejects boolean and non-finite `expiresAt` values before comparing
+credential expiry. Mirror the runtime file-admission rule without consuming a
+descriptor handoff. Missing/zero/negative numeric values retain unknown-expiry
+semantics. Coverage: `backend/tests/test_claude_credential_expiry.py`.
