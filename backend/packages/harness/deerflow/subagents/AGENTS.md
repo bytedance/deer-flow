@@ -1,8 +1,6 @@
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
-Result-reader acceptance runs on SQLite and, with TEST_POSTGRES_URI, an isolated
-PostgreSQL schema; both exercise submission, completion, reopen and ToolNode
-continuation without paid model work. Always clean up the temporary schema.
+Result-reader tests cover submission/completion/reopen/ToolNode on SQLite and TEST_POSTGRES_URI-gated isolated PostgreSQL; no paid models. Clean up the schema.
 
 **JSON**: See README. Authorize before local metadata and reads; inaccessible paths stay UNVERIFIED.
 
@@ -10,23 +8,9 @@ Apply each subagent's prompt overlay after assembling its full SystemMessage.
 Registry overrides must not mutate `BUILTIN_SUBAGENTS`.
 Direct returns use the compiled tool registry, including middleware tools. Match current-turn IDs in call order; error ToolMessages fail the task with outputs preserved.
 Durable batch specs store overlays as JSON and restore them before execution.
-`read_batch_item` projects only report/state/acceptance fields after owner and current-thread checks. Positions are immutable submission order; no status filtering. The bounded tool hashes that projection for continuation, detecting completion/retry/cancel changes. It does not persist snapshots, schedule work or expose execution specs; HTTP bulk export stays independent.
+`read_batch_item`: owner/thread checks; report/state/acceptance only; immutable positions, no status filter. Hash detects completion/retry/cancel; no snapshots/scheduling/specs. Bulk export is independent.
 
-Batch evidence uses nullable `result_artifact` (migration 0033), persisted with
-successful results under the same lease fence. Full-result exports and the selected
-native result endpoint expose bounded, cited RAG snapshots; compact item projections
-omit them. `batch_results.project_batch_result` allowlists report/state/acceptance
-fields and validated saved evidence, excludes raw artifacts and execution metadata,
-and hashes the detached projection. It shares `BATCH_RESULT_ITEM_FIELDS` with the
-model-facing reader; HTTP-only preview/timestamps and saved-evidence policy stay
-separate from the tool contract. The HTTP router runs projection off the request
-loop after its existing thread permission and batch ownership checks. Read exactly
-one immutable position with no status filter; a mismatched or absent row is 404. Cancelled,
-failed and stale attempts cannot publish evidence; retry clears it. Cover the
-formatter/step capture -> worker -> reopened SQLite -> authorized export chain
-in `tests/test_batch_rag_evidence.py` and selected reads in
-`tests/test_batch_results_acceptance.py`; historical inspection never fetches
-the provider again.
+`result_artifact` (nullable, migration 0033): cited RAG evidence commits with success under lease fencing; cancelled/failed/stale cannot publish; retry clears. Only full exports/selected reads expose bounded evidence. `batch_results.project_batch_result` validates evidence and hashes its detached allowlist; no raw artifacts/execution metadata. Share `BATCH_RESULT_ITEM_FIELDS`; HTTP preview/timestamps and saved-source policy stay separate. HTTP: thread/owner checks, one immutable position (absent/mismatch: 404), off-loop projection; no provider refetch. Test capture → worker → reopened SQLite → authorized export/selected read: `test_batch_rag_evidence.py`/`test_batch_results_acceptance.py`.
 Explicitly enabled nested tasks propagate report-bound omission IDs; filter and
 deduplicate at each forwarding boundary before publishing the durable count.
 
