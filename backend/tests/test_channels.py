@@ -11672,6 +11672,58 @@ class TestHandleGoalCommand:
 
         _run(go())
 
+    @pytest.mark.parametrize(
+        ("args", "method", "expected_reply"),
+        [("finish the work", "PUT", None), ("clear", "DELETE", "Goal cleared.")],
+    )
+    def test_goal_mutations_pass_gateway_auth_and_csrf_middleware(self, monkeypatch, args, method, expected_reply):
+        """Raw-httpx goal writes must carry the double-submit pair the SDK client sends."""
+        from dataclasses import replace
+
+        import httpx
+        from fastapi import FastAPI
+
+        from app.gateway.auth_middleware import AuthMiddleware
+        from app.gateway.csrf_middleware import CSRFMiddleware
+        from deerflow.runtime.user_context import get_effective_user_id
+
+        # Same order as app.gateway.app: AuthMiddleware inside CSRFMiddleware.
+        gateway = FastAPI()
+        gateway.add_middleware(AuthMiddleware)
+        gateway.add_middleware(CSRFMiddleware)
+        received = []
+
+        @gateway.put("/api/threads/{thread_id}/goal")
+        async def put_goal(thread_id: str):
+            received.append(("PUT", get_effective_user_id()))
+            return {"goal": None}
+
+        @gateway.delete("/api/threads/{thread_id}/goal")
+        async def delete_goal(thread_id: str):
+            received.append(("DELETE", get_effective_user_id()))
+            return {"goal": None}
+
+        real_async_client = httpx.AsyncClient
+        monkeypatch.setattr(
+            "app.channels.manager.httpx.AsyncClient",
+            lambda *a, **kw: real_async_client(*a, transport=httpx.ASGITransport(app=gateway), **kw),
+        )
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id="t-1")
+
+            async def _handle_chat(msg, **kwargs):
+                return None
+
+            monkeypatch.setattr(manager, "_handle_chat", _handle_chat)
+
+            msg = replace(self._msg(f"/goal {args}"), owner_user_id="owner-1")
+            reply = await manager._handle_goal_command(msg, args)
+            assert reply == expected_reply
+            assert received == [(method, "owner-1")]
+
+        _run(go())
+
 
 # ---------------------------------------------------------------------------
 # _merge_stream_text regression: CJK reduplication, repeated tokens, suffix

@@ -820,6 +820,12 @@ This release closes that milestone with **439 merged pull requests**.
   leaves the file untouched. The store API is async so the database never
   blocks the Gateway loop; Feishu's synchronous lark callback bridges its
   lookups to that loop with a bounded wait. ([#6558])
+- **channels:** `/goal <objective>` and `/goal clear` from an IM channel work
+  again when Gateway auth is enabled (the default). Both sent their write with
+  the internal auth token alone, and the Gateway's CSRF check, which does not
+  exempt internal auth, answered 403, so the channel replied "Failed to set
+  goal." or "Failed to clear goal." They now send the same CSRF cookie and
+  header pair as the channel's SDK client. `/goal` status was unaffected. ([#6537])
 - **auth:** In the Docker stack, five wrong passwords from one client no longer
   lock every user out of login for five minutes. Failed logins are counted per
   client IP, and the Gateway honors `X-Real-IP` only from a peer listed in
@@ -9327,4 +9333,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6506]: https://github.com/bytedance/deer-flow/pull/6506
 [#6512]: https://github.com/bytedance/deer-flow/pull/6512
 [#6519]: https://github.com/bytedance/deer-flow/pull/6519
+[#6537]: https://github.com/bytedance/deer-flow/pull/6537
 [#6558]: https://github.com/bytedance/deer-flow/pull/6558

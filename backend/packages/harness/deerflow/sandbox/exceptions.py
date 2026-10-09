@@ -87,6 +87,7 @@ class SandboxCapacityExceededError(SandboxError):
         active: int = 0,
         warm: int = 0,
         reserved: int = 0,
+        transitioning: int = 0,
         replicas: int = 0,
         retry_after_seconds: float = 5.0,
         reason: str = "capacity",
@@ -104,10 +105,13 @@ class SandboxCapacityExceededError(SandboxError):
             details["warm"] = warm
         if reserved:
             details["reserved"] = reserved
+        if transitioning:
+            details["transitioning"] = transitioning
         super().__init__(message, details)
         self.active = active
         self.warm = warm
         self.reserved = reserved
+        self.transitioning = transitioning
         self.replicas = replicas
         self.retry_after_seconds = retry_after_seconds
         self.reason = reason
