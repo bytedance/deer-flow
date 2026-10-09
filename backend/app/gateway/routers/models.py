@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["models"])
 
 
-async def _resolve_bound_owner_for_model_list(request: Request, user) -> object | None:
+async def _resolve_bound_owner_for_model_list(request: Request) -> object | None:
     """Resolve the trusted bound owner behind an internal channel call.
 
     Internal callers (IM channel workers, the scheduler) authenticate as a
@@ -152,7 +152,7 @@ async def list_models(
         # falls under default_role; when they carry a trusted bound owner,
         # filter with the owner's role so the list matches what run admission
         # would admit for that account.
-        owner = await _resolve_bound_owner_for_model_list(request, user)
+        owner = await _resolve_bound_owner_for_model_list(request)
         principal_user = owner if owner is not None else user
         try:
             provider, principal = resolve_model_authorization(principal_user, is_internal=_is_internal_caller(request, user))

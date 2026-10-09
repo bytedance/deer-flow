@@ -979,7 +979,7 @@ class TestChannelManager:
                 return None
 
             def json(self):
-                return {"models": [{"name": "default"}]}
+                return {"facts": [{"text": "a"}]}
 
         class MockAsyncClient:
             def __init__(self, *args, **kwargs):
@@ -1003,10 +1003,10 @@ class TestChannelManager:
             store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store, gateway_url="http://gateway:8001")
 
-            reply = await manager._fetch_gateway("/api/models", "models")
+            reply = await manager._fetch_gateway("/api/memory", "memory")
 
-            assert reply == "Available models:\n• default"
-            assert calls[0]["url"] == "http://gateway:8001/api/models"
+            assert reply == "Memory contains 1 fact(s)."
+            assert calls[0]["url"] == "http://gateway:8001/api/memory"
             assert calls[0]["timeout"] == 10
             assert calls[0]["headers"]["X-DeerFlow-Internal-Token"]
 
@@ -4595,6 +4595,44 @@ class TestChannelManager:
             )
 
             assert outbound_received[0].text == ("Available models:\n• model-a\n• model-b\nCurrent conversation model: model-b (pinned via /model)")
+
+        _run(go())
+
+    def test_models_command_skips_malformed_entries(self, monkeypatch):
+        """A malformed entry in the Gateway payload must not turn /models into
+        the generic internal-error reply: the listing renders the valid names,
+        mirroring the guarded comprehension in _handle_model_command."""
+        from app.channels.manager import ChannelManager
+
+        async def _payload(self, path, *, msg=None):
+            return {"models": [{"name": "model-a"}, {"broken": True}, "garbage", 42]}
+
+        monkeypatch.setattr(ChannelManager, "_fetch_gateway_json", _payload)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(bus=bus, store=store, gateway_url="http://gateway:8001")
+            manager._client = _make_mock_langgraph_client(thread_id="thread-1")
+            outbound_received = []
+
+            async def capture_outbound(message):
+                outbound_received.append(message)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            await manager._handle_command(
+                InboundMessage(
+                    channel_name="test",
+                    chat_id="chat1",
+                    user_id="platform-user",
+                    text="/models",
+                    msg_type=InboundMessageType.COMMAND,
+                )
+            )
+
+            assert outbound_received[0].text == "Available models:\n• model-a"
 
         _run(go())
 

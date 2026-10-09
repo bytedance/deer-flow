@@ -3172,7 +3172,7 @@ class ChannelManager:
                 logger.exception("Failed to fetch models from gateway")
                 reply = "Failed to fetch models information."
             else:
-                names = [m["name"] for m in data.get("models", [])]
+                names = [m["name"] for m in data.get("models", []) if isinstance(m, Mapping) and isinstance(m.get("name"), str)]
                 reply = ("Available models:\n" + "\n".join(f"• {n}" for n in names)) if names else "No models configured."
                 model_thread_id = await self._lookup_thread_id(msg)
                 if model_thread_id:
@@ -3519,10 +3519,7 @@ class ChannelManager:
             logger.exception("Failed to fetch %s from gateway", kind)
             return f"Failed to fetch {kind} information."
 
-        if kind == "models":
-            names = [m["name"] for m in data.get("models", [])]
-            return ("Available models:\n" + "\n".join(f"• {n}" for n in names)) if names else "No models configured."
-        elif kind == "memory":
+        if kind == "memory":
             facts = data.get("facts", [])
             return f"Memory contains {len(facts)} fact(s)."
         return str(data)
