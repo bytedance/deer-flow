@@ -36,6 +36,9 @@ SystemMessageCoalescing, ViewImage, SkillActivation. Summarization/Title use
 `SystemOperationKind.SUMMARIZATION`/`.TITLE`; summaries enter via DurableContext's
 `durable_context_data`, memory recall via DynamicContext's
 `dynamic_context_memory`. Memory only queues extraction.
+Rewrites that only modify the model-bound request view and never enter state do
+not require provenance stamps (precedents: InputSanitizationMiddleware,
+DanglingToolCallMiddleware, ModelContentCompatibilityMiddleware).
 
 **Self-description.** Configurable middleware exposes JSON-serialisable
 `release_policy_parameters()` (`ReleasePolicyProvider`, duck typed). Update
