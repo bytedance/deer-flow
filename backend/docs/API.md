@@ -959,14 +959,15 @@ Content-Type: multipart/form-data
 - `archive`: The `.skill` file to install. The filename must end with `.skill`.
 
 **Response:** the same shape as [Install Skill](#install-skill). An upload beyond
-the archive limit returns `413`, and a missing or non-file `archive` field returns
-`422`.
+the archive limit returns `413`. A missing `archive` field returns `422`; a
+non-file `archive` part is rejected during multipart parsing and returns `400`.
 
 #### List Custom Skills
 
 List only the caller's user-owned custom skills. Legacy shared skills are
-read-only and appear only in [List Skills](#list-skills). Requires an
-authenticated administrator.
+read-only and appear only in [List Skills](#list-skills). Available to normal
+users; no administrator role is required. When authorization is enabled, only
+skills visible to the caller's role are returned.
 
 ```http
 GET /api/skills/custom
@@ -992,7 +993,7 @@ GET /api/skills/custom/{skill_name}
   "category": "custom",
   "enabled": true,
   "editable": true,
-  "content": "# My Skill\n\nInstructions for the agent..."
+  "content": "---\nname: my-skill\ndescription: My custom skill\n---\n\n# My Skill\n\nInstructions for the agent..."
 }
 ```
 
@@ -1010,9 +1011,13 @@ Content-Type: application/json
 **Request Body:**
 ```json
 {
-  "content": "# My Skill\n\nUpdated instructions..."
+  "content": "---\nname: my-skill\ndescription: My custom skill\n---\n\n# My Skill\n\nUpdated instructions..."
 }
 ```
+
+The submitted content replaces the complete `SKILL.md`, so it must include YAML
+frontmatter with a nonempty `description` and a `name` that matches
+`{skill_name}`. Content without frontmatter returns `400`.
 
 **Response:** the updated skill with `content`, the same shape as
 [Get Custom Skill Content](#get-custom-skill-content).
