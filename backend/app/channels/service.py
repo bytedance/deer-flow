@@ -162,6 +162,7 @@ class ChannelService:
         self._running = False
         self._stopping = False
         self._shutdown_generation = 0
+        self._manager_start_lock = asyncio.Lock()
         self._readiness_locks: dict[str, asyncio.Lock] = {}
         self._config_epochs: dict[str, int] = {}
 
@@ -208,13 +209,16 @@ class ChannelService:
             raise RuntimeError("cannot start ChannelService while shutdown is incomplete")
 
         generation = self._shutdown_generation
-        await self.manager.start()
-        if generation != self._shutdown_generation:
-            # The concurrent stop may already have drained the manager before
-            # this startup completed, so always drain the late start.
-            await self.manager.stop()
-            return
-        self._running = True
+        async with self._manager_start_lock:
+            if generation != self._shutdown_generation or self._running:
+                return
+            await self.manager.start()
+            if generation != self._shutdown_generation:
+                # Keep newer starts waiting until this late start is drained.
+                # stop() must remain free to invalidate an in-flight startup.
+                await self.manager.stop()
+                return
+            self._running = True
 
         ready_status = await self.ensure_ready_channels(attempts=2)
         ready_count = sum(1 for ready in ready_status.values() if ready)
