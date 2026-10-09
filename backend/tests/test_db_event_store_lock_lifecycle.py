@@ -42,6 +42,12 @@ class _PausedDeleteSession:
     async def execute(self, _stmt, _params=None):
         return None
 
+    async def get(self, _model, _thread_id):
+        return None
+
+    def add(self, _obj) -> None:
+        return None
+
     async def commit(self) -> None:
         return None
 

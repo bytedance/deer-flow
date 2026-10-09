@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from deerflow.agents.interaction_policy import RunInteractionPolicy
 from deerflow.config.agents_config import load_agent_soul
+from deerflow.config.shared_reset_marker import SharedResetChange, SharedResetMarker, SharedResetMarkerTracker, resolve_shared_config_path
 from deerflow.config.subagents_config import (
     DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN,
     clamp_subagent_concurrency,
@@ -60,6 +61,98 @@ class _EnabledSkillsRefreshHandle:
 
 
 _enabled_skills_refresh_waiters: list[_EnabledSkillsRefreshHandle] = []
+
+# Cross-replica invalidation. ``SkillStorage.load_skills()`` rescans disk and
+# re-reads ``extensions_config.json`` on every call, so the caches in this module
+# are the only skill state that can go stale between Gateway processes sharing
+# one home volume. Every skill mutation publishes
+# ``.<extensions config name>.skills-cache-reset.json`` beside the shared config
+# (``publish_skills_cache_reset``); every lookup below compares that marker's
+# signature, throttled to one stat per second, before serving a cached entry.
+# A marker that names a ``user_id`` retires only that user's entries, the same
+# scope the local ``invalidate_user_skill_cache`` applies; anything else retires
+# all three layers. The tracker is module state so tests can swap in a fake
+# clock or call ``reset()``.
+SKILLS_CACHE_RESET_MARKER = SharedResetMarker("skills-cache-reset")
+_skills_cache_reset_tracker = SharedResetMarkerTracker(SKILLS_CACHE_RESET_MARKER)
+
+
+def _check_shared_skills_cache_reset() -> None:
+    """Retire caches that a reset published by another process has invalidated.
+
+    Runs on every cache lookup; the tracker bounds the filesystem cost to one
+    marker read per second and never blocks behind a concurrent poller. A
+    failing poll (an unreadable config directory, for example) keeps serving
+    the current cache: the next poll retries.
+    """
+    try:
+        change = _skills_cache_reset_tracker.poll()
+    except Exception:
+        logger.debug("Could not poll the shared skills cache reset marker", exc_info=True)
+        return
+    if change is None:
+        return
+    _apply_shared_skills_cache_reset(change)
+
+
+def _apply_shared_skills_cache_reset(change: SharedResetChange) -> None:
+    if change.user_ids is None:
+        logger.info("Shared skills cache reset observed (generation %s); invalidating enabled-skills caches", change.generation)
+        _invalidate_enabled_skills_cache()
+        return
+    for user_id in change.user_ids:
+        logger.info("Shared skills cache reset observed for user %s (generation %s); invalidating that user's enabled-skills cache", user_id, change.generation)
+        invalidate_user_skill_cache(user_id)
+
+
+class SkillCacheResetPublishError(RuntimeError):
+    """The shared skills cache reset marker could not be published.
+
+    Deliberately not an ``OSError`` subclass. The Gateway skill handlers map
+    ``FileNotFoundError`` to HTTP 404 ("archive/skill not found") and
+    ``ValueError`` to 400, and a marker that could not be written *after* a
+    skill was installed or edited successfully must not borrow either status;
+    this type falls through to their generic 500 branch instead. The original
+    filesystem error is chained as ``__cause__`` for logs; the message names
+    only its type, never a server path.
+    """
+
+
+def publish_skills_cache_reset(*, user_id: str | None = None) -> str | None:
+    """Publish a skills cache reset to every Gateway process sharing the config directory.
+
+    Call after the skill change is durable on disk and this process has
+    refreshed its own caches: peers retire their prompt-layer caches on their
+    next lookup (within one poll interval), while this process remembers the
+    generation so it does not retire the caches it just rebuilt. ``user_id``
+    scopes the reset to one user's custom-skill entries, mirroring
+    :func:`invalidate_user_skill_cache`; omit it for public-skill and
+    whole-catalog changes.
+
+    Blocking filesystem IO (path resolution, a lock file, an atomic replace):
+    call via ``asyncio.to_thread`` from the event loop.
+
+    Returns:
+        The published generation, or ``None`` when no extensions config path
+        can be resolved and the reset therefore stayed process-local.
+
+    Raises:
+        SkillCacheResetPublishError: the config directory, lock file or marker
+            could not be written (an ``OSError`` such as the directory
+            vanishing between path resolution and the atomic replace), or the
+            project root the path resolution depends on is misconfigured
+            (``ValueError``). A missing explicit config *path* is not an
+            error: :func:`resolve_shared_config_path` maps it to ``None``.
+    """
+    try:
+        config_path = resolve_shared_config_path()
+        if config_path is None:
+            return None
+        generation = SKILLS_CACHE_RESET_MARKER.publish(config_path, user_id=user_id)
+    except (OSError, ValueError) as exc:
+        raise SkillCacheResetPublishError(f"Could not publish the shared skills cache reset marker ({type(exc).__name__})") from exc
+    _skills_cache_reset_tracker.note_own_publication(generation)
+    return generation
 
 
 def _load_enabled_skills_sync() -> list[Skill]:
@@ -110,6 +203,7 @@ def _refresh_enabled_skills_cache_worker() -> None:
 def _ensure_enabled_skills_cache() -> threading.Event:
     global _enabled_skills_refresh_active
 
+    _check_shared_skills_cache_reset()
     with _enabled_skills_lock:
         if _enabled_skills_refresh_active:
             return _enabled_skills_refresh_event
@@ -160,9 +254,12 @@ def _get_enabled_skills():
 def get_cached_enabled_skills() -> list[Skill]:
     """Return the cached enabled-skills list, kicking off a background refresh on miss.
 
-    Safe to call from request paths: never blocks on disk I/O. Returns an empty
+    Safe to call from request paths: the skill directories are never scanned
+    inline, and the only filesystem work is the shared reset-marker check,
+    which is one small stat+read at most once per second. Returns an empty
     list on cache miss; the next call will see the warmed result.
     """
+    _check_shared_skills_cache_reset()
     with _enabled_skills_lock:
         cached = _enabled_skills_cache
 
@@ -196,6 +293,7 @@ def get_enabled_skills_for_config(app_config: AppConfig | None = None, user_id: 
     if app_config is None:
         return _get_enabled_skills()
 
+    _check_shared_skills_cache_reset()
     cache_key = (id(app_config), user_id or "default")
     with _enabled_skills_lock:
         cached = _enabled_skills_by_config_cache.get(cache_key)

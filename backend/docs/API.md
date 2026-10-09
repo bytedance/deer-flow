@@ -952,9 +952,11 @@ Raw skill files, sidecars and empty directories are preserved. No hooks/scripts 
 
 #### Reload Skills
 
-Invalidate the skill prompt caches for every user in the current Gateway
-process. Subsequent runs rescan the configured public, custom, and legacy skill
-directories; runs that have already started keep their existing skill snapshot.
+Invalidate the skill prompt caches for every user, then publish a reset marker
+beside the shared extensions config so every Gateway process mounting that
+directory rescans the configured public, custom, and legacy skill directories
+before its next prompt build. Runs that have already started keep their
+existing skill snapshot.
 
 ```http
 POST /api/skills/reload
@@ -974,8 +976,8 @@ curl -X POST http://localhost:2026/api/skills/reload \
 ```json
 {
   "success": true,
-  "scope": "process",
-  "message": "Skill caches invalidated; subsequent runs in this Gateway process will rescan the latest skills."
+  "scope": "shared_config",
+  "message": "Skill cache reset published through the shared config directory; subsequent runs in every Gateway process sharing it will rescan the latest skills."
 }
 ```
 
@@ -983,17 +985,30 @@ curl -X POST http://localhost:2026/api/skills/reload \
 malformed skills retain the existing parser behavior of being skipped and
 logged. The endpoint returns `401` for unauthenticated callers, `403` for
 non-admin users, and a generic `500` if the invalidation mechanism itself
-fails or the process-local background scan does not finish within the cache
-refresh timeout. A loader-level failure, such as an unavailable mounted root,
-does not publish an empty catalog: the last successfully loaded process cache
-remains available. A timed-out scan continues in its daemon worker and can
-still populate the process cache when it finishes.
+fails, the handling process's background scan does not finish within the cache
+refresh timeout, or the reset marker cannot be written. A loader-level failure,
+such as an unavailable mounted root, does not publish an empty catalog: the
+last successfully loaded process cache remains available. A timed-out scan
+continues in its daemon worker and can still populate the process cache when
+it finishes.
 
-The scope is deliberately process-local. Each Uvicorn worker or Kubernetes Pod
-must be called directly; repeated requests through a load-balanced Service do
-not guarantee that every instance is reached. External MinIO/NFS/CSI writes
-bypass the validation, SkillScan, and history used by the install/edit APIs, so
-the mounted directory must be writable only by trusted operators.
+`shared_config` means the handling process refreshed itself and then atomically
+replaced `.<extensions config name>.skills-cache-reset.json` next to the
+resolved `extensions_config.json`. Every Gateway worker or Pod mounting that
+directory compares the marker's signature (at most once per second) before it
+serves a cached skill list, so one request reaches every replica sharing the
+volume; it does not claim a deployment-wide broadcast when replicas use
+independent filesystems. The skill install, edit, delete, rollback and
+enable/disable endpoints publish the same marker after their own change is
+durable, scoped to the calling user for custom skills; if that publication
+fails after the change was applied, they return their generic `500` (never
+`404`), and a client that disconnects mid-request does not skip it. When no extensions
+config path can be resolved there is no shared directory to publish into; the
+request still refreshes the current process and returns `"scope": "process"`
+with the message `Skill caches invalidated; subsequent runs in this Gateway
+process will rescan the latest skills.` External MinIO/NFS/CSI writes bypass
+the validation, SkillScan, and history used by the install/edit APIs, so the
+mounted directory must be writable only by trusted operators.
 
 ### File Uploads
 

@@ -284,7 +284,7 @@ async def test_snapshot_fixed_boundaries_and_retention_invalidation(evidence):
     assert snap.coverage_limits
     assert snap.event_count == 1
     assert (await reader.get_snapshot(thread_id="t-r", run_id="r")).snapshot_ref == snap.snapshot_ref
-    await put_event(events, content="late")
+    late = await put_event(events, content="late")
     page = await reader.read_events(snapshot_ref=snap.snapshot_ref, cursor=None)
     assert len(page.items) == 1
     assert not page.has_more
@@ -292,7 +292,9 @@ async def test_snapshot_fixed_boundaries_and_retention_invalidation(evidence):
     with pytest.raises(FrozenInstanceError):
         snap.owner_id = "bob"
     await events.delete_by_run("t-r", "r", user_id="alice")
-    await put_event(events, content="replacement")
+    # Reopen the store to ensure deletion preserved the durable sequence floor.
+    replacement = await put_event(DbRunEventStore(sf), content="replacement")
+    assert replacement[0]["seq"] > late[0]["seq"]
     with pytest.raises(HostCapabilityError, match="NOT_FOUND"):
         await reader.read_events(snapshot_ref=snap.snapshot_ref, cursor=None)
 
@@ -628,8 +630,8 @@ def test_migration_is_additive_current_chain():
     from deerflow.persistence.bootstrap import _MIGRATIONS_DIR
 
     script = ScriptDirectory(str(_MIGRATIONS_DIR))
-    rev = script.get_revision("0034_completed_run_evidence")
-    assert rev.down_revision == "0033_batch_result_artifact"
+    rev = script.get_revision("0036_completed_run_evidence")
+    assert rev.down_revision == "0035_login_throttle"
 
 
 @pytest.mark.asyncio
@@ -727,8 +729,8 @@ def test_migration_upgrades_real_sqlite_and_preserves_legacy_partial(tmp_path):
             conn.execute(text(f"ALTER TABLE runs DROP COLUMN {name}"))
     config = _get_alembic_config(engine)
     config.set_main_option("sqlalchemy.url", f"sqlite+aiosqlite:///{tmp_path / 'migration.db'}")
-    command.stamp(config, "0033_batch_result_artifact")
-    command.upgrade(config, "0034_completed_run_evidence")
+    command.stamp(config, "0035_login_throttle")
+    command.upgrade(config, "0036_completed_run_evidence")
     with engine.connect() as conn:
         row = conn.execute(text("SELECT evidence_seal_state, evidence_revision, evidence_retention_revision FROM runs WHERE run_id='old'")).one()
         assert tuple(row) == (None, None, 0)

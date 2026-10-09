@@ -1,7 +1,7 @@
 """skill mutation publication journal
 
-Revision ID: 0035_skill_mutations
-Revises: 0034_completed_run_evidence
+Revision ID: 0037_skill_mutations
+Revises: 0036_completed_run_evidence
 Create Date: 2026-09-21 11:28:24.923105
 
 """
@@ -14,8 +14,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0035_skill_mutations"
-down_revision: str | Sequence[str] | None = "0034_completed_run_evidence"
+revision: str = "0037_skill_mutations"
+down_revision: str | Sequence[str] | None = "0036_completed_run_evidence"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

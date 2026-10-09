@@ -1,6 +1,7 @@
 """Unit tests for the Serper community web search tool."""
 
 import json
+import logging
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -8,10 +9,11 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def reset_api_key_warned():
+def reset_api_key_warned(monkeypatch):
     """Reset the module-level warning flag before each test."""
     import deerflow.community.serper.tools as serper_mod
 
+    monkeypatch.delenv("SERPER_BASE_URL", raising=False)
     serper_mod._api_key_warned = set()
     yield
     serper_mod._api_key_warned = set()
@@ -47,6 +49,98 @@ def _make_serper_images_response(images: list) -> MagicMock:
     mock_resp.json.return_value = {"images": images}
     mock_resp.raise_for_status = MagicMock()
     return mock_resp
+
+
+class TestSerperBaseUrl:
+    @pytest.mark.parametrize(("tool_name", "route"), [("web_search_tool", "search"), ("image_search_tool", "images")])
+    @pytest.mark.parametrize(
+        ("base_url", "expected_base"),
+        [
+            (None, "https://google.serper.dev"),
+            ("", "https://google.serper.dev"),
+            (" \t\r\n", "https://google.serper.dev"),
+            ("https://proxy.example", "https://proxy.example"),
+            ("https://proxy.example/", "https://proxy.example"),
+            (" \thttps://proxy.example/// \r\n", "https://proxy.example"),
+            ("https://proxy.example/api/v1/", "https://proxy.example/api/v1"),
+            ("http://127.0.0.1:8080/", "http://127.0.0.1:8080"),
+        ],
+    )
+    def test_tools_post_to_configured_endpoint(self, monkeypatch, mock_config_with_key, tool_name: str, route: str, base_url: str | None, expected_base: str) -> None:
+        import deerflow.community.serper.tools as serper_mod
+
+        if base_url is not None:
+            monkeypatch.setenv("SERPER_BASE_URL", base_url)
+        response = MagicMock()
+        response.json.return_value = {
+            "organic": [{"title": "Example", "link": "https://example.com", "snippet": "Result"}],
+            "images": [{"title": "Example", "imageUrl": "https://example.com/image.jpg"}],
+        }
+        with patch("deerflow.community.serper.tools.httpx.Client") as client_class:
+            post = client_class.return_value.__enter__.return_value.post
+            post.return_value = response
+            result = json.loads(getattr(serper_mod, tool_name).invoke({"query": "https://model-input.invalid"}))
+
+        assert "error" not in result
+        post.assert_called_once()
+        assert post.call_args.args[0] == f"{expected_base}/{route}"
+        assert post.call_args.kwargs["headers"] == {"X-API-KEY": "test-serper-key", "Content-Type": "application/json"}
+        assert post.call_args.kwargs["json"] == {"q": "https://model-input.invalid", "num": 5}
+        assert "params" not in post.call_args.kwargs
+        assert "test-serper-key" not in post.call_args.args[0]
+
+    @pytest.mark.parametrize("route", ["search", "images"])
+    def test_endpoint_is_resolved_before_transport(self, monkeypatch, route: str) -> None:
+        import deerflow.community.serper.tools as serper_mod
+
+        monkeypatch.setenv("SERPER_BASE_URL", "https://first.example/")
+        with patch("deerflow.community.serper.tools.httpx.Client") as client_class:
+            client = MagicMock()
+            client.post.return_value = _make_serper_response([])
+
+            def enter_client():
+                monkeypatch.setenv("SERPER_BASE_URL", "https://later.example/")
+                return client
+
+            client_class.return_value.__enter__.side_effect = enter_client
+            data, error = serper_mod._serper_post(f"https://google.serper.dev/{route}", "test-key", "test", 5, time_range="week")
+
+        assert error is None
+        assert data == {"organic": []}
+        assert client.post.call_args.args[0] == f"https://first.example/{route}"
+        assert client.post.call_args.kwargs["json"] == {"q": "test", "num": 5, "tbs": "qdr:w"}
+
+    @pytest.mark.parametrize("route", ["search", "images"])
+    @pytest.mark.parametrize("redact_urls", [False, True], ids=["plain-log", "redacted-log"])
+    def test_override_diagnostic_omits_credentials(self, monkeypatch, caplog, route: str, redact_urls: bool) -> None:
+        import deerflow.community.serper.tools as serper_mod
+        from deerflow.logging_config import UrlRedactionFilter
+
+        if redact_urls:
+            # Production logging installs this filter on root handlers; another
+            # test may already have enabled it before this test runs in a shard.
+            monkeypatch.setattr(caplog.handler, "filters", [*caplog.handler.filters, UrlRedactionFilter()])
+
+        monkeypatch.setenv("SERPER_BASE_URL", "https://user:password@proxy.example:8443/api/v1/")
+        with caplog.at_level(logging.DEBUG, logger=serper_mod.__name__), patch("deerflow.community.serper.tools.httpx.Client") as client_class:
+            post = client_class.return_value.__enter__.return_value.post
+            post.return_value = _make_serper_response([])
+            _, error = serper_mod._serper_post(f"https://google.serper.dev/{route}", "test-secret-api-key", "test", 5)
+
+        assert error is None
+        post.assert_called_once()
+        assert post.call_args.args[0] == f"https://user:password@proxy.example:8443/api/v1/{route}"
+        records = [record for record in caplog.records if "SERPER_BASE_URL" in record.getMessage()]
+        assert len(records) == 1
+        diagnostic = records[0].getMessage()
+        assert diagnostic in {
+            f"Serper endpoint from base_url/SERPER_BASE_URL: https://proxy.example:8443/api/v1/{route}",
+            "Serper endpoint from base_url/SERPER_BASE_URL: https://proxy.example:8443/<redacted>",
+        }
+        if redact_urls:
+            assert "<redacted>" in diagnostic
+        assert "user:password" not in caplog.text
+        assert "test-secret-api-key" not in caplog.text
 
 
 class TestGetApiKey:

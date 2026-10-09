@@ -10,22 +10,22 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from deerflow.persistence import bootstrap
 from deerflow.persistence.run.model import RunRow
 
-REVISION = "0035_skill_mutations"
+REVISION = "0037_skill_mutations"
 TABLES = {"skill_mutation_assets", "skill_mutation_owners", "skill_mutation_proposals", "skill_mutation_operations", "skill_mutation_scan_attempts"}
 
 
-def test_0035_is_the_chain_head():
+def test_0037_is_the_chain_head():
     assert bootstrap._get_head_revision() == REVISION
 
 
 @pytest.mark.asyncio
-async def test_0035_additive_upgrade_and_nullable_recovery_metadata(tmp_path):
+async def test_0037_additive_upgrade_and_nullable_recovery_metadata(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'skill-host.db'}")
     config = bootstrap._get_alembic_config(engine)
     try:
-        await asyncio.to_thread(bootstrap._upgrade, config, "0034_completed_run_evidence")
+        await asyncio.to_thread(bootstrap._upgrade, config, "0036_completed_run_evidence")
         # The historical create_all bootstrap uses today's metadata. Remove
-        # exactly the new, empty tables to represent a real 0034 installation.
+        # exactly the new, empty tables to represent a real 0036 installation.
         async with engine.begin() as connection:
             for table in sorted(TABLES):
                 await connection.execute(sa.text(f'DROP TABLE IF EXISTS "{table}"'))
@@ -39,7 +39,7 @@ async def test_0035_additive_upgrade_and_nullable_recovery_metadata(tmp_path):
             assert nullable["before_operation_id"]
             assert nullable["superseded_by_generation"]
             assert await connection.scalar(sa.text("SELECT status FROM runs WHERE run_id='legacy'")) == "success"
-        await asyncio.to_thread(command.downgrade, config, "0034_completed_run_evidence")
+        await asyncio.to_thread(command.downgrade, config, "0036_completed_run_evidence")
         async with engine.connect() as connection:
             names = await connection.run_sync(lambda sync: sa.inspect(sync).get_table_names())
             assert not TABLES.intersection(names)
