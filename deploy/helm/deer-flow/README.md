@@ -319,9 +319,11 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   override `config:` — a multi-instance gateway that leaves the index under
   the memory root logs a warning at startup. The index is rebuilt from the
   Markdown facts on every Pod start, so losing the emptyDir loses nothing.
-  A `PodDisruptionBudget` (`minAvailable: 1`) is rendered automatically for a
-  multi-instance gateway (same rule), and the rollout strategy is
-  surge-then-drain (`maxSurge: 1`, `maxUnavailable: 0`). The sandbox
+  A `PodDisruptionBudget` (`minAvailable: 1`; an integer or a percentage
+  string such as `"50%"`, while `0` fails the render -- disable the budget
+  instead) is rendered automatically for a multi-instance gateway (same rule),
+  and the rollout strategy is surge-then-drain (`maxSurge: 1`,
+  `maxUnavailable: 0`). The sandbox
   provisioner is not on the single-instance list: it scales independently
   (next item).
 - **Provisioner replicas.** `provisioner.replicas` (default 1) scales the

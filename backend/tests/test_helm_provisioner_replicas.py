@@ -13,6 +13,13 @@ Deployment wiring, the PodDisruptionBudget guard (enabled and replicas > 1),
 the label agreement between the two templates, the operator notes, and the
 source-level statelessness the replica claim rests on.
 
+Review of #6543 found that both budgets rendered ``minAvailable`` through
+``| int``, which turns a percentage such as ``"50%"`` (a value Kubernetes
+accepts) into ``0`` -- a budget that protects nothing -- so the tests also pin
+the shared ``deer-flow.pdbMinAvailable`` helper: integers pass through, digit
+strings from ``--set-string`` become integers, percentages stay quoted, and
+``0`` or anything else fails the render naming the values key.
+
 The ``helm template`` tests skip when helm is not installed; CI's runner has it.
 """
 
@@ -34,6 +41,8 @@ README = CHART / "README.md"
 DEPLOYMENT_TEMPLATE = CHART / "templates" / "provisioner-deployment.yaml"
 PDB_TEMPLATE = CHART / "templates" / "provisioner-pdb.yaml"
 GATEWAY_PDB_TEMPLATE = CHART / "templates" / "gateway-pdb.yaml"
+HELPERS_TEMPLATE = CHART / "templates" / "_helpers.tpl"
+PDB_TEMPLATES = {"gateway": GATEWAY_PDB_TEMPLATE, "provisioner": PDB_TEMPLATE}
 PROVISIONER_APP = REPO_ROOT / "docker" / "provisioner" / "app.py"
 PROVISIONER_README = REPO_ROOT / "docker" / "provisioner" / "README.md"
 
@@ -52,15 +61,32 @@ def _values() -> dict:
     return yaml.safe_load(VALUES.read_text(encoding="utf-8"))
 
 
-def _render_chart(*settings: str) -> list[dict]:
+def _helm(*args: str) -> subprocess.CompletedProcess[str]:
     helm = shutil.which("helm")
     if helm is None:
         pytest.skip("helm is unavailable")
-    command = [helm, "template", "deer-flow", str(CHART)]
-    for setting in settings:
-        command.extend(["--set", setting])
-    rendered = subprocess.run(command, check=True, capture_output=True, text=True).stdout
-    return [document for document in yaml.safe_load_all(rendered) if isinstance(document, dict)]
+    return subprocess.run([helm, "template", "deer-flow", str(CHART), *args], capture_output=True, text=True)
+
+
+def _render(*args: str) -> list[dict]:
+    result = _helm(*args)
+    assert result.returncode == 0, result.stderr
+    return [document for document in yaml.safe_load_all(result.stdout) if isinstance(document, dict)]
+
+
+def _render_chart(*settings: str) -> list[dict]:
+    return _render(*(arg for setting in settings for arg in ("--set", setting)))
+
+
+def _render_failure(*args: str) -> str:
+    """Return helm's stderr for a render that must be refused."""
+    result = _helm(*args)
+    assert result.returncode != 0, "the render must fail instead of producing a budget that protects nothing"
+    return result.stderr
+
+
+def _min_available_include(component: str) -> str:
+    return f'minAvailable: {{{{ include "deer-flow.pdbMinAvailable" (dict "value" $pdb.minAvailable "key" "{component}.podDisruptionBudget.minAvailable") }}}}'
 
 
 def _find(documents: list[dict], kind: str, name_suffix: str) -> dict | None:
@@ -127,7 +153,7 @@ def test_pdb_template_is_guarded_on_enabled_and_more_than_one_replica() -> None:
     assert "apiVersion: policy/v1" in template
     assert "kind: PodDisruptionBudget" in template
     assert 'name: {{ include "deer-flow.fullname" . }}-provisioner' in template, "must not collide with the gateway budget"
-    assert "minAvailable: {{ $pdb.minAvailable | default 1 | int }}" in template, "a budget of 0 is a disabled budget; disable it instead"
+    assert _min_available_include("provisioner") in template, "minAvailable goes through the shared helper so a percentage survives"
     assert template.count("app.kubernetes.io/component: provisioner") == 2, "once in metadata.labels, once in the selector"
     assert SELECTOR_BLOCK.search(template), "the selector must match the Deployment's Pod labels exactly"
 
@@ -136,8 +162,30 @@ def test_provisioner_pdb_mirrors_the_gateway_pdb() -> None:
     """Same shape as the gateway budget so the two stay reviewable side by side."""
     gateway = GATEWAY_PDB_TEMPLATE.read_text(encoding="utf-8").replace("gateway", "provisioner")
     provisioner = PDB_TEMPLATE.read_text(encoding="utf-8")
-    for line in ("apiVersion: policy/v1", "kind: PodDisruptionBudget", 'name: {{ include "deer-flow.fullname" . }}-provisioner', "minAvailable: {{ $pdb.minAvailable | default 1 | int }}"):
+    for line in ("apiVersion: policy/v1", "kind: PodDisruptionBudget", 'name: {{ include "deer-flow.fullname" . }}-provisioner', _min_available_include("provisioner")):
         assert line in gateway and line in provisioner, line
+
+
+@pytest.mark.parametrize("component", sorted(PDB_TEMPLATES))
+def test_both_budgets_render_min_available_through_the_shared_helper(component: str) -> None:
+    """``| int`` turns "50%" into 0; Kubernetes accepts an integer or a percentage, so the chart must preserve both."""
+    template = PDB_TEMPLATES[component].read_text(encoding="utf-8")
+    assert _min_available_include(component) in template
+    assert re.search(r"minAvailable:.*\|\s*int\b", template) is None, "int coerces a percentage string to 0"
+    assert "default 1" not in template, "the fallback lives in the helper so both budgets share it"
+
+
+def test_min_available_helper_preserves_percentages_and_fails_on_zero() -> None:
+    helpers = HELPERS_TEMPLATE.read_text(encoding="utf-8")
+    start = helpers.index('{{- define "deer-flow.pdbMinAvailable" -}}')
+    end = helpers.find("{{- define ", start + 1)
+    helper = helpers[start:] if end == -1 else helpers[start:end]
+    assert 'regexMatch "^[0-9]+%$"' in helper, "a percentage is preserved, not cast"
+    assert 'regexMatch "^[0-9]+$"' in helper, "a digit string from --set-string becomes an integer"
+    assert "quote" in helper, "the percentage must stay a YAML string"
+    assert "fail" in helper, "zero and unsupported values refuse to render instead of yielding 0"
+    assert 'kindIs "invalid"' in helper, "an unset value still falls back to 1"
+    assert re.search(r"\|\s*int\s*-?\}\}", helper) is None, "no branch may pipe the raw value through int"
 
 
 def test_operator_notes_document_the_provisioner_replicas() -> None:
@@ -208,3 +256,25 @@ def test_provisioner_budget_can_be_disabled_independently() -> None:
     documents = _render_chart("provisioner.replicas=2", "provisioner.podDisruptionBudget.enabled=false")
     assert _by_kind(documents, "Deployment", "-provisioner")["spec"]["replicas"] == 2
     assert _find(documents, "PodDisruptionBudget", "-provisioner") is None
+
+
+@pytest.mark.parametrize("component", sorted(PDB_TEMPLATES))
+def test_rendered_budget_preserves_a_percentage(component: str) -> None:
+    """With three replicas "50%" must keep two Pods; the old ``int`` coercion rendered 0 and protected none."""
+    documents = _render("--set", f"{component}.replicas=3", "--set-string", f"{component}.podDisruptionBudget.minAvailable=50%")
+    assert _by_kind(documents, "PodDisruptionBudget", f"-{component}")["spec"]["minAvailable"] == "50%"
+
+
+@pytest.mark.parametrize("component", sorted(PDB_TEMPLATES))
+@pytest.mark.parametrize("flag", ["--set", "--set-string"])
+def test_rendered_budget_keeps_an_integer_whichever_way_it_is_set(component: str, flag: str) -> None:
+    documents = _render("--set", f"{component}.replicas=3", flag, f"{component}.podDisruptionBudget.minAvailable=2")
+    assert _by_kind(documents, "PodDisruptionBudget", f"-{component}")["spec"]["minAvailable"] == 2
+
+
+@pytest.mark.parametrize("component", sorted(PDB_TEMPLATES))
+@pytest.mark.parametrize(("flag", "value"), [("--set-string", "abc"), ("--set", "0"), ("--set-string", "0%"), ("--set-string", "150%")])
+def test_rendered_budget_refuses_zero_and_unsupported_values(component: str, flag: str, value: str) -> None:
+    key = f"{component}.podDisruptionBudget.minAvailable"
+    stderr = _render_failure("--set", f"{component}.replicas=3", flag, f"{key}={value}")
+    assert key in stderr, "the message must name the values key the operator has to fix"

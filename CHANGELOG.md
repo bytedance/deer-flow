@@ -1177,7 +1177,11 @@ This release closes that milestone with **439 merged pull requests**.
   the API server, and create already tolerates the `409 AlreadyExists` a
   concurrent creator produces. The chart README and the provisioner README
   record what the replica count rests on and that the budget never renders
-  for a single replica. ([#6543])
+  for a single replica. Both budgets render `minAvailable` through one helper
+  that preserves a percentage such as `"50%"` (the previous `int` cast, also
+  in the pre-existing gateway budget, silently turned it into `0`, a budget
+  that protects nothing) and fails the render for `0`, `"0%"` or any other
+  unsupported value with a message naming the values key. ([#6543])
 - **persistence:** A second Gateway instance no longer fails startup with
   `TimeoutError` while another instance runs a PostgreSQL schema migration. The
   bootstrap advisory lock was taken with a blocking `pg_advisory_lock` on the

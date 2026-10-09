@@ -65,8 +65,10 @@ gateway:
       maxUnavailable: 0
   # PodDisruptionBudget, rendered only for a multi-instance gateway (replicas
   # > 1 or multiInstance: true; a budget of 1 on a single replica would block
-  # node drains). minAvailable falls back to 1 when unset; disable the budget
-  # rather than setting it to 0.
+  # node drains). minAvailable is an integer or a percentage string such as
+  # "50%" (quoted; a plain `int` cast would turn it into 0) and falls back to
+  # 1 when unset. 0 and "0%" fail the render -- a zero budget protects
+  # nothing -- so disable the budget instead.
   podDisruptionBudget:
     enabled: true
     minAvailable: 1
@@ -168,9 +170,11 @@ provisioner:
       maxSurge: 1
       maxUnavailable: 0
   # PodDisruptionBudget, rendered only for replicas > 1 (a budget of 1 on a
-  # single replica would block node drains). minAvailable falls back to 1 when
-  # unset; disable the budget rather than setting it to 0. Scaling with
-  # `kubectl scale` instead of `replicas` leaves the budget unrendered.
+  # single replica would block node drains). minAvailable is an integer or a
+  # percentage string such as "50%" and falls back to 1 when unset; 0 and
+  # "0%" fail the render -- a zero budget protects nothing -- so disable the
+  # budget instead. Scaling with `kubectl scale` instead of `replicas` leaves
+  # the budget unrendered.
   podDisruptionBudget:
     enabled: true
     minAvailable: 1
