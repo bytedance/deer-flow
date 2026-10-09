@@ -111,7 +111,22 @@ async def test_evaluator_input_is_unchanged_when_redaction_is_off(app_config):
 async def test_only_the_evidence_window_is_redacted(monkeypatch):
     # The first exchange is outside the evaluator's window, so redacting it would only hold the event loop.
     early = [HumanMessage(content="Write to dave@example.com first."), AIMessage(content="Noted, dave@example.com.")]
-    later = [message for index in range(goal.MAX_GOAL_CONVERSATION_MESSAGES // 2) for message in (HumanMessage(content=f"Step {index} for erin@example.com."), AIMessage(content=f"Step {index} done."))]
+    # Tool-only replies and tool results fill the window, so a windowing that counted them
+    # differently from the evidence would start elsewhere.
+    steps = goal.MAX_GOAL_CONVERSATION_MESSAGES // 2 - 1
+    later = [
+        *(
+            message
+            for index in range(steps)
+            for message in (
+                HumanMessage(content=f"Step {index} for erin@example.com."),
+                AIMessage(content="", tool_calls=[{"name": "write_file", "args": {"path": f"step{index}.md", "content": "erin@example.com"}, "id": f"call-{index}"}]),
+                ToolMessage(content=f"Wrote step {index} for erin@example.com.", tool_call_id=f"call-{index}", name="write_file"),
+            )
+        ),
+        HumanMessage(content="Wrap up."),
+        AIMessage(content=f"All {steps} steps done."),
+    ]
     messages = [*early, *later]
     redact_queued_messages = memory_middleware.redact_queued_messages
     redacted_batches = []

@@ -348,7 +348,11 @@ def _cap_evidence(lines: list[str]) -> str:
 
 
 def _evidence_window(messages: list[Any]) -> list[Any]:
-    """The messages ``format_visible_conversation`` reads: from the first of the last ``MAX_GOAL_CONVERSATION_MESSAGES`` visible ones."""
+    """The messages the evaluator reads: from the first of the last ``MAX_GOAL_CONVERSATION_MESSAGES`` visible ones.
+
+    ``format_visible_conversation`` and the redaction pass in ``evaluate_goal_completion`` both
+    take their messages from here, so a change to the window moves both.
+    """
     visible_positions = [index for index, message in enumerate(messages) if _is_visible_message(message)]
     return messages[visible_positions[-MAX_GOAL_CONVERSATION_MESSAGES:][0] :] if visible_positions else []
 
@@ -364,10 +368,9 @@ def format_visible_conversation(messages: list[Any]) -> str:
     except a clarification prompt, which the UI shows as its own card. The user's answer to such a
     card is a hidden message too, but the card shows it, so its value is included on its own line.
     """
-    visible_positions = [index for index, message in enumerate(messages) if _is_visible_message(message)]
-    if not visible_positions:
+    window = _evidence_window(messages)
+    if not window:
         return ""
-    window = messages[visible_positions[-MAX_GOAL_CONVERSATION_MESSAGES:][0] :]
     # Tool-call ids can repeat across turns, so each result is paired with the latest call
     # before it that has its id, not with the last call of that id anywhere in the window.
     calls: dict[str, tuple[str | None, bool]] = {}
