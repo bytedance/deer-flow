@@ -1188,7 +1188,14 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
 
             dest = uploads_dir / safe_name
             try:
-                dest = await asyncio.to_thread(write_upload_file_no_symlink, uploads_dir, safe_name, data)
+                while True:
+                    try:
+                        dest = await asyncio.to_thread(write_upload_file_no_symlink, uploads_dir, safe_name, data, exclusive=True)
+                        break
+                    except FileExistsError:
+                        # Another upload can claim a name after the directory
+                        # snapshot, including while this attachment downloads.
+                        safe_name = claim_unique_filename(safe_name, seen_names)
                 # Root-written 0o600 files are unreadable to the non-root
                 # sandbox; grant group/other read like the HTTP upload path.
                 await asyncio.to_thread(_make_inbound_file_sandbox_readable, dest)
@@ -1818,6 +1825,17 @@ class ChannelManager:
 
     # -- LangGraph SDK client (lazy) ----------------------------------------
 
+    def _csrf_headers(self) -> dict[str, str]:
+        """Return the double-submit CSRF pair for state-changing Gateway calls.
+
+        Internal auth does not exempt a request from ``CSRFMiddleware``, so every
+        Gateway mutation the manager sends must carry this pair.
+        """
+        return {
+            CSRF_HEADER_NAME: self._csrf_token,
+            "Cookie": f"{CSRF_COOKIE_NAME}={self._csrf_token}",
+        }
+
     def _get_client(self):
         """Return the ``langgraph_sdk`` async client, creating it on first use."""
         if self._client is None:
@@ -1825,11 +1843,7 @@ class ChannelManager:
 
             self._client = get_client(
                 url=self._langgraph_url,
-                headers={
-                    **create_internal_auth_headers(),
-                    CSRF_HEADER_NAME: self._csrf_token,
-                    "Cookie": f"{CSRF_COOKIE_NAME}={self._csrf_token}",
-                },
+                headers={**create_internal_auth_headers(), **self._csrf_headers()},
             )
         return self._client
 
@@ -2910,7 +2924,7 @@ class ChannelManager:
     ) -> dict[str, Any]:
         async with httpx.AsyncClient() as http:
             request = getattr(http, method.lower())
-            kwargs: dict[str, Any] = {"timeout": 10, "headers": headers}
+            kwargs: dict[str, Any] = {"timeout": 10, "headers": {**headers, **self._csrf_headers()}}
             if json is not None:
                 kwargs["json"] = json
             response = await request(f"{self._gateway_url}/api/threads/{quote(thread_id, safe='')}/goal", **kwargs)

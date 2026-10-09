@@ -140,6 +140,10 @@ literal prepend/append configuration without editing source templates. See
 Optional per-model [`request_admission`](backend/docs/CONFIGURATION.md#model-request-admission)
 paces requests to help stay within provider request-per-minute limits.
 It is disabled by default; see the linked guide to enable it.
+Enabling it disables exposed SDK retries and the Claude and Codex adapters'
+internal retry loops so middleware retries pass through request admission again.
+Middleware retries also cover HTTP 529 overload responses.
+A warning identifies `retry_max_attempts` values overridden by admission.
 
 For Google's official Gemini OpenAI-compatible endpoint, use the
 [Gemini reasoning profile](backend/docs/CONFIGURATION.md#gemini-via-googles-openai-compatible-endpoint).
@@ -866,6 +870,11 @@ DeerFlow can also expose user-owned IM channel connections in the workspace UI. 
 | QQ | WebSocket (text-only C2C and group @mentions; four/five passive replies per source) | Moderate |
 | DingTalk | Stream Push (WebSocket) | Moderate |
 | Buzz | Nostr relay (WebSocket, NIP-42) | Moderate |
+
+Attachments saved by the shared IM ingestion pipeline or Feishu/DingTalk's
+embedded downloads keep distinct filenames, including when concurrent uploads
+choose the same name. The final filename is passed to the agent and used for
+sandbox sync; an existing conversation file is not overwritten.
 
 **Configuration in `config.yaml`:**
 
@@ -2086,6 +2095,8 @@ Each task gets its own execution environment with a full filesystem view — ski
 
 The read-before-write gate ties each read mark to that `read_file` call's result, including custom tools returning multi-message `Command` updates. An unrelated result cannot authorize a write after a failed read or hide a successful read.
 
+Concurrent reads and writes to the same file share a gate across synchronous and asynchronous tool calls. Async callers waiting for that gate do not occupy worker threads needed to finish the current read or write. Cancelling a waiting call leaves the current operation running; a call that already started file inspection still waits for that work to finish before releasing its gate.
+
 The built-in `grep` tool searches either one text file or all matching text files below a directory, so an agent can search an uploaded document directly without first broadening the request to the entire uploads directory.
 E2B's `glob` filter preserves spaces, quotes, and dollar signs in filename patterns, while wildcard matching and root-relative directory scoping remain unchanged.
 
@@ -2211,6 +2222,11 @@ or promotion to the shelf; an older shelf document with a reserved name
 remains downloadable but cannot be attached directly. Download it, rename it,
 and upload it to the thread. This change does not recover or migrate older
 thread uploads that already match the staging pattern.
+
+Upload listings remain available during concurrent cleanup: removed files are
+omitted, and if the upload directory disappears or is replaced by a file, the
+listing returns any entries already collected. Permission and other operational
+errors still surface.
 
 This is the difference between a chatbot with tool access and an agent with an actual execution environment.
 
