@@ -35,7 +35,11 @@ from app.gateway.checkpoint_lineage import (
     checkpoint_messages,
     find_checkpoint_before_message,
     find_checkpoint_before_message_chronologically,
+    history_parent_index,
     is_duration_only_checkpoint,
+    parent_from_history_index,
+    resolve_history_versions,
+    resolve_stamp_candidate_versions,
 )
 from app.gateway.context_usage import build_context_usage
 from app.gateway.conversation_reader import (
@@ -85,6 +89,7 @@ _artifact_archive_slots = asyncio.Semaphore(4)
 _MISSING_REGENERATE_BASE_DETAIL = "Could not find an addressable checkpoint before the target user message"
 _UNSAFE_REGENERATE_LINEAGE_DETAIL = "Could not safely resolve the checkpoint before the target user message"
 THREAD_MESSAGE_LEGACY_SCAN_BATCH = 201
+_LEGACY_IDEMPOTENCY_REQUEST_KEY = "idempotency_request"
 
 
 IdempotencyKeyHeader = Annotated[
@@ -141,8 +146,8 @@ async def _refresh_store_backed_run(run_mgr: Any, record: Any) -> Any:
     return record
 
 
-def _is_duration_only_checkpoint(checkpoint_tuple: Any) -> bool:
-    return is_duration_only_checkpoint(checkpoint_tuple)
+def _is_duration_only_checkpoint(checkpoint_tuple: Any, history_index: dict[tuple[str, str], Any], versions=None, parent_versions=None) -> bool:
+    return is_duration_only_checkpoint(checkpoint_tuple, parent=parent_from_history_index(checkpoint_tuple, history_index), versions=versions, parent_versions=parent_versions)
 
 
 def compute_run_durations(runs) -> dict[str, int]:
@@ -368,6 +373,12 @@ async def _raise_lease_valid_elsewhere(
 
 def _record_to_response(record: RunRecord) -> RunResponse:
     kwargs = dict(record.kwargs or {})
+    legacy_idempotency_request = kwargs.pop(_LEGACY_IDEMPOTENCY_REQUEST_KEY, None)
+    if isinstance(legacy_idempotency_request, dict) and legacy_idempotency_request.get("kind") == "resume":
+        # Readers may outlive rows written by the pre-0034 rolling-upgrade
+        # fence. Keep its private digest and synthetic input out of every
+        # public run response; new writers use the dedicated ORM column.
+        kwargs["input"] = None
     if "config" in kwargs:
         kwargs["config"] = redact_config_secrets(kwargs["config"])
 
@@ -673,12 +684,19 @@ async def _find_base_checkpoint_before_human(
             raise HTTPException(status_code=409, detail=_UNSAFE_REGENERATE_LINEAGE_DETAIL) from exc
     try:
         raw_checkpoints = await accessor.ahistory(base_config, limit=REGENERATE_HISTORY_RAW_SCAN_LIMIT)
-        checkpoints = [item for item in raw_checkpoints if not _is_duration_only_checkpoint(item)]
+        history_index = history_parent_index(raw_checkpoints)
+        version_cache: dict[tuple[str, str, str], Any] = {}
+        checkpoints = []
+        for item in raw_checkpoints:
+            parent = parent_from_history_index(item, history_index)
+            versions, parent_versions = await resolve_stamp_candidate_versions(accessor, item, parent, version_cache)
+            if not _is_duration_only_checkpoint(item, history_index, versions=versions, parent_versions=parent_versions):
+                checkpoints.append(item)
     except Exception as exc:
         logger.exception("Failed to list checkpoints for regenerate thread %s", thread_id)
         raise HTTPException(status_code=500, detail="Failed to inspect checkpoint history") from exc
 
-    previous_checkpoint, target_found = find_checkpoint_before_message_chronologically(raw_checkpoints, human_message_id)
+    previous_checkpoint, target_found = find_checkpoint_before_message_chronologically(raw_checkpoints, human_message_id, history_versions=await resolve_history_versions(accessor, raw_checkpoints, cache=version_cache))
     if target_found:
         if previous_checkpoint is None:
             raise HTTPException(
