@@ -535,6 +535,60 @@ async def test_start_cannot_replace_poller_while_stop_is_draining(monkeypatch: p
 
 
 @pytest.mark.asyncio
+async def test_concurrent_batch_stops_share_one_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = SubagentBatchService(
+        repository=SimpleNamespace(),
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(),
+    )
+    poller_entered = asyncio.Event()
+    poller_cancelled = asyncio.Event()
+    release_poller = asyncio.Event()
+    drain_calls = 0
+
+    async def reluctant_poller() -> None:
+        poller_entered.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            poller_cancelled.set()
+            await release_poller.wait()
+
+    original_drain = service._drain_stop
+
+    async def counted_drain(poller, tasks) -> None:
+        nonlocal drain_calls
+        drain_calls += 1
+        await original_drain(poller, tasks)
+
+    monkeypatch.setattr(service, "_run", reluctant_poller)
+    monkeypatch.setattr(service, "_drain_stop", counted_drain)
+    await service.start()
+    await asyncio.wait_for(poller_entered.wait(), timeout=1)
+
+    first_stop = asyncio.create_task(service.stop())
+    await asyncio.wait_for(poller_cancelled.wait(), timeout=1)
+    cleanup_task = service._stop_cleanup_task
+    second_stop = asyncio.create_task(service.stop())
+    await asyncio.sleep(0)
+
+    assert cleanup_task is not None
+    assert service._stop_cleanup_task is cleanup_task
+    assert service._stop_drains == 1
+    assert drain_calls == 1
+    assert not first_stop.done()
+    assert not second_stop.done()
+
+    release_poller.set()
+    await asyncio.wait_for(asyncio.gather(first_stop, second_stop), timeout=1)
+    assert service._stop_cleanup_task is cleanup_task
+    assert cleanup_task.done()
+    assert service._stop_drains == 0
+    assert not service._stopping
+    assert drain_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_cancelled_batch_stop_allows_successful_retry(monkeypatch: pytest.MonkeyPatch) -> None:
     service = SubagentBatchService(
         repository=SimpleNamespace(),
@@ -553,19 +607,88 @@ async def test_cancelled_batch_stop_allows_successful_retry(monkeypatch: pytest.
 
     monkeypatch.setattr(service, "_run", reluctant_poller)
     await service.start()
+    original_poller = service._poller
+    await asyncio.wait_for(poller_entered.wait(), timeout=1)
+
+    first_stop = asyncio.create_task(service.stop())
+    await asyncio.sleep(0)
+    cleanup_task = service._stop_cleanup_task
+    first_stop.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first_stop
+
+    assert cleanup_task is not None
+    assert service._stop_cleanup_task is cleanup_task
+    assert service._stop_drains == 1
+    assert service._stopping
+    assert original_poller is not None
+    assert not original_poller.done()
+    assert not original_poller.cancelled()
+    with pytest.raises(RuntimeError, match="before stop completes"):
+        await service.start()
+
+    retry_stop = asyncio.create_task(service.stop())
+    await asyncio.sleep(0)
+    assert service._stop_cleanup_task is cleanup_task
+    assert not retry_stop.done()
+
+    release_poller.set()
+    await asyncio.wait_for(retry_stop, timeout=1)
+    assert original_poller.done()
+    assert service._poller is None
+    assert service._stop_cleanup_task is cleanup_task
+    assert cleanup_task.done()
+    assert service._stop_drains == 0
+    assert not service._stopping
+
+    await service.start()
+    assert service._poller is not original_poller
+    await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_batch_stop_cleanup_failure_is_reported_to_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = SubagentBatchService(
+        repository=SimpleNamespace(),
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(),
+    )
+    poller_entered = asyncio.Event()
+    release_poller = asyncio.Event()
+    cleanup_error = RuntimeError("stop cleanup failed")
+
+    async def reluctant_poller() -> None:
+        poller_entered.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            await release_poller.wait()
+
+    class FailingClearDict(dict):
+        def clear(self) -> None:
+            raise cleanup_error
+
+    monkeypatch.setattr(service, "_run", reluctant_poller)
+    service._executions = FailingClearDict()
+    await service.start()
     await asyncio.wait_for(poller_entered.wait(), timeout=1)
     first_stop = asyncio.create_task(service.stop())
     await asyncio.sleep(0)
     first_stop.cancel()
     with pytest.raises(asyncio.CancelledError):
         await first_stop
-    assert service._stop_drains == 0
+
+    cleanup_task = service._stop_cleanup_task
+    assert cleanup_task is not None
+    release_poller.set()
+    with pytest.raises(RuntimeError, match="stop cleanup failed"):
+        await asyncio.wait_for(asyncio.shield(cleanup_task), timeout=1)
+
     assert service._stopping
     with pytest.raises(RuntimeError, match="before stop completes"):
         await service.start()
 
-    release_poller.set()
-    await asyncio.wait_for(service.stop(), timeout=1)
-    assert service._poller is None
-    assert service._stop_drains == 0
-    assert not service._stopping
+    with pytest.raises(RuntimeError, match="stop cleanup failed") as raised:
+        await service.stop()
+    assert raised.value is cleanup_error
+    assert service._stop_cleanup_task is cleanup_task
