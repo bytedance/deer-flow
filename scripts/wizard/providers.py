@@ -513,6 +513,22 @@ LLM_PROVIDERS: list[LLMProvider] = [
         },
     ),
     LLMProvider(
+        name="api_route",
+        display_name="API Route",
+        description="OpenAI-compatible gateway (models depend on your API key)",
+        use="langchain_openai:ChatOpenAI",
+        models=["gpt-6.1-sol"],
+        default_model="gpt-6.1-sol",
+        env_var="API_ROUTE_API_KEY",
+        package="langchain-openai",
+        extra_config={
+            "base_url": "https://global.api-route.com/v1",
+            "request_timeout": 600.0,
+            "max_retries": 2,
+            "max_tokens": 8192,
+        },
+    ),
+    LLMProvider(
         name="vllm",
         display_name="vLLM",
         description="Self-hosted OpenAI-compatible serving",
