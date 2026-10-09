@@ -4362,7 +4362,7 @@ This release closes that milestone with **439 merged pull requests**.
   `MIDDLEWARE_EVENT_TAGS`; `backend/docs/summarization.md` lists the event's
   three missing `changes` fields. The extension example no longer claims to
   cover every contribution kind: it shows five of the eight, and its README
-  points to the observers guide and the bookmarks plugin for the rest.
+  points to the observers guide and the bookmarks plugin for the rest. ([#6582])
 
 ### Internal
 
@@ -9345,3 +9345,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6519]: https://github.com/bytedance/deer-flow/pull/6519
 [#6537]: https://github.com/bytedance/deer-flow/pull/6537
 [#6543]: https://github.com/bytedance/deer-flow/pull/6543
+[#6582]: https://github.com/bytedance/deer-flow/pull/6582

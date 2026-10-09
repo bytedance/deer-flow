@@ -3420,7 +3420,7 @@
   `summarize` 中间件标签并说明 `middleware:summarize` 事件，并新增测试将文档中
   的标签列表固定为 `MIDDLEWARE_EVENT_TAGS`；`backend/docs/summarization.md`
   补充该事件缺失的三个 `changes` 字段。扩展示例不再声称覆盖全部贡献类型：
-  它演示八种中的五种，README 为其余类型指向观察者指南和 bookmarks 插件示例。
+  它演示八种中的五种，README 为其余类型指向观察者指南和 bookmarks 插件示例。([#6582])
 
 ### 内部改进
 
@@ -7563,3 +7563,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6512]: https://github.com/bytedance/deer-flow/pull/6512
 [#6519]: https://github.com/bytedance/deer-flow/pull/6519
 [#6537]: https://github.com/bytedance/deer-flow/pull/6537
+[#6582]: https://github.com/bytedance/deer-flow/pull/6582
