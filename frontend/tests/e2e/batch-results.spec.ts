@@ -95,6 +95,14 @@ for (const custom of [false, true]) {
         }),
       );
       const reads: string[] = [];
+      await page.route(
+        "**/api/threads/*/artifacts/mnt/user-data/outputs/chart.svg",
+        (route) =>
+          route.fulfill({
+            contentType: "image/svg+xml",
+            body: '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40"><rect width="80" height="40" fill="#2563eb"/></svg>',
+          }),
+      );
       await page.route("**/api/threads/*/subagent-batches**", async (route) => {
         const url = new URL(route.request().url());
         reads.push(url.pathname + url.search);
@@ -145,6 +153,17 @@ for (const custom of [false, true]) {
         "href",
         `/api/threads/${MOCK_THREAD_ID}/artifacts/mnt/user-data/outputs/report.md`,
       );
+      const chart = report.getByRole("img", { name: "Saved chart" });
+      await expect(chart).toHaveAttribute(
+        "src",
+        `/api/threads/${MOCK_THREAD_ID}/artifacts/mnt/user-data/outputs/chart.svg`,
+      );
+      await chart.scrollIntoViewIfNeeded();
+      await expect
+        .poll(() =>
+          chart.evaluate((image: HTMLImageElement) => image.naturalWidth),
+        )
+        .toBe(80);
       await expect(
         report.locator("code").filter({ hasText: "[citation:1]" }),
       ).toHaveCount(1);

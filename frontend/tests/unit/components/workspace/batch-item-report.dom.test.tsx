@@ -201,6 +201,33 @@ it("resolves saved output links through the current thread artifact route", asyn
   );
 });
 
+it("resolves saved output images without borrowing the conversation's artifact list", async () => {
+  read.mockResolvedValue({
+    ...saved,
+    result:
+      "![Chart](/mnt/user-data/outputs/chart%20final.png?v=2#detail)\n\n![Remote](https://example.com/chart.png)\n\n![Relative](chart.png)",
+  });
+  const view = render(<App threadId="original-thread" />);
+  fireEvent.click(screen.getByRole("button", { name: "View report" }));
+  const chart = await screen.findByRole("img", { name: "Chart" });
+  const original =
+    "/api/threads/original-thread/artifacts/mnt/user-data/outputs/chart%20final.png?v=2#detail";
+  expect(chart.getAttribute("src")).toBe(original);
+  expect(chart.closest("a")?.getAttribute("href")).toBe(original);
+  expect(screen.getByRole("img", { name: "Remote" }).getAttribute("src")).toBe(
+    "https://example.com/chart.png",
+  );
+  expect(
+    screen.getByRole("img", { name: "Relative" }).getAttribute("src"),
+  ).toBe("chart.png");
+  view.rerender(<App threadId="next-thread" />);
+  fireEvent.click(screen.getByRole("button", { name: "View report" }));
+  const next = await screen.findByRole("img", { name: "Chart" });
+  expect(next.getAttribute("src")).toBe(
+    original.replace("original-thread", "next-thread"),
+  );
+});
+
 it("reads on demand and uses native Markdown for a list-contained tilde fence", async () => {
   render(<App />);
   expect(read).not.toHaveBeenCalled();

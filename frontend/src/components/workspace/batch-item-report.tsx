@@ -1,7 +1,7 @@
 "use client";
 
 import { LoaderCircleIcon } from "lucide-react";
-import { useMemo, useState } from "react";
+import { type ImgHTMLAttributes, useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -26,6 +26,7 @@ import {
 } from "@/core/subagent-batches";
 
 import { KnowledgeSourcesProvider } from "./citations/knowledge-source";
+import { MessageImage } from "./messages/markdown-image";
 import { createMarkdownLinkComponent } from "./messages/markdown-link";
 
 type ReportProps = {
@@ -83,7 +84,13 @@ function ReportBody({
   const { t } = useI18n();
   const labels = t.subagentBatches;
   const components = useMemo(
-    () => toStreamdownComponents({ a: createMarkdownLinkComponent(threadId) }),
+    () =>
+      toStreamdownComponents({
+        a: createMarkdownLinkComponent(threadId),
+        img: (props: ImgHTMLAttributes<HTMLImageElement>) => (
+          <MessageImage {...props} threadId={threadId} artifactPaths={[]} />
+        ),
+      }),
     [threadId],
   );
   const query = useSubagentBatchResult(

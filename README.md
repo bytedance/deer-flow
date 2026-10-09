@@ -1961,8 +1961,10 @@ separately from deterministic acceptance: an execution can succeed while its
 criteria remain unmet or unverified. Truncated reports are labeled, and JSONL
 export remains available for bulk results.
 
-Output-file links in saved reports open through the current conversation's
-artifact route, using the same link renderer as ordinary chat messages.
+Output-file links and images with absolute `/mnt/` paths in saved reports open
+through the current conversation's artifact route, using the same renderers as
+ordinary chat messages. Relative image paths are not inferred from the parent
+conversation's artifacts.
 
 Items offer report inspection once terminal or when a saved preview is present.
 Reports without acceptance criteria show **No criteria**; **Unverified** means

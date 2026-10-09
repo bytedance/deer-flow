@@ -109,6 +109,8 @@ Language-map membership checks only own properties; inherited names such as
    items or an item with a stored result preview.
    Saved reports reuse `createMarkdownLinkComponent(threadId)` so output-file
    links resolve through the current thread's artifact route alongside citations.
+   They share `MessageImage` with chat for absolute artifact images; an empty
+   artifact list prevents inferred relative images from borrowing parent artifacts.
    The panel must not infer batch mode from prompt text
    or inject the complete result set into chat state.
    Capability Center > Plugins > Lark uses a local generation only to suppress stale React
