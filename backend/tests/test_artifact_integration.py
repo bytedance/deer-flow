@@ -8,6 +8,8 @@ rewrites it to the real reference at the tool-call boundary.
 import re
 from typing import Any
 
+import httpx
+import pytest
 from _agent_e2e_helpers import FakeToolCallingModel
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage
@@ -122,3 +124,52 @@ def test_handle_projected_into_model_context():
     durable_blocks = [message.content for message in round3 if getattr(message, "additional_kwargs", {}).get("durable_context_data")]
     handle = next(e["handle"] for e in result["tool_artifacts"] if e["tool_call_id"] == "call_make")
     assert any(handle in content for content in durable_blocks), "captured handle never reached the model-facing durable context block"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://files.example/report.pdf?token=part.csvX",
+        "https://files.example/report.pdf?token=abc&download=copy.csvX#page=2",
+        "https://files.example/report.pdf?token=abc",
+    ],
+)
+def test_remote_url_survives_capture_checkpoint_and_resolved_download(url):
+    """Exercise the real agent graph with a fake model and offline HTTP transport."""
+    downloaded = []
+
+    @tool("make_file")
+    def remote_report(name: str) -> str:
+        """Create a remotely hosted report."""
+        return f"Download [{url}]"
+
+    def serve_report(request: httpx.Request) -> httpx.Response:
+        downloaded.append(request.url)
+        return httpx.Response(200 if request.url.query == httpx.URL(url).query else 403, content=b"report")
+
+    @tool("read_file")
+    def download_report(path: str) -> str:
+        """Download a report by its URL or artifact handle."""
+        assert path == url
+        with httpx.Client(transport=httpx.MockTransport(serve_report)) as client:
+            response = client.get(path)
+            response.raise_for_status()
+        return response.text
+
+    agent = create_agent(
+        model=_cycle_model(),
+        tools=[remote_report, download_report],
+        middleware=[DurableContextMiddleware(), ArtifactCaptureMiddleware(), ArtifactResolutionMiddleware()],
+        state_schema=ThreadState,
+        checkpointer=InMemorySaver(),
+    )
+    config = {"configurable": {"thread_id": THREAD_ID}}
+
+    result = agent.invoke({"messages": [HumanMessage(content="make then download")]}, config, context={"thread_id": THREAD_ID})
+
+    assert downloaded == [httpx.URL(url)]
+    made = next(entry for entry in result["tool_artifacts"] if entry["tool_call_id"] == "call_make")
+    assert made["real_ref"] == url
+    assert made["consumed_by"] == ["call_read"]
+    persisted = next(entry for entry in agent.get_state(config).values["tool_artifacts"] if entry["tool_call_id"] == "call_make")
+    assert persisted["real_ref"] == url

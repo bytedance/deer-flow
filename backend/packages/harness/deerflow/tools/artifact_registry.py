@@ -30,8 +30,10 @@ _HANDLE_LENGTH = 8
 # inside the mounted user-data tree).
 _SANDBOX_PATH_PATTERN = re.compile(r"/mnt/user-data/\S+")
 
-# Conservative URL-with-file-extension match for remote references.
-_REMOTE_FILE_URL_PATTERN = re.compile(r"https?://[^\s\"'`<>]+\.(?:png|jpg|jpeg|gif|html|pdf|csv|json|txt|log|md|xlsx?|docx?|zip)(?:[?#][^\s\"'`<>]*)?")
+# Scan complete URLs before checking the path, so extensions in query strings
+# cannot truncate a reference or turn a non-file URL into a file artifact.
+_REMOTE_URL_PATTERN = re.compile(r"https?://[^\s\"'`<>]+")
+_REMOTE_FILE_EXTENSION_PATTERN = re.compile(r"\.(?:png|jpg|jpeg|gif|html|pdf|csv|json|txt|log|md|xlsx?|docx?|zip)\Z")
 
 # Structured-content keys whose string values are treated as concrete
 # references (paths, URLs, remote task ids) rather than opaque payload.
@@ -142,9 +144,11 @@ def _detect_refs_in_text(text: str) -> list[dict[str, str]]:
                 "display": raw.split("/")[-1],
             }
         )
-    for match in _REMOTE_FILE_URL_PATTERN.finditer(text):
+    for match in _REMOTE_URL_PATTERN.finditer(text):
         raw = match.group(0).rstrip(_REF_TRAILING_NOISE_CHARS)
         if raw in seen or not _is_referenceable_url(raw):
+            continue
+        if not _REMOTE_FILE_EXTENSION_PATTERN.search(urlsplit(raw).path):
             continue
         seen.add(raw)
         refs.append(

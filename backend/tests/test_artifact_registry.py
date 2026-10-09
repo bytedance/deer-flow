@@ -2,6 +2,7 @@
 
 import json
 
+import pytest
 from langchain_core.messages import ToolMessage
 
 from deerflow.agents.thread_state import merge_tool_artifacts
@@ -39,6 +40,41 @@ def test_generate_handle_format():
     handle = generate_handle("thread-1", "call-1", 0)
     assert handle.startswith("art_")
     assert len(handle) == len("art_") + 8
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://files.example/report.pdf?token=part.csvX",
+        "https://files.example/report.pdf#section.md-more",
+        "https://files.example/report.pdf?token=abc&download=copy.csvX#page=2",
+        "https://files.example/report.pdf?token=abc",
+        "https://files.example/report.pdf#page=2",
+    ],
+)
+@pytest.mark.parametrize("content_block", [False, True])
+def test_text_file_urls_preserve_complete_query_and_fragment(url, content_block):
+    text = f"Report: [{url}]"
+    result = ToolMessage(content=[{"type": "text", "text": text}] if content_block else text, tool_call_id="call_url", name="remote_report")
+
+    entries = extract_artifacts_from_result(result, thread_id="thread-url")
+
+    assert [entry["real_ref"] for entry in entries] == [url]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://files.example/report.pdf/download",
+        "https://files.example/report.pdf.gz",
+        "https://files.example/report.pdfx",
+        "https://files.example/download?name=report.pdf",
+        "https://files.example/download#report.pdf",
+        "https://reports.pdf",
+    ],
+)
+def test_text_urls_require_a_file_extension_in_the_complete_path(url):
+    assert _detect_refs_in_text(f"Result: {url}") == []
 
 
 def test_extract_from_file_block():
