@@ -26,6 +26,7 @@ from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.runtime.secret_context import read_active_secrets
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.sandbox.env_policy import is_blocked_env_name
 from deerflow.sandbox.exceptions import (
     SandboxError,
     SandboxNotFoundError,
@@ -2400,6 +2401,7 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
         command: The bash command to execute. Always use absolute paths for files and directories.
         description: Optional short explanation of this command shown in the UI.
     """
+    redaction_env = None
     try:
         sandbox = ensure_sandbox_initialized(runtime)
         # Request-scoped secrets resolved for the active skill (#3861), plus a
@@ -2415,7 +2417,13 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
             injected_env = {**(injected_env or {}), **github_env}
         if lark_cli_env:
             injected_env = {**(injected_env or {}), **lark_cli_env}
+        redaction_env = injected_env
         if is_local_sandbox(runtime):
+            # Match the credential-name policy used for inherited host env.
+            # Keep benign operator settings readable and redact effective
+            # credentials before execution, including any exception output.
+            redaction_env = {name: value for name, value in (getattr(sandbox, "environment", None) or {}).items() if is_blocked_env_name(name)}
+            redaction_env.update(injected_env or {})
             if not is_host_bash_allowed():
                 return f"Error: {LOCAL_HOST_BASH_DISABLED_MESSAGE}"
             ensure_thread_directories_exist(runtime)
@@ -2455,7 +2463,7 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
                 timeout=command_timeout,
             )
             return _truncate_bash_output(
-                mask_secret_values(mask_local_paths_in_output(output, thread_data), injected_env),
+                mask_secret_values(mask_local_paths_in_output(output, thread_data), redaction_env),
                 max_chars,
             )
         ensure_thread_directories_exist(runtime)
@@ -2481,11 +2489,11 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
             max_chars,
         )
     except SandboxError as e:
-        return f"Error: {e}"
+        return mask_secret_values(f"Error: {e}", redaction_env)
     except PermissionError as e:
-        return f"Error: {e}"
+        return mask_secret_values(f"Error: {e}", redaction_env)
     except Exception as e:
-        return f"Error: Unexpected error executing command: {_sanitize_error(e, runtime)}"
+        return mask_secret_values(f"Error: Unexpected error executing command: {_sanitize_error(e, runtime)}", redaction_env)
 
 
 async def _bash_tool_async(runtime: Runtime, command: str, description: str = "") -> str:
