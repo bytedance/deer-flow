@@ -27,11 +27,11 @@ REMOTE_PROVIDERS = ("e2b", "boxlite", "tenki", "opensandbox")
 _CONTINUE = re.compile(r"Continue with start_line=(\d+)")
 
 
-def _remote_sandbox(name: str, monkeypatch: pytest.MonkeyPatch):
-    """The provider's own read_file over a fake transport that returns the stored file unchanged."""
+def _remote_sandbox(name: str, monkeypatch: pytest.MonkeyPatch, remote_files: dict[str, Path]):
+    """Map POSIX sandbox paths to native host files in the fake transport."""
 
     def read_text(path: str) -> str:
-        return Path(path).read_bytes().decode("utf-8")
+        return remote_files[path].read_bytes().decode("utf-8")
 
     if name == "e2b":
         from deerflow.community.e2b_sandbox.e2b_sandbox import E2BSandbox
@@ -63,14 +63,15 @@ def test_remote_ranged_read_matches_local_sandbox_line_numbers(provider, tmp_pat
     path = tmp_path / "mixed-separators.log"
     path.write_bytes(_CONTENT.encode("utf-8"))
     local = LocalSandbox("line-contract")
-    remote = _remote_sandbox(provider, monkeypatch)
+    remote_path = f"/workspace/{path.name}"
+    remote = _remote_sandbox(provider, monkeypatch, {remote_path: path})
 
     for start_line, end_line in _RANGES:
         expected = local.read_file(str(path), start_line=start_line, end_line=end_line)
-        assert remote.read_file(str(path), start_line=start_line, end_line=end_line) == expected, (start_line, end_line)
+        assert remote.read_file(remote_path, start_line=start_line, end_line=end_line) == expected, (start_line, end_line)
 
     # The line read_file's truncation marker would name after line 2.
-    assert remote.read_file(str(path), start_line=3, end_line=3) == "head\u2028tail"
+    assert remote.read_file(remote_path, start_line=3, end_line=3) == "head\u2028tail"
 
 
 @pytest.mark.parametrize("provider", REMOTE_PROVIDERS)
@@ -79,14 +80,15 @@ def test_remote_read_continues_at_the_line_a_truncation_marker_names(provider, t
     path = tmp_path / "progress.log"
     content = "".join(f"step {i:03d} 0%\rstep {i:03d} 100%\n" for i in range(1, 201))
     path.write_bytes(content.encode("utf-8"))
-    remote = _remote_sandbox(provider, monkeypatch)
+    remote_path = f"/workspace/{path.name}"
+    remote = _remote_sandbox(provider, monkeypatch, {remote_path: path})
 
-    truncated = _truncate_read_file_output(remote.read_file(str(path)), 1000)
+    truncated = _truncate_read_file_output(remote.read_file(remote_path), 1000)
     kept = truncated[: truncated.index(READ_FILE_TRUNCATION_PREFIX)]
     start_line = int(_CONTINUE.search(truncated).group(1))
     first_unread = content[len(kept) :].split("\n", 1)[0]
 
-    assert remote.read_file(str(path), start_line=start_line, end_line=start_line) == first_unread
+    assert remote.read_file(remote_path, start_line=start_line, end_line=start_line) == first_unread
 
 
 @pytest.mark.parametrize(
