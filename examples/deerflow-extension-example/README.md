@@ -191,7 +191,7 @@ name or the `module:install` value.
 ```text
 deerflow_extension_example/
 ├── __init__.py  # version-stamped install() entry point
-└── plugin.py    # state plus all five small contribution implementations
+└── plugin.py    # state plus the five demonstrated contribution implementations
 tests/
 ├── test_entry_point.py
 ├── test_plugin.py
