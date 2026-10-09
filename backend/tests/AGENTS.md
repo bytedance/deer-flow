@@ -2,6 +2,14 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+Mixed-version resume admission in `test_thread_run_idempotency.py` uses a real
+shared SQL repository and an old-column projection. The frozen pre-6499 helper
+models only null-input resume retry matching from `02ce9ab2`; do not update it
+to the new identity-aware policy or claim it runs a complete old Gateway.
+Assert both writer formats: old workers reuse conflicting decisions, upgraded
+workers reject conflicts, and identity-less legacy rows fail closed even for
+identical retries. This pins why rollout requires routing to upgraded workers.
+
 Upload case-collision coverage uses separate HTTP requests and preserves both
 reported payloads. Observe real filename-claim inputs to pin the disk seed;
 case-insensitive hosts can otherwise mask a missing seed through link retries.
@@ -188,3 +196,21 @@ assignment. Use offline transports. Detection is not behavioral defense; do not 
 the final model input from an isolated hook test. `test_jev_screening_policy.py` uses
 the host descriptor builder to pin policy identity; hash endpoint/prompt text and
 never project credential values.
+
+## Deploy home permission tests
+
+`test_deploy_home_writability.py` covers the production deploy permission
+preflight. It runs the complete script with a recording Docker stub and
+isolated runtime paths. Permission cases remove directory write bits or secret
+file read bits and restore them during teardown; they skip on Windows, as root,
+or when the filesystem does not enforce those bits. Cover both persisted
+secrets, shell/Compose dotenv overrides, readable read-only secrets, and teardown
+without secret exports. `down` must not probe, read, or generate secrets.
+Writable-directory cases remain portable.
+
+## Workspace text cache
+
+`test_scanner_text_cache_atomic.py` verifies complete publication and preservation
+of an existing entry on failure. A cleanup failure must preserve the original
+publish exception, including interruption. Import the scanner during fixture
+setup, after the autouse fixtures initialize runtime, to avoid the package cycle.

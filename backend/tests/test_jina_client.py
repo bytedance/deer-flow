@@ -1,5 +1,6 @@
 """Tests for JinaClient async crawl method."""
 
+import json
 import logging
 from unittest.mock import MagicMock
 
@@ -31,6 +32,57 @@ async def test_crawl_success(jina_client, monkeypatch):
     monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
     result = await jina_client.crawl("https://example.com")
     assert result == "<html><body>Hello</body></html>"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("max_retries", [0, 1])
+async def test_crawl_follows_jina_api_redirect(jina_client, monkeypatch, max_retries):
+    """A redirected Jina API endpoint should still return fetched content."""
+    requests = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.read()) == {"url": "https://example.com"}
+        requests.append(request)
+        if request.url.path == "/":
+            return httpx.Response(307, headers={"Location": "https://r.jina.ai/reader"})
+        return httpx.Response(200, text="Fetched page")
+
+    original_client = httpx.AsyncClient
+    transport = httpx.MockTransport(handle)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original_client(transport=transport, **kwargs))
+
+    result = await jina_client.crawl("https://example.com", max_retries=max_retries)
+
+    assert result == "Fetched page"
+    assert [request.url.path for request in requests] == ["/", "/reader"]
+    assert all(request.method == "POST" for request in requests)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("max_retries", [0, 1])
+async def test_crawl_strips_api_key_on_cross_host_redirect(jina_client, monkeypatch, max_retries):
+    """A redirected host must not receive the Jina bearer credential."""
+    requests: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.read()) == {"url": "https://example.com"}
+        requests.append(request)
+        if request.url.host == "r.jina.ai":
+            return httpx.Response(307, headers={"Location": "https://redirect.example/final"})
+        return httpx.Response(200, text="Fetched page")
+
+    original_client = httpx.AsyncClient
+    transport = httpx.MockTransport(handle)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original_client(transport=transport, **kwargs))
+    monkeypatch.setenv("JINA_API_KEY", "test-key")
+
+    result = await jina_client.crawl("https://example.com", max_retries=max_retries)
+
+    assert result == "Fetched page"
+    assert [request.url.host for request in requests] == ["r.jina.ai", "redirect.example"]
+    assert [request.method for request in requests] == ["POST", "POST"]
+    assert requests[0].headers["Authorization"] == "Bearer test-key"
+    assert "Authorization" not in requests[1].headers
 
 
 @pytest.mark.anyio
@@ -150,6 +202,7 @@ async def test_crawl_passes_proxy_to_httpx_client(jina_client, monkeypatch):
     assert result == "ok"
     assert captured_client_kwargs["proxy"] == "http://127.0.0.1:7890"
     assert captured_client_kwargs["trust_env"] is True
+    assert captured_client_kwargs["follow_redirects"] is True
 
 
 @pytest.mark.anyio
@@ -175,7 +228,7 @@ async def test_crawl_can_disable_trust_env(jina_client, monkeypatch):
     result = await jina_client.crawl("https://example.com", trust_env=False)
 
     assert result == "ok"
-    assert captured_client_kwargs == {"trust_env": False}
+    assert captured_client_kwargs == {"trust_env": False, "follow_redirects": True}
 
 
 @pytest.mark.anyio

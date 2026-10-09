@@ -135,7 +135,7 @@ they resolve from the `secrets` map):
 
 ```yaml
 config: |
-  config_version: 55
+  config_version: 57
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI
@@ -242,7 +242,8 @@ curl http://localhost:2026/health/ready    # readiness: database, checkpointer, 
 Postgres or the Redis stream bridge is unreachable (`stream_bridge: unreachable`),
 so those pods leave the Service instead of accepting runs they cannot stream.
 The `provisioner` field reports the provisioner's own `/health` but never
-changes the status code: every gateway pod shares that one provisioner.
+changes the status code: every gateway pod reaches the same `provisioner`
+Service, whichever replica answers.
 
 Hit the Ingress host (map it in `/etc/hosts` for local clusters) to load the UI.
 
@@ -307,9 +308,44 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   `persistence.home.accessMode: ReadWriteMany` on multi-node clusters (thread
   uploads, outputs, memory and `extensions_config.json` live on that volume)
   and `agent_storage.backend: db` so custom agents are visible on every Pod.
-  A `PodDisruptionBudget` (`minAvailable: 1`) is rendered automatically for a
-  multi-instance gateway (same rule), and the rollout strategy is
-  surge-then-drain (`maxSurge: 1`, `maxUnavailable: 0`).
+  Memory itself is multi-instance safe on that volume (per-user file locks,
+  journaled writes, and a Pod re-syncs a user's search index on its next
+  search after a peer writes), but DeerMem's derived SQLite FTS5 index is
+  not: SQLite WAL is unsupported on network filesystems, every Pod start would
+  rebuild a shared index under its peers, and one Pod's corruption recovery
+  would delete it from under them. The default `config` therefore sets
+  `memory.backend_config.retrieval_index_path: /var/lib/deerflow/memory-index`,
+  a Pod-local `emptyDir` the gateway Deployment mounts; keep that line when you
+  override `config:` — a multi-instance gateway that leaves the index under
+  the memory root logs a warning at startup. The index is rebuilt from the
+  Markdown facts on every Pod start, so losing the emptyDir loses nothing.
+  A `PodDisruptionBudget` (`minAvailable: 1`; an integer or a percentage
+  string such as `"50%"`, while `0` fails the render -- disable the budget
+  instead) is rendered automatically for a multi-instance gateway (same rule),
+  and the rollout strategy is surge-then-drain (`maxSurge: 1`,
+  `maxUnavailable: 0`). The sandbox
+  provisioner is not on the single-instance list: it scales independently
+  (next item).
+- **Provisioner replicas.** `provisioner.replicas` (default 1) scales the
+  sandbox provisioner. It keeps no state of its own between requests: the
+  sandbox Pods and Services it creates carry the labels
+  (`app=deer-flow-sandbox`, `sandbox-id`) that are its only registry; create,
+  discover, list and destroy all read them back from the API server; create
+  tolerates the `409 AlreadyExists` a concurrent creator on another replica
+  produces (several gateway Pods already run that race against one
+  provisioner) and destroy tolerates `404`; and NodePorts are allocated by the
+  API server, not the provisioner. The `provisioner` Service therefore spreads
+  the gateway's calls over any number of replicas without affinity. At 1
+  replica it is the last single point of failure in a multi-replica gateway
+  deployment: while its Pod restarts or its node drains no sandbox can be
+  created or discovered (running sandboxes are unaffected; the gateway talks
+  to them directly). A `PodDisruptionBudget` (`provisioner.podDisruptionBudget`,
+  `minAvailable: 1`) is rendered only while `provisioner.replicas > 1` -- on a
+  single replica it would block every node drain -- and the rollout strategy
+  is surge-then-drain (`maxSurge: 1`, `maxUnavailable: 0`), both mirroring
+  the gateway. There is no `multiInstance` switch for the provisioner because
+  nothing else in the chart renders differently per replica count; scaling it
+  with `kubectl scale` only leaves it without the budget.
 - **App secret.** `<release>-app` holds `BETTER_AUTH_SECRET`,
   `DEER_FLOW_INTERNAL_AUTH_TOKEN`, `AUTH_JWT_SECRET` (the session-cookie
   signing key) and `PROVISIONER_API_KEY` (the key the gateway presents to the

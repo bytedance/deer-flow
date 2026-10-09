@@ -37,6 +37,14 @@ monotonically for their supported deployment modes. JSONL only provides this
 guarantee within one process; shared multi-process deployments must use the
 database store.
 
+The database store additionally keeps a per-thread high-water mark
+(`run_event_thread_seq`) that is independent of the event rows. Deleting a run
+therefore never lowers the next allocated `seq`: values are not reused within a
+thread, and a consumer whose `after_seq` cursor already advanced past a deleted
+run does not miss later events. Thread deletion drops the mark only when no
+events remain for the thread across every owner and category; surviving rows
+retain the allocation floor.
+
 ## Categories
 
 `category="message"` means an event is eligible for a message projection; it

@@ -330,6 +330,23 @@ class MindIEChatModel(ChatOpenAI):
         result = await super()._agenerate(_fix_messages(messages), stop=stop, run_manager=run_manager, **kwargs)
         return self._patch_result_with_tools(result)
 
+    def _stream(self, messages, stop=None, run_manager=None, **kwargs):
+        if not kwargs.get("tools"):
+            decoder = _EscapedNewlineStreamDecoder()
+            for chunk in super()._stream(_fix_messages(messages), stop=stop, run_manager=run_manager, **kwargs):
+                if isinstance(chunk.message.content, str):
+                    chunk.message.content = decoder.push(chunk.message.content)
+                yield chunk
+            tail = decoder.flush()
+            if tail:
+                yield ChatGenerationChunk(message=AIMessageChunk(content=tail))
+            return
+
+        # Tool-enabled MindIE requests cannot use native streaming, even when
+        # the model's default is streaming=True.
+        result = self._generate(messages, stop=stop, run_manager=run_manager, **{**kwargs, "stream": False})
+        yield from self._simulate_stream(result)
+
     async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
         # Route standard queries to native streaming for lower TTFB
         if not kwargs.get("tools"):
@@ -347,8 +364,13 @@ class MindIEChatModel(ChatOpenAI):
         # Fallback for tool-enabled requests:
         # MindIE currently drops choices when stream=True and tools are present.
         # We await the full generation and yield chunks to simulate streaming.
-        result = await self._agenerate(messages, stop=stop, run_manager=run_manager, **kwargs)
+        result = await self._agenerate(messages, stop=stop, run_manager=run_manager, **{**kwargs, "stream": False})
+        for chunk in self._simulate_stream(result):
+            yield chunk
 
+    @staticmethod
+    def _simulate_stream(result: ChatResult) -> Iterator[ChatGenerationChunk]:
+        """Keep sync/async tool-mode chunking and terminal usage identical."""
         for gen in result.generations:
             msg = gen.message
             content = msg.content

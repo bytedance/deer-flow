@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import FastAPI
 
-from app.gateway.deps import _enforce_postgres_for_multi_worker, _validate_agent_storage, langgraph_runtime
+from app.gateway.deps import _enforce_postgres_for_multi_worker, _validate_agent_storage, _validate_login_throttle_storage, _validate_memory_retrieval_index, langgraph_runtime
 from app.gateway.routers.browser import _browser_tools_enabled
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.deployment_config import MULTI_INSTANCE_ENV_VAR, DeploymentConfig, multi_instance_declaration
@@ -707,3 +707,142 @@ def test_deployment_declaration_helpers(monkeypatch):
     by_env = multi_instance_declaration(SimpleNamespace(deployment=DeploymentConfig(multi_instance=True)))
     assert by_env is not None
     assert (by_env.source, by_env.knob, by_env.rollback) == ("env", f"{MULTI_INSTANCE_ENV_VAR}=replicas", f"unset {MULTI_INSTANCE_ENV_VAR}")
+
+
+# ---------------------------------------------------------------------------
+# Login throttle storage warning (auth.local.throttle_storage)
+# ---------------------------------------------------------------------------
+
+
+def _with_throttle_storage(config, selector):
+    config.auth = SimpleNamespace(local=SimpleNamespace(throttle_storage=selector))
+    return config
+
+
+def _throttle_warnings(caplog):
+    return [r.message for r in caplog.records if "auth.local.throttle_storage" in r.message]
+
+
+def test_login_throttle_warning_fires_for_a_declared_multi_instance_deployment_on_memory(caplog):
+    """Explicit memory counters under N replicas hand an attacker N x max_login_attempts guesses."""
+    from deerflow.config.auth_config import LoginThrottleStorage
+
+    with caplog.at_level("WARNING"):
+        _validate_login_throttle_storage(_with_throttle_storage(_cluster_ready(deployment_multi_instance=True), LoginThrottleStorage.MEMORY))
+    messages = _throttle_warnings(caplog)
+    assert messages and "deployment.multi_instance=true" in messages[0]
+    assert "max_login_attempts" in messages[0]
+    # The selector is a StrEnum; the warning must render its value, not "LoginThrottleStorage.MEMORY".
+    assert "auth.local.throttle_storage=memory:" in messages[0]
+    assert "LoginThrottleStorage" not in messages[0]
+
+
+def test_login_throttle_warning_names_the_worker_variable(monkeypatch, caplog):
+    monkeypatch.setenv("WEB_CONCURRENCY", "2")
+    with caplog.at_level("WARNING"):
+        _validate_login_throttle_storage(_with_throttle_storage(_cluster_ready(), "memory"))
+    messages = _throttle_warnings(caplog)
+    assert messages and "WEB_CONCURRENCY=2" in messages[0]
+
+
+def test_login_throttle_auto_resolves_to_the_database_under_multi_instance_without_warning(caplog):
+    with caplog.at_level("WARNING"):
+        _validate_login_throttle_storage(_with_throttle_storage(_cluster_ready(deployment_multi_instance=True), "auto"))
+        _validate_login_throttle_storage(_with_throttle_storage(_cluster_ready(deployment_multi_instance=True), "db"))
+    assert _throttle_warnings(caplog) == []
+
+
+def test_login_throttle_memory_is_silent_for_a_single_instance(caplog):
+    with caplog.at_level("WARNING"):
+        _validate_login_throttle_storage(_with_throttle_storage(_config_with_backend("sqlite"), "memory"))
+    assert _throttle_warnings(caplog) == []
+
+
+def test_login_throttle_gate_tolerates_a_config_without_an_auth_section(caplog):
+    with caplog.at_level("WARNING"):
+        _validate_login_throttle_storage(_cluster_ready(deployment_multi_instance=True))
+    assert _throttle_warnings(caplog) == []
+
+
+# DeerMem retrieval index: a declared multi-instance deployment must keep the
+# derived SQLite index off the shared memory volume.
+# ---------------------------------------------------------------------------
+
+
+def _memory_config(*, enabled: bool = True, manager_class: str = "deermem", **backend_config):
+    return SimpleNamespace(enabled=enabled, manager_class=manager_class, backend_config=backend_config)
+
+
+def _retrieval_index_warnings(caplog) -> list[str]:
+    return [r.message for r in caplog.records if "retrieval_index_path" in r.message]
+
+
+def test_declared_multi_instance_warns_when_the_retrieval_index_shares_the_memory_root(monkeypatch, caplog, tmp_path):
+    monkeypatch.setenv(MULTI_INSTANCE_ENV_VAR, "true")
+    config = _cluster_ready()
+    config.memory = _memory_config(storage_path=str(tmp_path))
+    with caplog.at_level("WARNING"):
+        _validate_memory_retrieval_index(config)
+    messages = _retrieval_index_warnings(caplog)
+    assert messages, "the default index location is inside storage_path and therefore on the shared volume"
+    assert f"{MULTI_INSTANCE_ENV_VAR}=true" in messages[0], "must name the knob that declared the topology"
+    assert str(tmp_path / ".retrieval") in messages[0]
+    assert str(tmp_path) in messages[0]
+
+
+def test_declared_multi_instance_warns_when_a_relative_index_path_stays_below_storage_path(caplog, tmp_path):
+    config = _cluster_ready(deployment_multi_instance=True)
+    config.memory = _memory_config(storage_path=str(tmp_path), retrieval_index_path="pod-index")
+    with caplog.at_level("WARNING"):
+        _validate_memory_retrieval_index(config)
+    messages = _retrieval_index_warnings(caplog)
+    assert messages and "deployment.multi_instance=true" in messages[0]
+    assert str(tmp_path / "pod-index") in messages[0]
+
+
+def test_declared_multi_instance_defaults_the_memory_root_to_runtime_home(monkeypatch, caplog, tmp_path):
+    """An empty storage_path means the host injects runtime_home(), which is the shared home volume."""
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    config = _cluster_ready(deployment_multi_instance=True)
+    config.memory = _memory_config()
+    with caplog.at_level("WARNING"):
+        _validate_memory_retrieval_index(config)
+    messages = _retrieval_index_warnings(caplog)
+    assert messages and str(tmp_path.resolve() / ".retrieval") in messages[0]
+
+
+def test_declared_multi_instance_accepts_an_instance_local_retrieval_index(caplog, tmp_path):
+    config = _cluster_ready(deployment_multi_instance=True)
+    config.memory = _memory_config(storage_path=str(tmp_path / "home"), retrieval_index_path=str(tmp_path / "pod-local"))
+    with caplog.at_level("WARNING"):
+        _validate_memory_retrieval_index(config)
+    assert _retrieval_index_warnings(caplog) == []
+
+
+def test_retrieval_index_warning_requires_the_multi_instance_declaration(monkeypatch, caplog, tmp_path):
+    """Workers of one process tree share local disk, where a shared WAL index is supported."""
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    config = _cluster_ready()
+    config.memory = _memory_config(storage_path=str(tmp_path))
+    with caplog.at_level("WARNING"):
+        _validate_memory_retrieval_index(config)
+    assert _retrieval_index_warnings(caplog) == []
+
+
+@pytest.mark.parametrize(
+    "memory",
+    [
+        None,
+        _memory_config(enabled=False, storage_path="/shared/home"),
+        _memory_config(manager_class="mem0", storage_path="/shared/home"),
+        _memory_config(storage_path="/shared/home", retrieval_adapter=""),
+        _memory_config(storage_path="/shared/home", retrieval_adapter="my_pkg.retrieval:create"),
+    ],
+)
+def test_retrieval_index_warning_only_covers_the_bundled_fts5_index(caplog, memory):
+    config = _cluster_ready(deployment_multi_instance=True)
+    if memory is not None:
+        config.memory = memory
+    with caplog.at_level("WARNING"):
+        _validate_memory_retrieval_index(config)
+    assert _retrieval_index_warnings(caplog) == []
