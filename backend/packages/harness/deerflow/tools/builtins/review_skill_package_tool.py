@@ -9,6 +9,7 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langgraph.types import Command
 
+from deerflow.config.paths import get_paths, make_safe_user_id
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.skills.review.analyzer import analyze_skill_package
 from deerflow.skills.review.models import stable_json_dumps
@@ -103,21 +104,23 @@ def _snapshot_for_target(target: str, *, runtime: Runtime, inline_content: str |
             raise ValueError("inline_content is required for inline:// targets")
         return build_inline_snapshot(inline_content, name_hint=target)
 
+    user_id = resolve_runtime_user_id(runtime)
     if target.startswith("skill://"):
-        user_id = resolve_runtime_user_id(runtime)
         storage = get_or_new_user_skill_storage(user_id)
         return InstalledSkillReader.from_target(target, storage=storage).read()
 
     path = Path(target).expanduser()
-    _ensure_local_target_allowed(path)
+    _ensure_local_target_allowed(path, user_id=user_id)
     if path.suffix == ".skill":
         return ArchivePackageReader(path).read()
     return LocalDirectoryReader(path).read()
 
 
-def _ensure_local_target_allowed(path: Path) -> None:
+def _ensure_local_target_allowed(path: Path, *, user_id: str) -> None:
     resolved = path.resolve()
-    allowed_roots: list[Path] = [Path.cwd().resolve(), Path("/tmp").resolve()]
+    # Never allow the Gateway cwd or /tmp: DEER_FLOW_HOME sits under the cwd in
+    # every documented deployment, so those roots expose other users' data.
+    allowed_roots: list[Path] = [get_paths().user_dir(make_safe_user_id(user_id)).resolve()]
     try:
         storage = get_or_new_skill_storage()
         allowed_roots.append(storage.get_skills_root_path().resolve())
@@ -131,7 +134,7 @@ def _ensure_local_target_allowed(path: Path) -> None:
             continue
         _ensure_local_target_is_package_or_archive(resolved)
         return
-    raise ValueError("Local review targets must be under the current workspace, /tmp, or the configured skills root")
+    raise ValueError("Local review targets must be under the caller's user directory or the configured skills root")
 
 
 def _ensure_local_target_is_package_or_archive(path: Path) -> None:
