@@ -2,6 +2,7 @@ import asyncio
 import json
 import tempfile
 import threading
+import time
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -585,7 +586,7 @@ async def _on_message_from_lark_thread(channel: FeishuChannel, event) -> None:
     await asyncio.to_thread(channel._on_message, event)
 
 
-async def _on_message_from_sdk_loop(channel: FeishuChannel, event) -> None:
+async def _on_message_from_sdk_loop(channel: FeishuChannel, event) -> float:
     """Drive ``_on_message`` exactly as lark-oapi 1.5.5 does in production.
 
     ``FeishuChannel._run_ws`` gives the SDK thread its own event loop and
@@ -599,19 +600,54 @@ async def _on_message_from_sdk_loop(channel: FeishuChannel, event) -> None:
     """
     channel._main_loop = asyncio.get_running_loop()
 
-    def sdk_thread() -> None:
+    def sdk_thread() -> float:
         sdk_loop = asyncio.new_event_loop()
         try:
 
-            async def frame_handler() -> None:
+            async def frame_handler() -> float:
                 assert asyncio.get_running_loop() is sdk_loop
+                started = time.monotonic()
                 channel._on_message(event)  # synchronous call from inside the SDK's running loop
+                return time.monotonic() - started  # how long the SDK's loop was blocked
 
-            sdk_loop.run_until_complete(frame_handler())
+            return sdk_loop.run_until_complete(frame_handler())
         finally:
             sdk_loop.close()
 
-    await asyncio.to_thread(sdk_thread)
+    return await asyncio.to_thread(sdk_thread)
+
+
+class _GatedStore:
+    """A channel store whose database only answers once ``gate`` is set (slow or hung DB)."""
+
+    def __init__(self, inner: JsonChannelStore, gate: asyncio.Event) -> None:
+        self.inner = inner
+        self.gate = gate
+        self.lookups = 0
+        self.channels_dir = inner.channels_dir
+
+    async def get_thread_id(self, channel_name, chat_id, topic_id=None):
+        self.lookups += 1
+        await self.gate.wait()
+        return await self.inner.get_thread_id(channel_name, chat_id, topic_id=topic_id)
+
+    async def set_thread_id(self, channel_name, chat_id, thread_id, *, topic_id=None, user_id=""):
+        await self.gate.wait()
+        await self.inner.set_thread_id(channel_name, chat_id, thread_id, topic_id=topic_id, user_id=user_id)
+
+
+async def _eventually(predicate, *, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        assert time.monotonic() < deadline, "condition not met in time"
+        await asyncio.sleep(0.01)
+
+
+def _fast_store_budgets(monkeypatch, *, total: float = 5.0) -> None:
+    monkeypatch.setattr(feishu_module, "FEISHU_STORE_LOOKUP_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(feishu_module, "FEISHU_STORE_BRIDGE_TIMEOUT_SECONDS", 0.3)
+    monkeypatch.setattr(feishu_module, "FEISHU_STORE_RESOLVE_RETRY_BACKOFF_SECONDS", 0.05)
+    monkeypatch.setattr(feishu_module, "FEISHU_STORE_RESOLVE_TOTAL_BUDGET_SECONDS", total)
 
 
 def test_feishu_on_message_reuses_stored_parent_topic_for_card_replies():
@@ -651,8 +687,10 @@ def test_feishu_on_message_reuses_stored_parent_topic_for_card_replies():
     _run(go())
 
 
-def test_feishu_on_message_skips_the_store_lookup_without_a_running_gateway_loop(caplog):
-    """No loop to bridge to (direct construction, no ``start()``): the mapping is not consulted and the message still routes."""
+def test_feishu_on_message_drops_a_store_backed_message_without_a_running_gateway_loop(caplog):
+    """No loop to bridge to (direct construction, no ``start()``): the mapping cannot be
+    consulted, so the message is dropped with a warning — an unresolved lookup is never
+    routed as a miss onto the unknown root (nothing could dispatch it without the loop anyway)."""
     store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
     channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test", "channel_store": store})
     event = _make_text_event("prod", message_id="msg_reply", root_id="om_root", parent_id="om_card")
@@ -663,8 +701,98 @@ def test_feishu_on_message_skips_the_store_lookup_without_a_running_gateway_loop
         with caplog.at_level("WARNING", logger="app.channels.feishu"):
             channel._on_message(event)
 
-    assert mock_make_inbound.call_args.kwargs["metadata"]["topic_id"] == "om_root"
+    mock_make_inbound.assert_not_called()
     assert "main loop not running, cannot resolve_topic_mapping" in caplog.text
+    assert "dropping message msg_reply" in caplog.text
+
+
+def test_feishu_slow_store_defers_the_reply_until_it_resolves_to_the_mapped_parent_thread(monkeypatch, caplog):
+    """Thread 4 of the #6558 review: a lookup the database answers late is *unresolved*, not a
+    miss. The reply (parent card mapped to thread A, root unmapped) is not dispatched until
+    the store answers, then routes to A; no new conversation, no alias overwrite, and the
+    SDK's loop is never blocked past the short bridge bound."""
+
+    async def go():
+        _fast_store_budgets(monkeypatch)
+        inner = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        await inner.set_thread_id("feishu", "chat_1", "thread-a", topic_id="om_card", user_id="user_1")
+        gate = asyncio.Event()
+        store = _GatedStore(inner, gate)
+        channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test", "channel_store": store})
+        dispatched: list = []
+        monkeypatch.setattr(channel, "_schedule_prepare_inbound", lambda msg_id, inbound, **kwargs: dispatched.append(inbound))
+        event = _make_text_event("answer", message_id="msg_reply", root_id="om_unknown_root", parent_id="om_card")
+
+        with caplog.at_level("WARNING", logger="app.channels.feishu"):
+            blocked_for = await _on_message_from_sdk_loop(channel, event)
+            assert blocked_for < feishu_module.FEISHU_STORE_BRIDGE_TIMEOUT_SECONDS + 0.5  # the lark loop is released at the short bound
+            assert dispatched == []  # unresolved: not routed as a miss
+            await asyncio.sleep(0.3)
+            assert dispatched == []  # still waiting for the database, retrying on the Gateway loop
+
+            gate.set()
+            await _eventually(lambda: len(dispatched) == 1)
+
+        inbound = dispatched[0]
+        assert inbound.topic_id == "om_card" and inbound.metadata["topic_id"] == "om_card"  # thread A, not the unknown root
+        assert inbound.thread_ts == "msg_reply"
+        assert await inner.get_thread_id("feishu", "chat_1", topic_id="om_card") == "thread-a"  # no alias overwrite
+        assert "dropping message" not in caplog.text
+        assert "Gateway loop itself" not in caplog.text
+
+    _run(go())
+
+
+def test_feishu_store_that_never_answers_drops_the_message_instead_of_opening_a_new_conversation(monkeypatch, caplog):
+    async def go():
+        _fast_store_budgets(monkeypatch, total=0.6)
+        inner = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        await inner.set_thread_id("feishu", "chat_1", "thread-a", topic_id="om_card", user_id="user_1")
+        store = _GatedStore(inner, asyncio.Event())  # never set
+        channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test", "channel_store": store})
+        dispatched: list = []
+        monkeypatch.setattr(channel, "_schedule_prepare_inbound", lambda msg_id, inbound, **kwargs: dispatched.append(inbound))
+        event = _make_text_event("answer", message_id="msg_reply", root_id="om_unknown_root", parent_id="om_card")
+
+        with caplog.at_level("WARNING", logger="app.channels.feishu"):
+            await _on_message_from_sdk_loop(channel, event)
+            await _eventually(lambda: "dropping message msg_reply" in caplog.text)
+            await asyncio.sleep(0.2)
+
+        assert dispatched == []  # never routed as a miss
+        assert await inner.get_thread_id("feishu", "chat_1", topic_id="om_card") == "thread-a"
+        assert store.lookups >= 2  # it kept retrying up to the total budget before giving up
+
+    _run(go())
+
+
+def test_feishu_deferred_messages_keep_per_chat_fifo_order(monkeypatch):
+    """A later message for the same chat must not overtake a deferred predecessor."""
+
+    async def go():
+        _fast_store_budgets(monkeypatch)
+        inner = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        await inner.set_thread_id("feishu", "chat_1", "thread-a", topic_id="om_card", user_id="user_1")
+        gate = asyncio.Event()
+        store = _GatedStore(inner, gate)
+        channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test", "channel_store": store})
+        dispatched: list = []
+        monkeypatch.setattr(channel, "_schedule_prepare_inbound", lambda msg_id, inbound, **kwargs: dispatched.append(inbound))
+
+        await _on_message_from_sdk_loop(channel, _make_text_event("first", message_id="msg_first", root_id="om_unknown_root", parent_id="om_card"))
+        # Needs no store answer itself (no root/parent/thread), but queues behind the deferred predecessor.
+        blocked_for = await _on_message_from_sdk_loop(channel, _make_text_event("second", message_id="msg_second"))
+        assert blocked_for < 0.2
+        await asyncio.sleep(0.3)
+        assert dispatched == []
+
+        gate.set()
+        await _eventually(lambda: len(dispatched) == 2)
+        assert [inbound.thread_ts for inbound in dispatched] == ["msg_first", "msg_second"]
+        assert dispatched[0].topic_id == "om_card"
+        assert dispatched[1].topic_id == "msg_second"
+
+    _run(go())
 
 
 def test_feishu_sdk_loop_callback_still_consults_the_stored_parent_mapping(caplog):
@@ -729,7 +857,8 @@ def test_feishu_sdk_loop_callback_restores_the_pending_mapping_through_the_bridg
 
 def test_feishu_store_bridge_refuses_to_block_the_gateway_loop_itself(caplog):
     """Only a wait issued from the Gateway loop itself is refused: it would block the loop
-    that has to run the submitted coroutine. The coroutine factory is never invoked."""
+    that has to run the submitted coroutine. The refusal is reported as *unresolved* (never
+    a miss) and the coroutine factory is never invoked."""
 
     async def go():
         store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
@@ -743,9 +872,9 @@ def test_feishu_store_bridge_refuses_to_block_the_gateway_loop_itself(caplog):
             return store.get_thread_id("feishu", "chat_1", topic_id="om_card")
 
         with caplog.at_level("WARNING", logger="app.channels.feishu"):
-            result = channel._run_store_call(make_coroutine, name="resolve_topic_mapping", msg_id="msg_1", default="fallback")
+            with pytest.raises(feishu_module.StoreLookupUnresolved):
+                channel._run_store_call(make_coroutine, name="resolve_topic_mapping", msg_id="msg_1")
 
-        assert result == "fallback"
         assert factory_calls == 0
         assert "resolve_topic_mapping requested on the Gateway loop itself" in caplog.text
 

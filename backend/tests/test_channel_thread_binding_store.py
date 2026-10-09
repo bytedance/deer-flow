@@ -39,6 +39,7 @@ from support.postgres import asyncpg_test_url
 from app.channels.store import ChannelStore, JsonChannelStore, SqlChannelStore, resolve_channel_store
 from deerflow.persistence.base import Base
 from deerflow.persistence.channel_thread_bindings import ChannelThreadBinding, ChannelThreadBindingRow, SqlChannelThreadBindingRepository, binding_key, split_binding_key
+from deerflow.persistence.channel_thread_bindings.model import CHANNEL_NAME_LENGTH, CHAT_ID_LENGTH, TOPIC_ID_LENGTH, USER_ID_LENGTH
 from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 
 pytestmark = pytest.mark.asyncio
@@ -402,7 +403,10 @@ async def test_import_keeps_a_corrupt_or_malformed_file_and_skips_bad_entries(tm
         corrupt.write_text("not json", encoding="utf-8")
         with caplog.at_level(logging.WARNING, logger="app.channels.store"):
             assert await _sql_store(engine, legacy_path=corrupt).import_legacy_json() == 0
-        assert corrupt.exists() and "Corrupt" in caplog.text
+        assert corrupt.exists()
+        # Import-path wording: nothing "starts fresh" here, the file is kept and the import skipped.
+        assert "Corrupt legacy channel store at" in caplog.text and "skipping the import (file kept)" in caplog.text
+        assert "starting fresh" not in caplog.text
 
         partial = tmp_path / "partial" / "store.json"
         _write_legacy(
@@ -417,13 +421,60 @@ async def test_import_keeps_a_corrupt_or_malformed_file_and_skips_bad_entries(tm
         store = _sql_store(engine, legacy_path=partial)
         with caplog.at_level(logging.WARNING, logger="app.channels.store"):
             assert await store.import_legacy_json() == 2
-        assert "2" in caplog.text
+        assert "Skipping 2 malformed or oversized entries" in caplog.text
         assert await store.get_thread_id("slack", "C1") == "good"
         assert await store.get_thread_id("slack", "C2") is None
         assert await store.get_thread_id("slack", "C3") is None
         (c4,) = [e for e in await store.list_entries() if e["chat_id"] == "C4"]
         assert c4["user_id"] == "" and c4["created_at"] == pytest.approx(time.time(), abs=60) and c4["updated_at"] == c4["created_at"]
         assert not partial.exists() and partial.with_name("store.json.migrated").exists()
+    finally:
+        await engine.dispose()
+
+
+async def test_import_skips_oversized_components_instead_of_failing_the_whole_import(tmp_path, caplog):
+    """A key component longer than its column would make PostgreSQL reject the batch
+    (``value too long for type character varying``) and take every IM channel down
+    with the failed ``ChannelService.start()``; SQLite would silently accept it, so
+    the two backends diverged on the same file. Oversized entries are skipped and
+    counted with the malformed ones; the rest import and the file is still renamed."""
+    path = tmp_path / "channels" / "store.json"
+    _write_legacy(
+        path,
+        {
+            "slack:C1": _legacy_entry("thread-1"),
+            f"slack:{'c' * (CHAT_ID_LENGTH + 1)}": _legacy_entry("thread-long-chat"),
+            f"slack:C2:{'t' * (TOPIC_ID_LENGTH + 1)}": _legacy_entry("thread-long-topic"),
+            "slack:C3": _legacy_entry("thread-3"),
+            f"{'x' * (CHANNEL_NAME_LENGTH + 1)}:C4": _legacy_entry("thread-long-channel"),
+            "slack:C5": _legacy_entry("u" * (USER_ID_LENGTH + 1), user_id="u" * (USER_ID_LENGTH + 1)),
+        },
+    )
+    engine = await _sqlite_engine(tmp_path / "bindings.db")
+    try:
+        store = _sql_store(engine, legacy_path=path)
+        with caplog.at_level(logging.WARNING, logger="app.channels.store"):
+            assert await store.import_legacy_json() == 2
+        assert "Skipping 4 malformed or oversized entries" in caplog.text
+        assert await store.get_thread_id("slack", "C1") == "thread-1"
+        assert await store.get_thread_id("slack", "C3") == "thread-3"
+        assert await store.get_thread_id("slack", "c" * (CHAT_ID_LENGTH + 1)) is None
+        assert await store.get_thread_id("slack", "C2", topic_id="t" * (TOPIC_ID_LENGTH + 1)) is None
+        assert len(await store.list_entries()) == 2
+        assert not path.exists() and path.with_name("store.json.migrated").exists()
+    finally:
+        await engine.dispose()
+
+
+async def test_sqlite_accepts_an_oversized_row_so_the_import_validator_is_the_only_guard(tmp_path):
+    """Why the validator matters: SQLite ignores ``String(n)``, so without it the same
+    file imports cleanly on SQLite and fails on PostgreSQL."""
+    engine = await _sqlite_engine(tmp_path / "bindings.db")
+    try:
+        repo = SqlChannelThreadBindingRepository(async_sessionmaker(engine, expire_on_commit=False))
+        oversized = ChannelThreadBinding.build("slack", "c" * (CHAT_ID_LENGTH + 1), "thread-x", now=1.0)
+        assert await repo.insert_missing([oversized]) == 1
+        assert await repo.get_thread_id(oversized.key) == "thread-x"
     finally:
         await engine.dispose()
 

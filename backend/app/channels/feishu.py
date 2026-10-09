@@ -9,8 +9,11 @@ import re
 import stat
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Coroutine
 from concurrent.futures import CancelledError as FutureCancelledError
+from concurrent.futures import Future
+from dataclasses import dataclass
 from typing import Any, Literal, TypeVar
 
 from app.channels.base import Channel, ChannelStopTimeout
@@ -39,9 +42,74 @@ from deerflow.uploads.manager import (
 
 logger = logging.getLogger(__name__)
 PENDING_CLARIFICATION_TTL_SECONDS = 30 * 60
-# Bound on a lark-thread wait for a channel-store call routed through the Gateway loop.
-FEISHU_STORE_BRIDGE_TIMEOUT_SECONDS = 10.0
+# Channel-store deadlines. ``_on_message`` runs on lark-oapi's private event loop,
+# which also carries the SDK's websocket reads, pongs and its 120s ping loop:
+# every second the bridge blocks that loop is a second the connection cannot
+# service keepalives, so the bound is a few seconds (one indexed SELECT per
+# candidate), not the database's 30s command timeout. The deadline lives on the
+# Gateway-loop side (``asyncio.wait_for`` around the store calls, which actually
+# cancels them); the bridge wait only adds slack for a stalled Gateway loop.
+FEISHU_STORE_LOOKUP_TIMEOUT_SECONDS = 3.0
+FEISHU_STORE_BRIDGE_TIMEOUT_SECONDS = FEISHU_STORE_LOOKUP_TIMEOUT_SECONDS + 1.0
+# A lookup that missed its deadline (or failed) is *unresolved*, never a miss:
+# the message is deferred to the Gateway loop, which retries with backoff up to
+# the database's own command budget and then drops it rather than opening a new
+# conversation for a reply whose mapping the database could still have served.
+FEISHU_STORE_RESOLVE_TOTAL_BUDGET_SECONDS = 30.0
+FEISHU_STORE_RESOLVE_RETRY_BACKOFF_SECONDS = 1.0
+FEISHU_STORE_RESOLVE_RETRY_MAX_BACKOFF_SECONDS = 8.0
 _T = TypeVar("_T")
+
+
+class StoreLookupUnresolved(Exception):
+    """A channel-store call produced no answer: deadline, store error, no Gateway loop, or channel stop.
+
+    Distinct from a *miss* (the store answered "no mapping"): an unresolved lookup
+    must never route a message as if the mapping did not exist.
+    """
+
+    def __init__(self, reason: str, *, future: Future[Any] | None = None) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        # The still-running bridge future when the lark-thread wait gave up before
+        # the coroutine's own deadline; the deferred path awaits its outcome first.
+        self.future = future
+
+
+@dataclass(slots=True)
+class _ParsedMessage:
+    """The content of one lark message event, independent of how it is routed."""
+
+    chat_id: str
+    msg_id: str
+    sender_id: str
+    root_id: str | None
+    parent_id: str | None
+    feishu_thread_id: str | None
+    chat_type: str | None
+    text: str
+    files: list[dict[str, Any]]
+    msg_type: InboundMessageType = InboundMessageType.CHAT
+
+
+@dataclass(frozen=True, slots=True)
+class _Routing:
+    """Where a parsed message goes: resolved (stored mapping), plain miss, or pending clarification."""
+
+    topic_id: str | None
+    from_stored_mapping: bool
+    from_pending: bool
+
+
+@dataclass(slots=True)
+class _RoutingAttempt:
+    """Retry state for one message: once a pending clarification is consumed the route is decided."""
+
+    parsed: _ParsedMessage
+    pending: dict[str, Any] | None = None
+    attempted: bool = False
+
+
 FEISHU_INBOUND_BATCH_WINDOW_SECONDS = 0.75
 FEISHU_MAX_INBOUND_FILE_BYTES = 20_000_000
 SOURCE_PREVIEW_METADATA_KEY = "feishu_source_preview"
@@ -90,6 +158,10 @@ class FeishuChannel(Channel):
         self._CreateImageRequestBody = None
         self._GetMessageResourceRequest = None
         self._thread_lock = threading.Lock()
+        # Per-chat FIFO of messages whose routing is deferred to the Gateway loop
+        # (unresolved store lookups); guarded by ``_thread_lock``. A chat with a
+        # queue has one drain task owning that deque.
+        self._deferred_routing: dict[str, deque[_RoutingAttempt]] = {}
 
     @staticmethod
     def _non_empty_str(value: Any) -> str | None:
@@ -782,13 +854,14 @@ class FeishuChannel(Channel):
             except Exception:
                 logger.exception("[Feishu] failed to remember thread mapping for topic_id=%s", topic_id)
 
-    def _run_store_call(self, make_coroutine: Callable[[], Coroutine[Any, Any, _T]], *, name: str, msg_id: Any, default: _T) -> _T:
+    def _run_store_call(self, make_coroutine: Callable[[], Coroutine[Any, Any, _T]], *, name: str, msg_id: Any) -> _T:
         """Run an async ``channel_store`` call from the synchronous lark callback.
 
         The store is async (it may be the shared database table). ``_on_message``
         runs on lark-oapi's thread, so the call is submitted to the Gateway loop
         (``_main_loop``) through the tracked threadsafe-future helper (``stop()``
-        drains or cancels it) and awaited here with a bound.
+        drains or cancels it) and awaited here for at most
+        ``FEISHU_STORE_BRIDGE_TIMEOUT_SECONDS``.
 
         That callback does run inside an event loop: ``_run_ws`` gives the SDK
         thread its own loop and lark-oapi 1.5.5 calls ``_on_message``
@@ -798,34 +871,40 @@ class FeishuChannel(Channel):
         on the JSON file rewrite the store did inline — because the coroutine runs
         on the Gateway loop, not on it. The only wait that must be refused is one
         issued from the Gateway loop itself (``get_running_loop() is _main_loop``):
-        it would block the loop that has to execute the submitted coroutine. That
-        case, and a Gateway loop that is not running, return ``default`` with a
-        warning. Exceptions the call raised propagate to the caller's own ``except``.
+        it would block the loop that has to execute the submitted coroutine.
+
+        Every way of *not* getting an answer — no running Gateway loop, called on
+        the Gateway loop, channel stopping, bridge wait exhausted, cancelled by
+        stop, or the coroutine's own ``StoreLookupUnresolved`` — raises
+        ``StoreLookupUnresolved`` so the caller can defer the message; a timed-out
+        wait is never reported as "no mapping". Other exceptions the coroutine
+        raised propagate unchanged.
         """
         loop = self._main_loop
         if loop is None or not loop.is_running():
             logger.warning("[Feishu] main loop not running, cannot %s", name)
-            return default
+            raise StoreLookupUnresolved("main loop not running")
         try:
             current = asyncio.get_running_loop()
         except RuntimeError:
             current = None
         if current is loop:
             logger.warning("[Feishu] %s requested on the Gateway loop itself; a blocking wait here would deadlock it, skipping the channel store call", name)
-            return default
+            raise StoreLookupUnresolved("called on the Gateway loop")
         future = self._submit_threadsafe_coroutine_future(make_coroutine(), loop, name=name, msg_id=msg_id)
         if future is None:
             logger.info("[Feishu] channel stopping, skipped %s", name)
-            return default
+            raise StoreLookupUnresolved("channel stopping")
         try:
             return future.result(timeout=FEISHU_STORE_BRIDGE_TIMEOUT_SECONDS)
         except TimeoutError:
-            future.cancel()
-            logger.warning("[Feishu] %s did not complete within %.0fs; continuing without the stored mapping", name, FEISHU_STORE_BRIDGE_TIMEOUT_SECONDS)
-            return default
+            # Not cancelled: the coroutine carries its own deadline and the
+            # deferred path awaits its outcome before retrying.
+            logger.warning("[Feishu] %s did not answer within %.0fs; deferring message %s", name, FEISHU_STORE_BRIDGE_TIMEOUT_SECONDS, msg_id)
+            raise StoreLookupUnresolved("bridge wait exhausted", future=future) from None
         except FutureCancelledError:
             logger.info("[Feishu] %s cancelled by channel stop", name)
-            return default
+            raise StoreLookupUnresolved("cancelled by channel stop") from None
 
     def _remember_pending_clarification(self, msg: OutboundMessage, card_message_id: str | None) -> None:
         if not msg.is_final or msg.metadata.get(PENDING_CLARIFICATION_METADATA_KEY) is not True:
@@ -880,55 +959,213 @@ class FeishuChannel(Channel):
             self._pending_clarifications.pop(key, None)
             return None
 
-    def _ensure_pending_thread_mapping(self, chat_id: str, user_id: str, pending: dict[str, Any]) -> None:
+    def _route_without_store(self, parsed: _ParsedMessage) -> _Routing:
+        """Routing for a channel constructed without a ``channel_store`` (no lookups possible)."""
+        topic_id: str | None = parsed.root_id or parsed.msg_id
+        if parsed.chat_type == "p2p":
+            topic_id = None
+        if parsed.msg_type != InboundMessageType.CHAT:
+            return _Routing(topic_id, False, False)
+        pending = self._consume_pending_clarification(parsed.chat_id, parsed.sender_id)
+        pending_topic_id = self._non_empty_str(pending.get("topic_id")) if pending else None
+        if not pending_topic_id:
+            return _Routing(topic_id, False, False)
+        return _Routing(pending_topic_id, False, True)
+
+    async def _resolve_routing(self, attempt: _RoutingAttempt) -> _Routing:
+        """Decide a message's topic on the Gateway loop, consulting and updating the channel store.
+
+        Stored mappings for the root / parent / thread ids win (``_first_stored_topic``);
+        otherwise the route is the root (or the message itself; ``None`` in P2P chats),
+        unless a pending clarification for the sender names a topic — that topic's
+        mapping is then persisted so the manager finds the clarified thread. The
+        pending clarification is consumed once: a retried attempt keeps the decision
+        and only redoes the write.
+        """
         store = self.config.get("channel_store")
-        topic_id = self._non_empty_str(pending.get("topic_id"))
-        thread_id = self._non_empty_str(pending.get("thread_id"))
-        if store is None or not topic_id or not thread_id:
-            return
+        parsed = attempt.parsed
+        if attempt.pending is None:
+            candidates = [candidate for candidate in (self._non_empty_str(parsed.root_id), parsed.parent_id, parsed.feishu_thread_id) if candidate]
+            if candidates:
+                stored = await self._first_stored_topic(store, parsed.chat_id, candidates)
+                if stored:
+                    return _Routing(stored, True, False)
+            topic_id: str | None = parsed.root_id or parsed.msg_id
+            if parsed.chat_type == "p2p":
+                topic_id = None
+            if parsed.msg_type != InboundMessageType.CHAT:
+                return _Routing(topic_id, False, False)
+            pending = self._consume_pending_clarification(parsed.chat_id, parsed.sender_id)
+            if not (pending and self._non_empty_str(pending.get("topic_id"))):
+                return _Routing(topic_id, False, False)
+            attempt.pending = pending
+        pending_topic_id = self._non_empty_str(attempt.pending.get("topic_id"))
+        thread_id = self._non_empty_str(attempt.pending.get("thread_id"))
+        if thread_id:
+            await store.set_thread_id(self.name, parsed.chat_id, thread_id, topic_id=pending_topic_id, user_id=parsed.sender_id)
+        return _Routing(pending_topic_id, False, True)
+
+    async def _resolve_routing_bounded(self, attempt: _RoutingAttempt) -> _Routing:
+        """``_resolve_routing`` under the store deadline; no answer in time (or a store error) is *unresolved*."""
+        attempt.attempted = True
         try:
-            self._run_store_call(
-                lambda: store.set_thread_id(self.name, chat_id, thread_id, topic_id=topic_id, user_id=user_id),
-                name="restore_pending_mapping",
-                msg_id=topic_id,
-                default=None,
-            )
-        except Exception:
-            logger.exception("[Feishu] failed to restore pending clarification mapping for topic_id=%s", topic_id)
-
-    def _resolve_topic_id(
-        self,
-        chat_id: str,
-        msg_id: str,
-        *,
-        root_id: str | None,
-        parent_id: str | None,
-        thread_id: str | None,
-    ) -> tuple[str, bool]:
-        store = self.config.get("channel_store")
-        candidates = [candidate for candidate in (self._non_empty_str(root_id), self._non_empty_str(parent_id), self._non_empty_str(thread_id)) if candidate]
-
-        if store is not None and candidates:
-            stored = self._run_store_call(
-                lambda: self._first_stored_topic(store, chat_id, candidates),
-                name="resolve_topic_mapping",
-                msg_id=msg_id,
-                default=None,
-            )
-            if stored:
-                return stored, True
-
-        return root_id or msg_id, False
+            return await asyncio.wait_for(self._resolve_routing(attempt), FEISHU_STORE_LOOKUP_TIMEOUT_SECONDS)
+        except TimeoutError:
+            raise StoreLookupUnresolved(f"channel store did not answer within {FEISHU_STORE_LOOKUP_TIMEOUT_SECONDS:.0f}s") from None
+        except StoreLookupUnresolved:
+            raise
+        except Exception as exc:
+            # A failing store is not "no mapping": routing on it would open a new
+            # conversation for a reply whose thread the database still knows.
+            logger.warning("[Feishu] channel store call failed for message %s (%s); treating the lookup as unresolved", attempt.parsed.msg_id, exc.__class__.__name__, exc_info=True)
+            raise StoreLookupUnresolved(f"channel store error: {exc.__class__.__name__}") from exc
 
     async def _first_stored_topic(self, store: Any, chat_id: str, candidates: list[str]) -> str | None:
         """The first candidate topic id the store already maps to a thread, in priority order."""
         for candidate in candidates:
-            try:
-                if await store.get_thread_id(self.name, chat_id, topic_id=candidate):
-                    return candidate
-            except Exception:
-                logger.exception("[Feishu] failed to resolve stored topic mapping for topic_id=%s", candidate)
+            if await store.get_thread_id(self.name, chat_id, topic_id=candidate):
+                return candidate
         return None
+
+    def _defer_routing(self, attempt: _RoutingAttempt, unresolved: StoreLookupUnresolved) -> None:
+        """Hand an unresolved message to the Gateway loop (lark thread; never blocks).
+
+        The chat gets a FIFO deque and one drain task; later messages for the same
+        chat queue behind it in ``_on_message`` so none overtakes a deferred
+        predecessor onto a different thread. Without a running Gateway loop the
+        message is dropped (logged) — nothing could dispatch it anyway.
+        """
+        parsed = attempt.parsed
+        loop = self._main_loop
+        if loop is None or not loop.is_running():
+            logger.warning("[Feishu] dropping message %s for chat %s: %s and no Gateway loop to defer it to", parsed.msg_id, parsed.chat_id, unresolved.reason)
+            return
+        queue: deque[_RoutingAttempt] = deque([attempt])
+        with self._thread_lock:
+            existing = self._deferred_routing.get(parsed.chat_id)
+            if existing is not None:
+                existing.append(attempt)
+                return
+            self._deferred_routing[parsed.chat_id] = queue
+        scheduled = self._submit_threadsafe_coroutine(
+            self._drain_deferred_routing(parsed.chat_id, queue, unresolved.future),
+            loop,
+            name="deferred_routing",
+            msg_id=parsed.msg_id,
+        )
+        if not scheduled:
+            with self._thread_lock:
+                if self._deferred_routing.get(parsed.chat_id) is queue:
+                    del self._deferred_routing[parsed.chat_id]
+            logger.warning("[Feishu] dropping message %s for chat %s: %s and the channel is stopping", parsed.msg_id, parsed.chat_id, unresolved.reason)
+            return
+        logger.info("[Feishu] deferred message %s for chat %s: %s; retrying on the Gateway loop for up to %.0fs", parsed.msg_id, parsed.chat_id, unresolved.reason, FEISHU_STORE_RESOLVE_TOTAL_BUDGET_SECONDS)
+
+    async def _drain_deferred_routing(self, chat_id: str, queue: deque[_RoutingAttempt], first_future: Future[Any] | None) -> None:
+        """Resolve and dispatch a chat's deferred messages in order, then retire the queue."""
+        try:
+            while True:
+                with self._thread_lock:
+                    if not queue:
+                        if self._deferred_routing.get(chat_id) is queue:
+                            del self._deferred_routing[chat_id]
+                        return
+                    attempt = queue[0]
+                routing: _Routing | None = None
+                if first_future is not None:
+                    # The lark thread's own call may still finish (its deadline is
+                    # the coroutine's); use that answer before spending retries.
+                    pending_first, first_future = first_future, None
+                    try:
+                        routing = await asyncio.shield(asyncio.wrap_future(pending_first))
+                    except StoreLookupUnresolved:
+                        routing = None
+                if routing is None:
+                    routing = await self._retry_routing(attempt)
+                try:
+                    if routing is None:
+                        logger.warning(
+                            "[Feishu] dropping message %s for chat %s: the channel store did not answer within %.0fs; not routing it as a new conversation",
+                            attempt.parsed.msg_id,
+                            chat_id,
+                            FEISHU_STORE_RESOLVE_TOTAL_BUDGET_SECONDS,
+                        )
+                    else:
+                        self._dispatch_inbound(attempt.parsed, routing)
+                finally:
+                    with self._thread_lock:
+                        if queue and queue[0] is attempt:
+                            queue.popleft()
+        finally:
+            with self._thread_lock:
+                leftover = len(queue)
+                queue.clear()
+                if self._deferred_routing.get(chat_id) is queue:
+                    del self._deferred_routing[chat_id]
+            if leftover:
+                logger.warning("[Feishu] dropping %d deferred messages for chat %s: the channel is stopping", leftover, chat_id)
+
+    async def _retry_routing(self, attempt: _RoutingAttempt) -> _Routing | None:
+        """Retry the bounded resolution with backoff until the total budget; ``None`` when it never answered."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + FEISHU_STORE_RESOLVE_TOTAL_BUDGET_SECONDS
+        backoff = FEISHU_STORE_RESOLVE_RETRY_BACKOFF_SECONDS
+        while True:
+            if attempt.attempted:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    return None
+                await asyncio.sleep(min(backoff, remaining))
+                backoff = min(backoff * 2, FEISHU_STORE_RESOLVE_RETRY_MAX_BACKOFF_SECONDS)
+            try:
+                return await self._resolve_routing_bounded(attempt)
+            except StoreLookupUnresolved as exc:
+                logger.debug("[Feishu] retrying routing for message %s: %s", attempt.parsed.msg_id, exc.reason)
+
+    def _dispatch_inbound(self, parsed: _ParsedMessage, routing: _Routing) -> None:
+        """Build the inbound for a routed message and hand it to batching / the Gateway loop."""
+        try:
+            source_preview = None
+            if self._should_include_source_preview(chat_type=parsed.chat_type, root_id=parsed.root_id, parent_id=parsed.parent_id, thread_id=parsed.feishu_thread_id):
+                source_preview = self._compact_source_preview(parsed.text)
+
+            metadata = {
+                "message_id": parsed.msg_id,
+                "root_id": parsed.root_id,
+                "parent_id": parsed.parent_id,
+                "thread_id": parsed.feishu_thread_id,
+                "topic_id": routing.topic_id,
+                "user_id": parsed.sender_id,
+                RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY: routing.from_pending,
+            }
+            if source_preview:
+                metadata[SOURCE_PREVIEW_METADATA_KEY] = source_preview
+
+            inbound = self._make_inbound(
+                chat_id=parsed.chat_id,
+                user_id=parsed.sender_id,
+                text=parsed.text,
+                msg_type=parsed.msg_type,
+                thread_ts=parsed.msg_id,
+                files=parsed.files,
+                metadata=metadata,
+            )
+            inbound.topic_id = routing.topic_id
+
+            if self._is_batchable_file_inbound(
+                msg_type=parsed.msg_type,
+                text=parsed.text,
+                files=parsed.files,
+                root_id=parsed.root_id,
+                parent_id=parsed.parent_id,
+                thread_id=parsed.feishu_thread_id,
+            ):
+                self._queue_file_inbound_batch(parsed.msg_id, inbound)
+                return
+
+            self._schedule_prepare_inbound(parsed.msg_id, inbound)
+        except Exception:
+            logger.exception("[Feishu] error dispatching message %s", parsed.msg_id)
 
     @staticmethod
     def _is_batchable_file_inbound(
@@ -1134,93 +1371,110 @@ class FeishuChannel(Channel):
         await self._reply_card(message_id, "Feishu connected to DeerFlow.")
         return True
 
-    def _on_message(self, event) -> None:
-        """Called by lark-oapi when a message is received (runs in lark thread)."""
-        try:
-            logger.info("[Feishu] raw event received: type=%s", type(event).__name__)
-            message = event.event.message
-            chat_id = message.chat_id
-            msg_id = message.message_id
-            sender_id = event.event.sender.sender_id.open_id
+    def _parse_message_event(self, event) -> _ParsedMessage | None:
+        """Extract text, attachments and ids from a lark message event; ``None`` for an empty message."""
+        message = event.event.message
+        chat_id = message.chat_id
+        msg_id = message.message_id
+        sender_id = event.event.sender.sender_id.open_id
 
-            root_id = getattr(message, "root_id", None) or None
-            chat_type = getattr(message, "chat_type", None)
-            parent_id = self._non_empty_str(getattr(message, "parent_id", None))
-            feishu_thread_id = self._non_empty_str(getattr(message, "thread_id", None))
+        root_id = getattr(message, "root_id", None) or None
+        chat_type = getattr(message, "chat_type", None)
+        parent_id = self._non_empty_str(getattr(message, "parent_id", None))
+        feishu_thread_id = self._non_empty_str(getattr(message, "thread_id", None))
 
-            # Parse message content
-            content = json.loads(message.content)
+        # Parse message content
+        content = json.loads(message.content)
 
-            # files_list store the any-file-key in feishu messages, which can be used to download the file content later
-            # In Feishu channel, image_keys are independent of file_keys.
-            # The file_key includes files, videos, and audio, but does not include stickers.
-            files_list = []
+        # files_list store the any-file-key in feishu messages, which can be used to download the file content later
+        # In Feishu channel, image_keys are independent of file_keys.
+        # The file_key includes files, videos, and audio, but does not include stickers.
+        files_list = []
 
-            if "text" in content:
-                # Handle plain text messages
-                text = content["text"]
-            elif "file_key" in content:
-                file_key = content.get("file_key")
-                if isinstance(file_key, str) and file_key:
-                    files_list.append({"file_key": file_key})
-                    text = "[file]"
-                else:
-                    text = ""
-            elif "image_key" in content:
-                image_key = content.get("image_key")
-                if isinstance(image_key, str) and image_key:
-                    files_list.append({"image_key": image_key})
-                    text = "[image]"
-                else:
-                    text = ""
-            elif "content" in content and isinstance(content["content"], list):
-                # Handle rich-text messages with a top-level "content" list (e.g., topic groups/posts)
-                text_paragraphs: list[str] = []
-                for paragraph in content["content"]:
-                    if isinstance(paragraph, list):
-                        paragraph_text_parts: list[str] = []
-                        for element in paragraph:
-                            if isinstance(element, dict):
-                                # Include both normal text and @ mentions
-                                if element.get("tag") in ("text", "at"):
-                                    text_value = element.get("text", "")
-                                    if text_value:
-                                        paragraph_text_parts.append(text_value)
-                                elif element.get("tag") == "img":
-                                    image_key = element.get("image_key")
-                                    if isinstance(image_key, str) and image_key:
-                                        files_list.append({"image_key": image_key})
-                                        paragraph_text_parts.append("[image]")
-                                elif element.get("tag") in ("file", "media"):
-                                    file_key = element.get("file_key")
-                                    if isinstance(file_key, str) and file_key:
-                                        files_list.append({"file_key": file_key})
-                                        paragraph_text_parts.append("[file]")
-                        if paragraph_text_parts:
-                            # Join text segments within a paragraph with spaces to avoid "helloworld"
-                            text_paragraphs.append(" ".join(paragraph_text_parts))
-
-                # Join paragraphs with blank lines to preserve paragraph boundaries
-                text = "\n\n".join(text_paragraphs)
+        if "text" in content:
+            # Handle plain text messages
+            text = content["text"]
+        elif "file_key" in content:
+            file_key = content.get("file_key")
+            if isinstance(file_key, str) and file_key:
+                files_list.append({"file_key": file_key})
+                text = "[file]"
             else:
                 text = ""
-            text = text.strip()
+        elif "image_key" in content:
+            image_key = content.get("image_key")
+            if isinstance(image_key, str) and image_key:
+                files_list.append({"image_key": image_key})
+                text = "[image]"
+            else:
+                text = ""
+        elif "content" in content and isinstance(content["content"], list):
+            # Handle rich-text messages with a top-level "content" list (e.g., topic groups/posts)
+            text_paragraphs: list[str] = []
+            for paragraph in content["content"]:
+                if isinstance(paragraph, list):
+                    paragraph_text_parts: list[str] = []
+                    for element in paragraph:
+                        if isinstance(element, dict):
+                            # Include both normal text and @ mentions
+                            if element.get("tag") in ("text", "at"):
+                                text_value = element.get("text", "")
+                                if text_value:
+                                    paragraph_text_parts.append(text_value)
+                            elif element.get("tag") == "img":
+                                image_key = element.get("image_key")
+                                if isinstance(image_key, str) and image_key:
+                                    files_list.append({"image_key": image_key})
+                                    paragraph_text_parts.append("[image]")
+                            elif element.get("tag") in ("file", "media"):
+                                file_key = element.get("file_key")
+                                if isinstance(file_key, str) and file_key:
+                                    files_list.append({"file_key": file_key})
+                                    paragraph_text_parts.append("[file]")
+                    if paragraph_text_parts:
+                        # Join text segments within a paragraph with spaces to avoid "helloworld"
+                        text_paragraphs.append(" ".join(paragraph_text_parts))
 
-            logger.info(
-                "[Feishu] parsed message: chat_id=%s, msg_id=%s, root_id=%s, parent_id=%s, thread_id=%s, chat_type=%s, sender=%s, text_len=%d",
-                chat_id,
-                msg_id,
-                root_id,
-                parent_id,
-                feishu_thread_id,
-                chat_type,
-                sender_id,
-                len(text or ""),
-            )
+            # Join paragraphs with blank lines to preserve paragraph boundaries
+            text = "\n\n".join(text_paragraphs)
+        else:
+            text = ""
+        text = text.strip()
 
-            if not (text or files_list):
-                logger.info("[Feishu] empty text, ignoring message")
+        logger.info(
+            "[Feishu] parsed message: chat_id=%s, msg_id=%s, root_id=%s, parent_id=%s, thread_id=%s, chat_type=%s, sender=%s, text_len=%d",
+            chat_id,
+            msg_id,
+            root_id,
+            parent_id,
+            feishu_thread_id,
+            chat_type,
+            sender_id,
+            len(text or ""),
+        )
+
+        if not (text or files_list):
+            logger.info("[Feishu] empty text, ignoring message")
+            return None
+        return _ParsedMessage(
+            chat_id=chat_id,
+            msg_id=msg_id,
+            sender_id=sender_id,
+            root_id=root_id,
+            parent_id=parent_id,
+            feishu_thread_id=feishu_thread_id,
+            chat_type=chat_type,
+            text=text,
+            files=files_list,
+        )
+
+    def _on_message(self, event) -> None:
+        """Called by lark-oapi when a message is received (runs synchronously on the SDK's loop thread)."""
+        try:
+            parsed = self._parse_message_event(event)
+            if parsed is None:
                 return
+            msg_id, chat_id, sender_id, text = parsed.msg_id, parsed.chat_id, parsed.sender_id, parsed.text
 
             connect_code = self._pending_connect_code(text)
             if connect_code:
@@ -1251,75 +1505,29 @@ class FeishuChannel(Channel):
             # inbound so ChannelManager._handle_command parses the bare command.
             command_text = strip_leading_mentions(text)
             if _is_feishu_command(command_text):
-                msg_type = InboundMessageType.COMMAND
-                text = command_text
-            else:
-                msg_type = InboundMessageType.CHAT
+                parsed.msg_type = InboundMessageType.COMMAND
+                parsed.text = command_text
 
             # topic_id determines which LangGraph thread the message maps to.
             # P2P chats: topic_id=None so all messages share one thread (like Telegram DMs).
             # But check stored mappings first for backward compatibility with pre-upgrade P2P threads.
-            topic_id, resolved_from_stored_mapping = self._resolve_topic_id(
-                chat_id,
-                msg_id,
-                root_id=root_id,
-                parent_id=parent_id,
-                thread_id=feishu_thread_id,
-            )
-            if chat_type == "p2p" and not resolved_from_stored_mapping:
-                topic_id = None
-            resolved_from_pending = False
-            if msg_type == InboundMessageType.CHAT and not resolved_from_stored_mapping:
-                pending = self._consume_pending_clarification(chat_id, sender_id)
-                pending_topic_id = self._non_empty_str(pending.get("topic_id")) if pending else None
-                if pending_topic_id:
-                    topic_id = pending_topic_id
-                    self._ensure_pending_thread_mapping(chat_id, sender_id, pending)
-                    resolved_from_pending = True
-
-            source_preview = None
-            if self._should_include_source_preview(
-                chat_type=chat_type,
-                root_id=root_id,
-                parent_id=parent_id,
-                thread_id=feishu_thread_id,
-            ):
-                source_preview = self._compact_source_preview(text)
-
-            metadata = {
-                "message_id": msg_id,
-                "root_id": root_id,
-                "parent_id": parent_id,
-                "thread_id": feishu_thread_id,
-                "topic_id": topic_id,
-                "user_id": sender_id,
-                RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY: resolved_from_pending,
-            }
-            if source_preview:
-                metadata[SOURCE_PREVIEW_METADATA_KEY] = source_preview
-
-            inbound = self._make_inbound(
-                chat_id=chat_id,
-                user_id=sender_id,
-                text=text,
-                msg_type=msg_type,
-                thread_ts=msg_id,
-                files=files_list,
-                metadata=metadata,
-            )
-            inbound.topic_id = topic_id
-
-            if self._is_batchable_file_inbound(
-                msg_type=msg_type,
-                text=text,
-                files=files_list,
-                root_id=root_id,
-                parent_id=parent_id,
-                thread_id=feishu_thread_id,
-            ):
-                self._queue_file_inbound_batch(msg_id, inbound)
+            if self.config.get("channel_store") is None:
+                self._dispatch_inbound(parsed, self._route_without_store(parsed))
                 return
 
-            self._schedule_prepare_inbound(msg_id, inbound)
+            attempt = _RoutingAttempt(parsed)
+            with self._thread_lock:
+                queue = self._deferred_routing.get(chat_id)
+                if queue is not None:
+                    # Per-chat FIFO: never overtake a deferred predecessor onto another thread.
+                    queue.append(attempt)
+                    logger.info("[Feishu] queued message %s behind a deferred message for chat %s", msg_id, chat_id)
+                    return
+            try:
+                routing = self._run_store_call(lambda: self._resolve_routing_bounded(attempt), name="resolve_topic_mapping", msg_id=msg_id)
+            except StoreLookupUnresolved as unresolved:
+                self._defer_routing(attempt, unresolved)
+                return
+            self._dispatch_inbound(parsed, routing)
         except Exception:
             logger.exception("[Feishu] error processing message")

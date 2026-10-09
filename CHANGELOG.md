@@ -817,9 +817,13 @@ This release closes that milestone with **439 merged pull requests**.
   an existing `store.json` is imported once into an empty table (`INSERT … ON
   CONFLICT DO NOTHING`, so two replicas importing at the same time cannot
   duplicate a binding) and renamed `store.json.migrated`; a populated table
-  leaves the file untouched. The store API is async so the database never
-  blocks the Gateway loop; Feishu's synchronous lark callback bridges its
-  lookups to that loop with a bounded wait. ([#6558])
+  leaves the file untouched; entries whose key components exceed the table's
+  column widths are skipped and counted instead of failing the whole import.
+  The store API is async so the database never blocks the Gateway loop;
+  Feishu's synchronous lark callback bridges its lookups to that loop with a
+  short bounded wait, and a lookup the database does not answer in time is
+  retried on the Gateway loop (up to 30 s, then the message is dropped with a
+  warning) rather than routed as a missing mapping onto a new thread. ([#6558])
 - **channels:** `/goal <objective>` and `/goal clear` from an IM channel work
   again when Gateway auth is enabled (the default). Both sent their write with
   the internal auth token alone, and the Gateway's CSRF check, which does not

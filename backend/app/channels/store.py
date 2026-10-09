@@ -48,6 +48,7 @@ from typing import Any, Protocol
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.channel_thread_bindings import ChannelThreadBinding, SqlChannelThreadBindingRepository, binding_key, split_binding_key
+from deerflow.persistence.channel_thread_bindings.model import BINDING_KEY_LENGTH, CHANNEL_NAME_LENGTH, CHAT_ID_LENGTH, THREAD_ID_LENGTH, TOPIC_ID_LENGTH, USER_ID_LENGTH
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +125,7 @@ class JsonChannelStore:
 
     def _ensure_loaded(self) -> dict[str, dict[str, Any]]:
         if self._data is None:
-            self._data = _read_legacy_file(self._path, log_missing=False) or {}
+            self._data = _read_legacy_file(self._path, log_missing=False, on_corrupt="Corrupt channel store at %s, starting fresh") or {}
         return self._data
 
     def _save(self) -> None:
@@ -254,7 +255,7 @@ class SqlChannelStore:
         path = self._legacy_path
         if path is None:
             return 0
-        entries = await asyncio.to_thread(_read_legacy_file, path, True)
+        entries = await asyncio.to_thread(lambda: _read_legacy_file(path, log_missing=True, on_corrupt="Corrupt legacy channel store at %s; skipping the import (file kept)"))
         if entries is None:
             return 0
         if await self._repo.count() > 0:
@@ -270,7 +271,11 @@ class SqlChannelStore:
                 continue
             bindings.append(binding)
         if skipped:
-            logger.warning("Skipping %d malformed entries in legacy channel store %s (no thread_id or not an object)", skipped, path)
+            logger.warning(
+                "Skipping %d malformed or oversized entries in legacy channel store %s (not an object, no thread_id, empty channel/chat, or a component longer than its column)",
+                skipped,
+                path,
+            )
         inserted = await self._repo.insert_missing(bindings)
         renamed = await asyncio.to_thread(_rename_migrated, path)
         logger.info(
@@ -283,8 +288,13 @@ class SqlChannelStore:
         return inserted
 
 
-def _read_legacy_file(path: Path, log_missing: bool) -> dict[str, Any] | None:
-    """Parse ``store.json``; ``None`` when missing or corrupt (corrupt is logged)."""
+def _read_legacy_file(path: Path, *, log_missing: bool, on_corrupt: str) -> dict[str, Any] | None:
+    """Parse ``store.json``; ``None`` when missing or corrupt.
+
+    ``on_corrupt`` is the caller's warning (``%s`` = path): the JSON store starts
+    fresh, the import skips and keeps the file — the two outcomes differ, so the
+    wording is the caller's.
+    """
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -292,27 +302,47 @@ def _read_legacy_file(path: Path, log_missing: bool) -> dict[str, Any] | None:
             logger.debug("No legacy channel store at %s", path)
         return None
     except OSError:
-        logger.warning("Corrupt channel store at %s, starting fresh", path, exc_info=True)
+        logger.warning(on_corrupt, path, exc_info=True)
         return None
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        logger.warning("Corrupt channel store at %s, starting fresh", path)
+        logger.warning(on_corrupt, path)
         return None
     if not isinstance(data, dict):
-        logger.warning("Corrupt channel store at %s, starting fresh", path)
+        logger.warning(on_corrupt, path)
         return None
     return data
 
 
 def _legacy_binding(key: str, entry: Any, now: float) -> ChannelThreadBinding | None:
+    """One legacy entry as a binding, or ``None`` when it is malformed or would not fit the table.
+
+    The column bounds are checked here because only PostgreSQL enforces
+    ``String(n)``: an oversized component would fail the whole import batch there
+    (``value too long for type character varying``) and take every IM channel down
+    with ``ChannelService.start()``, while SQLite silently accepts the same row.
+    """
     if not isinstance(entry, dict) or not isinstance(entry.get("thread_id"), str) or not entry["thread_id"]:
         return None
     channel_name, chat_id, topic_id = split_binding_key(key)
+    if not channel_name or not chat_id:
+        return None
+    thread_id = entry["thread_id"]
     user_id = entry.get("user_id")
+    user_id = user_id if isinstance(user_id, str) else ""
+    if (
+        len(key) > BINDING_KEY_LENGTH
+        or len(channel_name) > CHANNEL_NAME_LENGTH
+        or len(chat_id) > CHAT_ID_LENGTH
+        or (topic_id is not None and len(topic_id) > TOPIC_ID_LENGTH)
+        or len(thread_id) > THREAD_ID_LENGTH
+        or len(user_id) > USER_ID_LENGTH
+    ):
+        return None
     created_at = _stamp(entry.get("created_at"), now)
     updated_at = _stamp(entry.get("updated_at"), created_at)
-    return ChannelThreadBinding(key, channel_name, chat_id, topic_id, entry["thread_id"], user_id if isinstance(user_id, str) else "", created_at, updated_at)
+    return ChannelThreadBinding(key, channel_name, chat_id, topic_id, thread_id, user_id, created_at, updated_at)
 
 
 def _stamp(value: Any, fallback: float) -> float:
