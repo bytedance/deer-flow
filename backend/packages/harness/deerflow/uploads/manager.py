@@ -462,6 +462,10 @@ def apply_upload_sandbox_permits(file_path: os.PathLike[str] | str, extra_mode_b
 def list_files_in_dir(directory: Path) -> dict:
     """List files (not directories) in *directory*.
 
+    Listing is best-effort under concurrent deletion: vanished entries are
+    omitted, and a directory that disappears or becomes a non-directory
+    returns the entries collected so far. Operational errors still propagate.
+
     Args:
         directory: Directory to scan.
 
@@ -474,33 +478,38 @@ def list_files_in_dir(directory: Path) -> dict:
         return {"files": [], "count": 0}
 
     files = []
-    with os.scandir(directory) as entries:
-        for entry in sorted(entries, key=lambda e: e.name):
-            if is_upload_staging_file(entry.name):
-                continue
-            if not entry.is_file(follow_symlinks=False):
-                continue
-            try:
-                st = entry.stat(follow_symlinks=False)
-            except OSError as exc:
-                # The entry can vanish between the scandir sweep and this stat
-                # (the DELETE endpoint via delete_file_safe, possibly from
-                # another replica, or a sandbox process removing its own file).
-                # Same policy as the chmod path above: skip expected races,
-                # surface operational errors like EACCES.
-                if exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
-                    logger.debug("Skipped upload entry that vanished mid-scan: %s", entry.path)
+    try:
+        with os.scandir(directory) as entries:
+            for entry in sorted(entries, key=lambda e: e.name):
+                if is_upload_staging_file(entry.name):
                     continue
-                raise
-            files.append(
-                {
-                    "filename": entry.name,
-                    "size": st.st_size,
-                    "path": entry.path,
-                    "extension": Path(entry.name).suffix,
-                    "modified": st.st_mtime,
-                }
-            )
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                try:
+                    st = entry.stat(follow_symlinks=False)
+                except OSError as exc:
+                    # The entry can vanish between the scandir sweep and this stat
+                    # (the DELETE endpoint via delete_file_safe, possibly from
+                    # another replica, or a sandbox process removing its own file).
+                    # Same policy as the chmod path above: skip expected races,
+                    # surface operational errors like EACCES.
+                    if exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+                        logger.debug("Skipped upload entry that vanished mid-scan: %s", entry.path)
+                        continue
+                    raise
+                files.append(
+                    {
+                        "filename": entry.name,
+                        "size": st.st_size,
+                        "path": entry.path,
+                        "extension": Path(entry.name).suffix,
+                        "modified": st.st_mtime,
+                    }
+                )
+    except (FileNotFoundError, NotADirectoryError):
+        # Thread deletion or a sandbox process may remove or replace the
+        # directory after the is_dir() check. Keep the collected snapshot.
+        pass
     return {"files": files, "count": len(files)}
 
 

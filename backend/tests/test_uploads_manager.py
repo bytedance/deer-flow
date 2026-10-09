@@ -423,6 +423,35 @@ class TestListFilesInDir:
         result = list_files_in_dir(tmp_path / "nope")
         assert result == {"files": [], "count": 0}
 
+    @pytest.mark.parametrize("replacement", ["removed", "file"])
+    def test_directory_replaced_after_is_dir_check(self, tmp_path, monkeypatch, replacement):
+        directory = tmp_path / "uploads"
+        directory.mkdir()
+        real_scandir = os.scandir
+
+        def replace_before_scandir(path):
+            assert path == directory
+            directory.rmdir()
+            if replacement == "file":
+                directory.write_text("replacement", encoding="utf-8")
+            return real_scandir(path)
+
+        monkeypatch.setattr(os, "scandir", replace_before_scandir)
+
+        assert list_files_in_dir(directory) == {"files": [], "count": 0}
+
+    @pytest.mark.parametrize("error_code", [errno.EACCES, errno.EIO])
+    def test_scandir_operational_error_still_propagates(self, tmp_path, monkeypatch, error_code):
+        def fail_scandir(path):
+            raise OSError(error_code, os.strerror(error_code), str(path))
+
+        monkeypatch.setattr(os, "scandir", fail_scandir)
+
+        with pytest.raises(OSError) as excinfo:
+            list_files_in_dir(tmp_path)
+
+        assert excinfo.value.errno == error_code
+
     def test_multiple_files_sorted(self, tmp_path):
         (tmp_path / "b.txt").write_text("b")
         (tmp_path / "a.txt").write_text("a")
@@ -452,14 +481,15 @@ class TestListFilesInDir:
         assert result["count"] == 4
         assert [f["filename"] for f in result["files"]] == [".env", ".upload-note.txt", "draft.part", "visible.txt"]
 
-    def test_skips_entries_vanishing_mid_scan(self, tmp_path, monkeypatch, caplog):
+    @pytest.mark.parametrize("error_code", [errno.ENOENT, errno.ENOTDIR, errno.ELOOP])
+    def test_skips_entries_vanishing_mid_scan(self, tmp_path, monkeypatch, caplog, error_code):
         (tmp_path / "kept.txt").write_text("kept")
         (tmp_path / "gone.txt").write_text("gone")
         with os.scandir(tmp_path) as it:
             real_entries = {e.name: e for e in it}
         vanished = _VanishingDirEntry(
             real_entries["gone.txt"],
-            FileNotFoundError(errno.ENOENT, "No such file or directory", str(tmp_path / "gone.txt")),
+            OSError(error_code, os.strerror(error_code), str(tmp_path / "gone.txt")),
         )
         monkeypatch.setattr(os, "scandir", lambda path: _StaticScandir([real_entries["kept.txt"], vanished]))
 
