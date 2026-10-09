@@ -75,11 +75,13 @@ from deerflow.runtime.goal import (
     _is_visible_message,
     _message_type,
     attach_goal_evaluation,
+    build_goal_outcome,
     build_goal_state,
     compute_no_progress_count,
     create_goal_evaluator_model,
     evaluate_goal_completion,
     goal_thread_lock,
+    latest_visible_assistant_message_id,
     latest_visible_assistant_signature,
     make_goal_continuation_message,
     read_thread_goal,
@@ -1987,7 +1989,7 @@ async def run_agent(
 class _GoalCompletionCandidate:
     goal: GoalState
     conversation_signature: str
-    evaluation: GoalEvaluation | None = None
+    evaluation: GoalEvaluation
 
 
 def _scheduled_goal_objective(record: RunRecord, scheduled_runtime: Mapping[str, Any] | None) -> str | None:
@@ -2130,12 +2132,14 @@ async def _clear_completed_goal(
                 return
             # Duration bookkeeping may advance the checkpoint after evaluation.
             # Compare goal/conversation above, then guard against stale writes.
+            # The record lands in the same checkpoint as the clear, or not at all.
             values = await write_thread_goal(
                 checkpointer,
                 record.thread_id,
                 None,
                 as_node="goal_evaluator",
                 expected_checkpoint_id=_checkpoint_id(checkpoint_tuple),
+                outcome=build_goal_outcome(candidate.goal, candidate.evaluation, reply_message_id=latest_visible_assistant_message_id(messages)),
             )
             await bridge.publish(record.run_id, "values", serialize(values, mode="values"))
     except GoalWriteConflict:
@@ -2489,6 +2493,23 @@ async def _prepare_goal_continuation_input(
         await _persist(goal, evaluation, no_progress_count, stand_down_reason=stand_down_reason)
         return None
 
+    # Built before the continuation is counted: the message is redacted under the run's
+    # pii_redaction, and a redaction error fails the check as an evaluator redaction error
+    # does, so the raw objective and reason are never sent and the budget is not spent.
+    try:
+        continuation_message = make_goal_continuation_message(goal, evaluation, pii_redaction=getattr(app_config, "pii_redaction", None))
+    except Exception as exc:
+        logger.warning("Could not redact the goal continuation for thread %s after run %s", thread_id, run_id, exc_info=True)
+        # Only the exception type is stored: the error message could quote the text.
+        evaluation = GoalEvaluation(
+            satisfied=False,
+            blocker="run_failed",
+            reason=f"The goal continuation could not be redacted ({type(exc).__name__}).",
+            evidence_summary="",
+        )
+        await _persist(goal, evaluation, compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature), stand_down_reason="evaluator_failed")
+        return None
+
     next_count = int(goal.get("continuation_count", 0)) + 1
     updated_goal = await _persist(goal, evaluation, no_progress_count, continuation_count=next_count)
     if updated_goal is None:
@@ -2527,7 +2548,7 @@ async def _prepare_goal_continuation_input(
         updated_goal.get("continuation_count", next_count),
         updated_goal.get("max_continuations", 0),
     )
-    return {"messages": [make_goal_continuation_message(updated_goal, evaluation)]}
+    return {"messages": [continuation_message]}
 
 
 def _is_edit_replay_run(record: RunRecord) -> bool:
