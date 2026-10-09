@@ -36,3 +36,11 @@ That fence covers cached sync/async acquisition too: recheck after serializer
 waits and immediately before exposing a reused client. Signal-triggered shutdown
 may report deferred cleanup, but it must still forward the process's original
 SIGTERM/SIGINT/SIGHUP action while retaining the pending E2B state.
+
+## File search
+
+Quote the complete `grep --include=<pattern>` argument with `shlex.quote` before
+passing it to the shell. The shell must not split or expand filename patterns;
+grep owns basename globbing and `path_matches` owns root-relative directory
+scoping. `tests/test_sandbox_search_contract.py` pins this across providers using
+real temporary files and offline shell transports.
