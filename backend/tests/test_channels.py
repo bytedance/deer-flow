@@ -1,4 +1,4 @@
-"""Tests for the IM channel system (MessageBus, ChannelStore, ChannelManager)."""
+"""Tests for the IM channel system (MessageBus, ChannelManager, channel adapters)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import json
 import logging
 import tempfile
 import threading
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -23,7 +23,7 @@ from app.channels.message_bus import (
     OutboundMessage,
     ResolvedAttachment,
 )
-from app.channels.store import ChannelStore
+from app.channels.store import JsonChannelStore
 from deerflow.skills.types import Skill, SkillCategory
 
 
@@ -66,7 +66,7 @@ def test_channel_policy_explicit_interaction_mode_overrides_legacy_flag(tmp_path
     previous = CHANNEL_RUN_POLICY.get(channel_name)
     CHANNEL_RUN_POLICY[channel_name] = ChannelRunPolicy(is_interactive=False, interaction_mode=mode)
     try:
-        manager = ChannelManager(bus=MessageBus(), store=ChannelStore(path=tmp_path / "store.json"))
+        manager = ChannelManager(bus=MessageBus(), store=JsonChannelStore(path=tmp_path / "store.json"))
         msg = InboundMessage(channel_name=channel_name, chat_id="chat", user_id="user", text="hello")
         context: dict[str, object] = {}
         asyncio.run(manager._apply_channel_policy(msg, context))
@@ -96,7 +96,7 @@ def test_channel_policy_legacy_noninteractive_remains_supported(tmp_path):
     previous = CHANNEL_RUN_POLICY.get(channel_name)
     CHANNEL_RUN_POLICY[channel_name] = ChannelRunPolicy(is_interactive=False)
     try:
-        manager = ChannelManager(bus=MessageBus(), store=ChannelStore(path=tmp_path / "store.json"))
+        manager = ChannelManager(bus=MessageBus(), store=JsonChannelStore(path=tmp_path / "store.json"))
         msg = InboundMessage(channel_name=channel_name, chat_id="chat", user_id="user", text="hello")
         context: dict[str, object] = {}
         asyncio.run(manager._apply_channel_policy(msg, context))
@@ -277,111 +277,6 @@ class TestMessageBus:
         assert msg.is_final is True
         assert msg.thread_ts is None
         assert msg.metadata == {}
-
-
-# ---------------------------------------------------------------------------
-# ChannelStore tests
-# ---------------------------------------------------------------------------
-
-
-class TestChannelStore:
-    @pytest.fixture
-    def store(self, tmp_path):
-        return ChannelStore(path=tmp_path / "store.json")
-
-    def test_set_and_get_thread_id(self, store):
-        store.set_thread_id("slack", "ch1", "thread-abc", user_id="u1")
-        assert store.get_thread_id("slack", "ch1") == "thread-abc"
-
-    def test_get_nonexistent_returns_none(self, store):
-        assert store.get_thread_id("slack", "nonexistent") is None
-
-    def test_remove(self, store):
-        store.set_thread_id("slack", "ch1", "t1")
-        assert store.remove("slack", "ch1") is True
-        assert store.get_thread_id("slack", "ch1") is None
-
-    def test_remove_nonexistent_returns_false(self, store):
-        assert store.remove("slack", "nope") is False
-
-    def test_list_entries_all(self, store):
-        store.set_thread_id("slack", "ch1", "t1")
-        store.set_thread_id("feishu", "ch2", "t2")
-        entries = store.list_entries()
-        assert len(entries) == 2
-
-    def test_list_entries_filtered(self, store):
-        store.set_thread_id("slack", "ch1", "t1")
-        store.set_thread_id("feishu", "ch2", "t2")
-        entries = store.list_entries(channel_name="slack")
-        assert len(entries) == 1
-        assert entries[0]["channel_name"] == "slack"
-
-    def test_channel_store_concurrent_list_and_mutation(self, store, monkeypatch):
-        iteration_started = threading.Event()
-        mutation_requested = threading.Event()
-        mutation_finished = threading.Event()
-
-        class CoordinatedData(dict):
-            def items(self):
-                iterator = iter(super().items())
-                first = next(iterator)
-                iteration_started.set()
-
-                if store._lock.locked():
-                    assert mutation_requested.wait(timeout=5), "mutation thread never requested the store lock"
-                else:
-                    assert mutation_finished.wait(timeout=5), "mutation thread never changed the unlocked store"
-
-                yield first
-                yield from iterator
-
-        store._data = CoordinatedData(
-            {
-                "slack:ch1": {"thread_id": "t1", "user_id": "u1", "created_at": 1.0, "updated_at": 1.0},
-                "feishu:ch2": {"thread_id": "t2", "user_id": "u2", "created_at": 2.0, "updated_at": 2.0},
-            }
-        )
-        monkeypatch.setattr(store, "_save", lambda: None)
-
-        def mutate():
-            assert iteration_started.wait(timeout=5), "list_entries never started iterating"
-            mutation_requested.set()
-            store.set_thread_id("test", "new", "t3")
-            mutation_finished.set()
-
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            list_future = executor.submit(store.list_entries)
-            mutation_future = executor.submit(mutate)
-            mutation_future.result(timeout=5)
-            entries = list_future.result(timeout=5)
-
-        assert {(entry["channel_name"], entry["chat_id"]) for entry in entries} == {("slack", "ch1"), ("feishu", "ch2")}
-
-    def test_persistence(self, tmp_path):
-        path = tmp_path / "store.json"
-        store1 = ChannelStore(path=path)
-        store1.set_thread_id("slack", "ch1", "t1")
-
-        store2 = ChannelStore(path=path)
-        assert store2.get_thread_id("slack", "ch1") == "t1"
-
-    def test_update_preserves_created_at(self, store):
-        store.set_thread_id("slack", "ch1", "t1")
-        entries = store.list_entries()
-        created_at = entries[0]["created_at"]
-
-        store.set_thread_id("slack", "ch1", "t2")
-        entries = store.list_entries()
-        assert entries[0]["created_at"] == created_at
-        assert entries[0]["thread_id"] == "t2"
-        assert entries[0]["updated_at"] >= created_at
-
-    def test_corrupt_file_handled(self, tmp_path):
-        path = tmp_path / "store.json"
-        path.write_text("not json", encoding="utf-8")
-        store = ChannelStore(path=path)
-        assert store.get_thread_id("x", "y") is None
 
 
 # ---------------------------------------------------------------------------
@@ -754,7 +649,7 @@ class TestChannelManager:
         from app.channels.manager import ChannelManager
 
         bus = MessageBus()
-        store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
         manager = ChannelManager(bus=bus, store=store, langgraph_url="http://localhost:8001")
 
         with patch("langgraph_sdk.get_client") as get_client:
@@ -782,7 +677,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             created_ids: list[str] = []
@@ -818,7 +713,7 @@ class TestChannelManager:
             assert tid1 == tid2 == "thread-1"
             assert created1 is True
             assert created2 is False
-            assert store.get_thread_id("slack", "C1") == "thread-1"
+            assert await store.get_thread_id("slack", "C1") == "thread-1"
 
         _run(go())
 
@@ -835,7 +730,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
             first_create_started = asyncio.Event()
             release_first_with_error = asyncio.Event()
@@ -950,7 +845,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store, gateway_url="http://gateway:8001")
 
             reply = await manager._fetch_gateway("/api/models", "models")
@@ -992,7 +887,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store, gateway_url="http://gateway:8001")
             msg = InboundMessage(
                 channel_name="slack",
@@ -1016,7 +911,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             outbound_received = []
@@ -1140,7 +1035,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             outbound_received = []
@@ -1182,7 +1077,7 @@ class TestChannelManager:
             }
 
             # Thread ID should be stored
-            thread_id = store.get_thread_id("test", "chat1", topic_id="topic1")
+            thread_id = await store.get_thread_id("test", "chat1", topic_id="topic1")
             assert thread_id == "test-thread-123"
 
             # runs.wait should be called with the thread_id
@@ -1211,7 +1106,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             outbound_received = []
@@ -1257,7 +1152,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=tmp_path / "store.json")
+            store = JsonChannelStore(path=tmp_path / "store.json")
             manager = ChannelManager(bus=bus, store=store)
             manager._client = _make_mock_langgraph_client()
             outbound_received: list[OutboundMessage] = []
@@ -1450,7 +1345,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=tmp_path / "store.json")
+            store = JsonChannelStore(path=tmp_path / "store.json")
             manager = ChannelManager(bus=bus, store=store)
             manager._client = _make_mock_langgraph_client()
             manager._client.runs.stream = MagicMock(side_effect=lambda *a, **kw: _make_async_iterator(_ok_stream_events()))
@@ -1505,7 +1400,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=tmp_path / "store.json")
+            store = JsonChannelStore(path=tmp_path / "store.json")
             manager = ChannelManager(bus=bus, store=store)
             outbound_received: list[OutboundMessage] = []
             key_present_during_final_publish: list[bool] = []
@@ -1569,7 +1464,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=tmp_path / "store.json")
+            store = JsonChannelStore(path=tmp_path / "store.json")
             manager = ChannelManager(bus=bus, store=store)
             outbound_received: list[OutboundMessage] = []
 
@@ -1629,7 +1524,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=tmp_path / "store.json")
+            store = JsonChannelStore(path=tmp_path / "store.json")
             manager = ChannelManager(bus=bus, store=store)
             outbound_received: list[OutboundMessage] = []
 
@@ -1695,7 +1590,7 @@ class TestChannelManager:
         """
         from app.channels.manager import ChannelManager
 
-        manager = ChannelManager(bus=MessageBus(), store=ChannelStore(path=tmp_path / "store.json"))
+        manager = ChannelManager(bus=MessageBus(), store=JsonChannelStore(path=tmp_path / "store.json"))
 
         def _gh(delivery: str, agent: str = "reviewer", owner_user_id: str = "alice") -> InboundMessage:
             # Shaped exactly as app.gateway.github.dispatcher.fanout_event
@@ -1737,7 +1632,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=tmp_path / "store.json")
+            store = JsonChannelStore(path=tmp_path / "store.json")
             manager = ChannelManager(bus=bus, store=store)
             client = _make_mock_langgraph_client()
             attempts = {"n": 0}
@@ -1787,7 +1682,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
             outbound_received: list[OutboundMessage] = []
 
@@ -1825,7 +1720,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
             outbound_received: list[OutboundMessage] = []
 
@@ -1867,7 +1762,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
             outbound_received: list[OutboundMessage] = []
 
@@ -1894,7 +1789,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
             outbound_received: list[OutboundMessage] = []
 
@@ -1937,7 +1832,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(
                 bus=bus,
                 store=store,
@@ -1990,7 +1885,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             outbound_received = []
@@ -2110,7 +2005,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(
                 bus=bus,
                 store=store,
@@ -2170,7 +2065,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(
                 bus=bus,
                 store=store,
@@ -2210,7 +2105,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             outbound_received = []
@@ -2281,7 +2176,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             outbound_received = []
@@ -2348,7 +2243,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
             outbound_received: list[OutboundMessage] = []
 
@@ -2410,7 +2305,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             outbound_received = []
@@ -2464,7 +2359,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             outbound_received = []
@@ -2515,7 +2410,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             outbound_received = []
@@ -2609,7 +2504,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             msg = InboundMessage(
@@ -2662,7 +2557,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             first_started = asyncio.Event()
@@ -2740,7 +2635,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             outbound_received = []
@@ -2773,7 +2668,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             mock_client = _make_mock_langgraph_client()
@@ -2808,7 +2703,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             mock_client = _make_mock_langgraph_client()
@@ -2843,7 +2738,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             mock_client = _make_mock_langgraph_client(thread_id="new-thread-456")
@@ -2869,7 +2764,7 @@ class TestChannelManager:
             await manager.stop()
 
             mock_client.threads.create.assert_not_called()
-            assert store.get_thread_id("test", "chat1") is None
+            assert await store.get_thread_id("test", "chat1") is None
             assert outbound_received[0].text.startswith("Unknown command: /new.")
 
         _run(go())
@@ -2879,10 +2774,10 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
-            store.set_thread_id("test", "chat1", "base-thread")
-            store.set_thread_id("test", "chat1", "topic-thread", topic_id="topic-1")
+            await store.set_thread_id("test", "chat1", "base-thread")
+            await store.set_thread_id("test", "chat1", "topic-thread", topic_id="topic-1")
 
             outbound_received = []
 
@@ -2914,7 +2809,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
             manager._skill_storage = _make_channel_skill_storage([_make_channel_skill(tmp_path, "data-analysis")])
 
@@ -2965,7 +2860,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
             manager._skill_storage = _make_channel_skill_storage([_make_channel_skill(tmp_path, "data-analysis")])
 
@@ -3022,7 +2917,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
             manager._skill_storage = _make_channel_skill_storage([_make_channel_skill(tmp_path, "data-analysis")])
 
@@ -3074,7 +2969,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
             manager._skill_storage = _make_channel_skill_storage([_make_channel_skill(tmp_path, "data-analysis")])
 
@@ -3112,7 +3007,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(
                 bus=bus,
                 store=store,
@@ -3168,7 +3063,7 @@ class TestChannelManager:
         monkeypatch.setattr("app.channels.manager.load_agent_config", spy_load_agent_config)
 
         bus = MessageBus()
-        store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
         manager = ChannelManager(bus=bus, store=store, default_session={"assistant_id": "analyst-agent"})
 
         # A bound connection: the owner resolves to a real, non-default bucket.
@@ -3211,8 +3106,8 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=tmp_path / "store.json")
-            store.set_thread_id("test", "chat1", "legacy-thread", user_id="platform-user")
+            store = JsonChannelStore(path=tmp_path / "store.json")
+            await store.set_thread_id("test", "chat1", "legacy-thread", user_id="platform-user")
             manager = ChannelManager(bus=bus, store=store, connection_repo=EmptyConnectionRepo())
             manager._remember_thread_agent("legacy-thread", "frontend-only")
             manager._skill_storage = _make_channel_skill_storage([_make_channel_skill(tmp_path, "data-analysis")])
@@ -3253,7 +3148,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
             manager._skill_storage = _make_channel_skill_storage([_make_channel_skill(tmp_path, "data-analysis", enabled=False)])
 
@@ -3289,7 +3184,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
             manager._skill_storage = _make_channel_skill_storage([_make_channel_skill(tmp_path, "frontend-design")])
 
@@ -3330,10 +3225,10 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
-            store.set_thread_id("test", "chat1", "base-thread")
-            store.set_thread_id("test", "chat1", "topic-thread", topic_id="topic-1")
+            await store.set_thread_id("test", "chat1", "base-thread")
+            await store.set_thread_id("test", "chat1", "topic-thread", topic_id="topic-1")
 
             mock_client = _make_mock_langgraph_client()
             manager._client = mock_client
@@ -3369,10 +3264,10 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
-            store.set_thread_id("test", "chat1", "old-thread")
+            await store.set_thread_id("test", "chat1", "old-thread")
 
             mock_client = _make_mock_langgraph_client(thread_id="new-thread-456")
             manager._client = mock_client
@@ -3396,7 +3291,7 @@ class TestChannelManager:
             await _wait_for(lambda: len(outbound_received) >= 1)
             await manager.stop()
 
-            new_thread = store.get_thread_id("test", "chat1")
+            new_thread = await store.get_thread_id("test", "chat1")
             assert new_thread == "new-thread-456"
             assert new_thread != "old-thread"
             assert "New conversation started" in outbound_received[0].text
@@ -3422,7 +3317,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
             outbound_received = []
 
@@ -3460,8 +3355,8 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
-            store.set_thread_id("test", "chat1", "old-thread")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            await store.set_thread_id("test", "chat1", "old-thread")
             manager = ChannelManager(bus=bus, store=store)
             mock_client = _make_mock_langgraph_client(thread_id="research-thread")
             manager._client = mock_client
@@ -3477,7 +3372,7 @@ class TestChannelManager:
             reply = await manager._handle_agent_command(msg, "use Researcher")
 
             assert loaded == [("researcher", "deerflow-user-1")]
-            assert store.get_thread_id("test", "chat1") == "research-thread"
+            assert await store.get_thread_id("test", "chat1") == "research-thread"
             create_kwargs = mock_client.threads.create.call_args.kwargs
             assert create_kwargs["metadata"]["channel_agent_name"] == "researcher"
             assert create_kwargs["metadata"]["agent_name"] == "researcher"
@@ -3508,7 +3403,7 @@ class TestChannelManager:
         async def go():
             manager = ChannelManager(
                 bus=MessageBus(),
-                store=ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"),
+                store=JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"),
                 channel_sessions={
                     "test": {
                         "config": {config_carrier: {"agent_name": "configured-writer"}},
@@ -3548,7 +3443,7 @@ class TestChannelManager:
             bus = MessageBus()
             manager = ChannelManager(
                 bus=bus,
-                store=ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"),
+                store=JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"),
                 channel_sessions={
                     "test": {
                         "assistant_id": "configured-writer",
@@ -3582,7 +3477,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(
                 bus=bus,
                 store=store,
@@ -3618,7 +3513,7 @@ class TestChannelManager:
         async def go():
             manager = ChannelManager(
                 bus=MessageBus(),
-                store=ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"),
+                store=JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"),
                 channel_sessions={
                     "test": {
                         "config": {config_carrier: {"agent_name": "configured-writer"}},
@@ -3656,7 +3551,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             # Return a different thread_id for each create call
@@ -3710,7 +3605,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             mock_client = _make_mock_langgraph_client(thread_id="topic-thread-1")
@@ -3765,7 +3660,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             mock_client = _make_mock_langgraph_client(thread_id="private-thread-1")
@@ -3809,7 +3704,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             thread_ids = iter(["thread-A", "thread-B"])
@@ -3853,7 +3748,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             outbound_received = []
@@ -3903,7 +3798,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             outbound_received = []
@@ -3946,7 +3841,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             outbound_received = []
@@ -4009,7 +3904,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             outbound_received = []
@@ -4037,7 +3932,7 @@ class TestChannelManager:
 
             # A thread should be created
             mock_client.threads.create.assert_called_once()
-            assert store.get_thread_id("test", "chat1") == "bootstrap-thread"
+            assert await store.get_thread_id("test", "chat1") == "bootstrap-thread"
 
         _run(go())
 
@@ -4047,7 +3942,7 @@ class TestChannelManager:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             outbound_received = []
@@ -4083,7 +3978,7 @@ class TestResolveRunParamsUserId:
         from app.channels.manager import ChannelManager
 
         bus = MessageBus()
-        store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
         return ChannelManager(bus=bus, store=store)
 
     def test_safe_user_id_is_passed_through(self, monkeypatch):
@@ -4422,7 +4317,7 @@ class TestGithubFireAndForget:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             # GitHub deliveries skip the bound-identity gate (authenticity is
             # enforced at the webhook route by HMAC), but constructing the
             # manager with the default require_bound_identity=False keeps the
@@ -4473,7 +4368,7 @@ class TestGithubFireAndForget:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             outbound_received: list[OutboundMessage] = []
@@ -4528,7 +4423,7 @@ class TestGithubFireAndForget:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             outbound_received: list[OutboundMessage] = []
@@ -4583,7 +4478,7 @@ class TestGithubFireAndForget:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             mock_client = _make_mock_langgraph_client(thread_id="slack-thread-1")
@@ -4670,7 +4565,7 @@ class TestGithubFollowupBuffer:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             outbound_received: list[OutboundMessage] = []
@@ -4736,7 +4631,7 @@ class TestGithubFollowupBuffer:
 
             async def go():
                 bus = MessageBus()
-                store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+                store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
                 manager = ChannelManager(bus=bus, store=store)
 
                 outbound_received: list[OutboundMessage] = []
@@ -4782,7 +4677,7 @@ class TestGithubFollowupBuffer:
         not be buffered twice."""
         from app.channels.manager import ChannelManager
 
-        manager = ChannelManager(bus=MessageBus(), store=ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"))
+        manager = ChannelManager(bus=MessageBus(), store=JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"))
         thread_id = "gh-thread-dedup"
         msg = InboundMessage(
             channel_name="github",
@@ -4804,7 +4699,7 @@ class TestGithubFollowupBuffer:
         deep enough in the backlog to hit the cap."""
         from app.channels.manager import FOLLOWUP_BUFFER_MAX_PER_THREAD, ChannelManager
 
-        manager = ChannelManager(bus=MessageBus(), store=ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"))
+        manager = ChannelManager(bus=MessageBus(), store=JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"))
         thread_id = "gh-thread-overflow"
 
         with caplog.at_level(logging.WARNING):
@@ -4835,7 +4730,7 @@ class TestGithubFollowupBuffer:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             carrier_msg = InboundMessage(
@@ -4889,7 +4784,7 @@ class TestGithubFollowupBuffer:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             carrier_msg = InboundMessage(
@@ -4927,7 +4822,7 @@ class TestGithubFollowupBuffer:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             carrier_msg = InboundMessage(
@@ -4959,7 +4854,7 @@ class TestGithubFollowupBuffer:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             carrier_msg = InboundMessage(
@@ -4999,7 +4894,7 @@ class TestGithubFollowupBuffer:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             carrier_msg = InboundMessage(
@@ -5043,7 +4938,7 @@ class TestGithubFollowupBuffer:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             bridge = MemoryStreamBridge()
             manager = ChannelManager(bus=bus, store=store, get_stream_bridge=lambda: bridge)
 
@@ -5117,7 +5012,7 @@ class TestGithubFollowupBuffer:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             bridge = MemoryStreamBridge()
             manager = ChannelManager(bus=bus, store=store, get_stream_bridge=lambda: bridge)
 
@@ -5183,7 +5078,7 @@ class TestGithubFollowupBuffer:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             carrier_msg = InboundMessage(
@@ -5313,7 +5208,7 @@ class TestChannelManagerBoundIdentityPolicy:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store, require_bound_identity=True)
             mock_client = _make_mock_langgraph_client()
             manager._client = mock_client
@@ -5350,7 +5245,7 @@ class TestChannelManagerBoundIdentityPolicy:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store, require_bound_identity=True)
             mock_client = _make_mock_langgraph_client()
             manager._client = mock_client
@@ -5388,7 +5283,7 @@ class TestChannelManagerBoundIdentityPolicy:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store, require_bound_identity=True)
             outbound_received = []
 
@@ -5426,7 +5321,7 @@ class TestChannelManagerBoundIdentityPolicy:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             repo = _BoundIdentityRepo(
                 [
                     {
@@ -5469,7 +5364,7 @@ class TestChannelManagerBoundIdentityPolicy:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             repo = _BoundIdentityRepo(
                 [
                     {
@@ -5519,7 +5414,7 @@ class TestChannelManagerBoundIdentityPolicy:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             repo = _BoundIdentityRepo(
                 [
                     {
@@ -5568,7 +5463,7 @@ class TestChannelManagerBoundIdentityPolicy:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store, require_bound_identity=True)
             mock_client = _make_mock_langgraph_client(thread_id="thread-local")
             manager._client = mock_client
@@ -5597,7 +5492,7 @@ class TestChannelManagerBoundIdentityPolicy:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store, require_bound_identity=False)
             mock_client = _make_mock_langgraph_client(thread_id="thread-legacy")
             manager._client = mock_client
@@ -5626,7 +5521,7 @@ class TestChannelManagerBoundIdentityPolicy:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store, require_bound_identity=True)
             mock_client = _make_mock_langgraph_client()
             manager._client = mock_client
@@ -5663,7 +5558,7 @@ class TestChannelManagerBoundIdentityPolicy:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             repo = _BoundIdentityRepo(
                 [
                     {
@@ -5721,7 +5616,7 @@ class TestChannelManagerBoundIdentityPolicy:
 
             async def go():
                 bus = MessageBus()
-                store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+                store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
                 manager = ChannelManager(bus=bus, store=store, require_bound_identity=True)
                 mock_client = _make_mock_langgraph_client(thread_id="thread-webhook")
                 manager._client = mock_client
@@ -5776,7 +5671,7 @@ class TestChannelManagerConnectionRouting:
             )
 
             bus = MessageBus()
-            store = ChannelStore(path=tmp_path / "legacy-store.json")
+            store = JsonChannelStore(path=tmp_path / "legacy-store.json")
             manager = ChannelManager(bus=bus, store=store, connection_repo=repo)
             mock_client = _make_mock_langgraph_client()
             mock_client.threads.create = AsyncMock(
@@ -5814,7 +5709,7 @@ class TestChannelManagerConnectionRouting:
 
             assert await repo.get_thread_id(alice["id"], "C-shared", "1710000000.000100") == "thread-alice"
             assert await repo.get_thread_id(bob["id"], "C-shared", "1710000000.000100") == "thread-bob"
-            assert store.list_entries() == []
+            assert await store.list_entries() == []
 
             first_context = mock_client.runs.wait.call_args_list[0].kwargs["context"]
             second_context = mock_client.runs.wait.call_args_list[1].kwargs["context"]
@@ -5984,7 +5879,7 @@ class TestHandleChatWithArtifacts:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=tmp_path / "store.json")
+            store = JsonChannelStore(path=tmp_path / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             run_result = {
@@ -6031,7 +5926,7 @@ class TestHandleChatWithArtifacts:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             run_result = {
@@ -6078,7 +5973,7 @@ class TestHandleChatWithArtifacts:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             run_result = {
@@ -6126,7 +6021,7 @@ class TestHandleChatWithArtifacts:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             run_result = {
@@ -6170,7 +6065,7 @@ class TestHandleChatWithArtifacts:
 
         async def go():
             bus = MessageBus()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store)
 
             # Turn 1: produces report.md
@@ -6575,7 +6470,7 @@ class TestFeishuChannel:
         async def go():
             bus = MessageBus()
             bus.publish_inbound = AsyncMock()
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             channel = FeishuChannel(bus, config={"channel_store": store})
             channel._api_client = MagicMock()
 
@@ -6631,9 +6526,9 @@ class TestFeishuChannel:
             assert channel._reply_card.await_count == 1
             channel._update_card.assert_awaited_once_with("om-running-card", "Hello")
             assert "om-source-msg" not in channel._running_card_tasks
-            assert store.get_thread_id("feishu", "chat-1", topic_id="om-source-msg") == "thread-1"
-            assert store.get_thread_id("feishu", "chat-1", topic_id="om-running-card") == "thread-1"
-            assert store.get_thread_id("feishu", "chat-1", topic_id="om-root-msg") == "thread-1"
+            assert await store.get_thread_id("feishu", "chat-1", topic_id="om-source-msg") == "thread-1"
+            assert await store.get_thread_id("feishu", "chat-1", topic_id="om-running-card") == "thread-1"
+            assert await store.get_thread_id("feishu", "chat-1", topic_id="om-root-msg") == "thread-1"
 
         _run(go())
 
@@ -11637,7 +11532,7 @@ class TestHandleGoalCommand:
         from app.channels.manager import ChannelManager
 
         bus = MessageBus()
-        store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
         manager = ChannelManager(bus=bus, store=store, gateway_url="http://gateway:8001")
 
         async def _lookup(msg):
@@ -12051,7 +11946,7 @@ def test_streaming_chat_never_publishes_hidden_memory_context(monkeypatch):
 
     async def go():
         bus = MessageBus()
-        store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
         manager = ChannelManager(bus=bus, store=store)
         outbound_received: list[OutboundMessage] = []
 

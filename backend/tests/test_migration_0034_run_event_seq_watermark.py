@@ -19,7 +19,8 @@ from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 
 REVISION = "0034_run_event_seq_watermark"
 PREVIOUS = "0033_batch_result_artifact"
-CURRENT_HEAD = "0035_login_throttle"
+NEXT = "0035_login_throttle"
+CURRENT_HEAD = "0036_channel_thread_bindings"
 TABLE = "run_event_thread_seq"
 pytestmark = pytest.mark.asyncio
 
@@ -28,7 +29,8 @@ async def test_0034_remains_in_the_single_migration_chain():
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
     assert script.get_heads() == [CURRENT_HEAD]
     assert script.get_revision(REVISION).down_revision == PREVIOUS
-    assert script.get_revision(CURRENT_HEAD).down_revision == REVISION
+    assert script.get_revision(NEXT).down_revision == REVISION
+    assert script.get_revision(CURRENT_HEAD).down_revision == NEXT
     assert len(REVISION) <= 32
 
 

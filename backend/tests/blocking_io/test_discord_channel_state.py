@@ -41,17 +41,17 @@ pytestmark = pytest.mark.asyncio
 
 
 class _FakeStore:
-    """Stand-in for ChannelStore so the thread-mapping file lands under tmp_path."""
+    """Stand-in for a ChannelStore so the thread-mapping file lands under tmp_path."""
 
     def __init__(self, tmp_path: Path) -> None:
-        self._path = tmp_path / "channel_store.json"
+        self.channels_dir = tmp_path
 
 
 async def test_discord_constructor_is_io_free_on_async_path(tmp_path: Path) -> None:
     """``__init__`` must not touch the filesystem — ``_start_channel`` constructs inline."""
     # Direct construction on the event loop, no asyncio.to_thread wrapper —
     # mirrors the production _start_channel path. __init__ only resolves paths
-    # (Path.home / store._path.parent); if it regresses to doing exists/read_text
+    # (Path.home / store.channels_dir); if it regresses to doing exists/read_text
     # the Blockbuster gate raises BlockingError here.
     channel = DiscordChannel(bus=MessageBus(), config={"bot_token": "t", "channel_store": _FakeStore(tmp_path)})
     assert channel._bot_token == "t"

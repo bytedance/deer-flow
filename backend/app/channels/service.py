@@ -14,7 +14,7 @@ from app.channels.base import Channel, ChannelStopTimeout
 from app.channels.manager import DEFAULT_CHANNEL_MAX_CONCURRENCY, DEFAULT_CHANNEL_SHUTDOWN_GRACE_PERIOD_SECONDS, DEFAULT_GATEWAY_URL, DEFAULT_LANGGRAPH_URL, ChannelManager
 from app.channels.message_bus import DEFAULT_INBOUND_QUEUE_MAXSIZE, MessageBus
 from app.channels.runtime_config_store import merge_runtime_channel_configs
-from app.channels.store import ChannelStore
+from app.channels.store import ChannelStore, SqlChannelStore, resolve_channel_store
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
@@ -128,13 +128,18 @@ class ChannelService:
         require_bound_identity: bool = False,
         app_config: AppConfig | None = None,
         get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
+        store: ChannelStore | None = None,
     ) -> None:
         config = dict(channels_config or {})
         inbound_queue_maxsize = _resolve_positive_int(config, "inbound_queue_maxsize", DEFAULT_INBOUND_QUEUE_MAXSIZE)
         max_concurrency = _resolve_positive_int(config, "max_concurrency", DEFAULT_CHANNEL_MAX_CONCURRENCY)
         shutdown_grace_period_seconds = _resolve_non_negative_float(config, "shutdown_grace_period_seconds", DEFAULT_CHANNEL_SHUTDOWN_GRACE_PERIOD_SECONDS)
         self.bus = MessageBus(inbound_queue_maxsize=inbound_queue_maxsize)
-        self.store = ChannelStore()
+        # Chat-to-thread bindings: the shared ``channel_thread_bindings`` table
+        # for a sqlite/postgres database, the legacy JSON file otherwise. The
+        # JSON path resolves ``base_dir`` through realpath, so ``from_app_config``
+        # runs this constructor off the loop.
+        self.store: ChannelStore = store if store is not None else resolve_channel_store(app_config)
         self._connection_repo = connection_repo
         self._get_stream_bridge = get_stream_bridge
         langgraph_url = _resolve_service_url(config, "langgraph_url", _CHANNELS_LANGGRAPH_URL_ENV, DEFAULT_LANGGRAPH_URL)
@@ -206,6 +211,12 @@ class ChannelService:
         if self._stopping:
             raise RuntimeError("cannot start ChannelService while shutdown is incomplete")
 
+        if isinstance(self.store, SqlChannelStore):
+            # One-time move of a pre-database ``channels/store.json`` into the
+            # shared table (idempotent; a peer replica importing concurrently is
+            # tolerated). Must land before the manager routes its first message
+            # or a known chat would get a second thread.
+            await self.store.import_legacy_json()
         await self.manager.start()
         self._running = True
 
@@ -648,9 +659,9 @@ async def start_channel_service(
     global _channel_service
     if _channel_service is not None:
         return _channel_service
-    # from_app_config reads the JSON channel store and runtime config files;
-    # keep that disk IO off the event loop. asyncio.to_thread forwards both
-    # args and kwargs to the target callable.
+    # from_app_config resolves the channel store path (realpath) and reads the
+    # runtime config files; keep that disk IO off the event loop.
+    # asyncio.to_thread forwards both args and kwargs to the target callable.
     service = await asyncio.to_thread(ChannelService.from_app_config, app_config, get_stream_bridge=get_stream_bridge)
     _channel_service = service
 

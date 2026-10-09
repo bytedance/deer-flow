@@ -9,7 +9,9 @@ import re
 import stat
 import threading
 import time
-from typing import Any, Literal
+from collections.abc import Callable, Coroutine
+from concurrent.futures import CancelledError as FutureCancelledError
+from typing import Any, Literal, TypeVar
 
 from app.channels.base import Channel, ChannelStopTimeout
 from app.channels.commands import is_known_channel_command, strip_leading_mentions
@@ -37,6 +39,9 @@ from deerflow.uploads.manager import (
 
 logger = logging.getLogger(__name__)
 PENDING_CLARIFICATION_TTL_SECONDS = 30 * 60
+# Bound on a lark-thread wait for a channel-store call routed through the Gateway loop.
+FEISHU_STORE_BRIDGE_TIMEOUT_SECONDS = 10.0
+_T = TypeVar("_T")
 FEISHU_INBOUND_BATCH_WINDOW_SECONDS = 0.75
 FEISHU_MAX_INBOUND_FILE_BYTES = 20_000_000
 SOURCE_PREVIEW_METADATA_KEY = "feishu_source_preview"
@@ -708,10 +713,10 @@ class FeishuChannel(Channel):
                         running_card_id,
                     )
                     fallback_card_id = await self._reply_card(source_message_id, card_text)
-                    self._remember_thread_mapping(msg, source_message_id, fallback_card_id)
+                    await self._remember_thread_mapping(msg, source_message_id, fallback_card_id)
                     self._remember_pending_clarification(msg, fallback_card_id)
                 else:
-                    self._remember_thread_mapping(msg, source_message_id, running_card_id)
+                    await self._remember_thread_mapping(msg, source_message_id, running_card_id)
                     self._remember_pending_clarification(msg, running_card_id)
                     logger.info("[Feishu] running card updated: source=%s card=%s", source_message_id, running_card_id)
             elif msg.is_final:
@@ -719,7 +724,7 @@ class FeishuChannel(Channel):
                     source_message_id,
                     self._compose_card_text(msg.text, msg.metadata),
                 )
-                self._remember_thread_mapping(msg, source_message_id, final_card_id)
+                await self._remember_thread_mapping(msg, source_message_id, final_card_id)
                 self._remember_pending_clarification(msg, final_card_id)
             elif awaited_running_card_task:
                 logger.warning(
@@ -732,7 +737,7 @@ class FeishuChannel(Channel):
                     msg.text,
                     metadata=msg.metadata,
                 )
-                self._remember_thread_mapping(msg, source_message_id, created_card_id)
+                await self._remember_thread_mapping(msg, source_message_id, created_card_id)
 
             if msg.is_final:
                 self._running_card_ids.pop(source_message_id, None)
@@ -743,7 +748,7 @@ class FeishuChannel(Channel):
 
     # -- internal ----------------------------------------------------------
 
-    def _remember_thread_mapping(self, msg: OutboundMessage, *topic_ids: str | None) -> None:
+    async def _remember_thread_mapping(self, msg: OutboundMessage, *topic_ids: str | None) -> None:
         store = self.config.get("channel_store")
         if store is None or not msg.thread_id:
             return
@@ -767,7 +772,7 @@ class FeishuChannel(Channel):
                 continue
             seen.add(topic_id)
             try:
-                store.set_thread_id(
+                await store.set_thread_id(
                     self.name,
                     msg.chat_id,
                     msg.thread_id,
@@ -776,6 +781,44 @@ class FeishuChannel(Channel):
                 )
             except Exception:
                 logger.exception("[Feishu] failed to remember thread mapping for topic_id=%s", topic_id)
+
+    def _run_store_call(self, make_coroutine: Callable[[], Coroutine[Any, Any, _T]], *, name: str, msg_id: Any, default: _T) -> _T:
+        """Run an async ``channel_store`` call from the synchronous lark callback thread.
+
+        The store is async (it may be the shared database table). ``_on_message``
+        runs on lark-oapi's thread, so the call is submitted to the Gateway loop
+        through the tracked threadsafe-future helper (``stop()`` drains or
+        cancels it) and awaited here with a bound — this thread already blocked
+        on the JSON file rewrite the store used to do inline. On an event-loop
+        thread (never the production path) a blocking wait would deadlock that
+        loop, and without a running Gateway loop there is nothing to run the
+        call on: both return ``default`` with a warning instead. Exceptions the
+        call raised propagate to the caller's own ``except``.
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            logger.warning("[Feishu] %s requested on an event-loop thread; skipping the channel store call", name)
+            return default
+        loop = self._main_loop
+        if loop is None or not loop.is_running():
+            logger.warning("[Feishu] main loop not running, cannot %s", name)
+            return default
+        future = self._submit_threadsafe_coroutine_future(make_coroutine(), loop, name=name, msg_id=msg_id)
+        if future is None:
+            logger.info("[Feishu] channel stopping, skipped %s", name)
+            return default
+        try:
+            return future.result(timeout=FEISHU_STORE_BRIDGE_TIMEOUT_SECONDS)
+        except TimeoutError:
+            future.cancel()
+            logger.warning("[Feishu] %s did not complete within %.0fs; continuing without the stored mapping", name, FEISHU_STORE_BRIDGE_TIMEOUT_SECONDS)
+            return default
+        except FutureCancelledError:
+            logger.info("[Feishu] %s cancelled by channel stop", name)
+            return default
 
     def _remember_pending_clarification(self, msg: OutboundMessage, card_message_id: str | None) -> None:
         if not msg.is_final or msg.metadata.get(PENDING_CLARIFICATION_METADATA_KEY) is not True:
@@ -837,7 +880,12 @@ class FeishuChannel(Channel):
         if store is None or not topic_id or not thread_id:
             return
         try:
-            store.set_thread_id(self.name, chat_id, thread_id, topic_id=topic_id, user_id=user_id)
+            self._run_store_call(
+                lambda: store.set_thread_id(self.name, chat_id, thread_id, topic_id=topic_id, user_id=user_id),
+                name="restore_pending_mapping",
+                msg_id=topic_id,
+                default=None,
+            )
         except Exception:
             logger.exception("[Feishu] failed to restore pending clarification mapping for topic_id=%s", topic_id)
 
@@ -851,20 +899,29 @@ class FeishuChannel(Channel):
         thread_id: str | None,
     ) -> tuple[str, bool]:
         store = self.config.get("channel_store")
-        candidates = [root_id, parent_id, thread_id]
+        candidates = [candidate for candidate in (self._non_empty_str(root_id), self._non_empty_str(parent_id), self._non_empty_str(thread_id)) if candidate]
 
-        if store is not None:
-            for candidate in candidates:
-                candidate = self._non_empty_str(candidate)
-                if not candidate:
-                    continue
-                try:
-                    if store.get_thread_id(self.name, chat_id, topic_id=candidate):
-                        return candidate, True
-                except Exception:
-                    logger.exception("[Feishu] failed to resolve stored topic mapping for topic_id=%s", candidate)
+        if store is not None and candidates:
+            stored = self._run_store_call(
+                lambda: self._first_stored_topic(store, chat_id, candidates),
+                name="resolve_topic_mapping",
+                msg_id=msg_id,
+                default=None,
+            )
+            if stored:
+                return stored, True
 
         return root_id or msg_id, False
+
+    async def _first_stored_topic(self, store: Any, chat_id: str, candidates: list[str]) -> str | None:
+        """The first candidate topic id the store already maps to a thread, in priority order."""
+        for candidate in candidates:
+            try:
+                if await store.get_thread_id(self.name, chat_id, topic_id=candidate):
+                    return candidate
+            except Exception:
+                logger.exception("[Feishu] failed to resolve stored topic mapping for topic_id=%s", candidate)
+        return None
 
     @staticmethod
     def _is_batchable_file_inbound(
