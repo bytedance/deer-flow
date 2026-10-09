@@ -84,7 +84,7 @@ from deerflow.runtime.checkpoint_mode import (
     inject_checkpoint_mode,
 )
 from deerflow.runtime.checkpoint_state import graph_state_schema
-from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
+from deerflow.runtime.context_keys import NOTIFICATION_ONLY_CONTEXT_KEY, PROJECT_CONTEXT_KEY
 from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
@@ -660,6 +660,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
             # at admission from threads_meta; a client-supplied value must
             # never survive in either run-config section.
             PROJECT_CONTEXT_KEY,
+            NOTIFICATION_ONLY_CONTEXT_KEY,
             KNOWLEDGE_SCOPE_KEY,
             KNOWLEDGE_SCOPE_RUNTIME_KEY,
         }
@@ -1915,6 +1916,7 @@ async def start_run(
     idempotency_key: str | None = None,
     require_existing_thread: bool = False,
     scheduled_task_runtime: Mapping[str, Any] | None = None,
+    dependency_continuation: Mapping[str, Any] | None = None,
 ) -> RunRecord:
     """Create a RunRecord and launch the background agent task.
 
@@ -2139,6 +2141,10 @@ async def start_run(
             request_context=getattr(body, "context", None),
         )
 
+        if dependency_continuation is not None:
+            if getattr(request.state, "auth_source", None) != AUTH_SOURCE_INTERNAL:
+                raise HTTPException(status_code=403, detail="Dependency continuation requires internal admission")
+            run_ctx = replace(run_ctx, dependency_continuation=dict(dependency_continuation))
         if scheduled_task_runtime is not None:
             run_ctx = replace(run_ctx, scheduled_task_runtime=dict(scheduled_task_runtime))
         conversation_references = list(getattr(body, "conversation_references", None) or [])
@@ -2446,6 +2452,17 @@ async def launch_mcp_task_notification_run(
     event: dict[str, Any],
 ) -> dict[str, Any]:
     """Idempotently launch the Agent run that delivers one task event."""
+    host = getattr(app.state, "native_run_admission_host", None)
+    notification = dict(thread_id=thread_id, assistant_id=assistant_id, owner_user_id=owner_user_id, task_id=task_id, dispatch_version=dispatch_version, dispatch_attempt=dispatch_attempt, event=event)
+    if host is not None and hasattr(host, "forward_notification"):
+        return await host.forward_notification(notification)
+    plan = None
+    if host is not None and hasattr(host, "prepare_notification"):
+        plan = await host.prepare_notification(notification)
+        if plan and plan.get("existing_run_id"):
+            return {"run_id": plan["existing_run_id"], "thread_id": thread_id}
+        if plan:
+            event = plan["event"]
     request = SimpleNamespace(
         app=app,
         headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: owner_user_id},
@@ -2488,7 +2505,10 @@ async def launch_mcp_task_notification_run(
         if_not_exists="create",
         feedback_keys=None,
     )
-    idempotency_key = f"mcp-task:{task_id}:{dispatch_version}:{dispatch_attempt}"
+    if plan:
+        body.metadata = plan["metadata"]
+        body.context["model_name"] = plan["model_name"]
+    idempotency_key = plan["idempotency_key"] if plan else f"mcp-task:{task_id}:{dispatch_version}:{dispatch_attempt}"
     # Non-HTTP entry point, same as launch_scheduled_thread_run above: the MCP
     # task service drives this from its own background loop, so one scope per
     # notification keeps every delivery attempt separately correlatable.
@@ -2500,6 +2520,8 @@ async def launch_mcp_task_notification_run(
                 request,
                 idempotency_key=idempotency_key,
                 require_existing_thread=True,
+                dependency_continuation=plan["wait"] if plan else None,
+                scheduled_task_runtime=plan["runtime"] if plan else None,
             )
     except HTTPException as exc:
         if isinstance(exc, BusyThreadConflict):
@@ -2507,6 +2529,8 @@ async def launch_mcp_task_notification_run(
         if exc.status_code in {400, 401, 403, 404, 409, 422, 501}:
             raise PermanentNotificationError(str(exc.detail)) from exc
         raise
+    if plan:
+        await host.acknowledge_continuation(plan["wait"], record.run_id)
     return {"run_id": record.run_id, "thread_id": record.thread_id}
 
 

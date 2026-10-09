@@ -160,6 +160,28 @@ class ScheduledTaskRunRepository:
     def set_finalization_observer(self, callback: FinalizationObserver | None) -> None:
         self._finalization_observer = callback
 
+    async def transfer_dependency_run(self, *, task_id: str, occurrence_id: str, user_id: str, source_run_id: str, continuation_run_id: str) -> None:
+        """Move an existing occurrence's run association without new admission/accounting."""
+        async with self._sf() as session:
+            task = await self._lock_task(session, task_id)
+            occurrence = await session.get(ScheduledTaskRunRow, occurrence_id, with_for_update=True)
+            source = await session.get(RunRow, source_run_id)
+            continuation = await session.get(RunRow, continuation_run_id)
+            if task is None or task.user_id != user_id or occurrence is None or occurrence.task_id != task_id or occurrence.status != "running" or source is None or continuation is None:
+                raise ValueError("Scheduled dependency occurrence unavailable")
+            for run in (source, continuation):
+                metadata = run.metadata_json or {}
+                if run.user_id != user_id or run.thread_id != occurrence.thread_id or metadata.get("scheduled_task_id") != task_id or metadata.get("scheduled_task_run_id") != occurrence_id:
+                    raise ValueError("Scheduled dependency occurrence identity mismatch")
+            if occurrence.run_id == continuation_run_id:
+                return
+            if occurrence.run_id != source_run_id or source.status != "success" or source.cancel_action or (source.goal_verdict or {}).get("native_dependency_wait") is not True or continuation.status != "pending":
+                raise ValueError("Scheduled dependency transfer was superseded")
+            occurrence.run_id = continuation_run_id
+            if task.last_run_id == source_run_id:
+                task.last_run_id = continuation_run_id
+            await session.commit()
+
     @staticmethod
     def _row_to_dict(row: ScheduledTaskRunRow) -> dict[str, Any]:
         data = row.to_dict(exclude={"occurrence_seq", "launch_accounted"})
@@ -1003,12 +1025,24 @@ class ScheduledTaskRunRepository:
             await session.commit()
             return recovered
 
+    async def dependency_wait_sources(self) -> frozenset[str]:
+        """Snapshot sources to examine before recovery takes writer locks."""
+        async with self._sf() as session:
+            result = await session.execute(
+                select(RunRow.run_id)
+                .join(ScheduledTaskRunRow, ScheduledTaskRunRow.run_id == RunRow.run_id)
+                .where(ScheduledTaskRunRow.status.in_(EXECUTING_RUN_STATUSES), RunRow.status == "success", RunRow.goal_verdict["native_dependency_wait"].as_boolean().is_(True))
+            )
+            return frozenset(result.scalars())
+
     async def reconcile_active_runs(
         self,
         *,
         error: str,
         now: datetime,
         lease_grace_seconds: int = 10,
+        valid_dependency_wait_runs: frozenset[str] = frozenset(),
+        checked_dependency_wait_runs: frozenset[str] | None = None,
     ) -> int:
         """Reconcile only rows whose underlying owner is no longer live.
 
@@ -1016,6 +1050,23 @@ class ScheduledTaskRunRepository:
         underlying run, or a queued row whose parent task still has a dispatch
         lease, belongs to another process and must survive this startup.
         """
+
+        def protects_dependency_wait(candidate, task, row):
+            if candidate is None or candidate.status != "success" or (candidate.goal_verdict or {}).get("native_dependency_wait") is not True:
+                return False
+            if checked_dependency_wait_runs is not None and candidate.run_id not in checked_dependency_wait_runs:
+                # Completion after preflight is unchecked, not invalid.
+                return True
+            return (
+                not candidate.cancel_action
+                and candidate.run_id in valid_dependency_wait_runs
+                and task is not None
+                and candidate.user_id == task.user_id
+                and candidate.thread_id == row.thread_id
+                and (candidate.metadata_json or {}).get("scheduled_task_id") == task.id
+                and (candidate.metadata_json or {}).get("scheduled_task_run_id") == row.id
+            )
+
         async with self._sf() as session:
             result = await session.execute(
                 select(
@@ -1052,6 +1103,10 @@ class ScheduledTaskRunRepository:
                     # would hold SQLite's writer lock across the nested short
                     # transaction used by that durable-run CAS.
                     associations.append((task, row, candidate))
+                if protects_dependency_wait(candidate, task, row):
+                    # The host's durable dependency receipt owns settlement;
+                    # this occurrence retains overlap/global budget protection.
+                    continue
                 if candidate is not None and candidate.status not in {"pending", "running"}:
                     finalizations.append((task, row, candidate))
                     stale += 1
@@ -1088,14 +1143,18 @@ class ScheduledTaskRunRepository:
                             # active snapshot read above. Keep this detached:
                             # recovery must not write a stale ORM RunRow back.
                             candidate = RunRow(
-                                run_id=candidate.run_id,
-                                thread_id=candidate.thread_id,
-                                user_id=candidate.user_id,
+                                run_id=refreshed["run_id"],
+                                thread_id=refreshed["thread_id"],
+                                user_id=refreshed.get("user_id"),
                                 created_at=candidate.created_at,
+                                metadata_json=refreshed.get("metadata") or {},
+                                cancel_action=refreshed.get("cancel_action"),
                                 status=refreshed["status"],
                                 error=refreshed.get("error"),
                                 goal_verdict=refreshed.get("goal_verdict"),
                             )
+                            if protects_dependency_wait(candidate, task, row):
+                                continue
                 if row.status == "launching" and row.run_id is None:
                     if _lease_is_alive(row.lease_expires_at, now=now, grace_seconds=0):
                         continue

@@ -63,6 +63,7 @@ from deerflow.runtime.context_keys import (
     CHECKPOINT_AGENT_NAME_METADATA_KEY,
     CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
     DEFAULT_AGENT_NAME_METADATA_VALUE,
+    NOTIFICATION_ONLY_CONTEXT_KEY,
     PROJECT_CONTEXT_KEY,
     checkpoint_agent_binding_metadata,
 )
@@ -665,6 +666,9 @@ class RunContext:
     # this process" (embedded/tests) and resolves to the config default.
     checkpoint_snapshot_frequency: int | None = None
     on_run_completed: Any | None = field(default=None)
+    # Operator-owned dependency adapter v1; no client context grants authority.
+    on_dependency_wait: Any | None = field(default=None)
+    dependency_continuation: Mapping[str, Any] | None = field(default=None)
     # The host binds this capability to one run's authenticated reader and references.
     conversation_reader: Any | None = field(default=None)
     agent_runs: Any | None = field(default=None)
@@ -1308,17 +1312,37 @@ async def run_agent(
                 runnable_configs.append(initial_runnable_config)
 
         runtime_ctx[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = frozenset(pre_existing_message_ids)
+        # Always overwrite client context: only the trusted host receipt may
+        # turn a native result notification into a report-only run.
+        runtime_ctx[NOTIFICATION_ONLY_CONTEXT_KEY] = bool((ctx.dependency_continuation or {}).get("notification_only"))
         _install_runtime_context(config, runtime_ctx)
 
         scheduled_objective = _scheduled_goal_objective(record, ctx.scheduled_task_runtime)
+        resumed_goal = None
+        if ctx.dependency_continuation is not None and not ctx.dependency_continuation.get("notification_only"):
+            wait = ctx.dependency_continuation
+            async with goal_thread_lock(thread_id), _checkpoint_thread_lock(thread_id):
+                current_goal, checkpoint = await _reread_goal_and_checkpoint(checkpointer, thread_id)
+                signature = visible_conversation_signature(await _materialized_checkpoint_messages(accessor, thread_id))
+                if current_goal != wait["goal"] or signature != wait["conversation_signature"] or checkpoint is None:
+                    raise GoalWriteConflict("Dependency continuation was superseded before execution")
+                if int(current_goal.get("continuation_count", 0)) >= int(current_goal.get("max_continuations", DEFAULT_MAX_GOAL_CONTINUATIONS)) or int(current_goal.get("no_progress_count", 0)) >= int(
+                    current_goal.get("max_no_progress_continuations", DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS)
+                ):
+                    raise GoalWriteConflict("Dependency continuation budget exhausted")
+                resumed_goal = copy.deepcopy(current_goal)
+                resumed_goal["continuation_count"] = int(current_goal.get("continuation_count", 0)) + 1
+                values = await write_thread_goal(checkpointer, thread_id, resumed_goal, as_node="dependency_continuation", expected_checkpoint_id=_checkpoint_id(checkpoint))
+            await bridge.publish(run_id, "values", serialize(values, mode="values"))
         if scheduled_objective is not None:
             # Track the instance before admitting the write: synchronous saver
             # commits are drained even if host cancellation arrives mid-write.
-            scheduled_goal = build_goal_state(scheduled_objective, now=canonical_run_created_at(record.created_at))
+            scheduled_goal = resumed_goal or build_goal_state(scheduled_objective, now=canonical_run_created_at(record.created_at))
             record.scheduled_goal_cleanup_pending = True
             terminal_status_kwargs["persist"] = False
             try:
-                await _install_scheduled_goal(checkpointer=checkpointer, accessor=accessor, thread_id=thread_id, goal=scheduled_goal)
+                if resumed_goal is None:
+                    await _install_scheduled_goal(checkpointer=checkpointer, accessor=accessor, thread_id=thread_id, goal=scheduled_goal)
             except GoalWriteConflict:
                 # Rejected before the write was admitted. Even an equal goal
                 # snapshot belongs to its original writer, never this run.
@@ -1328,7 +1352,7 @@ async def run_agent(
                     terminal_status_kwargs.pop("persist", None)
                 raise
 
-        if scheduled_goal is None:
+        if scheduled_goal is None and ctx.dependency_continuation is None:
             await _clear_stale_scheduled_goal(record=record, run_manager=run_manager, bridge=bridge, checkpointer=checkpointer)
 
         # Capture the effective (resolved) model name from the agent's metadata.
@@ -1509,7 +1533,7 @@ async def run_agent(
                     final_goal_verdict.update(satisfied=False, blocker="missing_evidence", relied_on_assumption=False)
 
         await _stream_once(graph_input, initial_runnable_config)
-        while not record.abort_event.is_set() and not llm_error_fallback_message and (journal is None or not journal.had_llm_error_fallback):
+        while not record.abort_event.is_set() and not llm_error_fallback_message and (journal is None or not journal.had_llm_error_fallback) and not (ctx.dependency_continuation or {}).get("notification_only"):
             continuation_input = await _prepare_goal_continuation_input(
                 bridge=bridge,
                 accessor=accessor,
@@ -1735,7 +1759,17 @@ async def run_agent(
                 except Exception:
                     logger.debug("Failed to persist run duration for thread %s run %s (non-fatal)", thread_id, run_id)
 
-            if scheduled_goal is not None and not record.ownership_lost and checkpointer is not None:
+            dependency_waiting = False
+            if record.status == RunStatus.success and not record.abort_event.is_set() and not record.ownership_lost and ctx.on_dependency_wait is not None:
+                try:
+                    dependency_waiting = await ctx.on_dependency_wait(record)
+                    dependency_waiting = dependency_waiting and not record.abort_event.is_set() and not record.ownership_lost
+                    if dependency_waiting:
+                        record.goal_verdict = {**(record.goal_verdict or {}), "native_dependency_wait": True}
+                except Exception:
+                    logger.exception("Native dependency receipt could not be committed for run %s", run_id)
+                    await run_manager.set_status(run_id, RunStatus.error, error="Dependency receipt commit failed", persist=False)
+            if scheduled_goal is not None and not dependency_waiting and not record.ownership_lost and checkpointer is not None:
                 if record.abort_event.is_set() and record.abort_action == "rollback" and not checkpoint_rollback_completed:
                     await _finish_cancellation("rollback")
                 # Scheduled goals are occurrence-scoped. Keep the real run slot
@@ -1764,6 +1798,8 @@ async def run_agent(
                             # staged success; apply the accepted action, including
                             # rollback, before committing any terminal outcome.
                             await _finish_cancellation(record.abort_action, restore_checkpoint=not checkpoint_rollback_completed)
+                            if dependency_waiting:
+                                await _clear_scheduled_goal(goal=scheduled_goal, record=record, run_manager=run_manager, bridge=bridge, checkpointer=checkpointer, owned_admission=True)
                         await run_manager.persist_current_status(run_id)
                     else:
                         cancel_action = await run_manager.set_status_if_not_cancelled(
@@ -1775,6 +1811,8 @@ async def run_agent(
                         )
                         if cancel_action is not None:
                             await _finish_cancellation(cancel_action)
+                            if scheduled_goal is not None and dependency_waiting:
+                                await _clear_scheduled_goal(goal=scheduled_goal, record=record, run_manager=run_manager, bridge=bridge, checkpointer=checkpointer, owned_admission=True)
                             await run_manager.persist_current_status(run_id)
                 except Exception:
                     logger.warning("Failed to persist terminal status for run %s after delivery receipt attempts", run_id, exc_info=True)
@@ -1791,6 +1829,10 @@ async def run_agent(
                     logger.warning("Failed to persist run completion for %s (non-fatal)", run_id, exc_info=True)
 
             if scheduled_goal is not None and not record.ownership_lost:
+                if dependency_waiting and (record.abort_event.is_set() or record.status != RunStatus.success):
+                    # Cancellation won after the early wait receipt. Use the
+                    # native idle reservation/instance fence for late cleanup.
+                    await _clear_scheduled_goal(goal=scheduled_goal, record=record, run_manager=run_manager, bridge=bridge, checkpointer=checkpointer)
                 if not await run_manager.persist_current_status(run_id):
                     await run_manager._mark_ownership_lost(record, reason="Scheduled run terminal status could not be confirmed after goal cleanup.", require_active=False)
                 # Late cancellation can still drain a rollback after goal

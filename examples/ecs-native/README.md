@@ -20,5 +20,11 @@ environment variables. Use distinct container prefixes for separate node roles.
 Set the same `AUTH_JWT_SECRET` and `DEER_FLOW_INTERNAL_AUTH_TOKEN` on both peers.
 The JSON ledger URL uses SQLAlchemy's `postgresql+psycopg://` driver; the native
 database URL uses the normal native `postgresql://` form. This example has only
-the native profile: adding B and native notifications to one worker is Task 5
-work and requires the same shared node definition, not a second ledger.
+the native profile. For C→B→C, add an operator B profile to this same node definition
+and configure the ordinary MCP server/daemon against the same SQL ledger. Enable
+native MCP tasks and bind the frozen `user_auth` credential to the actual native
+owner; do not use a model-supplied owner ID. The combined executable example is
+`backend/tests/test_ecs_executor_bc_main.py`: it builds the shared pool and validates
+full C finalization, B attempt 1, exactly two native runs, same-goal budgets and
+native artifact delivery. These shell examples do not enable browser/memory; full
+configured capabilities and cloud deployment acceptance remain separate gates.

@@ -690,6 +690,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     run_lease_grace_seconds=startup_config.run_ownership.grace_seconds,
                     connection_repo=notification_connection_repo,
                     notification_repo=scheduled_notification_repo,
+                    dependency_wait_reconciler=getattr(getattr(app.state, "native_run_admission_host", None), "reconcile_dependency_waits", None),
                 )
                 app.state.scheduled_task_service = scheduled_task_service
                 if startup_config.scheduler.enabled:

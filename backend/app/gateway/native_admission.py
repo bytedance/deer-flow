@@ -81,6 +81,7 @@ async def make_native_snapshot(request, record, *, run_ctx, body, config, graph_
             "knowledge_scope": admitted_knowledge_scope,
             "scope_assistant_id": scope_assistant_id,
             "scheduled_task_runtime": scheduled_task_runtime,
+            "dependency_continuation": run_ctx.dependency_continuation,
             "require_existing_thread": require_existing_thread,
         },
     }
@@ -123,6 +124,10 @@ async def adopt_native_run(app, job, token, secret, *, admission_check=None):
     from ecs_executor.agent_dispatch import open_native_secrets
 
     execution = deepcopy(native["execution"])
+    if execution.get("dependency_continuation") is not None:
+        from dataclasses import replace
+
+        ctx = replace(ctx, dependency_continuation=execution["dependency_continuation"])
     request_secrets = open_native_secrets(native, job["node_id"], secret, native.get("secret_carrier"))
     if request_secrets:
         execution["config"].setdefault("context", {})["secrets"] = request_secrets

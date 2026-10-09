@@ -106,6 +106,24 @@ class NativeDispatchHost:
     async def quiesce(self):
         self.quiescing = True
 
+    async def prepare_notification(self, notification):
+        from ecs_executor.dependencies import prepare_notification
+
+        return await prepare_notification(self, notification)
+
+    async def reconcile_dependency_waits(self, source_run_ids):
+        from ecs_executor.dependencies import maintain_waits
+
+        return await maintain_waits(self, source_run_ids=source_run_ids)
+
+    async def acknowledge_continuation(self, wait, run_id):
+        from ecs_executor.dependencies import source_job
+
+        if wait.get("notification_only"):
+            return
+        job = await asyncio.to_thread(source_job, self.pool.store, wait["source_run_id"])
+        await asyncio.to_thread(self.pool.store.mutate, job["id"], lambda row: row["dependency_wait"].update(continuation_run_id=run_id))
+
     async def admit_native(self, record, snapshot_factory):
         if self.quiescing:
             raise RuntimeError("Native dispatcher is quiescing")
@@ -120,6 +138,12 @@ class NativeDispatchHost:
             return False
         node = node or self.config["native_node"]
         snapshot = await snapshot_factory(transport_node=node, transport_secret=self.credentials[node])
+        wait = snapshot["execution"].get("dependency_continuation")
+        scheduled = snapshot["execution"].get("scheduled_task_runtime")
+        if wait is not None and not wait.get("notification_only") and scheduled is not None:
+            await self.app.state.scheduled_task_run_repo.transfer_dependency_run(
+                task_id=scheduled["task_id"], occurrence_id=scheduled["occurrence_id"], user_id=record.user_id, source_run_id=wait["source_run_id"], continuation_run_id=record.run_id
+            )
         if not record.user_id:
             raise ValueError("Remote native admission requires an authenticated owner")
         node = node or self.config["native_node"]
@@ -215,6 +239,10 @@ class NativeDispatchHost:
         await asyncio.to_thread(self.pool.store.mutate, job["id"], lambda value: value.update(settlement_pending=False))
 
     async def maintain(self):
+        from ecs_executor.dependencies import maintain_waits
+
+        if getattr(self.app.state, "run_manager", None) is not None:
+            await maintain_waits(self)
         store = self.app.state.run_store
         pending = await asyncio.to_thread(self.pool.store.list_native_settlement_pending)
         for job in pending:
@@ -316,9 +344,44 @@ def install_native_dispatch(app, host):
                 owned = await asyncio.to_thread(host.pool.owned, node, args["owner"], kind="C")
                 claim = None if host.quiescing else await asyncio.to_thread(host.pool.claim, node, args["owner"], kind="C")
                 return JSONResponse({"owned": [{"job": job, "capability": sign_native_launch(job, credential)} for job in owned], "claim": {"job": claim, "capability": sign_native_launch(claim, credential)} if claim else None})
+            if operation == "notification":
+                from app.gateway.services import launch_mcp_task_notification_run
+                from app.mcp_tasks.errors import PermanentNotificationError
+                from deerflow.runtime.runs.manager import ConflictError
+
+                notification = args["notification"]
+                owner, thread_id = notification["owner_user_id"], notification["thread_id"]
+                claims = verify_execution_scope(args["capability"], secret=credential.encode(), authenticated_user_id=owner, arguments=notification, expected_audience=node, expected_operation="native_notification")
+                thread = await host.app.state.thread_store.get(thread_id, user_id=owner)
+                if thread is None or claims["thread_id"] != thread_id or claims["incarnation"] != thread["incarnation"]:
+                    raise ValueError("Native notification identity mismatch")
+                # Global native notification claims may be owned by any peer.
+                # Authenticate the sender, then resolve placement centrally;
+                # the sender node is never evidence of the source Run's node.
+                task = await host.app.state.mcp_task_repo.get(notification["task_id"], user_id=owner, thread_id=thread_id, thread_incarnation=thread["incarnation"])
+                if (
+                    task is None
+                    or task.get("run_id") != args["source_run_id"]
+                    or claims["run_id"] != (task.get("run_id") or "mcp-task:" + notification["task_id"])
+                    or task.get("dispatch_version") != notification["dispatch_version"]
+                    or task.get("dispatch_attempt") != notification["dispatch_attempt"]
+                    or task.get("dispatch_event") != notification["event"]
+                    or task.get("notification_status") != "launching"
+                ):
+                    raise ValueError("Native notification reservation mismatch")
+                try:
+                    return JSONResponse(await launch_mcp_task_notification_run(app=host.app, **notification))
+                except PermanentNotificationError:
+                    return JSONResponse({"error": "Notification permanently rejected"}, status_code=410)
+                except ConflictError:
+                    return JSONResponse({"error": "Notification waiting for native dependencies"}, status_code=409)
             job = await asyncio.to_thread(host.pool.store.get, args["job_id"])
             if job.get("kind") != "C" or job.get("node_id") != node or job.get("worker_owner") != args["owner"] or job.get("generation") != args.get("generation"):
                 raise ValueError("Native assignment mismatch")
+            if operation == "wait":
+                from ecs_executor.dependencies import persist_wait
+
+                return JSONResponse({"waiting": await persist_wait(host, job)})
             if operation == "refuse":
                 return JSONResponse(await host.refuse(job))
             if operation == "get":
@@ -357,6 +420,39 @@ class NativeWorkerHost:
         self.secret = os.environ[config["credential_env"]]
         self.mount_id = (Path(config["artifact_root"]) / "pool-mount-id").read_text(encoding="ascii")
         self.client = httpx.AsyncClient(headers={"Authorization": "Bearer " + self.secret, "X-DeerFlow-Internal-Token": os.environ["DEER_FLOW_INTERNAL_AUTH_TOKEN"]}, timeout=30)
+
+    async def persist_dependency_wait(self, record):
+        for job, owned in self.executions.values():
+            if owned.run_id == record.run_id:
+                return (await self.request("wait", job_id=job["id"], generation=job["generation"]))["waiting"]
+        raise RuntimeError("Native dependency source assignment unavailable")
+
+    async def forward_notification(self, notification):
+        from app.mcp_tasks.errors import PermanentNotificationError
+        from deerflow.runtime.runs.manager import ConflictError
+
+        thread = await self.app.state.thread_store.get(notification["thread_id"], user_id=notification["owner_user_id"])
+        task = await self.app.state.mcp_task_repo.get(notification["task_id"], user_id=notification["owner_user_id"], thread_id=notification["thread_id"], thread_incarnation=thread.get("incarnation") if thread else None)
+        if task is None:
+            raise PermanentNotificationError("Native notification source unavailable")
+        capability = mint_execution_scope(
+            secret=self.secret.encode(),
+            audience=self.config["node_id"],
+            user_id=notification["owner_user_id"],
+            thread_id=notification["thread_id"],
+            incarnation=thread["incarnation"],
+            run_id=task.get("run_id") or "mcp-task:" + notification["task_id"],
+            operation="native_notification",
+            arguments=notification,
+        )
+        try:
+            return await self.request("notification", source_run_id=task.get("run_id"), notification=notification, capability=capability)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in {403, 410}:
+                raise PermanentNotificationError("Native notification capability or dependency rejected") from exc
+            if exc.response.status_code == 409:
+                raise ConflictError("Native dependencies are not ready") from exc
+            raise
 
     async def admit(self, record):
         raise RuntimeError("Native worker accepts signed existing admissions only")
@@ -476,7 +572,7 @@ class NativeWorkerHost:
                     state = "cancelled" if latest.get("cancel_requested") or record.status.value == "interrupted" else {"success": "completed"}.get(record.status.value, "failed")
                     if state == "cancelled":
                         await self.stop_owned(job)
-                    await self.report(job, {"state": state, "error": record.error, "physical_stopped": True})
+                    await self.report(job, {"state": state, "error": record.error, "physical_stopped": True, "physical_stopped_at": time.time()})
                     break
                 except (httpx.HTTPError, RuntimeError):
                     # Retry this settled native outcome/owned STOP, never the

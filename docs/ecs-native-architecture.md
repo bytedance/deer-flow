@@ -1,6 +1,6 @@
 # 原生 DeerFlow ECS 工作池架构
 
-更新：2026-10-09。本文对应 `codex/ecs-native-reuse` 的实际实现。B 主干及 C 执行部分已通过本地验证和独立审查；C→B→C 正在实现。完整浏览器、记忆、调度器能力、fork 合并、运维及云验收仍待完成。本文不是部署完成声明。
+更新：2026-10-09。本文对应 `codex/ecs-native-reuse` 的实际实现。B 主干及 C 执行部分已通过本地验证和独立审查；C→B→C 依赖合同已通过本地主干与独立审查。完整浏览器、记忆、调度器能力、fork 合并、运维及云验收仍待完成。本文不是部署完成声明。
 
 ## 需求与职责
 
@@ -11,7 +11,7 @@ B 和 C 可以共存，共用节点和资源账。B 执行程序；C 执行完�
 | 用户、会话、权限、文件展示 | users、threads、artifact API、NAS 目录 | 签名身份传递、输入快照、输出发布 |
 | B 长任务跟踪、轮询、通知 | McpTaskService、ordinary MCP driver、mcp_tasks | 持久程序队列、Docker 执行及物理清理 |
 | C 推理、工具、checkpoint、事件、取消 | Gateway、RunManager、run_agent、PostgreSQL、Redis | 排队、pending Run 所有权交接、纯出站执行接点 |
-| 目标评估和预算 | GoalState 与原生目标运行逻辑 | 依赖关联、有效性判定及通知准入，正在实现 |
+| 目标评估和预算 | GoalState 与原生目标运行逻辑 | 依赖关联、有效性判定及原生通知准入 |
 | 机器池容量 | 原生子系统各自限流 | B/C 共用 CPU、内存、并发资源预留 |
 
 不新增第二套 Agent 图、checkpoint、用户会话或目标评估器。执行账记录物理工作；原生数据库记录用户任务和 Agent 生命周期。
@@ -81,11 +81,11 @@ flowchart LR
 
 本地已检查 AIO 的实际 Docker 限额。Linux 上 Gateway 的 500m/1GiB cgroup 限额尚须部署脚本及云/容器环境验证。
 
-## C→B→C：实施中的合同
+## C→B→C：原生依赖合同
 
 当前 C 提交 B 后，需要持久保存原生任务成员和目标 identity/revision，在 checkpoint、工作区及完整原生收尾后释放可释放额度。B 结果经原生 McpTaskService 的既有通知通道触发一次有效续跑。
 
-目标、线程 incarnation、用户取消、新消息及累计预算必须重新校验；重复事件不能创建竞争 run。等待 B 时也必须保留原生 Scheduler occurrence 的 overlap 保护。此部分正在实现，不能把现有 MCP 通知能力视为组合功能已完成。
+目标、线程 incarnation、用户取消、新消息及累计预算必须重新校验；重复事件不能创建竞争 run。等待 B 时也必须保留原生 Scheduler occurrence 的 overlap 保护。最新实际组合主干通过：1 passed / 142.71 秒，检查同节点、真实 C 收尾在 B 启动之前、B attempt=1、两个原生 Run、原目标预算及文件交付。定时任务接点有原生运行时和 SQL 合同验证；SPEC 与质量复审通过，冻结代码相关回归 282 passed；完整 Scheduler 配置验收仍待完成。不能把此证据视为完整功能已交付。
 
 ## 扩展边界与后续同步原仓库
 

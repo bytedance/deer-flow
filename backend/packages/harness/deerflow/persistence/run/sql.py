@@ -44,6 +44,12 @@ def _origin_kind(operation_kind: str, metadata: Any) -> str | None:
 
 
 class RunRepository(RunStore):
+    async def find_by_idempotency_key(self, key: str, *, user_id: str, thread_id: str) -> dict[str, Any] | None:
+        """Owner-scoped recovery of an admission whose acknowledgement was lost."""
+        async with self._sf() as session:
+            row = await session.scalar(select(RunRow).where(RunRow.idempotency_key == key, RunRow.user_id == user_id, RunRow.thread_id == thread_id))
+            return self._row_to_dict(row) if row is not None else None
+
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
 

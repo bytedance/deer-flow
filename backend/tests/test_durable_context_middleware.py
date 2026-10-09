@@ -1353,6 +1353,28 @@ def _system_text(messages):
 
 
 class TestActiveGoalInjection:
+    def test_notification_only_suppresses_goal_without_mutating_state(self):
+        state = {"messages": [HumanMessage(content="B completed")], "goal": build_goal_state(_GOAL_OBJECTIVE)}
+        request = SimpleNamespace(state=state, runtime=SimpleNamespace(context={"__deerflow_notification_only": True}), messages=state["messages"])
+        request.override = lambda **kwargs: SimpleNamespace(**kwargs)
+        result = DurableContextMiddleware()._inject(request)
+        assert _GOAL_OBJECTIVE not in str(result.messages)
+        assert "Report only the terminal task result" in _system_text(result.messages)
+        assert result.tools == []
+        assert state["goal"]["objective"] == _GOAL_OBJECTIVE
+
+    @pytest.mark.asyncio
+    async def test_notification_only_blocks_even_unsolicited_tool_calls(self):
+        request = SimpleNamespace(runtime=SimpleNamespace(context={"__deerflow_notification_only": True}), tool_call={"id": "call", "name": "set_goal", "args": {}})
+        called = []
+
+        async def handler(request):
+            called.append(request)
+
+        result = await DurableContextMiddleware().awrap_tool_call(request, handler)
+        assert result.status == "error"
+        assert not called
+
     def _invoke(self, state, **middleware_kwargs):
         model = RecordingFakeModel(responses=[AIMessage(content="ok")])
         agent = create_agent(model=model, tools=[], middleware=[DurableContextMiddleware(**middleware_kwargs)], state_schema=ThreadState)

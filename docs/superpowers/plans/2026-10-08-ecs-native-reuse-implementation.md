@@ -54,9 +54,9 @@ Files: ecs_executor/agent_dispatch.py, minimal native internal admission adapter
 
 Files: ecs_executor/dependencies.py, native notification/goal lifecycle adapter where required; backend/tests/test_ecs_executor_bc_main.py.
 
-- [ ] Persist awaited job membership and goal identity/revision; use native goal/checkpoint as goal authority. End/yield the current execution only after state and workspace have committed.
-- [ ] Release only actually freed run resources. On dependency terminal event, use one native notification path and one idempotent continuation admission.
-- [ ] Prove C→B→C in a minimal local pool, with original goal preserved. User cancel/goal replacement stops stale continuation; repeated events cannot start competing runs. Preserve cumulative budgets and Scheduler overlap protection.
+- [x] Persist awaited job membership and goal identity/revision; use native goal/checkpoint as goal authority. End/yield the current execution only after state and workspace have committed.
+- [x] Release only actually freed run resources. On dependency terminal event, use one native notification path and one idempotent continuation admission.
+- [x] Prove C→B→C in a minimal local pool, with original goal preserved. User cancel/goal replacement stops stale continuation; repeated events cannot start competing runs. Preserve cumulative budgets and Scheduler overlap protection.
 
 ## Task 6: Integration, operations and delivery
 

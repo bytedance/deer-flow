@@ -1,6 +1,6 @@
 # 原生 ECS 工作池库表说明
 
-更新：2026-10-09。字段核对自当前已审查代码；依赖协调正在实现，其新增结构将在代码和验收稳定后补齐。旧 docs/ecs-fleet-database.md 属于上一版 Fleet，不能作为本次重做的部署 schema。
+更新：2026-10-09。B/C 基础字段核对自已审查代码；下述 Task5 依赖字段已通过主干、离线回归和独立 SPEC/质量复审。旧 docs/ecs-fleet-database.md 属于上一版 Fleet，不能作为本次重做的部署 schema。
 
 ## 数据权威与逻辑关系
 
@@ -41,8 +41,9 @@ B 通过 mcp_tasks.remote_task_id 对应 ecs_execution_jobs.id；C 通过执行�
 | 暂存 | staged_deadline | 未完成本地持久跟踪的暂存到期边界 |
 | 分配 | node_id、worker_owner、generation、attempt、lease_until | 所属节点及报告 fence |
 | 启动/取消 | start_intent、started_at、cancel_requested | 未知启动禁止重放 |
-| 物理收尾 | physical_stopped、cleanup_pending | 资源释放和终态清理证据 |
+| 物理收尾 | physical_stopped、physical_stopped_at、cleanup_pending | 资源释放和终态清理证据；时间戳用于核对 C 收尾后 B 才启动 |
 | C 跨库收尾 | settlement_pending、settlement_kind、settlement_error、settlement_cancel_action | 原生 terminal commit / END / 执行账收尾的恢复意图 |
+| 依赖等待 | dependency_wait | Task5 的原生任务成员、目标快照、可见消息签名与续跑 Run 关联；非目标权威 |
 | 结果 | error、exit_code、artifact、native_artifact_uri | 程序/执行结果和原生文件引用 |
 
 状态：staged → queued → starting → running → completed/failed/cancelled；starting/running 的未知结果可以进入 uncertain。取消未启动的任务可直接终止；已启动的任务不能跳过物理确认。终态结果可能保留 cleanup_pending，不能把业务结果终态当作容器已删除。
@@ -89,7 +90,24 @@ mcp_tasks 保留本地 id、user/thread/incarnation/run/tool_call、server/drive
 
 GoalState 存在原生 checkpoint：objective、status、created_at、updated_at、continuation_count/max_continuations、no_progress_count/max_no_progress_continuations、last_evaluation。不是新 goal 表，不能把执行账里的快照当作最新目标权威。
 
-Scheduler 复用 scheduled_tasks 与 scheduled_task_runs，active occurrence 的 queued/launching/running 唯一保护、租约和全局预算仍由原生仓库管理。Task5 将补充等待依赖时保持原 occurrence 的接点，当前未宣称完成。
+Scheduler 复用 scheduled_tasks 与 scheduled_task_runs，active occurrence 的 queued/launching/running 唯一保护、租约和全局预算仍由原生仓库管理。Task5 通过 scheduled_task_runs.run_id 和 scheduled_tasks.last_run_id 将同一 occurrence 移交给续跑 Run，不新增 occurrence 或重记 run_count。移交在原生 pending Run 准入之后、执行队列可见之前完成，事务先锁父 task，再锁 occurrence，并核对 owner/thread/任务关联及源 Run 的成功、等待和取消状态。
+
+### dependency_wait：原生依赖合同
+
+字段存于 C 的 ecs_execution_jobs.record，不新增 goal 表或通知表：
+
+| 字段 | 含义 |
+| --- | --- |
+| source_run_id | 原生等待来源 Run |
+| task_ids | 同 owner/thread/incarnation/run 的原生 mcp_tasks 成员 |
+| goal | 原生 GoalState 快照，用于识别目标及累计预算 |
+| conversation_signature | 可见消息签名，用于识别等待后的新用户消息 |
+| active | 等待凭据是否仍有效 |
+| continuation_run_id | 已准入续跑的原生 Run ID，用于恢复确认 |
+
+续跑幂等键为 mcp-dependencies:<source_run_id>，使用原生 runs 的既有幂等查询和准入；本字段写回失败时，恢复先查询原生 Run。通知仍使用 mcp_tasks 的 dispatch_version/dispatch_attempt/dispatch_event 和现有 launcher。所有成员终态后才允许续跑，并在执行时再次核对最新原生 checkpoint，以 CAS 累加原目标预算。
+
+原生 Run 的 goal_verdict.native_dependency_wait 表示此执行已持久记下等待，不能单独作为无限占位依据。恢复先只读快照需要检查的 scheduled source，再由扩展精确检查当前凭据、目标、消息、取消和 occurrence 关联，区分 checked 与 valid Run ID；原生仓库在锁内再次核对身份。刚完成但未检查的 source 延后一轮，租约接管 CAS 败给并发成功时也重做同一保护判定。续跑 Run 已创建但尚未关联 occurrence 时，原等待仅在有效租约与目标下暂保留；关联已完成才确认续跑。过期准入复用原生租约 CAS 收敛。无扩展或已检查但无有效凭据时正常结算，不永久保留历史标记。过期结果采用内部 notification_only 策略，经同一通知路径展示，禁用工具执行和目标续跑，不改写当前目标。
 
 ## 初始化、迁移与旧版兼容
 
@@ -97,4 +115,4 @@ Scheduler 复用 scheduled_tasks 与 scheduled_task_runs，active occurrence 的
 
 旧 fork 数据库可能位于 0022_fleet_main_merge，包含 0018_thread_execution_bindings 和 0019_scheduled_execution 以及 scheduled_tasks.execution。必须保留原 revision ID 并提供兼容 merge/upgrade 路径，显式处置旧执行绑定和配置。禁止以新迁移目录覆盖旧库、直接删表或假设旧数据库等于全新数据库。
 
-后续依赖关联结构、索引与迁移脚本须按最终代码补入本文，并验证全新库与旧 fork 升级。架构入口：[ecs-native-architecture.md](ecs-native-architecture.md)。
+依赖等待目前仅新增 JSON 字段和原生仓库合同。版本化迁移脚本仍待 Task6 完成，必须验证全新库与旧 fork 升级。架构入口：[ecs-native-architecture.md](ecs-native-architecture.md)。

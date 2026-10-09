@@ -10,7 +10,7 @@
 | B 程序主干 | 原生任务持久跟踪、真实 TCP/PostgreSQL/Docker、输入快照、原生结果文件、重启与取消通过 | 不证明云 NAS 或 C |
 | B/C 共享资源池 | PostgreSQL、两个出站 worker、三条真实程序任务，排队与容量复用通过 | 此用例中的 C 只验证准入 |
 | C 原生执行 | 两个真实 Gateway、DeepSeek、AIO 工具、checkpoint/events、Redis END、affinity、跨实例取消与 STOP 通过 | 完整浏览器/记忆/Scheduler 仍待集成 |
-| C→B→C | 正在编码 | 尚无主干通过证据 |
+| C→B→C | 最新真实主干 1 passed / 142.71 秒；冻结收口 282 passed / 1 live deselected | SPEC 与质量复审通过；完整配置及部署仍待验收 |
 | fork 升级、启动/回滚与云 | 待完成 | 两台 ECS 保持停机，本轮未部署 |
 
 最新 C 主干：1 passed，49.78 秒；独立 SPEC 与质量复审通过。其定向回归集合 609 passed；root 独立复验停机屏障及拒绝恢复两例 2 passed，1.18 秒。此前 root 还独立跑通相同 C 主干，1 passed，43.94 秒。
@@ -76,7 +76,14 @@ ECS_NATIVE_LIVE=1 .venv/bin/python -m pytest \
 
 ### 3. 组合及最终门禁
 
-C→B→C 用例正在实现，本文暂不提供未存在的运行命令或通过声明。最终应证明：同一最小工作机上 C 提交 B，C 真实释放动态容量，B 执行并发布结果，经既有原生通知继续原目标；旧目标、取消、新消息及重复事件不得造成错误续跑。累计预算和 Scheduler overlap 保护必须保持。
+最新组合主干已通过（1 passed / 142.71 秒），使用两个原生 Gateway、真实 ordinary MCP、Alpine B 和同一个共享工作节点。断言检查真实动态资源释放顺序、同节点、B attempt=1、恰好两个原生 Run、原目标和累计预算，以及 present_files 结果交付；测试拥有的资源已清理。后续共享通知与恢复修复已通过离线 ASGI/SQL 回归、独立 SPEC 和质量复审。最终冻结代码收口为 282 passed / 1 live deselected，15.36 秒。完整配置及部署验收仍待完成。复验使用上面的私有模型路径环境：
+
+```bash
+ECS_NATIVE_LIVE=1 .venv/bin/python -m pytest \
+  tests/test_ecs_executor_bc_main.py -m live -q -s --tb=short
+```
+
+本次依赖合同已验证：同一最小工作机上 C 提交 B，C 真实释放动态容量，B 执行并发布结果，经既有原生通知继续原目标；旧目标、取消、新消息及重复事件不得造成错误续跑。累计预算和 Scheduler overlap 保护必须保持。
 
 完成整个功能批次、审查通过后，执行正式后端门禁：
 

@@ -267,6 +267,18 @@ class McpTaskRepository:
             row = (await session.execute(stmt)).scalar_one_or_none()
             return self._row_to_dict(row) if row is not None else None
 
+    async def list_by_run(self, run_id: str, *, user_id: str, thread_id: str, thread_incarnation: str | None) -> list[dict[str, Any]]:
+        """Trusted exact source membership, independent of the UI projection cap."""
+        stmt = select(McpTaskRow).where(
+            McpTaskRow.run_id == run_id,
+            McpTaskRow.user_id == user_id,
+            McpTaskRow.thread_id == thread_id,
+            McpTaskRow.thread_incarnation.is_not_distinct_from(thread_incarnation),
+            _matches_current_thread_incarnation(user_id=user_id, thread_id=thread_id, thread_incarnation=thread_incarnation),
+        )
+        async with self._sf() as session:
+            return [self._row_to_dict(row) for row in (await session.execute(stmt)).scalars()]
+
     async def list_by_thread(
         self,
         thread_id: str,

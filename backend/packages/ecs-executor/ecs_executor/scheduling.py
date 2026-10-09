@@ -10,7 +10,7 @@ from ecs_executor.job_store import _JOBS
 
 _METADATA = MetaData()
 _NODES = Table("ecs_execution_nodes", _METADATA, Column("id", String(64), primary_key=True), Column("record", JSON, nullable=False))
-_FIELDS = {"state", "start_intent", "started_at", "error", "exit_code", "artifact", "native_artifact_uri", "cleanup_pending", "physical_stopped"}
+_FIELDS = {"state", "start_intent", "started_at", "error", "exit_code", "artifact", "native_artifact_uri", "cleanup_pending", "physical_stopped", "physical_stopped_at"}
 
 
 class Scheduling:

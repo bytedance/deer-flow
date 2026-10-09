@@ -217,6 +217,7 @@ class ScheduledTaskService:
         connection_repo=None,
         notification_repo=None,
         own_stop_available: bool | None = None,
+        dependency_wait_reconciler=None,
     ) -> None:
         self._task_repo = task_repo
         self._task_run_repo = task_run_repo
@@ -242,6 +243,7 @@ class ScheduledTaskService:
         # None (production) reads the live config at each launch, the same source
         # the run itself uses to grant the tool; a bool is a fixed test override.
         self._own_stop_available = own_stop_available
+        self._dependency_wait_reconciler = dependency_wait_reconciler
         self._lease_owner = f"{socket.gethostname()}:{uuid.uuid4().hex}"
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
@@ -930,6 +932,8 @@ class ScheduledTaskService:
         )
 
     async def handle_run_completion(self, record: RunRecord) -> None:
+        if record.status.value == "success" and (record.goal_verdict or {}).get("native_dependency_wait") is True:
+            return
         metadata = record.metadata or {}
         task_id = metadata.get("scheduled_task_id")
         task_run_id = metadata.get("scheduled_task_run_id")
@@ -981,7 +985,7 @@ class ScheduledTaskService:
         if self._task is not None:
             return
         restart_error = _RESTART_RECOVERY_ERROR
-        if self._multi_instance:
+        if self._multi_instance or self._dependency_wait_reconciler is not None:
             await self._reconcile_active_state(now=datetime.now(UTC))
             self._skip_next_lease_reconciliation = True
         else:
@@ -1013,10 +1017,16 @@ class ScheduledTaskService:
     async def _reconcile_active_state(self, *, now: datetime) -> None:
         error = _LEASE_RECOVERY_ERROR
         try:
+            dependency_kwargs = {}
+            if self._dependency_wait_reconciler is not None:
+                checked = await self._task_run_repo.dependency_wait_sources()
+                dependency_kwargs["checked_dependency_wait_runs"] = checked
+                dependency_kwargs["valid_dependency_wait_runs"] = await self._dependency_wait_reconciler(checked)
             stale = await self._task_run_repo.reconcile_active_runs(
                 error=error,
                 now=now,
                 lease_grace_seconds=self._run_lease_grace_seconds,
+                **dependency_kwargs,
             )
             if stale:
                 logger.warning("Marked %d stale scheduled task run(s) as interrupted after lease reconciliation", stale)

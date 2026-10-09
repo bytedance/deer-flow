@@ -2896,3 +2896,10 @@ startup by worker ownership. The opt-in outbound native worker adopts that admit
 existing native runtime, with durable queued ownership, shared resource
 reservations, and thread-incarnation affinity. See the package README for
 operator configuration and the current configured-capability limitations.
+
+Native C runs can yield for ordinary MCP jobs and resume the same checkpoint goal
+through the existing native task notification launcher. The shared pool waits for
+full C finalization before admitting B; a durable group receipt permits one
+continuation only after all awaited jobs are terminal. Goal replacement, new
+conversation, cancellation and native continuation budgets fence stale resumes.
+See the package README for local acceptance and deployment boundaries.

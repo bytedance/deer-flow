@@ -32,7 +32,7 @@ from deerflow.agents.thread_state import _DELEGATION_LEDGER_MAX_ENTRIES, TERMINA
 from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.config.summarization_config import DEFAULT_SKILL_FILE_READ_TOOL_NAMES
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
-from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY, NOTIFICATION_ONLY_CONTEXT_KEY
 from deerflow.tools.artifact_registry import render_artifact_registry
 
 _DURABLE_CONTEXT_DATA_KEY = "durable_context_data"
@@ -399,7 +399,22 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
 
     def _inject(self, request: ModelRequest) -> ModelRequest:
         state = request.state or {}
-        goal_objective = redact_text(_active_goal_objective(state.get("goal")), self._pii_redaction_config)
+        context = getattr(getattr(request, "runtime", None), "context", None) or {}
+        notification_only = context.get(NOTIFICATION_ONLY_CONTEXT_KEY) is True
+        if notification_only:
+            request = request.override(
+                tools=[],
+                messages=insert_after_leading_system_messages(
+                    list(request.messages),
+                    [
+                        SystemMessage(
+                            content="Report only the terminal task result in this notification. Do not pursue any goal or request in earlier conversation, start work, or modify the thread goal.",
+                            additional_kwargs=provenance_kwargs(ContentKind.MIDDLEWARE_INJECTION, "notification_policy"),
+                        )
+                    ],
+                ),
+            )
+        goal_objective = None if notification_only else redact_text(_active_goal_objective(state.get("goal")), self._pii_redaction_config)
         artifacts = []
         if self._inject_tool_artifacts:
             for entry in state.get("tool_artifacts") or []:
@@ -463,3 +478,19 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
         return await handler(self._inject(request))
+
+    def _notification_tool_block(self, request):
+        context = getattr(getattr(request, "runtime", None), "context", None) or {}
+        if context.get(NOTIFICATION_ONLY_CONTEXT_KEY) is True:
+            return ToolMessage(content="Tool execution is unavailable in a result-only notification.", name=request.tool_call.get("name"), tool_call_id=request.tool_call["id"], status="error")
+        return None
+
+    @override
+    def wrap_tool_call(self, request, handler):
+        blocked = self._notification_tool_block(request)
+        return blocked if blocked is not None else handler(request)
+
+    @override
+    async def awrap_tool_call(self, request, handler):
+        blocked = self._notification_tool_block(request)
+        return blocked if blocked is not None else await handler(request)

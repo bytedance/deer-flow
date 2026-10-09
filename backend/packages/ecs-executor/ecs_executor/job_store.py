@@ -113,6 +113,16 @@ class JobStore:
             query = select(_JOBS.c.record).where(_JOBS.c.state.in_(TERMINAL), _JOBS.c.record["cleanup_pending"].as_boolean().is_(True))
             return [dict(row.record) for row in connection.execute(query)]
 
+    def list_native_dependency_waiting(self, *, after_id: str = "") -> list[dict[str, Any]]:
+        query = (
+            select(_JOBS.c.record)
+            .where(_JOBS.c.id > after_id, _JOBS.c.record["kind"].as_string() == "C", _JOBS.c.record["dependency_wait"]["active"].as_boolean().is_(True), _JOBS.c.record["dependency_wait"]["continuation_run_id"].as_string().is_(None))
+            .order_by(_JOBS.c.id)
+            .limit(100)
+        )
+        with self.engine.connect() as connection:
+            return [dict(row.record) for row in connection.execute(query)]
+
     def claim_queued(self) -> dict[str, Any] | None:
         for job in self.list_active():
             if job["state"] != "queued":

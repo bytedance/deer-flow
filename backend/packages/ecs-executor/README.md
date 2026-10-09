@@ -298,11 +298,31 @@ The initial real main acceptance config explicitly enables native bash/file tool
 and disables browser, memory, and scheduler. It proves actual model and isolated
 native tools, original Run ownership, peer events/checkpoints, and affinity. Full
 configured browser capability remains subject to the native multi-instance gate;
-worker-local scheduled/notification continuations still need the next admission
-integration. These are pending capabilities, not silently substituted tools.
+Native dependency notifications now forward outbound into the same central native
+notification launcher. Durable receipts bind awaited native MCP tasks to the
+original goal revision and visible conversation; all tasks must be terminal before
+one idempotent group continuation. Source finalizers drain before B acquires the
+shared slot. Cancellation, replacement, new messages and cumulative native budgets
+reject stale goal work. A stale result notification may report its bounded native
+task result without model tools or goal mutation. Scheduled waits retain their
+original goal and overlap slot; atomic occurrence transfer precedes queue activation.
+Recovery validates current receipt/goal/cancellation/occurrence outside writer
+transactions; removed host configuration cannot retain a historical wait forever.
+The native scheduler snapshots sources before validation, resolves each receipt
+exactly, and defers sources completed after that snapshot to the next pass.
+Global notification claims may forward from any authenticated node, including
+ordinary tasks with no source RunId; canonical native task scope determines
+identity while central placement determines whether a goal continuation is valid.
 Shared memory text/locks must use NAS and the SQLite FTS index must stay local per
 instance when enabled. Cloud NAS/cgroup/combined C-B-C deployment acceptance is
 still required before claiming full remote deployment completion.
+
+The combined local main uses the same owned PostgreSQL/Redis/native HTTP fixture,
+one node and one dynamic slot, actual DeepSeek, Alpine Docker B, native file tools
+and `present_files`. Run `tests/test_ecs_executor_bc_main.py -m live` with the same
+environment below. Scheduler goal/occurrence recovery is covered by focused native
+runtime and SQL contracts. This is an independent package with explicit optional
+core hooks, rather than a fully portable extension plugin.
 
 Run the single opt-in actual model acceptance with operator-owned model sources:
 

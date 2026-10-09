@@ -1,5 +1,11 @@
 ### Middleware Chain
 
+Trusted native result-only notifications install a server-overwritten
+`NOTIFICATION_ONLY_CONTEXT_KEY`; Gateway removes external copies. DurableContext
+omits active-goal projection without writing the checkpoint, advertises no model
+tools and blocks sync/async tool execution. This reports stale task results
+through the existing notification graph without authorizing new goal work.
+
 Table synopses count nonblank CSV/TSV logical records, excluding the header.
 Preserve the recognition sample and 5,000,000 UTF-8-byte guard. Count incrementally;
 on parsing or field-limit errors, report an undetermined count rather than a

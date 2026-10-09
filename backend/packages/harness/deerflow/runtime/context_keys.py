@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from typing import Final
 
 CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: Final[str] = "__deerflow_pre_run_message_ids"
+NOTIFICATION_ONLY_CONTEXT_KEY: Final[str] = "__deerflow_notification_only"
 
 # Server-authored checkpoint metadata that binds materialized state to the
 # agent policy which produced it. The sentinel is intentionally not a valid

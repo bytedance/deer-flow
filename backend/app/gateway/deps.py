@@ -987,6 +987,7 @@ def get_run_context(request: Request) -> RunContext:
         app_config=get_config(),
         extensions=getattr(request.app.state, "extensions", None),
         on_run_completed=getattr(request.app.state, "scheduled_task_service", None).handle_run_completion if getattr(request.app.state, "scheduled_task_service", None) is not None else None,
+        on_dependency_wait=getattr(getattr(request.app.state, "native_run_admission_host", None), "persist_dependency_wait", None),
     )
 
 

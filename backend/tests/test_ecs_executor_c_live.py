@@ -31,6 +31,10 @@ def _port():
 
 
 def test_native_http_remote_model_tool_and_peer_cancel(tmp_path):
+    _native_http_acceptance(tmp_path)
+
+
+def _native_http_acceptance(tmp_path, *, dependency_mode=False):
     backend = Path(__file__).resolve().parents[1]
     run_id = uuid.uuid4().hex[:12]
     names, processes, handles = [], [], []
@@ -99,6 +103,7 @@ def test_native_http_remote_model_tool_and_peer_cancel(tmp_path):
             "stream_bridge": {"type": "redis", "redis_url": "$C_NATIVE_REDIS_URL", "heartbeat_interval_seconds": 1},
             "memory": {"enabled": False},
             "scheduler": {"enabled": False},
+            "mcp_tasks": {"enabled": dependency_mode, "poll_interval_seconds": 1},
         }
         native = {
             "enabled": True,
@@ -112,6 +117,8 @@ def test_native_http_remote_model_tool_and_peer_cancel(tmp_path):
             "worker_credential_env": {"one": "C_NATIVE_NODE_SECRET"},
             "remote_origins": ["schedule"],
         }
+        if dependency_mode:
+            native["nodes"]["one"]["profiles"].append("small")
         for role, port in (("central", central_port), ("worker", worker_port)):
             role_config = {**config, "sandbox": {**config["sandbox"], "container_prefix": prefix + "-" + role}}
             config_path = tmp_path / (role + ".yaml")
@@ -140,11 +147,17 @@ def test_native_http_remote_model_tool_and_peer_cancel(tmp_path):
                 raise AssertionError(f"{role} Gateway failed readiness")
         central = f"http://127.0.0.1:{central_port}"
         worker = f"http://127.0.0.1:{worker_port}"
-        with httpx.Client(base_url=central, timeout=240) as client:
+        with httpx.Client(base_url=central, timeout=240, limits=httpx.Limits(max_keepalive_connections=0)) as client:
             initialized = client.post("/api/v1/auth/initialize", json={"email": "native-c@example.com", "password": "NativeC!" + secrets.token_urlsafe(20)}, headers={"Origin": central})
             assert initialized.status_code == 201, initialized.status_code
             owner = initialized.json()["id"]
             headers = {"X-DeerFlow-Internal-Token": environment["DEER_FLOW_INTERNAL_AUTH_TOKEN"], "X-DeerFlow-Owner-User-Id": owner, "Authorization": "Bearer internal-test"}
+            if dependency_mode:
+                from test_ecs_executor_bc_main import _run_dependency_main, _setup_dependency_pool
+
+                _setup_dependency_pool(backend, tmp_path, environment, native, owner, processes, handles, central_port, worker_port)
+                _run_dependency_main(client, headers, owner, tmp_path, environment, run_id)
+                return
             thread = "native-c-" + run_id
             response = client.post("/api/threads", json={"thread_id": thread}, headers=headers)
             assert response.status_code in (200, 201), response.text[:200]
