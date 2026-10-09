@@ -97,6 +97,9 @@ STREAM_UPDATE_MIN_CHARS = 60  # flush immediately when this many chars accumulat
 STREAM_MODES = ["messages-tuple", "values"]
 MESSAGE_STREAM_EVENTS = ("messages-tuple", "messages")
 THREAD_BUSY_MESSAGE = "This conversation is already processing another request. Please wait for it to finish and try again."
+# Recovery replies must say the turn was dropped: the run was rejected before
+# starting, so the triggering message never reached the agent.
+_STALE_PIN_RETRY_NOTE = "Your message was not processed — please send it again."
 BOUND_IDENTITY_REQUIRED_MESSAGE = "Connect this channel from DeerFlow Settings, complete the in-channel connect step, then send your message again."
 BOUND_IDENTITY_UNAVAILABLE_MESSAGE = "Channel connection verification is temporarily unavailable. Please try again later or contact the DeerFlow operator."
 # Inbound-redelivery dedup window. The dedupe state lives in
@@ -3099,16 +3102,26 @@ class ChannelManager:
             thread_id = await self._lookup_thread_id(msg)
             reply = f"Active thread: {thread_id}" if thread_id else "No active conversation."
         elif reply is None and command == "models":
-            reply = await self._fetch_gateway("/api/models", "models", msg=msg)
-            model_thread_id = await self._lookup_thread_id(msg)
-            if model_thread_id:
-                try:
-                    pinned_model = await self._load_thread_model(self._get_client(), msg, model_thread_id)
-                except Exception:
-                    logger.warning("[Manager] failed to load model pin for /models footer (thread_id=%s)", model_thread_id, exc_info=True)
-                    pinned_model = None
-                if pinned_model:
-                    reply += f"\nCurrent conversation model: {pinned_model} (pinned via /model)"
+            # The pin footer decorates only a successful listing: appended to
+            # the failure string it would advertise a pin next to an error
+            # that lists nothing.
+            try:
+                data = await self._fetch_gateway_json("/api/models", msg=msg)
+            except Exception:
+                logger.exception("Failed to fetch models from gateway")
+                reply = "Failed to fetch models information."
+            else:
+                names = [m["name"] for m in data.get("models", [])]
+                reply = ("Available models:\n" + "\n".join(f"• {n}" for n in names)) if names else "No models configured."
+                model_thread_id = await self._lookup_thread_id(msg)
+                if model_thread_id:
+                    try:
+                        pinned_model = await self._load_thread_model(self._get_client(), msg, model_thread_id)
+                    except Exception:
+                        logger.warning("[Manager] failed to load model pin for /models footer (thread_id=%s)", model_thread_id, exc_info=True)
+                        pinned_model = None
+                    if pinned_model:
+                        reply += f"\nCurrent conversation model: {pinned_model} (pinned via /model)"
         elif reply is None and command == "model":
             reply = await self._handle_model_command(msg, parts[1] if len(parts) > 1 else "")
         elif reply is None and command == "memory":
@@ -3263,18 +3276,22 @@ class ChannelManager:
                         self._remember_thread_model(thread_id, None)
                         cleared = True
             if cleared:
-                return f"The model '{expected_pin}' selected for this conversation is no longer available, so I reset the model selection. This conversation now follows the configured default. Use /model <name> to pick a different model."
+                return (
+                    f"The model '{expected_pin}' selected for this conversation is no longer available, "
+                    "so I reset the model selection. This conversation now follows the configured default. "
+                    f"Use /model <name> to pick a different model. {_STALE_PIN_RETRY_NOTE}"
+                )
             current = self._thread_model_names.get(thread_id)
             if current == expected_pin:
                 # State unchanged but the durable write failed.
-                return f"The model '{expected_pin}' is no longer available, but I could not reset the selection automatically. Send /model default, then pick another model with /model <name>."
+                return f"The model '{expected_pin}' is no longer available, but I could not reset the selection automatically. Send /model default, then pick another model with /model <name>. {_STALE_PIN_RETRY_NOTE}"
         # The rejected selection is no longer current (replaced by a newer
         # /model, already reset, or never pinned — e.g. the rejection came
         # from session configuration): reassure without touching the current
         # selection.
         if current:
-            return f"That message used model '{expected_pin}', which is no longer available. The current selection '{current}' is unchanged."
-        return f"That message used model '{expected_pin}', which is no longer available. This conversation now follows the configured default."
+            return f"That message used model '{expected_pin}', which is no longer available. The current selection '{current}' is unchanged. {_STALE_PIN_RETRY_NOTE}"
+        return f"That message used model '{expected_pin}', which is no longer available. This conversation now follows the configured default. {_STALE_PIN_RETRY_NOTE}"
 
     async def _handle_model_command(self, msg: InboundMessage, args: str) -> str:
         """Show, pin, or reset the model used by the current conversation.
@@ -3299,7 +3316,9 @@ class ChannelManager:
                 return f"Current model: {pinned} (pinned for this conversation). Use /model default to reset."
             configured, source = await self._resolve_configured_model_name(self._get_client(), msg, thread_id)
             if configured:
-                origin = "agent configuration" if source == "agent" else "channel configuration"
+                # "session" covers default, channel, and user layers alike —
+                # naming one layer would misreport the other two.
+                origin = "agent configuration" if source == "agent" else "session configuration"
                 return f"Current model: {configured} (from {origin})."
             return "Current model: server default. Use /models to list available models."
 

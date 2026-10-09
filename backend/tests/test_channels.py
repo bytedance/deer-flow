@@ -3906,7 +3906,7 @@ class TestChannelManager:
             # Cleared pin -> the session-configured model is reported.
             manager._remember_thread_model("thread-1", None)
             reply = await manager._handle_model_command(msg, "")
-            assert reply == "Current model: session-model (from channel configuration)."
+            assert reply == "Current model: session-model (from session configuration)."
 
             # No thread, no session config -> server default.
             manager2 = ChannelManager(
@@ -3942,7 +3942,7 @@ class TestChannelManager:
 
             reply = await manager._handle_model_command(msg, "")
 
-            assert reply == "Current model: configured-model (from channel configuration)."
+            assert reply == "Current model: configured-model (from session configuration)."
 
         _run(go())
 
@@ -3974,17 +3974,17 @@ class TestChannelManager:
 
             # Within the context carrier, the channel layer beats the default layer.
             reply = await manager._handle_model_command(msg, "")
-            assert reply == "Current model: channel-ctx (from channel configuration)."
+            assert reply == "Current model: channel-ctx (from session configuration)."
 
             # A user-layer configurable entry cannot shadow a channel-layer context entry.
             manager._channel_sessions["test"].setdefault("users", {}).setdefault("platform-user", {})["config"] = {"configurable": {"model_name": "user-cfg"}}
             reply = await manager._handle_model_command(msg, "")
-            assert reply == "Current model: channel-ctx (from channel configuration)."
+            assert reply == "Current model: channel-ctx (from session configuration)."
 
             # A user-layer context entry wins over every configurable entry.
             manager._channel_sessions["test"]["users"]["platform-user"]["context"] = {"model_name": "user-ctx"}
             reply = await manager._handle_model_command(msg, "")
-            assert reply == "Current model: user-ctx (from channel configuration)."
+            assert reply == "Current model: user-ctx (from session configuration)."
 
         _run(go())
 
@@ -4217,7 +4217,7 @@ class TestChannelManager:
             # Session layer wins over the agent fallback (requested > agent_model_name).
             manager._channel_sessions["test"]["context"] = {"model_name": "session-model"}
             reply = await manager._handle_model_command(msg, "")
-            assert reply == "Current model: session-model (from channel configuration)."
+            assert reply == "Current model: session-model (from session configuration)."
 
         _run(go())
 
@@ -4310,6 +4310,40 @@ class TestChannelManager:
 
         _run(go())
 
+    def test_models_command_omits_pin_footer_on_fetch_failure(self, monkeypatch):
+        """The pin footer decorates only a successful listing — a failed fetch
+        must not advertise a pin next to an error that lists nothing."""
+        from app.channels.manager import ChannelManager
+
+        async def _raise(path, *, msg=None):
+            raise RuntimeError("gateway down")
+
+        monkeypatch.setattr(ChannelManager, "_fetch_gateway_json", _raise)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(bus=bus, store=store, gateway_url="http://gateway:8001")
+            manager._thread_model_names["thread-1"] = "model-b"
+            manager._client = _make_mock_langgraph_client(thread_id="thread-1")
+            outbound_received = []
+            bus.subscribe_outbound(outbound_received.append)
+
+            await manager._handle_command(
+                InboundMessage(
+                    channel_name="test",
+                    chat_id="chat1",
+                    user_id="platform-user",
+                    text="/models",
+                    msg_type=InboundMessageType.COMMAND,
+                )
+            )
+
+            assert outbound_received[0].text == "Failed to fetch models information."
+
+        _run(go())
+
     def _make_allowlist_exc(self, model: str):
         import httpx
         from langgraph_sdk.errors import BadRequestError
@@ -4348,6 +4382,7 @@ class TestChannelManager:
             text = await manager._stale_pin_recovery(msg, self._make_allowlist_exc("gone-model"), expected_pin="gone-model")
 
             assert text and "gone-model" in text and "/model" in text
+            assert "not processed" in text
             assert manager._thread_model_names["thread-1"] is None
             mock_client.threads.update.assert_awaited_once()
             assert mock_client.threads.update.await_args.kwargs["metadata"] == {"channel_model_name": None}
