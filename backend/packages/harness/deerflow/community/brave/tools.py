@@ -258,7 +258,16 @@ def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRang
     if error_json is not None:
         return error_json
 
-    web_results = (data.get("web") or {}).get("results", [])
+    web = data.get("web")
+    if web is None:
+        web = {}
+    if not isinstance(web, dict):
+        return _unexpected_format_error(query)
+    web_results = web.get("results")
+    if web_results is None:
+        web_results = []
+    if not isinstance(web_results, list):
+        return _unexpected_format_error(query)
     if not web_results:
         return json.dumps({"error": "No results found", "query": query}, ensure_ascii=False)
 
@@ -269,7 +278,10 @@ def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRang
             "content": r.get("description", ""),
         }
         for r in web_results
+        if isinstance(r, dict)
     ]
+    if not normalized_results:
+        return _unexpected_format_error(query)
 
     output = {
         "query": query,
