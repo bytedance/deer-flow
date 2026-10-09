@@ -241,6 +241,14 @@ services:
       - DEER_FLOW_INTERNAL_AUTH_TOKEN=${DEER_FLOW_INTERNAL_AUTH_TOKEN:-}
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
+      # The login lockout counts failures per client IP, but every browser
+      # request reaches the Gateway from nginx. Trust nginx's X-Real-IP (it
+      # overwrites the header on every Gateway route) so one client's wrong
+      # passwords cannot lock everyone out. Hostname, re-resolved every 10s.
+      # `:-` on purpose: an empty value also means nginx, because every browser
+      # request arrives through it, so direct mode would only bring back the
+      # shared lockout. Set another list in .env to change whom to trust.
+      - AUTH_TRUSTED_PROXIES=${AUTH_TRUSTED_PROXIES:-nginx}
       # Pass PROVISIONER_API_KEY into the gateway container so config.yaml can reference it
       # as sandbox.provisioner_api_key: $PROVISIONER_API_KEY
       - PROVISIONER_API_KEY=${PROVISIONER_API_KEY:-}

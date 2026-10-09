@@ -548,6 +548,20 @@ version requires configuration changes, run `make config-upgrade` before restart
 See [Operations and Troubleshooting](frontend/src/content/en/application/operations-and-troubleshooting.mdx#upgrading-an-existing-checkout)
 for the commands for each mode.
 
+When rolling out the resume-command idempotency fix across multiple Gateway
+workers or Pods, route **all keyed resume submissions and retries** (`command.resume`
+with `Idempotency-Key`, on thread-scoped `/runs`, `/runs/stream`, or `/runs/wait`)
+only to upgraded workers until every worker serving these endpoints is upgraded.
+Older workers ignore the private resume identity and compare only `input`: with
+`input: null`, retrying `deny` can incorrectly reuse an earlier `approve` run.
+If the load balancer cannot isolate upgraded workers, pause keyed resume traffic
+until the rollout finishes, or stop all old workers before restarting on the new
+version. The additive database migration keeps old run-history readers compatible;
+it does not make old workers safe for resume admission. An upgraded worker returns
+409 when retrying an identity-less legacy resume run, even for the same decision;
+inspect that run and the current thread state before deciding to submit a new
+action. See the [run API contract](backend/docs/API.md#create-run).
+
 #### Option 2: Local Development
 
 If you prefer running services locally:
@@ -1759,7 +1773,7 @@ Rebuild with `make up` after changing the managed extension set. See
 
 Gateway-generated follow-up suggestions now normalize both plain-string model output and block/list-style rich content before parsing the JSON array response, so provider-specific content wrappers do not silently drop suggestions.
 
-Backend response cleanup preserves unrelated tag names such as `<think-tank>` and `<think:note>` in follow-up suggestions and polished drafts; only the exact `<think>` name (optionally followed by attributes) starts a reasoning block. Self-closing `<think/>` and `<think />` tags are empty reasoning blocks and leave the following answer intact.
+Backend response cleanup preserves unrelated tag names such as `<think-tank>` and `<think:note>` in follow-up suggestions and polished drafts; only the exact `<think>` name (optionally followed by attributes) starts a reasoning block. Self-closing `<think/>` and `<think />` tags are empty reasoning blocks and leave the following answer intact. Delimiters inside quoted attributes, such as `<think note=">"/>`, also leave the following answer intact.
 
 The Web UI composer can polish draft input before sending. The rewrite runs as a short Gateway LLM request using the `input_polish` model configuration, keeps slash skill prefixes such as `/data-analysis`, and only replaces the local draft after the user clicks the polish button; it does not create a thread run or persist a message.
 
@@ -2078,6 +2092,7 @@ Each task gets its own execution environment with a full filesystem view — ski
 The read-before-write gate ties each read mark to that `read_file` call's result, including custom tools returning multi-message `Command` updates. An unrelated result cannot authorize a write after a failed read or hide a successful read.
 
 The built-in `grep` tool searches either one text file or all matching text files below a directory, so an agent can search an uploaded document directly without first broadening the request to the entire uploads directory.
+E2B's `glob` filter preserves spaces, quotes, and dollar signs in filename patterns, while wildcard matching and root-relative directory scoping remain unchanged.
 
 Remote `ls` excludes ignored descendants before applying its 500-entry listing limit, so dependency and build trees do not crowd out visible files. Explicitly listing an ignored directory still lists its contents; normal depth and output limits remain in effect.
 

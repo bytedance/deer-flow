@@ -276,6 +276,7 @@ class MCPSessionPool:
         removed: Collection[str],
         *,
         domain: MCPPoolDomain = "deployment",
+        retire_unlisted: bool = False,
     ) -> PreparedRetirement:
         """Apply already-classified binding changes and detach only changed owners.
 
@@ -283,12 +284,25 @@ class MCPSessionPool:
         supplies current fingerprints and removed names. Epoch installation,
         registry detach and owner signalling are one non-awaiting critical
         section, so a stale creator cannot resurrect after the transition.
+
+        ``retire_unlisted`` makes that same critical section also tombstone every
+        server the pool still holds binding or session state for in ``domain``
+        that ``active`` does not declare. Callers set it when they have no applied
+        baseline of their own — a restarted process, where a durable-task caller's
+        binding is the only record that a server exists — because enumerating
+        those names separately would race a concurrent ``ensure_binding()``.
         """
         entries: list[tuple[ClientSession, asyncio.AbstractEventLoop, asyncio.Task[Any], asyncio.Event]] = []
         inflight: list[tuple[asyncio.AbstractEventLoop, asyncio.Future[ClientSession], asyncio.Task[Any], asyncio.Event]] = []
         changed: set[str] = set()
 
         with self._lock:
+            if retire_unlisted:
+                retained = {server_name for bind_domain, server_name in self._bindings if bind_domain == domain}
+                retained.update(key[0] for key in self._entries if key[3] == domain)
+                retained.update(key[0] for key in self._inflight if key[3] == domain)
+                removed = set(removed) | (retained - set(active))
+
             for server_name, fingerprint in active.items():
                 binding_key = (domain, server_name)
                 self._binding_lifecycle_servers.add(binding_key)
@@ -326,6 +340,21 @@ class MCPSessionPool:
             self._track_detached_owner(loop, task)
 
         return PreparedRetirement(entries=tuple(entries), inflight=tuple(inflight))
+
+    def retained_server_names(self, *, domain: MCPPoolDomain = "deployment") -> frozenset[str]:
+        """Return the server names this pool retains binding or session state for.
+
+        The configuration layer needs this to retire servers that a revision no
+        longer declares when it has no applied baseline of its own: after a
+        restart, a durable-task caller's binding is the only record that the
+        server exists. The result is scoped to one ownership domain, so a
+        deployment revision can never retire a personal binding or session.
+        """
+        with self._lock:
+            names = {server_name for bind_domain, server_name in self._bindings if bind_domain == domain}
+            names.update(key[0] for key in self._entries if key[3] == domain)
+            names.update(key[0] for key in self._inflight if key[3] == domain)
+            return frozenset(names)
 
     def retire_all(self) -> None:
         """Fence this pool so stale wrappers cannot create sessions after reset."""
