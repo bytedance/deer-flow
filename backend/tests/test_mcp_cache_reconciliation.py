@@ -671,6 +671,94 @@ async def test_repeated_identical_revision_does_not_retire_again(reconciler, mon
     assert log["exited"]["cmd-A"] == 1
 
 
+@pytest.mark.asyncio
+async def test_committed_delete_then_identical_readd_installs_a_new_epoch(reconciler, monkeypatch, tmp_path):
+    """The committed handoff must not coalesce a delete/readd back to one revision."""
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    log = _session_log()
+    servers = {"A": _stdio("cmd-A")}
+    await _initialize(monkeypatch, cfg, servers, log)
+
+    old_binding = _binding(pool, "A")
+    old_entry = _entry(pool, "A")
+    assert old_entry is not None
+    old_cm = log["cms"]["cmd-A"][0]
+    assert old_cm.closed is False
+
+    _write_config(cfg, {})
+    deleted = ExtensionsConfig.from_file(str(cfg))
+    cache_module.finish_mcp_reconciliation(cache_module.prepare_mcp_reconciliation(deleted, config_path=cfg))
+    await _wait_until(lambda: log["exited"].get("cmd-A") == 1)
+    assert old_cm.closed is True
+
+    _write_config(cfg, servers)
+    readded = ExtensionsConfig.from_file(str(cfg))
+    cache_module.finish_mcp_reconciliation(cache_module.prepare_mcp_reconciliation(readded, config_path=cfg))
+
+    new_binding = _binding(pool, "A")
+    assert new_binding.epoch > old_binding.epoch
+    with pytest.raises(StaleMCPBindingError):
+        await pool.get_session("A", "u:t", servers["A"], binding=old_binding)
+
+
+@pytest.mark.asyncio
+async def test_committed_handoff_tombstones_durable_only_binding_without_cache(reconciler, tmp_path):
+    """A pre-discovery durable binding is local state even when tools never published."""
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    pool.ensure_binding(
+        "A",
+        _fingerprint({"A": _stdio("cmd-A")}, "A"),
+        domain="deployment",
+    )
+    assert cache_module._cache_initialized is False
+    assert cache_module._mcp_tools_cache is None
+
+    _write_config(cfg, {})
+    committed = ExtensionsConfig.from_file(str(cfg))
+    cache_module.finish_mcp_reconciliation(cache_module.prepare_mcp_reconciliation(committed, config_path=cfg))
+
+    assert session_pool_module.get_session_pool() is pool
+    assert _binding(pool, "A").fingerprint is None
+
+
+@pytest.mark.asyncio
+async def test_committed_handoff_reconciles_every_changed_server_in_one_revision(reconciler, monkeypatch, tmp_path):
+    """A multi-server commit reconciles the whole effective diff, not just one name."""
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    log = _session_log()
+    await _initialize(
+        monkeypatch,
+        cfg,
+        {"A": _stdio("cmd-A1"), "B": _stdio("cmd-B1"), "C": _stdio("cmd-C1")},
+        log,
+    )
+
+    binding_a = _binding(pool, "A")
+    binding_b = _binding(pool, "B")
+    binding_c = _binding(pool, "C")
+    session_c = _entry(pool, "C")[0]
+    owner_c = _entry(pool, "C")[2]
+
+    _write_config(
+        cfg,
+        {"A": _stdio("cmd-A2"), "B": _stdio("cmd-B2"), "C": _stdio("cmd-C1")},
+    )
+    committed = ExtensionsConfig.from_file(str(cfg))
+    cache_module.finish_mcp_reconciliation(cache_module.prepare_mcp_reconciliation(committed, config_path=cfg))
+
+    assert _binding(pool, "A").epoch > binding_a.epoch
+    assert _binding(pool, "B").epoch > binding_b.epoch
+    assert _binding(pool, "C") is binding_c
+    assert _entry(pool, "C")[0] is session_c
+    assert _entry(pool, "C")[2] is owner_c
+
+
 # ---------------------------------------------------------------------------
 # Applied baseline and state machine
 # ---------------------------------------------------------------------------
