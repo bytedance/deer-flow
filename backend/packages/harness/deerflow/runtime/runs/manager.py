@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import inspect
 import logging
 import socket
 import sqlite3
@@ -25,6 +26,7 @@ from .schemas import EVIDENCE_ORIGINS, DisconnectMode, RunStatus, ThreadOperatio
 from .store.base import (
     EditReplayVisibility,
     RunIdempotencyConflict,
+    RunStore,
     canonical_run_created_at,
     normalize_run_created_at_iso,
     run_is_before_cursor,
@@ -34,7 +36,6 @@ from .store.base import (
 if TYPE_CHECKING:
     from deerflow.config.run_ownership_config import RunOwnershipConfig
     from deerflow.runtime.events.store.base import RunEventStore
-    from deerflow.runtime.runs.store.base import RunStore
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +184,22 @@ class PersistenceRetryPolicy:
     backoff_factor: float = 2.0
 
 
+class RunIdempotencyUnsupported(RuntimeError):
+    """The configured store cannot safely persist keyed-resume identity."""
+
+
+def _store_accepts_idempotency_request(store: RunStore) -> bool:
+    """Best-effort capability check for old explicit RunStore overrides."""
+    callable_ = store.create_thread_operation_atomic
+    if getattr(callable_, "__func__", None) is RunStore.create_thread_operation_atomic:
+        return False
+    try:
+        parameters = inspect.signature(callable_).parameters
+    except (TypeError, ValueError):
+        return True
+    return "idempotency_request" in parameters or any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+
+
 @dataclass
 class RunRecord:
     """Mutable record for a single run."""
@@ -235,6 +252,7 @@ class RunRecord:
     # stays active and its lease must keep renewing until that commit.
     terminal_commit_pending: bool = False
     idempotency_key: str | None = None
+    idempotency_request: dict[str, Any] | None = None
     # True only on the caller that recovered an existing idempotent admission;
     # that caller must not attach a second worker to the durable run.
     idempotency_reused: bool = False
@@ -343,6 +361,8 @@ class RunManager:
             payload["evidence_origin"] = record.evidence_origin
         if record.evidence_agent_id is not None:
             payload["evidence_agent_id"] = record.evidence_agent_id
+        if record.idempotency_request is not None:
+            payload["idempotency_request"] = record.idempotency_request
         if record.user_id is not None:
             payload["user_id"] = record.user_id
         if record.stop_reason is not None:
@@ -524,6 +544,7 @@ class RunManager:
             stop_reason=row.get("stop_reason"),
             goal_verdict=row.get("goal_verdict"),
             idempotency_key=row.get("idempotency_key"),
+            idempotency_request=row.get("idempotency_request"),
         )
 
     async def update_run_completion(self, run_id: str, **kwargs) -> None:
@@ -1578,6 +1599,7 @@ class RunManager:
         idempotency_key: str | None = None,
         evidence_origin: str = "unknown",
         evidence_agent_id: str | None = None,
+        idempotency_request: dict[str, Any] | None = None,
     ) -> RunRecord:
         """Atomically admit a normal agent run for a thread."""
         return await self._admit_thread_operation(
@@ -1593,6 +1615,7 @@ class RunManager:
             idempotency_key=idempotency_key,
             evidence_origin=evidence_origin,
             evidence_agent_id=evidence_agent_id,
+            idempotency_request=idempotency_request,
         )
 
     async def _close_cancelled_admission(self, record: RunRecord) -> None:
@@ -1655,6 +1678,7 @@ class RunManager:
         idempotency_key: str | None = None,
         evidence_origin: str = "unknown",
         evidence_agent_id: str | None = None,
+        idempotency_request: dict[str, Any] | None = None,
     ) -> RunRecord:
         """Atomically check for inflight runs and create a new one.
 
@@ -1703,6 +1727,7 @@ class RunManager:
             idempotency_key=idempotency_key,
             evidence_origin=evidence_origin,
             evidence_agent_id=evidence_agent_id,
+            idempotency_request=idempotency_request,
         )
 
         async with self._lock:
@@ -1753,6 +1778,8 @@ class RunManager:
             # 2) Persist to store while still holding the local lock. The
             #    store is the source of truth for cross-process atomicity.
             if self._store is not None:
+                if idempotency_request is not None and not _store_accepts_idempotency_request(self._store):
+                    raise RunIdempotencyUnsupported("The configured RunStore does not support keyed resume idempotency")
                 if multitask_strategy == "reject":
                     create_kwargs = {
                         "run_id": run_id,
@@ -1775,6 +1802,8 @@ class RunManager:
                         create_kwargs["evidence_origin"] = evidence_origin
                     if evidence_agent_id is not None:
                         create_kwargs["evidence_agent_id"] = evidence_agent_id
+                    if idempotency_request is not None:
+                        create_kwargs["idempotency_request"] = idempotency_request
                     try:
                         await self._call_store_with_retry(
                             "create_thread_operation_atomic",
@@ -1811,6 +1840,8 @@ class RunManager:
                         create_kwargs["evidence_origin"] = evidence_origin
                     if evidence_agent_id is not None:
                         create_kwargs["evidence_agent_id"] = evidence_agent_id
+                    if idempotency_request is not None:
+                        create_kwargs["idempotency_request"] = idempotency_request
                     # Interrupt / rollback: store-side claim + insert in one
                     # transaction. Retry on IntegrityError in case another
                     # worker races us between our SELECT FOR UPDATE and INSERT.

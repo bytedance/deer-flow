@@ -1386,6 +1386,15 @@ class RunJournal(BaseCallbackHandler):
         """Force flush remaining buffer. Called in worker's finally block."""
         if self._closed:
             return
+        # Events recorded from worker threads reach this loop through
+        # call_soon_threadsafe (see record_middleware). Since Python 3.13 an
+        # awaited run_in_executor()/to_thread() may complete without yielding
+        # to the loop when the worker finished before its future was chained,
+        # so such callbacks can still be queued when flush() starts. Yield once
+        # so they land in the buffer instead of being dropped after detach.
+        await asyncio.sleep(0)
+        if self._closed:
+            return
         self._explicit_flush_in_progress = True
         try:
             self._commit_pending_llm_response()

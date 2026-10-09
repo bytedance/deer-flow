@@ -100,7 +100,10 @@ producers (currently slash-skill activation via `asyncio.to_thread`) schedule
 journal mutation directly onto its owning event loop; they never mutate or
 flush `RunJournal._buffer` from the worker thread. The task-tool subagent proxy
 rejects a loop that differs from the journal owner, so its close fence always
-drains the only scheduling hop.
+drains the only scheduling hop. `flush()` yields to the loop once before
+draining: since Python 3.13 an awaited executor future can complete without a
+loop iteration, so a hop queued by a worker that already returned may still be
+pending when flush starts.
 The persisted projection accepts
 only framework-defined error/action values and strict booleans (using null for
 invalid values) from the producer-supplied tool stamp; tool content, args,
@@ -270,3 +273,5 @@ JSONL's single-process deployment constraint. Regression coverage is in
 ## Completed-evidence provenance
 
 Gateway admission and RunManager validate host-owned evidence origin against the shared `EVIDENCE_ORIGINS` in `runtime/runs/schemas.py`. Preserve the string values and reject client metadata as provenance; only trusted Python entry points set the admission argument.
+
+Idempotent resume reuse preserves both the private request identity and the original evidence origin/agent across worker and store boundaries. A retry must not relabel existing evidence. Memory/SQLite parity is covered in `tests/test_completed_evidence_admission.py`.

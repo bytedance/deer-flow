@@ -79,7 +79,7 @@ async def test_default_and_request_compatibility(transport, options):
     assert request.headers["x-timeout"] == "7"
     assert request.headers["content-type"] == "application/json"
     assert request.extensions["timeout"]["read"] == 7
-    assert transport[2] == [{"proxy": "http://proxy.invalid", "trust_env": False}]
+    assert transport[2] == [{"proxy": "http://proxy.invalid", "trust_env": False, "follow_redirects": True}]
     assert stream.closed
 
 

@@ -101,3 +101,56 @@ async def test_evidence_agent_is_effective_canonical_id_not_routing_or_display_n
         record = await start_run(body, "effective-agent-test", request)
         await record.task
     assert admission.call_args.kwargs["evidence_agent_id"] == "researcher"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+async def test_keyed_resume_peer_reuse_preserves_evidence_identity(tmp_path, backend):
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from deerflow.persistence.base import Base
+    from deerflow.persistence.run.sql import RunRepository
+
+    engine = None
+    if backend == "sqlite":
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'admission.db'}")
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        store = RunRepository(async_sessionmaker(engine, expire_on_commit=False))
+    else:
+        store = MemoryRunStore()
+    identity = {"version": 1, "kind": "resume", "sha256": "a" * 64}
+    try:
+        owner = RunManager(store=store)
+        original = await owner.create_or_reject(
+            "resume-thread",
+            "lead_agent",
+            user_id="alice",
+            idempotency_key="resume-key",
+            idempotency_request=identity,
+            evidence_origin="extension_evaluation",
+            evidence_agent_id="researcher",
+        )
+        peer = RunManager(store=store)
+        reused = await peer.create_or_reject(
+            "resume-thread",
+            "lead_agent",
+            user_id="alice",
+            idempotency_key="resume-key",
+            idempotency_request=identity,
+            evidence_origin="interactive",
+            evidence_agent_id="different-agent",
+        )
+        assert reused.run_id == original.run_id
+        assert reused.idempotency_reused
+        assert reused.store_only
+        assert reused.idempotency_request == identity
+        assert reused.evidence_origin == "extension_evaluation"
+        assert reused.evidence_agent_id == "researcher"
+        persisted = await store.get(original.run_id, user_id="alice")
+        assert persisted["idempotency_request"] == identity
+        assert persisted["evidence_origin"] == "extension_evaluation"
+        assert persisted["evidence_agent_id"] == "researcher"
+    finally:
+        if engine is not None:
+            await engine.dispose()

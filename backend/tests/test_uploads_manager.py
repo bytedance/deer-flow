@@ -1,6 +1,7 @@
 """Tests for deerflow.uploads.manager — shared upload management logic."""
 
 import errno
+import logging
 import os
 import shutil
 import stat
@@ -378,6 +379,41 @@ class TestCopyUploadFileNoSymlink:
 # ---------------------------------------------------------------------------
 
 
+class _VanishingDirEntry:
+    """DirEntry stand-in whose stat() raises, simulating a file removed mid-scan."""
+
+    def __init__(self, real, error):
+        self._real = real
+        self._error = error
+
+    @property
+    def name(self):
+        return self._real.name
+
+    @property
+    def path(self):
+        return self._real.path
+
+    def is_file(self, follow_symlinks=False):
+        return True
+
+    def stat(self, follow_symlinks=False):
+        raise self._error
+
+
+class _StaticScandir:
+    """Context manager mimicking os.scandir over a fixed entry list."""
+
+    def __init__(self, entries):
+        self._entries = entries
+
+    def __enter__(self):
+        return iter(self._entries)
+
+    def __exit__(self, *exc_info):
+        return False
+
+
 class TestListFilesInDir:
     def test_empty_dir(self, tmp_path):
         result = list_files_in_dir(tmp_path)
@@ -386,6 +422,42 @@ class TestListFilesInDir:
     def test_nonexistent_dir(self, tmp_path):
         result = list_files_in_dir(tmp_path / "nope")
         assert result == {"files": [], "count": 0}
+
+    @pytest.mark.parametrize("replacement", ["removed", "file"])
+    def test_directory_replaced_after_is_dir_check(self, tmp_path, monkeypatch, caplog, replacement):
+        directory = tmp_path / "uploads"
+        directory.mkdir()
+        real_scandir = os.scandir
+
+        def replace_before_scandir(path):
+            assert path == directory
+            directory.rmdir()
+            if replacement == "file":
+                directory.write_text("replacement", encoding="utf-8")
+            return real_scandir(path)
+
+        monkeypatch.setattr(os, "scandir", replace_before_scandir)
+
+        with caplog.at_level(logging.DEBUG, logger="deerflow.uploads.manager"):
+            assert list_files_in_dir(directory) == {"files": [], "count": 0}
+
+        assert (
+            "deerflow.uploads.manager",
+            logging.DEBUG,
+            f"Uploads directory vanished mid-scan, keeping partial snapshot of 0 entries: {directory}",
+        ) in caplog.record_tuples
+
+    @pytest.mark.parametrize("error_code", [errno.EACCES, errno.EIO])
+    def test_scandir_operational_error_still_propagates(self, tmp_path, monkeypatch, error_code):
+        def fail_scandir(path):
+            raise OSError(error_code, os.strerror(error_code), str(path))
+
+        monkeypatch.setattr(os, "scandir", fail_scandir)
+
+        with pytest.raises(OSError) as excinfo:
+            list_files_in_dir(tmp_path)
+
+        assert excinfo.value.errno == error_code
 
     def test_multiple_files_sorted(self, tmp_path):
         (tmp_path / "b.txt").write_text("b")
@@ -415,6 +487,35 @@ class TestListFilesInDir:
 
         assert result["count"] == 4
         assert [f["filename"] for f in result["files"]] == [".env", ".upload-note.txt", "draft.part", "visible.txt"]
+
+    @pytest.mark.parametrize("error_code", [errno.ENOENT, errno.ENOTDIR, errno.ELOOP])
+    def test_skips_entries_vanishing_mid_scan(self, tmp_path, monkeypatch, caplog, error_code):
+        (tmp_path / "kept.txt").write_text("kept")
+        (tmp_path / "gone.txt").write_text("gone")
+        with os.scandir(tmp_path) as it:
+            real_entries = {e.name: e for e in it}
+        vanished = _VanishingDirEntry(
+            real_entries["gone.txt"],
+            OSError(error_code, os.strerror(error_code), str(tmp_path / "gone.txt")),
+        )
+        monkeypatch.setattr(os, "scandir", lambda path: _StaticScandir([real_entries["kept.txt"], vanished]))
+
+        with caplog.at_level(logging.DEBUG, logger="deerflow.uploads.manager"):
+            result = list_files_in_dir(tmp_path)
+
+        assert result["count"] == 1
+        assert result["files"][0]["filename"] == "kept.txt"
+        assert any("vanished mid-scan" in record.message and str(tmp_path / "gone.txt") in record.message for record in caplog.records)
+
+    def test_stat_permission_error_still_propagates(self, tmp_path, monkeypatch):
+        (tmp_path / "locked.txt").write_text("locked")
+        with os.scandir(tmp_path) as it:
+            real_entry = next(iter(it))
+        locked = _VanishingDirEntry(real_entry, PermissionError(errno.EACCES, "Permission denied", str(tmp_path / "locked.txt")))
+        monkeypatch.setattr(os, "scandir", lambda path: _StaticScandir([locked]))
+
+        with pytest.raises(PermissionError):
+            list_files_in_dir(tmp_path)
 
 
 # ---------------------------------------------------------------------------

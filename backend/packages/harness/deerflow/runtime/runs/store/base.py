@@ -152,6 +152,7 @@ class RunStore(abc.ABC):
         idempotency_key: str | None = None,
         evidence_origin: str = "unknown",
         evidence_agent_id: str | None = None,
+        idempotency_request: dict[str, Any] | None = None,
     ) -> None:
         pass
 
@@ -446,6 +447,7 @@ class RunStore(abc.ABC):
         idempotency_key: str | None = None,
         evidence_origin: str = "unknown",
         evidence_agent_id: str | None = None,
+        idempotency_request: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically create an active thread operation with cross-process uniqueness.
 
@@ -462,7 +464,7 @@ class RunStore(abc.ABC):
             raise NotImplementedError("RunStore must implement create_thread_operation_atomic() or create_run_atomic()")
         if operation_kind != "run":
             raise NotImplementedError("Legacy RunStore.create_run_atomic() cannot create non-run thread operations")
-        if idempotency_key is not None:
+        if idempotency_key is not None or idempotency_request is not None:
             raise NotImplementedError("Legacy RunStore.create_run_atomic() cannot guarantee idempotent admission")
         return await self.create_run_atomic(
             run_id,

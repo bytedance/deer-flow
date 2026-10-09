@@ -2,6 +2,14 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+Mixed-version resume admission in `test_thread_run_idempotency.py` uses a real
+shared SQL repository and an old-column projection. The frozen pre-6499 helper
+models only null-input resume retry matching from `02ce9ab2`; do not update it
+to the new identity-aware policy or claim it runs a complete old Gateway.
+Assert both writer formats: old workers reuse conflicting decisions, upgraded
+workers reject conflicts, and identity-less legacy rows fail closed even for
+identical retries. This pins why rollout requires routing to upgraded workers.
+
 Upload case-collision coverage uses separate HTTP requests and preserves both
 reported payloads. Observe real filename-claim inputs to pin the disk seed;
 case-insensitive hosts can otherwise mask a missing seed through link retries.

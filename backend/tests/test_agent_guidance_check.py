@@ -43,6 +43,7 @@ EXPECTED_GUIDANCE_PATHS = {
     "backend/packages/harness/deerflow/tracing/AGENTS.md",
     "backend/packages/harness/deerflow/tui/AGENTS.md",
     "backend/packages/harness/deerflow/typesafe/AGENTS.md",
+    "backend/packages/harness/deerflow/uploads/AGENTS.md",
     "backend/packages/harness/deerflow/utils/AGENTS.md",
     "frontend/src/AGENTS.md",
     "scripts/AGENTS.md",

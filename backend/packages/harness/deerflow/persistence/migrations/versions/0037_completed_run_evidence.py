@@ -3,8 +3,8 @@
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0036_completed_run_evidence"
-down_revision = "0035_login_throttle"
+revision = "0037_completed_run_evidence"
+down_revision = "0036_run_idempotency_request"
 branch_labels = None
 depends_on = None
 

@@ -190,7 +190,7 @@ results alone do not establish PostgreSQL lock behavior.
 
 Back up the application database and user skill directories together. Stop all
 writers, upgrade all Gateway/embedded writer processes and migrate through
-`0037_skill_mutations`, then restart before enabling mutation grants. Do not mix
+`0038_skill_mutations`, then restart before enabling mutation grants. Do not mix
 old and new writers on enrolled assets.
 
 Standalone SDK processes without a Gateway mutation runtime check persisted
