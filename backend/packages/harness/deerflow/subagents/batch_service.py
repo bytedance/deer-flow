@@ -46,6 +46,7 @@ class SubagentBatchService:
     # Also used by focused shutdown tests constructing an instance via __new__.
     _stopping: bool = False
     _stop_drains: int = 0
+    _stop_cleanup_task: asyncio.Task[None] | None = None
 
     def __init__(
         self,
@@ -70,6 +71,7 @@ class SubagentBatchService:
         self._poller: asyncio.Task[None] | None = None
         self._stopping = False
         self._stop_drains = 0
+        self._stop_cleanup_task: asyncio.Task[None] | None = None
         self._executions: dict[str, asyncio.Task[None]] = {}
         self._execution_ids: dict[str, str] = {}
         self._item_batches: dict[str, str] = {}
@@ -77,51 +79,64 @@ class SubagentBatchService:
     async def start(self) -> None:
         if self._stopping:
             raise RuntimeError("cannot start subagent batch poller before stop completes")
+        cleanup_task = getattr(self, "_stop_cleanup_task", None)
+        if cleanup_task is not None:
+            cleanup_task.result()
+            self._stop_cleanup_task = None
         if self._poller is not None:
             return
         self._stop.clear()
         self._poller = asyncio.create_task(self._run(), name="subagent-batch-poller")
 
     async def stop(self) -> None:
-        # Keep poller ownership visible until the entire drain finishes.
-        # Otherwise start() could create a fresh poller during this await.
-        self._stop_drains += 1
-        self._stopping = True
-        self._stop.set()
-        poller = self._poller
+        cleanup_task = getattr(self, "_stop_cleanup_task", None)
+        if cleanup_task is None:
+            # Fence start() before taking the owned-work snapshot. All stop
+            # callers then join this one cleanup generation instead of issuing
+            # competing cancellations and clearing one another's state.
+            self._stopping = True
+            self._stop.set()
+            poller = self._poller
 
-        # Issue every owned-work cancellation before the first await. The
-        # Gateway wraps this stop hook in a deadline; if poller teardown is
-        # slow, cancellation of this coroutine must not prevent native/item
-        # cancellation from being requested.
-        execution_ids = list(self._execution_ids.values())
-        for execution_id in execution_ids:
-            request_cancel_background_task(execution_id)
-        tasks = list(self._executions.values())
+            # Issue every owned-work cancellation before the first await. The
+            # Gateway wraps this stop hook in a deadline; if poller teardown is
+            # slow, cancellation of this caller must not prevent native/item
+            # cancellation from being requested.
+            execution_ids = list(self._execution_ids.values())
+            for execution_id in execution_ids:
+                request_cancel_background_task(execution_id)
+            tasks = list(self._executions.values())
 
-        if poller is not None:
-            poller.cancel()
-        for task in tasks:
-            task.cancel()
-
-        completed = False
-        try:
             if poller is not None:
-                await asyncio.gather(poller, return_exceptions=True)
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-            self._executions.clear()
-            self._execution_ids.clear()
-            self._item_batches.clear()
-            if self._poller is poller:
-                self._poller = None
-            completed = True
-        finally:
-            # A cancelled caller cannot leave a phantom drain count. Keep
-            # start fenced until a subsequent successful stop retries cleanup.
-            self._stop_drains -= 1
-            if completed and self._stop_drains == 0:
-                self._stopping = False
+                poller.cancel()
+            for task in tasks:
+                task.cancel()
+
+            self._stop_drains = 1
+            cleanup_task = asyncio.create_task(
+                self._drain_stop(poller, tasks),
+                name="subagent-batch-stop-cleanup",
+            )
+            self._stop_cleanup_task = cleanup_task
+
+        await asyncio.shield(cleanup_task)
+
+    async def _drain_stop(
+        self,
+        poller: asyncio.Task[None] | None,
+        tasks: list[asyncio.Task[None]],
+    ) -> None:
+        if poller is not None:
+            await asyncio.gather(poller, return_exceptions=True)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._executions.clear()
+        self._execution_ids.clear()
+        self._item_batches.clear()
+        if self._poller is poller:
+            self._poller = None
+        self._stop_drains = 0
+        self._stopping = False
 
     async def _run(self) -> None:
         while not self._stop.is_set():
