@@ -814,8 +814,10 @@ This release closes that milestone with **439 merged pull requests**.
   included), and both compose files default it to the bundled `nginx` service.
   nginx overwrites `X-Real-IP` with `$remote_addr` on every Gateway route, so
   a client cannot choose its own address. An `AUTH_TRUSTED_PROXIES` value in
-  `.env` still takes precedence. Deployments behind another reverse proxy also
-  need nginx's `real_ip` module for that proxy; see `.env.example`. ([#6519])
+  `.env` still takes precedence, including under `make docker-start`, which now
+  exports it for Compose interpolation like the proxy variables. Deployments
+  behind another reverse proxy also need nginx's `real_ip` module for that
+  proxy; see `.env.example`. ([#6519])
 - **scheduler:** "Run once now" on a one-time task before its run time no longer
   cancels the scheduled run. The trial launched as the task's own run: the task
   was marked `running`, and the trial's outcome then finished it (`completed`,

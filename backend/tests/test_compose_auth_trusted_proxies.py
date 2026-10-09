@@ -23,6 +23,7 @@ import pytest
 import yaml
 from support.compose import DOCKER, requires_docker_compose
 from support.nginx_conf import NGINX_CONFIGS, read_config
+from support.shell import find_script_bash
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_PATHS = {
@@ -30,6 +31,7 @@ COMPOSE_PATHS = {
     "dev": REPO_ROOT / "docker" / "docker-compose-dev.yaml",
 }
 EXPECTED_ENTRY = "AUTH_TRUSTED_PROXIES=${AUTH_TRUSTED_PROXIES:-nginx}"
+BASH_EXECUTABLE = find_script_bash()
 
 
 @pytest.mark.parametrize("variant", sorted(COMPOSE_PATHS))
@@ -44,7 +46,7 @@ def test_gateway_trusts_the_bundled_nginx_service_by_default(variant: str):
 
 
 def _render(tmp_path: Path, variant: str, env_file: str | None) -> dict:
-    """Render the compose file the way deploy.sh / docker.sh call it (``--env-file ../.env``)."""
+    """Render the compose file the way deploy.sh calls it (``--env-file ../.env``)."""
     docker_dir = tmp_path / "docker"
     shutil.copytree(REPO_ROOT / "docker", docker_dir)
     (tmp_path / "frontend").mkdir(exist_ok=True)
@@ -79,6 +81,62 @@ def _render(tmp_path: Path, variant: str, env_file: str | None) -> dict:
 )
 def test_real_compose_renders_the_default_and_keeps_an_operator_override(tmp_path, variant: str, env_file: str | None, expected: str):
     assert _render(tmp_path, variant, env_file)["AUTH_TRUSTED_PROXIES"] == expected
+
+
+def _render_through_docker_start(tmp_path: Path, env_file: str, shell_value: str | None = None) -> dict:
+    """Render the dev compose file with the exact command, cwd and environment ``make docker-start`` uses.
+
+    ``scripts/docker.sh start`` runs Compose from ``docker/`` without
+    ``--env-file``, so interpolation never reads the checkout ``.env`` by itself.
+    A ``docker`` shell function stands in for the CLI and swaps ``up ...`` for
+    ``config`` while keeping every argument before it.
+    """
+    docker_dir = tmp_path / "docker"
+    shutil.copytree(REPO_ROOT / "docker", docker_dir)
+    (tmp_path / "frontend").mkdir()
+    (tmp_path / "frontend" / ".env").write_text("", encoding="utf-8")
+    (tmp_path / ".env").write_text(env_file, encoding="utf-8")
+    (tmp_path / "config.yaml").write_text("sandbox:\n  use: deerflow.sandbox.local:LocalSandboxProvider\n", encoding="utf-8")
+    (tmp_path / "extensions_config.json").write_text("{}", encoding="utf-8")
+    rendered = tmp_path / "rendered.json"
+    env = {key: value for key, value in os.environ.items() if not key.startswith(("DEER_FLOW_", "COMPOSE_", "AUTH_"))}
+    if shell_value is not None:
+        env["AUTH_TRUSTED_PROXIES"] = shell_value
+    script = f"""
+source '{REPO_ROOT / "scripts" / "docker.sh"}'
+PROJECT_ROOT='{tmp_path}'
+DOCKER_DIR='{docker_dir}'
+require_compose_version() {{ :; }}
+docker() {{
+    local args=()
+    for arg in "$@"; do
+        [ "$arg" = up ] && break
+        args+=("$arg")
+    done
+    command '{DOCKER}' "${{args[@]}}" config --format json > '{rendered}'
+}}
+start
+"""
+    subprocess.run([BASH_EXECUTABLE, "-c", script], env=env, capture_output=True, text=True, timeout=120, check=True)
+    return json.loads(rendered.read_text(encoding="utf-8"))["services"]["gateway"]["environment"]
+
+
+@requires_docker_compose
+@pytest.mark.skipif(BASH_EXECUTABLE is None, reason="bash is required to run scripts/docker.sh")
+@pytest.mark.parametrize(
+    ("env_file", "shell_value", "expected"),
+    [
+        ("", None, "nginx"),
+        ("AUTH_TRUSTED_PROXIES=\n", None, "nginx"),
+        ("AUTH_TRUSTED_PROXIES=10.0.0.0/8,edge-proxy\n", None, "10.0.0.0/8,edge-proxy"),
+        ("AUTH_TRUSTED_PROXIES='10.0.0.0/8'\r\n", None, "10.0.0.0/8"),
+        ("AUTH_TRUSTED_PROXIES=10.0.0.0/8\n", "192.0.2.1", "192.0.2.1"),
+    ],
+    ids=["default", "explicitly-empty", "dotenv-override", "quoted-crlf", "shell-export-wins"],
+)
+def test_make_docker_start_keeps_a_dotenv_override(tmp_path, env_file: str, shell_value: str | None, expected: str):
+    """The dev launcher must hand the checkout .env value to interpolation, or the default replaces it."""
+    assert _render_through_docker_start(tmp_path, env_file, shell_value)["AUTH_TRUSTED_PROXIES"] == expected
 
 
 def _gateway_locations(content: str) -> list[tuple[str, str]]:
