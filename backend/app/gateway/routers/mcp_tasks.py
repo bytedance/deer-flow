@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_current_user, get_mcp_task_repo, get_mcp_task_service, get_thread_store
+from deerflow.mcp.tasks import TaskStatus
 from deerflow.mcp_scope import is_valid_thread_incarnation
 from deerflow.utils.thread_id import ThreadId
 
@@ -91,6 +92,8 @@ async def list_mcp_tasks(
     thread_id: ThreadId,
     request: Request,
     limit: int = Query(default=50, ge=1, le=100),
+    status: TaskStatus | None = None,
+    active_only: bool = False,
 ) -> list[dict[str, Any]]:
     repository = get_mcp_task_repo(request)
     service = get_mcp_task_service(request)
@@ -105,6 +108,8 @@ async def list_mcp_tasks(
         user_id=user_id,
         thread_incarnation=thread_incarnation,
         limit=limit,
+        status=status,
+        active_only=active_only,
     )
     threshold = service.tracking_degraded_after_errors
     return [_list_item(record, threshold=threshold) for record in records]
