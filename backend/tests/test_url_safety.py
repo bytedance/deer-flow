@@ -78,9 +78,7 @@ def test_delegated_backend_fails_closed_when_unresolvable():
 
 
 def test_delegated_backend_allows_public_address():
-    error = validate_delegated_backend_url(
-        "https://production-sfo.browserless.io", resolver=lambda _host: [ipaddress.ip_address("93.184.216.34")]
-    )
+    error = validate_delegated_backend_url("https://production-sfo.browserless.io", resolver=lambda _host: [ipaddress.ip_address("93.184.216.34")])
 
     assert error is None
 

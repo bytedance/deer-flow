@@ -141,6 +141,12 @@ def validate_delegated_backend_url(
     the deployment network, so this fails closed unless the operator confirms the
     backend's egress is isolated via ``network_isolation_confirmed=True``.
 
+    The check resolves the backend hostname once, at validation time only. A
+    backend client built afterwards connects by hostname and resolves the name
+    again, so a DNS name that answers with a public address during screening and
+    a private one at connect time still passes. Pin the connection to the vetted
+    addresses (:func:`resolve_public_addresses`) to close that rebinding window.
+
     Returns an ``"Error: ..."`` string when delegation must be refused, or
     ``None`` when the caller may proceed. Blocking like
     :func:`resolve_public_addresses`; from a coroutine, call it via
@@ -160,8 +166,5 @@ def validate_delegated_backend_url(
     try:
         resolve_public_addresses(hostname, action="delegate to", resolver=resolver)
     except ValueError as exc:
-        return (
-            f"{exc}. To delegate to a self-hosted backend, set "
-            "network_isolation_confirmed: true."
-        )
+        return f"{exc}. To delegate to a self-hosted backend, set network_isolation_confirmed: true."
     return None

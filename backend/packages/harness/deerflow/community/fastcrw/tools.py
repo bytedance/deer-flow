@@ -34,14 +34,24 @@ def _coerce_max_results(value: object) -> int:
     return count
 
 
-def _get_fastcrw_client(tool_name: str = "web_search", base_url: str | None = None) -> FirecrawlApp:
-    config = get_app_config().get_tool_config(tool_name)
-    api_key = None
-    if config is not None:
-        if "api_key" in config.model_extra:
-            api_key = config.model_extra.get("api_key")
-        if base_url is None and "base_url" in config.model_extra:
-            base_url = config.model_extra.get("base_url")
+def _get_fastcrw_client(
+    tool_name: str = "web_search",
+    *,
+    cfg: dict | None = None,
+    base_url: str | None = None,
+) -> FirecrawlApp:
+    """Build a fastCRW client from one configuration snapshot.
+
+    ``cfg`` is the tool config extras already read by the caller. Resolving the
+    API key and endpoint from that same snapshot keeps a backend change made
+    between the URL screen and client construction from pairing one revision's
+    endpoint with another revision's key.
+    """
+    if cfg is None:
+        cfg = _get_tool_config_extra(tool_name)
+    api_key = cfg.get("api_key")
+    if base_url is None:
+        base_url = cfg.get("base_url")
     if api_key is None:
         api_key = os.getenv("CRW_API_KEY")
     if base_url is None:
@@ -145,7 +155,7 @@ def web_fetch_tool(url: str) -> str:
         backend_error = _validate_backend_base_url(cfg, base_url)
         if backend_error:
             return backend_error
-        client = _get_fastcrw_client("web_fetch", base_url=base_url)
+        client = _get_fastcrw_client("web_fetch", cfg=cfg, base_url=base_url)
         result = client.scrape(url, formats=["markdown"])
 
         markdown_content = result.markdown or ""

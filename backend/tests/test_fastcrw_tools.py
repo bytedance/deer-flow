@@ -202,6 +202,37 @@ class TestWebFetchTool:
             formats=["markdown"],
         )
 
+    @patch.dict("os.environ", {}, clear=True)
+    @patch("deerflow.community.fastcrw.tools.FirecrawlApp")
+    @patch("deerflow.community.fastcrw.tools.get_app_config")
+    @pytest.mark.usefixtures("public_dns")
+    def test_fetch_builds_client_from_the_validated_config_snapshot(self, mock_get_app_config, mock_fastcrw_cls):
+        # The endpoint screen reads the config once; a later read returning a
+        # different revision must not leak its key into the screened client.
+        config_a = MagicMock()
+        config_a.model_extra = {
+            "base_url": "http://192.168.0.47:3002",
+            "api_key": "key-a",
+        }
+        config_b = MagicMock()
+        config_b.model_extra = {
+            "base_url": "http://192.168.0.99:3002",
+            "api_key": "key-b",
+        }
+        mock_get_app_config.return_value.get_tool_config.side_effect = [config_a, config_b]
+
+        mock_scrape_result = MagicMock()
+        mock_scrape_result.markdown = "Fetched markdown"
+        mock_scrape_result.metadata = MagicMock(title="Fetched Page")
+        mock_fastcrw_cls.return_value.scrape.return_value = mock_scrape_result
+
+        from deerflow.community.fastcrw.tools import web_fetch_tool
+
+        result = web_fetch_tool.invoke({"url": "https://example.com"})
+
+        assert result == "# Fetched Page\n\nFetched markdown"
+        mock_fastcrw_cls.assert_called_once_with(api_key="key-a", api_url="http://192.168.0.47:3002")
+
 
 class TestFastcrwBackendIsolation:
     """Fail-closed delegated-backend SSRF guard (issue #5970)."""

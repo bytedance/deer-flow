@@ -86,14 +86,24 @@ def _validate_backend_base_url(cfg: dict, base_url: str) -> str | None:
     return validate_delegated_backend_url(base_url, network_isolation_confirmed=network_isolation_confirmed)
 
 
-def _get_firecrawl_client(tool_name: str = "web_search", api_url: str | None = None) -> AsyncFirecrawlApp:
-    config = get_app_config().get_tool_config(tool_name)
-    api_key = None
-    if config is not None:
-        if "api_key" in config.model_extra:
-            api_key = config.model_extra.get("api_key")
-        if api_url is None and "base_url" in config.model_extra:
-            api_url = config.model_extra.get("base_url")
+def _get_firecrawl_client(
+    tool_name: str = "web_search",
+    *,
+    cfg: dict | None = None,
+    api_url: str | None = None,
+) -> AsyncFirecrawlApp:
+    """Build a Firecrawl app from one configuration snapshot.
+
+    ``cfg`` is the tool config extras already read by the caller. Resolving the
+    API key and endpoint from that same snapshot keeps a backend change made
+    between the URL screen and client construction from pairing one revision's
+    endpoint with another revision's key.
+    """
+    if cfg is None:
+        cfg = _get_tool_config_extra(tool_name)
+    api_key = cfg.get("api_key")
+    if api_url is None:
+        api_url = cfg.get("base_url")
     kwargs = {"api_key": api_key}
     if api_url:
         kwargs["api_url"] = api_url
@@ -159,7 +169,7 @@ async def web_fetch_tool(url: str) -> str:
             backend_error = await asyncio.to_thread(_validate_backend_base_url, cfg, api_url)
             if backend_error:
                 return backend_error
-        client = _get_firecrawl_client("web_fetch", api_url=api_url)
+        client = _get_firecrawl_client("web_fetch", cfg=cfg, api_url=api_url)
         result = await client.scrape(url, formats=["markdown"])
 
         markdown_content = result.markdown or ""

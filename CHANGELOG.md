@@ -4198,6 +4198,20 @@ This release closes that milestone with **439 merged pull requests**.
   package. Previously a `hooks/install.jse` carrying one stray byte received
   no static analysis and no executable review. ([#6321])
 
+- **community:** Delegated `web_fetch`/`web_capture` backends fail closed by
+  default. Browserless, Crawl4AI, Firecrawl, and fastCRW resolve the target URL
+  in the backend's own network namespace, so the target-URL SSRF screen cannot
+  be enforced end-to-end. Each entry point now screens its resolved backend
+  base URL (config key, env fallback, and default) before delegating: a public
+  backend still works unchanged, but a loopback, private, or unverifiable
+  backend is refused unless the operator confirms its egress isolation.
+  **Upgrade note:** a deployment using the documented defaults (Browserless at
+  `http://localhost:3032`, Crawl4AI at `http://localhost:11235`, or a
+  self-hosted Firecrawl/fastCRW via `base_url`/`CRW_API_URL`) now sees a
+  delegation error on `web_fetch`/`web_capture` until it either points the
+  backend at its public address or sets `network_isolation_confirmed: true` in
+  the tool config. ([#6531])
+
 ### Documentation
 
 - **docs:** Fix the Apple Container verification instructions. The guide
