@@ -809,7 +809,7 @@ This release closes that milestone with **439 merged pull requests**.
   the internal auth token alone, and the Gateway's CSRF check, which does not
   exempt internal auth, answered 403, so the channel replied "Failed to set
   goal." or "Failed to clear goal." They now send the same CSRF cookie and
-  header pair as the channel's SDK client. `/goal` status was unaffected.
+  header pair as the channel's SDK client. `/goal` status was unaffected. ([#6537])
 - **scheduler:** "Run once now" on a one-time task before its run time no longer
   cancels the scheduled run. The trial launched as the task's own run: the task
   was marked `running`, and the trial's outcome then finished it (`completed`,
@@ -9302,3 +9302,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6501]: https://github.com/bytedance/deer-flow/pull/6501
 [#6506]: https://github.com/bytedance/deer-flow/pull/6506
 [#6512]: https://github.com/bytedance/deer-flow/pull/6512
+[#6537]: https://github.com/bytedance/deer-flow/pull/6537
