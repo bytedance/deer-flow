@@ -213,7 +213,7 @@ def _assemble_from_features(
 ) -> tuple[list[AgentMiddleware], list[BaseTool]]:
     """Build an ordered middleware chain + extra tools from *feat*.
 
-    Middleware order matches ``make_lead_agent`` (14 middlewares):
+    Middleware order matches ``make_lead_agent`` (18 middlewares):
 
       0-2. Sandbox infrastructure (ThreadData → Uploads → Sandbox)
       3.   DanglingToolCallMiddleware (always)
@@ -228,7 +228,9 @@ def _assemble_from_features(
       10.  ViewImageMiddleware (vision feature)
       11.  SubagentLimitMiddleware (subagent feature)
       12.  LoopDetectionMiddleware (loop_detection feature)
-      13.  ClarificationMiddleware (always last)
+      13.  TokenBudgetMiddleware (token_budget feature)
+      13a. ModelContentCompatibilityMiddleware (always)
+      14.  ClarificationMiddleware (always last)
 
     Two-phase ordering:
       1. Built-in chain — fixed sequential append.
@@ -434,6 +436,15 @@ def _assemble_from_features(
 
             # ``enabled`` defaults to False for config.yaml; ``token_budget=True`` is the opt-in.
             chain.append(TokenBudgetMiddleware.from_config(TokenBudgetConfig(enabled=True)))
+
+    # --- [13a] ModelContentCompatibility (always) ---
+    # Read-time sanitizer: rewrites persisted URL-sourced file/image blocks in
+    # ToolMessage content into text placeholders in the request view only, so
+    # threads poisoned before the conversion-layer fix heal on the next model
+    # call. Placed just before Clarification to see the near-final request.
+    from deerflow.agents.middlewares.model_content_compatibility_middleware import ModelContentCompatibilityMiddleware
+
+    chain.append(ModelContentCompatibilityMiddleware())
 
     # --- [14] Clarification (always last among built-ins) ---
     chain.append(ClarificationMiddleware())

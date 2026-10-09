@@ -1,0 +1,144 @@
+"""Read-time sanitizer for model-incompatible content blocks in tool results.
+
+The MCP tool-result conversion layer once persisted URL-sourced ``file``
+content blocks (MCP ``ResourceLink`` results: ``ui://`` MCP App cards, local
+files at ``/mnt/user-data/...`` virtual paths, remote non-image links) into
+checkpointed ``ToolMessage`` content. From the next turn on, every model call
+in such a thread fails during client-side message serialization:
+langchain-core's OpenAI translator raises ``ValueError: OpenAI Chat Completions
+does not support file URLs.`` for ANY ``file`` block carrying a ``url`` — the
+Chat Completions API accepts file blocks only as base64 or file-id, and DeerFlow
+does not enable the Responses API. The agent loop classifies that as a generic,
+non-retriable failure, so every subsequent turn answers with a fallback error:
+the thread is permanently bricked.
+
+The conversion layer no longer emits those blocks for new results. This
+middleware covers the other time window — history written before the fix — by
+rewriting the *request view* at the model boundary:
+
+- a ``{"type": "file", "url": ...}`` block becomes a plain text placeholder
+  ``[Resource ({mime or "unknown type"}) available at {url}]``;
+- an ``{"type": "image", "url": ...}`` block whose URL scheme the provider
+  cannot fetch (anything outside ``http``/``https``/``data``) becomes the same
+  placeholder — local images are meant to reach the model through the
+  ``view_image`` tool, not as unresolvable URLs.
+
+The rewrite hooks ``wrap_model_call``/``awrap_model_call`` and hands the
+handler an overridden request, exactly like ``ViewImageMiddleware``: nothing is
+written to state, so checkpoints keep the original blocks (artifact capture and
+other state readers are unaffected) and a poisoned thread heals itself on its
+next turn with no migration. The placeholder text keeps the location visible to
+the model and to the artifact free-text scan; the original link also survives
+in the tool message's structured artifact channel.
+
+Scope is deliberately narrow: ``ToolMessage`` list-form content only. User
+uploads never produce URL-sourced file blocks (the uploads middleware inlines
+or references host paths), so ``HumanMessage``/``AIMessage`` content is left
+untouched. The rewrite is order-preserving and idempotent — placeholder text
+blocks pass through unchanged on any later application.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Awaitable, Callable
+from typing import Any, override
+from urllib.parse import urlparse
+
+from langchain.agents import AgentState
+from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
+from langchain_core.messages import AnyMessage, ToolMessage
+
+logger = logging.getLogger(__name__)
+
+# URL schemes a chat model provider can resolve for image blocks. Everything
+# else (``ui://``, scheme-less virtual paths, unknown schemes) is downgraded to
+# a text reference. ``data:`` embeds the payload inline, so it is fetchable.
+_FETCHABLE_IMAGE_SCHEMES = frozenset({"http", "https", "data"})
+
+
+def _placeholder_text(mime_type: object, url: str) -> str:
+    mime = mime_type if isinstance(mime_type, str) and mime_type else "unknown type"
+    return f"[Resource ({mime}) available at {url}]"
+
+
+def _sanitize_block(block: Any) -> Any:
+    """Return *block* unchanged, or its text-placeholder replacement.
+
+    Identity is the unchanged signal for the caller: the same object comes back
+    when nothing was rewritten.
+    """
+    if not isinstance(block, dict):
+        return block
+    block_type = block.get("type")
+    if block_type == "file":
+        # URL-sourced file blocks are rejected by Chat Completions regardless of
+        # scheme; base64/file_id blocks are fine and stay untouched.
+        url = block.get("url")
+        if isinstance(url, str) and url:
+            return {"type": "text", "text": _placeholder_text(block.get("mime_type"), url)}
+        return block
+    if block_type == "image":
+        url = block.get("url")
+        if isinstance(url, str) and url and urlparse(url).scheme.lower() not in _FETCHABLE_IMAGE_SCHEMES:
+            return {"type": "text", "text": _placeholder_text(block.get("mime_type"), url)}
+        return block
+    return block
+
+
+def _sanitize_message(message: AnyMessage) -> AnyMessage:
+    """Return *message* unchanged, or a copy with incompatible blocks replaced."""
+    if not isinstance(message, ToolMessage):
+        return message
+    content = message.content
+    if not isinstance(content, list):
+        return message
+    patched = [_sanitize_block(block) for block in content]
+    if all(new is old for new, old in zip(patched, content, strict=True)):
+        return message
+    return message.model_copy(update={"content": patched})
+
+
+def _sanitize_messages(messages: list[AnyMessage]) -> list[AnyMessage] | None:
+    """Rewrite *messages* for the model request, or ``None`` when nothing changed."""
+    updated: list[AnyMessage] = []
+    changed = False
+    for message in messages:
+        patched = _sanitize_message(message)
+        changed = changed or patched is not message
+        updated.append(patched)
+    return updated if changed else None
+
+
+class ModelContentCompatibilityMiddleware(AgentMiddleware[AgentState]):
+    """Downgrades persisted URL-sourced content blocks the model cannot accept.
+
+    Request-view-only rewrite at the model boundary; see the module docstring
+    for the failure mode and the contract. Stateless and config-free: the
+    behavior is an unconditional bug fix, not a feature flag.
+    """
+
+    @override
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelCallResult:
+        return handler(self._sanitize_request(request))
+
+    @override
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelCallResult:
+        # Pure in-memory rewrite: no sandbox or file I/O, so it stays on the loop.
+        return await handler(self._sanitize_request(request))
+
+    @staticmethod
+    def _sanitize_request(request: ModelRequest) -> ModelRequest:
+        patched = _sanitize_messages(request.messages)
+        if patched is None:
+            return request
+        return request.override(messages=patched)
