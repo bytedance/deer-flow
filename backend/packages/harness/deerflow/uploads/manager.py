@@ -509,7 +509,7 @@ def list_files_in_dir(directory: Path) -> dict:
     except (FileNotFoundError, NotADirectoryError):
         # Thread deletion or a sandbox process may remove or replace the
         # directory after the is_dir() check. Keep the collected snapshot.
-        pass
+        logger.debug("Uploads directory vanished mid-scan, keeping partial snapshot of %d entries: %s", len(files), directory)
     return {"files": files, "count": len(files)}
 
 

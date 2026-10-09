@@ -424,7 +424,7 @@ class TestListFilesInDir:
         assert result == {"files": [], "count": 0}
 
     @pytest.mark.parametrize("replacement", ["removed", "file"])
-    def test_directory_replaced_after_is_dir_check(self, tmp_path, monkeypatch, replacement):
+    def test_directory_replaced_after_is_dir_check(self, tmp_path, monkeypatch, caplog, replacement):
         directory = tmp_path / "uploads"
         directory.mkdir()
         real_scandir = os.scandir
@@ -438,7 +438,14 @@ class TestListFilesInDir:
 
         monkeypatch.setattr(os, "scandir", replace_before_scandir)
 
-        assert list_files_in_dir(directory) == {"files": [], "count": 0}
+        with caplog.at_level(logging.DEBUG, logger="deerflow.uploads.manager"):
+            assert list_files_in_dir(directory) == {"files": [], "count": 0}
+
+        assert (
+            "deerflow.uploads.manager",
+            logging.DEBUG,
+            f"Uploads directory vanished mid-scan, keeping partial snapshot of 0 entries: {directory}",
+        ) in caplog.record_tuples
 
     @pytest.mark.parametrize("error_code", [errno.EACCES, errno.EIO])
     def test_scandir_operational_error_still_propagates(self, tmp_path, monkeypatch, error_code):
