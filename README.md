@@ -1830,9 +1830,9 @@ Supported commands:
 /goal clear        # clear it
 ```
 
-After each Gateway-backed run, DeerFlow evaluates the visible conversation, including the assistant's tool calls and shortened tool results, against the active goal with a non-thinking evaluator model. A successful tool result alone does not satisfy a goal, and when the assistant had to guess missing or ambiguous information the evaluator reports `needs_user_input`. The evaluator must return a typed blocker (`missing_evidence`, `needs_user_input`, `run_failed`, `external_wait`, or `goal_not_met_yet`) plus visible evidence. DeerFlow only injects a hidden continuation when the latest assistant turn is durably checkpointed, the blocker is `goal_not_met_yet`, the thread did not change during evaluation, and the no-progress breaker has not fired. The safety cap defaults to 8 hidden continuations, and repeated identical non-progress evaluations stop after 2 attempts. `/goal clear` and any user-authored new input win over queued continuations. When the evaluator considers the goal satisfied, DeerFlow clears it after the run successfully finalizes and publishes the updated thread state. If required artifact delivery or its receipt persistence fails, the run reports an error and the goal remains active for a later retry; this does not start another hidden continuation.
+After each Gateway-backed run, DeerFlow evaluates the visible conversation, including the assistant's tool calls and shortened tool results, against the active goal with a non-thinking evaluator model. A successful tool result alone does not satisfy a goal, and when the assistant had to guess missing or ambiguous information the evaluator reports `needs_user_input`. The evaluator must return a typed blocker (`missing_evidence`, `needs_user_input`, `run_failed`, `external_wait`, or `goal_not_met_yet`) plus visible evidence. DeerFlow only injects a hidden continuation when the latest assistant turn is durably checkpointed, the blocker is `goal_not_met_yet`, the thread did not change during evaluation, and the no-progress breaker has not fired. The safety cap defaults to 8 hidden continuations, and repeated identical non-progress evaluations stop after 2 attempts. `/goal clear` and any user-authored new input win over queued continuations. When the evaluator considers the goal satisfied, DeerFlow clears it after the run successfully finalizes and publishes the updated thread state. The same checkpoint records the completion as `goal_outcome`, which stays until the next goal change. If required artifact delivery or its receipt persistence fails, the run reports an error and the goal remains active for a later retry; this does not start another hidden continuation.
 
-The Web UI shows the active goal above the composer. The same command is available from the TUI and supported IM channels. In the Web UI and supported IM channels, setting `/goal <completion condition>` also starts a run with the condition as the task; status and clear commands only manage goal state. Setting or clearing a goal is rejected while that thread has a run in flight, including a run owned by another Gateway worker, so the goal checkpoint cannot branch away from an active run's checkpoint lineage.
+The Web UI shows the active goal above the composer, says why auto-continue stopped, and shows a "Goal met" notice after a goal is met. Editing the last message is off while a goal is set. The same command is available from the TUI and supported IM channels. In the Web UI and supported IM channels, setting `/goal <completion condition>` also starts a run with the condition as the task; status and clear commands only manage goal state. Setting or clearing a goal is rejected while that thread has a run in flight, including a run owned by another Gateway worker, so the goal checkpoint cannot branch away from an active run's checkpoint lineage.
 
 When your role lacks `runs:create`, the Web UI rejects a new task or `/goal <completion condition>` before preparing the thread or saving the goal, and keeps your draft for retry. Goal status, goal clearing, and `/compact` remain governed by their own endpoint permissions.
 
@@ -1852,14 +1852,16 @@ DeerFlow adds a reminder using the latest task statuses before the next model
 call. Skipped or failed compaction leaves the existing messages unchanged.
 
 Optional `pii_redaction.enabled` redacts detected identifiers in user messages,
-remote tool results, compaction input, reinjected summaries, and configured
-LLM title input. Memory admission, including pre-compaction flushes, also redacts
+remote tool results, compaction input, reinjected summaries, configured
+LLM title input, and the `/goal` evaluator's input. Memory admission,
+including pre-compaction flushes, also redacts
 detected identifiers in supported text/JSON content, parsed and invalid call arguments/error text,
 provider-raw/legacy function calls and supported user-content provenance.
 It is off by default; enabled deployments supply a secret for stable, keyed
 value-derived placeholders. No token-to-raw mapping is persisted. Raw thread
 text and local fallback titles remain available for display; memory redaction
 copies messages without changing the caller's history or tool execution.
+The hidden `/goal` continuation is redacted before it is stored.
 
 The Web UI preserves persisted message order when merging history with live updates. Streaming steps around a persisted result inside the loaded history stay together, including steps that arrive after the result. Steps captured during compaction also remain visible before their persisted result when history has not refreshed and the UI has not rendered them yet.
 
