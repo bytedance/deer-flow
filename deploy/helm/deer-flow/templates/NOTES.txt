@@ -66,11 +66,18 @@ Provisioner / sandbox notes:
   • On multi-node clusters you additionally need
     `persistence.home.accessMode: ReadWriteMany` (e.g. NFS) so sandbox Pods on
     other nodes can mount the shared user-data PVC.
+  • Memory data stays on that PVC; DeerMem's rebuildable SQLite search index
+    is Pod-local (`memory.backend_config.retrieval_index_path`, an emptyDir at
+    /var/lib/deerflow/memory-index). Keep that config line when you override
+    `config`, or gateway Pods share one SQLite WAL file over the network.
 
 Generated secrets (persisted across upgrades):
 
-  • BETTER_AUTH_SECRET and DEER_FLOW_INTERNAL_AUTH_TOKEN are stored in the
-    Secret `{{ include "deer-flow.appSecret" . }}`.
+  • BETTER_AUTH_SECRET, DEER_FLOW_INTERNAL_AUTH_TOKEN, AUTH_JWT_SECRET (the
+    session-cookie signing key shared by every gateway Pod) and
+    PROVISIONER_API_KEY (the key the gateway presents to the sandbox
+    provisioner, which answers 401 to every /api/* request without it) are
+    stored in the Secret `{{ include "deer-flow.appSecret" . }}`.
 
 Database ({{ if .Values.postgresql.enabled }}bundled postgres{{ else }}external postgres{{ end }}):
 

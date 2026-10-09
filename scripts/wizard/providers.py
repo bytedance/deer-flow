@@ -496,6 +496,23 @@ LLM_PROVIDERS: list[LLMProvider] = [
         },
     ),
     LLMProvider(
+        name="opper",
+        display_name="Opper",
+        description="EU-hosted AI gateway, 700+ models behind one OpenAI-compatible API",
+        use="langchain_openai:ChatOpenAI",
+        models=["claude-sonnet-4-6", "gpt-5.5", "gemini-3.8-flash", "gpt-5.4-mini"],
+        default_model="claude-sonnet-4-6",
+        env_var="OPPER_API_KEY",
+        package="langchain-openai",
+        extra_config={
+            "base_url": "https://api.opper.ai/v3/compat",
+            "request_timeout": 600.0,
+            "max_retries": 2,
+            "max_tokens": 8192,
+            "temperature": 0.7,
+        },
+    ),
+    LLMProvider(
         name="vllm",
         display_name="vLLM",
         description="Self-hosted OpenAI-compatible serving",
@@ -733,6 +750,14 @@ WEB_FETCH_PROVIDERS: list[WebProvider] = [
         description="Page as markdown, API key required",
         use="deerflow.community.sofya.tools:web_fetch_tool",
         env_var="SOFYA_API_KEY",
+        tool_name="web_fetch",
+    ),
+    WebProvider(
+        name="unbrowse",
+        display_name="Unbrowse",
+        description="Page as markdown, cloud browser for JavaScript pages, API key required",
+        use="deerflow.community.unbrowse.tools:web_fetch_tool",
+        env_var="UNBROWSE_API_KEY",
         tool_name="web_fetch",
     ),
     WebProvider(

@@ -28,6 +28,12 @@ class GuardrailRequest:
     channel_user_id: str | None = None
     is_internal: bool = False
     authz_attributes: dict[str, Any] = field(default_factory=dict)
+    # Host-resolved tool provenance (display/enterprise context) and the bound
+    # tool object itself (opaque identity for the infrastructure exemption).
+    # ``tool_identity`` is never serialized and never forwarded into
+    # AuthzRequest; a missing tool yields ``{}`` / ``None``.
+    tool_provenance: dict[str, Any] = field(default_factory=dict)
+    tool_identity: Any = None
 
 
 @dataclass

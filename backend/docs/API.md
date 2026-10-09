@@ -36,7 +36,7 @@ return `503`.
 
 ### Account Preferences
 
-`GET /api/v1/auth/preferences` returns the signed-in browser user's four
+`GET /api/v1/auth/preferences` returns the signed-in browser user's five
 preferences. `PATCH` updates only explicitly supplied fields and returns `204`.
 Both require `X-Expected-User-Id` matching the session user; PATCH also requires
 the normal `X-CSRF-Token` header. The expected ID is a stale-tab guard, not an
@@ -48,17 +48,22 @@ authorization credential. PAT, internal, and auth-disabled callers receive
   "notification_enabled": false,
   "model_name": "my-model",
   "mode": "pro",
-  "reasoning_effort": "high"
+  "reasoning_effort": "high",
+  "locale": "zh-CN"
 }
 ```
 
-All four fields accept `null` to restore the default. `mode` accepts `flash`,
+All five fields accept `null` to restore the default. `mode` accepts `flash`,
 `thinking`, `pro`, or `ultra`; `reasoning_effort` accepts `minimal`, `low`,
-`medium`, or `high`; model names are at most 200 characters. Unknown fields and
+`medium`, or `high`; `locale` accepts `en-US` or `zh-CN`; model names are at
+most 200 characters. Unknown fields and
 invalid values return `422`. Missing preferences read as `null`. Separate-field
 patches preserve each other's changes, and same-field writes are last-commit-wins.
 Storage requires SQLite or PostgreSQL (`503` when unavailable). Browser
 notification permission remains device-local and is not changed by this API.
+`locale` is the web UI language; the web app writes it after sign-in and on
+every language switch, and scheduled-task IM notices are written in it (without
+it they use `channel_connections.notification_locale`).
 
 ### Personal Access Tokens
 
@@ -526,6 +531,36 @@ via `config.configurable.thread_id` to keep conversation history.
 
 Base URL: `/api`
 
+### Custom Agent portability
+
+`GET /api/agents/{name}/export` downloads a version-1 JSON package for a
+caller-owned Custom Agent. The package uses `format: "deerflow.custom-agent"`
+and contains the portable Agent configuration plus SOUL. It excludes memory
+contents, conversations, credentials, and deployment-owned GitHub bindings.
+
+`POST /api/agents/import` creates the packaged Agent for the current user.
+Pass `?name=<new-name>` to choose a different local identifier. The document
+schema rejects unknown fields and unsupported format/version values; invalid
+names or models return 422, and an existing name returns 409 without changing
+the existing Agent. Import is create-only and never restores runtime state.
+
+```json
+{
+  "format": "deerflow.custom-agent",
+  "version": 1,
+  "agent": {
+    "name": "research-lead",
+    "description": "Coordinates parallel research",
+    "model": "deepseek-v3",
+    "tool_groups": ["web"],
+    "skills": ["literature-review"],
+    "allowed_subagents": ["researcher", "reporter"],
+    "memory_enabled": true,
+    "soul": "Delegate independent searches, then synthesize evidence."
+  }
+}
+```
+
 ### Models
 
 #### List Models
@@ -771,9 +806,11 @@ placeholders.
 
 #### Reset MCP Tools Cache
 
-Clear cached MCP tools and persistent MCP sessions process-wide. This affects
-all threads and users in the current Gateway process. Tools are loaded again
-from configured MCP servers on the next agent run or tool lookup.
+Publish a shared cache generation, then clear cached MCP tools and persistent
+MCP sessions in the handling process. Every Gateway worker sharing the writable
+extensions-config directory observes that generation and reloads tools on its
+next agent run or tool lookup. This also refreshes remote `tools/list` changes
+that did not modify `extensions_config.json`.
 
 ```http
 POST /api/mcp/cache/reset
@@ -785,9 +822,15 @@ Requires an authenticated admin session.
 ```json
 {
   "success": true,
-  "message": "MCP tools cache reset. Tools will reload on next use."
+  "scope": "shared_config",
+  "message": "MCP tools cache reset published through the shared config directory. Tools will reload on next use."
 }
 ```
+
+`shared_config` means every worker mounting that same directory observes the
+generation; it does not claim a deployment-wide broadcast when replicas use
+independent filesystems. When no extensions-config path can be resolved, the
+request still resets the current worker and returns `"scope": "process"`.
 
 ### Skills
 
@@ -909,9 +952,11 @@ Raw skill files, sidecars and empty directories are preserved. No hooks/scripts 
 
 #### Reload Skills
 
-Invalidate the skill prompt caches for every user in the current Gateway
-process. Subsequent runs rescan the configured public, custom, and legacy skill
-directories; runs that have already started keep their existing skill snapshot.
+Invalidate the skill prompt caches for every user, then publish a reset marker
+beside the shared extensions config so every Gateway process mounting that
+directory rescans the configured public, custom, and legacy skill directories
+before its next prompt build. Runs that have already started keep their
+existing skill snapshot.
 
 ```http
 POST /api/skills/reload
@@ -931,8 +976,8 @@ curl -X POST http://localhost:2026/api/skills/reload \
 ```json
 {
   "success": true,
-  "scope": "process",
-  "message": "Skill caches invalidated; subsequent runs in this Gateway process will rescan the latest skills."
+  "scope": "shared_config",
+  "message": "Skill cache reset published through the shared config directory; subsequent runs in every Gateway process sharing it will rescan the latest skills."
 }
 ```
 
@@ -940,17 +985,30 @@ curl -X POST http://localhost:2026/api/skills/reload \
 malformed skills retain the existing parser behavior of being skipped and
 logged. The endpoint returns `401` for unauthenticated callers, `403` for
 non-admin users, and a generic `500` if the invalidation mechanism itself
-fails or the process-local background scan does not finish within the cache
-refresh timeout. A loader-level failure, such as an unavailable mounted root,
-does not publish an empty catalog: the last successfully loaded process cache
-remains available. A timed-out scan continues in its daemon worker and can
-still populate the process cache when it finishes.
+fails, the handling process's background scan does not finish within the cache
+refresh timeout, or the reset marker cannot be written. A loader-level failure,
+such as an unavailable mounted root, does not publish an empty catalog: the
+last successfully loaded process cache remains available. A timed-out scan
+continues in its daemon worker and can still populate the process cache when
+it finishes.
 
-The scope is deliberately process-local. Each Uvicorn worker or Kubernetes Pod
-must be called directly; repeated requests through a load-balanced Service do
-not guarantee that every instance is reached. External MinIO/NFS/CSI writes
-bypass the validation, SkillScan, and history used by the install/edit APIs, so
-the mounted directory must be writable only by trusted operators.
+`shared_config` means the handling process refreshed itself and then atomically
+replaced `.<extensions config name>.skills-cache-reset.json` next to the
+resolved `extensions_config.json`. Every Gateway worker or Pod mounting that
+directory compares the marker's signature (at most once per second) before it
+serves a cached skill list, so one request reaches every replica sharing the
+volume; it does not claim a deployment-wide broadcast when replicas use
+independent filesystems. The skill install, edit, delete, rollback and
+enable/disable endpoints publish the same marker after their own change is
+durable, scoped to the calling user for custom skills; if that publication
+fails after the change was applied, they return their generic `500` (never
+`404`), and a client that disconnects mid-request does not skip it. When no extensions
+config path can be resolved there is no shared directory to publish into; the
+request still refreshes the current process and returns `"scope": "process"`
+with the message `Skill caches invalidated; subsequent runs in this Gateway
+process will rescan the latest skills.` External MinIO/NFS/CSI writes bypass
+the validation, SkillScan, and history used by the install/edit APIs, so the
+mounted directory must be writable only by trusted operators.
 
 ### File Uploads
 
@@ -1053,6 +1111,77 @@ DELETE /api/threads/{thread_id}
 **Error behavior:**
 - `422` for invalid thread IDs
 - `500` returns a generic `{"detail": "Failed to delete local thread data."}` response while full exception details stay in server logs
+
+Deleting a thread also removes every user's read marker for it.
+
+### Thread Origin, Activity and Unread State
+
+Runs the server starts for a user (a schedule, an IM channel, a GitHub agent,
+an extension, an MCP notification) carry a server-owned origin in their
+metadata, and so does a thread the server creates for one:
+
+```json
+{ "deerflow_origin": { "kind": "im_channel", "provider": "feishu" } }
+```
+
+`kind` is one of `schedule`, `im_channel`, `github`, `extension`,
+`mcp_notification` (`contracts/thread_origin_contract.json`); `provider`
+(IM/GitHub) and `namespace` (extension plugin) are optional. Clients cannot
+set it: `POST /api/threads` and `PATCH /api/threads/{thread_id}` strip it, run
+admission drops it from `metadata` and `config.metadata`, and only server-side
+launchers and the internal channel caller may stamp it. The run's kind is also
+stored as `runs.origin_kind` (`null` for interactive and pre-upgrade runs). IM
+threads keep `metadata.channel_source` as their marker. This key is unrelated to
+the message-level `additional_kwargs.deerflow_scheduled_origin` of a scheduled
+prompt.
+
+**Activity feed.** Requires SQL persistence (`503` on the memory backend);
+`GET /api/features` reports `{"thread_activity": {"available": true}}`.
+
+```http
+GET /api/thread-activity?cursor=1834:run-42&limit=200
+```
+
+```json
+{
+  "cursor": "1840:run-57",
+  "threads": [{ "thread_id": "…", "origin_kind": "schedule", "status": "success" }],
+  "truncated": false,
+  "read_version": 17
+}
+```
+
+- Without `cursor` the call only seeds: it returns the caller's current
+  position (`"0:"` for a user with no runs) and no threads.
+- With a cursor it pages the caller's run changes in order (`limit` 1-500,
+  default 200). `threads` lists each thread with a change from a
+  server-originated run of the caller in the page, once, with the status of
+  its latest such change. The caller's own interactive runs advance the cursor
+  but are not listed.
+- `cursor` is the position of the last change used, so a `truncated` page
+  continues on the next poll without gaps. Treat it as opaque.
+- `read_version` is the caller's read clock; it changes when a thread is
+  marked read on any device.
+- A malformed cursor returns `422` with `detail.code` `invalid_cursor`.
+- Every query is scoped to the caller; another user's cursor reveals nothing.
+
+**Unread state.** A thread is unread for a user while one of that user's
+server-originated runs in it changed after the user last read it. The user's
+own interactive runs, other users' runs in a shared thread and pre-upgrade runs
+never make a thread unread.
+
+```http
+POST /api/threads/{thread_id}/read
+```
+
+```json
+{ "unread": false, "read_version": 18 }
+```
+
+The read position never moves backwards. A thread already read up to its
+latest run writes nothing and returns the unchanged `read_version`. Items of
+`POST /api/threads/search` carry `unread` (`true`/`false`; `null` without SQL
+persistence); other thread responses return `null`.
 
 ### Projects
 
@@ -1218,9 +1347,188 @@ GET /api/threads/{thread_id}/artifacts/{path}
 
 ---
 
+### Scheduled Tasks
+
+Owner-scoped task management for `/workspace/scheduled-tasks`. Reads need
+`threads:read`; mutations need `threads:write`, and create, update, resume and
+trigger also need `runs:create`.
+
+```http
+GET    /api/scheduled-tasks
+POST   /api/scheduled-tasks
+GET    /api/scheduled-tasks/{task_id}
+PATCH  /api/scheduled-tasks/{task_id}
+DELETE /api/scheduled-tasks/{task_id}
+POST   /api/scheduled-tasks/{task_id}/pause
+POST   /api/scheduled-tasks/{task_id}/resume
+POST   /api/scheduled-tasks/{task_id}/trigger
+GET    /api/scheduled-tasks/{task_id}/runs?status=&limit=&offset=
+GET    /api/threads/{thread_id}/scheduled-tasks
+GET    /api/threads/{thread_id}/scheduled-task-events?limit=50
+POST   /api/scheduled-tasks/preview-cron
+```
+
+**Task fields.** Create and PATCH accept `title`, `prompt`, `schedule_type`
+(`once` | `cron` | `interval`), `schedule_spec`, `timezone`, `context_mode`,
+`thread_id`, `assistant_id`, plus:
+
+| Field | Type | Notes |
+|---|---|---|
+| `goal_objective` | string \| null | What one run must achieve (at most 4000 characters after whitespace normalization); requires `fresh_thread_per_run`. |
+| `max_runs` | integer \| null | Safety cap: automatic runs over the task's lifetime (trial runs excluded); at least 1. |
+| `end_at` | date-time \| null | Safety cap: no automatic run after this time. Without a UTC offset it is wall-clock time in the task's timezone. |
+| `stop_condition` | string \| null | The user's "stop when …" rule, stored in its own field. Whitespace collapses to single spaces; at most 500 characters; blank means none. It is never part of `prompt`: each launch appends it as an instruction to call `stop_scheduled_task` (or, with `scheduler.tool_enabled` off, to report a met rule). |
+
+In a PATCH, sending `null` clears `goal_objective`, `max_runs`, `end_at` or
+`stop_condition`; for every other field `null` means unchanged (`assistant_id:
+null` restores `lead_agent`). PATCH may change `schedule_type` together with
+`schedule_spec`. Changing the goal, `prompt` or `stop_condition` starts a new
+count for the automatic pause after three unmet runs. A PATCH that changes the
+schedule of a finished task re-arms it (then its safety cap applies); a PATCH
+that only changes the cap leaves a finished task finished.
+
+Task responses (list, get, create, PATCH, pause, resume) return the stored task
+plus `automatic_runs_used` (integer) and `active_run_status` (`queued` |
+`launching` | `running` | null). A recurring task's `status` stays `enabled`
+while its run executes, so check `active_run_status` for "is a run active".
+`GET /api/threads/{thread_id}/scheduled-tasks` rows add `thread_relation`
+(`origin`: created in the chat, `reuse`: runs in the chat, `run`: the chat is
+one of its runs) and `thread_run` (`{"run_number", "trigger", "scheduled_for",
+"status"}` for `run`, else null).
+
+`GET /api/threads/{thread_id}/scheduled-task-events` (thread owner check;
+`limit` 1–200, default 50) returns the caller's lifecycle events for a chat
+that created tasks, oldest first:
+
+```json
+{ "events": [ { "id": "evt-…", "task_id": "task-…", "event": "task_stopped", "reason_code": "agent_stop",
+  "task_title": "Check the release checklist", "stop_condition": "all items are ticked",
+  "run_thread_id": "…", "run_agent_name": "lead_agent", "run_number": 4, "run_status": "success", "max_runs": null, "end_at": null,
+  "schedule_type": "cron", "after_run_id": "…", "created_at": "2026-10-06T09:00:03+00:00" } ] }
+```
+
+`event` is `task_stopped` (the agent paused its own schedule, reason
+`agent_stop`), `task_paused` (automatic pause, `consecutive_unmet`) or
+`task_finished` (`max_runs`, `end_at`, or a one-time task's `once_done` /
+`once_failed`); the vocabulary is pinned in
+`contracts/scheduled_goal_notes_contract.json`. Each row is written in the
+same transaction as the state change it reports and is unique per task,
+transition and event, so recovery never adds a second one. `run_status` is the
+last run's outcome (a stop or finish after a failed run says so);
+`run_thread_id` is null when the occurrence never launched, and
+`run_agent_name` is the agent that ran it (its run chat's route); `after_run_id` is
+the newest run of the chat when the event was written (the chat shows the line
+after that turn, else at the end). Rows keep a title snapshot and stay after
+the task is deleted; deleting the chat removes them. Tasks created on the
+Scheduled tasks page have no originating chat and no rows. IDs are for links
+only.
+
+**Create** returns `409 scheduler_not_running` (after the request validates)
+while this Gateway process's scheduler is not running; the tasks page's
+Duplicate is a create.
+
+**Pause** of a `completed`, `failed` or `cancelled` task returns `409
+task_finished`.
+
+**Resume** accepts an optional renewal body:
+
+```json
+{ "max_runs": 70, "end_at": "2026-12-31T18:00:00" }
+```
+
+Each field is optional; `null` clears that cap (a chat-created task that runs
+more often than hourly must keep one: `422 frequent_requires_limit`). The next
+run is the stored one when still ahead, otherwise computed from now, so no
+catch-up run happens; a one-time task whose time passed returns `422
+once_time_passed`. Resuming an `enabled` task changes nothing. A task whose
+safety cap is used up returns `409 limits_exhausted` unless the same request
+renews the limit named in `params.limit`: for `max_runs`, a `max_runs` above
+`params.used` or `null`; for `end_at`, a later `end_at` or `null`. A later
+`end_at` alone does not renew a used-up `max_runs`.
+A future `end_at` that falls before the next run returns `422
+end_at_before_first_run` (also on a PATCH that changes the schedule).
+
+**Trigger** (one trial run) returns:
+
+```json
+{ "id": "task-…", "triggered": true, "outcome": "launched", "existing": false, "thread_id": "…" }
+```
+
+`outcome` is `launched` or `queued`; `existing: true` means a run was already
+waiting and no trial was added.
+
+**Runs** rows add `run_number` (the automatic-run number counted like
+`max_runs`; null for trials and runs that never launched), `total_tokens` of the
+launched run (null if none), and `summary` (first line of the agent's final
+reply as plain text; when that line ends with a colon, the list items that
+follow it are appended, joined with `；` for CJK text and `; ` otherwise; at
+most 160 characters).
+
+**Errors (breaking change).** Every error these routes raise for a well-typed
+request is coded:
+
+```json
+{ "detail": { "code": "limits_exhausted", "message": "All 5 automatic runs are used. Raise max_runs above 5 or clear it (max_runs: null) in the same request to reactivate.", "params": { "limit": "max_runs", "used": 5, "max_runs": 5, "end_at": null } } }
+```
+
+`message` stays English for API clients; `params` is omitted when empty.
+Clients that read `detail` as a string must read `detail.message` instead.
+Three errors keep their old shape: a `403` from route permissions is the plain
+string `"Permission denied: <permission>"`, FastAPI's own `422` for malformed
+JSON or wrong types (for example `"max_runs": "abc"`) keeps its list `detail`,
+and the shared `503` `"Thread metadata store not available"` (a Gateway without
+a thread store) stays a plain string. Codes the web UI translates: `invalid_request`, `invalid_schedule`, `invalid_schedule_type`, `invalid_timezone`, `interval_too_short`, `interval_too_long`, `once_in_past`, `once_too_soon`, `once_time_passed`, `invalid_context_mode`, `reuse_thread_requires_thread`, `thread_not_found`, `invalid_assistant`, `unknown_assistant`, `invalid_goal`, `goal_requires_fresh_thread`, `invalid_stop_condition`, `invalid_max_runs`, `end_at_in_past`, `end_at_before_first_run`, `frequent_requires_limit`, `max_runs_not_above_used`, `limits_exhausted`, `task_not_found`, `task_running`, `run_queued`, `task_changed`, `task_finished`, `task_quota_exceeded`, `scheduler_not_running`, `scheduler_unavailable` (503: this Gateway has no scheduled-task persistence), `trigger_failed`. Codes only the chat capability
+returns: `timezone_required`, `authentication_required`, `permission_denied`, `scheduler_tools_disabled`, `authority_expired`, `conversation_not_found`, `interactive_run_required`, `unsupported_action`, `unsupported_fields`, `task_id_required`, `note_not_verbatim`, `note_limit_reached`, `trial_requires_direct_request`, `no_stop_authority`, `occurrence_not_active`. The machine-readable list is
+`contracts/scheduled_task_errors_contract.json`.
+
+**Feature flag.** `GET /api/features` includes:
+
+```json
+{ "scheduled_tasks": { "available": true, "running": true, "tool_enabled": false, "min_interval_seconds": 60 } }
+```
+
+`available`: the task APIs have persistence. `running`: this process's
+scheduler poller runs (tasks fire and can be created). `tool_enabled`: chats
+can manage tasks and scheduled runs can stop their own schedule.
+`min_interval_seconds`: shortest interval and earliest one-time delay.
+
+**Browser timezone for chat-created tasks.** A run request may carry
+`context.client_timezone` (an IANA name, at most 64 characters, for example
+`"Asia/Shanghai"`). It is read only as the default timezone of tasks the
+`schedule_task` tool creates in that turn; an unknown or malformed value is
+ignored, and it never reaches the run config, the checkpoint or the prompt.
+
+**Scheduled run messages.** A scheduled run's prompt message has the id
+`scheduled-<task_run_id>` and carries `additional_kwargs.deerflow_scheduled_origin`
+(`task_id`, `task_run_id`, `trigger`, `run_number`, `scheduled_for`, `timezone`,
+`schedule_type`, `task_title`, `instructions`, `stop_condition`,
+`standing_notes`), the user-written parts a client shows instead of the
+launched text. Show an `interval` run's time in the viewer's zone (its stored
+`timezone` may be the `"UTC"` placeholder of a task created without one) and
+other runs in `timezone`. A new run conversation is titled
+`"{task title} · MM-DD HH:MM"` in the task's zone, or `"{task title} · #{run}"`
+when that zone is only the placeholder. The key is server-owned: it is
+stripped from client-supplied messages and state updates.
+
+**IM notices ("scheduled task updates").** With `channel_connections.enabled`,
+each item of `GET /api/channels/providers` carries
+`proactive_notifications` (bool): whether scheduled-task updates are pushed to
+that app. Only providers with proactive push (WeCom today) get notices; the
+others get none, and Settings says so. An occurrence sends at most one message,
+in the owner's `locale` preference (see Account Preferences), else
+`channel_connections.notification_locale`. Notices carry no IDs and no links;
+see `backend/docs/CONFIGURATION.md` for the events and the merge rule.
+
+```json
+{ "provider": "wecom", "display_name": "WeCom", "connection_status": "connected", "proactive_notifications": true }
+```
+
+---
+
 ## Error Responses
 
-All APIs return errors in a consistent format:
+Most APIs return errors in this format (scheduled-task routes and skill export
+return a coded object instead; see [Scheduled Tasks](#scheduled-tasks)):
 
 ```json
 {
@@ -1329,6 +1637,21 @@ Accept: text/event-stream
 Both endpoints return `Content-Location: /api/threads/{thread_id}/runs/{run_id}`.
 The DeerFlow web UI and LangGraph SDK clients rely on this header to discover the
 assigned `thread_id` and `run_id` on the first message of a new chat.
+
+Every SSE response (both create endpoints above, `GET /api/threads/{thread_id}/runs/{run_id}/join`
+and `GET`/`POST /api/threads/{thread_id}/runs/{run_id}/stream`) carries the same headers:
+
+```http
+Content-Type: text/event-stream
+Cache-Control: no-cache, no-transform
+Connection: keep-alive
+X-Accel-Buffering: no
+```
+
+`no-transform` keeps compressing proxies (for example the Next.js rewrite proxy
+when the frontend runs with `pnpm start` and no nginx) from gzipping and therefore
+buffering the stream; `X-Accel-Buffering: no` does the same for nginx. A reverse
+proxy you put in front of the Gateway should not compress `text/event-stream`.
 
 ### SSE replay retention and gaps
 

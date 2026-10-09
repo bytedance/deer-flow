@@ -144,7 +144,8 @@ def test_aio_sandbox_env_routes_through_bash_exec() -> None:
     out = sbx.execute_command("gh pr create", env={"GH_TOKEN": "tok-123"})
 
     assert out == "ok"
-    assert captured["command"] == "gh pr create"
+    assert captured["command"] == "exec < /dev/null\ngh pr create"
+    assert "tok-123" not in captured["command"]
     assert captured["env"] == {"GH_TOKEN": "tok-123"}
     assert captured["created_session"] == captured["exec_session"] == captured["closed_session"]
     assert captured["create_options"] == {
@@ -175,7 +176,7 @@ def test_aio_sandbox_no_env_leaves_command_unchanged() -> None:
     sbx._recovery_session_id = None
     sbx._default_shell_corrupted = False
 
-    sbx.execute_command("echo hello")
+    assert sbx.execute_command("echo hello") == "ok"
 
     assert captured["command"] == "echo hello"
 
@@ -425,6 +426,7 @@ def test_bash_tool_routes_subagent_command_to_its_shell_scope(
         state={"sandbox": {"sandbox_id": "aio:xyz"}},
         context={
             "thread_id": "t1",
+            "user_id": "u-test",
             "sandbox_command_scope_id": "subagent:task-1",
         },
         config={},
@@ -464,7 +466,7 @@ def test_bash_tool_routes_subagent_command_to_its_shell_scope(
 
     assert result == "done"
     assert captured["scope_id"] == "subagent:task-1"
-    assert captured["command"] == "cd /mnt/user-data/workspace; ls"
+    assert captured["command"] == "export DEERFLOW_USER_ID=u-test; cd /mnt/user-data/workspace; ls"
 
 
 # ---------------------------------------------------------------------------

@@ -1116,7 +1116,14 @@ class MemoryUpdater:
         except Exception:
             logger.warning("Failed to record capacity-eviction audit", exc_info=True)
 
-    def import_memory_data(self, memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
+    def import_memory_data(
+        self,
+        memory_data: dict[str, Any],
+        agent_name: str | None = None,
+        *,
+        user_id: str | None = None,
+        replace_shared_summaries: bool = True,
+    ) -> dict[str, Any]:
         """Persist imported memory data via the injected storage."""
         if not isinstance(memory_data, dict):
             raise ValueError("memory_data")
@@ -1141,14 +1148,19 @@ class MemoryUpdater:
             )
             current_by_id = {str(fact.get("id")): fact for fact in current.get("facts", []) if isinstance(fact, dict)}
             incoming_ids = {str(fact.get("id")) for fact in incoming_facts}
+            change_set = {
+                "upserts": incoming_facts,
+                "upsertRevisions": {str(fact.get("id")): (int(current_by_id[str(fact.get("id"))].get("revision") or 1) if str(fact.get("id")) in current_by_id else None) for fact in incoming_facts},
+                "deletes": [fact_id for fact_id in current_by_id if fact_id not in incoming_ids],
+                "deleteRevisions": {fact_id: int(fact.get("revision") or 1) for fact_id, fact in current_by_id.items() if fact_id not in incoming_ids},
+            }
+            if replace_shared_summaries:
+                change_set["summaries"] = {
+                    "user": copy.deepcopy(memory_data.get("user", {})),
+                    "history": copy.deepcopy(memory_data.get("history", {})),
+                }
             self._storage.apply_changes(
-                {
-                    "upserts": incoming_facts,
-                    "upsertRevisions": {str(fact.get("id")): (int(current_by_id[str(fact.get("id"))].get("revision") or 1) if str(fact.get("id")) in current_by_id else None) for fact in incoming_facts},
-                    "deletes": [fact_id for fact_id in current_by_id if fact_id not in incoming_ids],
-                    "deleteRevisions": {fact_id: int(fact.get("revision") or 1) for fact_id, fact in current_by_id.items() if fact_id not in incoming_ids},
-                    "summaries": {"user": copy.deepcopy(memory_data.get("user", {})), "history": copy.deepcopy(memory_data.get("history", {}))},
-                },
+                change_set,
                 agent_name=agent_name,
                 user_id=user_id,
                 expected_manifest_revision=int(current.get("revision") or 0),

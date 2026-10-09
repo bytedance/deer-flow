@@ -12,13 +12,11 @@ from deerflow.constants import CONVERSATION_TOOL_USE
 from deerflow.mcp.tasks.runtime import is_mcp_task_runtime_available
 from deerflow.reflection import resolve_variable
 from deerflow.sandbox.security import is_host_bash_allowed
+from deerflow.scheduler.runtime import SchedulerRunCapability, is_scheduler_capability, scheduler_tools_enabled
 from deerflow.subagents.batch_runtime import is_subagent_batch_runtime_available
 from deerflow.tools.builtins import (
     ask_clarification_tool,
-    batch_status,
-    batch_task,
     cancel_background_task,
-    cancel_batch,
     list_background_tasks,
     list_uploaded_files,
     present_file_tool,
@@ -26,7 +24,7 @@ from deerflow.tools.builtins import (
     task_tool,
     view_image_tool,
 )
-from deerflow.tools.mcp_metadata import tag_mcp_tool
+from deerflow.tools.mcp_metadata import get_mcp_source, tag_mcp_tool
 from deerflow.tools.sync import make_sync_tool_wrapper
 
 logger = logging.getLogger(__name__)
@@ -78,7 +76,7 @@ def _extract_max_tokens(model_config: object | None) -> int | None:
 
     Handles ModelConfig (where max_tokens may be stored as an extra dynamic field),
     dicts, SimpleNamespace, or test stubs. Rejects booleans, mocks, non-numeric
-    values, negative numbers, zero, and None.
+    values, non-finite numbers, negative numbers, zero, and None.
     """
     if model_config is None:
         return None
@@ -88,7 +86,7 @@ def _extract_max_tokens(model_config: object | None) -> int | None:
     try:
         val = int(raw)
         return val if val > 0 else None
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return None
 
 
@@ -110,6 +108,7 @@ def get_available_tools(
     mcp_plugins: list[str] | None = None,
     include_upload_tool: bool = True,
     include_conversation_reader: bool = False,
+    scheduler_capability: SchedulerRunCapability | None = None,
     app_config: AppConfig | None = None,
     extensions=None,
     chat_model: BaseChatModel | None = None,
@@ -134,12 +133,18 @@ def get_available_tools(
         include_conversation_reader: Allow the configured conversation reader
             only when the host provides its authorized runtime capability.
             Defaults to false for embedded callers and subagents.
+        scheduler_capability: Current-run host grant for conversation schedule
+            management or own-schedule stopping. Omitted for embedded,
+            bootstrap and subagent assembly.
 
     Returns:
         List of available tools.
     """
     config = app_config or get_app_config()
     tool_configs = [tool for tool in config.tools if groups is None or tool.group in groups]
+    # These operations are assembled from the host grant below. Registering a
+    # tool path in YAML cannot widen that grant or its interaction mode.
+    tool_configs = [tool for tool in tool_configs if tool.use not in {"deerflow.tools.scheduled_tasks:schedule_task", "deerflow.tools.scheduled_tasks:stop_scheduled_task"}]
     if not include_conversation_reader:
         tool_configs = [tool for tool in tool_configs if tool.use != CONVERSATION_TOOL_USE]
 
@@ -173,6 +178,10 @@ def get_available_tools(
 
     # Conditionally add tools based on config
     builtin_tools = BUILTIN_TOOLS.copy()
+    if scheduler_tools_enabled(config) and is_scheduler_capability(scheduler_capability):
+        from deerflow.tools.scheduled_tasks import schedule_task, stop_scheduled_task
+
+        builtin_tools.append(schedule_task if scheduler_capability.mode == "interactive" else stop_scheduled_task)
     if is_mcp_task_runtime_available():
         builtin_tools.extend((list_background_tasks, cancel_background_task))
     if include_upload_tool:
@@ -187,7 +196,10 @@ def get_available_tools(
     if subagent_enabled:
         builtin_tools.extend(SUBAGENT_TOOLS)
         if is_subagent_batch_runtime_available():
-            builtin_tools.extend((batch_task, batch_status, cancel_batch))
+            from deerflow.subagents.batch_runtime import get_subagent_batch_submitter
+            from deerflow.tools.builtins.batch_task_tool import bind_batch_tools
+
+            builtin_tools.extend(bind_batch_tools(submitter_provider=get_subagent_batch_submitter, app_config=config))
         logger.info("Including native subagent tools")
 
     # If no model_name specified, use the first model (default)
@@ -207,22 +219,27 @@ def get_available_tools(
     # models configured without max_tokens.
     max_tokens = _extract_max_tokens(chat_model if chat_model is not None else model_config)
     if max_tokens is not None:
-        safe_chars = int(max_tokens * 3 * 0.7)
-        budget_note = (
-            f"\n\nPER-RESPONSE BUDGET: your output limit is {max_tokens} tokens "
-            f"(≈{safe_chars} chars). Single non-append writes above this will be truncated. "
-            "For larger documents, write the first section now, "
-            "then use append=True for subsequent sections."
-        )
-        loaded_tools = [
-            _clone_tool_with_description(
-                tool,
-                f"{getattr(tool, 'description', '') or ''}{budget_note}",
+        try:
+            safe_chars = int(max_tokens * 3 * 0.7)
+        except OverflowError:
+            # Even finite caps can be too large for this optional estimate.
+            pass
+        else:
+            budget_note = (
+                f"\n\nPER-RESPONSE BUDGET: your output limit is {max_tokens} tokens "
+                f"(≈{safe_chars} chars). Single non-append writes above this will be truncated. "
+                "For larger documents, write the first section now, "
+                "then use append=True for subsequent sections."
             )
-            if tool.name == "write_file" and hasattr(tool, "description") and "PER-RESPONSE BUDGET:" not in (getattr(tool, "description", "") or "")
-            else tool
-            for tool in loaded_tools
-        ]
+            loaded_tools = [
+                _clone_tool_with_description(
+                    tool,
+                    f"{getattr(tool, 'description', '') or ''}{budget_note}",
+                )
+                if tool.name == "write_file" and hasattr(tool, "description") and "PER-RESPONSE BUDGET:" not in (getattr(tool, "description", "") or "")
+                else tool
+                for tool in loaded_tools
+            ]
 
     # Get cached MCP tools if enabled
     # NOTE: We use ExtensionsConfig.from_file() instead of config.extensions
@@ -262,6 +279,25 @@ def get_available_tools(
                     # MCP pays no config-hashing or discovery cost, while one that
                     # did still checks the existing cache for staleness.
                     refresh_mcp_cache_if_active()
+                from deerflow.mcp.user_tools import get_user_mcp_tools
+
+                try:
+                    personal_tools, personal_config = get_user_mcp_tools()
+                except Exception as exc:
+                    # Invalid personal credentials must neither be logged nor
+                    # bypass explicit selection of the platform tools.
+                    logger.warning("Could not load personal MCP tools (%s)", type(exc).__name__)
+                    personal_tools, personal_config = [], ExtensionsConfig()
+                colliding_names = extensions_config.mcp_servers.keys() & personal_config.mcp_servers.keys()
+                if colliding_names:
+                    # A deployment name can match a generated personal runtime
+                    # name. Keep only the deployment tool and its routing metadata.
+                    logger.warning("Skipping personal MCP tools with deployment name collisions: %s", sorted(colliding_names))
+                    personal_tools = [tool for tool in personal_tools if (source := get_mcp_source(tool)) and source["server_name"] not in colliding_names]
+                    available_servers = {name: server for name, server in personal_config.mcp_servers.items() if name not in colliding_names}
+                    personal_config = personal_config.model_copy(update={"mcp_servers": available_servers})
+                mcp_tools = [*mcp_tools, *personal_tools]
+                extensions_config = extensions_config.model_copy(update={"mcp_servers": {**extensions_config.mcp_servers, **personal_config.mcp_servers}})
                 if mcp_plugins is not None:
                     from deerflow.capabilities.runtime import filter_mcp_plugins
 

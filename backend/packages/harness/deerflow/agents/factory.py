@@ -410,9 +410,9 @@ def _assemble_from_features(
             from deerflow.subagents.batch_runtime import is_subagent_batch_runtime_available
 
             if is_subagent_batch_runtime_available():
-                from deerflow.tools.builtins import batch_status, batch_task, cancel_batch
+                from deerflow.tools.builtins import batch_status, batch_task, cancel_batch, read_batch_result
 
-                extra_tools.extend((batch_task, batch_status, cancel_batch))
+                extra_tools.extend((batch_task, batch_status, cancel_batch, read_batch_result))
 
     # --- [12] LoopDetection ---
     if feat.loop_detection is not False:

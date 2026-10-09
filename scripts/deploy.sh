@@ -120,6 +120,25 @@ fi
 echo -e "${BLUE}DEER_FLOW_HOME=$DEER_FLOW_HOME${NC}"
 mkdir -p "$DEER_FLOW_HOME"
 
+# ── DEER_FLOW_HOME writability preflight ─────────────────────────────────────
+
+# `make docker-start` bind-mounts the host `backend/` directory into the gateway
+# container, whose process runs as root, so state it creates under
+# backend/.deer-flow ends up owned by root on the host. A later `make up` runs
+# this script as the invoking user and only fails deep into the run with a bare
+# "Permission denied" while persisting generated secrets. Detect it up front and
+# print the exact recovery command instead.
+fail_home_permission() {
+    echo -e "${RED}✗ $1 is not $2 by '$(id -un)'.${NC}" >&2
+    echo -e "${RED}  This usually happens when the dev stack (make docker-start) created it as root.${NC}" >&2
+    echo -e "${YELLOW}  Recover with: sudo chown -R $(id -u):$(id -g) '$DEER_FLOW_HOME'${NC}" >&2
+    exit 1
+}
+
+if [ "$CMD" != "down" ] && [ ! -w "$DEER_FLOW_HOME" ]; then
+    fail_home_permission "$DEER_FLOW_HOME" writable
+fi
+
 # ── DEER_FLOW_REPO_ROOT (for skills host path in DooD) ───────────────────────
 
 export DEER_FLOW_REPO_ROOT="$REPO_ROOT"
@@ -208,10 +227,15 @@ dotenv_provides_secret() {
 # sessions survive container restarts.
 
 _secret_file="$DEER_FLOW_HOME/.better-auth-secret"
-if [ -z "$BETTER_AUTH_SECRET" ] && dotenv_provides_secret BETTER_AUTH_SECRET; then
+if [ "$CMD" != "down" ] && [ -z "$BETTER_AUTH_SECRET" ] && dotenv_provides_secret BETTER_AUTH_SECRET; then
     echo -e "${GREEN}✓ BETTER_AUTH_SECRET loaded from $ENV_FILE${NC}"
-elif [ -z "$BETTER_AUTH_SECRET" ]; then
+elif [ "$CMD" != "down" ] && [ -z "$BETTER_AUTH_SECRET" ]; then
     if [ -f "$_secret_file" ]; then
+        # A writable directory can still contain a root-owned, unreadable file.
+        # Persisted secrets are only read; read-only files and overrides are valid.
+        if [ ! -r "$_secret_file" ]; then
+            fail_home_permission "$_secret_file" readable
+        fi
         export BETTER_AUTH_SECRET
         BETTER_AUTH_SECRET="$(cat "$_secret_file")"
         echo -e "${GREEN}✓ BETTER_AUTH_SECRET loaded from $_secret_file${NC}"
@@ -246,6 +270,9 @@ if [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_INTERNAL_AUTH_TOKEN" ] && dotenv_pro
     echo -e "${GREEN}✓ DEER_FLOW_INTERNAL_AUTH_TOKEN loaded from $ENV_FILE${NC}"
 elif [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_INTERNAL_AUTH_TOKEN" ]; then
     if [ -f "$_internal_auth_token_file" ]; then
+        if [ ! -r "$_internal_auth_token_file" ]; then
+            fail_home_permission "$_internal_auth_token_file" readable
+        fi
         export DEER_FLOW_INTERNAL_AUTH_TOKEN
         DEER_FLOW_INTERNAL_AUTH_TOKEN="$(cat "$_internal_auth_token_file")"
         echo -e "${GREEN}✓ DEER_FLOW_INTERNAL_AUTH_TOKEN loaded from $_internal_auth_token_file${NC}"
@@ -442,6 +469,7 @@ report_startup_failure() {
     echo -e "${RED}✗ DeerFlow services failed to become ready.${NC}" >&2
     echo '  If Docker Compose reports "unknown flag: --wait", upgrade to a version that' >&2
     echo '  supports `docker compose up --wait`.' >&2
+    echo '  If it reports "env_file.0 must be a string", upgrade to Docker Compose 2.24+.' >&2
     echo "  Container status:" >&2
     "${COMPOSE_CMD[@]}" ps >&2 || true
     echo "" >&2

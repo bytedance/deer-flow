@@ -16,11 +16,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.run.model import RunChangeClockRow, RunRow
+from deerflow.runtime.run_origin import origin_kind_of
 from deerflow.runtime.runs.store.base import (
     LeaseRenewal,
     RunIdempotencyConflict,
     RunStore,
     StatusFinalization,
+    canonical_run_created_at,
     normalize_run_created_at_iso,
 )
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
@@ -30,6 +32,15 @@ from deerflow.utils.time import coerce_iso
 def _lease_expired_or_null(lease_col, cutoff: datetime):
     """SQLAlchemy filter: True when the lease is NULL or has expired past *cutoff*."""
     return or_(lease_col.is_(None), lease_col < cutoff)
+
+
+def _origin_kind(operation_kind: str, metadata: Any) -> str | None:
+    """Denormalized ``runs.origin_kind``: the server-owned origin of an agent run.
+
+    Thread operations (checkpoint writes, deletes) never carry one, and a run
+    without a well-formed ``deerflow_origin`` stays NULL (interactive/legacy).
+    """
+    return origin_kind_of(metadata) if operation_kind == "run" else None
 
 
 class RunRepository(RunStore):
@@ -120,6 +131,7 @@ class RunRepository(RunStore):
         kwargs=None,
         error=None,
         stop_reason: str | None = None,
+        goal_verdict: dict[str, Any] | None = None,
         created_at=None,
         follow_up_to_run_id=None,
         owner_worker_id: str | None = None,
@@ -148,10 +160,12 @@ class RunRepository(RunStore):
             "kwargs_json": self._safe_json(kwargs) or {},
             "error": error,
             "stop_reason": stop_reason,
+            "goal_verdict": self._safe_json(goal_verdict),
             "follow_up_to_run_id": follow_up_to_run_id,
             "owner_worker_id": owner_worker_id,
             "lease_expires_at": lease_dt,
             "idempotency_key": idempotency_key,
+            "origin_kind": _origin_kind(operation_kind, metadata),
             "updated_at": now,
         }
         async with self._sf() as session:
@@ -202,6 +216,17 @@ class RunRepository(RunStore):
             result = await session.execute(stmt)
             return [self._row_to_dict(row) for row in result.scalars()]
 
+    async def latest_change(self, *, user_id: str) -> tuple[int, str] | None:
+        """The caller's newest run-change position ``(change_seq, run_id)``, or ``None``.
+
+        Seeds the activity feed cursor: one backward seek on
+        ``ix_runs_user_change_seq``. ``user_id`` is always an explicit owner id.
+        """
+        stmt = select(RunRow.change_seq, RunRow.run_id).where(RunRow.user_id == user_id).order_by(RunRow.change_seq.desc(), RunRow.run_id.desc()).limit(1)
+        async with self._sf() as session:
+            row = (await session.execute(stmt)).first()
+        return (int(row.change_seq), str(row.run_id)) if row is not None else None
+
     async def list_by_thread(
         self,
         thread_id,
@@ -235,6 +260,12 @@ class RunRepository(RunStore):
         async with self._sf() as session:
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
+
+    async def list_by_thread_created_at(self, thread_id, *, user_id, created_at):
+        timestamp = datetime.fromisoformat(canonical_run_created_at(created_at))
+        async with self._sf() as session:
+            result = await session.execute(select(RunRow).where(RunRow.thread_id == thread_id, RunRow.user_id == user_id, RunRow.created_at == timestamp))
+            return [self._row_to_dict(row) for row in result.scalars()]
 
     async def list_successful_regenerate_sources(
         self,
@@ -296,12 +327,14 @@ class RunRepository(RunStore):
             result = await session.execute(stmt)
             return {row.run_id: self._row_to_dict(row) for row in result.scalars()}
 
-    async def update_status(self, run_id, status, *, error=None, stop_reason=None) -> bool:
+    async def update_status(self, run_id, status, *, error=None, stop_reason=None, goal_verdict=None) -> bool:
         values: dict[str, Any] = {"status": status, "updated_at": datetime.now(UTC)}
         if error is not None:
             values["error"] = error
         if stop_reason is not None:
             values["stop_reason"] = stop_reason
+        if goal_verdict is not None:
+            values["goal_verdict"] = self._safe_json(goal_verdict)
         # Guard: only transition rows that are still active. ``interrupted`` is
         # included because the rollback path goes ``running → interrupted``
         # (cancel acknowledged) then ``interrupted → error`` (task finalize).
@@ -449,6 +482,7 @@ class RunRepository(RunStore):
         last_ai_message: str | None = None,
         first_human_message: str | None = None,
         error: str | None = None,
+        goal_verdict: dict[str, Any] | None = None,
     ) -> bool:
         """Update status + token usage + convenience fields on run completion.
 
@@ -474,6 +508,8 @@ class RunRepository(RunStore):
             values["first_human_message"] = first_human_message[:2000]
         if error is not None:
             values["error"] = error
+        if goal_verdict is not None:
+            values["goal_verdict"] = self._safe_json(goal_verdict)
         allowed_sources = ["pending", "running"]
         if status not in allowed_sources:
             allowed_sources.append(status)
@@ -704,6 +740,7 @@ class RunRepository(RunStore):
         status: str,
         error: str | None = None,
         stop_reason: str | None = None,
+        goal_verdict: dict[str, Any] | None = None,
     ) -> StatusFinalization:
         """Atomically let completion win only before cancellation."""
         values: dict[str, Any] = {
@@ -714,6 +751,8 @@ class RunRepository(RunStore):
             values["error"] = error
         if stop_reason is not None:
             values["stop_reason"] = stop_reason
+        if goal_verdict is not None:
+            values["goal_verdict"] = self._safe_json(goal_verdict)
 
         async with self._sf() as session:
             values["change_seq"] = await self._next_change_seq(session)
@@ -847,6 +886,7 @@ class RunRepository(RunStore):
             "owner_worker_id": owner_worker_id,
             "lease_expires_at": lease_dt,
             "idempotency_key": idempotency_key,
+            "origin_kind": _origin_kind(operation_kind, metadata),
             "created_at": created,
             "updated_at": now,
         }

@@ -24,7 +24,7 @@ import os
 import sys
 import threading
 from abc import abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from types import ModuleType
 from typing import Any, ClassVar, Literal
@@ -192,6 +192,14 @@ class MemoryManager(BaseModel):
     # that fails fast at instantiation rather than silently returning empty
     # results). Default False: a new backend must explicitly opt in to tool mode.
     supports_search: ClassVar[bool] = False
+    # Opt-in capability for Gateway management calls that name an agent scope.
+    # The HTTP layer rejects a scoped read/write unless the backend declares
+    # this flag, because accepting ``agent_name`` in a Python signature does
+    # not prove that an adapter actually binds storage and mutations to it.
+    # Backends that leave it False retain the unscoped management API and get
+    # an explicit 501 for scoped management instead of silently operating on
+    # the user's default/global bucket.
+    supports_agent_scoped_management: ClassVar[bool] = False
     # Backends that rely on conversation-level extraction instead of fact CRUD
     # can retain MemoryMiddleware writes while tool mode supplies query-aware
     # search. Most backends keep tool mode fully model-directed.
@@ -417,7 +425,11 @@ class MemoryManager(BaseModel):
         agent_name: str | None = None,
     ) -> dict[str, Any]:
         """Import a memory document into the bucket; return the merged result.
-        Default: unsupported."""
+
+        An explicit ``agent_name`` replaces only that agent's facts. Shared
+        user/history summaries must remain unchanged even when the incoming
+        document contains summary fields. Default: unsupported.
+        """
         raise NotImplementedError(f"import_memory not supported by {type(self).__name__}")
 
     def export_memory(
@@ -1097,6 +1109,27 @@ def _refresh_judge_for_reloaded_config(manager: MemoryManager) -> None:
     logger.info("Memory judge refreshed after a memory judging-config change")
 
 
+def resolve_deermem_storage_path(backend_config: Mapping[str, Any]) -> str:
+    """Return the absolute DeerMem data root the host injects for ``backend_config``.
+
+    Zero-config UX: an empty ``storage_path`` is deer-flow's state dir (absolute,
+    CWD-independent), so memory lands at ``{runtime_home}/users/{user_id}/memory.json``
+    (deer-flow's base_dir, same as pre-abstraction). A relative value is resolved
+    against ``runtime_home()`` to preserve those semantics; left as-is it would be
+    CWD-relative and fragile. Resolved in host code so the portable ``paths.py``
+    stays free of any runtime_home dependency. The Gateway startup gate reuses it
+    to locate the derived retrieval index without constructing a backend.
+    """
+    from deerflow.config.runtime_paths import runtime_home
+
+    storage_path = str(backend_config.get("storage_path") or "")
+    if not storage_path:
+        return str(runtime_home())
+    if not Path(storage_path).is_absolute():
+        return str((Path(runtime_home()) / storage_path).resolve())
+    return storage_path
+
+
 # ── Singleton factory ─────────────────────────────────────────────────────
 def get_memory_manager() -> MemoryManager:
     """Return the singleton :class:`MemoryManager` for the active config.
@@ -1132,22 +1165,7 @@ def get_memory_manager() -> MemoryManager:
         manager_class = cfg.manager_class
         cls = _resolve_manager_class(manager_class)
         backend_config = dict(cfg.backend_config or {})
-        # Zero-config UX: default DeerMem storage to deer-flow's state dir
-        # (absolute, CWD-independent) so memory lands at
-        # {runtime_home}/users/{user_id}/memory.json (deer-flow's base_dir,
-        # same as pre-abstraction) unless the host explicitly sets storage_path.
-        if not backend_config.get("storage_path"):
-            from deerflow.config.runtime_paths import runtime_home
-
-            backend_config["storage_path"] = str(runtime_home())
-        elif not Path(backend_config.get("storage_path", "")).is_absolute():
-            # A relative storage_path is resolved against runtime_home() (base_dir-
-            # relative, CWD-independent) to preserve pre-abstraction semantics; left
-            # as-is it would be CWD-relative and fragile. (Resolved here in host code
-            # so the portable paths.py stays free of any runtime_home dependency.)
-            from deerflow.config.runtime_paths import runtime_home
-
-            backend_config["storage_path"] = str((Path(runtime_home()) / backend_config["storage_path"]).resolve())
+        backend_config["storage_path"] = resolve_deermem_storage_path(backend_config)
         # storage_path-is-a-file guard lives on DeerMemConfig.model_validator
         # now (DeerMem-private semantics; fires even when the factory bypassed).
         # Host hook providers: the factory supplies these as kwargs; each

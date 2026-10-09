@@ -99,3 +99,41 @@ test("an empty older page retains a route back to the latest records", async () 
   await waitFor(() => expect(result.current.data?.[0]?.id).toBe("new-0"));
   expect(result.current.page).toBe(0);
 });
+
+test("a run finishing on the latest page refreshes the task queries", async () => {
+  let status: ScheduledTaskRun["status"] = "running";
+  fetchRuns.mockImplementation(async () => [
+    { id: "occ-1", status } as ScheduledTaskRun,
+  ]);
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  clients.push(client);
+  const invalidate = rs.spyOn(client, "invalidateQueries");
+  const { result } = renderHook(() => useScheduledTaskRunHistory("task-a"), {
+    wrapper: ({ children }: PropsWithChildren) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    ),
+  });
+  await waitFor(() => expect(result.current.data?.[0]?.status).toBe("running"));
+  expect(invalidate).not.toHaveBeenCalled();
+  status = "success";
+  await act(() =>
+    client.refetchQueries({ queryKey: ["scheduled-tasks", "runs", "task-a"] }),
+  );
+  await waitFor(() => expect(result.current.data?.[0]?.status).toBe("success"));
+  await waitFor(() => expect(invalidate).toHaveBeenCalledTimes(1));
+  const filters = invalidate.mock.calls[0]?.[0];
+  expect(filters?.queryKey).toEqual(["scheduled-tasks"]);
+  // The history itself is not refetched again by its own invalidation.
+  expect(
+    filters?.predicate?.({
+      queryKey: ["scheduled-tasks", "runs", "task-a", 0],
+    } as never),
+  ).toBe(false);
+  expect(
+    filters?.predicate?.({
+      queryKey: ["scheduled-tasks", "task", "task-a"],
+    } as never),
+  ).toBe(true);
+});
