@@ -546,6 +546,56 @@ async def test_admin_api_redacts_key_and_tracks_capabilities(store, monkeypatch)
     assert (await router.image_generation_status(admin))["status"] == "unreachable"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("storage_error", [ValueError, OSError])
+async def test_managed_image_probe_returns_live_result_when_recording_fails(store, monkeypatch, caplog, storage_error):
+    from app.gateway.routers import image_generation as router
+
+    config = AppConfig.model_validate({"sandbox": {"use": "test"}})
+    monkeypatch.setattr(router, "get_app_config", lambda: config)
+    admin = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
+    saved = store.save(profile(), expected_revision=None)
+    monkeypatch.setattr(router, "probe_image_profile", lambda _profile, _operation: "success")
+
+    def fail_record(*_args):
+        raise storage_error("synthetic-image-secret")
+
+    monkeypatch.setattr(ManagedImageGenerationProfileStore, "record_test", fail_record)
+    result = await router.test_image_profile(
+        admin,
+        saved.name,
+        "generation",
+        router.TestImageProfileRequest(expected_revision=saved.revision),
+    )
+
+    assert result == {"ok": True, "message": "success"}
+    assert store.list()[0].verified_generation is False
+    assert "synthetic-image-secret" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("race_error", [FileExistsError, FileNotFoundError])
+async def test_managed_image_probe_rejects_profile_changed_during_recording(store, monkeypatch, race_error):
+    from app.gateway.routers import image_generation as router
+
+    admin = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
+    saved = store.save(profile(), expected_revision=None)
+    monkeypatch.setattr(router, "probe_image_profile", lambda _profile, _operation: "success")
+
+    def fail_record(*_args):
+        raise race_error("changed")
+
+    monkeypatch.setattr(ManagedImageGenerationProfileStore, "record_test", fail_record)
+    with pytest.raises(HTTPException) as changed:
+        await router.test_image_profile(
+            admin,
+            saved.name,
+            "generation",
+            router.TestImageProfileRequest(expected_revision=saved.revision),
+        )
+    assert changed.value.status_code == 409
+
+
 def test_command_environment_is_provider_specific():
     profile = ImageGenerationProfile(provider="openai", model="image-model", base_url="https://images.example/v1", api_key="synthetic-key")
     env = profile.command_environment()

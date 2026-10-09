@@ -260,10 +260,10 @@ def _test(name: str, body: TestImageProfileRequest, operation: Literal["generati
     if result not in {"missing_api_key", "invalid_operation"}:
         try:
             store.record_test(name, body.expected_revision, operation, result)
-        except FileExistsError:
+        except (FileExistsError, FileNotFoundError):
             raise HTTPException(409, "Image profile changed during the test; reload before retrying") from None
-        except (ValueError, OSError):
-            raise HTTPException(503, "Image profile storage is unavailable") from None
+        except (ValueError, OSError) as exc:
+            logger.warning("Could not save managed image probe result: %s", type(exc).__name__)
     return {"ok": result == "success", "message": result}
 
 

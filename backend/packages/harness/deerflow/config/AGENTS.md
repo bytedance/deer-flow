@@ -20,9 +20,9 @@ image management router and reports it through `/api/features`. Restart the
 local Gateway or recreate its Docker container after changing the switch.
 Server probe results are stored by credential-bound fingerprint in an encrypted
 catalog; a model, URL, or key change invalidates displayed readiness. Unreadable
-probe evidence degrades readiness to unverified, while an admin test still
-returns its live result if recording that evidence fails. Managed
-image profiles use `image_generation.py` and the same encrypted JSON
+probe evidence degrades readiness to unverified. Server and managed tests
+return live results on record failure; managed profile races return 409.
+Managed image profiles use `image_generation.py` and the same encrypted JSON
 catalog primitive as managed chat models. The image catalog lives at
 `runtime_home()/managed-image-profiles/catalog.enc` with an adjacent `key`, not
 in SQL or `config.yaml`. The admin-selected default lives in the adjacent
