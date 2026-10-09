@@ -143,12 +143,21 @@ def test_review_skill_package_allows_shared_skills_root_package(deployment, tmp_
     assert command.update["messages"][0].status == "success"
 
 
-def test_review_skill_package_rejects_another_users_package(deployment):
+@pytest.mark.parametrize(
+    "target_for",
+    [
+        pytest.param(lambda paths, victim: str(victim), id="absolute"),
+        pytest.param(lambda paths, victim: f"{paths.user_dir('alice')}/../bob/skills/custom/{victim.name}", id="dot-dot"),
+        pytest.param(lambda paths, victim: ".deer-flow/users/bob/skills/custom/secret-skill", id="cwd-relative"),
+    ],
+)
+def test_review_skill_package_rejects_another_users_package(deployment, target_for):
     victim_package = deployment.user_custom_skills_dir("bob") / "secret-skill"
     _write_package(victim_package, _skill_content("secret-skill") + "BOB_PRIVATE_BODY\n")
+    deployment.user_dir("alice").mkdir(parents=True)
 
     command = review_skill_package.func(
-        target=str(victim_package),
+        target=target_for(deployment, victim_package),
         runtime=_runtime("alice"),
     )
 
@@ -158,11 +167,13 @@ def test_review_skill_package_rejects_another_users_package(deployment):
     assert "BOB_PRIVATE_BODY" not in message.content
 
 
-def test_review_skill_package_rejects_symlink_into_another_users_package(deployment):
+def test_review_skill_package_rejects_symlink_planted_in_callers_outputs(deployment):
+    """A sandbox can write symlinks into the caller's own outputs; the resolved target decides."""
     victim_package = deployment.user_custom_skills_dir("bob") / "secret-skill"
     _write_package(victim_package, _skill_content("secret-skill") + "BOB_PRIVATE_BODY\n")
-    link = deployment.user_custom_skills_dir("alice") / "borrowed-skill"
-    link.parent.mkdir(parents=True)
+    outputs_dir = deployment.sandbox_outputs_dir("thread-1", user_id="alice")
+    outputs_dir.mkdir(parents=True)
+    link = outputs_dir / "borrowed-skill"
     link.symlink_to(victim_package, target_is_directory=True)
 
     command = review_skill_package.func(
@@ -172,6 +183,7 @@ def test_review_skill_package_rejects_symlink_into_another_users_package(deploym
 
     message = command.update["messages"][0]
     assert message.status == "error"
+    assert "Local review targets must be under" in message.content
     assert "BOB_PRIVATE_BODY" not in message.content
 
 
