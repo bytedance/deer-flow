@@ -5697,3 +5697,329 @@ async def test_unstarted_edit_replay_releases_admission(trigger, monkeypatch):
     )
     admitted = await peer.create_or_reject("thread-1", user_id=record.user_id)
     assert admitted.thread_id == "thread-1"
+
+
+@pytest.mark.anyio
+async def test_unstarted_durable_rollback_must_not_delete_thread_checkpoint(monkeypatch):
+    """A durable rollback accepted before try_start must not wipe thread history.
+
+    ``rollback_point is None`` is ambiguous: it means either "captured and the
+    thread was empty" or "never captured". A run that never started must never
+    reach the ``adelete_thread`` reset path, which would delete existing history.
+    """
+    run_store = MemoryRunStore()
+    ownership = RunOwnershipConfig(lease_seconds=30, grace_seconds=10, heartbeat_enabled=True)
+    run_manager = RunManager(store=run_store, run_ownership_config=ownership)
+    record = await run_manager.create(
+        "thread-1",
+        metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-run"},
+    )
+    assert await run_store.request_cancel(record.run_id, action="rollback") == "rollback"
+    record.abort_action = "rollback"
+    record.abort_event.set()
+
+    deletes: list[str] = []
+
+    class HistoryCheckpointer:
+        async def aget_tuple(self, _config):
+            return SimpleNamespace(
+                config={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "cp-1"}},
+                checkpoint={"id": "cp-1", "channel_values": {"messages": []}},
+                metadata={},
+                pending_writes=[],
+            )
+
+        async def adelete_thread(self, thread_id):
+            deletes.append(thread_id)
+
+    async def cancelled_try_start(_run_id):
+        return RunStartOutcome.cancelled
+
+    monkeypatch.setattr(run_manager, "try_start", cancelled_try_start)
+
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+    await asyncio.wait_for(
+        run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=HistoryCheckpointer(), event_store=MemoryRunEventStore()),
+            agent_factory=MagicMock(side_effect=AssertionError("agent must not be built")),
+            graph_input={},
+            config={},
+        ),
+        timeout=10,
+    )
+
+    assert deletes == [], "a run that never started must not reset (delete) the thread's checkpoint history"
+    assert record.status == RunStatus.error
+
+
+@pytest.mark.anyio
+async def test_started_before_snapshot_capture_rollback_does_not_delete(monkeypatch):
+    """A rollback between try_start and snapshot capture must not delete history.
+
+    ``started`` is already True there, but no pre-run snapshot exists yet and the
+    run has not mutated a checkpoint, so no restore (and no reset/delete) is owed.
+    """
+    run_store = MemoryRunStore()
+    ownership = RunOwnershipConfig(lease_seconds=30, grace_seconds=10, heartbeat_enabled=True)
+    run_manager = RunManager(store=run_store, run_ownership_config=ownership)
+    record = await run_manager.create(
+        "thread-1",
+        metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-run"},
+    )
+    record.abort_action = "rollback"
+    record.abort_event.set()
+
+    deletes: list[str] = []
+
+    class HistoryCheckpointer:
+        async def aget_tuple(self, _config):
+            return SimpleNamespace(
+                config={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "cp-1"}},
+                checkpoint={"id": "cp-1", "channel_values": {"messages": []}},
+                metadata={},
+                pending_writes=[],
+            )
+
+        async def adelete_thread(self, thread_id):
+            deletes.append(thread_id)
+
+    class DummyAgent:
+        async def aget_state(self, _config):
+            return SimpleNamespace(
+                values={"messages": []},
+                config={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "cp-1"}},
+                parent_config=None,
+                metadata={},
+                next=(),
+                tasks=(),
+                created_at=None,
+            )
+
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            if False:  # pragma: no cover
+                yield
+
+    async def started_try_start(_run_id):
+        return RunStartOutcome.started
+
+    async def cancelled_capture(*_args, **_kwargs):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(run_manager, "try_start", started_try_start)
+    monkeypatch.setattr("deerflow.runtime.runs.worker._capture_rollback_point", cancelled_capture)
+
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+    await asyncio.wait_for(
+        run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=HistoryCheckpointer(), event_store=MemoryRunEventStore()),
+            agent_factory=lambda *, config: DummyAgent(),
+            graph_input={},
+            config={},
+        ),
+        timeout=10,
+    )
+
+    assert deletes == [], "a run cancelled before its snapshot capture must not delete thread history"
+
+
+@pytest.mark.anyio
+async def test_captured_empty_thread_rollback_still_resets(monkeypatch):
+    """The legitimate reset path (captured empty thread) must be preserved."""
+    from deerflow.runtime.runs import worker as worker_module
+
+    deletes: list[str] = []
+
+    class ResetCheckpointer:
+        async def adelete_thread(self, thread_id):
+            deletes.append(thread_id)
+
+    restored = await worker_module._rollback_to_pre_run_checkpoint(
+        accessor=None,
+        checkpointer=ResetCheckpointer(),
+        thread_id="thread-1",
+        run_id="run-1",
+        rollback_point=None,
+        snapshot_capture_failed=False,
+    )
+
+    assert restored is True
+    assert deletes == ["thread-1"]
+
+
+@pytest.mark.anyio
+async def test_started_before_snapshot_capture_edit_replay_releases_admission(monkeypatch):
+    """A started edit replay cancelled before snapshot capture owes no restore.
+
+    ``started`` is True but the pre-run snapshot was never captured, so there is
+    no restore to wait for; the run must terminalize (rollback -> error) and
+    release the thread's admission slot instead of leaking it.
+    """
+    run_store = MemoryRunStore()
+    ownership = RunOwnershipConfig(lease_seconds=30, grace_seconds=10, heartbeat_enabled=True)
+    run_manager = RunManager(store=run_store, run_ownership_config=ownership)
+    record = await run_manager.create(
+        "thread-1",
+        metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-run"},
+    )
+    assert await run_store.request_cancel(record.run_id, action="rollback") == "rollback"
+    record.abort_action = "rollback"
+    record.abort_event.set()
+
+    deletes: list[str] = []
+
+    class HistoryCheckpointer:
+        async def aget_tuple(self, _config):
+            return SimpleNamespace(
+                config={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "cp-1"}},
+                checkpoint={"id": "cp-1", "channel_values": {"messages": []}},
+                metadata={},
+                pending_writes=[],
+            )
+
+        async def adelete_thread(self, thread_id):
+            deletes.append(thread_id)
+
+    class DummyAgent:
+        async def aget_state(self, _config):
+            return SimpleNamespace(
+                values={"messages": []},
+                config={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "cp-1"}},
+                parent_config=None,
+                metadata={},
+                next=(),
+                tasks=(),
+                created_at=None,
+            )
+
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            if False:  # pragma: no cover
+                yield
+
+    async def started_try_start(_run_id):
+        return RunStartOutcome.started
+
+    async def cancelled_capture(*_args, **_kwargs):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(run_manager, "try_start", started_try_start)
+    monkeypatch.setattr("deerflow.runtime.runs.worker._capture_rollback_point", cancelled_capture)
+
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+    await asyncio.wait_for(
+        run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=HistoryCheckpointer(), event_store=MemoryRunEventStore()),
+            agent_factory=lambda *, config: DummyAgent(),
+            graph_input={},
+            config={},
+        ),
+        timeout=10,
+    )
+
+    assert deletes == [], "no restore is owed, so the thread history must be untouched"
+    row = await run_store.get(record.run_id)
+    assert row["status"] == "error", f"a started edit replay cancelled before snapshot capture owes no restore and must release admission: row status is {row['status']!r}"
+    assert record.terminal_committed is True
+    peer = RunManager(store=run_store, worker_id="peer", run_ownership_config=ownership)
+    admitted = await peer.create_or_reject("thread-1", user_id=record.user_id)
+    assert admitted.thread_id == "thread-1"
+
+
+@pytest.mark.anyio
+async def test_real_try_start_pre_capture_rollback_preserves_history_and_releases_admission(monkeypatch):
+    """Production path: real try_start, blocked before the snapshot resolves.
+
+    ``try_start`` genuinely persists ``running``; the run is then cancelled while
+    the pre-run snapshot capture is still in flight, with a durable rollback
+    accepted. The thread history must survive, the run must terminalize to
+    ``error``, and a peer must be able to take the thread's admission slot.
+    """
+    run_store = MemoryRunStore()
+    ownership = RunOwnershipConfig(lease_seconds=30, grace_seconds=10, heartbeat_enabled=True)
+    run_manager = RunManager(store=run_store, run_ownership_config=ownership)
+    record = await run_manager.create(
+        "thread-1",
+        metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-run"},
+    )
+
+    deletes: list[str] = []
+
+    class HistoryCheckpointer:
+        async def aget_tuple(self, _config):
+            return SimpleNamespace(
+                config={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "cp-1"}},
+                checkpoint={"id": "cp-1", "channel_values": {"messages": []}},
+                metadata={},
+                pending_writes=[],
+            )
+
+        async def adelete_thread(self, thread_id):
+            deletes.append(thread_id)
+
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def blocking_capture(*_args, **_kwargs):
+        entered.set()
+        await release.wait()
+        return None
+
+    monkeypatch.setattr("deerflow.runtime.runs.worker._capture_rollback_point", blocking_capture)
+
+    class DummyAgent:
+        async def aget_state(self, _config):
+            return SimpleNamespace(
+                values={"messages": []},
+                config={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "cp-1"}},
+                parent_config=None,
+                metadata={},
+                next=(),
+                tasks=(),
+                created_at=None,
+            )
+
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            if False:  # pragma: no cover
+                yield
+
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+    task = asyncio.create_task(
+        run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=HistoryCheckpointer(), event_store=MemoryRunEventStore()),
+            agent_factory=lambda *, config: DummyAgent(),
+            graph_input={},
+            config={},
+        )
+    )
+    record.task = task
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=10)
+        # The real try_start must have durably moved the row pending -> running.
+        assert (await run_store.get(record.run_id))["status"] == "running"
+        assert await run_store.request_cancel(record.run_id, action="rollback") == "rollback"
+        record.abort_action = "rollback"
+        record.abort_event.set()
+        task.cancel()
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert deletes == [], "the thread history must be preserved"
+    row = await run_store.get(record.run_id)
+    assert row["status"] == "error", row
+    assert record.terminal_committed is True
+    peer = RunManager(store=run_store, worker_id="peer", run_ownership_config=ownership)
+    admitted = await peer.create_or_reject("thread-1", user_id=record.user_id)
+    assert admitted.thread_id == "thread-1"

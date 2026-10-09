@@ -955,6 +955,11 @@ async def run_agent(
     workspace_changes_user_id: str | None = None
     workspace_excluded_dir_names: frozenset[str] | None = None
     snapshot_capture_failed = False
+    # True once the pre-run snapshot capture has been *attempted*. Distinguishes
+    # "captured (possibly an empty thread)" from "never captured", which
+    # ``rollback_point is None`` alone cannot; the latter must never reach the
+    # reset/delete path.
+    rollback_capture_attempted = False
     llm_error_fallback_message: str | None = None
     checkpoint_rollback_completed = False
     # Message ids checkpointed *before* this run started. The stream loop uses
@@ -1103,6 +1108,10 @@ async def run_agent(
             return EditReplayRestoreOutcome.OWNERSHIP_LOST
         if not _is_edit_replay_run(record) or record.status == RunStatus.success:
             return EditReplayRestoreOutcome.NOT_REQUIRED
+        if checkpointer is not None and not rollback_capture_attempted:
+            # The pre-run snapshot was never attempted, so this run cannot have
+            # mutated a checkpoint that needs restoring (and must not reset it).
+            return EditReplayRestoreOutcome.NOT_REQUIRED
         if not record.finalizing:
             await run_manager.set_finalizing(run_id, True)
         try:
@@ -1175,6 +1184,12 @@ async def run_agent(
             # The preflight never reached ``try_start``, so no edit-replay
             # checkpoint restore is owed and the admission slot must be released.
             return True
+        if checkpointer is not None and not rollback_capture_attempted:
+            # Started, but the pre-run snapshot was never captured, so the run
+            # cannot have mutated a checkpoint that needs restoring. Match
+            # ``_ensure_edit_replay_restored`` instead of holding the slot for a
+            # restore that will never run.
+            return True
         if _is_edit_replay_run(record) and record.status != RunStatus.success and not checkpoint_rollback_completed:
             return False
         return True
@@ -1218,6 +1233,12 @@ async def run_agent(
         if action != "rollback" or not restore_checkpoint:
             # An interrupt has no restore, and a path that has not started one
             # must not consume the rollback a later safe boundary can still do.
+            return
+        if not started or (checkpointer is not None and not rollback_capture_attempted):
+            # Nothing to restore: the run never started, or its pre-run snapshot
+            # was never captured. Reaching ``_rollback_to_pre_run_checkpoint``
+            # here would take the ambiguous ``rollback_point is None`` reset path
+            # and DELETE the thread's existing checkpoint history.
             return
 
         await _join_owned_restore(ensure_checkpoint_restored())
@@ -1484,7 +1505,10 @@ async def run_agent(
                     rollback_point = await _capture_rollback_point(accessor, checkpointer, checkpoint_config)
                 except Exception:
                     snapshot_capture_failed = True
+                    rollback_capture_attempted = True
                     logger.warning("Could not capture pre-run checkpoint snapshot for run %s", run_id, exc_info=True)
+                else:
+                    rollback_capture_attempted = True
                 if rollback_point is not None:
                     pre_run_checkpoint_id = rollback_point.config.get("configurable", {}).get("checkpoint_id")
                     pre_existing_message_ids = _collect_pre_existing_message_ids({"messages": list(rollback_point.messages)})
