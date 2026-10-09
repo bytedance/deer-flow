@@ -812,7 +812,7 @@ This release closes that milestone with **439 merged pull requests**.
   others — the next message for the same chat landing elsewhere opened a second
   thread — and concurrent writers clobbered each other's file. The bindings now
   live in the shared `channel_thread_bindings` table (migration
-  `0036_channel_thread_bindings`) whenever `database.backend` is `sqlite` or
+  `0037_channel_thread_bindings`) whenever `database.backend` is `sqlite` or
   `postgres`; `memory` keeps the JSON file. On the first start after upgrading,
   an existing `store.json` is imported once into an empty table (`INSERT … ON
   CONFLICT DO NOTHING`, so two replicas importing at the same time cannot

@@ -1,7 +1,7 @@
 """Shared IM chat -> DeerFlow thread bindings for multi-replica channel routing.
 
-Revision ID: 0036_channel_thread_bindings
-Revises: 0035_login_throttle
+Revision ID: 0037_channel_thread_bindings
+Revises: 0036_run_idempotency_request
 
 Creates ``channel_thread_bindings``: one row per unbound IM conversation the
 ``ChannelManager`` routed to a thread, keyed by the legacy composite
@@ -28,8 +28,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0036_channel_thread_bindings"
-down_revision: str | Sequence[str] | None = "0035_login_throttle"
+revision: str = "0037_channel_thread_bindings"
+down_revision: str | Sequence[str] | None = "0036_run_idempotency_request"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

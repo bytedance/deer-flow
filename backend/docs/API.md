@@ -229,11 +229,29 @@ and key reuses the existing run instead of executing the input again. The key is
 shared across `/runs`, `/runs/stream`, and `/runs/wait` for a given user and
 thread, so the same key string cannot back two different calls even across those
 endpoints. Reuse is bound to the original `input`, `assistant_id` and
-`conversation_references`; a retry that changes them returns 409. Generate a new key for every intentional user
+`conversation_references`; a retry that changes them returns 409. When
+`command.resume` takes precedence over `input`, reuse instead requires the same
+resume value, assistant and conversation references. Resume values must be strict
+JSON with finite numbers, with or without an idempotency key; booleans, integers
+and floats remain distinct when comparing keyed retries. Generate a new key for every intentional user
 action; reuse a key only when retrying that same action after an uncertain HTTP
 result. Keys may be at most 255 characters. Stateless `/api/langgraph/runs/*`
 endpoints do not support this header because requests without an explicit thread
 create a new temporary conversation.
+
+**Rolling upgrades and keyed resume:** route all initial submissions and retries
+containing both `command.resume` and `Idempotency-Key` to upgraded Gateway workers
+only, across `/runs`, `/runs/stream` and `/runs/wait`, until every worker serving
+these endpoints is upgraded. Older workers ignore `runs.idempotency_request_json`
+and compare only `input`, so with `input: null` they can reuse an `approve` run
+for a conflicting `deny` request. If version-aware routing is unavailable, pause
+keyed resume traffic until the rollout completes, or replace all old workers
+before accepting it again. The additive migration preserves old-reader run-history
+compatibility, not mixed-version resume admission safety. Upgraded workers return
+409 for identity-less legacy resume rows, including identical decisions; inspect
+the original run and current thread state before submitting a new intentional
+action with a fresh key. Removing the header is not a retry workaround: it makes
+the request non-idempotent.
 
 Retrying a still-running run that this worker cannot stream returns 409 from
 `/runs/stream` (`Run ... is not active on this worker and cannot be streamed`)
@@ -836,7 +854,8 @@ request still resets the current worker and returns `"scope": "process"`.
 
 #### List Skills
 
-Get all available skills.
+Get all available skills, including public and custom skills. When authorization
+is enabled, only skills visible to the caller's role are returned.
 
 ```http
 GET /api/skills
@@ -848,25 +867,30 @@ GET /api/skills
   "skills": [
     {
       "name": "pdf-processing",
-      "display_name": "PDF Processing",
       "description": "Handle PDF documents efficiently",
-      "enabled": true,
       "license": "MIT",
-      "path": "public/pdf-processing"
+      "category": "public",
+      "enabled": true,
+      "editable": false
     },
     {
       "name": "frontend-design",
-      "display_name": "Frontend Design",
       "description": "Design and build frontend interfaces",
-      "enabled": false,
       "license": "MIT",
-      "path": "public/frontend-design"
+      "category": "public",
+      "enabled": false,
+      "editable": false
     }
   ]
 }
 ```
 
 #### Get Skill Details
+
+Return one skill's metadata. The response does not include `content`; read a
+custom skill's `SKILL.md` with [Get Custom Skill Content](#get-custom-skill-content).
+When authorization is enabled, a skill hidden from the caller's role returns
+`404`, indistinguishable from a missing skill.
 
 ```http
 GET /api/skills/{skill_name}
@@ -876,13 +900,11 @@ GET /api/skills/{skill_name}
 ```json
 {
   "name": "pdf-processing",
-  "display_name": "PDF Processing",
   "description": "Handle PDF documents efficiently",
-  "enabled": true,
   "license": "MIT",
-  "path": "public/pdf-processing",
-  "allowed_tools": ["read_file", "write_file", "bash"],
-  "content": "# PDF Processing\n\nInstructions for the agent..."
+  "category": "public",
+  "enabled": true,
+  "editable": false
 }
 ```
 
@@ -916,28 +938,175 @@ Requires an authenticated admin session.
 
 #### Install Skill
 
-Install a skill from a `.skill` file.
+Install a `.skill` archive that already exists in a thread's user-data directory.
+Requires an authenticated administrator.
 
 ```http
 POST /api/skills/install
-Content-Type: multipart/form-data
+Content-Type: application/json
 ```
 
 **Request Body:**
-- `file`: The `.skill` file to install
+```json
+{
+  "thread_id": "<thread id>",
+  "path": "mnt/user-data/outputs/my-skill.skill"
+}
+```
 
 **Response:**
 ```json
 {
   "success": true,
-  "message": "Skill 'my-skill' installed successfully",
-  "skill": {
-    "name": "my-skill",
-    "display_name": "My Skill",
-    "path": "custom/my-skill"
-  }
+  "skill_name": "my-skill",
+  "message": "Skill 'my-skill' installed successfully"
 }
 ```
+
+#### Upload and Install Skill
+
+Upload a local `.skill` archive and install it for the current user. Requires an
+authenticated administrator.
+
+```http
+POST /api/skills/install/upload
+Content-Type: multipart/form-data
+```
+
+**Request Body:**
+- `archive`: The `.skill` file to install. The filename must end with `.skill`.
+
+**Response:** the same shape as [Install Skill](#install-skill). An upload beyond
+the archive limit returns `413`. A missing `archive` field returns `422`; a
+non-file `archive` part is rejected during multipart parsing and returns `400`.
+
+#### List Custom Skills
+
+List only the caller's user-owned custom skills. Legacy shared skills are
+read-only and appear only in [List Skills](#list-skills). Available to normal
+users; no administrator role is required. When authorization is enabled, only
+skills visible to the caller's role are returned.
+
+```http
+GET /api/skills/custom
+```
+
+**Response:** the same shape as [List Skills](#list-skills).
+
+#### Get Custom Skill Content
+
+Return a custom skill's metadata plus its raw `SKILL.md` content. Requires an
+authenticated administrator.
+
+```http
+GET /api/skills/custom/{skill_name}
+```
+
+**Response:**
+```json
+{
+  "name": "my-skill",
+  "description": "My custom skill",
+  "license": null,
+  "category": "custom",
+  "enabled": true,
+  "editable": true,
+  "content": "---\nname: my-skill\ndescription: My custom skill\n---\n\n# My Skill\n\nInstructions for the agent..."
+}
+```
+
+#### Edit Custom Skill
+
+Replace a custom skill's `SKILL.md`. The content is validated and security
+scanned; a blocked scan returns `400` and nothing is written. Each accepted edit
+appends a history entry. Requires an authenticated administrator.
+
+```http
+PUT /api/skills/custom/{skill_name}
+Content-Type: application/json
+```
+
+**Request Body:**
+```json
+{
+  "content": "---\nname: my-skill\ndescription: My custom skill\n---\n\n# My Skill\n\nUpdated instructions..."
+}
+```
+
+The submitted content replaces the complete `SKILL.md`, so it must include YAML
+frontmatter with a nonempty `description` and a `name` that matches
+`{skill_name}`. Content without frontmatter returns `400`.
+
+**Response:** the updated skill with `content`, the same shape as
+[Get Custom Skill Content](#get-custom-skill-content).
+
+#### Delete Custom Skill
+
+Delete a custom skill and record the deletion in its history. Requires an
+authenticated administrator.
+
+```http
+DELETE /api/skills/custom/{skill_name}
+```
+
+**Response:**
+```json
+{
+  "success": true
+}
+```
+
+#### Get Custom Skill History
+
+Return the custom skill's recorded changes, oldest first. Requires an
+authenticated administrator.
+
+```http
+GET /api/skills/custom/{skill_name}/history
+```
+
+**Response:**
+```json
+{
+  "history": [
+    {
+      "ts": "2026-01-01T00:00:00+00:00",
+      "action": "human_edit",
+      "author": "human",
+      "thread_id": null,
+      "file_path": "SKILL.md",
+      "prev_content": "...",
+      "new_content": "...",
+      "scanner": {"decision": "allow", "reason": "..."}
+    }
+  ]
+}
+```
+
+#### Rollback Custom Skill
+
+Restore a custom skill's `SKILL.md` from a history entry. The restored content is
+validated and security scanned before it is written, and the rollback is itself
+recorded as a history entry. Requires an authenticated administrator.
+
+```http
+POST /api/skills/custom/{skill_name}/rollback
+Content-Type: application/json
+```
+
+**Request Body:**
+```json
+{
+  "history_index": 0
+}
+```
+
+`history_index` indexes the list returned by
+[Get Custom Skill History](#get-custom-skill-history) and defaults to `-1` (the
+latest change). An out-of-range index returns `400`.
+
+**Response:** the updated skill with `content`, the same shape as
+[Get Custom Skill Content](#get-custom-skill-content).
 
 #### Export a Custom Skill
 

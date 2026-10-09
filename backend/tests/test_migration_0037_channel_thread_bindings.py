@@ -1,4 +1,4 @@
-"""Migration 0036: the shared ``channel_thread_bindings`` table (IM chat -> DeerFlow thread)."""
+"""Migration 0037: the shared ``channel_thread_bindings`` table (IM chat -> DeerFlow thread)."""
 
 from __future__ import annotations
 
@@ -20,15 +20,15 @@ from deerflow.persistence.base import Base
 from deerflow.persistence.channel_thread_bindings import ChannelThreadBindingRow
 from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 
-REVISION = "0036_channel_thread_bindings"
-PREVIOUS = "0035_login_throttle"
+REVISION = "0037_channel_thread_bindings"
+PREVIOUS = "0036_run_idempotency_request"
 TABLE = "channel_thread_bindings"
 COLUMNS = {"key", "channel_name", "chat_id", "topic_id", "thread_id", "user_id", "created_at", "updated_at"}
 INDEX = "ix_channel_thread_bindings_channel_chat"
 pytestmark = pytest.mark.asyncio
 
 
-async def test_0036_is_the_single_head_and_chains_after_0035():
+async def test_0037_is_the_single_head_and_chains_after_0036():
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
     assert script.get_heads() == [REVISION]
     assert script.get_revision(REVISION).down_revision == PREVIOUS
@@ -41,7 +41,7 @@ def _engine(tmp_path, backend):
         return create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'migration.db'}"), None
     uri = os.environ.get("TEST_POSTGRES_URI")
     if not uri:
-        pytest.skip("requires TEST_POSTGRES_URI (real Postgres migration 0036)")
+        pytest.skip("requires TEST_POSTGRES_URI (real Postgres migration 0037)")
     schema = f"channel_bindings_{uuid.uuid4().hex}"
     return create_async_engine(asyncpg_test_url(uri), connect_args=build_asyncpg_connect_args(schema)), schema
 
@@ -82,7 +82,7 @@ async def _orm_diff(engine) -> list:
 
 
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"])
-async def test_0036_creates_the_table_matching_the_orm_and_downgrades_cleanly(tmp_path, backend):
+async def test_0037_creates_the_table_matching_the_orm_and_downgrades_cleanly(tmp_path, backend):
     engine, schema = _engine(tmp_path, backend)
     cfg = bootstrap._get_alembic_config(engine, postgres_schema=schema or "")
     try:
@@ -139,7 +139,7 @@ async def test_0036_creates_the_table_matching_the_orm_and_downgrades_cleanly(tm
 
 
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"])
-async def test_0036_completes_a_partially_applied_upgrade(tmp_path, backend):
+async def test_0037_completes_a_partially_applied_upgrade(tmp_path, backend):
     """The table already exists (an interrupted earlier attempt): upgrade still lands."""
     engine, schema = _engine(tmp_path, backend)
     cfg = bootstrap._get_alembic_config(engine, postgres_schema=schema or "")
