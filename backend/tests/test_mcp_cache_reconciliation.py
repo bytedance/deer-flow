@@ -714,6 +714,7 @@ async def test_committed_response_failure_still_finishes_retired_pool(reconciler
         )
 
     assert exc_info.value.status_code == 500
+    assert "response boom" not in exc_info.value.detail
     assert close_calls == [True]
     assert pool._retired is True
 

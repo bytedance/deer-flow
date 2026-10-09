@@ -1333,7 +1333,7 @@ def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> dict:
 
     try:
         logger.info(f"MCP configuration updated and saved to: {config_path}")
-        return _mcp_server_responses_from_raw(config_data)
+        return _mcp_server_responses_from_committed_raw(config_data)
     finally:
         finish_mcp_reconciliation(pending)
 
@@ -1376,7 +1376,7 @@ def _apply_mcp_server_state_update(body: McpServerStateUpdateRequest) -> dict:
 
     try:
         logger.info("MCP server %s enabled state updated to %s", body.server_name, body.enabled)
-        return _mcp_server_responses_from_raw(raw_data)
+        return _mcp_server_responses_from_committed_raw(raw_data)
     finally:
         finish_mcp_reconciliation(pending)
 
@@ -1422,6 +1422,18 @@ def _mcp_server_responses_from_raw(raw_data: dict) -> dict[str, McpServerConfigR
     return {name: _mcp_server_response_from_raw(name, server) for name, server in _raw_mcp_servers(raw_data).items()}
 
 
+def _mcp_server_responses_from_committed_raw(raw_data: dict) -> dict[str, McpServerConfigResponse]:
+    """Build a committed write's response without exposing conversion errors."""
+    try:
+        return _mcp_server_responses_from_raw(raw_data)
+    except Exception as exc:
+        logger.error("MCP configuration was saved, but response construction failed (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="MCP configuration was saved, but constructing the response failed; retry or inspect Gateway logs.",
+        ) from exc
+
+
 def _load_raw_mcp_server_responses() -> dict[str, McpServerConfigResponse]:
     """Read editable MCP server definitions under the shared config lock."""
     config_path = ExtensionsConfig.resolve_config_path()
@@ -1462,7 +1474,7 @@ def _apply_mcp_servers_create(body: McpConfigUpdateRequest) -> dict:
 
     try:
         logger.info("Added MCP servers: %s", ", ".join(body.mcp_servers))
-        return _mcp_server_responses_from_raw(raw_data)
+        return _mcp_server_responses_from_committed_raw(raw_data)
     finally:
         finish_mcp_reconciliation(pending)
 
@@ -1492,7 +1504,7 @@ def _apply_mcp_server_config_update(body: McpServerConfigUpdateRequest) -> dict:
 
     try:
         logger.info("Updated MCP server: %s", body.server_name)
-        return _mcp_server_responses_from_raw(raw_data)
+        return _mcp_server_responses_from_committed_raw(raw_data)
     finally:
         finish_mcp_reconciliation(pending)
 
@@ -1521,7 +1533,7 @@ def _apply_mcp_server_delete(server_name: str) -> dict:
 
     try:
         logger.info("Deleted MCP server: %s", server_name)
-        return _mcp_server_responses_from_raw(raw_data)
+        return _mcp_server_responses_from_committed_raw(raw_data)
     finally:
         finish_mcp_reconciliation(pending)
 
