@@ -9,7 +9,7 @@
 | 原生 submit 身份 | 真实 ToolNode / ordinary driver / interceptor 调用链，SPEC 与质量审查通过 | 不单独证明物理执行 |
 | B 程序主干 | 原生任务持久跟踪、真实 TCP/PostgreSQL/Docker、输入快照、原生结果文件、重启与取消通过 | 不证明云 NAS 或 C |
 | B/C 共享资源池 | PostgreSQL、两个出站 worker、三条真实程序任务，排队与容量复用通过 | 此用例中的 C 只验证准入 |
-| C 原生执行 | 两个真实 Gateway、DeepSeek、AIO 工具、checkpoint/events、Redis END、affinity、跨实例取消与 STOP 通过 | Scheduler 配置验收见下文；完整浏览器/记忆仍待集成 |
+| C 原生执行 | 两个真实 Gateway、DeepSeek、AIO 工具、checkpoint/events、Redis END、affinity、跨实例取消与 STOP 通过 | Scheduler 配置验收见下文；原生记忆验收见下文；完整浏览器仍待集成 |
 | C→B→C | 最新真实主干 1 passed / 142.71 秒；冻结收口 282 passed / 1 live deselected | SPEC 与质量复审通过；完整配置及部署仍待验收 |
 | fork 升级、启动/回滚与云 | 待完成 | 两台 ECS 保持停机，本轮未部署 |
 
@@ -130,3 +130,28 @@ PYTHONPATH=.:packages/ecs-executor uv run --no-sync pytest \
 ```
 
 root 独立复验 test_ecs_native_scheduler.py：5 passed / 1.95 秒。首试缺少 ECS 包 PYTHONPATH，4 passed / 1 import failure；按扩展文档修正命令后通过。12 个改动 Python 文件 Ruff lint/format 与 diff check 通过。独立 SPEC 与质量审查 PASS。完整 Task4 和 Task6 保持未完成。
+
+## 原生记忆共享与本地索引（2026-10-09）
+
+原生 DeerMem 配置无需运行时代码修改。两个 Gateway 使用同一 DEER_FLOW_HOME 事实目录，每实例设置独立的本地检索目录；开启原生 tool mode，通过 memory_search/get/add 管理事实。本地共享目录的验证不替代真实云 NAS 锁与持久化验收。
+
+首条实际主干 1 passed / 43.66 秒，证明隐藏 UUID 事实检索、工作机写入、两端可见、另一注册用户隔离和不同本地 FTS 索引。审查补强交付断言后，必要的同用例复跑 1 passed / 46.71 秒，进一步检查 present_files 精确路径、匹配 tool_call_id 的成功结果、原生 state.artifacts 及控制端 artifact HTTP 200 和正文。测试保持同一最初准入的远程 Run 和工作机 owner，不新增记忆存储；其拥有的运行时与容器已清理。
+
+使用前文只读模型配置环境，从 backend/ 仅选此用例：
+
+```bash
+ECS_NATIVE_LIVE=1 PYTHONPATH=.:packages/ecs-executor .venv/bin/python -m pytest \
+  tests/test_ecs_executor_c_live.py::test_native_remote_memory_shared_facts_and_owner_isolation -q -s
+```
+
+此前原生记忆/隔离/边界回归 61 passed / 4.59 秒、用户身份 27 passed / 1.24 秒。配置测试经 SPEC 修正，实际 AppConfig loader 解析本地路径环境变量并验证基础 model/database/auth/Redis 保留：实现者 2 passed / 0.95 秒，root 独立 2 passed / 1.02 秒。61 用例命令在项目根目录执行：
+
+```bash
+backend/.venv/bin/python -m pytest backend/tests/test_ecs_native_memory_config.py \
+  backend/tests/test_memory_tools.py backend/tests/test_memory_get_tool.py \
+  backend/tests/test_memory_retrieval_index_local.py \
+  backend/tests/test_memory_updater_user_isolation.py backend/tests/test_harness_boundary.py -q
+backend/.venv/bin/python -m pytest backend/tests/test_user_context.py -q
+```
+
+配置叠加文件与安全合并命令见 examples/ecs-native/README.md；memory-only 文件不能直接作为完整启动配置。独立 SPEC 与质量审查 PASS。浏览器和 Task6 仍待完成。

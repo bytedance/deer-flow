@@ -26,8 +26,8 @@ native MCP tasks and bind the frozen `user_auth` credential to the actual native
 owner; do not use a model-supplied owner ID. The combined executable example is
 `backend/tests/test_ecs_executor_bc_main.py`: it builds the shared pool and validates
 full C finalization, B attempt 1, exactly two native runs, same-goal budgets and
-native artifact delivery. These shell examples do not enable browser/memory; full
-configured capabilities and cloud deployment acceptance remain separate gates.
+native artifact delivery. These shell examples do not enable browser/memory;
+configured browser capability and cloud deployment acceptance remain separate gates.
 
 For the configured native Scheduler slice, retain the same shared infrastructure
 and add these settings to both normal native Gateway configurations:
@@ -47,3 +47,66 @@ central dispatch. Browser/UI ingress stays on the control Gateway. See
 for readiness semantics and the exact single-case acceptance command; its fixture
 reuses the same owned PostgreSQL/Redis/AIO infrastructure and automatically
 launches a genuine scheduled occurrence before C→ordinary MCP B→same-goal C.
+
+For native memory, merge the `memory` section from `native-memory.yaml` into each
+role's normal Gateway config. Keep `DEER_FLOW_HOME` on the same canonical shared
+NAS root. Leave `memory.backend_config.storage_path` omitted so normal native
+per-user paths and owner resolution remain active. Set
+`DEER_FLOW_MEMORY_INDEX_PATH` to an absolute local directory unique to each
+Gateway instance (for example `/var/cache/deerflow/central-memory` on central
+and `/var/cache/deerflow/worker-memory` on the worker). This derived SQLite FTS
+index, including its WAL/SHM files, must not be on NAS; it can be rebuilt from
+shared Markdown facts and their revision manifest. Replicas on the same host
+need different local directories too.
+
+`native-memory.yaml` is a partial overlay, not a complete startup config. From
+`backend/`, create a separate merged config with only its `memory` section replaced;
+this preserves the base model/database/auth settings and environment references.
+The exclusive file creation refuses to overwrite an existing merged config:
+
+```bash
+.venv/bin/python - ../examples/ecs-native/native-shell.yaml \
+  ../examples/ecs-native/native-memory.yaml /private/operator/native-memory-config.yaml <<'PY'
+import sys
+from pathlib import Path
+import yaml
+
+base_path, overlay_path, output_path = map(Path, sys.argv[1:])
+base = yaml.safe_load(base_path.read_text())
+overlay = yaml.safe_load(overlay_path.read_text())
+assert isinstance(base, dict) and isinstance(overlay, dict) and set(overlay) == {"memory"}
+base["memory"] = overlay["memory"]
+with output_path.open("x", encoding="utf-8") as output:
+    yaml.safe_dump(base, output)
+PY
+export DEER_FLOW_CONFIG_PATH=/private/operator/native-memory-config.yaml
+export DEER_FLOW_MEMORY_INDEX_PATH=/var/cache/deerflow/central-memory
+```
+
+Use an existing protected operator directory for the output, and substitute your
+normal role config as the base when it contains deployment-specific model/auth
+settings. For the worker, generate its own merged config and choose its own local
+index directory. Keep the existing `ECS_NATIVE_CONFIG` role selector and shared
+`DEER_FLOW_HOME`, PostgreSQL/Redis/auth/model environment settings. Start the normal
+native Gateway using `DEER_FLOW_CONFIG_PATH` pointing to the merged config; do not
+point it at the partial overlay.
+
+The overlay uses native DeerMem tool mode: the model calls `memory_search`,
+`memory_get`, and fact CRUD explicitly; DeerMem does not run passive extraction
+in this mode. The fixture's opt-in memory main preserves the shell, ordinary BC,
+and scheduled defaults and uses one actual model run to retrieve an API-seeded
+UUID fact absent from its prompt, add another fact on the remote worker, and
+deliver the retrieved fact through native files. It checks both peer APIs,
+server-owned Run identity, another owner's isolation, and separate local indexes.
+Run just this case from `backend/` with existing Docker images/environment:
+
+```bash
+ECS_NATIVE_LIVE=1 ECS_NATIVE_MODEL_CONFIG=/private/config.yaml \
+  ECS_NATIVE_MODEL_ENV=/private/.env PYTHONPATH=.:packages/ecs-executor \
+  .venv/bin/python -m pytest \
+  tests/test_ecs_executor_c_live.py::test_native_remote_memory_shared_facts_and_owner_isolation -q -s
+```
+
+This local two-process acceptance uses a shared directory as the canonical NAS
+stand-in. Actual cloud NAS locking/durability and Gateway cgroups still require
+cloud deployment acceptance. The memory overlay does not enable browser tools.

@@ -1,6 +1,6 @@
 # 原生 DeerFlow ECS 工作池架构
 
-更新：2026-10-09。本文对应 `codex/ecs-native-reuse` 的实际实现。B 主干及 C 执行部分已通过本地验证和独立审查；C→B→C 依赖合同已通过本地主干与独立审查。原生 Scheduler 已通过真实自动派发组合主干与独立审查；完整浏览器、记忆、fork 合并、运维及云验收仍待完成。本文不是部署完成声明。
+更新：2026-10-09。本文对应 `codex/ecs-native-reuse` 的实际实现。B 主干及 C 执行部分已通过本地验证和独立审查；C→B→C 依赖合同已通过本地主干与独立审查。原生 Scheduler 已通过真实自动派发组合主干与独立审查；原生记忆共享与本地索引也已通过真实主干及独立审查；完整浏览器、fork 合并、运维及云验收仍待完成。本文不是部署完成声明。
 
 ## 需求与职责
 
@@ -109,4 +109,4 @@ fork 迁移、旧 Fleet 数据处置、版本回滚、可复用启动/停止脚�
 
 工作机前台 schedule_task/stop_scheduled_task 和完成回调保持可用；manual trial/trigger 写入同一原生持久 occurrence 队列，由控制端处理。is_running 表示本地 poller，is_available 表示前台能力；停止服务会清除前台 readiness。角色不由模型参数或请求 context 决定。用户 UI 入口仍为控制端。
 
-实际自动 once 定时 C→MCP B→C 主干通过：1 passed / 72.92 秒，保留同 occurrence、一次计数、原目标预算和原生文件交付。SPEC 与质量审查 PASS。浏览器、记忆、fork 运维和云验收仍待完成。
+实际自动 once 定时 C→MCP B→C 主干通过：1 passed / 72.92 秒，保留同 occurrence、一次计数、原目标预算和原生文件交付。SPEC 与质量审查 PASS。浏览器、fork 运维和云验收仍待完成；原生记忆验收见测试文档。

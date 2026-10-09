@@ -147,7 +147,6 @@ file through the native artifact API, restarts the executor without another
 container start, and confirms cancellation after STOP. See
 [local B verification evidence](LOCAL_B_EVIDENCE.md) for the recorded run.
 
-
 ## Outbound PostgreSQL pool
 
 Set `mode: "pool"` in the private central JSON configuration. Pool mode requires
@@ -238,7 +237,6 @@ It verifies node assignment, resident overhead/concurrency caps, queued work
 using released capacity, report fencing, and physical cleanup. It removes only
 its own PostgreSQL/job containers. This is local transport evidence, not cloud
 or native C-runtime deployment evidence.
-
 
 ## Native Gateway outbound execution (opt-in)
 
@@ -359,8 +357,8 @@ existing owned live fixture. An authenticated once task is launched automaticall
 by the real Scheduler into the original pending native Run, executes on the
 fixed remote C worker, waits for ordinary MCP B, then resumes C with the same
 occurrence and native goal budget. Final native file delivery settles the once
-task with one occurrence/count and clears its goal. Browser/memory and cloud
-acceptance remain separate work.
+task with one occurrence/count and clears its goal. Browser and cloud
+acceptance remain separate work; native memory has its own opt-in case below.
 
 Run only the actual scheduled main from `backend/` (Docker images and the locked
 backend environment must already exist; credentials are read-only inputs):
@@ -371,3 +369,40 @@ ECS_NATIVE_LIVE=1 ECS_NATIVE_MODEL_CONFIG=/private/config.yaml \
   uv run --no-sync pytest \
   tests/test_ecs_executor_bc_main.py::test_real_scheduled_native_c_mcp_b_same_occurrence_goal_c -q -s
 ```
+
+### Native memory configuration
+
+Native C reuses the normal memory backend and server-owned user/agent identity.
+Merge the memory overlay in `examples/ecs-native/native-memory.yaml` into each
+role's normal Gateway config: enable native `deermem` in `tool` mode, share
+`DEER_FLOW_HOME` for canonical per-user summaries/Markdown facts and locks, and
+omit `backend_config.storage_path`. Set the overlay's
+`DEER_FLOW_MEMORY_INDEX_PATH` environment reference to a distinct absolute
+instance-local directory on every Gateway. Derived SQLite FTS/WAL/SHM files
+must stay off shared NAS. Shared manifest revisions refresh each local index
+when a peer writes; no executor memory store or control protocol is involved.
+The overlay is not a complete startup config. Use the exclusive-create merge
+command in [the operator example](../../../examples/ecs-native/README.md) to
+replace only the base config's `memory` section while preserving model/database/
+auth settings, then set `DEER_FLOW_CONFIG_PATH` to that merged file. Give each
+role its own merged config and local index path.
+
+The opt-in single actual-model memory main reuses the C fixture's owned
+PostgreSQL/Redis and two normal native Gateways:
+
+```bash
+ECS_NATIVE_LIVE=1 ECS_NATIVE_MODEL_CONFIG=/private/config.yaml \
+  ECS_NATIVE_MODEL_ENV=/private/.env PYTHONPATH=.:packages/ecs-executor \
+  .venv/bin/python -m pytest \
+  tests/test_ecs_executor_c_live.py::test_native_remote_memory_shared_facts_and_owner_isolation -q -s
+```
+
+It primes the peer before the API seed, then requires the actual worker's
+`memory_search` and `memory_get` to retrieve a UUID receipt value absent from
+the prompt. Actual `memory_add` writes another fact visible from central and
+worker; native `write_file`/`present_files` deliver the retrieved content. Both
+APIs exclude those facts for another registered owner. One original remote Run,
+worker ownership, DB events, canonical Markdown files and two separate local
+indexes are checked. The ordinary shell/BC/Scheduler fixture modes retain their
+existing defaults. This local shared-directory acceptance does not prove cloud
+NAS behavior, browser support, or Linux Gateway cgroups.

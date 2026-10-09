@@ -34,7 +34,22 @@ def test_native_http_remote_model_tool_and_peer_cancel(tmp_path):
     _native_http_acceptance(tmp_path)
 
 
-def _native_http_acceptance(tmp_path, *, dependency_mode=False, scheduled_mode=False):
+def _native_memory_config(tmp_path, role, *, enabled):
+    if not enabled:
+        return {"enabled": False}
+    return {
+        "enabled": True,
+        "mode": "tool",
+        "manager_class": "deermem",
+        "backend_config": {"retrieval_index_path": str(tmp_path / (role + "-memory-index")), "token_counting": "char"},
+    }
+
+
+def test_native_remote_memory_shared_facts_and_owner_isolation(tmp_path):
+    _native_http_acceptance(tmp_path, memory_mode=True)
+
+
+def _native_http_acceptance(tmp_path, *, dependency_mode=False, scheduled_mode=False, memory_mode=False):
     backend = Path(__file__).resolve().parents[1]
     run_id = uuid.uuid4().hex[:12]
     names, processes, handles = [], [], []
@@ -120,7 +135,7 @@ def _native_http_acceptance(tmp_path, *, dependency_mode=False, scheduled_mode=F
         if dependency_mode:
             native["nodes"]["one"]["profiles"].append("small")
         for role, port in (("central", central_port), ("worker", worker_port)):
-            role_config = {**config, "sandbox": {**config["sandbox"], "container_prefix": prefix + "-" + role}}
+            role_config = {**config, "sandbox": {**config["sandbox"], "container_prefix": prefix + "-" + role}, "memory": _native_memory_config(tmp_path, role, enabled=memory_mode)}
             config_path = tmp_path / (role + ".yaml")
             config_path.write_text(yaml.safe_dump(role_config))
             dispatch_path = tmp_path / (role + "-native.json")
@@ -152,6 +167,9 @@ def _native_http_acceptance(tmp_path, *, dependency_mode=False, scheduled_mode=F
             assert initialized.status_code == 201, initialized.status_code
             owner = initialized.json()["id"]
             headers = {"X-DeerFlow-Internal-Token": environment["DEER_FLOW_INTERNAL_AUTH_TOKEN"], "X-DeerFlow-Owner-User-Id": owner, "Authorization": "Bearer internal-test"}
+            if memory_mode:
+                _run_memory_main(client, worker, headers, owner, tmp_path, environment, run_id)
+                return
             if dependency_mode:
                 from test_ecs_executor_bc_main import _run_dependency_main, _setup_dependency_pool
 
@@ -286,3 +304,98 @@ def _native_http_acceptance(tmp_path, *, dependency_mode=False, scheduled_mode=F
         own_sandboxes = subprocess.run(["docker", "ps", "-aq", "--filter", "name=" + prefix], capture_output=True, text=True).stdout.split()
         for name in names + own_sandboxes:
             subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+
+
+def _run_memory_main(client, worker, headers, owner, tmp_path, environment, run_id):
+    # Prime the peer before central writes, so its next read must see a peer revision.
+    before = httpx.get(worker + "/api/memory", headers=headers)
+    assert before.status_code == 200 and before.json()["facts"] == []
+    lookup = "native-memory-" + run_id
+    secret_value = "receipt-" + uuid.uuid4().hex
+    seed_content = f"My {lookup} receipt value is {secret_value}."
+    seed = client.post("/api/memory/facts", headers=headers, json={"content": seed_content, "category": "context", "confidence": 1.0})
+    assert seed.status_code == 200, seed.status_code
+    seed_fact = next(fact for fact in seed.json()["facts"] if fact["content"] == seed_content)
+    peer = httpx.get(worker + "/api/memory", headers=headers)
+    assert peer.status_code == 200 and seed_fact["id"] in {fact["id"] for fact in peer.json()["facts"]}
+    bob = client.post("/api/v1/auth/register", headers={"Origin": str(client.base_url).rstrip("/")}, json={"email": "memory-peer@example.com", "password": "NativeM!" + secrets.token_urlsafe(20)})
+    assert bob.status_code == 201, bob.status_code
+    other_headers = {**headers, "X-DeerFlow-Owner-User-Id": bob.json()["id"]}
+    for origin in (str(client.base_url).rstrip("/"), worker):
+        other = httpx.get(origin + "/api/memory", headers=other_headers)
+        assert other.status_code == 200 and secret_value not in other.text
+    thread = "native-memory-" + run_id
+    created = client.post("/api/threads", json={"thread_id": thread}, headers=headers)
+    assert created.status_code in (200, 201), created.status_code
+    added_content = f"My native memory acceptance label is {lookup}."
+    prompt = (
+        f"Use native memory_search to find my stored {lookup} receipt. Then use memory_get with the returned fact ID to read its full content. "
+        "The receipt value is only in stored memory; do not guess it. "
+        f"Use native memory_add to store exactly this new fact: {added_content} "
+        "Use native write_file to write the full retrieved receipt fact into /mnt/user-data/outputs/native_memory_receipt.txt. "
+        "Invoke native present_files on that exact file to deliver it. Finally answer with the retrieved full fact. Actually invoke all five tools."
+    )
+    assert secret_value not in prompt and seed_fact["id"] not in prompt
+    started = client.post(
+        f"/api/threads/{thread}/runs",
+        headers=headers,
+        json={
+            "assistant_id": "lead_agent",
+            "input": {"messages": [{"role": "user", "content": prompt}]},
+            "metadata": {"deerflow_origin": {"kind": "schedule"}},
+            "context": {"model_name": "deepseek-chat", "non_interactive": True},
+            "stream_mode": ["values", "messages-tuple", "custom"],
+            "on_disconnect": "continue",
+            "config": {"recursion_limit": 100},
+        },
+    )
+    assert started.status_code == 200, started.status_code
+    admitted_run = started.json()["run_id"]
+    joined = httpx.get(worker + f"/api/threads/{thread}/runs/{admitted_run}/join", headers=headers, timeout=240)
+    assert joined.status_code == 200 and "event: end" in joined.text
+    result = client.get(f"/api/threads/{thread}/runs/{admitted_run}", headers=headers).json()
+    assert result["status"] == "success", {key: result.get(key) for key in ("status", "error", "stop_reason")}
+    state = httpx.get(worker + f"/api/threads/{thread}/state", headers=headers).json()
+    messages = state.get("values", {}).get("messages", [])
+    calls = [call for message in messages for call in message.get("tool_calls", [])]
+    assert {"memory_search", "memory_get", "memory_add", "write_file", "present_files"} <= {call["name"] for call in calls}
+    get_calls = [call for call in calls if call["name"] == "memory_get"]
+    assert any(call["args"].get("fact_id") == seed_fact["id"] for call in get_calls)
+    tool_results = [message for message in messages if message.get("type") == "tool" or message.get("role") == "tool"]
+    assert any(message.get("name") == "memory_get" and seed_content in str(message.get("content")) for message in tool_results)
+    assert any(secret_value in str(message.get("content")) for message in messages if message.get("type") == "ai" or message.get("role") == "assistant")
+    presented_path = "/mnt/user-data/outputs/native_memory_receipt.txt"
+    assert presented_path in state.get("values", {}).get("artifacts", [])
+    presented_calls = [call for call in calls if call["name"] == "present_files" and call["args"].get("filepaths") == [presented_path]]
+    assert presented_calls, "Receipt path was not passed to native present_files"
+    assert any(message.get("tool_call_id") in {call["id"] for call in presented_calls} and message.get("content") == "Successfully presented files" for message in tool_results), "Native present_files did not report successful delivery"
+    delivered = client.get(f"/api/threads/{thread}/artifacts/{presented_path.lstrip('/')}", headers=headers)
+    assert delivered.status_code == 200 and seed_content in delivered.text
+    artifact = tmp_path / "nas/users" / owner / "threads" / thread / "user-data/outputs/native_memory_receipt.txt"
+    assert seed_content in artifact.read_text()
+    for origin in (str(client.base_url).rstrip("/"), worker):
+        observed = httpx.get(origin + "/api/memory", headers=headers)
+        assert observed.status_code == 200
+        contents = {fact["content"] for fact in observed.json()["facts"]}
+        assert {seed_content, added_content} <= contents
+        other = httpx.get(origin + "/api/memory", headers=other_headers)
+        assert other.status_code == 200 and secret_value not in other.text and added_content not in other.text
+    root = tmp_path / "nas"
+    assert (root / "users" / owner / "memory.json").is_file()
+    facts = list((root / "users" / owner / "agents/__default__/facts").rglob("*.md"))
+    assert len(facts) == 2 and all(any(content in fact.read_text() for fact in facts) for content in (seed_content, added_content))
+    indexes = [tmp_path / (role + "-memory-index/memory-fts5.sqlite3") for role in ("central", "worker")]
+    assert all(path.is_file() for path in indexes) and not indexes[0].samefile(indexes[1])
+    assert not list(root.rglob("*.sqlite3*")), "Shared canonical home contains a derived SQLite/WAL file"
+    sql = create_engine(environment["C_NATIVE_EXECUTOR_DATABASE_URL"])
+    try:
+        with sql.connect() as connection:
+            jobs = list(connection.execute(text("select record from ecs_execution_jobs")).scalars())
+            assert len(jobs) == 1 and jobs[0]["native"]["run_id"] == admitted_run and jobs[0]["node_id"] == "one"
+            worker_identity = re.search(r"Run lease heartbeat started for worker ([^\n]+)", (tmp_path / "worker.log").read_text()).group(1)
+            assert connection.execute(text("select owner_worker_id from runs where run_id=:id"), {"id": admitted_run}).scalar_one() == worker_identity
+            assert connection.execute(text("select count(*) from runs where run_id=:id"), {"id": admitted_run}).scalar_one() == 1
+            assert connection.execute(text("select count(*) from run_events where run_id=:id"), {"id": admitted_run}).scalar_one() > 0
+    finally:
+        sql.dispose()
+    print("Native memory receipt: one remote original Run; actual memory_search/get/add and file delivery; shared per-owner Markdown facts, peer revision visibility, other-owner isolation; two local FTS indexes and no NAS SQLite/WAL.")

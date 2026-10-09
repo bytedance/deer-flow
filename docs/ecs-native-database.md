@@ -116,3 +116,9 @@ Scheduler 复用 scheduled_tasks 与 scheduled_task_runs，active occurrence 的
 旧 fork 数据库可能位于 0022_fleet_main_merge，包含 0018_thread_execution_bindings 和 0019_scheduled_execution 以及 scheduled_tasks.execution。必须保留原 revision ID 并提供兼容 merge/upgrade 路径，显式处置旧执行绑定和配置。禁止以新迁移目录覆盖旧库、直接删表或假设旧数据库等于全新数据库。
 
 依赖等待目前仅新增 JSON 字段和原生仓库合同。版本化迁移脚本仍待 Task6 完成，必须验证全新库与旧 fork 升级。架构入口：[ecs-native-architecture.md](ecs-native-architecture.md)。
+
+## 原生记忆数据位置
+
+记忆继续由原生 DeerMem 管理，不新增 ECS 记忆表。默认 DEER_FLOW_HOME 下 users/{user_id}/memory.json 保存共享摘要、revision 与时间；users/{user_id}/agents/{agent}/facts/{prefix}/{fact_id}.md 保存事实。事实写入沿用原生跨进程锁、revision 和恢复日志。省略 memory.backend_config.storage_path，保持正常原生用户路径。
+
+memory.backend_config.retrieval_index_path 指向每实例独立的本地目录。SQLite FTS 及 WAL/SHM 是可重建检索数据，不放 NAS，不作为事实来源。examples/ecs-native/native-memory.yaml 通过 DEER_FLOW_MEMORY_INDEX_PATH 提供此目录；只合并 memory 段到完整配置。实际两 Gateway 主干验证共享事实、原生工具/身份、另一用户隔离和两份不同的本地索引；真实云 NAS 仍待验收。
