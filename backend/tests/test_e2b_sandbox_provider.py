@@ -2147,6 +2147,30 @@ def test_reclaim_warm_pool_sandbox_handles_reconnect_exception(monkeypatch):
     assert "sb-broken" not in p._warm_pool
 
 
+def test_reclaim_warm_pool_sandbox_with_missing_sandbox_frees_slot(monkeypatch):
+    """Reclaiming a confirmed-missing warm sandbox frees the transition slot (#6540).
+
+    ``Sandbox.connect`` raising a trusted not-found error is a confirmed-gone
+    result: it must not leave an eviction tombstone behind that pins the
+    transitioning slot forever.
+    """
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+
+    def missing_sandbox(_sid, **_kw):
+        raise RuntimeError(FakeCommandsAPI.NOT_FOUND_MSG)
+
+    fake_cls.connect_factory = missing_sandbox
+    seed = p._stable_seed("t1", "u1")
+    p._warm_pool["sb-gone"] = (seed, 12345.0)
+
+    assert p._reclaim_warm_pool_sandbox("t1", user_id="u1") is None
+    assert "sb-gone" not in p._warm_pool
+    assert p._eviction_tombstones == set()
+    assert p._remote_ops_in_progress == set()
+    assert p._transitioning_slots == 0
+
+
 def test_acquire_discards_warm_sandbox_when_bootstrap_fails(monkeypatch):
     p = _make_provider()
     fake_cls = _install_fake_sdk(monkeypatch, p)
@@ -4658,6 +4682,59 @@ def test_capacity_retries_tombstone_until_warm_vm_is_destroyed(monkeypatch):
     assert p._transitioning_slots == 0
 
 
+def test_eviction_of_missing_sandbox_releases_local_capacity(monkeypatch):
+    """A control-plane confirmed missing warm sandbox frees its local slot (#6540).
+
+    The eviction sees a trusted not-found error from ``Sandbox.connect``, so
+    the transitioning slot is released instead of being retained behind a
+    tombstone that can never clear; the next acquire must succeed.
+    """
+    p = _make_provider(replicas=1, overflow_policy="reject")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+
+    sid = p.acquire("t1", user_id="u1")
+    p.release(sid)
+
+    def missing_sandbox(_sid, **_kw):
+        raise RuntimeError(FakeCommandsAPI.NOT_FOUND_MSG)
+
+    fake_cls.connect_factory = missing_sandbox
+
+    sid2 = p.acquire("t2", user_id="u2")
+
+    assert sid2 != sid
+    assert p._eviction_tombstones == set()
+    assert p._evictions_in_progress == set()
+    assert p._transitioning_slots == 0
+
+
+def test_tombstone_retry_of_missing_sandbox_frees_retained_slot(monkeypatch):
+    """Retrying a retained tombstone against a confirmed-missing VM frees the slot exactly once."""
+    p = _make_provider(replicas=1, overflow_policy="reject")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+
+    sid = p.acquire("t1", user_id="u1")
+    p.release(sid)
+    fake_cls.connect_factory = lambda _sid, **_kw: (_ for _ in ()).throw(RuntimeError("network down"))
+
+    with pytest.raises(SandboxCapacityExceededError) as excinfo:
+        p.acquire("t2", user_id="u2")
+    # A state-unknown failure keeps the slot retained, and the error reports it.
+    assert excinfo.value.transitioning == 1
+    assert p._eviction_tombstones == {sid}
+    assert p._transitioning_slots == 1
+
+    fake_cls.connect_factory = lambda _sid, **_kw: (_ for _ in ()).throw(RuntimeError(FakeCommandsAPI.NOT_FOUND_MSG))
+    assert p._evict_oldest_warm() == sid
+
+    assert p._eviction_tombstones == set()
+    assert p._evictions_in_progress == set()
+    assert p._transitioning_slots == 0
+
+    sid2 = p.acquire("t2", user_id="u2")
+    assert sid2 != sid
+
+
 def test_tombstone_eviction_has_one_retry_owner(monkeypatch):
     """Only one thread can retry a tombstone at a time."""
     p = _make_provider()
@@ -4721,6 +4798,44 @@ def test_shutdown_during_initial_eviction_reconnect_failure_tracks_vm(monkeypatc
     assert p._warm_pool == {}
     assert p._eviction_tombstones == set()
     assert p._evictions_in_progress == set()
+
+
+def test_shutdown_during_gone_sandbox_eviction_releases_slot_once(monkeypatch):
+    """Shutdown racing a confirmed-missing eviction leaves no retained slot.
+
+    The eviction's own cleanup must stay idempotent when shutdown has already
+    cleared the bookkeeping sets: no double slot release, no resurrected
+    tombstone.
+    """
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    p._warm_pool["warm-1"] = ("seed", time.time())
+
+    reconnect_started = threading.Event()
+    allow_failure = threading.Event()
+    calls = 0
+
+    def reconnect(_sid, **_kw):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            reconnect_started.set()
+            assert allow_failure.wait(timeout=2)
+        raise RuntimeError(FakeCommandsAPI.NOT_FOUND_MSG)
+
+    fake_cls.connect_factory = reconnect
+    eviction = threading.Thread(target=p._evict_oldest_warm)
+    eviction.start()
+    assert reconnect_started.wait(timeout=1)
+
+    p.shutdown()
+    allow_failure.set()
+    eviction.join(timeout=5)
+
+    assert p._warm_pool == {}
+    assert p._eviction_tombstones == set()
+    assert p._evictions_in_progress == set()
+    assert p._transitioning_slots == 0
 
 
 def test_capacity_reset_uses_destructive_shutdown_semantics(monkeypatch):
