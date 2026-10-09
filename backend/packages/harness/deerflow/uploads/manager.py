@@ -484,10 +484,12 @@ def list_files_in_dir(directory: Path) -> dict:
                 st = entry.stat(follow_symlinks=False)
             except OSError as exc:
                 # The entry can vanish between the scandir sweep and this stat
-                # (another worker deleting an upload, the staging sweep, ...).
+                # (the DELETE endpoint via delete_file_safe, possibly from
+                # another replica, or a sandbox process removing its own file).
                 # Same policy as the chmod path above: skip expected races,
                 # surface operational errors like EACCES.
                 if exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+                    logger.debug("Skipped upload entry that vanished mid-scan: %s", entry.path)
                     continue
                 raise
             files.append(

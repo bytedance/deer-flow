@@ -1,6 +1,7 @@
 """Tests for deerflow.uploads.manager — shared upload management logic."""
 
 import errno
+import logging
 import os
 import shutil
 import stat
@@ -451,7 +452,7 @@ class TestListFilesInDir:
         assert result["count"] == 4
         assert [f["filename"] for f in result["files"]] == [".env", ".upload-note.txt", "draft.part", "visible.txt"]
 
-    def test_skips_entries_vanishing_mid_scan(self, tmp_path, monkeypatch):
+    def test_skips_entries_vanishing_mid_scan(self, tmp_path, monkeypatch, caplog):
         (tmp_path / "kept.txt").write_text("kept")
         (tmp_path / "gone.txt").write_text("gone")
         with os.scandir(tmp_path) as it:
@@ -462,10 +463,12 @@ class TestListFilesInDir:
         )
         monkeypatch.setattr(os, "scandir", lambda path: _StaticScandir([real_entries["kept.txt"], vanished]))
 
-        result = list_files_in_dir(tmp_path)
+        with caplog.at_level(logging.DEBUG, logger="deerflow.uploads.manager"):
+            result = list_files_in_dir(tmp_path)
 
         assert result["count"] == 1
         assert result["files"][0]["filename"] == "kept.txt"
+        assert any("vanished mid-scan" in record.message and str(tmp_path / "gone.txt") in record.message for record in caplog.records)
 
     def test_stat_permission_error_still_propagates(self, tmp_path, monkeypatch):
         (tmp_path / "locked.txt").write_text("locked")
