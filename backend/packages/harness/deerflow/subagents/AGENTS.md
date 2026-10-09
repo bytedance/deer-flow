@@ -1,14 +1,12 @@
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
-Result-reader tests cover submission/completion/reopen/ToolNode on SQLite and TEST_POSTGRES_URI-gated isolated PostgreSQL; no paid models. Clean up the schema.
+Reader tests: submission/completion/reopen/ToolNode on SQLite and TEST_POSTGRES_URI-gated isolated PostgreSQL; no paid models. Clean up the schema.
 
 **JSON**: See README. Authorize before local metadata and reads; inaccessible paths stay UNVERIFIED.
 
-Apply each subagent's prompt overlay after assembling its full SystemMessage.
-Registry overrides must not mutate `BUILTIN_SUBAGENTS`.
-Direct returns use the compiled tool registry, including middleware tools. Match current-turn IDs in call order; error ToolMessages fail the task with outputs preserved.
-Durable batch specs store overlays as JSON and restore them before execution.
-`read_batch_item`: owner/thread checks; report/state/acceptance only; immutable positions, no status filter. Hash detects completion/retry/cancel; no snapshots/scheduling/specs. Bulk export is independent.
+Apply overlays after the full SystemMessage; registry overrides cannot mutate `BUILTIN_SUBAGENTS`. Batch specs restore JSON overlays before execution.
+Direct returns use the compiled registry (including middleware tools): match current-turn IDs in call order; error ToolMessages fail with outputs preserved.
+Bounded `read_batch_item`: owner/thread checks; report/state/acceptance only; immutable submission positions, no status filter. Continuation hash detects completion/retry/cancel; no snapshots/scheduling/specs; bulk export independent.
 
 `result_artifact` (nullable, migration 0033): cited RAG evidence commits with success under lease fencing; cancelled/failed/stale cannot publish; retry clears. Only full exports/selected reads expose bounded evidence. `batch_results.project_batch_result` validates evidence and hashes its detached allowlist; no raw artifacts/execution metadata. Share `BATCH_RESULT_ITEM_FIELDS`; HTTP preview/timestamps and saved-source policy stay separate. HTTP: thread/owner checks, one immutable position (absent/mismatch: 404), off-loop projection; no provider refetch. Test capture → worker → reopened SQLite → authorized export/selected read: `test_batch_rag_evidence.py`/`test_batch_results_acceptance.py`.
 Explicitly enabled nested tasks propagate report-bound omission IDs; filter and
