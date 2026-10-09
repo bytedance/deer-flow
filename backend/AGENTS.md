@@ -426,3 +426,11 @@ See `docs/` directory for detailed documentation:
 - [PATH_EXAMPLES.md](docs/PATH_EXAMPLES.md) - Path types and usage
 - [summarization.md](docs/summarization.md) - Context summarization
 - [plan_mode_usage.md](docs/plan_mode_usage.md) - Plan mode with TodoList
+
+Task6A isolates private executor migrations from native persistence. Production
+B/central require an already-compatible executor schema; outbound workers validate
+the same revision over credential-authenticated transport. Gateway checks preserved
+legacy Fleet intent immediately after native DB initialization, before checkpoint,
+recovery and scheduler activation. A schema upgrade is not permission to replay old
+intent. Inventory/disposition and stopped-writer rollback are documented in
+`docs/ecs-native-fork-integration.md`; cloud/ops gates remain separate.

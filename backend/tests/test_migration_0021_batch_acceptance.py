@@ -34,8 +34,9 @@ async def test_upgrade_and_downgrade_preserve_legacy_batch_item(tmp_path, source
                     "VALUES ('i','b','k',0,'p','succeeded',1,'old result',0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"
                 )
             )
-        await bootstrap.bootstrap_schema(engine, backend="sqlite")
-        await bootstrap.bootstrap_schema(engine, backend="sqlite")
+        # Audit reversible native DDL independently of the protected fork join.
+        await asyncio.to_thread(bootstrap._upgrade, cfg, bootstrap._FORWARD_COMPATIBLE_REVISION)
+        await asyncio.to_thread(bootstrap._upgrade, cfg, bootstrap._FORWARD_COMPATIBLE_REVISION)
         async with engine.connect() as conn:
             columns = await conn.run_sync(lambda sync: {col["name"] for col in sa.inspect(sync).get_columns("subagent_batch_items")})
             assert {"acceptance_criteria", "acceptance_verdict"} <= columns

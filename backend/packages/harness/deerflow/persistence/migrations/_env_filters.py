@@ -152,6 +152,11 @@ def include_object(object_, name, type_, reflected, compare_to):  # noqa: ARG001
     Signature matches alembic's ``include_object`` callable contract:
     ``(object, name, type_, reflected, compare_to)``.
     """
+    # Historical user-fork intent remains immutable until explicit disposition.
+    if type_ == "table" and (name == "thread_execution_bindings" or name.startswith("fleet_")):
+        return False
+    if type_ == "column" and name == "execution" and getattr(getattr(object_, "table", None), "name", None) == "scheduled_tasks":
+        return False
     if type_ == "table" and (name in LANGGRAPH_OWNED_TABLES or _is_extension_owned(name)):
         return False
     parent_table = getattr(object_, "table", None)

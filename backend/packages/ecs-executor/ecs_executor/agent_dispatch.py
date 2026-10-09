@@ -18,6 +18,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from ecs_executor.dispatch import PROTOCOL, WORKER_VERSION
+from ecs_executor.schema import SCHEMA_REVISION
 from ecs_executor.scope import arguments_sha256, mint_execution_scope, verify_execution_scope
 
 
@@ -334,17 +335,30 @@ def install_native_dispatch(app, host):
             if not credential or not hmac.compare_digest(request.headers.get("authorization", ""), "Bearer " + credential):
                 raise ValueError("Worker credential denied")
             args = await request.json()
-            if args.get("protocol") != PROTOCOL or args.get("worker_version") != host.pool.nodes[node].worker_version or args.get("mount_id") != mount_id or not isinstance(args.get("owner"), str) or not args["owner"]:
+            if (
+                args.get("schema_revision") != SCHEMA_REVISION
+                or args.get("protocol") != PROTOCOL
+                or args.get("worker_version") != host.pool.nodes[node].worker_version
+                or args.get("mount_id") != mount_id
+                or not isinstance(args.get("owner"), str)
+                or not args["owner"]
+            ):
                 raise ValueError("Worker protocol mismatch")
             operation = request.path_params["operation"]
             if operation == "bootstrap":
                 await host.maintain()
-                return JSONResponse({"renewed": True})
+                return JSONResponse({"schema_revision": SCHEMA_REVISION, "renewed": True})
             if operation == "poll":
                 await host.maintain()
                 owned = await asyncio.to_thread(host.pool.owned, node, args["owner"], kind="C")
                 claim = None if host.quiescing else await asyncio.to_thread(host.pool.claim, node, args["owner"], kind="C")
-                return JSONResponse({"owned": [{"job": job, "capability": sign_native_launch(job, credential)} for job in owned], "claim": {"job": claim, "capability": sign_native_launch(claim, credential)} if claim else None})
+                return JSONResponse(
+                    {
+                        "schema_revision": SCHEMA_REVISION,
+                        "owned": [{"job": job, "capability": sign_native_launch(job, credential)} for job in owned],
+                        "claim": {"job": claim, "capability": sign_native_launch(claim, credential)} if claim else None,
+                    }
+                )
             if operation == "notification":
                 from app.gateway.services import launch_mcp_task_notification_run
                 from app.mcp_tasks.errors import PermanentNotificationError
@@ -464,10 +478,14 @@ class NativeWorkerHost:
 
     async def request(self, operation, **args):
         response = await self.client.post(
-            f"{self.config['executor_url'].rstrip('/')}/api/native-workers/{self.config['node_id']}/{operation}", json={"protocol": PROTOCOL, "worker_version": WORKER_VERSION, "mount_id": self.mount_id, "owner": self.owner, **args}
+            f"{self.config['executor_url'].rstrip('/')}/api/native-workers/{self.config['node_id']}/{operation}",
+            json={"schema_revision": SCHEMA_REVISION, "protocol": PROTOCOL, "worker_version": WORKER_VERSION, "mount_id": self.mount_id, "owner": self.owner, **args},
         )
         response.raise_for_status()
-        return response.json()
+        payload = response.json()
+        if operation in {"bootstrap", "poll"} and payload.get("schema_revision") != SCHEMA_REVISION:
+            raise RuntimeError("Executor schema capability mismatch")
+        return payload
 
     async def report(self, job, changes):
         current = await self.request("get", job_id=job["id"], generation=job["generation"])

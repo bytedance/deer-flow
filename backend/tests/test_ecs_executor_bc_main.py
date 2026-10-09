@@ -104,7 +104,9 @@ async def test_shared_notification_claim_forwarding_uses_canonical_task_not_send
 
             async def request(operation, **kwargs):
                 response = await client.post(
-                    f"/api/native-workers/sender/{operation}", headers={"Authorization": "Bearer " + secret}, json={"protocol": PROTOCOL, "worker_version": "1", "mount_id": mount, "owner": "notification-claim-owner", **kwargs}
+                    f"/api/native-workers/sender/{operation}",
+                    headers={"Authorization": "Bearer " + secret},
+                    json={"schema_revision": "e0001_execution_ledger", "protocol": PROTOCOL, "worker_version": "1", "mount_id": mount, "owner": "notification-claim-owner", **kwargs},
                 )
                 response.raise_for_status()
                 return response.json()
@@ -192,7 +194,7 @@ def _setup_dependency_pool(backend, tmp_path, environment, native, owner, proces
         "discovery_credential_env": "BC_DISCOVERY",
         "artifact_root": native["artifact_root"],
         "workspace_root": str(tmp_path / "nas"),
-        "metadata_database_url": environment["C_NATIVE_EXECUTOR_DATABASE_URL"],
+        "metadata_database_url": environment["C_NATIVE_DATABASE_URL"].replace("postgresql://", "postgresql+psycopg://"),
         "artifact_base_url": f"http://127.0.0.1:{central_port}",
         "port": port,
     }
@@ -205,7 +207,7 @@ def _setup_dependency_pool(backend, tmp_path, environment, native, owner, proces
                 "executor_url": f"http://127.0.0.1:{port}",
                 "artifact_root": native["artifact_root"],
                 "workspace_root": str(tmp_path / "nas"),
-                "metadata_database_url": environment["C_NATIVE_EXECUTOR_DATABASE_URL"],
+                "metadata_database_url": environment["C_NATIVE_DATABASE_URL"].replace("postgresql://", "postgresql+psycopg://"),
             }
         )
     )
@@ -268,7 +270,7 @@ def _run_dependency_main(client, headers, owner, tmp_path, environment, suffix, 
         )
         assert created.status_code in {200, 201}, created.text[:300]
         task_id = created.json()["id"]
-        observation = create_engine(environment["C_NATIVE_EXECUTOR_DATABASE_URL"])
+        observation = create_engine(environment["C_NATIVE_DATABASE_URL"].replace("postgresql://", "postgresql+psycopg://"))
         try:
             for _ in range(180):
                 with observation.connect() as connection:
@@ -298,10 +300,11 @@ def _run_dependency_main(client, headers, owner, tmp_path, environment, suffix, 
         assert started.status_code == 200, started.text[:300]
         source_id = started.json()["run_id"]
     sql = create_engine(environment["C_NATIVE_EXECUTOR_DATABASE_URL"])
+    native_sql = create_engine(environment["C_NATIVE_DATABASE_URL"].replace("postgresql://", "postgresql+psycopg://"))
     try:
         for _ in range(480):
-            with sql.connect() as connection:
-                runs = list(connection.execute(text("select run_id,status,goal_verdict from runs where thread_id=:thread order by created_at"), {"thread": thread}).mappings())
+            with sql.connect() as connection, native_sql.connect() as native_connection:
+                runs = list(native_connection.execute(text("select run_id,status,goal_verdict from runs where thread_id=:thread order by created_at"), {"thread": thread}).mappings())
                 jobs = [row[0] for row in connection.execute(text("select record from ecs_execution_jobs where record->'native'->>'thread_id'=:thread or record->>'thread_id'=:thread"), {"thread": thread})]
             if len(runs) >= 2 and runs[-1]["status"] not in {"pending", "running"}:
                 break
@@ -320,9 +323,9 @@ def _run_dependency_main(client, headers, owner, tmp_path, environment, suffix, 
             assert runtime["goal_objective"] == objective
             assert runtime["task_id"] == task_id and runtime["occurrence_id"] == occurrence_id
             assert continuation["native"]["execution"]["scheduled_task_runtime"] == runtime
-            with sql.connect() as connection:
-                final_occurrences = list(connection.execute(text("select id,run_id,status,launch_accounted,occurrence_seq from scheduled_task_runs where task_id=:id"), {"id": task_id}).mappings())
-                final_task = connection.execute(text("select status,run_count from scheduled_tasks where id=:id"), {"id": task_id}).mappings().one()
+            with sql.connect() as connection, native_sql.connect() as native_connection:
+                final_occurrences = list(native_connection.execute(text("select id,run_id,status,launch_accounted,occurrence_seq from scheduled_task_runs where task_id=:id"), {"id": task_id}).mappings())
+                final_task = native_connection.execute(text("select status,run_count from scheduled_tasks where id=:id"), {"id": task_id}).mappings().one()
             assert len(final_occurrences) == 1 and final_occurrences[0]["id"] == occurrence_id
             assert final_occurrences[0]["run_id"] == continuation["native"]["run_id"] and final_occurrences[0]["status"] == "success"
             assert final_occurrences[0]["launch_accounted"] and final_occurrences[0]["occurrence_seq"] == 1
@@ -343,6 +346,7 @@ def _run_dependency_main(client, headers, owner, tmp_path, environment, suffix, 
         print("Native C→ordinary MCP B→C: one original goal, two native Runs, one real Docker B, same 2CPU/4GiB node with one dynamic slot, native present_files delivery.")
     finally:
         sql.dispose()
+        native_sql.dispose()
 
 
 @pytest.mark.asyncio

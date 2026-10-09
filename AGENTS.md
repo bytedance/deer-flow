@@ -242,3 +242,9 @@ These apply repo-wide; module guides own the module-specific detail.
   `scripts/verify_versions.sh <ver>` to catch drift early. See [RELEASING.md](RELEASING.md).
 - **Don't edit `CLAUDE.md`** — it only contains `@AGENTS.md`. All agent guidance changes
   belong here in `AGENTS.md`; `CLAUDE.md` is a thin import shim.
+
+Native ECS executor schema is independently versioned in a dedicated database.
+Historical user-fork Fleet intent is preserved and quarantines Gateway activation;
+never clear it or replay it to make startup succeed. See
+[the audited integration guide](docs/ecs-native-fork-integration.md) and full
+[path disposition](docs/ecs-native-fork-disposition.v1.json).

@@ -166,6 +166,8 @@ extensions = ["broken-extension @ {missing_extension.as_uri()}"]
         encoding="utf-8",
     )
     environment = os.environ.copy()
+    # Isolated synchronization is independent of the caller's no-sync gate.
+    environment.pop("UV_NO_SYNC", None)
     environment["UV_CACHE_DIR"] = str(tmp_path / "uv-cache")
     subprocess.run(["uv", "lock"], cwd=project, env=environment, check=True, capture_output=True)
     missing_extension.unlink()
@@ -212,6 +214,8 @@ def test_root_extension_shortcuts_are_cross_platform_and_keep_trust_confirmation
 @_skip_without_make
 def test_root_extension_shortcuts_reject_ambient_environment_arguments() -> None:
     environment = os.environ.copy()
+    # Isolated synchronization is independent of the caller's no-sync gate.
+    environment.pop("UV_NO_SYNC", None)
 
     for target, variable in (
         ("extension-install", "SOURCE"),

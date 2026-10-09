@@ -270,3 +270,11 @@ fails browser operations 503. See package README and `test_ecs_native_browser.py
 Only central provider teardown is independently registered in Gateway cleanup.
 Worker teardown belongs to native host release after native finalizers, including
 deferred drain; never close its browser through a second cleanup callback.
+
+`deps` performs legacy execution quarantine immediately after native persistence
+initialization and before checkpoint/recovery/scheduler startup. Retained historical
+Fleet bindings, non-NULL schedule execution JSON or Fleet tables refuse activation
+with a disposition link; no disabled-feature bypass or local fallback exists.
+Native central dispatch requires the dedicated executor database's current revision
+and shape; startup never calls `create_all`. Workers require the same schema
+capability over their existing authenticated outbound channel.

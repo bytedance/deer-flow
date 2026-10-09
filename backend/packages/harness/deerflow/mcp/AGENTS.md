@@ -72,3 +72,10 @@
 
 - Personal MCP configs live under the authenticated user root (`user_config.py`), use literal values, and never enter the deployment tool cache. `user_tools.py` guards owner and current revision before every call. Runtime server names bind owner/name/revision; durable task `driver_data.connection_scope` records personal or deployment ownership at submission, and background calls resolve a personal key only in the persisted task owner's file. Older rows without that field are deployment-owned. When a deployment name matches a personal runtime name, Agent assembly omits the personal tool rather than exposing two tools under one name; an already submitted personal task still uses its recorded personal scope. Keep catalog IDs stable across edits; never fall back by display name.
 - Personal definitions without `personal_public_network: true` require current administrator authority at discovery and every tool/durable call. `personal_access.py` uses a host-installed async lookup, never a captured role or cached decision; absent/failed lookup denies privileged connections. The Gateway binds the lookup to fresh account records on its database-owning loop for its lifespan. Deployment connections are unaffected. This is admission control, not termination of operations already admitted before a role change.
+
+Persistent and background StructuredTool wrappers publish a concrete injected
+`Runtime` annotation before construction. A `Runtime | None` annotation is not
+recognized by injected-argument recovery and can silently remove server runtime
+identity. Preserve hidden runtime and native incarnation validation; never expose
+runtime as a public model argument. `test_mcp_session_pool` covers the real local
+ToolNode path without old Fleet workspace hooks.

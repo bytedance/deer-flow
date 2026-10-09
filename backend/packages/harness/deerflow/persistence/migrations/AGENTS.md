@@ -178,3 +178,17 @@ on installs that never enabled it. The convention is:
 - `persistence/bootstrap.py` — `bootstrap_schema(engine, backend=...)`, the three-branch provisioning decision, locked revision validation, and the narrow 0019 forward-compatibility exception
 - `extensions/loader.py::load_extensions` — registers each spec's `table_prefix` with `register_extension_table_prefix()`
 - Tests: `tests/test_persistence_bootstrap.py` (branches), `tests/test_persistence_bootstrap_concurrency.py` (concurrency), `tests/test_persistence_bootstrap_regression.py` (issue #3682), `tests/test_persistence_migrations_env.py` (filter, including extension-owned tables), `tests/test_extension_loader.py::TestTablePrefixRegistration` (spec-to-filter wiring), `tests/blocking_io/test_persistence_bootstrap.py` (asyncio.to_thread anchor), `tests/test_migration_0004_run_ownership_dedupe.py` + `tests/test_migration_0007_scheduled_run_active_dedupe.py` (dedupe-before-unique-index pre-steps), `tests/test_migration_0025_repair_run_change_seq.py` (issue #5516 skipped-revision heal)
+
+## Audited historical user-fork join
+
+Current integrated head is `0035_native_fork_compatibility`, joining native
+`0034_run_event_seq_watermark` with preserved `0022_fleet_main_merge`. Historical
+`0018_thread_execution_bindings` -> `0019_scheduled_execution` retains its exact
+parent at `0017_personal_access_tokens`; `0022` retains both historical parents.
+No shipped native ancestor is reparented. Legacy table/JSON remains outside active
+ORM metadata and is excluded from autogenerate deletion. Gateway activation is
+quarantined when old intent/Fleet tables remain; no automatic conversion, data
+deletion or downgrade exists. The fresh hybrid ORM bootstrap need not create the
+unused historical table/column; a real Alembic fresh upgrade does create them.
+Both have no intent to replay. Executor metadata belongs in a dedicated database
+and private Alembic chain, never `Base.metadata`. See the root integration guide.

@@ -102,7 +102,17 @@ async def test_real_postgres_tcp_two_workers_native_queue(tmp_path, monkeypatch)
         mapped = (await docker.checked("port", pg_name, "5432/tcp")).decode().strip()
         pg_port = int(mapped.rsplit(":", 1)[1])
         db = f"postgresql+psycopg://postgres:{password}@127.0.0.1:{pg_port}/postgres"
-        store = JobStore(db)
+        # Provision the two task-owned databases before schema admission.
+        for _ in range(100):
+            try:
+                await docker.checked("exec", pg_name, "pg_isready", "-U", "postgres")
+                break
+            except Exception:
+                await asyncio.sleep(0.1)
+        else:
+            raise AssertionError("Task-owned PostgreSQL readiness failed")
+        await docker.checked("exec", pg_name, "createdb", "-U", "postgres", "execution")
+        store = JobStore(db.rsplit("/", 1)[0] + "/execution")
         for _ in range(100):
             try:
                 await asyncio.to_thread(store.initialize)
@@ -129,7 +139,7 @@ async def test_real_postgres_tcp_two_workers_native_queue(tmp_path, monkeypatch)
         node = {"cpu_millis": 1000, "memory_mib": 256, "resident_cpu_millis": 500, "resident_memory_mib": 128, "max_concurrency": 1, "profiles": ["small"], "kinds": ["B", "C"]}
         config = {
             "mode": "pool",
-            "database_url": db,
+            "database_url": db.rsplit("/", 1)[0] + "/execution",
             "audience": "executor",
             "profiles": {"small": {"image": "alpine:3.20", "cpu_millis": 500, "memory_mib": 128}},
             "user_profiles": {"alice": ["small"]},

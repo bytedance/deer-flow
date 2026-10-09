@@ -37,7 +37,10 @@ class JobStore:
         self.engine = create_engine(url)
 
     def initialize(self):
-        _METADATA.create_all(self.engine)
+        """Explicit test/local bootstrap; production entrypoints use require_schema."""
+        from ecs_executor.schema import upgrade_schema
+
+        upgrade_schema(self.engine)
 
     def get(self, job_id: str) -> dict[str, Any]:
         with self.engine.connect() as connection:

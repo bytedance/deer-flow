@@ -99,7 +99,7 @@ def _native_http_acceptance(tmp_path, *, dependency_mode=False, scheduled_mode=F
     artifacts.mkdir(parents=True)
     pg_port, redis_port, central_port, worker_port = [_port() for _ in range(4)]
     environment["C_NATIVE_DATABASE_URL"] = f"postgresql://postgres:{password}@127.0.0.1:{pg_port}/postgres"
-    environment["C_NATIVE_EXECUTOR_DATABASE_URL"] = environment["C_NATIVE_DATABASE_URL"].replace("postgresql://", "postgresql+psycopg://")
+    environment["C_NATIVE_EXECUTOR_DATABASE_URL"] = environment["C_NATIVE_DATABASE_URL"].replace("postgresql://", "postgresql+psycopg://").rsplit("/", 1)[0] + "/execution"
     environment["C_NATIVE_REDIS_URL"] = f"redis://127.0.0.1:{redis_port}/0"
     prefix = "deer-c-main-" + run_id
     try:
@@ -114,6 +114,15 @@ def _native_http_acceptance(tmp_path, *, dependency_mode=False, scheduled_mode=F
             time.sleep(0.5)
         else:
             raise AssertionError("Test PostgreSQL failed readiness")
+        # The owned executor DB is independent of native ORM/checkpoints.
+        subprocess.run(["docker", "exec", names[0], "createdb", "-U", "postgres", "execution"], check=True, capture_output=True)
+        from ecs_executor.schema import upgrade_schema
+
+        ledger_engine = create_engine(environment["C_NATIVE_EXECUTOR_DATABASE_URL"])
+        try:
+            upgrade_schema(ledger_engine)
+        finally:
+            ledger_engine.dispose()
         example = yaml.safe_load((backend.parent / "config.example.yaml").read_text())
         config = {
             "models": [model],
@@ -248,7 +257,7 @@ def _native_http_acceptance(tmp_path, *, dependency_mode=False, scheduled_mode=F
             messages = peer_state.get("values", {}).get("messages", [])
             (tmp_path / "peer-stream.txt").write_text(peer.text)
             if result["status"] != "success":
-                diagnostic_engine = create_engine(environment["C_NATIVE_EXECUTOR_DATABASE_URL"])
+                diagnostic_engine = create_engine(environment["C_NATIVE_DATABASE_URL"].replace("postgresql://", "postgresql+psycopg://"))
                 with diagnostic_engine.connect() as connection:
                     row = connection.execute(text("select status,error,stop_reason,owner_worker_id,cancel_action from runs where run_id=:id"), {"id": admitted_run}).mappings().one()
                     diagnostic = str(dict(row))[:2000]
@@ -264,15 +273,16 @@ def _native_http_acceptance(tmp_path, *, dependency_mode=False, scheduled_mode=F
             artifact = tmp_path / "nas/users" / owner / "threads" / thread / "user-data/outputs/native_c_main.txt"
             assert "338350" in artifact.read_text() and "Linux" in artifact.read_text()
             sql = create_engine(environment["C_NATIVE_EXECUTOR_DATABASE_URL"])
-            with sql.connect() as connection:
+            native_sql = create_engine(environment["C_NATIVE_DATABASE_URL"].replace("postgresql://", "postgresql+psycopg://"))
+            with sql.connect() as connection, native_sql.connect() as native_connection:
                 jobs = [row[0] for row in connection.execute(text("select record from ecs_execution_jobs"))]
                 assert len(jobs) == 1 and jobs[0]["native"]["run_id"] == admitted_run and jobs[0]["node_id"] == "one"
-                assert connection.execute(text("select count(*) from runs where run_id=:id"), {"id": admitted_run}).scalar_one() == 1
+                assert native_connection.execute(text("select count(*) from runs where run_id=:id"), {"id": admitted_run}).scalar_one() == 1
                 worker_identity = re.search(r"Run lease heartbeat started for worker ([^\n]+)", (tmp_path / "worker.log").read_text()).group(1)
                 central_identity = re.search(r"Run lease heartbeat started for worker ([^\n]+)", (tmp_path / "central.log").read_text()).group(1)
-                native_owner = connection.execute(text("select owner_worker_id from runs where run_id=:id"), {"id": admitted_run}).scalar_one()
+                native_owner = native_connection.execute(text("select owner_worker_id from runs where run_id=:id"), {"id": admitted_run}).scalar_one()
                 assert native_owner == worker_identity and native_owner != central_identity
-                assert connection.execute(text("select count(*) from run_events where run_id=:id"), {"id": admitted_run}).scalar_one() > 0
+                assert native_connection.execute(text("select count(*) from run_events where run_id=:id"), {"id": admitted_run}).scalar_one() > 0
             containers = json.loads(
                 subprocess.run(
                     ["docker", "inspect", *subprocess.run(["docker", "ps", "-q", "--filter", "name=" + prefix + "-worker"], capture_output=True, text=True, check=True).stdout.split()], capture_output=True, text=True, check=True
@@ -301,7 +311,7 @@ def _native_http_acceptance(tmp_path, *, dependency_mode=False, scheduled_mode=F
             assert continuation.status_code == 200, continuation.text[:200]
             cancelled_run = continuation.json()["run_id"]
             for _ in range(30):
-                with sql.connect() as connection:
+                with sql.connect() as connection, native_sql.connect() as native_connection:
                     count = connection.execute(text("select count(*) from ecs_execution_jobs where record->'native'->>'run_id'=:id"), {"id": cancelled_run}).scalar_one()
                 if count == 1:
                     break
@@ -318,7 +328,7 @@ def _native_http_acceptance(tmp_path, *, dependency_mode=False, scheduled_mode=F
             cancel = client.post(f"/api/threads/{thread}/runs/{cancelled_run}/cancel", headers=headers)
             assert cancel.status_code in (202, 204), cancel.text[:200]
             for _ in range(480):
-                with sql.connect() as connection:
+                with sql.connect() as connection, native_sql.connect() as native_connection:
                     stopped = connection.execute(text("select record from ecs_execution_jobs where record->'native'->>'run_id'=:id"), {"id": cancelled_run}).scalar_one()
                 if stopped.get("physical_stopped"):
                     break
@@ -333,6 +343,7 @@ def _native_http_acceptance(tmp_path, *, dependency_mode=False, scheduled_mode=F
                 "central cancel reached worker, native finally drained, exact sandbox physically STOPped before dynamic reservation release."
             )
             sql.dispose()
+            native_sql.dispose()
     finally:
         for process in reversed(processes):
             process.terminate()
@@ -430,16 +441,18 @@ def _run_memory_main(client, worker, headers, owner, tmp_path, environment, run_
     assert all(path.is_file() for path in indexes) and not indexes[0].samefile(indexes[1])
     assert not list(root.rglob("*.sqlite3*")), "Shared canonical home contains a derived SQLite/WAL file"
     sql = create_engine(environment["C_NATIVE_EXECUTOR_DATABASE_URL"])
+    native_sql = create_engine(environment["C_NATIVE_DATABASE_URL"].replace("postgresql://", "postgresql+psycopg://"))
     try:
-        with sql.connect() as connection:
+        with sql.connect() as connection, native_sql.connect() as native_connection:
             jobs = list(connection.execute(text("select record from ecs_execution_jobs")).scalars())
             assert len(jobs) == 1 and jobs[0]["native"]["run_id"] == admitted_run and jobs[0]["node_id"] == "one"
             worker_identity = re.search(r"Run lease heartbeat started for worker ([^\n]+)", (tmp_path / "worker.log").read_text()).group(1)
-            assert connection.execute(text("select owner_worker_id from runs where run_id=:id"), {"id": admitted_run}).scalar_one() == worker_identity
-            assert connection.execute(text("select count(*) from runs where run_id=:id"), {"id": admitted_run}).scalar_one() == 1
-            assert connection.execute(text("select count(*) from run_events where run_id=:id"), {"id": admitted_run}).scalar_one() > 0
+            assert native_connection.execute(text("select owner_worker_id from runs where run_id=:id"), {"id": admitted_run}).scalar_one() == worker_identity
+            assert native_connection.execute(text("select count(*) from runs where run_id=:id"), {"id": admitted_run}).scalar_one() == 1
+            assert native_connection.execute(text("select count(*) from run_events where run_id=:id"), {"id": admitted_run}).scalar_one() > 0
     finally:
         sql.dispose()
+        native_sql.dispose()
     print("Native memory receipt: one remote original Run; actual memory_search/get/add and file delivery; shared per-owner Markdown facts, peer revision visibility, other-owner isolation; two local FTS indexes and no NAS SQLite/WAL.")
 
 
@@ -593,19 +606,21 @@ def _run_browser_main(client, worker, headers, owner, tmp_path, environment, run
             assert any(isinstance(resumed.recv(timeout=10), bytes) for _ in range(8))
         assert len(signals) == 2
         sql = create_engine(environment["C_NATIVE_EXECUTOR_DATABASE_URL"])
+        native_sql = create_engine(environment["C_NATIVE_DATABASE_URL"].replace("postgresql://", "postgresql+psycopg://"))
         try:
-            with sql.connect() as connection:
+            with sql.connect() as connection, native_sql.connect() as native_connection:
                 jobs = list(connection.execute(text("select record from ecs_execution_jobs")).scalars())
                 assert len(jobs) == 0 if control_only else len(jobs) == 1 and jobs[0]["native"]["run_id"] == admitted and jobs[0]["node_id"] == "one"
                 worker_identity = re.search(r"Run lease heartbeat started for worker ([^\n]+)", (tmp_path / "worker.log").read_text()).group(1)
                 if control_only:
-                    assert connection.execute(text("select count(*) from runs where thread_id=:thread"), {"thread": thread}).scalar_one() == 0
+                    assert native_connection.execute(text("select count(*) from runs where thread_id=:thread"), {"thread": thread}).scalar_one() == 0
                 else:
-                    assert connection.execute(text("select owner_worker_id from runs where run_id=:id"), {"id": admitted}).scalar_one() == worker_identity
-                    assert connection.execute(text("select count(*) from run_events where run_id=:id"), {"id": admitted}).scalar_one() > 0
+                    assert native_connection.execute(text("select owner_worker_id from runs where run_id=:id"), {"id": admitted}).scalar_one() == worker_identity
+                    assert native_connection.execute(text("select count(*) from run_events where run_id=:id"), {"id": admitted}).scalar_one() > 0
                 assert connection.execute(text("select count(*) from ecs_native_affinities where user_id=:owner and thread_id=:thread"), {"owner": owner, "thread": thread}).scalar_one() == 1
         finally:
             sql.dispose()
+            native_sql.dispose()
         assert client.delete(f"/api/threads/{thread}", headers=ui_headers).status_code in (200, 204)
         for _ in range(80):
             fresh = other.post(f"/api/threads/{other_thread}/browser/navigate", headers=other_ui, json={"url": page_url})

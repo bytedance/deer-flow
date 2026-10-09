@@ -18,7 +18,9 @@ class Scheduling:
         if not nodes or lease_seconds < 120:
             raise ValueError("A fixed pool and at least 120 seconds of lease/cleanup safety are required")
         self.store, self.nodes, self.lease_seconds = store, nodes, lease_seconds
-        _METADATA.create_all(store.engine)
+        from ecs_executor.schema import require_schema
+
+        require_schema(store.engine)
         with self.transaction() as connection:
             for node_id, node in nodes.items():
                 old = connection.execute(select(_NODES.c.record).where(_NODES.c.id == node_id)).scalar_one_or_none()

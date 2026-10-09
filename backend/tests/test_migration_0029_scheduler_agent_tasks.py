@@ -33,7 +33,7 @@ pytestmark = pytest.mark.asyncio
 
 async def test_0029_remains_in_the_single_migration_chain():
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
-    assert script.get_heads() == [CURRENT_HEAD]
+    assert script.get_heads() == ["0035_native_fork_compatibility"]
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     assert script.get_revision(NEXT).down_revision == REVISION
     assert len(REVISION) <= 32

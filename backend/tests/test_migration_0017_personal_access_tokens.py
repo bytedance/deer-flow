@@ -65,7 +65,7 @@ async def test_pat_migration_upgrade_downgrade_cycle(tmp_path: Path) -> None:
         # Alembic's env.py drives migrations with its own asyncio.run, so the
         # sync command API must run off the test loop (same wrapper the
         # production bootstrap uses).
-        await asyncio.to_thread(alembic_command.upgrade, cfg, "head")
+        await asyncio.to_thread(alembic_command.upgrade, cfg, "0034_run_event_seq_watermark")
 
         tables = await _inspect(engine, _table_names)
         assert "personal_access_tokens" in tables
@@ -86,7 +86,7 @@ async def test_pat_migration_upgrade_downgrade_cycle(tmp_path: Path) -> None:
         assert "personal_access_tokens" not in tables_after_down
 
         # Upgrade again recreates it (idempotent round trip).
-        await asyncio.to_thread(alembic_command.upgrade, cfg, "head")
+        await asyncio.to_thread(alembic_command.upgrade, cfg, "0034_run_event_seq_watermark")
         tables_after_up = await _inspect(engine, _table_names)
         assert "personal_access_tokens" in tables_after_up
     finally:

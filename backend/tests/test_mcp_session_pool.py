@@ -3121,3 +3121,48 @@ async def test_mcp_tools_routed_to_source_server_with_prefix_overlap():
     routing = dict(routed)
     assert routing["web_scraper_search"] == "web_scraper", f"tool mis-routed to {routing.get('web_scraper_search')!r}, expected 'web_scraper'"
     assert routing["web_open"] == "web"
+
+
+@pytest.mark.asyncio
+async def test_local_persistent_toolnode_preserves_runtime_without_model_schema_change():
+    from langchain_core.messages import AIMessage
+    from langchain_core.tools import StructuredTool
+    from langgraph.graph import MessagesState, StateGraph
+    from langgraph.prebuilt import ToolNode
+    from pydantic import BaseModel
+
+    from deerflow.mcp.tools import _make_session_pool_tool
+    from deerflow.tools.sync import make_sync_tool_wrapper
+
+    class Args(BaseModel):
+        value: str
+
+    session = AsyncMock()
+    session.call_tool.return_value = CallToolResult(content=[TextContent(type="text", text="Local-result")], isError=False)
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=session)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    seen = []
+
+    async def interceptor(request, handler):
+        seen.append(request.runtime)
+        return await handler(request)
+
+    raw = StructuredTool(name="srv_act", description="Local persistent", args_schema=Args, coroutine=AsyncMock())
+    with patch("langchain_mcp_adapters.sessions.create_session", return_value=cm):
+        tool = _make_session_pool_tool(raw, "srv", {"transport": "streamable_http", "url": "http://example.invalid/mcp"}, tool_interceptors=[interceptor])
+        tool.func = make_sync_tool_wrapper(tool.coroutine, tool.name)
+        assert tool.tool_call_schema.model_json_schema()["properties"] == Args.model_json_schema()["properties"]
+        graph = StateGraph(MessagesState, context_schema=dict)
+        graph.add_node("tools", ToolNode([tool]))
+        graph.set_entry_point("tools")
+        graph.set_finish_point("tools")
+        result = await graph.compile().ainvoke(
+            {"messages": [AIMessage(content="", tool_calls=[{"name": tool.name, "id": "Local-call", "args": {"value": "Local-value"}, "type": "tool_call"}])]},
+            context={"user_id": "Local-user", "thread_id": "Local-thread", "run_id": "Local-run", "thread_incarnation": "a" * 32},
+        )
+        assert seen[0].context == {"user_id": "Local-user", "thread_id": "Local-thread", "run_id": "Local-run", "thread_incarnation": "a" * 32}
+        assert seen[0].tool_call_id == "Local-call"
+        assert "Local-result" in str(result["messages"][-1].content)
+        session.call_tool.assert_awaited_once()
+    await get_session_pool().close_all()

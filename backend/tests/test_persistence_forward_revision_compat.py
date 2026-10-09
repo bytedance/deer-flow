@@ -46,6 +46,8 @@ def _url(tmp_path: Path, name: str) -> str:
 
 def _postgres_url(url: str) -> str:
     parts = urlsplit(url)
+    if parts.scheme in {"postgres", "postgresql"}:
+        parts = parts._replace(scheme="postgresql+asyncpg")
     query = urlencode([(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True) if key not in {"sslmode", "channel_binding"}])
     return urlunsplit(parts._replace(query=query))
 

@@ -25,7 +25,7 @@ pytestmark = pytest.mark.asyncio
 
 async def test_0034_is_the_single_migration_head():
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
-    assert script.get_heads() == [REVISION]
+    assert script.get_heads() == ["0035_native_fork_compatibility"]
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     assert len(REVISION) <= 32
 

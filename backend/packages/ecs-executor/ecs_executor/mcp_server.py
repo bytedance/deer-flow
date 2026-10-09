@@ -131,7 +131,9 @@ def main():
         raise ValueError("ECS_EXECUTOR_CONFIG must name an operator configuration file")
     config = json.loads(Path(path).read_text(encoding="utf-8"))
     store = JobStore(config["database_url"])
-    store.initialize()
+    from ecs_executor.schema import require_schema
+
+    require_schema(store.engine)
     jobs = ExecutionJobs(
         store,
         secret=os.environ["ECS_EXECUTOR_SCOPE_SECRET"].encode(),

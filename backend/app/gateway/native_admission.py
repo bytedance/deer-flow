@@ -208,7 +208,7 @@ async def prepare_native_host(app, startup_config):
     config = snapshot.native_config if snapshot is not None else json.loads(Path(path).read_text(encoding="utf-8"))
     if config.get("enabled") is not True:
         return None
-    from ecs_executor.agent_dispatch import _AFFINITY_METADATA, NativeDispatchHost, NativeWorkerHost, install_native_dispatch
+    from ecs_executor.agent_dispatch import NativeDispatchHost, NativeWorkerHost, install_native_dispatch
 
     if not startup_config.deployment.multi_instance or startup_config.database.backend != "postgres" or not startup_config.run_ownership.heartbeat_enabled or startup_config.run_events.backend != "db":
         raise ValueError("Enabled native dispatch requires native multi-instance PostgreSQL/events/ownership")
@@ -222,8 +222,9 @@ async def prepare_native_host(app, startup_config):
         store = JobStore(os.environ[config["database_url_env"]])
         if store.engine.dialect.name != "postgresql":
             raise ValueError("Native pool requires PostgreSQL")
-        await asyncio.to_thread(store.initialize)
-        await asyncio.to_thread(_AFFINITY_METADATA.create_all, store.engine)
+        from ecs_executor.schema import require_schema
+
+        await asyncio.to_thread(require_schema, store.engine)
         nodes = {key: Node.model_validate(value) for key, value in config["nodes"].items()}
         if config["native_node"] not in nodes or nodes[config["native_node"]].max_concurrency != 1 or "C" not in nodes[config["native_node"]].kinds:
             raise ValueError("Native affinity requires one fixed serial worker")

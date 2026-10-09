@@ -13,6 +13,7 @@ import httpx
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from ecs_executor.schema import SCHEMA_REVISION
 from ecs_executor.worker import LocalWorker
 
 PROTOCOL = "ecs-executor-1"
@@ -43,14 +44,21 @@ def install_dispatch(app, pool, credentials, artifact_root):
             if node not in credentials or not hmac.compare_digest(request.headers.get("authorization", ""), "Bearer " + credentials[node]):
                 return JSONResponse({"error": "Unauthorized worker"}, status_code=403)
             args = await request.json()
-            if args.get("protocol") != PROTOCOL or args.get("worker_version") != pool.nodes[node].worker_version or args.get("mount_id") != mount_id or not isinstance(args.get("owner"), str) or not args["owner"]:
+            if (
+                args.get("schema_revision") != SCHEMA_REVISION
+                or args.get("protocol") != PROTOCOL
+                or args.get("worker_version") != pool.nodes[node].worker_version
+                or args.get("mount_id") != mount_id
+                or not isinstance(args.get("owner"), str)
+                or not args["owner"]
+            ):
                 raise ValueError("Worker protocol or shared mount verification failed")
             operation = request.path_params["operation"]
             if operation == "poll":
                 await asyncio.to_thread(pool.store.expire_staged)
                 owned = await asyncio.to_thread(pool.owned, node, args["owner"], kind="B")
                 claim = await asyncio.to_thread(pool.claim, node, args["owner"], kind="B")
-                return JSONResponse({"owned": owned, "claim": claim})
+                return JSONResponse({"schema_revision": SCHEMA_REVISION, "owned": owned, "claim": claim})
             job = await asyncio.to_thread(pool.store.get, args["job_id"])
             if job.get("node_id") != node or job.get("worker_owner") != args["owner"] or job.get("generation") != args.get("generation"):
                 raise ValueError("Worker assignment fence mismatch")
@@ -78,12 +86,15 @@ class OutboundStore:
         self.records, self.claimed = {}, None
 
     def request(self, operation, **args):
-        response = self.client.post(f"{self.url}/workers/{self.node_id}/{operation}", json={"protocol": PROTOCOL, "worker_version": WORKER_VERSION, "mount_id": self.mount_id, "owner": self.owner, **args})
+        response = self.client.post(f"{self.url}/workers/{self.node_id}/{operation}", json={"schema_revision": SCHEMA_REVISION, "protocol": PROTOCOL, "worker_version": WORKER_VERSION, "mount_id": self.mount_id, "owner": self.owner, **args})
         if response.status_code == 409:
             raise RuntimeError("Worker snapshot changed; retry")
         if response.status_code != 200:
             raise RuntimeError("Outbound worker request denied or unavailable")
-        return response.json()
+        payload = response.json()
+        if operation == "poll" and payload.get("schema_revision") != SCHEMA_REVISION:
+            raise RuntimeError("Executor schema capability mismatch")
+        return payload
 
     def expire_staged(self):
         response = self.request("poll")

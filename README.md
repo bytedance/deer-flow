@@ -2903,3 +2903,11 @@ full C finalization before admitting B; a durable group receipt permits one
 continuation only after all awaited jobs are terminal. Goal replacement, new
 conversation, cancellation and native continuation budgets fence stale resumes.
 See the package README for local acceptance and deployment boundaries.
+
+
+Docker development database wiring (host versus container `localhost`) is documented
+in [Docker Dev](docs/DOCKER_DEV.md), preserving the user fork's setup guidance.
+The optional [native ECS bridge](backend/packages/ecs-executor/README.md) requires
+an independently versioned executor database. [User-fork integration and legacy
+quarantine](docs/ecs-native-fork-integration.md) distinguish schema/data preservation
+from activation: historical Fleet intent is retained and cannot run automatically.

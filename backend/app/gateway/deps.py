@@ -625,6 +625,10 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         # cancellation cannot strand an engine created along the way.
         stack.push_async_callback(close_engine)
         await init_engine_from_config(config.database)
+        from deerflow.persistence.engine import get_engine
+        from deerflow.persistence.legacy_execution import require_activation
+
+        await require_activation(get_engine())
 
         app.state.checkpointer = await stack.enter_async_context(make_checkpointer(config))
         app.state.store = await stack.enter_async_context(make_store(config))

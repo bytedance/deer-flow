@@ -330,3 +330,30 @@ def test_sync_wrapped_builtin_tools_still_resolve_runtime():
         # _ensure_sync_invocable_tool does exactly this to async-only tools.
         patched.func = make_sync_tool_wrapper(patched.coroutine, patched.name)
         assert _get_all_injected_args(patched).runtime == "runtime", f"sync wrapper dropped runtime resolution for built-in tool {patched.name}"
+
+
+@pytest.mark.parametrize("config_injection", [False, True])
+def test_sync_bridge_preserves_runtime_and_runnable_config_injection(config_injection):
+    from types import SimpleNamespace
+
+    from langchain.tools import ToolRuntime
+    from langgraph.prebuilt.tool_node import _get_all_injected_args
+
+    runtime = SimpleNamespace(context={"user_id": "Local", "thread_id": "thread", "run_id": "run"})
+    config = {"configurable": {"thread_id": "thread"}}
+
+    async def runtime_only(value: int, runtime: ToolRuntime = None):
+        return (value, runtime)
+
+    async def both(value: int, runtime: ToolRuntime = None, run_config: RunnableConfig = None):
+        return (value, runtime, run_config)
+
+    coro = both if config_injection else runtime_only
+    tool = StructuredTool(name="actual_sync_bridge", description="Bridge", args_schema=MockArgs, coroutine=coro)
+    tool.func = make_sync_tool_wrapper(coro, tool.name)
+    assert _get_all_injected_args(tool).runtime == "runtime"
+    assert tool._injected_args_keys == frozenset({"runtime"})
+    assert "runtime" not in tool.tool_call_schema.model_json_schema()["properties"]
+    result = tool.func(value=3, runtime=runtime, **({"config": config} if config_injection else {}))
+    assert result == ((3, runtime, config) if config_injection else (3, runtime))
+    assert tool.func(value=3) == ((3, None, None) if config_injection else (3, None))

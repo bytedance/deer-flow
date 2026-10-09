@@ -20,6 +20,9 @@ private artifact directory and ledger; a process lock rejects a second worker.
 It binds HTTP to `127.0.0.1` and requires an operator-provided private JSON config:
 
 ```bash
+# First stop every process using the executor ledger; provision a dedicated DB.
+python -m ecs_executor.schema upgrade --database-url-env ECS_EXECUTOR_DATABASE_URL
+python -m ecs_executor.schema check --database-url-env ECS_EXECUTOR_DATABASE_URL
 ECS_EXECUTOR_CONFIG=/private/operator/executor.json \
   python -m ecs_executor.mcp_server
 ```
@@ -493,3 +496,36 @@ Strict session retirement is permanent: held Live/tool references cannot rebuild
 Chromium after close. Initialization is shielded through private-loop settlement,
 and physical close shares its initialization lock, so an in-flight launch cannot
 outlive a successful capacity release. Default session behavior is unchanged.
+
+
+## Versioned private executor schema
+
+The executor owns a dedicated database containing only `ecs_execution_jobs`,
+`ecs_execution_nodes`, `ecs_native_affinities`, and
+`ecs_executor_alembic_version`. Native Run/MCP/schedule/checkpoint tables stay in
+the native application database. `metadata_database_url` names that **native**
+database for owner file publication; it must not name the executor database.
+The B service and central Gateway call a read-only revision/shape guard before
+dispatch. Outbound B/native workers send and check schema revision
+`e0001_execution_ledger` through the existing authenticated worker channel;
+missing/unknown revisions fail closed. Matching version text alone cannot adopt
+unknown column/default/generated/key/FK/CHECK/index/collation semantics. Unknown constraints
+are refused without deletion or repair; neutral PostgreSQL reflection defaults
+are accepted. SQLite requires native BINARY index semantics and conservatively
+refuses explicit column/table COLLATE overrides; PostgreSQL columns must retain
+the native type-default collation. CLI URL construction and failures remain redacted. No startup config flag selects bootstrap.
+
+`python -m ecs_executor.schema upgrade` is an explicit stopped-writer operation.
+It executes private Alembic migrations, including adoption of an exact previously
+unversioned accepted ledger without changing job/node/affinity records. Unknown
+reservations and ambiguous physical starts remain retained; the migration never
+claims, starts, releases or replays a job. `JobStore.initialize()` is an explicit
+Python test/local helper executing this same versioned upgrade; production
+entrypoints never call it. Unknown version rows, native/Fleet tables, and malformed
+existing ledger shapes are refused. SQLite remains an isolated single-host/local
+option; multi-host production requires PostgreSQL and a dedicated database.
+See [schema, legacy quarantine and rollback](../../../docs/ecs-native-fork-integration.md).
+Current live helpers now provision an owned independent executor database and
+observe native tables through the native URL. Their prior model evidence is
+historical; these schema wiring edits were checked without repeating model runs.
+Ops/cgroup/cloud/restart acceptance belongs to Task6B.
