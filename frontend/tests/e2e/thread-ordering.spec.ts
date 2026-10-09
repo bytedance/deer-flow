@@ -395,27 +395,39 @@ test.describe("Thread message ordering", () => {
     });
     // DOM relative order, not viewport coordinates: stick-to-bottom smooth
     // scrolling makes two separate boundingBox reads race each other.
-    const questionBeforeAnswer = await page.evaluate(() => {
-      const list = document.querySelector('[data-testid="main-message-list"]');
-      if (!list) {
-        return null;
-      }
-      const leaf = (text: string) =>
-        [...list.querySelectorAll("div, p")].find(
-          (element) =>
-            element.children.length === 0 && element.textContent === text,
-        );
-      const question = leaf("final-turn question");
-      const answer = leaf("final-turn answer");
-      if (!question || !answer) {
-        return null;
-      }
-      return (
-        (question.compareDocumentPosition(answer) &
-          Node.DOCUMENT_POSITION_FOLLOWING) !==
-        0
-      );
-    });
+    // Streaming and the finishing history refetch can replace virtual rows
+    // between the visibility check and this read. Wait for the same DOM-order
+    // read instead of treating an intermediate missing row as a failure. A
+    // complete read with reversed order must still fail immediately.
+    let questionBeforeAnswer: boolean | null = null;
+    await expect
+      .poll(async () => {
+        questionBeforeAnswer = await page.evaluate(() => {
+          const list = document.querySelector(
+            '[data-testid="main-message-list"]',
+          );
+          if (!list) {
+            return null;
+          }
+          const leaf = (text: string) =>
+            [...list.querySelectorAll("div, p")].find(
+              (element) =>
+                element.children.length === 0 && element.textContent === text,
+            );
+          const question = leaf("final-turn question");
+          const answer = leaf("final-turn answer");
+          if (!question || !answer) {
+            return null;
+          }
+          return (
+            (question.compareDocumentPosition(answer) &
+              Node.DOCUMENT_POSITION_FOLLOWING) !==
+            0
+          );
+        });
+        return questionBeforeAnswer;
+      })
+      .not.toBeNull();
     expect(questionBeforeAnswer).toBe(true);
 
     // The finishing refetch observed the extended feed; the established
