@@ -21,7 +21,9 @@ thread since messages from multiple runs need unified seq ordering.
 
 Read records using physical newline boundaries, not ``str.splitlines()``:
 Unicode line separators are valid JSON string content and must stay inside
-their record. ``read_text`` normalizes CRLF before the LF split.
+their record. Decode one physical line at a time so an incomplete UTF-8 tail
+cannot hide earlier records. Writers separate unterminated tails from new
+records without discarding existing bytes.
 """
 
 from __future__ import annotations
@@ -29,9 +31,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import weakref
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -135,12 +138,8 @@ class JsonlRunEventStore(RunEventStore):
         thread_dir = self._thread_dir(thread_id)
         if thread_dir.exists():
             for f in thread_dir.glob("*.jsonl"):
-                for line in f.read_text(encoding="utf-8").strip().split("\n"):
-                    try:
-                        record = json.loads(line)
-                        max_seq = max(max_seq, record.get("seq", 0))
-                    except json.JSONDecodeError:
-                        logger.debug("Skipping malformed JSONL line in %s", f)
+                for record in self._iter_records(f):
+                    max_seq = max(max_seq, record.get("seq", 0))
         return max_seq
 
     async def _ensure_seq_loaded(self, thread_id: str) -> None:
@@ -152,9 +151,18 @@ class JsonlRunEventStore(RunEventStore):
 
     def _write_record(self, record: dict) -> None:
         path = self._run_file(record["thread_id"], record["run_id"])
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, default=str, ensure_ascii=False) + "\n")
+        self._append_records(path, [record])
+
+    def _iter_records(self, path: Path) -> Iterator[dict]:
+        """Read physical UTF-8 lines, skipping malformed or interrupted records."""
+        with open(path, "rb") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    yield json.loads(line.decode("utf-8"))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    logger.debug("Skipping malformed JSONL line in %s", path)
 
     def _read_thread_events(self, thread_id: str) -> list[dict]:
         """Read all events for a thread, sorted by seq (blocking I/O)."""
@@ -163,13 +171,7 @@ class JsonlRunEventStore(RunEventStore):
         if not thread_dir.exists():
             return events
         for f in sorted(thread_dir.glob("*.jsonl")):
-            for line in f.read_text(encoding="utf-8").strip().split("\n"):
-                if not line:
-                    continue
-                try:
-                    events.append(json.loads(line))
-                except json.JSONDecodeError:
-                    logger.debug("Skipping malformed JSONL line in %s", f)
+            events.extend(self._iter_records(f))
         events.sort(key=lambda e: e.get("seq", 0))
         return events
 
@@ -178,14 +180,7 @@ class JsonlRunEventStore(RunEventStore):
         path = self._existing_run_file(thread_id, run_id)
         if path is None:
             return []
-        events = []
-        for line in path.read_text(encoding="utf-8").strip().split("\n"):
-            if not line:
-                continue
-            try:
-                events.append(json.loads(line))
-            except json.JSONDecodeError:
-                logger.debug("Skipping malformed JSONL line in %s", path)
+        events = list(self._iter_records(path))
         events.sort(key=lambda e: e.get("seq", 0))
         return events
 
@@ -308,8 +303,14 @@ class JsonlRunEventStore(RunEventStore):
     def _append_records(self, path: Path, records: list[dict[str, Any]]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         lines = "".join(json.dumps(r, default=str, ensure_ascii=False) + "\n" for r in records)
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(lines)
+        with open(path, "a+b") as f:
+            if f.tell():
+                f.seek(-1, os.SEEK_END)
+                if f.read(1) != b"\n":
+                    # A crash can leave either valid JSON without its newline
+                    # or a partial record. Never concatenate new JSON onto it.
+                    f.write(b"\n")
+            f.write(lines.encode("utf-8"))
 
     def _append_record_groups(self, groups: list[tuple[Path, list[dict[str, Any]]]]) -> None:
         """Append run groups and restore their original sizes if one fails."""
