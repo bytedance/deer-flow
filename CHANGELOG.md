@@ -804,6 +804,20 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **auth:** In the Docker stack, five wrong passwords from one client no longer
+  lock every user out of login for five minutes. Failed logins are counted per
+  client IP, and the Gateway honors `X-Real-IP` only from a peer listed in
+  `AUTH_TRUSTED_PROXIES`, which the compose files never set; every browser
+  request reaches the Gateway from the `nginx` container, so all logins shared
+  nginx's address and one lockout. `AUTH_TRUSTED_PROXIES` now also accepts
+  hostnames, resolved off the event loop and cached for 10 seconds (failures
+  included), and both compose files default it to the bundled `nginx` service.
+  nginx overwrites `X-Real-IP` with `$remote_addr` on every Gateway route, so
+  a client cannot choose its own address. An `AUTH_TRUSTED_PROXIES` value in
+  `.env` still takes precedence, including under `make docker-start`, which now
+  exports it for Compose interpolation like the proxy variables. Deployments
+  behind another reverse proxy also need nginx's `real_ip` module for that
+  proxy; see `.env.example`. ([#6519])
 - **scheduler:** "Run once now" on a one-time task before its run time no longer
   cancels the scheduled run. The trial launched as the task's own run: the task
   was marked `running`, and the trial's outcome then finished it (`completed`,
@@ -9296,3 +9310,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6501]: https://github.com/bytedance/deer-flow/pull/6501
 [#6506]: https://github.com/bytedance/deer-flow/pull/6506
 [#6512]: https://github.com/bytedance/deer-flow/pull/6512
+[#6519]: https://github.com/bytedance/deer-flow/pull/6519
