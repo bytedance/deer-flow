@@ -2214,6 +2214,11 @@ remains downloadable but cannot be attached directly. Download it, rename it,
 and upload it to the thread. This change does not recover or migrate older
 thread uploads that already match the staging pattern.
 
+Upload listings remain available during concurrent cleanup: removed files are
+omitted, and if the upload directory disappears or is replaced by a file, the
+listing returns any entries already collected. Permission and other operational
+errors still surface.
+
 This is the difference between a chatbot with tool access and an agent with an actual execution environment.
 
 ```
