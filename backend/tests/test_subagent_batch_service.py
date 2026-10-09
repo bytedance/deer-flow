@@ -543,19 +543,23 @@ async def test_cancelled_batch_stop_allows_successful_retry(monkeypatch: pytest.
     )
     poller_entered = asyncio.Event()
     release_poller = asyncio.Event()
+    poller_draining = asyncio.Event()
 
     async def reluctant_poller() -> None:
         poller_entered.set()
         try:
             await asyncio.Future()
         except asyncio.CancelledError:
+            poller_draining.set()
             await release_poller.wait()
 
     monkeypatch.setattr(service, "_run", reluctant_poller)
     await service.start()
     await asyncio.wait_for(poller_entered.wait(), timeout=1)
     first_stop = asyncio.create_task(service.stop())
-    await asyncio.sleep(0)
+    # Ensure the next cancellation interrupts draining, rather than being
+    # swallowed together with the initial poller cancellation.
+    await asyncio.wait_for(poller_draining.wait(), timeout=1)
     first_stop.cancel()
     with pytest.raises(asyncio.CancelledError):
         await first_stop
