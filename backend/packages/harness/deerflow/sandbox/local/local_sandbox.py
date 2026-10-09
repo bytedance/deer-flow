@@ -40,15 +40,33 @@ class _BoundedPipeCapture:
         *,
         limit_bytes: int = _COMMAND_CAPTURE_LIMIT_BYTES,
         encoding: str = "utf-8",
+        fallback_encoding: str | None = None,
         normalize_newlines: bool = False,
     ) -> None:
         self._limit_bytes = limit_bytes
         self._encoding = encoding
+        self._fallback_encoding = fallback_encoding
         self._normalize_newlines = normalize_newlines
         self._chunks: list[bytes] = []
         self._kept_bytes = 0
         self._total_bytes = 0
         self._lock = threading.Lock()
+
+    def _decode(self, data: bytes) -> str:
+        """Decode captured bytes, preferring the primary encoding when valid.
+
+        A forced ``encoding`` describes the shell's *own* output. Windows-native
+        children (``python.exe``, CLI shims) inherit the pipe and keep writing the
+        host code page, which is not valid in the forced encoding. Rather than
+        replacing every such byte with U+FFFD, retry the whole buffer with
+        ``fallback_encoding`` (the locale) when the primary decode fails.
+        """
+        if self._fallback_encoding is None:
+            return data.decode(self._encoding, errors="replace")
+        try:
+            return data.decode(self._encoding)
+        except UnicodeDecodeError:
+            return data.decode(self._fallback_encoding, errors="replace")
 
     def append(self, chunk: bytes) -> None:
         with self._lock:
@@ -67,7 +85,7 @@ class _BoundedPipeCapture:
             total_bytes = self._total_bytes
             kept_bytes = self._kept_bytes
 
-        output = data.decode(self._encoding, errors="replace")
+        output = self._decode(data)
         if self._normalize_newlines:
             # Match ``subprocess.run(..., text=True)``: text streams use universal
             # newlines, translating both CRLF and bare CR to LF.
@@ -191,9 +209,10 @@ class LocalSandbox(Sandbox):
         name: str,
         *,
         encoding: str = "utf-8",
+        fallback_encoding: str | None = None,
         normalize_newlines: bool = False,
     ) -> tuple[_BoundedPipeCapture, threading.Thread]:
-        capture = _BoundedPipeCapture(encoding=encoding, normalize_newlines=normalize_newlines)
+        capture = _BoundedPipeCapture(encoding=encoding, fallback_encoding=fallback_encoding, normalize_newlines=normalize_newlines)
         thread = threading.Thread(target=LocalSandbox._drain_pipe, args=(fd, capture), name=name, daemon=True)
         thread.start()
         return capture, thread
@@ -212,7 +231,12 @@ class LocalSandbox(Sandbox):
         except OSError:
             return False
 
-    def __init__(self, id: str, path_mappings: list[PathMapping] | None = None):
+    def __init__(
+        self,
+        id: str,
+        path_mappings: list[PathMapping] | None = None,
+        environment: dict[str, str] | None = None,
+    ):
         """
         Initialize local sandbox with optional path mappings.
 
@@ -220,9 +244,22 @@ class LocalSandbox(Sandbox):
             id: Sandbox identifier
             path_mappings: List of path mappings with optional read-only flag.
                           Skills directory is read-only by default.
+            environment: Operator-authorized variables (``sandbox.environment``
+                          in config.yaml, ``$VAR`` refs already resolved) layered
+                          into every subprocess even when the env-policy scrubber
+                          would drop them from inherited ``os.environ`` — the
+                          same injection channel as request-scoped secrets, so
+                          an entry here is trusted like a declared
+                          ``required-secrets`` value.
         """
         super().__init__(id)
         self.path_mappings = path_mappings or []
+        environment = dict(environment) if environment else {}
+        # Config-derived keys flow into every subprocess's Popen(env=...); a
+        # bad name (``"MY=KEY"``, empty) must fail at construction — a clear
+        # startup error — instead of on the first command execution.
+        _validate_extra_env(environment)
+        self.environment: dict[str, str] = environment
         # Track files written through write_file so read_file only
         # reverse-resolves paths in agent-authored content.
         self._agent_written_paths: set[str] = set()
@@ -516,10 +553,13 @@ class LocalSandbox(Sandbox):
         if timeout is None:
             timeout = DEFAULT_COMMAND_TIMEOUT_SECONDS
 
-        # Inherit os.environ minus platform secrets, then layer any injected
-        # request-scoped secrets on top (#3861). An explicit env is always passed
-        # so platform credentials never leak into skill subprocesses.
-        sandbox_env = build_sandbox_env(env)
+        # Inherit os.environ minus platform secrets, then layer injected
+        # request-scoped secrets on top (#3861). Operator-configured
+        # ``sandbox.environment`` entries ride the same authorized injection
+        # channel (and lose to request-scoped values on key collision), so
+        # platform credentials still never leak into skill subprocesses.
+        injected = {**self.environment, **(env or {})}
+        sandbox_env = build_sandbox_env(injected)
         timed_out = False
         if os.name == "nt":
             if self._is_powershell(shell):
@@ -540,7 +580,24 @@ class LocalSandbox(Sandbox):
                             "MSYS2_ARG_CONV_EXCL": exclusions,
                         }
 
-            if self._is_powershell(shell):
+            if self._is_msys_shell(shell):
+                # Git Bash/MSYS writes its own output as UTF-8, so the host code
+                # page (GBK on zh-CN) must not decode it. Windows-native children
+                # it spawns (python.exe, CLI shims) inherit the pipe and keep
+                # writing the host code page, so a buffer that is not valid UTF-8
+                # falls back to the locale instead of being replaced wholesale.
+                stdout, stderr, returncode, timed_out = self._run_windows_command(
+                    args,
+                    timeout,
+                    sandbox_env,
+                    encoding="utf-8",
+                    fallback_encoding=locale.getpreferredencoding(False),
+                )
+            elif self._is_powershell(shell):
+                # PowerShell is pinned to UTF-8 by the preamble above, so its own
+                # output must be decoded as UTF-8: any other code page (GBK on
+                # zh-CN) mangles non-ASCII output because the pipe decoder
+                # replaces instead of raising.
                 stdout, stderr, returncode, timed_out = self._run_windows_command(args, timeout, sandbox_env, encoding="utf-8")
             else:
                 stdout, stderr, returncode, timed_out = self._run_windows_command(args, timeout, sandbox_env)
@@ -572,6 +629,7 @@ class LocalSandbox(Sandbox):
         env: dict[str, str] | None = None,
         *,
         encoding: str | None = None,
+        fallback_encoding: str | None = None,
     ) -> tuple[str, str, int, bool]:
         """Run with bounded capture, a process-tree timeout, and locale decoding unless overridden."""
         timed_out = False
@@ -609,12 +667,14 @@ class LocalSandbox(Sandbox):
             stdout_read_fd,
             "deerflow-bash-stdout-drain",
             encoding=encoding,
+            fallback_encoding=fallback_encoding,
             normalize_newlines=True,
         )
         stderr_capture, stderr_thread = LocalSandbox._start_pipe_drain(
             stderr_read_fd,
             "deerflow-bash-stderr-drain",
             encoding=encoding,
+            fallback_encoding=fallback_encoding,
             normalize_newlines=True,
         )
 
