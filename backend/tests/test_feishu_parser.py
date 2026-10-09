@@ -428,12 +428,12 @@ def test_feishu_receive_file_path_traversal_failure_is_per_attachment(tmp_path, 
         real_write = feishu_module.write_upload_file_no_symlink
         call_count = 0
 
-        def flaky_write(base_dir, filename, data):
+        def flaky_write(base_dir, filename, data, *, exclusive=False):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
                 raise PathTraversalError("Path traversal detected")
-            return real_write(base_dir, filename, data)
+            return real_write(base_dir, filename, data, exclusive=exclusive)
 
         monkeypatch.setattr(feishu_module, "write_upload_file_no_symlink", flaky_write)
         msg = InboundMessage(
