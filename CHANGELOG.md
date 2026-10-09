@@ -4243,7 +4243,7 @@ This release closes that milestone with **439 merged pull requests**.
   `SKILL.md` and `references/` back in the model response. The tool is
   always available, so skill tool policy could not remove it. Local targets
   are now confined to the configured skills root and the caller's own user
-  directory; `skill://` and `inline://` targets are unchanged.
+  directory; `skill://` and `inline://` targets are unchanged. ([#6580])
 
 ### Documentation
 
@@ -9346,3 +9346,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6519]: https://github.com/bytedance/deer-flow/pull/6519
 [#6537]: https://github.com/bytedance/deer-flow/pull/6537
 [#6543]: https://github.com/bytedance/deer-flow/pull/6543
+[#6580]: https://github.com/bytedance/deer-flow/pull/6580

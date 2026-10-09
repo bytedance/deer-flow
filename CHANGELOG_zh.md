@@ -3313,7 +3313,7 @@
   `.deer-flow/users/<id>/skills/custom/<skill>`，在模型响应中拿到该技能的
   `SKILL.md` 与 `references/` 内容。该工具始终可用，技能工具策略也无法移除它。
   现在本地目标仅限于配置的技能根目录和调用者自己的用户目录；`skill://` 与
-  `inline://` 目标不受影响。
+  `inline://` 目标不受影响。([#6580])
 
 ### 文档
 
@@ -7564,3 +7564,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6512]: https://github.com/bytedance/deer-flow/pull/6512
 [#6519]: https://github.com/bytedance/deer-flow/pull/6519
 [#6537]: https://github.com/bytedance/deer-flow/pull/6537
+[#6580]: https://github.com/bytedance/deer-flow/pull/6580
