@@ -1,0 +1,26 @@
+{{- /*
+  PodDisruptionBudget for the sandbox provisioner. Rendered only while the
+  provisioner is enabled and runs more than one replica: with a single
+  replica a budget of 1 would block every node drain, and with several it
+  keeps at least one Pod answering the gateway's sandbox create/discover
+  calls while nodes are drained. Unlike the gateway there is no multiInstance
+  override, because nothing else in the chart renders differently per
+  provisioner replica count; scaling with kubectl alone leaves it unbudgeted.
+*/ -}}
+{{- $pdb := .Values.provisioner.podDisruptionBudget | default dict -}}
+{{- if and .Values.provisioner.enabled $pdb.enabled (gt (int .Values.provisioner.replicas) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "deer-flow.fullname" . }}-provisioner
+  namespace: {{ include "deer-flow.namespace" . }}
+  labels:
+    {{- include "deer-flow.labels" . | nindent 4 }}
+    app.kubernetes.io/component: provisioner
+spec:
+  minAvailable: {{ include "deer-flow.pdbMinAvailable" (dict "value" $pdb.minAvailable "key" "provisioner.podDisruptionBudget.minAvailable") }}
+  selector:
+    matchLabels:
+      {{- include "deer-flow.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: provisioner
+{{- end }}
