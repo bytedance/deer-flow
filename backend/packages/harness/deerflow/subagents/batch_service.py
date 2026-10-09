@@ -42,6 +42,10 @@ def _usage(records: list[dict[str, Any]] | None) -> dict[str, int] | None:
 class SubagentBatchService:
     """Lease, execute, and recover durable native-subagent batch items."""
 
+    # Also used by focused shutdown tests constructing an instance via __new__.
+    _stopping: bool = False
+    _stop_drains: int = 0
+
     def __init__(
         self,
         *,
@@ -63,34 +67,60 @@ class SubagentBatchService:
         self._lease_owner = f"{socket.gethostname()}:{uuid.uuid4().hex}"
         self._stop = asyncio.Event()
         self._poller: asyncio.Task[None] | None = None
+        self._stopping = False
+        self._stop_drains = 0
         self._executions: dict[str, asyncio.Task[None]] = {}
         self._execution_ids: dict[str, str] = {}
         self._item_batches: dict[str, str] = {}
 
     async def start(self) -> None:
+        if self._stopping:
+            raise RuntimeError("cannot start subagent batch poller before stop completes")
         if self._poller is not None:
             return
         self._stop.clear()
         self._poller = asyncio.create_task(self._run(), name="subagent-batch-poller")
 
     async def stop(self) -> None:
+        # Keep poller ownership visible until the entire drain finishes.
+        # Otherwise start() could create a fresh poller during this await.
+        self._stop_drains += 1
+        self._stopping = True
         self._stop.set()
         poller = self._poller
-        self._poller = None
-        if poller is not None:
-            poller.cancel()
-            await asyncio.gather(poller, return_exceptions=True)
+
+        # Issue every owned-work cancellation before the first await. The
+        # Gateway wraps this stop hook in a deadline; if poller teardown is
+        # slow, cancellation of this coroutine must not prevent native/item
+        # cancellation from being requested.
         execution_ids = list(self._execution_ids.values())
         for execution_id in execution_ids:
             request_cancel_background_task(execution_id)
         tasks = list(self._executions.values())
+
+        if poller is not None:
+            poller.cancel()
         for task in tasks:
             task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        self._executions.clear()
-        self._execution_ids.clear()
-        self._item_batches.clear()
+
+        completed = False
+        try:
+            if poller is not None:
+                await asyncio.gather(poller, return_exceptions=True)
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            self._executions.clear()
+            self._execution_ids.clear()
+            self._item_batches.clear()
+            if self._poller is poller:
+                self._poller = None
+            completed = True
+        finally:
+            # A cancelled caller cannot leave a phantom drain count. Keep
+            # start fenced until a subsequent successful stop retries cleanup.
+            self._stop_drains -= 1
+            if completed and self._stop_drains == 0:
+                self._stopping = False
 
     async def _run(self) -> None:
         while not self._stop.is_set():

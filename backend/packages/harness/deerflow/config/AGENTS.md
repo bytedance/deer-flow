@@ -1,5 +1,14 @@
 ### Configuration System
 
+`Paths.user_projects_dir()` uses `extended_length_path()` on native Windows.
+All document paths, including staging and retention walks, inherit the same
+extended drive/UNC namespace even when the root itself is short. Persisted
+`stored_relpath` values and Docker mount paths retain their existing spelling.
+`project_document_path()` still resolves symlinks and checks confinement using
+the same namespace for both the user projects root and the document path.
+Do not prefix only paths already exceeding MAX_PATH: appended filenames and
+derived companions can cross the limit later.
+
 Operator prompt overlays: `lead_prompt_overlay` on AppConfig and
 `subagents.agents.<name>.prompt_overlay` accept literal `prepend`/`append` strings.
 The per-assembly snapshot owns these settings; no run-context override exists.
@@ -54,7 +63,7 @@ YAML loading and both middleware tool-call paths in `test_tool_output_config_lim
 
 **Config Hot-Reload Boundary**: Gateway dependencies route through `get_app_config()` on every request, so per-run fields like `models[*].max_tokens`, `summarization.*`, `title.*`, `memory.*`, `subagents.*`, `verification.*`, `tools[*]`, and the agent system prompt pick up `config.yaml` edits on the next message. `AppConfig` is intentionally **not** cached on `app.state` — `lifespan()` keeps a local `startup_config` variable for one-shot bootstrap work and passes it to `langgraph_runtime(app, startup_config)`.
 
-Infrastructure fields are **restart-required**. The authoritative list lives in `packages/harness/deerflow/config/reload_boundary.py::STARTUP_ONLY_FIELDS` and is mirrored by the standardised `"startup-only:"` prefix on the corresponding `Field(description=...)` in `AppConfig` or an explicitly registered nested config model, so IDE hover on those fields surfaces the reason inline (no need to context-switch into this table). Currently registered: `plugins`, `database`, `checkpointer`, `run_events`, `agent_storage`, `stream_bridge`, `sandbox`, `skills.container_path`, `log_level`, `logging`, `channels`, `channel_connections`, `scheduler`, `mcp_tasks`, `subagent_runtime`, `subagent_batches`, `run_ownership`, `dedupe_storage`. Adding a new restart-required field requires updating the registry; drift is pinned by `tests/test_reload_boundary.py`. `scheduler.recursion_limit` is the exception inside that section: it is read from `get_app_config()` at each scheduled dispatch, so a YAML edit applies to the next run without restarting the poller.
+Infrastructure fields are **restart-required**. The authoritative list lives in `packages/harness/deerflow/config/reload_boundary.py::STARTUP_ONLY_FIELDS` and is mirrored by the standardised `"startup-only:"` prefix on the corresponding `Field(description=...)` in `AppConfig` or an explicitly registered nested config model, so IDE hover on those fields surfaces the reason inline (no need to context-switch into this table). Currently registered: `plugins`, `database`, `checkpointer`, `run_events`, `agent_storage`, `stream_bridge`, `sandbox`, `skills.container_path`, `log_level`, `logging`, `channels`, `channel_connections`, `scheduler`, `mcp_tasks`, `subagent_runtime`, `subagent_batches`, `run_ownership`, `dedupe_storage`, `auth.local.throttle_storage` (the login throttle store is installed once by `langgraph_runtime`; `max_login_attempts` / `lockout_seconds` stay live-read). Adding a new restart-required field requires updating the registry; drift is pinned by `tests/test_reload_boundary.py`. `scheduler.recursion_limit` is the exception inside that section: it is read from `get_app_config()` at each scheduled dispatch, so a YAML edit applies to the next run without restarting the poller.
 
 **Persistence backend resolution**: the unified `database` section selects the
 Gateway's LangGraph checkpointer, LangGraph Store, and DeerFlow SQL repositories.
@@ -112,6 +121,8 @@ Extensions loads parse the bytes from `read_config_with_signature`, recording
 that read's digest rather than an earlier probe's. Freshness reloads read the
 probed path explicitly; a missing or invalid revision keeps the last-known-good
 cache, including AppConfig's middleware snapshot, until a readable revision returns.
+
+**Shared Reset Markers** (`shared_reset_marker.py`): caches derived from the extensions config can go stale without a byte of it changing (a remote MCP server's `tools/list`, a skill installed or edited on the shared volume by another process). `SharedResetMarker(suffix)` owns one hidden JSON file beside the resolved config, `.<config name>.<suffix>.json`; `publish()` replaces it atomically with a random generation under `extensions_config_write_lock` + `extensions_config_file_lock` (`publish_locked()` when the caller already holds both), chaining `previous_generation` and an optional `user_id`. `SharedResetMarkerTracker.poll()` re-reads the marker at most once per second (monotonic clock, never blocking behind a concurrent poller), adopts the current state silently on its first poll, and reports a `SharedResetChange`: `user_ids={user}` only when exactly one publication carrying that user happened since the last poll, otherwise `None` (retire everything), including deleted/unreadable markers and config-path switches. `note_own_publication()` lets the writer skip the redundant self-invalidation. `resolve_shared_config_path()` maps a missing explicit path to `None` (no shared directory: callers answer `scope=process`). Consumers: `mcp/cache.py` (`mcp-cache-reset`) and `agents/lead_agent/prompt.py` (`skills-cache-reset`). Tests: `tests/test_shared_reset_marker.py`.
 
 ### Config Schema
 

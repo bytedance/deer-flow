@@ -4,13 +4,13 @@ import asyncio
 import json
 import logging
 import threading
-import uuid
 from pathlib import Path
 
 from langchain_core.tools import BaseTool
 
 from deerflow.config.file_signature import ConfigSignature as _ConfigSignature
 from deerflow.config.file_signature import get_config_signature as _get_config_signature
+from deerflow.config.shared_reset_marker import SharedResetMarker
 from deerflow.mcp.config_normalization import normalize_mcp_interceptor_paths, normalize_mcp_server_config
 
 logger = logging.getLogger(__name__)
@@ -54,19 +54,20 @@ _initialized_without_config = False
 # their next lookup.
 _cache_reset_marker_signature: _ConfigSignature | None = None
 
+#: ``.<extensions config name>.mcp-cache-reset.json`` beside the resolved config.
+#: The generic marker/tracker contract lives in ``deerflow.config.shared_reset_marker``
+#: and is shared with the skills prompt-cache reset.
+MCP_CACHE_RESET_MARKER = SharedResetMarker("mcp-cache-reset")
+
 
 def _cache_reset_marker_path(config_path: Path) -> Path:
     """Return the shared reset marker colocated with the extensions config."""
-    path = Path(config_path)
-    target = path.resolve(strict=False) if path.is_symlink() else path
-    return target.parent / f".{target.name}.mcp-cache-reset.json"
+    return MCP_CACHE_RESET_MARKER.path_for(config_path)
 
 
 def _current_cache_reset_marker_signature(config_path: Path | None) -> _ConfigSignature | None:
     """Return the current shared-reset marker signature, if one exists."""
-    if config_path is None:
-        return None
-    return _get_config_signature(_cache_reset_marker_path(config_path))
+    return MCP_CACHE_RESET_MARKER.current_signature(config_path)
 
 
 def _resolve_config_path() -> Path | None:
@@ -300,6 +301,7 @@ async def initialize_mcp_tools() -> list[BaseTool]:
         await asyncio.to_thread(_wait_for_initialization, waiting_generation)
 
     from deerflow.config.extensions_config import ExtensionsConfig
+    from deerflow.mcp.session_pool import StaleMCPBindingError, get_session_pool
     from deerflow.mcp.tools import get_mcp_tools
 
     loaded_tools = None
@@ -329,7 +331,35 @@ async def initialize_mcp_tools() -> list[BaseTool]:
             raise RuntimeError("Extensions config could not be loaded for MCP tool discovery") from None
         loaded_snapshot = _effective_mcp_config_snapshot(loaded_config)
         loaded_reset_signature = _current_cache_reset_marker_signature(_resolve_config_path())
-        loaded_tools = await get_mcp_tools(extensions_config=loaded_config)
+        # Claim the exact pool this generation owns under the same lock the
+        # reset path takes, so verify-generation + capture-pool is one atomic
+        # ownership handoff. A superseded initializer must never resolve the
+        # singleton after the reset: that would install its stale fingerprint
+        # into the replacement pool the successor initializer runs on.
+        with _init_condition:
+            if _cache_generation != claim_generation:
+                logger.info("MCP cache was reset before tool discovery; discarding superseded initialization")
+                return []
+
+            claimed_pool = get_session_pool()
+
+        try:
+            loaded_tools = await get_mcp_tools(
+                extensions_config=loaded_config,
+                session_pool=claimed_pool,
+            )
+        except StaleMCPBindingError:
+            # The pool this claim owns was retired while discovery was running.
+            # That is the same cache race as a generation change, so keep the
+            # existing "discard stale initialization" semantics; a stale binding
+            # on a pool this claim still owns stays a real error.
+            with _init_condition:
+                superseded = _cache_generation != claim_generation
+
+            if superseded:
+                logger.info("MCP cache was reset during binding installation; discarding superseded initialization")
+                return []
+            raise
         post_path, post_sig = _current_config_state()
         post_reset_signature = _current_cache_reset_marker_signature(post_path)
         if post_path is not None and post_sig is not None:
@@ -573,19 +603,10 @@ def publish_mcp_tools_cache_reset() -> str | None:
         reset_mcp_tools_cache()
         return None
 
-    from deerflow.config.extensions_config import (
-        atomic_write_extensions_config,
-        extensions_config_file_lock,
-        extensions_config_write_lock,
-    )
-
-    generation = uuid.uuid4().hex
-    marker_path = _cache_reset_marker_path(config_path)
-    with extensions_config_write_lock, extensions_config_file_lock(config_path):
-        atomic_write_extensions_config(
-            marker_path,
-            {"version": 1, "generation": generation},
-        )
+    # The marker is replaced atomically under ``extensions_config_write_lock``
+    # and the cross-process ``extensions_config_file_lock``, the same discipline
+    # every ``extensions_config.json`` writer follows.
+    generation = MCP_CACHE_RESET_MARKER.publish(config_path)
 
     # Publish-before-retire is intentional.  A successful API response must
     # never mean only the handling worker was refreshed; if publication fails,

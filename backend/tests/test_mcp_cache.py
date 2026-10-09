@@ -507,6 +507,9 @@ def test_config_change_during_initialization_retires_pool_for_same_server_connec
                 self.sessions[key] = FakeSession(connection["command"])
             return self.sessions[key]
 
+        def retire_all(self) -> None:
+            pass
+
         def close_all_sync(self) -> None:
             self.closed = True
 
@@ -552,6 +555,85 @@ def test_config_change_during_initialization_retires_pool_for_same_server_connec
         assert cache_module._cache_initialized is True
     finally:
         real_reset_session_pool()
+
+
+def test_superseded_initializer_cannot_seed_replacement_pool(cache_globals, monkeypatch, tmp_path):
+    """A superseded initializer must not install its binding into the new pool.
+
+    Generation invalidation already discards the stale result, but
+    ``ensure_binding()`` is a persistent side effect on the session pool. If the
+    stale initializer re-resolves the singleton *after* the reset, it seeds the
+    replacement pool with the fingerprint it read from the superseded config;
+    the successor initializer then fails closed on its own clean pool and the
+    cache can never publish again until an explicit reset.
+    """
+    from unittest.mock import AsyncMock
+
+    from deerflow.mcp import session_pool as session_pool_module
+    from deerflow.mcp import tools as tools_module
+
+    cfg = tmp_path / "extensions_config.json"
+    _write_extensions_config(cfg, {"A": _server("old-cmd")})
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    real_get_mcp_tools = tools_module.get_mcp_tools
+
+    class FakeClient:
+        def __init__(self, connections, **kwargs) -> None:
+            self.connections = connections
+            self.callbacks = kwargs.get("callbacks") or []
+            self.tool_interceptors = kwargs.get("tool_interceptors") or []
+            self.tool_name_prefix = kwargs.get("tool_name_prefix", True)
+
+        async def get_tools(self, *, server_name=None):
+            return []
+
+    async def _scenario() -> None:
+        session_pool_module.reset_session_pool()
+        old_pool = session_pool_module.get_session_pool()
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _gated_get_mcp_tools(*args, **kwargs):
+            # Gate after the cache prologue so the test can supersede the claim
+            # while discovery still holds the config revision it read for G0.
+            entered.set()
+            await release.wait()
+            return await real_get_mcp_tools(*args, **kwargs)
+
+        monkeypatch.setattr(tools_module, "get_mcp_tools", _gated_get_mcp_tools)
+        monkeypatch.setattr("deerflow.mcp.tools.get_initial_oauth_headers", AsyncMock(return_value={}))
+        monkeypatch.setattr("deerflow.mcp.tools.build_mcp_tool_interceptors", lambda *a, **k: [])
+        monkeypatch.setattr("langchain_mcp_adapters.client.MultiServerMCPClient", FakeClient)
+
+        stale = asyncio.create_task(cache_module.initialize_mcp_tools())
+        await asyncio.wait_for(entered.wait(), 1)
+
+        _write_extensions_config(cfg, {"A": _server("new-cmd")})
+        cache_module.reset_mcp_tools_cache()
+        assert old_pool._retired is True
+        assert session_pool_module._pool is None
+
+        release.set()
+        assert await asyncio.wait_for(stale, 1) == []
+        assert cache_module._cache_initialized is False
+
+        # The successor must initialize against a pool the stale claim never
+        # touched; poisoning it here previously raised StaleMCPBindingError and
+        # left the cache permanently uninitialized.
+        assert await asyncio.wait_for(cache_module.initialize_mcp_tools(), 5) == []
+        assert cache_module._cache_initialized is True
+
+        new_pool = session_pool_module.get_session_pool()
+        assert new_pool is not old_pool
+        assert old_pool._bindings == {}
+        assert ("deployment", "A") in new_pool._bindings
+
+    try:
+        asyncio.run(_scenario())
+    finally:
+        session_pool_module.reset_session_pool()
 
 
 def test_reset_mcp_tools_cache_does_not_wait_for_in_flight_initialization(cache_globals, monkeypatch, tmp_path):
@@ -1072,10 +1154,16 @@ def test_initialization_hands_the_snapshotted_config_to_discovery(cache_globals,
     _write_extensions_config(cfg, {"srv1": _server("npx")})
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
 
-    seen: dict[str, str] = {}
+    from deerflow.mcp import session_pool as session_pool_module
 
-    async def _fake_tools(*, extensions_config):
+    seen: dict[str, object] = {}
+    claimed_pool = session_pool_module.get_session_pool()
+
+    async def _fake_tools(*, extensions_config, session_pool=None):
         seen["command"] = extensions_config.mcp_servers["srv1"].command
+        # Discovery must run against the pool this generation captured, never a
+        # singleton re-resolved after the claim.
+        seen["pool"] = session_pool
         # A transient flip to Y and back to X must not invalidate X-built tools.
         _write_extensions_config(cfg, {"srv1": _server("uvx")})
         _write_extensions_config(cfg, {"srv1": _server("npx")})
@@ -1086,6 +1174,7 @@ def test_initialization_hands_the_snapshotted_config_to_discovery(cache_globals,
     result = asyncio.run(cache_module.initialize_mcp_tools())
 
     assert seen["command"] == "npx"
+    assert seen["pool"] is claimed_pool
     assert result == ["loaded-tools"]
     assert cache_module._cache_initialized is True
     assert cache_module._mcp_config_snapshot is not None
@@ -1415,3 +1504,41 @@ class TestLazyInitializationFailure:
 
         assert len(calls) == 1
         assert cache_module._cache_initialized is True
+
+
+def test_failed_task_server_discovery_publishes_healthy_tools_once(cache_globals, monkeypatch, tmp_path):
+    """An unreachable task-enabled server must not leave the cache uninitialized."""
+    from langchain_core.tools import StructuredTool
+
+    cfg = tmp_path / "extensions_config.json"
+    toolset = {"name": "reports", "submit_tool": "submit_report", "status_tool": "get_report_status", "cancel_tool": "cancel_report"}
+    _write_extensions_config(
+        cfg,
+        {
+            "healthy": {"type": "http", "url": "http://healthy.invalid/mcp"},
+            "reports": {"type": "http", "url": "http://reports.invalid/mcp", "task_toolsets": [toolset]},
+        },
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+    discovered: list[str] = []
+
+    class FakeClient:
+        def __init__(self, connections, *, callbacks=None, tool_interceptors=None, tool_name_prefix=False):
+            self.callbacks = callbacks
+            self.tool_interceptors = tool_interceptors or []
+
+        async def get_tools(self, *, server_name=None):
+            discovered.append(server_name)
+            if server_name == "reports":
+                raise ConnectionError("reports is down")
+            return [StructuredTool.from_function(lambda: "ok", name="healthy_search", description="search")]
+
+    monkeypatch.setattr("langchain_mcp_adapters.client.MultiServerMCPClient", FakeClient)
+
+    first = cache_module.get_cached_mcp_tools()
+    second = cache_module.get_cached_mcp_tools()
+
+    assert [tool.name for tool in first] == ["healthy_search"]
+    assert second == first
+    assert cache_module._cache_initialized is True
+    assert sorted(discovered) == ["healthy", "reports"]

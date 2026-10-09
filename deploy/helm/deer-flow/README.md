@@ -135,7 +135,7 @@ they resolve from the `secrets` map):
 
 ```yaml
 config: |
-  config_version: 55
+  config_version: 57
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI
@@ -277,7 +277,7 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   `%40`). The chart uses an external `databaseUrl` verbatim and does not
   rewrite the DSN in a user-managed Secret.
 
-- **Graceful shutdown & memory drain.** The gateway pod sets `terminationGracePeriodSeconds` (default 90s, overridable via `gateway.terminationGracePeriodSeconds`) plus an optional `preStop` sleep (`gateway.preStopSleepSeconds`, default 5s), and bounds uvicorn's `--timeout-graceful-shutdown` (`gateway.uvicornGracefulShutdownSeconds`, default 10s) so an idle SSE connection cannot hold up lifespan shutdown indefinitely. The grace period MUST exceed the Gateway's graceful-shutdown work — the preStop sleep, the uvicorn timeout, and the lifespan's worst case: six hooks bounded at 5s each (startup trash sweep, notification delivery worker, channel service, scheduled task service, browser sessions, MCP session pool), the 1s retrieval-warm wait, the in-flight run drain (5s) and the memory-queue drain (`memory.shutdown_flush_timeout_seconds`, default 30s), about 66s in total, plus a buffer — because the drain runs on a daemon thread and K8s SIGKILLs anything still running at the end of the grace window. K8s defaults to 30s, which SIGKILLs the drain mid-flight and silently re-introduces the memory loss the drain is fixing. `backend/tests/_gateway_shutdown_budget.py` reads these bounds from the Gateway and pins the chart and compose budgets against them. **When you raise `memory.shutdown_flush_timeout_seconds`, raise `gateway.terminationGracePeriodSeconds` to match** (preStop + uvicorn timeout + ~36s of bounded hooks and drains + memory drain + buffer).
+- **Graceful shutdown & memory drain.** The gateway pod sets `terminationGracePeriodSeconds` (default 90s, overridable via `gateway.terminationGracePeriodSeconds`) plus an optional `preStop` sleep (`gateway.preStopSleepSeconds`, default 5s), and bounds uvicorn's `--timeout-graceful-shutdown` (`gateway.uvicornGracefulShutdownSeconds`, default 10s) so an idle SSE connection cannot hold up lifespan shutdown indefinitely. The grace period MUST exceed the Gateway's graceful-shutdown work — the preStop sleep, the uvicorn timeout, and the lifespan's worst case: seven hooks bounded at 5s each (startup trash sweep, notification delivery worker, channel service, scheduled task service, subagent batch service, browser sessions, MCP session pool), the 1s retrieval-warm wait, the in-flight run drain (5s) and the memory-queue drain (`memory.shutdown_flush_timeout_seconds`, default 30s), about 71s in total, plus a buffer — because the drain runs on a daemon thread and K8s SIGKILLs anything still running at the end of the grace window. K8s defaults to 30s, which SIGKILLs the drain mid-flight and silently re-introduces the memory loss the drain is fixing. `backend/tests/_gateway_shutdown_budget.py` reads these bounds from the Gateway and pins the chart and compose budgets against them. **When you raise `memory.shutdown_flush_timeout_seconds`, raise `gateway.terminationGracePeriodSeconds` to match** (preStop + uvicorn timeout + ~41s of bounded hooks and drains + memory drain + buffer).
 - **Gateway replicas.** Run control is cross-pod-safe since the work tracked
   by [issue #3948](https://github.com/bytedance/deer-flow/issues/3948) landed
   (#4003, #4064, #4500): admission is a durable one-active-run-per-thread
@@ -307,6 +307,17 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   `persistence.home.accessMode: ReadWriteMany` on multi-node clusters (thread
   uploads, outputs, memory and `extensions_config.json` live on that volume)
   and `agent_storage.backend: db` so custom agents are visible on every Pod.
+  Memory itself is multi-instance safe on that volume (per-user file locks,
+  journaled writes, and a Pod re-syncs a user's search index on its next
+  search after a peer writes), but DeerMem's derived SQLite FTS5 index is
+  not: SQLite WAL is unsupported on network filesystems, every Pod start would
+  rebuild a shared index under its peers, and one Pod's corruption recovery
+  would delete it from under them. The default `config` therefore sets
+  `memory.backend_config.retrieval_index_path: /var/lib/deerflow/memory-index`,
+  a Pod-local `emptyDir` the gateway Deployment mounts; keep that line when you
+  override `config:` — a multi-instance gateway that leaves the index under
+  the memory root logs a warning at startup. The index is rebuilt from the
+  Markdown facts on every Pod start, so losing the emptyDir loses nothing.
   A `PodDisruptionBudget` (`minAvailable: 1`) is rendered automatically for a
   multi-instance gateway (same rule), and the rollout strategy is
   surge-then-drain (`maxSurge: 1`, `maxUnavailable: 0`).

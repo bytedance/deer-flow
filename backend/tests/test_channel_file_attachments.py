@@ -381,6 +381,29 @@ class TestInboundFileIngestion:
         assert (uploads_dir / "report.pdf").read_bytes() == gateway_payload
         assert (uploads_dir / ".upload-fixture.part").read_bytes() == gateway_payload
 
+    def test_case_variant_names_keep_both_inbound_attachments(self, tmp_path):
+        from app.channels import manager
+
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        msg = InboundMessage(
+            channel_name="telegram",
+            chat_id="chat-1",
+            user_id="user-1",
+            text="see attachments",
+            files=[
+                {"type": "file", "filename": "Report.txt", "_content": b"first"},
+                {"type": "file", "filename": "report.txt", "_content": b"second"},
+            ],
+        )
+
+        with patch("deerflow.uploads.manager.ensure_uploads_dir", return_value=uploads_dir):
+            result = _run(manager._ingest_inbound_files("thread-1", msg))
+
+        assert [item["filename"] for item in result] == ["Report.txt", "report_1.txt"]
+        assert (uploads_dir / "Report.txt").read_bytes() == b"first"
+        assert (uploads_dir / "report_1.txt").read_bytes() == b"second"
+
     def test_consumes_inline_channel_bytes_without_exposing_them_downstream(self, tmp_path):
         from app.channels import manager
 
