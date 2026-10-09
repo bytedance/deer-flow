@@ -1568,6 +1568,13 @@ def test_context_size_rejects_percent_style_fraction_value() -> None:
         ContextSize(type="fraction", value=80)
 
 
+@pytest.mark.parametrize("context_type", ["fraction", "tokens", "messages"])
+@pytest.mark.parametrize("value", [True, False])
+def test_context_size_rejects_boolean_values(context_type: str, value: bool) -> None:
+    with pytest.raises(ValidationError, match="value must be a number"):
+        ContextSize(type=context_type, value=value)
+
+
 def test_context_size_rejects_non_positive_absolute_values() -> None:
     with pytest.raises(ValidationError, match="tokens ContextSize value must be positive"):
         ContextSize(type="tokens", value=0)
