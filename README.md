@@ -2411,6 +2411,11 @@ DeerFlow can be used as an embedded Python library without running the full HTTP
 
 For database-backed run events, deleting a run preserves its thread's sequence watermark. Thread deletion removes that watermark once no events remain, allowing a recreated thread to restart at sequence 1. Owner-scoped deletion preserves the watermark when another owner's events remain.
 
+Single-process JSONL event storage also retains the thread sequence watermark
+across run deletion and restarts, so clients using `after_seq` do not miss later
+messages. Keep `runs/.seq-watermark` with the run files when backing up this
+backend. Deleting the complete thread removes the watermark and resets allocation.
+
 Thread IDs may be supplied by callers and do not have to be UUIDs. Explicit
 IDs must contain 1–64 ASCII letters, digits, hyphens, or underscores
 (`^[A-Za-z0-9_-]{1,64}$`). DeerFlow generates a UUID only when `thread_id` is

@@ -117,6 +117,15 @@ idempotent writes, LF/CRLF, blank lines, and malformed records.
 Reads and deletes treat a run ID writes reject as an unknown run (routes pass
 URL IDs through); writes still raise.
 
+**JSONL sequence watermark:** before deleting a non-empty run, save the thread's
+allocation floor with atomic replacement of `runs/.seq-watermark`, off-loop under
+the existing mutation fence. Recovery takes the maximum of that floor and surviving
+run files, including legacy directories without a watermark. Failed publication
+must leave the run intact; unreadable/corrupt watermarks fail closed. Complete
+thread deletion removes the watermark only after deleting all run files, including
+when no events remain. This does not add multi-process JSONL support. Coverage:
+`tests/test_jsonl_event_store_seq_watermark.py` and the mutation cancellation suite.
+
 **Targeted run-event attribution** (`runtime/events/store/`):
 `RunEventStore.find_latest_ai_message_run_ids()` has a complete-or-error
 contract. Its default implementation walks `list_messages()` backward in

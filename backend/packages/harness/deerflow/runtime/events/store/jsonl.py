@@ -30,6 +30,7 @@ import asyncio
 import json
 import logging
 import re
+import tempfile
 import weakref
 from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
@@ -131,7 +132,7 @@ class JsonlRunEventStore(RunEventStore):
 
     def _compute_max_seq(self, thread_id: str) -> int:
         """Scan all run files for a thread and return the current max seq (blocking I/O)."""
-        max_seq = 0
+        max_seq = self._read_seq_watermark(thread_id)
         thread_dir = self._thread_dir(thread_id)
         if thread_dir.exists():
             for f in thread_dir.glob("*.jsonl"):
@@ -142,6 +143,34 @@ class JsonlRunEventStore(RunEventStore):
                     except json.JSONDecodeError:
                         logger.debug("Skipping malformed JSONL line in %s", f)
         return max_seq
+
+    def _read_seq_watermark(self, thread_id: str) -> int:
+        path = self._thread_dir(thread_id) / ".seq-watermark"
+        try:
+            seq = int(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return 0
+        if seq < 0:
+            raise ValueError(f"Invalid JSONL sequence watermark in {path}")
+        return seq
+
+    def _save_seq_watermark(self, thread_id: str, seq: int) -> None:
+        """Publish the allocation floor before deleting records (blocking I/O)."""
+        if seq <= self._read_seq_watermark(thread_id):
+            return
+        path = self._thread_dir(thread_id) / ".seq-watermark"
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, prefix=".seq-", suffix=".tmp", delete=False) as file:
+                temporary = Path(file.name)
+                file.write(str(seq))
+            temporary.replace(path)
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning("Could not remove JSONL watermark temporary file %s", temporary, exc_info=True)
 
     async def _ensure_seq_loaded(self, thread_id: str) -> None:
         """Load max seq from existing files into the in-memory counter (non-blocking)."""
@@ -194,6 +223,8 @@ class JsonlRunEventStore(RunEventStore):
         if thread_dir.exists():
             for f in thread_dir.glob("*.jsonl"):
                 f.unlink()
+            # Reset only after every run file has been removed successfully.
+            (thread_dir / ".seq-watermark").unlink(missing_ok=True)
 
     def _delete_run_file(self, thread_id: str, run_id: str) -> None:
         path = self._existing_run_file(thread_id, run_id)
@@ -476,6 +507,9 @@ class JsonlRunEventStore(RunEventStore):
         async def mutate():
             events = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
             count = len(events)
+            if count:
+                await self._ensure_seq_loaded(thread_id)
+                await asyncio.to_thread(self._save_seq_watermark, thread_id, self._seq_counters[thread_id])
             await asyncio.to_thread(self._delete_run_file, thread_id, run_id)
             return count
 
