@@ -140,6 +140,12 @@ for (const custom of [false, true]) {
       await expect(report).toContainText("No criteria");
       await expect(report).not.toContainText("Unverified");
       await expect(
+        report.getByRole("link", { name: "Report file" }),
+      ).toHaveAttribute(
+        "href",
+        `/api/threads/${MOCK_THREAD_ID}/artifacts/mnt/user-data/outputs/report.md`,
+      );
+      await expect(
         report.locator("code").filter({ hasText: "[citation:1]" }),
       ).toHaveCount(1);
       const citations = page.getByRole("button", {

@@ -1961,6 +1961,9 @@ separately from deterministic acceptance: an execution can succeed while its
 criteria remain unmet or unverified. Truncated reports are labeled, and JSONL
 export remains available for bulk results.
 
+Output-file links in saved reports open through the current conversation's
+artifact route, using the same link renderer as ordinary chat messages.
+
 Items offer report inspection once terminal or when a saved preview is present.
 Reports without acceptance criteria show **No criteria**; **Unverified** means
 criteria still lack conclusive verification. Blank source names or

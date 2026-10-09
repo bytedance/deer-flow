@@ -107,6 +107,8 @@ Language-map membership checks only own properties; inherited names such as
    An empty criteria definition is No criteria; Unverified applies only to existing
    criteria without conclusive verification. Offer inspection only for terminal
    items or an item with a stored result preview.
+   Saved reports reuse `createMarkdownLinkComponent(threadId)` so output-file
+   links resolve through the current thread's artifact route alongside citations.
    The panel must not infer batch mode from prompt text
    or inject the complete result set into chat state.
    Capability Center > Plugins > Lark uses a local generation only to suppress stale React

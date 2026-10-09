@@ -1,7 +1,7 @@
 "use client";
 
 import { LoaderCircleIcon } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -25,8 +25,8 @@ import {
   useSubagentBatchResult,
 } from "@/core/subagent-batches";
 
-import { CitationLink } from "./citations/citation-link";
 import { KnowledgeSourcesProvider } from "./citations/knowledge-source";
+import { createMarkdownLinkComponent } from "./messages/markdown-link";
 
 type ReportProps = {
   threadId: string;
@@ -82,6 +82,10 @@ function ReportBody({
 }: ReportProps & { userId: string }) {
   const { t } = useI18n();
   const labels = t.subagentBatches;
+  const components = useMemo(
+    () => toStreamdownComponents({ a: createMarkdownLinkComponent(threadId) }),
+    [threadId],
+  );
   const query = useSubagentBatchResult(
     threadId,
     batchId,
@@ -175,7 +179,7 @@ function ReportBody({
           <SafeStreamdown
             {...streamdownPluginsWithoutRawHtml}
             mode="static"
-            components={toStreamdownComponents({ a: CitationLink })}
+            components={components}
           >
             {saved.result}
           </SafeStreamdown>

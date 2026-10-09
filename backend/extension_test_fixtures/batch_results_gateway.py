@@ -52,6 +52,7 @@ async def create_app(directory):
     source_id = artifact["knowledge_sources"]["sources"][0]["id"]
     report = f"- ~~~\n  [citation:1](#knowledge-{source_id})\n  ~~~\n\nFull saved report\n" + report.replace("[citation:1]", "[citation:2]") + "\n<script>window.PWNED = true</script>"
     report += f"\n\n> ~~~\n> quoted example\n\n[citation:3](#knowledge-{source_id})"
+    report += "\n\n[Report file](/mnt/user-data/outputs/report.md)"
     snapshot = durable_source_artifact([{"type": "tool", "name": "knowledge_search", "artifact": artifact}], report, max_chars=100_000)
     await repository.finalize_item(
         claimed[0]["id"],

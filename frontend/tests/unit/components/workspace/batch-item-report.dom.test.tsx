@@ -180,6 +180,27 @@ it("allows a running item's saved preview to be inspected", async () => {
   expect(read).toHaveBeenCalledTimes(1);
 });
 
+it("resolves saved output links through the current thread artifact route", async () => {
+  read.mockResolvedValue({
+    ...saved,
+    result: "[Report](/mnt/user-data/outputs/report.md)",
+  });
+  const view = render(<App threadId="original-thread" />);
+  fireEvent.click(screen.getByRole("button", { name: "View report" }));
+  const report = await screen.findByRole("link", { name: "Report" });
+  expect(report.getAttribute("href")).toBe(
+    "/api/threads/original-thread/artifacts/mnt/user-data/outputs/report.md",
+  );
+  expect(report.getAttribute("target")).toBe("_blank");
+  expect(report.getAttribute("rel")).toBe("noopener noreferrer");
+  view.rerender(<App threadId="next-thread" />);
+  fireEvent.click(screen.getByRole("button", { name: "View report" }));
+  const next = await screen.findByRole("link", { name: "Report" });
+  expect(next.getAttribute("href")).toBe(
+    "/api/threads/next-thread/artifacts/mnt/user-data/outputs/report.md",
+  );
+});
+
 it("reads on demand and uses native Markdown for a list-contained tilde fence", async () => {
   render(<App />);
   expect(read).not.toHaveBeenCalled();
