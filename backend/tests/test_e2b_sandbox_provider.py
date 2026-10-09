@@ -4043,7 +4043,7 @@ def _search_stdout(raw: str, *, status: int = 0) -> str:
 def test_grep_scoped_glob_excludes_unrelated_directory_matches():
     """Regression: grep(glob="src/*.js") must not leak matches from sibling
     directories that merely share the file extension."""
-    raw_stdout = "/home/user/workspace/other_dir/unrelated.js:1:console.log('needle in other_dir');\n/home/user/workspace/src/app.js:1:console.log('needle in src');\n"
+    raw_stdout = "/home/user/workspace/other_dir/unrelated.js\x001:console.log('needle in other_dir');\n/home/user/workspace/src/app.js\x001:console.log('needle in src');\n"
     client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout=_search_stdout(raw_stdout), stderr="", exit_code=0)]))
     sb = _make_sandbox(client)
 
@@ -4059,7 +4059,7 @@ def test_grep_plain_glob_matches_files_in_any_directory():
     """No regression: a plain non-scoped glob (no ``/`` in the pattern) must
     keep matching files at any depth, same as before the directory-scoping
     fix."""
-    raw_stdout = "/home/user/workspace/other_dir/deep/mod.py:1:needle in a deeply nested file\n/home/user/workspace/src/app.py:1:needle in a python file too\n"
+    raw_stdout = "/home/user/workspace/other_dir/deep/mod.py\x001:needle in a deeply nested file\n/home/user/workspace/src/app.py\x001:needle in a python file too\n"
     client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout=_search_stdout(raw_stdout), stderr="", exit_code=0)]))
     sb = _make_sandbox(client)
 
@@ -4089,7 +4089,7 @@ def test_grep_scoped_glob_still_passes_coarse_include_flag():
 def test_grep_without_glob_is_unaffected():
     """No regression: omitting ``glob`` entirely must return every match
     with no path-based post-filtering."""
-    raw_stdout = "/home/user/workspace/anywhere/file.txt:3:needle here\n"
+    raw_stdout = "/home/user/workspace/anywhere/file.txt\x003:needle here\n"
     client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout=_search_stdout(raw_stdout), stderr="", exit_code=0)]))
     sb = _make_sandbox(client)
 
@@ -4101,7 +4101,7 @@ def test_grep_without_glob_is_unaffected():
 
 def test_grep_single_file_path_with_matching_glob():
     """A basename glob must also apply when the search root is one file."""
-    raw_stdout = "/home/user/uploads/report.md:2:needle here\n"
+    raw_stdout = "/home/user/uploads/report.md\x002:needle here\n"
     client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout=_search_stdout(raw_stdout), stderr="", exit_code=0)]))
     sb = _make_sandbox(client)
 
@@ -5928,6 +5928,22 @@ def _rs_sandbox(tmp_path, failing: str | None = None):
 
 def _rs_search(sb, op: str, root: str):
     return sb.grep(root, "needle") if op == "grep" else sb.glob(root, "**/*.py")
+
+
+@_RS_POSIX
+@pytest.mark.parametrize("relative_path", ["plain.txt", "report:2026.txt", "report:2:2026.txt", "2026-10-09T13:45:00.txt", "reports:2026/result.txt"])
+@pytest.mark.parametrize("search_scope", ["directory", "single_file", "filtered_directory"])
+def test_remote_grep_preserves_colons_in_paths(tmp_path, relative_path, search_scope):
+    target = tmp_path / relative_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("header\nneedle: hello:world\n", encoding="utf-8")
+    root = target if search_scope == "single_file" else tmp_path
+    glob = "*.txt" if search_scope == "filtered_directory" else None
+
+    matches, truncated = _rs_sandbox(tmp_path).grep(str(root), "needle", glob=glob)
+
+    assert [(match.path, match.line_number, match.line) for match in matches] == [(str(target), 2, "needle: hello:world")]
+    assert truncated is False
 
 
 @_RS_POSIX

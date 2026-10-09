@@ -44,3 +44,8 @@ passing it to the shell. The shell must not split or expand filename patterns;
 grep owns basename globbing and `path_matches` owns root-relative directory
 scoping. `tests/test_sandbox_search_contract.py` pins this across providers using
 real temporary files and offline shell transports.
+
+Use `grep --null` to separate the filename from `line:text`, then parse the
+line number only after that NUL delimiter. Colons are valid path characters,
+so never split the whole record on them. Real-shell regressions in
+`tests/test_e2b_sandbox_provider.py` cover colon-containing files and directories.
