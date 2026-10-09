@@ -594,8 +594,9 @@ models:
   #   supports_vision: true
   #   supports_thinking: true
   #   # PatchedChatMiniMax is the MiniMax adapter: it enables reasoning_split and
-  #   # maps MiniMax's structured reasoning into reasoning_content (the field
-  #   # DeerFlow understands), and it strips the per-message `name` field that
+  #   # maps MiniMax's structured reasoning_details and native reasoning_content
+  #   # into the reasoning_content field DeerFlow understands, and it strips the
+  #   # per-message `name` field that
   #   # DeerFlow middlewares attach — MiniMax rejects requests whose user-message
   #   # names differ with "user name must be consistent (2013)". Declare the
   #   # thinking toggle so non-thinking paths (flash mode, follow-up suggestions,
@@ -658,8 +659,9 @@ models:
   #   supports_vision: true
   #   supports_thinking: true
   #   # PatchedChatMiniMax is the MiniMax adapter: it enables reasoning_split and
-  #   # maps MiniMax's structured reasoning into reasoning_content (the field
-  #   # DeerFlow understands), and it strips the per-message `name` field that
+  #   # maps MiniMax's structured reasoning_details and native reasoning_content
+  #   # into the reasoning_content field DeerFlow understands, and it strips the
+  #   # per-message `name` field that
   #   # DeerFlow middlewares attach — MiniMax rejects requests whose user-message
   #   # names differ with "user name must be consistent (2013)". Declare the
   #   # thinking toggle so non-thinking paths (flash mode, follow-up suggestions,
@@ -3380,7 +3382,9 @@ authorization:
 # auth:
 #   local:
 #     allow_registration: false
-#     # Login throttling per client IP. Raise max_login_attempts when many
+#     # Login throttling per client IP. The client IP is X-Real-IP from a
+#     # proxy listed in AUTH_TRUSTED_PROXIES (the Docker stack trusts its
+#     # bundled nginx), else the TCP peer. Raise max_login_attempts when many
 #     # users share one egress IP (corporate proxy / NAT) so shared-IP
 #     # lockouts don't block the whole office; lower it for a stricter
 #     # posture (minimum 2 — one failed attempt must never lock an IP, or a
