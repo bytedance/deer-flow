@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
@@ -11,10 +12,49 @@ from pathlib import Path
 
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.types import SKILL_MD_FILE, Skill, SkillCategory  # noqa: F401
+from deerflow.utils.host_paths import windows_incompatible_segment
 
 logger = logging.getLogger(__name__)
 
 _SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+def walk_skill_directories(root: Path) -> Iterable[tuple[str, list[str], list[str]]]:
+    """Follow directory links, but prune links back to the current ancestors.
+
+    Keep os.walk's mutable directory list so callers retain their namespace,
+    hidden-directory and package-boundary rules. Track only the current branch:
+    two independent aliases of an external skill tree must both be discoverable.
+    """
+    ancestors: list[tuple[Path, Path]] = []
+    for current_root, dir_names, file_names in os.walk(root, followlinks=True):
+        current_path = Path(current_root)
+        while ancestors and ancestors[-1][0] != current_path.parent:
+            ancestors.pop()
+        try:
+            resolved = current_path.resolve(strict=True)
+        except (OSError, RuntimeError):
+            # The directory may have disappeared or its link changed mid-scan.
+            dir_names.clear()
+            continue
+        if any(resolved == real_path for _, real_path in ancestors):
+            dir_names.clear()
+            continue
+        ancestors.append((current_path, resolved))
+        yield current_root, dir_names, file_names
+
+
+def read_text_or_none(path: Path) -> str | None:
+    """Return *path*'s content as UTF-8 text, or ``None`` when it is not text.
+
+    For history records only: a skill's support files may be binary (the
+    installer rejects executable binaries, not images or other assets), and
+    recording "no previous text" must never abort the mutation being logged.
+    """
+    try:
+        return path.read_bytes().decode("utf-8")
+    except UnicodeDecodeError:
+        return None
 
 
 class SkillStorage(ABC):
@@ -95,8 +135,17 @@ class SkillStorage(ABC):
             return False
         return len(relative_parent.parts) == 1 and skill_file.parent.resolve().is_dir()
 
-    def ensure_safe_support_path(self, name: str, relative_path: str) -> Path:
-        """Validate and return the resolved absolute path for a support file."""
+    def ensure_safe_support_path(self, name: str, relative_path: str, *, enforce_portability: bool = True) -> Path:
+        """Validate and return the resolved absolute path for a support file.
+
+        The path must name a file *inside* one of the support directories: a
+        bare ``assets`` resolves to its own allowed root and would otherwise
+        pass the containment check, letting callers try to remove or overwrite
+        a directory.
+
+        ``enforce_portability`` is False only for removal, so a support file
+        stored before this check can still be deleted. Traversal checks stay.
+        """
         _ALLOWED_SUPPORT_SUBDIRS = {"references", "templates", "scripts", "assets"}
         skill_dir = self.get_custom_skill_dir(self.validate_skill_name(name)).resolve()
         if not relative_path or relative_path.endswith("/"):
@@ -106,9 +155,16 @@ class SkillStorage(ABC):
             raise ValueError("Supporting file path must be relative.")
         if any(part in {"..", ""} for part in relative.parts):
             raise ValueError("Supporting file path must not contain parent-directory traversal.")
+        if enforce_portability:
+            for part in relative.parts:
+                reason = windows_incompatible_segment(part)
+                if reason:
+                    raise ValueError(f"Supporting file path is not portable to Windows: {relative_path!r} ({reason})")
         top_level = relative.parts[0] if relative.parts else ""
         if top_level not in _ALLOWED_SUPPORT_SUBDIRS:
             raise ValueError(f"Supporting files must live under one of: {', '.join(sorted(_ALLOWED_SUPPORT_SUBDIRS))}.")
+        if len(relative.parts) < 2:
+            raise ValueError(f"Supporting file path must name a file inside '{top_level}/'.")
         target = (skill_dir / relative).resolve()
         allowed_root = (skill_dir / top_level).resolve()
         try:
@@ -181,12 +237,20 @@ class SkillStorage(ABC):
         Origin: ``deerflow.skills.manager.atomic_write``.
         """
 
-    def remove_custom_skill_file(self, name: str, relative_path: str) -> str:
-        """Remove a supporting file and return its previous text content."""
-        target = self.ensure_safe_support_path(name, relative_path)
+    def remove_custom_skill_file(self, name: str, relative_path: str) -> str | None:
+        """Remove a supporting file and return its previous text content.
+
+        Returns ``None`` when the file was not UTF-8 text (a binary asset such
+        as ``assets/logo.png`` from a ``.skill`` archive): the previous content
+        only feeds the history record, so it must never block the removal.
+        A directory is rejected rather than removed.
+        """
+        target = self.ensure_safe_support_path(name, relative_path, enforce_portability=False)
+        if target.is_dir():
+            raise ValueError(f"Supporting file path '{relative_path}' is a directory, not a file.")
         if not target.exists():
             raise FileNotFoundError(f"Supporting file '{relative_path}' not found for skill '{name}'.")
-        previous_content = target.read_text(encoding="utf-8")
+        previous_content = read_text_or_none(target)
         target.unlink()
         return previous_content
 

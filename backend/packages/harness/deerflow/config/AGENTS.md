@@ -1,5 +1,20 @@
 ### Configuration System
 
+`Paths.user_projects_dir()` uses `extended_length_path()` on native Windows.
+All document paths, including staging and retention walks, inherit the same
+extended drive/UNC namespace even when the root itself is short. Persisted
+`stored_relpath` values and Docker mount paths retain their existing spelling.
+`project_document_path()` still resolves symlinks and checks confinement using
+the same namespace for both the user projects root and the document path.
+Do not prefix only paths already exceeding MAX_PATH: appended filenames and
+derived companions can cross the limit later.
+
+Operator prompt overlays: `lead_prompt_overlay` on AppConfig and
+`subagents.agents.<name>.prompt_overlay` accept literal `prepend`/`append` strings.
+The per-assembly snapshot owns these settings; no run-context override exists.
+DeerMem owns its separate `memory.backend_config.prompt_prepend`/`prompt_append`
+fields so the memory package remains host-agnostic.
+
 Custom Agent `AgentConfig.display_name` is an optional, whitespace-trimmed Unicode
 label of at most 100 Unicode code points. C0/C1 controls and bidirectional
 formatting controls (U+202A–U+202E, U+2066–U+2069) are rejected before trimming.
@@ -20,7 +35,11 @@ raise, and API create/update validation remains strict.
 
 **Main Configuration** (`config.yaml`):
 
-Setup: Copy `config.example.yaml` to `config.yaml` in the **project root** directory.
+Setup: Copy root `config.example.yaml` to `config.yaml`. Startup callers use
+`deerflow.env.load_selected_env_file()` for optional `DEER_FLOW_ENV_FILE` (cwd-relative,
+strict readable file, process env wins). Reject a disabling `PYTHON_DOTENV_DISABLED`
+when selection is explicit; otherwise retain the original `load_dotenv()`.
+Keep this helper free of config imports so auth/debug cannot preload defaults.
 
 **Config Versioning**: `config.example.yaml` has a `config_version` field. On startup, `AppConfig.from_file()` compares user version vs example version and emits a warning if outdated. Missing `config_version` = version 0. Run `make config-upgrade` to auto-merge missing fields. When changing the config schema, bump `config_version` in `config.example.yaml`.
 
@@ -33,11 +52,18 @@ their tool-local settings unchanged.
 
 Top-level `recursion_limit` and `max_recursion_limit` are hot-reloaded per Gateway run. The former supplies the default when a request omits or provides an invalid value; the latter caps both configured and client-provided budgets.
 
-**Config Caching**: `get_app_config()` caches the parsed config, but automatically reloads it when the resolved config path or file content signature changes. The signature includes file metadata and a content digest, so Gateway and LangGraph reads stay aligned with `config.yaml` edits even on object-store or network mounts where mtime can remain stale.
+`tool_output` character/count limits and every `tool_overrides` value share
+non-negative integer validation. Reject booleans before Pydantic coercion;
+preserve numeric strings from environment substitution and explicit zero.
+Zero per-tool overrides disable externalization only; a positive global
+fallback budget still truncates oversized output. Regression tests exercise
+YAML loading and both middleware tool-call paths in `test_tool_output_config_limits.py`.
+
+**Config Caching**: `get_app_config()` caches the parsed config, but automatically reloads it when the resolved config path or file content signature changes. The signature includes file metadata and a content digest, so Gateway and LangGraph reads stay aligned with `config.yaml` edits even on object-store or network mounts where mtime can remain stale. The loader reads the file once through `file_signature.read_config_with_signature` and parses those same bytes, so the recorded signature always describes the parsed content: a write that races the load can only cause one extra reload, never a cache that holds one revision under another revision's signature (which the comparison could never detect). The cached `extensions` snapshot follows the process extensions singleton: `get_app_config()` also reloads when `get_extensions_config()` returns a new instance (see **Extensions Config Caching** below), and the loader takes that instance before reading `config.yaml`, so it can only be older than the YAML it merges with, never newer.
 
 **Config Hot-Reload Boundary**: Gateway dependencies route through `get_app_config()` on every request, so per-run fields like `models[*].max_tokens`, `summarization.*`, `title.*`, `memory.*`, `subagents.*`, `verification.*`, `tools[*]`, and the agent system prompt pick up `config.yaml` edits on the next message. `AppConfig` is intentionally **not** cached on `app.state` — `lifespan()` keeps a local `startup_config` variable for one-shot bootstrap work and passes it to `langgraph_runtime(app, startup_config)`.
 
-Infrastructure fields are **restart-required**. The authoritative list lives in `packages/harness/deerflow/config/reload_boundary.py::STARTUP_ONLY_FIELDS` and is mirrored by the standardised `"startup-only:"` prefix on the corresponding `Field(description=...)` in `AppConfig` or an explicitly registered nested config model, so IDE hover on those fields surfaces the reason inline (no need to context-switch into this table). Currently registered: `plugins`, `database`, `checkpointer`, `run_events`, `agent_storage`, `stream_bridge`, `sandbox`, `skills.container_path`, `log_level`, `logging`, `channels`, `channel_connections`, `scheduler`, `mcp_tasks`, `subagent_runtime`, `subagent_batches`, `run_ownership`, `dedupe_storage`. Adding a new restart-required field requires updating the registry; drift is pinned by `tests/test_reload_boundary.py`. `scheduler.recursion_limit` is the exception inside that section: it is read from `get_app_config()` at each scheduled dispatch, so a YAML edit applies to the next run without restarting the poller.
+Infrastructure fields are **restart-required**. The authoritative list lives in `packages/harness/deerflow/config/reload_boundary.py::STARTUP_ONLY_FIELDS` and is mirrored by the standardised `"startup-only:"` prefix on the corresponding `Field(description=...)` in `AppConfig` or an explicitly registered nested config model, so IDE hover on those fields surfaces the reason inline (no need to context-switch into this table). Currently registered: `plugins`, `database`, `checkpointer`, `run_events`, `agent_storage`, `stream_bridge`, `sandbox`, `skills.container_path`, `log_level`, `logging`, `channels`, `channel_connections`, `scheduler`, `mcp_tasks`, `subagent_runtime`, `subagent_batches`, `run_ownership`, `dedupe_storage`, `auth.local.throttle_storage` (the login throttle store is installed once by `langgraph_runtime`; `max_login_attempts` / `lockout_seconds` stay live-read). Adding a new restart-required field requires updating the registry; drift is pinned by `tests/test_reload_boundary.py`. `scheduler.recursion_limit` is the exception inside that section: it is read from `get_app_config()` at each scheduled dispatch, so a YAML edit applies to the next run without restarting the poller.
 
 **Persistence backend resolution**: the unified `database` section selects the
 Gateway's LangGraph checkpointer, LangGraph Store, and DeerFlow SQL repositories.
@@ -47,16 +73,23 @@ application repositories continue to use `database`.
 
 Configuration priority:
 1. Explicit `config_path` argument
-2. `DEER_FLOW_CONFIG_PATH` environment variable
-3. `config.yaml` in current directory (backend/)
-4. `config.yaml` in parent directory (project root - **recommended location**)
+2. `DEER_FLOW_CONFIG_PATH` environment variable (a missing file is an error, not a fallthrough)
+3. `config.yaml` under `DEER_FLOW_PROJECT_ROOT`, or the current directory when it is unset
+4. Legacy `backend/config.yaml`, then repository-root `config.yaml` (project root is the **recommended location**)
+
+`scripts/config-upgrade.sh` calls `AppConfig.resolve_config_path` rather than copying this order.
+The legacy locations are anchored to the installed harness source, not to the caller's checkout.
+`scripts/doctor.py` calls `AppConfig.resolve_config_path` rather than copying this order.
 
 Config values starting with `$` are resolved as environment variables (e.g., `$OPENAI_API_KEY`).
 `ModelConfig` also declares `use_responses_api` and `output_version` so OpenAI `/v1/responses` can be enabled explicitly while still using `langchain_openai:ChatOpenAI`.
 
 `ModelConfig.request_admission` is optional and is not a provider parameter.
 Its positive RPM, finite wait deadline, queue bound and optional quota-group name
-configure process-local model pacing. Models sharing an explicit group must use
+configure process-local model pacing. `requests_per_minute` and `max_queue_size` are strict
+integers (bools and floats are rejected) behind a `BeforeValidator` that converts a
+decimal literal delivered as a string, because `$VAR` substitution always yields
+`str`; any other string still fails validation. Models sharing an explicit group must use
 identical policies. Restart after changing, disabling or regrouping an active
 policy; conflicting policies fail construction rather than silently resetting
 an active budget. This nested model option is enforced by its limiter registry,
@@ -65,6 +98,9 @@ not by the top-level infrastructure reload-boundary registry.
 **Extensions Configuration** (`extensions_config.json`):
 
 MCP servers and skills are configured together in `extensions_config.json` in project root:
+
+Both the runtime loader and raw read-modify-write reader accept UTF-8 with or
+without a leading BOM. Writes remain UTF-8 without a BOM.
 
 Docker development mounts the project directory at `/app/project` and points
 `DEER_FLOW_CONFIG_PATH` / `DEER_FLOW_EXTENSIONS_CONFIG_PATH` into that directory.
@@ -79,15 +115,33 @@ Configuration priority:
 
 Extensions are optional only in the fallback *search* mode (priority 3-4 above): `ExtensionsConfig.resolve_config_path()` returns `None` when neither an explicit `config_path` nor `DEER_FLOW_EXTENSIONS_CONFIG_PATH` is given and the search locations find nothing. An explicit `config_path` argument or a set `DEER_FLOW_EXTENSIONS_CONFIG_PATH` (priority 1-2) is an operator assertion that one particular file must be used, so a missing file in either of those modes raises `FileNotFoundError` instead — including when the file existed earlier and has since been deleted. The MCP tools cache's staleness check (`deerflow.mcp.cache._resolve_config_path`) is a narrow, deliberate exception to that rule: it catches that `FileNotFoundError` locally and treats it as "unconfigured" so a previously-valid config disappearing mid-run degrades the cache to serving its last-known-good tools instead of raising out of a per-request hot path (see the MCP System section below).
 
+**Extensions Config Caching**: `get_extensions_config()` caches the parsed file but revalidates it on every call against the resolved path and the `(mtime, size, sha256)` signature from `file_signature.get_config_signature`, so an edit made by another Gateway worker, or by another instance sharing the file (the Helm home volume, the compose bind mount), is visible to this process on its next read without a restart or an explicit reload. Writers (MCP router, skill toggle, `DeerFlowClient`) still call `reload_extensions_config()` after their write, which records the written revision so the next read does not reload it again. Once a configuration has been loaded, a revision that cannot be loaded — the file vanished, or it is truncated or invalid, for example midway through the non-atomic `EBUSY` overwrite fallback — keeps the last-known-good configuration and is logged once at warning level with the exception type only (validation messages can embed resolved `$VAR` secrets); the first load still raises, so a broken file at startup stays loud. `reload_extensions_config(config_path=...)` makes the cache follow that file (later edits included) until a reset or an argument-less reload. `set_extensions_config()` pins an injected instance until `reload_extensions_config()` or `reset_extensions_config()`; tests that inject one must reset it afterwards, because the `extensions` snapshot of `get_app_config()` follows the pinned instance too. The local-bash absolute path allowlist (`sandbox/tools.py::_get_mcp_allowed_paths`) is derived from this singleton, which is why the revalidation is a security property rather than an optimization. Pinned by `tests/test_extensions_config_freshness.py` and the extensions cases in `tests/test_app_config_reload.py`.
+
+Extensions loads parse the bytes from `read_config_with_signature`, recording
+that read's digest rather than an earlier probe's. Freshness reloads read the
+probed path explicitly; a missing or invalid revision keeps the last-known-good
+cache, including AppConfig's middleware snapshot, until a readable revision returns.
+
+**Shared Reset Markers** (`shared_reset_marker.py`): caches derived from the extensions config can go stale without a byte of it changing (a remote MCP server's `tools/list`, a skill installed or edited on the shared volume by another process). `SharedResetMarker(suffix)` owns one hidden JSON file beside the resolved config, `.<config name>.<suffix>.json`; `publish()` replaces it atomically with a random generation under `extensions_config_write_lock` + `extensions_config_file_lock` (`publish_locked()` when the caller already holds both), chaining `previous_generation` and an optional `user_id`. `SharedResetMarkerTracker.poll()` re-reads the marker at most once per second (monotonic clock, never blocking behind a concurrent poller), adopts the current state silently on its first poll, and reports a `SharedResetChange`: `user_ids={user}` only when exactly one publication carrying that user happened since the last poll, otherwise `None` (retire everything), including deleted/unreadable markers and config-path switches. `note_own_publication()` lets the writer skip the redundant self-invalidation. `resolve_shared_config_path()` maps a missing explicit path to `None` (no shared directory: callers answer `scope=process`). Consumers: `mcp/cache.py` (`mcp-cache-reset`) and `agents/lead_agent/prompt.py` (`skills-cache-reset`). Tests: `tests/test_shared_reset_marker.py`.
+
 ### Config Schema
 
 **`config.yaml`** key sections:
-- `models[]` - LLM configs with `use` class path, `supports_thinking`, `supports_vision`, provider-specific fields
+- `models[]` - LLM configs with `use` class path, `supports_thinking`, `supports_vision`, provider-specific fields. An optional `reasoning:` block (issue #5073) declares thinking availability (`unsupported|optional|required`), the accepted effort `values` with `aliases`/`default`/`path`, the payload `dialect`, and the reasoning `history` requirement; when present, `supports_thinking` / `supports_reasoning_effort` are derived from it and contradictory combinations fail validation in `ModelConfig`
+  A declared custom `reasoning.effort.path` is the only effort serialization path: `ModelConfig` rejects leftover `reasoning_effort` keys in the profile or thinking templates, even if their values are otherwise accepted.
+  A boolean or level-string `reasoning` (`true` / `false`, or `low|medium|high` for gpt-oss style models) remains the legacy native ChatOllama setting and is passed to the provider; only a mapping opts into the contract.
 - `logging.enhance` - Log output only (`enabled`, `format`): whether log records carry a `trace_id` field, and in which format. Trace ids are issued unconditionally — the Gateway `X-Trace-Id` header and Langfuse `deerflow_trace_id` metadata are always present whatever this says (see the Request Trace Context section in `packages/harness/deerflow/AGENTS.md`); restart-required
 - vLLM reasoning models should use `deerflow.models.vllm_provider:VllmChatModel`; for Qwen-style parsers prefer `when_thinking_enabled.extra_body.chat_template_kwargs.enable_thinking`, and DeerFlow will also normalize the older `thinking` alias
 - `tools[]` - Tool configs with `use` variable path and `group`
 - `tool_groups[]` - Logical groupings for tools
 - `sandbox.use` - Sandbox provider class path
+- `sandbox.ownership` - Cross-instance sandbox lease storage. Renewal interval
+  and TTL multiplier must each be finite, and their derived lease TTL must also
+  remain finite. Redis-backed lease TTLs must be at least one millisecond and
+  use at most half of Redis's signed 64-bit millisecond range, leaving
+  deterministic headroom for conversion from a relative TTL to an absolute Unix
+  timestamp during validation. The Redis store rounds fractional milliseconds
+  up so its integer TTL never shortens the validated lease.
 - `skills.path` / `skills.container_path` - Host and container paths to skills directory. AIO and E2B snapshot the container path at provider startup. Their local/remote backends and the Kubernetes provisioner require one canonical absolute non-root path outside reserved platform mounts; custom roots participate in deterministic sandbox identity, and E2B records the root in remote metadata.
 - `skills.deferred_discovery` - When `true`, replaces the full-metadata `<available_skills>` prompt block with a compact `<skill_index>` (names only) and registers the `describe_skill` tool so the agent fetches metadata on demand. Defaults to `false` (legacy full-metadata injection)
 - `title` - Auto-title generation (enabled, max_words, max_chars, model_name; null model_name uses fast local fallback, explicit model_name uses the prompt_template LLM path)

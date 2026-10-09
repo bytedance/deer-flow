@@ -410,6 +410,26 @@ def _parse_fact_markdown(path: Path) -> dict[str, Any]:
         raise MemoryStorageCorruption(f"Failed to parse canonical fact {path}: {exc}") from exc
 
 
+def _parse_listed_fact(path: Path) -> dict[str, Any] | None:
+    """Parse a fact found by a directory scan that ran without the scope locks.
+
+    A commit can delete a listed fact before it is opened; that vanished entry
+    returns ``None``. An entry that is still present but unreadable (such as a
+    dangling symlink) remains corruption.
+
+    The ``lexists`` re-check is a best-effort heuristic, not an exact test: a
+    delete followed by a recreate of the same id before the check still raises
+    (the conservative side), and an ``lstat`` failure on a parent directory
+    (such as ``EACCES``) reads as vanished, so that entry is skipped.
+    """
+    try:
+        return _parse_fact_markdown(path)
+    except MemoryStorageCorruption:
+        if os.path.lexists(path):
+            raise
+        return None
+
+
 def _fsync_parent_directory(directory: Path) -> None:
     """Make a completed rename durable on POSIX filesystems."""
     if os.name == "nt":
@@ -561,6 +581,22 @@ class FileMemoryStorage(MemoryStorage):
         self._cache_lock = threading.Lock()
         self._scope_locks: weakref.WeakValueDictionary[tuple[str | None, str | None], threading.RLock] = weakref.WeakValueDictionary()
         self._retrieval_dirty_scopes: set[tuple[str | None, str | None]] = set()
+        # Manifest signature at which this process last brought each agent scope's
+        # index in sync. A different live signature means another process wrote
+        # the user's memory, so the scope is rebuilt before it is searched.
+        self._retrieval_synced_signatures: dict[tuple[str | None, str | None], tuple[Any, ...]] = {}
+        # Generations bumped (under _cache_lock) whenever rebuild_index publishes
+        # or forgets a scope's rows: per scope for a scoped rebuild, storage-wide
+        # for a full one. Signature promotion after an own commit is fenced on
+        # them, because a rebuild that installed rows in between may have read
+        # its facts before that commit and has recorded its own signature.
+        self._retrieval_index_generation = 0
+        self._retrieval_scope_generations: dict[tuple[str | None, str | None], int] = {}
+        # Serializes a rebuild's row replacement with its signature publication
+        # (see rebuild_index): the adapter lock ends when the install returns, so
+        # two overlapping refreshes of one scope could otherwise install in one
+        # order and publish in the other.
+        self._retrieval_publish_lock = threading.Lock()
 
     def close(self) -> None:
         """Release the retrieval adapter owned by this storage instance."""
@@ -828,11 +864,42 @@ class FileMemoryStorage(MemoryStorage):
         *,
         user_id: str | None,
         agent_name: str | None,
+        committed: tuple[int, tuple[Any, ...]] | None = None,
     ) -> None:
-        """Notify the optional index only after durable storage locks are released."""
+        """Notify the optional index only after durable storage locks are released.
+
+        ``committed`` is ``(previous_revision, signature)`` of a manifest this
+        process just replaced, with ``previous_revision`` read under the user lock
+        right before the commit; a commit that changed nothing passes ``None``.
+        Once every notification lands, the user's scopes whose index was in sync
+        at ``previous_revision`` are in sync at ``signature`` too: the write was
+        the only change in between and the index carries its delta, so the next
+        search does not rebuild them. A scope synced at an older revision keeps
+        that older signature and is rebuilt, because a peer wrote the manifest
+        in between; a no-op commit leaves every recorded signature as it was.
+
+        A scope is promoted only when the delta is provably compatible with the
+        published snapshot: it is synced at exactly ``previous_revision`` and no
+        rebuild published rows for it (or storage-wide) since the generation
+        snapshot taken before the first adapter call. The SQLite lock covers
+        single adapter calls only, so ``rebuild_index`` may replace the scope's
+        rows at any point around the notifications below, and a rebuild may
+        have read its facts before this commit (resurrecting a fact this write
+        deleted) or after it (so that an older delta replayed on top reinserts
+        a fact a peer has since deleted). The scope this delta mutated therefore
+        forgets its recorded signature whenever compatibility cannot be proved,
+        so the next search's comparison rebuilds it; the user's other scopes
+        were not mutated here and are promoted when provable, else left alone.
+        """
         if self._retrieval is None:
             return
         scope = _scope_dict(user_id, agent_name)
+        key = self._cache_key(agent_name, user_id=user_id)
+        fence: tuple[int, dict[tuple[str | None, str | None], int]] | None = None
+        if committed is not None:
+            with self._cache_lock:
+                fence = (self._retrieval_index_generation, dict(self._retrieval_scope_generations))
+        failed = False
         for action, value, fact_path in notifications:
             try:
                 if action == "upsert":
@@ -840,9 +907,35 @@ class FileMemoryStorage(MemoryStorage):
                 else:
                     self._retrieval.remove(str(value), scope=scope)
             except Exception:
+                failed = True
                 logger.exception("Retrieval notification failed for %s", value)
-                with self._cache_lock:
-                    self._retrieval_dirty_scopes.add(self._cache_key(agent_name, user_id=user_id))
+        # Decided under _cache_lock together with the generation reads, so a
+        # rebuild publishing concurrently is either seen here or sees the result.
+        with self._cache_lock:
+            if failed:
+                self._retrieval_dirty_scopes.add(key)
+                self._retrieval_synced_signatures.pop(key, None)
+                return
+            publication_moved = fence is None or fence[0] != self._retrieval_index_generation
+
+            def provably_compatible(synced_key: tuple[str | None, str | None]) -> bool:
+                if committed is None or fence is None or publication_moved:
+                    return False
+                synced = self._retrieval_synced_signatures.get(synced_key)
+                if synced is None or (synced[2] or 0) != committed[0]:
+                    return False
+                return self._retrieval_scope_generations.get(synced_key, 0) == fence[1].get(synced_key, 0)
+
+            if notifications and not provably_compatible(key):
+                # Rows of this scope were mutated by a delta that may be older than
+                # the published snapshot: drop the signature so the next search rebuilds.
+                self._retrieval_synced_signatures.pop(key, None)
+            if committed is None or publication_moved:
+                return
+            signature = committed[1]
+            for synced_key in [synced_key for synced_key in self._retrieval_synced_signatures if synced_key[0] == user_id]:
+                if provably_compatible(synced_key):
+                    self._retrieval_synced_signatures[synced_key] = signature
 
     @staticmethod
     def _validate_loaded_fact(
@@ -869,7 +962,12 @@ class FileMemoryStorage(MemoryStorage):
             return []
         facts: list[dict[str, Any]] = []
         for fact_path in sorted(agent_facts_directory(path, agent_name).glob("**/*.md")):
-            fact = _parse_fact_markdown(fact_path)
+            # Reached both unlocked (load()/reload()) and under the scope locks
+            # (save(), clear_all(), default-bucket migration); the vanished-entry
+            # skip only ever fires on the unlocked paths.
+            fact = _parse_listed_fact(fact_path)
+            if fact is None:
+                continue
             facts.append(self._validate_loaded_fact(fact, fact_path, user_id=user_id, agent_name=agent_name))
         # Shard directories are an internal layout detail and must not change
         # the stable fact order observed by callers.
@@ -1396,8 +1494,11 @@ class FileMemoryStorage(MemoryStorage):
                 migration_notifications = self._run_read_migrations_locked(path, agent_name, user_id=user_id)
         for notification_agent, notifications in migration_notifications:
             self._dispatch_retrieval_notifications(notifications, user_id=user_id, agent_name=notification_agent)
-        document = self._read_document(path, agent_name, user_id=user_id)
+        # Sign before reading, as load() does: a write landing in between then
+        # leaves a stale signature that forces a re-read, never a stale
+        # document cached under the new signature.
         signature = self._scope_signature(path, agent_name)
+        document = self._read_document(path, agent_name, user_id=user_id)
         with self._cache_lock:
             self._memory_cache[key] = (copy.deepcopy(document), signature)
         if _rebuild_retrieval and agent_name is not None and self._retrieval is not None:
@@ -1447,6 +1548,7 @@ class FileMemoryStorage(MemoryStorage):
         lock_path = path.parent / ".memory.lock"
         notifications: list[RetrievalNotification] = []
         deleted_metadata_ids: list[str] = []
+        committed: tuple[int, tuple[Any, ...]] | None = None
         try:
             if not isinstance(memory_data, dict):
                 raise ValueError("memory_data must be an object")
@@ -1469,7 +1571,8 @@ class FileMemoryStorage(MemoryStorage):
                 summaries = None
                 if agent_name is None:
                     summaries = {"user": memory_data.get("user", {}), "history": memory_data.get("history", {})}
-                _, notifications = self._commit_changes_locked(
+                pre_revision = int((self._load_memory_file(path) or {}).get("revision") or 0)
+                memory_file, notifications = self._commit_changes_locked(
                     path,
                     user_id=user_id,
                     agent_name=agent_name,
@@ -1480,6 +1583,10 @@ class FileMemoryStorage(MemoryStorage):
                 )
                 document = self._read_document(path, agent_name, user_id=user_id)
                 signature = self._scope_signature(path, agent_name)
+                # A no-op commit hands back the unchanged manifest: nothing was
+                # replaced, so no recorded index signature may move.
+                if int(memory_file.get("revision") or 0) != pre_revision:
+                    committed = (pre_revision, signature)
                 with self._cache_lock:
                     self._memory_cache[key] = (copy.deepcopy(document), signature)
         except MemoryRevisionConflict:
@@ -1488,7 +1595,7 @@ class FileMemoryStorage(MemoryStorage):
             logger.error("Failed to save memory scope %s: %s", key, exc)
             return False
 
-        self._dispatch_retrieval_notifications(notifications, user_id=user_id, agent_name=agent_name)
+        self._dispatch_retrieval_notifications(notifications, user_id=user_id, agent_name=agent_name, committed=committed)
         if agent_name is not None and deleted_metadata_ids:
             self.clear_fact_metadata(
                 agent_name=agent_name,
@@ -1658,12 +1765,14 @@ class FileMemoryStorage(MemoryStorage):
         expected = expected_manifest_revision
         notifications: list[RetrievalNotification] = []
         memory_file: dict[str, Any] | None = None
+        committed: tuple[int, tuple[Any, ...]] | None = None
         safe_delete_rebase = not deletes or (isinstance(delete_revisions, dict) and all(str(fact_id) in delete_revisions for fact_id in deletes))
         safe_upsert_rebase = all(str(incoming["id"]) in normalized_upsert_revisions for incoming in upserts)
         for attempt in range(3):
             try:
                 with self._scope_lock(key), _process_file_lock(path.parent / ".memory.lock", float(getattr(self._config, "file_lock_timeout_seconds", 10))):
                     self._recover_if_needed(path)
+                    pre_revision = int((self._load_memory_file(path) or {}).get("revision") or 0)
                     memory_file, notifications = self._commit_changes_locked(
                         path,
                         user_id=user_id,
@@ -1675,6 +1784,10 @@ class FileMemoryStorage(MemoryStorage):
                         delete_revisions=copy.deepcopy(delete_revisions),
                         upsert_revisions=normalized_upsert_revisions,
                     )
+                    # A no-op commit (unchanged values, empty change set) hands back
+                    # the unchanged manifest; only a real replacement may advance
+                    # the recorded index signatures.
+                    committed = (pre_revision, self._scope_signature(path, agent_name)) if int(memory_file.get("revision") or 0) != pre_revision else None
                 break
             except MemoryManifestRevisionConflict as exc:
                 can_rebase = allow_manifest_rebase and has_fact_changes and summaries is None and safe_delete_rebase and safe_upsert_rebase and attempt < 2
@@ -1683,7 +1796,7 @@ class FileMemoryStorage(MemoryStorage):
                 current = self._load_memory_file(path)
                 expected = int((current or {}).get("revision") or 0)
                 logger.info("Rebasing disjoint memory fact change after revision conflict: %s", exc)
-        self._dispatch_retrieval_notifications(notifications, user_id=user_id, agent_name=agent_name)
+        self._dispatch_retrieval_notifications(notifications, user_id=user_id, agent_name=agent_name, committed=committed)
         if memory_file is None:  # defensive: the bounded loop either commits or raises
             raise MemoryStorageError("Memory repository change did not produce a result")
         deleted_fact_ids = [str(value) for action, value, _ in notifications if action == "remove"]
@@ -1797,6 +1910,26 @@ class FileMemoryStorage(MemoryStorage):
             requested_keys = {self._cache_key(self._scope_kwargs(scope).get("agent_name"), user_id=self._scope_kwargs(scope).get("user_id")) for scope in scopes}
             with self._cache_lock:
                 dirty = requested_keys & self._retrieval_dirty_scopes
+                synced = {key: self._retrieval_synced_signatures.get(key) for key in requested_keys}
+            for key in requested_keys - dirty:
+                user_id, agent_name = key
+                if agent_name is None:
+                    continue
+                # Another process wrote this user's memory since this process last
+                # indexed the scope: the live manifest signature no longer matches.
+                try:
+                    live_signature = self._scope_signature(self._get_memory_file_path(agent_name, user_id=user_id), agent_name)
+                except (OSError, ValueError, MemoryStorageCorruption) as exc:
+                    # The local index exists to decouple search from the shared
+                    # volume: a transient read error or a corrupt manifest must not
+                    # fail a search the index can answer. Serve it as is and keep the
+                    # recorded signature so the next search compares again; a dirty
+                    # mark would send the rebuild into the same failing read.
+                    logger.warning("Memory retrieval freshness check skipped for user %r agent %r; serving the local index: %s", user_id, agent_name, exc)
+                    logger.debug("Memory retrieval freshness check failure", exc_info=exc)
+                    continue
+                if synced[key] != live_signature:
+                    dirty.add(key)
             if dirty:
                 dirty_scopes = [{"userId": user_id, "agentName": agent_name} for user_id, agent_name in dirty]
                 rebuild_result = self.rebuild_index(dirty_scopes)
@@ -1822,7 +1955,10 @@ class FileMemoryStorage(MemoryStorage):
             for fact in facts:
                 content = fact.get("content")
                 if isinstance(content, str) and query_lower in content.lower():
-                    results.append({"fact": fact, "score": float(fact.get("confidence") or 0.5), "matchType": "substring"})
+                    # 0.0 is a persisted confidence _normalize_fact accepts; only unset/null defaults.
+                    confidence = fact.get("confidence")
+                    score = 0.5 if confidence is None else float(confidence)
+                    results.append({"fact": fact, "score": score, "matchType": "substring"})
         results.sort(key=lambda result: result["score"], reverse=True)
         return results[:top_k]
 
@@ -1832,13 +1968,28 @@ class FileMemoryStorage(MemoryStorage):
         records: list[tuple[dict[str, Any], dict[str, str | None], str]] = []
         indexed = 0
         failed = 0
+        # Manifest signatures taken before each scope's facts are read. A write that
+        # races the rebuild leaves a newer live signature, so the scope is re-synced on
+        # its next search instead of hiding behind a signature taken after a stale read.
+        synced_signatures: dict[tuple[str | None, str | None], tuple[Any, ...]] = {}
         if scopes is None:
             root = Path(self._config.storage_path) if self._config.storage_path else memory_file_path(self._config).parent
             candidates = root.glob("**/facts/**/*.md")
+            # One signature per manifest: every agent bucket of a user shares its
+            # memory.json, and _scope_signature reads only that file.
+            manifest_signatures: dict[Path, tuple[Any, ...]] = {}
             for path in candidates:
                 try:
-                    fact = _parse_fact_markdown(path)
                     relative_parts = path.relative_to(root).parts
+                    manifest_path: Path | None = None
+                    if "agents" in relative_parts[:-1]:
+                        agents_index = relative_parts.index("agents")
+                        manifest_path = root.joinpath(*relative_parts[:agents_index]) / self._config.manifest_filename
+                        if manifest_path not in manifest_signatures:
+                            manifest_signatures[manifest_path] = self._scope_signature(manifest_path, relative_parts[agents_index + 1])
+                    fact = _parse_listed_fact(path)
+                    if fact is None:
+                        continue
                     agents_index = relative_parts.index("agents")
                     expected_agent = relative_parts[agents_index + 1]
                     expected_user_bucket = relative_parts[1] if len(relative_parts) > 1 and relative_parts[0] == "users" else None
@@ -1850,6 +2001,8 @@ class FileMemoryStorage(MemoryStorage):
                         raise MemoryStorageCorruption(f"Fact user scope does not match directory for {path}")
                     validate_agent_name(expected_agent)
                     self._validate_loaded_fact(fact, path, user_id=original_user, agent_name=expected_agent)
+                    if manifest_path is not None:
+                        synced_signatures.setdefault(self._cache_key(expected_agent, user_id=original_user), manifest_signatures[manifest_path])
                     records.append((fact, _scope_dict(original_user, expected_agent), str(path)))
                 except Exception:
                     logger.exception("Failed to rebuild retrieval index for %s", path)
@@ -1861,44 +2014,88 @@ class FileMemoryStorage(MemoryStorage):
                 agent_name = kwargs.get("agent_name")
                 if agent_name is None:
                     continue
-                for fact in self.list_facts(**kwargs):
+                synced_signatures[self._cache_key(agent_name, user_id=kwargs.get("user_id"))] = self._scope_signature(memory_path, agent_name)
+                # The bulk replace below drops every row this rebuild does not
+                # supply, so read the complete scope rather than a list_facts page.
+                for fact in self.load(**kwargs).get("facts", []):
                     try:
                         records.append((fact, _scope_dict(kwargs.get("user_id"), agent_name), str(fact_file_path(memory_path, fact["id"], agent_name=agent_name))))
                     except Exception:
                         logger.exception("Failed to rebuild retrieval index for fact %s", fact.get("id"))
                         failed += 1
 
-        bulk_rebuild = getattr(self._retrieval, "rebuild", None)
-        if callable(bulk_rebuild):
-            try:
-                bulk_rebuild(records, scopes=scopes)
-                indexed = len(records)
-                with self._cache_lock:
-                    if scopes is None:
-                        self._retrieval_dirty_scopes.clear()
-                    else:
-                        self._retrieval_dirty_scopes.difference_update(self._cache_key(self._scope_kwargs(scope).get("agent_name"), user_id=self._scope_kwargs(scope).get("user_id")) for scope in scopes)
-            except Exception:
-                logger.exception("Failed to atomically rebuild retrieval index")
-                failed += len(records) or 1
-                return {"supported": True, "indexed": indexed, "failed": failed, "fatal": True}
-        else:
-            clear = getattr(self._retrieval, "clear", None)
-            if callable(clear):
-                clear(scopes=scopes)
-            for fact, scope, path in records:
+        requested_keys = None if scopes is None else {self._cache_key(self._scope_kwargs(scope).get("agent_name"), user_id=self._scope_kwargs(scope).get("user_id")) for scope in scopes}
+
+        def bump_generations() -> None:
+            """Fence in-flight signature promotions off the scopes published here (caller holds _cache_lock)."""
+            if requested_keys is None:
+                self._retrieval_index_generation += 1
+            else:
+                for key in requested_keys:
+                    self._retrieval_scope_generations[key] = self._retrieval_scope_generations.get(key, 0) + 1
+
+        def mark_synced() -> None:
+            with self._cache_lock:
+                bump_generations()
+                if requested_keys is None:
+                    self._retrieval_dirty_scopes.clear()
+                    self._retrieval_synced_signatures = synced_signatures
+                else:
+                    self._retrieval_dirty_scopes.difference_update(requested_keys)
+                    self._retrieval_synced_signatures.update(synced_signatures)
+
+        def forget_synced() -> None:
+            with self._cache_lock:
+                bump_generations()
+                if requested_keys is None:
+                    self._retrieval_synced_signatures.clear()
+                else:
+                    for key in requested_keys:
+                        self._retrieval_synced_signatures.pop(key, None)
+
+        # Row replacement and signature publication form one unit under
+        # _retrieval_publish_lock. The adapter lock ends when the install
+        # returns, so two overlapping refreshes of one scope could otherwise
+        # install in one order and publish in the other, and the later (live)
+        # signature would certify the earlier refresh's stale rows. Serialized,
+        # whichever installs last also publishes last, and a stale captured
+        # signature published last is caught by the next search's compare.
+        # Fact reading above stays outside the lock so a slow read never blocks
+        # refreshes of other scopes. The startup full rebuild holds it for its
+        # single bulk install; scoped refreshes wait for that, which is fine
+        # because before warm-up completes a search would be rebuilding its
+        # scope anyway. Lock order: callers hold no storage lock here
+        # (search_facts releases _cache_lock first; reload() leaves its
+        # scope/file-lock block before rebuilding; DeerMem's warm-up lock is an
+        # outer RLock that nothing inside acquires), and only the adapter's own
+        # lock and _cache_lock are taken inside, both leaf locks.
+        with self._retrieval_publish_lock:
+            bulk_rebuild = getattr(self._retrieval, "rebuild", None)
+            if callable(bulk_rebuild):
                 try:
-                    self.notify_fact_upsert(fact, path=path)
-                    indexed += 1
+                    bulk_rebuild(records, scopes=scopes)
+                    indexed = len(records)
+                    mark_synced()
                 except Exception:
-                    logger.exception("Failed to rebuild retrieval index for fact %s", fact.get("id"))
-                    failed += 1
-            if failed == 0:
-                with self._cache_lock:
-                    if scopes is None:
-                        self._retrieval_dirty_scopes.clear()
-                    else:
-                        self._retrieval_dirty_scopes.difference_update(self._cache_key(self._scope_kwargs(scope).get("agent_name"), user_id=self._scope_kwargs(scope).get("user_id")) for scope in scopes)
+                    logger.exception("Failed to atomically rebuild retrieval index")
+                    failed += len(records) or 1
+                    forget_synced()
+                    return {"supported": True, "indexed": indexed, "failed": failed, "fatal": True}
+            else:
+                clear = getattr(self._retrieval, "clear", None)
+                if callable(clear):
+                    clear(scopes=scopes)
+                for fact, scope, path in records:
+                    try:
+                        self.notify_fact_upsert(fact, path=path)
+                        indexed += 1
+                    except Exception:
+                        logger.exception("Failed to rebuild retrieval index for fact %s", fact.get("id"))
+                        failed += 1
+                if failed == 0:
+                    mark_synced()
+                else:
+                    forget_synced()
         return {"supported": True, "indexed": indexed, "failed": failed}
 
     def retrieval_status(self) -> dict[str, Any]:

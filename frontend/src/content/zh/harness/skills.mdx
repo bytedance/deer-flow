@@ -64,7 +64,7 @@ DeerFlow 内置以下公共技能：
 
 ### 发现和加载
 
-`skills/loader.py` 中的 `load_skills()` 扫描配置技能路径下的 `public/` 和 `custom/` 目录。它每次调用都重新读取 `ExtensionsConfig.from_file()`，这意味着通过 Gateway API 启用或禁用技能会立即在运行中的 LangGraph 服务器中生效，无需重启。
+`skills/storage/` 中的 `SkillStorage.load_skills()`（`LocalSkillStorage` 以及按用户隔离的 `UserScopedSkillStorage`）扫描配置技能路径下的 `public/`、按用户的 `custom/`、集成和 legacy 目录。它每次调用都重新扫描磁盘并重新读取 extensions 配置，这意味着通过 Gateway API 启用或禁用技能会立即在运行中的 Agent 运行时中生效，无需重启。唯一被缓存的技能状态是 `agents/lead_agent/prompt.py` 中的提示词层（已启用技能列表和渲染后的 `<skill_system>` 段）；每一次技能变更以及 `POST /api/skills/reload` 都会先刷新处理请求的进程，再在共享的 `extensions_config.json` 旁写入 `.extensions_config.json.skills-cache-reset.json` 标记文件，其他挂载同一目录的 Gateway 进程会在下一次构建提示词前检查该标记（每秒最多一次）。因此一次 API 调用即可覆盖所有共享该卷的副本；reload 响应返回 `scope: shared_config`，在没有可用 extensions 配置路径时返回 `scope: process`。
 
 ### 解析
 
@@ -106,7 +106,7 @@ skills:
 技能可用性在 `extensions_config.json` 中跟踪（独立于 `config.yaml`）。你可以管理技能状态：
 
 - **通过 DeerFlow 应用界面**：技能面板允许你切换技能的启用/禁用状态。
-- **通过 Gateway API**：`POST /api/extensions/skills/{name}/enable` 和 `/disable`。
+- **通过 Gateway API**：`PUT /api/skills/{name}`，请求体为 `{"enabled": true}` 或 `{"enabled": false}`（仅管理员）。
 - **直接编辑 `extensions_config.json`**。
 
 由于 `load_skills()` 每次调用都重新读取扩展配置，更改立即生效——无需重启服务器。

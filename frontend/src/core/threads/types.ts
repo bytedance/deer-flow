@@ -1,5 +1,7 @@
 import type { Message, Thread } from "@langchain/langgraph-sdk";
 
+import type { ReasoningEffortValue } from "@/core/models/reasoning";
+
 import type { Todo } from "../todos";
 
 export interface GoalState {
@@ -29,12 +31,26 @@ export interface GoalState {
   };
 }
 
+export interface ArtifactEntry {
+  handle: string;
+  tool_name: string;
+  tool_call_id: string;
+  call_index: number;
+  artifact_type: string;
+  display_name: string;
+  real_ref: string;
+  mime_type?: string | null;
+  created_at?: string;
+  consumed_by?: string[];
+}
+
 export interface AgentThreadState extends Record<string, unknown> {
   title: string;
   messages: Message[];
   artifacts?: string[];
   todos?: Todo[];
   goal?: GoalState | null;
+  tool_artifacts?: ArtifactEntry[];
 }
 
 export interface AgentThreadContext extends Record<string, unknown> {
@@ -43,12 +59,18 @@ export interface AgentThreadContext extends Record<string, unknown> {
   thinking_enabled: boolean;
   is_plan_mode: boolean;
   subagent_enabled: boolean;
-  reasoning_effort?: "minimal" | "low" | "medium" | "high";
+  reasoning_effort?: ReasoningEffortValue;
   agent_name?: string;
 }
 
 export interface AgentThread extends Thread<AgentThreadState> {
   context?: AgentThreadContext;
+  /**
+   * Thread search only: a server-originated run of the viewer (schedule, IM,
+   * GitHub, extension) changed since the viewer last opened the thread.
+   * `null`/absent when unknown (another endpoint, or no SQL read state).
+   */
+  unread?: boolean | null;
 }
 
 export interface RunMessage {

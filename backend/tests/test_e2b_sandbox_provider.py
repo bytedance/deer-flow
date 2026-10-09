@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import importlib
+import importlib.util
 import json
 import os
 import shutil
+import signal
 import subprocess
+import sys
 import threading
 import time
 from collections import OrderedDict
@@ -21,7 +24,8 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from e2b import FileNotFoundException, TimeoutException
+from e2b import CommandExitException, FileNotFoundException, TimeoutException
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic import ValidationError
 
 from deerflow.community.e2b_sandbox.capacity import (
@@ -278,6 +282,7 @@ def _make_provider(
     provider._transitioning_slots = 0
     provider._capacity_cond = threading.Condition(provider._lock)
     provider._shutdown_called = False
+    provider._shutdown_cleanup_pending = False
     provider._owner_id = "owner-a"
     provider._ownership = FakeOwnershipStore({}, owner_id=provider._owner_id)
     provider._ownership_config = SimpleNamespace(
@@ -1749,13 +1754,77 @@ def test_execute_command_returns_stdout_on_success():
     assert sb.is_dead is False
 
 
+def _raise_exit(stdout: str, stderr: str, exit_code: int):
+    """The real SDK raises ``CommandExitException`` on a nonzero exit; it
+    never returns a result with ``exit_code != 0``."""
+
+    def run(_cmd: str) -> Any:
+        raise CommandExitException(stderr=stderr, stdout=stdout, exit_code=exit_code, error=f"exit status {exit_code}")
+
+    return run
+
+
 def test_execute_command_appends_exit_marker_when_failure_has_output():
     """LocalSandbox parity: a nonzero exit must survive in the output text
     even when the command produced output, so evidence consumers (acceptance
     checklist) recover the actual shell status."""
-    client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout="5 passed, 1 error\n", stderr="", exit_code=1)]))
+    client = FakeClient(commands=FakeCommandsAPI([_raise_exit("5 passed, 1 error\n", "", 1)]))
     sb = _make_sandbox(client)
     assert sb.execute_command("make test") == "5 passed, 1 error\n\nExit Code: 1"
+
+
+def test_execute_command_keeps_stdout_and_stderr_on_nonzero_exit():
+    client = FakeClient(commands=FakeCommandsAPI([_raise_exit("12 passed\n", "coverage below 80%\n", 2)]))
+    sb = _make_sandbox(client)
+    assert sb.execute_command("pytest -q") == "12 passed\n\ncoverage below 80%\n\nExit Code: 2"
+    assert sb.is_dead is False
+
+
+def test_execute_command_reports_exit_code_when_failure_has_no_output():
+    client = FakeClient(commands=FakeCommandsAPI([_raise_exit("", "", 1)]))
+    sb = _make_sandbox(client)
+    assert sb.execute_command("false") == "Command exited with code 1"
+
+
+def test_execute_command_nonzero_exit_mentioning_not_found_does_not_mark_dead():
+    """A command's own stderr can contain "sandbox not found"; that is a failed
+    command, not a reaped VM."""
+    client = FakeClient(commands=FakeCommandsAPI([_raise_exit("", "error: sandbox not found\n", 1)]))
+    sb = _make_sandbox(client)
+    assert sb.execute_command("mytool status") == "error: sandbox not found\n\nExit Code: 1"
+    assert sb.is_dead is False
+
+
+def test_execute_command_nonzero_exit_is_harvested_as_error():
+    """End-to-end with the real executor harvest. ``tests/conftest.py`` mocks
+    ``deerflow.subagents.executor``, so it is loaded under a unique name."""
+    path = Path(__file__).parents[1] / "packages/harness/deerflow/subagents/executor.py"
+    spec = importlib.util.spec_from_file_location("_e2b_exit_marker_executor", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    try:
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        from deerflow.subagents import acceptance_checks
+
+        client = FakeClient(commands=FakeCommandsAPI([_raise_exit("12 passed\n", "coverage below 80%\n", 1)]))
+        out = _make_sandbox(client).execute_command("pytest -q")
+
+        cmd = "pytest -q"
+        ai = AIMessage(content="", tool_calls=[{"name": "bash", "args": {"command": cmd}, "id": "tc-1", "type": "tool_call"}])
+        tm = ToolMessage(content=out, tool_call_id="tc-1", name="bash")
+        executions = module._harvest_bash_executions({"messages": [HumanMessage(content="task"), ai, tm]})
+        assert executions, "harvest returned no bash executions"
+        for entry in executions:
+            entry["shell_persistent"] = False
+        assert executions[-1]["status"] == "error"
+        assert executions[-1]["status_marker"] == "Exit Code: 1"
+        assert acceptance_checks._check_tests_passed_leaf(cmd, executions)["holds"] is False
+    finally:
+        sys.modules.pop(spec.name, None)
+        shutdown = getattr(module, "_shutdown_isolated_subagent_loop", None)
+        if shutdown is not None:
+            shutdown()
 
 
 def test_execute_command_does_not_mark_dead_on_unrelated_error():
@@ -3175,6 +3244,107 @@ def test_release_skips_warm_pool_when_sync_reveals_dead_vm(monkeypatch, tmp_path
     assert client.killed is True
 
 
+@pytest.mark.anyio
+async def test_shutdown_defers_teardown_and_fences_cached_acquire_while_maintenance_thread_is_alive():
+    p = _make_provider()
+    p._acquire_executor = ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="e2b-shutdown-acquire-test",
+    )
+    client = FakeClient(sandbox_id="sb-owned")
+    sandbox = _make_sandbox(client, sandbox_id="sb-owned")
+    p._sandboxes = {"sb-owned": sandbox}
+    p._owned_sandbox_ids = {"sb-owned"}
+    p._thread_sandboxes[p._thread_key("thread-owned", "user-owned")] = "sb-owned"
+
+    class JoinControlledThread:
+        def __init__(self) -> None:
+            self.alive = True
+            self.join_timeout: float | None = None
+
+        def join(self, timeout: float | None = None) -> None:
+            self.join_timeout = timeout
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+    lease_thread = JoinControlledThread()
+    p._lease_thread = lease_thread
+
+    with pytest.raises(RuntimeError, match="lease renewal"):
+        p.shutdown()
+
+    assert p._shutdown_called is True
+    assert p._shutdown_cleanup_pending is True
+    assert p._maintenance_stop.is_set()
+    assert p._sandboxes == {"sb-owned": sandbox}
+    assert p._thread_sandboxes[p._thread_key("thread-owned", "user-owned")] == "sb-owned"
+    assert client.killed is False
+    assert lease_thread.join_timeout == 11.0
+
+    with pytest.raises(SandboxCapacityExceededError) as sync_exc:
+        p.acquire("thread-owned", user_id="user-owned")
+    assert sync_exc.value.reason == "shutdown"
+
+    with pytest.raises(SandboxCapacityExceededError) as async_exc:
+        await p.acquire_async("thread-owned", user_id="user-owned")
+    assert async_exc.value.reason == "shutdown"
+
+    lease_thread.alive = False
+    p.shutdown()
+
+    assert p._shutdown_called is True
+    assert p._shutdown_cleanup_pending is False
+    assert p._sandboxes == {}
+    assert client.killed is True
+
+
+def test_atexit_shutdown_logs_pending_cleanup_without_raising(monkeypatch, caplog):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    p = _make_provider()
+
+    def blocked_shutdown() -> None:
+        with p._lock:
+            p._shutdown_called = True
+            p._shutdown_cleanup_pending = True
+        raise mod._E2BMaintenanceShutdownTimeout("E2B maintenance thread shutdown timed out: lease renewal")
+
+    monkeypatch.setattr(p, "shutdown", blocked_shutdown)
+
+    p._shutdown_at_exit()
+
+    assert p._shutdown_cleanup_pending is True
+    assert "still pending at interpreter exit" in caplog.text
+
+
+def test_signal_handler_forwards_original_action_when_shutdown_cleanup_is_pending(monkeypatch):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    p = _make_provider()
+    registered: dict[int, Any] = {}
+    forwarded: list[tuple[int, Any]] = []
+
+    def original_handler(signum, frame):
+        forwarded.append((signum, frame))
+
+    monkeypatch.setattr(signal, "getsignal", lambda _signum: original_handler)
+    monkeypatch.setattr(signal, "signal", lambda signum, handler: registered.__setitem__(signum, handler))
+
+    def blocked_shutdown() -> None:
+        with p._lock:
+            p._shutdown_called = True
+            p._shutdown_cleanup_pending = True
+        raise mod._E2BMaintenanceShutdownTimeout("E2B maintenance thread shutdown timed out: lease renewal")
+
+    monkeypatch.setattr(p, "shutdown", blocked_shutdown)
+    p._register_signal_handlers()
+
+    frame = object()
+    registered[signal.SIGTERM](signal.SIGTERM, frame)
+
+    assert forwarded == [(signal.SIGTERM, frame)]
+    assert p._shutdown_cleanup_pending is True
+
+
 def test_shutdown_only_kills_sandboxes_owned_by_current_instance(monkeypatch):
     p = _make_provider()
     owned_client = FakeClient(sandbox_id="sb-owned")
@@ -3550,6 +3720,11 @@ def test_read_file_supports_bounded_ranges():
     assert sb.read_file("/mnt/user-data/workspace/range.txt", start_line=2, end_line=4) == "line 2\nline 3\nline 4"
     assert sb.read_file("/mnt/user-data/workspace/range.txt", start_line=4) == "line 4\nline 5"
     assert sb.read_file("/mnt/user-data/workspace/range.txt", end_line=2) == "line 1\nline 2"
+    # A start past EOF comes back empty rather than raising, and a negative
+    # start reads from the first line instead of wrapping around.
+    assert sb.read_file("/mnt/user-data/workspace/range.txt", start_line=99) == ""
+    assert sb.read_file("/mnt/user-data/workspace/range.txt", start_line=-1) == "line 1\nline 2\nline 3\nline 4\nline 5"
+    assert sb.read_file("/mnt/user-data/workspace/range.txt", end_line=-1) == ""
 
     resolved_path = "/home/user/workspace/range.txt"
     assert all(path == resolved_path for path, _fmt in files.read_calls), files.read_calls
@@ -5478,8 +5653,9 @@ def test_list_dir_raises_when_client_closed():
 
 @pytest.mark.parametrize("marker, error", [("missing", FileNotFoundError), ("1", OSError)])
 def test_list_dir_classifies_empty_failure(marker, error):
-    listing = SimpleNamespace(stdout=f"\n__DF_FIND_STATUS__:{marker}\n", stderr="", exit_code=1)
-    client = FakeClient(commands=FakeCommandsAPI([listing]))
+    # The listing script exits 1 for both; the SDK raises CommandExitException,
+    # whose stdout still carries the status marker the parser classifies by.
+    client = FakeClient(commands=FakeCommandsAPI([_raise_exit(f"\n__DF_FIND_STATUS__:{marker}\n", "", 1)]))
     sb = _make_sandbox(client)
 
     with pytest.raises(error) as exc:
@@ -5487,9 +5663,19 @@ def test_list_dir_classifies_empty_failure(marker, error):
     assert type(exc.value) is error
 
 
+def test_list_dir_returns_entries_when_head_truncation_exits_141():
+    """``head`` closing the pipe on a large listing kills ``find`` with SIGPIPE
+    (141), a successful truncation. The SDK raises for the nonzero exit; the
+    listing must still be returned, not surface as ``OSError``."""
+    stdout = "/home/user\n/home/user/a\n/home/user/b\n\n__DF_FIND_STATUS__:141\n"
+    client = FakeClient(commands=FakeCommandsAPI([_raise_exit(stdout, "", 141)]))
+    sb = _make_sandbox(client)
+
+    assert sb.list_dir("/home/user") == ["/home/user", "/home/user/a", "/home/user/b"]
+
+
 def test_list_dir_raises_oserror_when_find_exit_is_not_missing_path():
-    listing = SimpleNamespace(stdout="", stderr="", exit_code=127)
-    client = FakeClient(commands=FakeCommandsAPI([listing]))
+    client = FakeClient(commands=FakeCommandsAPI([_raise_exit("", "", 127)]))
     sb = _make_sandbox(client)
 
     with pytest.raises(OSError, match="exited with code 127"):

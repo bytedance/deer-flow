@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -1766,6 +1767,47 @@ class TestCardMode:
             assert channel._incoming_messages == {}
             assert channel._card_repliers == {}
             assert channel._card_track_ids == {}
+
+        _run(go())
+
+
+class TestStop:
+    def test_stop_retains_live_stream_thread_after_join_timeout(self):
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={})
+            thread = MagicMock()
+            thread.is_alive.return_value = True
+            channel._thread = thread
+            channel._running = True
+
+            with pytest.raises(RuntimeError, match="still running after stop timeout"):
+                await channel.stop()
+
+            thread.join.assert_called_once_with(timeout=5)
+            assert channel._thread is thread
+
+        _run(go())
+
+    def test_stop_joins_stream_thread_off_the_event_loop(self):
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={})
+            release = threading.Event()
+            # dingtalk-stream's start_forever() never returns, so the join in
+            # stop() waits out its timeout; this thread blocks the same way,
+            # bounded so a join run on the event loop fails the assertion
+            # below instead of hanging the test.
+            stream_thread = threading.Thread(target=release.wait, args=(2,), daemon=True)
+            stream_thread.start()
+            channel._thread = stream_thread
+            channel._running = True
+
+            stop_task = asyncio.create_task(channel.stop())
+            await asyncio.sleep(0.05)
+            assert not stop_task.done()
+
+            release.set()
+            await stop_task
+            assert channel._thread is None
 
         _run(go())
 

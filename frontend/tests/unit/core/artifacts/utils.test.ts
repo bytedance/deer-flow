@@ -104,8 +104,59 @@ describe("artifact URL helpers", () => {
     expect(
       resolveArtifactURL("/mnt/user-data/outputs/a%23b%3F.txt", "thread-1"),
     ).toBe(
-      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/a%23b%3F.txt",
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/a%2523b%253F.txt",
     );
+  });
+
+  test.each(["report%20final.md", "a%2Fb.txt", "a%2520b.png"])(
+    "preserves literal percent escapes in the raw artifact path %s",
+    async (filename) => {
+      const { resolveArtifactURL, urlOfArtifact } =
+        await loadFreshArtifactUtils();
+      const filepath = `/mnt/user-data/outputs/${filename}`;
+      for (const url of [
+        urlOfArtifact({ filepath, threadId: "thread-1" }),
+        urlOfArtifact({ filepath, threadId: "thread-1", download: true }),
+        urlOfArtifact({ filepath, threadId: "thread-1", isMock: true }),
+        resolveArtifactURL(filepath, "thread-1"),
+      ]) {
+        const pathname = new URL(url, "http://localhost").pathname;
+        expect(decodeURIComponent(pathname.split("/artifacts")[1]!)).toBe(
+          filepath,
+        );
+      }
+    },
+  );
+
+  test("decodes Markdown URLs once before resolving the raw artifact path", async () => {
+    const { resolveMarkdownArtifactURL, resolveMessageImageURL } =
+      await loadFreshArtifactUtils();
+    const rawPath = "/mnt/user-data/outputs/report%20final.png";
+    const expected =
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/report%2520final.png?v=2#detail";
+
+    expect(
+      resolveMarkdownArtifactURL(
+        "/mnt/user-data/outputs/report%2520final.png?v=2#detail",
+        "thread-1",
+      ),
+    ).toBe(expected);
+    expect(
+      resolveMessageImageURL("report%2520final.png?v=2#detail", "thread-1", [
+        rawPath,
+      ]),
+    ).toBe(expected);
+  });
+
+  test("preserves percent escapes in static-demo file names", async () => {
+    setEnv("NEXT_PUBLIC_STATIC_WEBSITE_ONLY", "true");
+    const { urlOfArtifact } = await loadFreshArtifactUtils();
+    expect(
+      urlOfArtifact({
+        filepath: "/mnt/user-data/outputs/report%20final.md",
+        threadId: "thread-1",
+      }),
+    ).toBe("/demo/threads/thread-1/user-data/outputs/report%2520final.md");
   });
 
   test("preserves markdown query and fragment suffixes on artifact URLs", async () => {

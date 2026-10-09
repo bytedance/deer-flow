@@ -15,6 +15,15 @@ relies on:
 Every contract runs against InMemorySaver, AsyncSqliteSaver, and - when
 ``TEST_POSTGRES_URI`` is set - AsyncPostgresSaver, because each backend
 implements blob/version handling slightly differently.
+
+Two further tests pin currently-unfixed upstream defects (langgraph #8382
+parallel-superstep replay order, #8448 Postgres paginated delta walk). They
+assert the correct contract and trip - skip, naming the issue - while the
+defect is present, becoming live gates once a dependency bump lands a fix. The
+#8448 trip is scoped to the Postgres parameter, the only backend that pages its
+stage-1 scan: on memory/sqlite it stays a live differential assertion against
+``InMemorySaver``, so a regression there fails instead of blaming the
+Postgres-only upstream issue.
 """
 
 from __future__ import annotations
@@ -31,12 +40,13 @@ from langgraph.channels import DeltaChannel
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.serde.types import _DeltaSnapshot
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-from langgraph.graph import StateGraph
+from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.types import Overwrite
 
 from deerflow.agents.goal_state import GoalState
 from deerflow.agents.thread_state import DeltaThreadState, merge_message_writes
+from deerflow.config.database_config import DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY
 from deerflow.runtime.checkpoint_mode import CHECKPOINT_MODE_METADATA_KEY, checkpoint_tuple_uses_delta
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.goal import write_thread_goal
@@ -318,3 +328,133 @@ async def test_non_delta_writers_preserve_delta_messages_and_markers(saver_env: 
     assert checkpoint_tuple_uses_delta(latest_tuple)
     assert latest_tuple.metadata.get(CHECKPOINT_MODE_METADATA_KEY) == "delta"
     assert latest_tuple.metadata.get("run_durations", {}).get("run-1") == 7
+
+
+# ---------------------------------------------------------------------------
+# Known-unfixed upstream DeltaChannel defects.
+#
+# langgraph #8382 (parallel-superstep delta replay order) and #8448 (Postgres
+# paginated delta-walk cursor) are both still open against the pinned
+# langgraph-checkpoint 4.2.0 / langgraph-checkpoint-postgres 3.1.2, with fixes
+# (PR #8544 / PR #8556) unmerged and no released version carrying them. Each
+# test below asserts the CORRECT contract; while the defect is present it trips
+# (skips, naming the upstream issue) instead of failing, so a later dependency
+# bump that lands the fix flips it into a live gate. The contract is never
+# asserted as buggy behaviour.
+# ---------------------------------------------------------------------------
+
+_PARALLEL_LABELS = tuple("abcdefgh")
+_PAGINATION_STEPS = 12
+# Shrink the Postgres stage-1 page so a dozen checkpoints cross it. The defect
+# is decided by which page the target lands on, not the absolute count; upstream
+# PR #8556 makes the same substitution in its own regression rather than writing
+# 1024+ real checkpoints.
+_PAGINATION_PAGE_SIZE = 3
+
+
+class LongChainState(TypedDict):
+    """Delta ``messages`` at the production snapshot cadence (long walks)."""
+
+    messages: Annotated[
+        list[AnyMessage],
+        DeltaChannel(merge_message_writes, snapshot_frequency=DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY),
+    ]
+
+
+def _message_digest(values: dict[str, Any]) -> list[tuple[str, str, str | None]]:
+    return [(m.type, m.content, m.id) for m in values["messages"]]
+
+
+def _append_node(index: int) -> Any:
+    def node(state: dict[str, Any]) -> dict[str, Any]:
+        return {"messages": [AIMessage(id=f"l{index}", content=f"long-{index}")]}
+
+    return node
+
+
+def _build_linear_graph(saver: Any, steps: int) -> Any:
+    builder = StateGraph(LongChainState)
+    for i in range(steps):
+        builder.add_node(f"l{i}", _append_node(i))
+    builder.set_entry_point("l0")
+    for i in range(steps - 1):
+        builder.add_edge(f"l{i}", f"l{i + 1}")
+    builder.set_finish_point(f"l{steps - 1}")
+    return builder.compile(checkpointer=saver)
+
+
+def _expected_long_chain(steps: int) -> list[tuple[str, str, str]]:
+    return [("human", "kickoff", "h0"), *[("ai", f"long-{i}", f"l{i}") for i in range(steps)]]
+
+
+async def _long_chain_history(saver: Any, thread_id: str, steps: int) -> list[tuple[list, tuple]]:
+    """Materialize every checkpoint of a linear delta chain (newest first)."""
+    graph = _build_linear_graph(saver, steps)
+    config = _config(thread_id)
+    await graph.ainvoke({"messages": [HumanMessage(id="h0", content="kickoff")]}, config)
+    accessor = CheckpointStateAccessor.bind(graph, saver, mode="delta")
+    return [(_message_digest(s.values), tuple(s.next)) for s in await accessor.ahistory(config)]
+
+
+@pytest.mark.anyio
+async def test_long_chain_history_survives_pagination(saver_env: _SaverEnv, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every checkpoint of a long delta chain must materialize its own ancestor
+    prefix. Postgres resolves the history through a stage-1 scan paged
+    newest-first; when the target checkpoint is not on the first page the
+    unpatched cursor is derived from a not-yet-loaded parent and parks at
+    ``None`` for good, so old checkpoints hydrate empty (upstream #8448)."""
+    if saver_env.kind == "postgres":
+        pg_aio = pytest.importorskip("langgraph.checkpoint.postgres.aio", reason="postgres extra not installed")
+        monkeypatch.setattr(pg_aio, "_DELTA_PAGE_SIZE", _PAGINATION_PAGE_SIZE)
+
+    got = await _long_chain_history(saver_env.saver, _thread_id(), _PAGINATION_STEPS)
+    oracle = await _long_chain_history(InMemorySaver(), _thread_id(), _PAGINATION_STEPS)
+
+    # Reference sanity: newest-first, the head carries the whole chain, and
+    # only the pre-input root checkpoint is empty.
+    assert oracle[0] == (_expected_long_chain(_PAGINATION_STEPS), ())
+    assert all(digest for digest, next_key in oracle if next_key != ("__start__",))
+
+    if saver_env.kind == "postgres" and got != oracle:
+        pytest.skip("upstream langgraph#8448 unfixed in langgraph-checkpoint-postgres 3.1.2: the paged delta walk poisons the channel cursor for a target past the first stage-1 page, hydrating old checkpoints empty")
+    assert got == oracle
+
+
+def _fanout_node(label: str) -> Any:
+    def node(state: dict[str, Any]) -> dict[str, Any]:
+        return {"messages": [AIMessage(id=f"fan-{label}", content=label)]}
+
+    return node
+
+
+def _build_fanout_graph(saver: Any) -> Any:
+    builder = StateGraph(LongChainState)
+    for label in _PARALLEL_LABELS:
+        builder.add_node(label, _fanout_node(label))
+        builder.add_edge(START, label)
+        builder.add_edge(label, END)
+    return builder.compile(checkpointer=saver)
+
+
+@pytest.mark.anyio
+async def test_parallel_superstep_replay_matches_live_write_order(saver_env: _SaverEnv) -> None:
+    """When several parallel tasks write the same delta channel in one
+    superstep, the live ``apply_writes`` order is path-sorted, but the delta
+    history replay sorts by the hashed ``(task_id, idx)`` - an unrelated order
+    (upstream #8382). ``get_state`` on the same thread must report the order the
+    run actually produced."""
+    graph = _build_fanout_graph(saver_env.saver)
+    config = _config(_thread_id())
+    live = await graph.ainvoke({"messages": []}, config)
+    live_order = [m.content for m in live["messages"]]
+
+    # Live superstep writes are deterministic and path-sorted, so the fan-out
+    # lands in label order regardless of task completion order.
+    assert live_order == list(_PARALLEL_LABELS)
+
+    replayed = await graph.aget_state(config)
+    replayed_order = [m.content for m in replayed.values["messages"]]
+
+    if replayed_order != live_order:
+        pytest.skip("upstream langgraph#8382 unfixed in langgraph-checkpoint 4.2.0: delta replay orders writes by hashed (task_id, idx) instead of the path order apply_writes used live, so get_state/resume reorders same-superstep writes")
+    assert replayed_order == live_order

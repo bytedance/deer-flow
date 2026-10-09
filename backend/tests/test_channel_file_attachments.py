@@ -282,6 +282,29 @@ class TestResolveAttachments:
 
 
 class TestInboundFileIngestion:
+    def test_case_variant_names_keep_both_inbound_attachments(self, tmp_path):
+        from app.channels import manager
+
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        msg = InboundMessage(
+            channel_name="telegram",
+            chat_id="chat-1",
+            user_id="user-1",
+            text="see attachments",
+            files=[
+                {"type": "file", "filename": "Report.txt", "_content": b"first"},
+                {"type": "file", "filename": "report.txt", "_content": b"second"},
+            ],
+        )
+
+        with patch("deerflow.uploads.manager.ensure_uploads_dir", return_value=uploads_dir):
+            result = _run(manager._ingest_inbound_files("thread-1", msg))
+
+        assert [item["filename"] for item in result] == ["Report.txt", "report_1.txt"]
+        assert (uploads_dir / "Report.txt").read_bytes() == b"first"
+        assert (uploads_dir / "report_1.txt").read_bytes() == b"second"
+
     def test_consumes_inline_channel_bytes_without_exposing_them_downstream(self, tmp_path):
         from app.channels import manager
 
@@ -568,6 +591,97 @@ class TestInboundFileSandboxPerms:
         # non-root sandbox process can read it.
         assert mode & stat.S_IRGRP
         assert mode & stat.S_IROTH
+
+    def test_feishu_receive_file_makes_file_sandbox_readable(self, tmp_path, monkeypatch):
+        from io import BytesIO
+
+        from app.channels.feishu import FeishuChannel
+        from deerflow.config.paths import Paths
+
+        monkeypatch.setattr("app.channels.feishu.get_paths", lambda: Paths(str(tmp_path)))
+        monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", _MountedProvider)
+
+        channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+        channel._GetMessageResourceRequest = MagicMock()
+        builder = MagicMock()
+        builder.message_id.return_value = builder
+        builder.file_key.return_value = builder
+        builder.type.return_value = builder
+        builder.build.return_value = object()
+        channel._GetMessageResourceRequest.builder.return_value = builder
+        response = MagicMock()
+        response.success.return_value = True
+        response.file = BytesIO(b"DATA")
+        response.file_name = "report.pdf"
+        channel._api_client = MagicMock()
+        channel._api_client.im.v1.message_resource.get.return_value = response
+
+        msg = InboundMessage(
+            channel_name="feishu",
+            chat_id="chat-1",
+            user_id="ou-user",
+            thread_ts="message-1",
+            text="[file]",
+            files=[{"file_key": "file-key"}],
+        )
+
+        _run(channel.receive_file(msg, "thread-1", user_id="ou-user"))
+
+        dest = tmp_path / "users" / "ou-user" / "threads" / "thread-1" / "user-data" / "uploads" / "report.pdf"
+        assert dest.read_bytes() == b"DATA"
+        mode = stat.S_IMODE(os.stat(dest).st_mode)
+        # Feishu persists the attachment itself (the manager's URL-based
+        # _ingest_inbound_files pass cannot read a file_key descriptor), so it
+        # owes the sandbox the same group/other read bits the manager grants.
+        assert mode & stat.S_IRGRP
+        assert mode & stat.S_IROTH
+
+    def test_dingtalk_receive_file_makes_file_sandbox_readable(self, tmp_path, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from app.channels.dingtalk import DingTalkChannel
+        from deerflow.config.paths import Paths
+
+        monkeypatch.setattr("app.channels.dingtalk.get_paths", lambda: Paths(str(tmp_path)))
+        monkeypatch.setattr("app.channels.dingtalk.get_sandbox_provider", _MountedProvider)
+
+        channel = DingTalkChannel(MessageBus(), config={})
+        channel._download_by_code = AsyncMock(return_value=b"DATA")
+
+        msg = InboundMessage(
+            channel_name="dingtalk",
+            chat_id="chat-1",
+            user_id="user-1",
+            text="[file]",
+            files=[{"type": "file", "download_code": "code-1", "filename": "report.pdf"}],
+        )
+
+        _run(channel.receive_file(msg, "thread-1", user_id="user-1"))
+
+        dest = tmp_path / "users" / "user-1" / "threads" / "thread-1" / "user-data" / "uploads" / "report.pdf"
+        assert dest.read_bytes() == b"DATA"
+        mode = stat.S_IMODE(os.stat(dest).st_mode)
+        # DingTalk clears msg.files, so the manager's ingest pass never runs for
+        # it at all; the permit has to be applied here or nowhere.
+        assert mode & stat.S_IRGRP
+        assert mode & stat.S_IROTH
+
+
+class _MountedProvider:
+    """A `uses_thread_data_mounts` provider: the sandbox reads the persisted
+    upload over the bind mount, so no bytes are copied and the file's own mode
+    is the only thing standing between the sandbox and a readable attachment."""
+
+    uses_thread_data_mounts = True
+
+    def acquire(self, thread_id=None, *, user_id=None):
+        raise AssertionError("mounted uploads must not acquire a sandbox")
+
+    async def acquire_async(self, thread_id=None, *, user_id=None):
+        raise AssertionError("mounted uploads must not acquire a sandbox")
+
+    def get(self, sandbox_id):
+        raise AssertionError("mounted uploads must not look up a sandbox")
 
 
 # ---------------------------------------------------------------------------

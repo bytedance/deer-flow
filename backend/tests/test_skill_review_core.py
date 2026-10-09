@@ -2,6 +2,7 @@ import io
 import json
 import stat
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from deerflow.skills.review.cli import main as review_cli_main
 from deerflow.skills.review.models import PackageLimits, normalize_relative_path
 from deerflow.skills.review.readers import ArchivePackageReader, parse_skill_uri
 from deerflow.skills.review.renderer import build_static_report, render_report_markdown
+from deerflow.skills.review.resource_graph import _extract_references
 
 CONTRACTS_DIR = Path(__file__).resolve().parents[2] / "contracts" / "skill_review"
 
@@ -115,6 +117,170 @@ def test_resource_graph_tracks_referenced_resource(tmp_path):
     assert "references/guide.md" not in facts["resources"]["orphans"]
 
 
+def test_resource_graph_strips_trailing_sentence_punctuation_from_prose_refs(tmp_path):
+    # A bare path at the end of an English sentence is followed by "." or "!".
+    # Those are prose punctuation, not part of the path: they must not turn a
+    # valid reference into a resource.missing finding or orphan the real file.
+    _write(
+        tmp_path / "SKILL.md",
+        _valid_skill() + "\nRead references/setup.md.\nAlso see references/usage.md!\n",
+    )
+    _write(tmp_path / "references" / "setup.md", "# Setup\n")
+    _write(tmp_path / "references" / "usage.md", "# Usage\n")
+
+    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+
+    for target in ("references/setup.md", "references/usage.md"):
+        assert {"source": "SKILL.md", "target": target} in facts["resources"]["edges"]
+        assert target not in facts["resources"]["orphans"]
+    assert not any(f["rule_id"] == "resource.missing" and f["path"] == "SKILL.md" for f in facts["findings"])
+
+
+def test_resource_graph_keeps_real_dotted_filenames(tmp_path):
+    # "." is also a legitimate path character: a real dotted filename in a
+    # link target or a path token must keep its dots, not be stripped.
+    _write(
+        tmp_path / "SKILL.md",
+        _valid_skill() + "\nSee [config](references/config.yaml) and references/v1.0.md.\n",
+    )
+    _write(tmp_path / "references" / "config.yaml", "a: 1\n")
+    _write(tmp_path / "references" / "v1.0.md", "# v1.0\n")
+
+    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+
+    for target in ("references/config.yaml", "references/v1.0.md"):
+        assert {"source": "SKILL.md", "target": target} in facts["resources"]["edges"]
+        assert target not in facts["resources"]["orphans"]
+    assert not any(f["rule_id"] == "resource.missing" and f["path"] == "SKILL.md" for f in facts["findings"])
+
+
+def test_resource_graph_strips_fragment_from_code_span_refs(tmp_path):
+    # A code span can carry a section anchor just like a markdown link
+    # target ("`references/faq.md#pricing`"). The anchor is not part of
+    # the path: it must not turn a valid reference into a
+    # resource.missing finding.
+    _write(
+        tmp_path / "SKILL.md",
+        _valid_skill() + "\nSee `references/faq.md#pricing` for details.\n",
+    )
+    _write(tmp_path / "references" / "faq.md", "# FAQ\n")
+
+    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+
+    assert {"source": "SKILL.md", "target": "references/faq.md"} in facts["resources"]["edges"]
+    assert "references/faq.md" not in facts["resources"]["orphans"]
+    assert not any(f["rule_id"] == "resource.missing" and f["path"] == "SKILL.md" for f in facts["findings"])
+
+
+def test_resource_graph_keeps_real_dots_when_stripping_code_span_fragments(tmp_path):
+    # Stripping the fragment must not eat real dotted filenames: the
+    # extension dots of a fragment-bearing code span reference survive.
+    _write(
+        tmp_path / "SKILL.md",
+        _valid_skill() + "\nRead `references/v1.0.md#notes`.\n",
+    )
+    _write(tmp_path / "references" / "v1.0.md", "# v1.0\n")
+
+    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+
+    assert {"source": "SKILL.md", "target": "references/v1.0.md"} in facts["resources"]["edges"]
+    assert not any(f["rule_id"] == "resource.missing" and f["path"] == "SKILL.md" for f in facts["findings"])
+
+
+def test_resource_graph_prefers_hash_filenames_over_fragments(tmp_path):
+    # A package filename may legally contain '#': a code-span reference to
+    # `references/C#.md` must resolve to the real file, not be truncated to
+    # `references/C` by fragment stripping. The suffix is only treated as a
+    # fragment when the exact path does not exist.
+    _write(
+        tmp_path / "SKILL.md",
+        _valid_skill() + "\nSee `references/C#.md` and `references/faq.md#pricing`.\n",
+    )
+    _write(tmp_path / "references" / "C#.md", "# C#\n")
+    _write(tmp_path / "references" / "faq.md", "# FAQ\n")
+
+    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+
+    assert {"source": "SKILL.md", "target": "references/C#.md"} in facts["resources"]["edges"]
+    assert {"source": "SKILL.md", "target": "references/faq.md"} in facts["resources"]["edges"]
+    assert not any(f["rule_id"] == "resource.missing" and f["path"] == "SKILL.md" for f in facts["findings"])
+
+
+def test_resource_graph_prefers_hash_filenames_from_nested_sources(tmp_path):
+    # The literal-file check must canonicalize leading relative segments
+    # before comparing against the snapshot keys: from
+    # references/sub/guide.md, `../C#.md` joins to
+    # `references/sub/../C#.md`, which matches no key verbatim — without
+    # canonicalization the reference is truncated to `../C` and produces a
+    # false resource.missing plus an orphan report for the real file.
+    _write(tmp_path / "SKILL.md", _valid_skill())
+    _write(
+        tmp_path / "references" / "sub" / "guide.md",
+        _valid_skill("guide") + "\nSee `../C#.md`.\n",
+    )
+    _write(tmp_path / "references" / "C#.md", "# C#\n")
+
+    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+
+    assert {"source": "references/sub/guide.md", "target": "references/C#.md"} in facts["resources"]["edges"]
+    assert not any(f["rule_id"] in {"resource.missing", "resource.escaping-link"} and f["path"] == "references/sub/guide.md" for f in facts["findings"])
+
+
+def test_resource_graph_prefers_hash_directory_paths_over_stripping(tmp_path):
+    # '#' is legal in directory names too: the whole token
+    # `references/C#/readme.md` names a real file even though the text
+    # after '#' contains '/'. It must not be truncated to `references/C`
+    # — only a '..' segment in the post-'#' text forces the strip-first
+    # fallback ("faq.md#/../other.md").
+    _write(
+        tmp_path / "SKILL.md",
+        _valid_skill() + "\nSee `references/C#/readme.md`.\n",
+    )
+    _write(tmp_path / "references" / "C#" / "readme.md", "# C#\n")
+
+    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+
+    assert {"source": "SKILL.md", "target": "references/C#/readme.md"} in facts["resources"]["edges"]
+    assert not any(f["rule_id"] == "resource.missing" and f["path"] == "SKILL.md" for f in facts["findings"])
+
+
+def test_resource_graph_strips_fragment_before_normalizing_fallback(tmp_path):
+    # The exact-path preference must check the literal token: normalizing
+    # first collapses a hash-bearing segment ("faq.md#/.." -> "other.md")
+    # and can silently retarget the edge and orphan faq.md. The fragment is
+    # dropped first when the literal token is not a real file.
+    _write(
+        tmp_path / "SKILL.md",
+        _valid_skill() + "\nSee `references/faq.md#/../other.md`.\n",
+    )
+    _write(tmp_path / "references" / "faq.md", "# FAQ\n")
+    _write(tmp_path / "references" / "other.md", "# Other\n")
+
+    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+
+    assert {"source": "SKILL.md", "target": "references/faq.md"} in facts["resources"]["edges"]
+    assert not any(f["rule_id"] == "resource.missing" and f["path"] == "SKILL.md" for f in facts["findings"])
+
+
+def test_resource_graph_always_strips_markdown_link_fragments(tmp_path):
+    # In Markdown link syntax the text after '#' is always a URL fragment —
+    # a link to a file literally named "faq.md#pricing" would have to
+    # percent-encode it. The link must resolve to faq.md and stay broken
+    # (resource.missing) even when a file literally named
+    # references/faq.md#pricing exists; the bare-path pass must not see the
+    # link-internal text and resurrect the literal edge.
+    _write(
+        tmp_path / "SKILL.md",
+        _valid_skill() + "\nSee [FAQ](references/faq.md#pricing).\n",
+    )
+    _write(tmp_path / "references" / "faq.md#pricing", "# trap\n")
+
+    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+
+    assert not any(e["target"] == "references/faq.md#pricing" for e in facts["resources"]["edges"])
+    assert any(f["rule_id"] == "resource.missing" and f["path"] == "SKILL.md" and "references/faq.md" in f["message"] for f in facts["findings"])
+
+
 def test_resource_graph_ignores_eval_fixture_references(tmp_path):
     _write(tmp_path / "SKILL.md", _valid_skill())
     _write(
@@ -125,6 +291,125 @@ def test_resource_graph_ignores_eval_fixture_references(tmp_path):
     facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
 
     assert not any(f["rule_id"] == "resource.missing" and f["path"].startswith("evals/fixtures/") for f in facts["findings"])
+
+
+@pytest.mark.parametrize(
+    "make_payload",
+    [
+        pytest.param(lambda n: "[" * n, id="unmatched-brackets"),
+        pytest.param(lambda n: "[a](" + "x]([" * n + "b y)", id="closer-dense"),
+    ],
+)
+def test_resource_graph_link_scan_stays_linear(make_payload):
+    # #5714: both shapes drove the markdown-link scan quadratic. A long run of
+    # unmatched "[" has no "](" at all, and the "]("-dense run below never
+    # completes a target: each of its candidates re-scanned the whole suffix
+    # (11 s at 16k repetitions measured before the fix).
+    #
+    # Assert the shape, not an absolute budget: the quadratic/linear
+    # distinction is ~4x vs ~2x per doubling, which no CI machine can
+    # confuse, while an absolute bound is a coin-flip on a slower host.
+    # _extract_references is measured directly so the skillscan/digest/eval
+    # passes add no host-dependent variance. min() over repeats keeps the
+    # tiny-input ratios stable.
+    small = make_payload(32768)
+    large = make_payload(65536)
+
+    def timed(payload):
+        return min(_elapsed(_extract_references, payload) for _ in range(5))
+
+    small_elapsed = timed(small)
+    large_elapsed = timed(large)
+
+    assert small_elapsed < 1.0, f"link scan took {small_elapsed:.2f}s"
+    assert large_elapsed / small_elapsed < 3, f"link scan looks superlinear: 32K took {small_elapsed:.4f}s, 64K took {large_elapsed:.4f}s"
+
+
+def _elapsed(fn, payload):
+    # perf_counter, not monotonic: on Windows monotonic ticks at ~15.6 ms, the
+    # linear scan finishes inside one tick, and small_elapsed can measure as
+    # exactly 0.0 — a zero divisor for the ratio assertion below.
+    started = time.perf_counter()
+    fn(payload)
+    return time.perf_counter() - started
+
+
+@pytest.mark.parametrize(
+    "payload, expected",
+    [
+        pytest.param("[x]([)y](z)", {"["}, id="opener-inside-consumed-construct"),
+        pytest.param(
+            "a [x]([) references/notes.md b](x)",
+            {"[", "references/notes.md"},
+            id="no-bogus-ref-from-overlap",
+        ),
+        pytest.param("[x]([)y](z) [)y](z)", {"[", "z"}, id="blanking-keeps-later-match"),
+    ],
+)
+def test_resource_graph_link_scan_matches_finditer(payload, expected):
+    # The scan must agree with the regex it replaces exactly: `finditer`
+    # matches are non-overlapping and resume at the end of the previous
+    # match, so an opener inside an already-consumed construct can never
+    # start a new match. `[x]([)y](z)` matches `[x]([)` and stops — the `z`
+    # link is not real — while `[x]([)y](z) [)y](z)` has two genuine,
+    # non-overlapping matches that must both be found and blanked.
+    assert _extract_references(payload) == expected
+
+
+@pytest.mark.parametrize(
+    "payload, expected",
+    [
+        pytest.param('[a](foo/bar.md "Title")', {"foo/bar.md"}, id="titled-link"),
+        pytest.param(
+            '[a](foo/bar.md "Title with ) paren")',
+            {"foo/bar.md"},
+            id="paren-inside-title",
+        ),
+        pytest.param('[a](foo/bar.md "")', {"foo/bar.md"}, id="empty-title"),
+        pytest.param('[a](foo/bar.md\t"Title")', {"foo/bar.md"}, id="tab-separator"),
+        pytest.param('![a](foo/bar.png "Logo")', {"foo/bar.png"}, id="image-with-title"),
+        pytest.param('[a](foo/bar.md "unterminated', set(), id="unterminated-title"),
+    ],
+)
+def test_resource_graph_quoted_title_targets(payload, expected):
+    # The hand-rolled title parser replaces `(?:\s+"[^"]*")?`: pin its
+    # behavior on the shapes that distinguish it from the regex — the
+    # `)`-inside-title case in particular exercises `content.find('"')`
+    # against the regex's `[^"]*`.
+    assert _extract_references(payload) == expected
+
+
+def test_resource_graph_link_blanking_starts_at_the_leftmost_opener(tmp_path):
+    # A link construct starts at the first "[" after the previous "]" (the
+    # leftmost match wins), so the whole construct is blanked out of the
+    # residual text. A path token inside it must not reach the bare-path pass
+    # and resurrect a reference: only the real link target is extracted.
+    _write(
+        tmp_path / "SKILL.md",
+        _valid_skill() + "\n[references/hidden.md[a](references/kept.md)\n",
+    )
+    _write(tmp_path / "references" / "kept.md", "# Kept\n")
+
+    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+
+    assert {"source": "SKILL.md", "target": "references/kept.md"} in facts["resources"]["edges"]
+    assert not any(f["rule_id"] == "resource.missing" and "hidden" in f["message"] for f in facts["findings"])
+
+
+def test_resource_graph_non_link_reference_passes_survive_link_guard(tmp_path):
+    # The link scan must only skip the markdown-link pass: code-span and
+    # bare-path references carry no "](" construct and must still be extracted.
+    _write(
+        tmp_path / "SKILL.md",
+        _valid_skill() + "\nSee `references/from-code-span.md` and references/from-bare-path.md.\n",
+    )
+    _write(tmp_path / "references" / "from-code-span.md", "# A\n")
+    _write(tmp_path / "references" / "from-bare-path.md", "# B\n")
+
+    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+
+    for target in ("references/from-code-span.md", "references/from-bare-path.md"):
+        assert {"source": "SKILL.md", "target": target} in facts["resources"]["edges"]
 
 
 def test_package_digest_is_path_independent(tmp_path):
@@ -164,6 +449,20 @@ def test_skillscan_high_findings_are_review_errors(tmp_path):
     finding = next(f for f in facts["findings"] if f["source"] == "skillscan" and f["rule_id"] == "declaration-prompt-override")
     assert finding["severity"] == "error"
     assert finding["skillscan_severity"] == "HIGH"
+
+
+@pytest.mark.parametrize("hardcoded", [False, True])
+def test_cli_mapping_credentials_gate_on_values(tmp_path, capsys, hardcoded):
+    _write(tmp_path / "SKILL.md", _valid_skill() + "\nRead [loader](scripts/load.py).\n")
+    value = '"9f8e7d6c5b4a3210ff"' if hardcoded else 'os.getenv("ACCESS_TOKEN")'
+    _write(tmp_path / "scripts" / "load.py", f'import os\ntokens = {{"access_token": {value}, "refresh_token": os.getenv("REFRESH_TOKEN")}}\n')
+
+    exit_code = review_cli_main([str(tmp_path), "--format", "json", "--fail-on", "error", "--fail-on-incomplete"])
+    report = json.loads(capsys.readouterr().out)
+
+    assert exit_code == (1 if hardcoded else 0)
+    assert any(finding["rule_id"] == "secret-env-assignment" for finding in report["findings"]) is hardcoded
+    assert "9f8e7d6c5b4a3210ff" not in repr(report)
 
 
 def test_skillscan_ignores_eval_fixture_skill_markdown(tmp_path):
@@ -230,13 +529,21 @@ def test_skillscan_scans_eval_fixture_files_other_than_skill_markdown(tmp_path, 
     assert f"{fixture_dir}/SKILL.md" not in scanned_paths
 
 
+def test_case_sensitivity_probe_preserves_existing_files(tmp_path):
+    existing = tmp_path / "CaseProbe"
+    _write(existing, "keep this file")
+
+    _is_case_insensitive_directory(tmp_path)
+
+    assert existing.read_text(encoding="utf-8") == "keep this file"
+    assert list(tmp_path.iterdir()) == [existing]
+
+
 def _is_case_insensitive_directory(path: Path) -> bool:
-    probe = path / "CaseProbe"
-    probe.touch()
-    try:
-        return (path / "caseprobe").exists()
-    finally:
-        probe.unlink()
+    with tempfile.TemporaryDirectory(dir=path) as probe_dir:
+        directory = Path(probe_dir)
+        (directory / "CaseProbe").touch()
+        return (directory / "caseprobe").exists()
 
 
 @pytest.mark.parametrize(

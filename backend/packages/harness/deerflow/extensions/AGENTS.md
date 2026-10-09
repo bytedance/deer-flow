@@ -43,6 +43,10 @@ case rather than reviving a record whose package declaration may already be gone
 cancellation skips the recovery sync entirely — the declarations are already restored and
 the next locked startup sync reconciles the environment, whereas blocking an interrupt on a
 full dependency resolve invites a second interrupt that escapes the handler mid-transaction.
+File snapshots capture the original permission bits alongside the bytes; rollback applies
+that mode to a temporary file before atomically replacing the destination, including when
+restoring `config.yaml` after a failed removal. A failed write, chmod, or replace leaves the
+current destination untouched and removes the temporary file.
 Package mutation is deferred from environment mutation: after `uv add/remove`
 updates the declaration and lock, one `uv sync --locked --all-packages` preserves the same
 config-/environment-detected optional extras as normal startup. All three uv calls pin the
@@ -277,9 +281,34 @@ detached task store, the same fallback `notify_system_model_call` uses when its 
 supplies none.
 
 Gateway services start in registration order after the persistence engine and session
-factory are ready. Each receives the same `ExtensionRuntimeDeps` snapshot containing the
+factory are ready. Ungranted services share an `ExtensionRuntimeDeps` snapshot containing the
 app store, projected host policy, session factory, and optional read-only
-`RunEvidenceReader`. The Gateway constructs the configured run and event stores before
+`RunEvidenceReader`. `plugins[].host_access.model_invocation` optionally binds a model invoker
+to each service via the host-only `ModelInvocationService` adapter. The loader captures
+one `ModelInvocationScope` per installation, not per `use` string, so duplicate sources
+cannot inherit one another's roles. Its semaphore is shared by that installation's
+services; its admission ceiling is twice the concurrency limit, checked before
+payload processing. Provider work is shielded from caller cancellation and retains
+both budgets until actual completion, including synchronous LangChain executor calls
+and offloaded construction. Abandoned construction cannot dispatch a model request.
+Provider-task cancellation is a normalized failure; only a new cancellation of
+the invoking task propagates. Compare cancellation counts against invocation entry
+so previously handled caller cancellations do not mask provider failures.
+Failed-install positional rollback also removes its adapters. The adapter
+receives startup config through `start_with_host`, while extensions receive only the
+neutral invoker in a replaced deps snapshot. No-grant services preserve their old path.
+Failed start and stop revoke the service's handle and cancel queued/in-flight
+callers; they do not release slots owned by still-running provider work. Structured
+schema checks and output validation run in terminable isolated Python children,
+with pipe I/O on admission-bounded dedicated threads (Windows selector-loop compatible,
+independent of a potentially saturated provider executor). Cancellation kills and
+reaps those children before releasing admission.
+Grants and model profiles are startup snapshots; changing them requires restarting the
+Gateway. Calls use the normal model factory and attributed tracing, return plain text,
+usage counts and optionally locally validated JSON objects, and never return raw model
+objects or provider exception chains. See `backend/docs/extension-model-invocation.md`.
+
+The Gateway constructs the configured run and event stores before
 services so the reader is usable from `start()`. Changed-run discovery uses an opaque,
 scope-bound cursor over `(change_seq, run_id)`; a run that changes after it was returned may
 be replayed, but an unreturned run cannot be skipped. Legacy rows start at `change_seq=0`
@@ -397,3 +426,13 @@ No online settings write API is added. `plugin_tools.py` joins normal tool assem
 the run's extension snapshot; task delegation passes that snapshot explicitly. Browser
 public-field projection is an allowlist. Package code is trusted, not sandboxed. See
 `docs/full-stack-plugins.md` and the independently packaged bookmark example.
+
+Full Agent run control is an optional `deerflow_extension_api.AgentRuns` handle
+on action/tool contexts and the request resolver. Gateway owns principal binding,
+revocation and ordinary route admission in `app/gateway/extension_agent_runs.py`.
+Never replace this with `ModelInvoker`, raw global RunManager access, or a
+caller-supplied user ID. Service-held handles are process-local, permission-capped
+and revoked before host shutdown; PAT/internal grants remain unsupported.
+Unstamped internal launches receive no handle and must still start normally.
+Action/tool dispatch scopes handles to each registered plugin namespace for
+idempotency isolation; request-resolved handles use `for_plugin` explicitly.

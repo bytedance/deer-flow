@@ -119,17 +119,25 @@ sandbox:
 Replace the file-based memory with any persistent store by implementing `MemoryStorage`:
 
 ```python
-from deerflow.agents.memory.storage import MemoryStorage
 from typing import Any
 
+from deerflow.agents.memory.backends.deermem.deermem.core.storage import MemoryStorage
+
+
 class RedisMemoryStorage(MemoryStorage):
-    def load(self, agent_name: str | None = None) -> dict[str, Any]:
+    # `create_storage()` builds the class as `cls(config)`, so it must take the backend config.
+    def __init__(self, config) -> None:
         ...
 
-    def reload(self, agent_name: str | None = None) -> dict[str, Any]:
+    # The memory updater calls these with `user_id=` — and `save()` also with
+    # `expected_revision=` — so both extra parameters must stay in the signature.
+    def load(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
         ...
 
-    def save(self, memory_data: dict[str, Any], agent_name: str | None = None) -> bool:
+    def reload(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
+        ...
+
+    def save(self, memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None, expected_revision: int | None = None) -> bool:
         ...
 ```
 
@@ -137,8 +145,11 @@ Configure it in `config.yaml`:
 
 ```yaml
 memory:
-  storage_class: mypackage.storage:RedisMemoryStorage
+  backend_config:
+    storage_class: mypackage.storage.RedisMemoryStorage
 ```
+
+Unlike `sandbox.use:` above, `storage_class` is resolved with a dotted `module.Class` path — `RedisMemoryStorage` is split off after the last dot, so a `module:Class` value fails to import.
 
 ## Custom skills
 

@@ -155,6 +155,29 @@ class TestHashToolCalls:
 
         assert _hash_tool_calls([forward_call]) == _hash_tool_calls([reversed_call])
 
+    def test_non_finite_read_file_line_bound_does_not_crash(self):
+        """A model-emitted ``1e999`` parses to ``float('inf')`` via ``json.loads``.
+
+        ``int(float('inf'))`` raises ``OverflowError``, which the line-bound
+        coercion must treat as an unusable value — falling back to the
+        open-ended read key — instead of crashing ``after_model`` and the run.
+        """
+        inf_call = {
+            "name": "read_file",
+            "args": {"path": "/tmp/demo.py", "start_line": float("inf")},
+        }
+        open_ended_call = {"name": "read_file", "args": {"path": "/tmp/demo.py"}}
+
+        assert _hash_tool_calls([inf_call]) == _hash_tool_calls([open_ended_call])
+
+    def test_non_finite_end_line_does_not_crash(self):
+        inf_call = {
+            "name": "read_file",
+            "args": {"path": "/tmp/demo.py", "end_line": float("inf")},
+        }
+
+        assert isinstance(_hash_tool_calls([inf_call]), str)
+
     def test_stringified_non_dict_args_do_not_crash(self):
         non_dict_json_call = {"name": "bash", "args": '"echo hello"'}
         plain_string_call = {"name": "bash", "args": "echo hello"}
@@ -277,6 +300,96 @@ class TestReadFileRangeKey:
         assert _hash_tool_calls([self._read_call(path="/w/a.py", start_line=1, end_line=40)]) != _hash_tool_calls([self._read_call(path="/w/b.py", start_line=1, end_line=40)])
 
 
+class TestGenericToolKey:
+    """Tools without a dedicated key rule must keep every argument that changes the call.
+
+    Keying only the first salient field (``path``/``url``/``query``/...) collapsed
+    distinct calls onto one key: paging a URL or a search, or rewriting one
+    skill file with new content, hard-stopped on its fifth *distinct* call.
+    Only a sandbox tool's UI narration (``description``) may vary without
+    making a call new.
+    """
+
+    @staticmethod
+    def _call(tool_name, args):
+        return {"name": tool_name, "id": f"call_{tool_name}", "args": args}
+
+    @pytest.mark.parametrize(
+        ("name", "first", "second"),
+        [
+            ("fetch", {"url": "https://example.com/doc", "start_index": 0}, {"url": "https://example.com/doc", "start_index": 5000}),
+            ("search_issues", {"query": "is:open label:bug", "page": 1}, {"query": "is:open label:bug", "page": 2}),
+            ("list_uploaded_files", {"query": "report"}, {"query": "report", "cursor": "next-page"}),
+            ("skill_manage", {"action": "write_file", "name": "etl", "path": "scripts/run.py", "content": "v1"}, {"action": "write_file", "name": "etl", "path": "scripts/run.py", "content": "v2"}),
+            ("grep", {"path": "/w", "pattern": "foo", "case_sensitive": False}, {"path": "/w", "pattern": "foo", "case_sensitive": True}),
+        ],
+    )
+    def test_non_salient_args_affect_hash(self, name, first, second):
+        assert _hash_tool_calls([self._call(name, first)]) != _hash_tool_calls([self._call(name, second)])
+
+    @pytest.mark.parametrize(
+        ("name", "args"),
+        [
+            ("bash", {"command": "make test"}),
+            ("ls", {"path": "/w"}),
+            ("glob", {"path": "/w", "pattern": "*.py"}),
+            ("grep", {"path": "/w", "pattern": "foo"}),
+        ],
+    )
+    def test_sandbox_ui_narration_does_not_affect_hash(self, name, args):
+        """Regression guard for #1905: rewording the narration must not dodge detection."""
+        first = self._call(name, {**args, "description": "run it"})
+        second = self._call(name, {**args, "description": "run it once more"})
+
+        assert _hash_tool_calls([first]) == _hash_tool_calls([second])
+
+    @pytest.mark.parametrize(
+        ("name", "args"),
+        [
+            ("update_agent", {}),
+            ("setup_agent", {"soul": "You are helpful."}),
+            ("create_issue", {"title": "Crash on start"}),
+        ],
+    )
+    def test_description_payload_affects_hash(self, name, args):
+        """``description`` is the operation's payload outside the sandbox narration tools."""
+        first = self._call(name, {**args, "description": "Reviews pull requests."})
+        second = self._call(name, {**args, "description": "Reviews pull requests and triages issues."})
+
+        assert _hash_tool_calls([first]) != _hash_tool_calls([second])
+
+    def test_description_only_agent_updates_do_not_hard_stop(self):
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=5)
+        runtime = _make_runtime()
+
+        for version in range(6):
+            call = self._call("update_agent", {"description": f"Assistant v{version}"})
+            assert mw._apply(_make_state(tool_calls=[call]), runtime) is None, f"update to v{version} was treated as a loop"
+        assert mw.consume_stop_reason("test-run") is None
+
+    def test_paging_a_url_does_not_hard_stop(self):
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=5)
+        runtime = _make_runtime()
+
+        for start in range(0, 50_000, 5_000):
+            call = self._call("fetch", {"url": "https://example.com/doc", "max_length": 5_000, "start_index": start})
+            assert mw._apply(_make_state(tool_calls=[call]), runtime) is None, f"page at start_index={start} was treated as a loop"
+        assert mw.consume_stop_reason("test-run") is None
+
+    def test_repeating_one_page_still_hard_stops(self):
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=5)
+        runtime = _make_runtime()
+        call = [self._call("fetch", {"url": "https://example.com/doc", "start_index": 5_000})]
+
+        for _ in range(4):
+            assert mw._apply(_make_state(tool_calls=call), runtime) is None
+        hard_stop = mw._apply(_make_state(tool_calls=call), runtime)
+
+        assert hard_stop is not None
+        assert hard_stop["messages"][0].tool_calls == []
+        assert mw.consume_stop_reason("test-run") == "loop_capped"
+
+
 class TestLoopDetection:
     def test_no_tool_calls_returns_none(self):
         mw = LoopDetectionMiddleware()
@@ -294,6 +407,24 @@ class TestLoopDetection:
         for _ in range(2):
             result = mw._apply(_make_state(tool_calls=call), runtime)
             assert result is None
+
+    def test_non_finite_line_bound_does_not_break_detection(self):
+        """``after_model`` must survive a read_file call whose JSON args carry
+        ``start_line: 1e999`` (parsed to ``float('inf')``): the middleware keeps
+        tracking the call instead of raising ``OverflowError`` out of the hook.
+        """
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=5)
+        runtime = _make_runtime()
+        call = [{"name": "read_file", "id": "call_inf", "args": {"path": "/tmp/demo.py", "start_line": float("inf")}}]
+
+        for _ in range(2):
+            result = mw._apply(_make_state(tool_calls=call), runtime)
+            assert result is None
+
+        result = mw._apply(_make_state(tool_calls=call), runtime)
+        assert result is None
+        assert mw._pending_warnings[_pending_key()]
+        assert "LOOP DETECTED" in mw._pending_warnings[_pending_key()][0]
 
     def test_warn_at_threshold_queues_but_does_not_mutate_state(self):
         """At warn threshold, ``after_model`` enqueues but returns None.

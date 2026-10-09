@@ -84,6 +84,25 @@ def test_group_filter_and_name_collision_fail_closed(installed):
         build_plugin_tools(loaded, reserved_names={tool.name})
 
 
+def test_built_tools_carry_host_recorded_plugin_provenance(installed):
+    """The tag is written at construction, from registry-validated values."""
+    from deerflow.tools.tool_provenance import get_plugin_source, is_plugin_tool, resolve_tool_provenance
+
+    loaded, plugin, _ = installed
+    (tool,) = build_plugin_tools(loaded)
+
+    assert is_plugin_tool(tool) is True
+    assert get_plugin_source(tool) == {
+        "namespace": plugin.namespace,
+        "declaration": "search",
+        "installation": "test",
+    }
+    provenance = resolve_tool_provenance(tool)
+    assert provenance is not None
+    assert provenance.source == f"plugin:{plugin.namespace}"
+    assert provenance.declaration == "search"
+
+
 @pytest.mark.parametrize("source", ["config", "builtin", "mcp", "acp"])
 def test_assembly_keeps_ordinary_and_unaffected_plugin_tools_on_collision(installed, monkeypatch, caplog, source):
     from langchain_core.tools import Tool
@@ -123,3 +142,25 @@ def test_assembly_keeps_ordinary_and_unaffected_plugin_tools_on_collision(instal
     duplicate_snapshot = replace(loaded, plugins=loaded.plugins + loaded.plugins)
     with pytest.raises(ValueError, match="collision"):
         assembly.get_available_tools(app_config=config, extensions=duplicate_snapshot, include_mcp=False, include_upload_tool=False)
+
+
+@pytest.mark.asyncio
+async def test_model_tool_receives_run_control_from_host_runtime(installed):
+    from unittest.mock import Mock
+
+    from deerflow_extension_api import AGENT_RUNS_CONTEXT_KEY
+
+    loaded, plugin, calls = installed
+    (tool,) = build_plugin_tools(loaded)
+    graph = StateGraph(MessagesState)
+    graph.add_node("tools", ToolNode([tool]))
+    graph.add_edge(START, "tools")
+    graph.add_edge("tools", END)
+    scoped = object()
+    handle = SimpleNamespace(for_plugin=Mock(return_value=scoped))
+    await graph.compile().ainvoke(
+        {"messages": [AIMessage(content="", tool_calls=[{"id": "call", "name": tool.name, "args": {"query": "hello"}}])]},
+        context={"user_id": "alice", "thread_id": "thread", AGENT_RUNS_CONTEXT_KEY: handle},
+    )
+    handle.for_plugin.assert_called_once_with(plugin.namespace)
+    assert calls[0].agent_runs is scoped

@@ -40,6 +40,8 @@ Unit tests live under `tests/unit/` and mirror the `src/` layout (e.g., `tests/u
 
 Webpack is the default development bundler. Use `DEER_FLOW_DEV_BUNDLER=turbo` with `pnpm dev` to opt in to Turbopack when diagnosing a local Next.js bundler issue.
 
+On Windows `pnpm dev` binds `127.0.0.1` by default because Hyper-V/winnat excluded port ranges can reject Next's default `0.0.0.0` bind with `EACCES` (#2870). Pass `pnpm dev -- --hostname 0.0.0.0` to listen on a LAN interface instead.
+
 Rstest runs them as two projects (`rstest.config.ts`). `*.test.ts` / `*.test.tsx` run in a plain **node** environment — that is nearly the whole suite, and it is the default for anything that is pure logic. `*.dom.test.ts` / `*.dom.test.tsx` run in **happy-dom**, for tests that need a document: hooks driven through `renderHook` from `@testing-library/react`, and components. Keep the split — a DOM environment costs roughly 3x the runtime of the node suite, so tests that do not render should not opt into it. A hook whose behavior only exists under real React (effect ordering, cleanup on unmount, re-render on store change) belongs in a `.dom.test.*` file rather than a node test that mocks `react` itself.
 
 E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`. The real-backend auth contract in `tests/e2e-real-backend/auth-disabled-contract.spec.ts` and `backend/tests/test_auth_me_permissions.py` pin the complete route-permission list; update both when adding registered permissions (including `projects:read/write/delete`).
@@ -51,6 +53,14 @@ Fetch 51 rows to display 50 plus a next-page sentinel; never append pages. Only
 page zero polls or refreshes on focus/reconnect. Task switches reset to page zero,
 and consumed AbortSignals cancel obsolete reads. Live offsets are not snapshots;
 explicit mutations or navigation may observe newly inserted runs.
+Run status `unmet` identifies a finished occurrence whose scheduled goal was not satisfied; keep it distinct from execution failure.
+`core/scheduled-tasks/goal-outcome.ts` maps goal verdicts and host reason codes for run history; show known codes as localized labels; unknown codes, raw run errors and the evaluator's reason stay behind the run row's Details. Check-failure codes are "unchecked", not a miss. `contracts/scheduled_goal_notes_contract.json` pins the host strings it and `run-error.ts` match.
+Scheduled-task views read state through the pure `core/scheduled-tasks` helpers (`status.ts`, `actions.ts`, `format.ts`, `describeTaskSchedule`, `errors.ts`) so list, detail and chat card agree. "Is a run active?" is `status === "running"` or `active_run_status` (a recurring task stays `enabled` while it runs). Default views show no IDs, ISO times, cron strings or enum names; errors localize by `detail.code` (`contracts/scheduled_task_errors_contract.json`) with raw text only behind Details. `tests/e2e/utils/readable.ts` and `tests/unit/helpers/readable.ts` assert this.
+The tasks page (`app/workspace/scheduled-tasks/page.tsx`) only composes `components/workspace/scheduled-tasks/*`: list with status tabs, detail (Runs / Stops when / goal / Does / notes / History), outcome notice, create/edit/duplicate dialog (PATCH sends only changed fields, `null` clears) and the renew dialog that a `limits_exhausted` Resume opens. `?task_id=` selects a task; `?thread_id=` scopes the list to one chat.
+In chat, a `schedule_task` result becomes an `assistant:scheduled-task` group (`core/scheduled-tasks/tool-result.ts`, last card per task per turn; not a turn boundary) rendered by `ScheduledTaskCard`, which polls the task only while on screen. A human message with `additional_kwargs.deerflow_scheduled_origin` stays a `human` group with `scheduledOrigin`: `ScheduledRunPrompt` renders the origin's user-language parts, never the launched text, and it is not editable.
+Server-created threads: `core/threads/origin.ts` reads `metadata.deerflow_origin` (`contracts/thread_origin_contract.json`), then `channel_source`, then a legacy `scheduled_task_id`; provider names come from `threads.origin.providers`. `core/threads/activity.ts` polls `/api/thread-activity` (mount `useThreadActivity` once; unmounting resets its cursor; first poll only seeds; invalidate lists only on server-origin threads, truncation or a higher `read_version`) and `useMarkThreadRead` posts reads. `core/scheduled-tasks/events.ts` loads a chat's lifecycle events, not gated on its task list; `placeTaskEvents` puts each at the end of its `after_run_id` turn. The UI language is saved as the `locale` preference once per session and on each switch, only when the Gateway's preferences include `locale`.
+Thread rows (sidebar, `/workspace/chats`) show `ThreadOriginIcon` and, if `unread === true` and not the open thread, `ThreadUnreadDot` with `threads.unreadLabel` as row label. `WorkspaceSidebar` mounts `useThreadActivity`. Chat pages call `useMarkOpenThreadRead` once metadata loads (marks read on load, on an unread flip, on tab visible, and via its callback from `onFinish`).
+Chat pages pass `useThreadScheduledTaskEvents` data to `MessageList` (`scheduledTaskEvents`; the custom-agent page also passes its agent for the run link), which renders `ScheduledTaskEventLine` through `VirtualMessageList.renderAfterGroup` at the `placeTaskEvents` position, inside the group's measured row. Lines are history: never gated on the task list. Channel provider cards (Settings and the sidebar list) render `ChannelScheduledUpdates` from `proactive_notifications`, and nothing when the field is absent.
 
 ## Architecture
 
@@ -85,14 +95,25 @@ More specific `AGENTS.md` files under `src/` contain the frontend sections split
 
 `core/utils/markdown.ts` reads web-fetch titles from the first nonblank line.
 Match zero to three literal spaces before `# ` without trimming indentation;
-mixed space/tab code blocks must fall back to the URL. Keep this local to title
-extraction rather than changing the shared streamdown fence parser.
+mixed space/tab code blocks must fall back to the URL. Strip optional closing
+hashes with a backwards scan so long fetched titles cannot cause quadratic regex
+backtracking. Closing hashes require a preceding space/tab (or an empty title)
+and only ASCII spaces/tabs afterward, apart from the terminal CR in CRLF input.
+Non-ASCII trailing whitespace must not turn literal hashes into closing syntax.
+Keep this local to title extraction rather than changing the shared streamdown
+fence parser.
 
 Custom Agent `display_name` is an optional Unicode UI label, edited in
 `AgentSettingsDialog`. Use it with a fallback to `name` for gallery/chat text;
 keep `name` for React identity, URLs, requests, and runtime `agent_name`.
 The 100-code-point budget uses `[...value.trim()].length`, matching Pydantic;
 do not use HTML `maxLength`, which counts UTF-16 code units instead.
+
+Custom Agent portability uses the versioned `deerflow.custom-agent` JSON
+document through `core/agents/api.ts`. Keep file parsing client-side only for
+previewing the proposed local name; the Gateway is authoritative for schema,
+name, model, and conflict validation. Export downloads must never synthesize
+runtime state from browser caches.
 
 - **Imports**: Enforced ordering (builtin → external → internal → parent → sibling), alphabetized, newlines between groups. Use inline type imports: `import { type Foo }`.
 - **Unused variables**: Prefix with `_`.
@@ -187,6 +208,12 @@ lists from the server instead of inserting those snapshots into either view.
 
 CSV/TSV previews share `artifact-table-preview.tsx` between the panel and standalone viewer. Papa Parse runs only inside `delimited-preview.worker.ts`; `use-delimited-preview.ts` bounds input before transfer, cancels stale work, and enforces a five-second timeout. The parser detects the first record separator outside quoted fields and passes it explicitly to Papa Parse, so embedded newlines in an incomplete quoted field cannot corrupt newline detection. It retains at most 202 logical records and 50 columns, discarding an incomplete final record from truncated input. UI pagination displays at most 200 data rows in pages of 50. Keep the table mounted but inactive when switching to source so header/pagination state survives; changing file identity resets it. Pending `write_file` content stays in source mode until success.
 
+For a truncated sample whose first separator is LF or CRLF, strip a terminal CR
+before parsing so a split CRLF separator cannot make a quoted final field
+invalidate the whole preview, including LF-first files with later CRLF records.
+The terminal record remains incomplete and is discarded; complete CR-only files
+and malformed quotes retain their existing behavior.
+
 Custom skill export is admin-only and disabled in static demos. The lazy
 `skill-export-dialog.tsx` must abort requests and ignore stale callbacks on close
 or user/skill changes. `core/skills/export.ts` owns the revision-bound Blob download;
@@ -263,6 +290,23 @@ keeps the saved key, explicit removal sends an empty key. Saving invalidates bot
 admin catalog and `MODELS_QUERY_KEY`. Editor unmount aborts probes and fences late
 callbacks. Static demos and non-admin users must not query the management API.
 
+### Model reasoning capabilities
+
+`/api/models` projects a per-model `reasoning` contract (issue #5073) beside the
+deprecated `supports_thinking` / `supports_reasoning_effort` booleans.
+`core/models/reasoning.ts` is the only place that interprets it: it falls back to
+the booleans for older Gateways, clamps the chat mode (`getResolvedMode` never
+yields `flash` for a required-thinking model), lists the effort options the
+composer and the sidecar render, and maps mode presets and remembered values
+through the contract's aliases/default (`resolveReasoningEffort`). Effort values
+are open strings (`ReasoningEffortValue`), so provider-specific tokens such as
+`max` flow through local settings and account preferences unchanged; the custom
+agent dialog offers only the intersection with the per-agent `low/medium/high`
+schema and hides "off" for required-thinking models. Do not read the booleans in
+components directly. On a legacy model, `resolveReasoningEffort` keeps only its
+advertised generic values; this drops a remembered provider-specific token after
+a model switch without changing the backend's direct legacy-request behavior.
+
 ## Full-stack plugin UI
 
 `core/extensions/` loads authenticated deployment-installed ES modules from `/api/plugins`.
@@ -273,8 +317,14 @@ Both honor the backend base and prefixes; transport and cache semantics are docu
 Conversation action factories, shapes and availability callbacks are guarded per plugin;
 only validated value snapshots reach the toolbar/sidebar render paths.
 `PluginNavigation` and the dynamic workspace extension route consume page declarations;
-Capability Center details only show metadata and status. Conversation action slots augment
-normal/custom-agent toolbars and sidebar menus without replacing native export or notification.
+Capability Center defaults to the repository examples in `core/extensions/catalog.ts`,
+merged by explicit namespace with runtime descriptors. Catalog-only entries are discovery
+metadata, never module-loader inputs or proof of installation. Backend-only examples may
+have no plugin descriptor; keep their runtime status unasserted. Details link to package
+installation instructions. Keep the catalog aligned with `examples/deerflow-extension-*`.
+Agent teams uses `community.agent-teams`; merge its installed descriptor into the
+localized catalog entry without asserting runtime status for a catalog-only row.
+Conversation action slots augment normal/custom-agent toolbars and sidebar menus without replacing native export or notification.
 Plugin views use mount/dispose and abort signals; Shadow DOM is CSS isolation, not a sandbox.
 Descriptors are user-keyed page snapshots, refreshed manually. Backend calls bind the plugin's
 namespace, action allowlist and expected viewer identity. See `docs/full-stack-plugins.md`.
@@ -283,3 +333,22 @@ Plugin page `openConversation(threadId)` resolves authenticated thread metadata
 with `pathOfThread`; do not let plugins hardcode default-agent routes. The page's
 abort signal fences late navigation after unmount/account changes. Synchronous
 conversation-action callbacks reject Promise returns while consuming rejections.
+
+### Composer references
+
+`components/workspace/mentions/` owns cursor-local `@` detection, the picker,
+and atomic references. Render labels as DOM text, never HTML; canonical tokens
+preserve draft positions. Submission expands tokens to `@label` and sends up to
+16 unique skill IDs in `additional_kwargs.skill_references`; the backend checks
+each against the user registry and agent allowlist. The web slash picker lists
+only `/goal` and `/compact`; skill selection uses `@`. Legacy typed slash text
+continues through normal message submission for backend and channel compatibility.
+Project files require confirmed `additional_kwargs.files`. Conversation context
+is reconciled from tokens against the current capability and limit. Only successful
+discovery may flatten references; pending/errors preserve IDs and block reference
+sends, with retry on failure. Polish restores whole labels longest-first in one
+pass. Confirmed thread creation seeds metadata before migration; references stay
+locked during attachment. Deleting an object removes its context; undo restores
+references already attached to the draft. Labels grant no read authority. IME,
+caret, thread changes and attachment fences apply to editor and picker. The `@`
+and attachment buttons share the picker.

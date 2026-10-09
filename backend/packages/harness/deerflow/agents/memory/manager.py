@@ -18,12 +18,13 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import json
 import logging
 import os
 import sys
 import threading
 from abc import abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from types import ModuleType
 from typing import Any, ClassVar, Literal
@@ -44,6 +45,12 @@ _MANAGER_CLASS_ATTR = "MANAGER_CLASS"
 _memory_manager: MemoryManager | None = None
 _backends_cache: dict[str, type[MemoryManager]] | None = None
 _manager_lock = threading.Lock()
+# Signature of the host judging config the cached manager's judge was built
+# from. ``memory.*`` is documented as hot-reloadable, but the manager singleton
+# (and its injected judge) is constructed once; this lets get_memory_manager()
+# rebuild only the judge when memory.prescreen / memory.signal_classification
+# changes. None = no manager built yet (or reset).
+_memory_judge_signature: str | None = None
 
 
 def context_query_kwargs(get_context: Callable[..., str], query: str | None) -> dict[str, str | None]:
@@ -185,6 +192,14 @@ class MemoryManager(BaseModel):
     # that fails fast at instantiation rather than silently returning empty
     # results). Default False: a new backend must explicitly opt in to tool mode.
     supports_search: ClassVar[bool] = False
+    # Opt-in capability for Gateway management calls that name an agent scope.
+    # The HTTP layer rejects a scoped read/write unless the backend declares
+    # this flag, because accepting ``agent_name`` in a Python signature does
+    # not prove that an adapter actually binds storage and mutations to it.
+    # Backends that leave it False retain the unscoped management API and get
+    # an explicit 501 for scoped management instead of silently operating on
+    # the user's default/global bucket.
+    supports_agent_scoped_management: ClassVar[bool] = False
     # Backends that rely on conversation-level extraction instead of fact CRUD
     # can retain MemoryMiddleware writes while tool mode supplies query-aware
     # search. Most backends keep tool mode fully model-directed.
@@ -410,7 +425,11 @@ class MemoryManager(BaseModel):
         agent_name: str | None = None,
     ) -> dict[str, Any]:
         """Import a memory document into the bucket; return the merged result.
-        Default: unsupported."""
+
+        An explicit ``agent_name`` replaces only that agent's facts. Shared
+        user/history summaries must remain unchanged even when the incoming
+        document contains summary fields. Default: unsupported.
+        """
         raise NotImplementedError(f"import_memory not supported by {type(self).__name__}")
 
     def export_memory(
@@ -531,6 +550,16 @@ class MemoryManager(BaseModel):
 
     def on_turn_start(self, turn_number: int, message: Any, **kwargs: Any) -> None:
         """Turn-start nudge (future background review). Default: no-op."""
+        return None
+
+    def refresh_judge(self, judge: Any) -> None:
+        """Replace the injected memory judge after a judging-config hot-reload.
+
+        Called by :func:`get_memory_manager` when ``memory.prescreen`` or
+        ``memory.signal_classification`` changes in ``config.yaml``, so toggling
+        a mode takes effect without restarting the process. Default: no-op (a
+        backend without a judge ignores it).
+        """
         return None
 
     # ── Async (speculative) ──────────────────────────────────────────────
@@ -912,6 +941,34 @@ def _host_default_extraction_callback(payload: Any) -> None:
                 fact_scope_rejected / extracted * 100,
                 thread_id,
             )
+    prescreen = payload.get("prescreen")
+    if isinstance(prescreen, dict):
+        # The pre-screen record is the only trace a *skip* leaves (no LLM call
+        # runs), so it carries the digest and the fallback reason rather than a
+        # probability for every batch.
+        logger.info(
+            "Memory pre-screen: thread=%s mode=%s verdict=%s p=%s cached=%s digest=%s fallback=%s",
+            thread_id,
+            prescreen.get("mode"),
+            prescreen.get("verdict"),
+            prescreen.get("probability"),
+            prescreen.get("cached"),
+            prescreen.get("digest"),
+            prescreen.get("fallback_reason"),
+        )
+    signal_classification = payload.get("signal_classification")
+    if isinstance(signal_classification, dict):
+        logger.info(
+            "Memory signal classification: thread=%s mode=%s labels=%s cached=%s digest=%s fallback=%s",
+            thread_id,
+            signal_classification.get("mode"),
+            signal_classification.get("labels"),
+            signal_classification.get("cached"),
+            signal_classification.get("digest"),
+            signal_classification.get("fallback_reason"),
+        )
+    if payload.get("skip_vetoed_by_model_signal"):
+        logger.info("Memory pre-screen skip vetoed by a model signal (thread=%s)", thread_id)
 
 
 def _collect_host_hooks() -> dict[str, Any]:
@@ -924,6 +981,13 @@ def _collect_host_hooks() -> dict[str, Any]:
     builds the host default model when it actually needs one (i.e. has no model
     of its own) -- building an unused default on every startup would waste
     time. The others are direct values (cheap function refs).
+
+    ``judge`` is built here from the host memory config (pre-screening and signal
+    classification) and is ``None`` when both sides are off, which leaves the
+    extraction path byte-identical to a deployment without the feature. A
+    configured-but-unusable judge fails *here* (agent build time) rather than
+    silently degrading on the first batch: it can decide whether a call happens,
+    so a half-configured one must not run.
     """
     from deerflow.trace_context import ensure_trace_context
 
@@ -933,7 +997,127 @@ def _collect_host_hooks() -> dict[str, Any]:
         "trace_context_manager": ensure_trace_context,
         "host_llm_factory": _host_default_llm,
         "extraction_callback": _host_default_extraction_callback,
+        "judge": _host_default_judge(),
     }
+
+
+def _host_default_judge() -> Any:
+    """Build the memory judge from the host memory config (``None`` when every side is off)."""
+    from deerflow.agents.memory.signals.coordinator import build_memory_judge
+
+    return build_memory_judge()
+
+
+def _judging_config_signature(cfg: Any) -> str:
+    """Stable signature of the host judging config, for change detection.
+
+    Covers both slots in full (mode, ``use``, and provider ``config``), the
+    shared top-level ``typesafe:`` block, and each enabled side's *resolved*
+    connection identity. A side that does not override a connection field
+    (endpoint, model, credential, deadlines) inherits it from that block, so
+    editing the block must invalidate the cached judge; the resolved identity
+    also catches a credential rotated through its environment variable, which
+    the block's own fields do not show.
+    """
+    from deerflow.typesafe.connection import typesafe_defaults
+
+    return json.dumps(
+        {
+            "prescreen": cfg.prescreen.model_dump(mode="json"),
+            "signal_classification": cfg.signal_classification.model_dump(mode="json"),
+            "typesafe": typesafe_defaults(),
+            "effective_connections": _effective_connection_signature(cfg),
+        },
+        sort_keys=True,
+    )
+
+
+def _effective_connection_signature(cfg: Any) -> dict[str, Any]:
+    """Each judging side's resolved connection identity, keyed by slot.
+
+    Uses the same ``resolve_connection_for_mode`` the providers use, so the
+    signature reflects the *effective* settings (slot override > shared block >
+    built-in defaults > environment credential) rather than config text alone.
+    It records the credential's fingerprint, never the key. A side that is off
+    resolves to ``None``; a side whose config cannot resolve is marked
+    ``unresolved`` instead of raising, so this signature can never break
+    ``get_memory_manager()`` — the rebuild that follows surfaces the same error.
+    """
+    from deerflow.agents.memory.prescreen.contract import CONFIGURATION_SOURCE as PRESCREEN_SOURCE
+    from deerflow.agents.memory.signals.contract import CONFIGURATION_SOURCE as SIGNAL_SOURCE
+    from deerflow.typesafe.connection import resolve_connection_for_mode, typesafe_defaults
+
+    defaults = typesafe_defaults()
+    signature: dict[str, Any] = {}
+    for name, slot, source in (
+        ("prescreen", cfg.prescreen, PRESCREEN_SOURCE),
+        ("signal_classification", cfg.signal_classification, SIGNAL_SOURCE),
+    ):
+        try:
+            connection = resolve_connection_for_mode(mode=slot.mode, settings=slot.config, defaults=defaults, configuration_source=source)
+        except Exception:
+            signature[name] = {"unresolved": True}
+            continue
+        signature[name] = None if connection is None else {**connection.public_parameters(), "credential": connection.credential_fingerprint()}
+    return signature
+
+
+def _refresh_judge_for_reloaded_config(manager: MemoryManager) -> None:
+    """Rebuild and re-inject the judge when the host judging config changed.
+
+    The manager singleton (and its judge) is built once, yet ``memory.*`` is
+    documented as hot-reloadable and a mode toggle must take effect:
+    ``enforce`` -> ``off`` must stop skipping extraction and sending the
+    conversation to the provider, and ``off`` -> ``shadow`` must start
+    recording. Rebuild here so storage / queue / LLM dependencies stay intact
+    and only the judging hook is swapped.
+    """
+    global _memory_judge_signature
+    signature = _judging_config_signature(get_memory_config())
+    if signature == _memory_judge_signature:
+        return
+    try:
+        judge = _host_default_judge()
+    except Exception:
+        # A transiently broken judging config must not fail every memory call.
+        # Keep the last-good judge, record the signature so the rebuild is not
+        # retried until the config is edited again, and surface it loudly.
+        logger.error("Failed to rebuild the memory judge from the reloaded config; keeping the previous judge", exc_info=True)
+        with _manager_lock:
+            _memory_judge_signature = signature
+        return
+    # Publish under the manager lock, revalidating the config generation first:
+    # another thread may have rolled the config back (e.g. enforce -> off) while
+    # this judge was being built, and installing it then would resurrect the
+    # superseded mode for already-queued batches. If the generation moved, drop
+    # this build and let the next lookup rebuild for the current config.
+    with _manager_lock:
+        if _judging_config_signature(get_memory_config()) != signature:
+            return
+        manager.refresh_judge(judge)
+        _memory_judge_signature = signature
+    logger.info("Memory judge refreshed after a memory judging-config change")
+
+
+def resolve_deermem_storage_path(backend_config: Mapping[str, Any]) -> str:
+    """Return the absolute DeerMem data root the host injects for ``backend_config``.
+
+    Zero-config UX: an empty ``storage_path`` is deer-flow's state dir (absolute,
+    CWD-independent), so memory lands at ``{runtime_home}/users/{user_id}/memory.json``
+    (deer-flow's base_dir, same as pre-abstraction). A relative value is resolved
+    against ``runtime_home()`` to preserve those semantics; left as-is it would be
+    CWD-relative and fragile. Resolved in host code so the portable ``paths.py``
+    stays free of any runtime_home dependency. The Gateway startup gate reuses it
+    to locate the derived retrieval index without constructing a backend.
+    """
+    from deerflow.config.runtime_paths import runtime_home
+
+    storage_path = str(backend_config.get("storage_path") or "")
+    if not storage_path:
+        return str(runtime_home())
+    if not Path(storage_path).is_absolute():
+        return str((Path(runtime_home()) / storage_path).resolve())
+    return storage_path
 
 
 # ── Singleton factory ─────────────────────────────────────────────────────
@@ -945,8 +1129,12 @@ def get_memory_manager() -> MemoryManager:
     :func:`reset_memory_manager` to force re-resolution (tests / runtime
     backend switching).
     """
-    global _memory_manager
+    global _memory_manager, _memory_judge_signature
     if _memory_manager is not None:
+        # The manager is built once; refresh only the judge so a hot-reloaded
+        # memory.prescreen / memory.signal_classification takes effect (a mode
+        # switch must not keep a stale judge deciding or a stale skip persisting).
+        _refresh_judge_for_reloaded_config(_memory_manager)
         return _memory_manager
 
     # deer-flow is multi-threaded: memory injection runs via asyncio.to_thread,
@@ -957,28 +1145,17 @@ def get_memory_manager() -> MemoryManager:
     # connections) constructed here in __init__.
     with _manager_lock:
         if _memory_manager is not None:
+            # Another thread built the singleton while we waited for the lock; it
+            # installed the matching judge signature, and the lock-free fast path
+            # above is what handles later config edits. (Refreshing here would
+            # re-enter _manager_lock.)
             return _memory_manager
 
         cfg = get_memory_config()
         manager_class = cfg.manager_class
         cls = _resolve_manager_class(manager_class)
         backend_config = dict(cfg.backend_config or {})
-        # Zero-config UX: default DeerMem storage to deer-flow's state dir
-        # (absolute, CWD-independent) so memory lands at
-        # {runtime_home}/users/{user_id}/memory.json (deer-flow's base_dir,
-        # same as pre-abstraction) unless the host explicitly sets storage_path.
-        if not backend_config.get("storage_path"):
-            from deerflow.config.runtime_paths import runtime_home
-
-            backend_config["storage_path"] = str(runtime_home())
-        elif not Path(backend_config.get("storage_path", "")).is_absolute():
-            # A relative storage_path is resolved against runtime_home() (base_dir-
-            # relative, CWD-independent) to preserve pre-abstraction semantics; left
-            # as-is it would be CWD-relative and fragile. (Resolved here in host code
-            # so the portable paths.py stays free of any runtime_home dependency.)
-            from deerflow.config.runtime_paths import runtime_home
-
-            backend_config["storage_path"] = str((Path(runtime_home()) / backend_config["storage_path"]).resolve())
+        backend_config["storage_path"] = resolve_deermem_storage_path(backend_config)
         # storage_path-is-a-file guard lives on DeerMemConfig.model_validator
         # now (DeerMem-private semantics; fires even when the factory bypassed).
         # Host hook providers: the factory supplies these as kwargs; each
@@ -990,6 +1167,7 @@ def get_memory_manager() -> MemoryManager:
         # ``mode`` mirrors host MemoryConfig.mode so the invariant validator
         # (mode=="tool" requires search) can fire on the factory path too.
         _memory_manager = cls.from_config(backend_config, mode=cfg.mode, **host_hooks)
+        _memory_judge_signature = _judging_config_signature(cfg)
         logger.info("Memory manager resolved: %s (manager_class=%r)", cls.__name__, manager_class)
         return _memory_manager
 
@@ -1027,7 +1205,8 @@ def reset_memory_manager() -> None:
     The next :func:`get_memory_manager` call re-reads the config and re-scans
     backends. Use this in tests or when switching backends at runtime.
     """
-    global _memory_manager, _backends_cache
+    global _memory_manager, _backends_cache, _memory_judge_signature
     with _manager_lock:
         _memory_manager = None
         _backends_cache = None
+        _memory_judge_signature = None

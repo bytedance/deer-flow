@@ -1,9 +1,11 @@
 """Tests for Browserless community tools."""
 
 import ipaddress
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from deerflow.community.browserless import tools
@@ -159,7 +161,7 @@ class TestBrowserlessClient:
             assert "timed out" in result.lower() or "timeout" in result.lower()
 
     async def test_fetch_html_with_token(self):
-        """fetch_html includes token in payload when set."""
+        """fetch_html sends the token as a query parameter, never in the body."""
         with patch("deerflow.community.browserless.browserless_client.httpx.AsyncClient") as mock_cls:
             mock_ctx = MagicMock()
             mock_cls.return_value.__aenter__.return_value = mock_ctx
@@ -173,8 +175,9 @@ class TestBrowserlessClient:
             client = BrowserlessClient(base_url="http://browserless:3000", token="my-token")
             await client.fetch_html("https://example.com")
 
-            payload = mock_ctx.post.call_args.kwargs["json"]
-            assert payload["token"] == "my-token"
+            call = mock_ctx.post.call_args
+            assert call.kwargs["params"] == {"token": "my-token"}
+            assert "token" not in call.kwargs["json"]
 
     async def test_fetch_html_with_wait_for_selector(self):
         """fetch_html sends waitForSelector when selector is set."""
@@ -306,9 +309,64 @@ class TestBrowserlessClient:
         assert result == "Error: Browserless returned empty screenshot response"
 
 
+def _browserless_transport(server_token: str | None) -> httpx.MockTransport:
+    """Stand-in for a Browserless server's request gate.
+
+    Browserless authenticates from the ``token`` query parameter or an
+    ``Authorization`` header only, before it reads the body, and its body
+    schemas reject unknown keys such as ``token``.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if server_token is not None:
+            bearer = request.headers.get("Authorization", "").removeprefix("Bearer ")
+            if server_token not in (request.url.params.get("token"), bearer):
+                return httpx.Response(401, text="Bad or missing authentication.")
+        if "token" in json.loads(request.content):
+            return httpx.Response(400, text="POST Body validation failed: must NOT have additional properties")
+        if request.url.path == "/screenshot":
+            return httpx.Response(200, content=b"\x89PNG\r\n\x1a\n", headers={"Content-Type": "image/png"})
+        return httpx.Response(200, text="<html><body>OK</body></html>")
+
+    return httpx.MockTransport(handler)
+
+
+async def _fetch(client: BrowserlessClient):
+    return await client.fetch_html_with_status("https://example.com")
+
+
+async def _capture(client: BrowserlessClient):
+    return await client.capture_screenshot("https://example.com")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("call", [_fetch, _capture], ids=["fetch", "capture"])
+@pytest.mark.parametrize("server_token", ["secret-token", None], ids=["server-requires-token", "server-without-token"])
+async def test_configured_token_passes_browserless_request_gate(call, server_token) -> None:
+    transport = _browserless_transport(server_token)
+    real_client = httpx.AsyncClient
+
+    def client_with_transport(**kwargs):
+        return real_client(transport=transport, **kwargs)
+
+    with patch("deerflow.community.browserless.browserless_client.httpx.AsyncClient", side_effect=client_with_transport):
+        result = await call(BrowserlessClient(base_url="http://browserless:3000", token="secret-token"))
+
+    assert not isinstance(result, str), result
+
+
 @pytest.mark.asyncio
 class TestBrowserlessTools:
     """Tests for the Browserless tool functions."""
+
+    @pytest.fixture(autouse=True)
+    def _resolve_example_com(self):
+        """Keep tool tests offline while preserving URL-safety validation."""
+        with patch(
+            "deerflow.community.browserless.tools._resolve_host_addresses",
+            return_value=[ipaddress.ip_address("93.184.216.34")],
+        ):
+            yield
 
     async def test_get_browserless_client_uses_env_token_fallback(self):
         """Browserless tools use BROWSERLESS_TOKEN when config omits token."""
@@ -367,6 +425,74 @@ class TestBrowserlessTools:
 
         assert "Error:" not in result
         assert "warning:" not in result
+
+    async def _fetch_kwargs_with_config(self, cfg: dict) -> dict:
+        """Invoke web_fetch_tool against ``cfg`` and return the kwargs it sent."""
+        with (
+            patch("deerflow.community.browserless.tools._get_browserless_client") as mock_get_client,
+            patch("deerflow.community.browserless.tools._get_tool_config", return_value=cfg),
+        ):
+            mock_client = MagicMock()
+            mock_client.fetch_html_with_status = AsyncMock(
+                return_value=BrowserlessFetchResult(
+                    html="<html><body><p>ok</p></body></html>",
+                    target_status_code="200",
+                    target_status="OK",
+                )
+            )
+            mock_get_client.return_value = mock_client
+            await tools.web_fetch_tool.ainvoke("https://example.com")
+            return mock_client.fetch_html_with_status.call_args.kwargs
+
+    async def test_web_fetch_tool_reads_reject_lists_from_config(self):
+        """`reject_resource_types` / `reject_request_pattern` reach the client.
+
+        web_fetch_tool declared both and passed them to the client, but only ever
+        assigned ``None``: the client supports them (and is tested for it) while
+        nothing in the tool ever read them from config, so the provider's
+        resource blocking was unreachable.
+        """
+        kwargs = await self._fetch_kwargs_with_config(
+            {
+                "reject_resource_types": ["image", "media"],
+                "reject_request_pattern": [r"\.css$"],
+            }
+        )
+
+        assert kwargs["reject_resource_types"] == ["image", "media"]
+        assert kwargs["reject_request_pattern"] == [r"\.css$"]
+
+    async def test_web_fetch_tool_accepts_comma_separated_reject_lists(self):
+        """A comma-separated string is accepted too, since YAML makes it natural."""
+        kwargs = await self._fetch_kwargs_with_config({"reject_resource_types": "image, media"})
+
+        assert kwargs["reject_resource_types"] == ["image", "media"]
+
+    async def test_web_fetch_tool_omits_reject_params_when_unset(self):
+        """An unset key stays ``None`` so the parameter is left out of the payload."""
+        kwargs = await self._fetch_kwargs_with_config({})
+
+        assert kwargs["reject_resource_types"] is None
+        assert kwargs["reject_request_pattern"] is None
+
+    async def test_web_fetch_tool_ignores_unusable_reject_values(self):
+        """A scalar or empty value yields ``None`` instead of an unusable payload."""
+        kwargs = await self._fetch_kwargs_with_config({"reject_resource_types": 5, "reject_request_pattern": []})
+
+        assert kwargs["reject_resource_types"] is None
+        assert kwargs["reject_request_pattern"] is None
+
+    async def test_web_fetch_tool_ignores_non_string_reject_list_items(self):
+        """Non-string list items stay out of the Browserless payload."""
+        kwargs = await self._fetch_kwargs_with_config(
+            {
+                "reject_resource_types": ["image", 5, "", " media "],
+                "reject_request_pattern": [False],
+            }
+        )
+
+        assert kwargs["reject_resource_types"] == ["image", "media"]
+        assert kwargs["reject_request_pattern"] is None
 
     @patch("deerflow.community.browserless.tools._get_browserless_client")
     async def test_web_fetch_tool_error(self, mock_get_client):

@@ -32,7 +32,6 @@ import { isSidecarThread, SIDECAR_METADATA_KEY } from "../sidecar/thread";
 import { useSubtaskContext, useUpdateSubtask } from "../tasks/context";
 import { taskEventToSubtaskUpdate } from "../tasks/lifecycle";
 import { messageToStep } from "../tasks/steps";
-import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 import { uuid } from "../utils/uuid";
 
@@ -107,10 +106,14 @@ type SendMessageOptions = {
    */
   conversationReferences?: string[];
   /**
-   * Invoked exactly once when the send passes the in-flight guard and is
-   * genuinely dispatched. It never fires on the early-return path, so callers
-   * can safely perform one-time cleanup (e.g. clearing quoted references)
-   * without losing state when a concurrent send is dropped.
+   * Invoked exactly once when the send is genuinely dispatched: after the
+   * in-flight guard and after any attachments upload, right before the run is
+   * submitted. It never fires for a dropped send or one whose attachments fail
+   * to prepare or upload, so callers can safely perform one-time cleanup (e.g.
+   * clearing quoted references) without losing state a retry still needs.
+   * The guarantee ends at dispatch: a run that fails afterwards does not
+   * reject `thread.submit` (the SDK reports it through the stream's
+   * `onError`), so the send resolves and the composer is cleared as a whole.
    */
   onSent?: () => void;
 };
@@ -172,6 +175,29 @@ export function hasToolResult(messages: Message[], toolName: string): boolean {
   );
 }
 
+/**
+ * `additional_kwargs` of this turn's visible human message. The optimistic
+ * display copy (before and after the upload) and the submitted message all
+ * build it here, so caller metadata such as quotes and conversation
+ * references stays on the bubble through the upload. Files staged out-of-band
+ * (e.g. a project document attached to this thread and carried in
+ * ``additionalKwargs.files``) ride alongside ``files`` instead of being
+ * overwritten by them.
+ */
+export function buildHumanMessageAdditionalKwargs(
+  additionalKwargs: Record<string, unknown> | undefined,
+  files: FileInMessage[],
+): Record<string, unknown> {
+  const stagedFiles = Array.isArray(additionalKwargs?.files)
+    ? (additionalKwargs.files as FileInMessage[])
+    : [];
+  const allFiles = [...stagedFiles, ...files];
+  return {
+    ...additionalKwargs,
+    ...(allFiles.length > 0 ? { files: allFiles } : {}),
+  };
+}
+
 export function buildThreadSubmitMessages({
   text,
   additionalKwargs,
@@ -190,13 +216,6 @@ export function buildThreadSubmitMessages({
    */
   humanMessageId?: string;
 }): Message[] {
-  // Files staged out-of-band (e.g. a project document attached to this
-  // thread and carried in ``additionalKwargs.files``) ride alongside the
-  // freshly uploaded files instead of being overwritten by them.
-  const stagedFiles = Array.isArray(additionalKwargs?.files)
-    ? (additionalKwargs.files as FileInMessage[])
-    : [];
-  const allFiles = [...stagedFiles, ...filesForSubmit];
   return [
     ...additionalInputMessages,
     {
@@ -208,10 +227,10 @@ export function buildThreadSubmitMessages({
           text,
         },
       ],
-      additional_kwargs: {
-        ...additionalKwargs,
-        ...(allFiles.length > 0 ? { files: allFiles } : {}),
-      },
+      additional_kwargs: buildHumanMessageAdditionalKwargs(
+        additionalKwargs,
+        filesForSubmit,
+      ),
     } as Message,
   ];
 }
@@ -223,6 +242,7 @@ export function buildThreadSubmitMessages({
  * `string[]` under `context.conversation_references`, only when the caller
  * attached them, and never from local settings. A stray key in settings is
  * dropped rather than forwarded, so a stale value can never grant access.
+ * `client_timezone` carries the browser's zone (scheduled-task default only).
  */
 export function buildRunContext({
   settings,
@@ -259,7 +279,24 @@ export function buildRunContext({
             ? "low"
             : undefined),
     thread_id: threadId,
+    ...clientTimezoneContext(),
   };
+}
+
+/**
+ * The browser's IANA zone as `context.client_timezone`. The Gateway reads it
+ * only to offer a default zone when a chat creates a scheduled task; it never
+ * reaches the model's context. Omitted when the browser cannot tell.
+ */
+function clientTimezoneContext(): { client_timezone?: string } {
+  try {
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return typeof timeZone === "string" && timeZone.length > 0
+      ? { client_timezone: timeZone }
+      : {};
+  } catch {
+    return {};
+  }
 }
 
 // Stable identity for "no optimistic messages" so the merged-messages memo
@@ -648,16 +685,74 @@ export function reconcileThreadHistoryRows(
     rowsBySeq.set(row.seq, row);
   }
 
-  const reconciled = dedupeRunMessagesByIdentity(
-    [...rowsBySeq.values()].sort((left, right) => left.seq - right.seq),
+  const sortedRows = [...rowsBySeq.values()].sort(
+    (left, right) => left.seq - right.seq,
   );
+  const reconciled = dedupeRunMessagesByIdentity(sortedRows);
+  // Deduping collapses a re-persisted identity to its newest copy, but per
+  // the backend `get_message_seqs` earliest-seq-wins rule the message keeps
+  // the position it first occupied (see buildVisibleHistoryMessages).
+  // Re-anchor the surviving row to the earliest seq the identity held in
+  // this window, otherwise a re-persisted update pushes the message towards
+  // the tail. Prefer visible rows so a hidden control copy cannot move its
+  // visible twin; hidden rows provide a fallback only when no visible copy exists.
+  const earliestSeqByRunIdentity = new Map<string, number>();
+  const earliestVisibleSeqByRunIdentity = new Map<string, number>();
+  for (const row of sortedRows) {
+    const identity = messageIdentity(row.content);
+    if (!identity || !isValidMessageSeq(row.seq)) {
+      continue;
+    }
+    const key = `${row.run_id}:${identity}`;
+    const known = earliestSeqByRunIdentity.get(key);
+    if (known === undefined || row.seq < known) {
+      earliestSeqByRunIdentity.set(key, row.seq);
+    }
+    if (!isHiddenFromUIMessage(row.content)) {
+      const knownVisible = earliestVisibleSeqByRunIdentity.get(key);
+      if (knownVisible === undefined || row.seq < knownVisible) {
+        earliestVisibleSeqByRunIdentity.set(key, row.seq);
+      }
+    }
+  }
+  const anchored = reconciled.map((row) => {
+    const identity = messageIdentity(row.content);
+    if (!identity) {
+      return row;
+    }
+    const key = `${row.run_id}:${identity}`;
+    const earliestSeq =
+      earliestVisibleSeqByRunIdentity.get(key) ??
+      earliestSeqByRunIdentity.get(key);
+    if (earliestSeq === undefined || row.seq === earliestSeq) {
+      return row;
+    }
+    return { ...row, seq: earliestSeq };
+  });
+  // Re-anchoring can change row order. Sort before comparing with the retained
+  // snapshot so unchanged reconciliations can still reuse the previous array.
+  anchored.sort((left, right) => left.seq - right.seq);
   if (
-    reconciled.length === previousRows.length &&
-    reconciled.every((row, index) => row === previousRows[index])
+    anchored.length === previousRows.length &&
+    anchored.every((row, index) => {
+      const previous = previousRows[index];
+      if (!previous) {
+        return false;
+      }
+      // Re-anchoring rebuilds the row object on every pass; treat a row whose
+      // run_id, seq and content reference all match as unchanged so the
+      // retained-history state can stay referentially stable.
+      return (
+        row === previous ||
+        (row.run_id === previous.run_id &&
+          row.seq === previous.seq &&
+          row.content === previous.content)
+      );
+    })
   ) {
     return previousRows;
   }
-  return reconciled;
+  return anchored;
 }
 
 // mergeMessages now lives in ./message-order (pure, unit-testable ordering
@@ -1856,6 +1951,9 @@ export function useThreadStream({
   // Keep completed IDs across recovery-state resets so stale "running" data
   // cannot restart a submitted or natively reconnected stream.
   const completedRunIdsRef = useRef(new Set<string>());
+  // onCreated fires only for runs this hook submitted. A failed submit stays
+  // with the submit flow; only SDK reconnects are handed to recovery.
+  const submittedRunIdRef = useRef<string | null>(null);
 
   // Keep listeners ref updated with latest callbacks
   useEffect(() => {
@@ -1909,24 +2007,48 @@ export function useThreadStream({
   const { tasksRef, setTasks } = useSubtaskContext();
   const updateSubtask = useUpdateSubtask();
 
-  const scheduleActiveRunRejoinRetry = useCallback(() => {
-    const rejoin = activeRunRejoinRef.current;
-    if (!rejoin.inFlight || !rejoin.threadId || !rejoin.runId) {
-      return;
-    }
+  const scheduleActiveRunRejoinRetry = useCallback(
+    (run: Pick<Run, "thread_id" | "run_id"> | undefined) => {
+      const rejoin = activeRunRejoinRef.current;
+      // SDK 1.6.0 LGP joinStream errors include { thread_id, run_id }; history
+      // errors omit it. Re-verify this callback contract when upgrading the SDK.
+      if (
+        run &&
+        !rejoin.inFlight &&
+        run.run_id !== submittedRunIdRef.current &&
+        readReconnectRun(run.thread_id) === run.run_id
+      ) {
+        // The SDK's same-tab reconnect tries once and keeps its pointer on
+        // error, so the recovery effect would keep deferring to a stream that
+        // no longer exists. Release the pointer and let recovery take over.
+        clearReconnectRun(run.thread_id, run.run_id);
+        setActiveRunRejoinRetry((current) => current + 1);
+        return;
+      }
+      if (
+        !rejoin.inFlight ||
+        !rejoin.threadId ||
+        !rejoin.runId ||
+        run?.thread_id !== rejoin.threadId ||
+        run?.run_id !== rejoin.runId
+      ) {
+        return;
+      }
 
-    rejoin.inFlight = false;
-    clearReconnectRun(rejoin.threadId, rejoin.runId);
-    const retryDelay = ACTIVE_RUN_REJOIN_RETRY_DELAYS_MS[rejoin.attempts - 1];
-    if (retryDelay === undefined) {
-      return;
-    }
+      rejoin.inFlight = false;
+      clearReconnectRun(rejoin.threadId, rejoin.runId);
+      const retryDelay = ACTIVE_RUN_REJOIN_RETRY_DELAYS_MS[rejoin.attempts - 1];
+      if (retryDelay === undefined) {
+        return;
+      }
 
-    rejoin.retryTimer = setTimeout(() => {
-      rejoin.retryTimer = null;
-      setActiveRunRejoinRetry((current) => current + 1);
-    }, retryDelay);
-  }, []);
+      rejoin.retryTimer = setTimeout(() => {
+        rejoin.retryTimer = null;
+        setActiveRunRejoinRetry((current) => current + 1);
+      }, retryDelay);
+    },
+    [],
+  );
 
   const settleActiveRunRejoin = useCallback(() => {
     const rejoin = activeRunRejoinRef.current;
@@ -1973,6 +2095,7 @@ export function useThreadStream({
     // Keep explicit: SDK types claim @default true, but runtime uses throttle ?? false.
     throttle: true,
     onCreated(meta) {
+      submittedRunIdRef.current = meta.run_id;
       handleStreamStart(meta.thread_id, meta.run_id);
       const now = new Date().toISOString();
       upsertThreadInSearchCache(queryClient, {
@@ -2115,8 +2238,8 @@ export function useThreadStream({
         }
       }
     },
-    onError(error) {
-      scheduleActiveRunRejoinRetry();
+    onError(error, run) {
+      scheduleActiveRunRejoinRetry(run);
       setOptimisticMessages([]);
       setOptimisticThreadId(null);
       setLiveMessagesThreadId(null);
@@ -2191,7 +2314,8 @@ export function useThreadStream({
     }
 
     // A matching pointer means the SDK's native same-tab reconnect owns this
-    // run. Do not create a second SSE consumer.
+    // run. Do not create a second SSE consumer; if that reconnect fails,
+    // scheduleActiveRunRejoinRetry releases the pointer.
     if (readReconnectRun(resolvedThreadId) === resolvedRunId) {
       return;
     }
@@ -2337,13 +2461,18 @@ export function useThreadStream({
     };
     summarizedRef.current = new Set<string>();
     pendingUsageBaselineMessageIdsRef.current = new Set();
-    localTurnAnchorRef.current = null;
     pendingPreparedReplayRef.current = null;
     setPendingSupersededRunIds(new Set());
     setPendingSupersededMessageIds(new Set());
     prevHumanMsgCountRef.current =
       latestMessageCountsRef.current.humanMessageCount;
   }, [threadId]);
+
+  // Confirming a new thread only assigns its SDK id; the displayed
+  // conversation and its submitted human anchor have not changed.
+  useEffect(() => {
+    localTurnAnchorRef.current = null;
+  }, [currentViewThreadId]);
 
   // Release entries individually once canonical history confirms their stable
   // identities. Keep unconfirmed entries across failure/refetch within this
@@ -2427,10 +2556,6 @@ export function useThreadStream({
       }
       sendInFlightRef.current = true;
 
-      // The send has genuinely proceeded past the in-flight guard, so callers
-      // can now run one-time cleanup that must not fire on the dropped path.
-      options?.onSent?.();
-
       const text = message.text.trim();
 
       // Capture the current human message count before showing optimistic
@@ -2478,18 +2603,16 @@ export function useThreadStream({
         }),
       );
 
-      const optimisticAdditionalKwargs = {
-        ...options?.additionalKwargs,
-        ...(optimisticFiles.length > 0 ? { files: optimisticFiles } : {}),
-      };
-
       const newOptimistic: Message[] = [];
       if (!hideFromUI) {
         newOptimistic.push({
           type: "human",
           id: humanMessageId,
           content: text ? [{ type: "text", text }] : "",
-          additional_kwargs: optimisticAdditionalKwargs,
+          additional_kwargs: buildHumanMessageAdditionalKwargs(
+            options?.additionalKwargs,
+            optimisticFiles,
+          ),
         });
       }
 
@@ -2508,7 +2631,9 @@ export function useThreadStream({
 
       listeners.current.onSend?.(threadId);
 
-      let uploadedFileInfo: UploadedFileInfo[] = [];
+      // Shared by the optimistic bubble and the submit, so the files the
+      // user sees are exactly the files that are sent.
+      let uploadedFiles: FileInMessage[] = [];
 
       try {
         // Upload files first if any
@@ -2537,24 +2662,24 @@ export function useThreadStream({
 
             if (files.length > 0) {
               const uploadResponse = await uploadFiles(threadId, files);
-              uploadedFileInfo = uploadResponse.files;
+              uploadedFiles = uploadResponse.files.map((info) => ({
+                filename: info.filename,
+                size: info.size,
+                path: info.virtual_path,
+                status: "uploaded" as const,
+              }));
 
               // Update optimistic human message with uploaded status + paths
-              const uploadedFiles: FileInMessage[] = uploadedFileInfo.map(
-                (info) => ({
-                  filename: info.filename,
-                  size: info.size,
-                  path: info.virtual_path,
-                  status: "uploaded" as const,
-                }),
-              );
               setOptimisticMessages((messages) => {
                 if (messages.length > 1 && messages[0]) {
                   const humanMessage: Message = messages[0];
                   return [
                     {
                       ...humanMessage,
-                      additional_kwargs: { files: uploadedFiles },
+                      additional_kwargs: buildHumanMessageAdditionalKwargs(
+                        options?.additionalKwargs,
+                        uploadedFiles,
+                      ),
                     },
                     ...messages.slice(1),
                   ];
@@ -2577,23 +2702,17 @@ export function useThreadStream({
           }
         }
 
-        // Build files metadata for submission (included in additional_kwargs)
-        const filesForSubmit: FileInMessage[] = uploadedFileInfo.map(
-          (info) => ({
-            filename: info.filename,
-            size: info.size,
-            path: info.virtual_path,
-            status: "uploaded" as const,
-          }),
-        );
-
+        // Attachments are uploaded, so the send is genuinely dispatched and
+        // callers can drop one-time state. A failed upload rejected above
+        // without reaching here, leaving that state for a retry.
+        options?.onSent?.();
         await thread.submit(
           {
             messages: buildThreadSubmitMessages({
               text,
               additionalKwargs: options?.additionalKwargs,
               additionalInputMessages: options?.additionalInputMessages,
-              filesForSubmit,
+              filesForSubmit: uploadedFiles,
               humanMessageId,
             }),
           },
@@ -2951,7 +3070,7 @@ export function useThreadStream({
       visibleOptimisticMessages,
     );
     const localTurnAnchor =
-      localTurnAnchorRef.current?.threadId === threadId
+      localTurnAnchorRef.current?.threadId === currentViewThreadId
         ? localTurnAnchorRef.current
         : null;
     const canonicalHistoryIdentities = new Set(
@@ -3003,6 +3122,7 @@ export function useThreadStream({
           canonicalHistoryIdentities,
         );
   }, [
+    currentViewThreadId,
     previouslyRenderedOrder,
     renderMessages,
     threadId,
@@ -3427,6 +3547,7 @@ export function useInfiniteThreads(
     sortOrder: "desc",
     select: ["thread_id", "updated_at", "values", "metadata"],
   },
+  { enabled = true }: { enabled?: boolean } = {},
 ) {
   const apiClient = getAPIClient();
   return useInfiniteQuery<
@@ -3448,6 +3569,7 @@ export function useInfiniteThreads(
     getNextPageParam: (lastPage, allPages) =>
       getInfiniteThreadsNextPageParam(lastPage, allPages),
     refetchOnWindowFocus: false,
+    enabled,
   });
 }
 

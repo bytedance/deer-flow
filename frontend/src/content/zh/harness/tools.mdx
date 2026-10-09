@@ -204,7 +204,7 @@ tools:
 
 ### 网页内容抓取
 
-<Tabs items={["Jina AI（默认）", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya"]}>
+<Tabs items={["Jina AI（默认）", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "Unbrowse"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -260,6 +260,15 @@ tools:
 ```
 以 Markdown 形式返回页面内容。需要 [Sofya](https://sofya.co) API Key。
   </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.unbrowse.tools:web_fetch_tool
+    api_key: $UNBROWSE_API_KEY
+    # render: auto # auto | never（仅普通 HTTP）| always（云端浏览器）
+```
+以 Markdown 形式返回页面内容：普通 HTTP 足够时直接抓取，需要 JavaScript 的页面则在托管浏览器中渲染。需要 [Unbrowse](https://unbrowse.ai) API Key。
+  </Tabs.Tab>
 </Tabs>
 
 ### 网页截图
@@ -280,7 +289,8 @@ tools:
 
 使用 Browserless `/screenshot` 渲染网页并截图，然后通过 DeerFlow 的 artifact
 机制把图片呈现给用户。适合网页视觉证据、UI 检查，以及仅提取 Markdown 不够的
-JavaScript 页面。默认会拒绝解析到私网、回环或云元数据地址的 URL；仅在确实需要
+JavaScript 页面。默认会拒绝解析到私网、回环、共享地址（`100.64.0.0/10`，CGNAT 与
+Tailscale 使用）、其他非全局或云元数据地址的 URL；仅在确实需要
 截取内网主机时才设置 `allow_private_addresses: true`。
 
 ### 图像搜索

@@ -7,6 +7,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from deerflow.community.ragflow.sources import durable_source_artifact
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.subagent_batches_config import SubagentBatchesConfig
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
@@ -41,6 +42,11 @@ def _usage(records: list[dict[str, Any]] | None) -> dict[str, int] | None:
 class SubagentBatchService:
     """Lease, execute, and recover durable native-subagent batch items."""
 
+    # Also used by focused shutdown tests constructing an instance via __new__.
+    _stopping: bool = False
+    _stop_drains: int = 0
+    _stop_cleanup_task: asyncio.Task[None] | None = None
+
     def __init__(
         self,
         *,
@@ -62,34 +68,74 @@ class SubagentBatchService:
         self._lease_owner = f"{socket.gethostname()}:{uuid.uuid4().hex}"
         self._stop = asyncio.Event()
         self._poller: asyncio.Task[None] | None = None
+        self._stopping = False
+        self._stop_drains = 0
+        self._stop_cleanup_task: asyncio.Task[None] | None = None
         self._executions: dict[str, asyncio.Task[None]] = {}
         self._execution_ids: dict[str, str] = {}
         self._item_batches: dict[str, str] = {}
 
     async def start(self) -> None:
+        if self._stopping:
+            raise RuntimeError("cannot start subagent batch poller before stop completes")
+        cleanup_task = getattr(self, "_stop_cleanup_task", None)
+        if cleanup_task is not None:
+            cleanup_task.result()
+            self._stop_cleanup_task = None
         if self._poller is not None:
             return
         self._stop.clear()
         self._poller = asyncio.create_task(self._run(), name="subagent-batch-poller")
 
     async def stop(self) -> None:
-        self._stop.set()
-        poller = self._poller
-        self._poller = None
+        cleanup_task = getattr(self, "_stop_cleanup_task", None)
+        if cleanup_task is None:
+            # Fence start() before taking the owned-work snapshot. All stop
+            # callers then join this one cleanup generation instead of issuing
+            # competing cancellations and clearing one another's state.
+            self._stopping = True
+            self._stop.set()
+            poller = self._poller
+
+            # Issue every owned-work cancellation before the first await. The
+            # Gateway wraps this stop hook in a deadline; if poller teardown is
+            # slow, cancellation of this caller must not prevent native/item
+            # cancellation from being requested.
+            execution_ids = list(self._execution_ids.values())
+            for execution_id in execution_ids:
+                request_cancel_background_task(execution_id)
+            tasks = list(self._executions.values())
+
+            if poller is not None:
+                poller.cancel()
+            for task in tasks:
+                task.cancel()
+
+            self._stop_drains = 1
+            cleanup_task = asyncio.create_task(
+                self._drain_stop(poller, tasks),
+                name="subagent-batch-stop-cleanup",
+            )
+            self._stop_cleanup_task = cleanup_task
+
+        await asyncio.shield(cleanup_task)
+
+    async def _drain_stop(
+        self,
+        poller: asyncio.Task[None] | None,
+        tasks: list[asyncio.Task[None]],
+    ) -> None:
         if poller is not None:
-            poller.cancel()
             await asyncio.gather(poller, return_exceptions=True)
-        execution_ids = list(self._execution_ids.values())
-        for execution_id in execution_ids:
-            request_cancel_background_task(execution_id)
-        tasks = list(self._executions.values())
-        for task in tasks:
-            task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._executions.clear()
         self._execution_ids.clear()
         self._item_batches.clear()
+        if self._poller is poller:
+            self._poller = None
+        self._stop_drains = 0
+        self._stopping = False
 
     async def _run(self) -> None:
         while not self._stop.is_set():
@@ -172,6 +218,17 @@ class SubagentBatchService:
     ) -> dict[str, Any] | None:
         return await self._repository.get_batch(batch_id, user_id=user_id)
 
+    async def read_batch_item(self, *, batch_id: str, user_id: str, thread_id: str, position: int) -> dict[str, Any] | None:
+        """Read one current-thread result; never expose worker execution context."""
+        batch = await self._repository.get_batch(batch_id, user_id=user_id)
+        if batch is None or batch["thread_id"] != thread_id:
+            return None
+        items = await self._repository.list_items(batch_id, user_id=user_id, offset=position, limit=1, include_result=True)
+        if not items:
+            return None
+        fields = ("id", "item_key", "position", "status", "attempt", "result", "result_truncated", "error", "stop_reason", "acceptance_criteria", "acceptance_verdict")
+        return {key: items[0].get(key) for key in fields}
+
     async def cancel_batch(
         self,
         *,
@@ -196,7 +253,12 @@ class SubagentBatchService:
             batch = item["batch"]
             self._item_batches[item_id] = batch["id"]
             spec = batch["execution_spec"]
-            config = SubagentConfig(**spec["subagent_config"])
+            config_data = spec["subagent_config"]
+            if "prompt_overlay" in config_data:
+                from deerflow.config.prompt_overlay import PromptOverlay
+
+                config_data = {**config_data, "prompt_overlay": PromptOverlay.model_validate(config_data["prompt_overlay"])}
+            config = SubagentConfig(**config_data)
             app_config = self._app_config or get_app_config()
             from deerflow.tools import get_available_tools
 
@@ -316,6 +378,11 @@ class SubagentBatchService:
             truncated = len(raw_result) > self._config.max_result_chars
             stored_result = raw_result[: self._config.max_result_chars] if raw_result else None
             preview = raw_result[: self._config.result_preview_max_chars] if raw_result else None
+            result_artifact = durable_source_artifact(
+                getattr(result, "ai_messages", None) or [],
+                stored_result or "",
+                max_chars=self._config.max_result_chars,
+            )
             acceptance_verdict = None
             if result.status is SubagentStatus.COMPLETED and item.get("acceptance_criteria"):
                 try:
@@ -339,6 +406,7 @@ class SubagentBatchService:
                 model_name=effective_model,
                 completed_at=datetime.now(UTC),
                 acceptance_verdict=acceptance_verdict,
+                result_artifact=result_artifact,
             )
         except asyncio.CancelledError:
             if execution_id is not None:
