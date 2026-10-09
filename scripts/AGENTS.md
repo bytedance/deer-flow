@@ -4,7 +4,9 @@ Thread manifests use a nonempty `DEER_FLOW_HOME` exclusively, resolving relative
 values from the checkout like the local launcher. Read root `.env` path settings
 without exporting secrets; dotenv overrides shell exports, including empty values.
 Expand unquoted leading tildes, preserving quoted literals. If python-dotenv is
-unavailable, retain shell/legacy lookup so troubleshooting remains usable.
+unavailable or `.env` cannot be read/decoded as UTF-8, retain shell/legacy lookup
+so troubleshooting remains usable. Read the complete file before applying any
+assignments so a decoding failure cannot partially override shell values.
 Resolve `$NAME`, `${NAME}` and `${NAME:-literal}` in unquoted/double-quoted
 values using a private environment with checkout `PWD` and earlier dotenv
 assignments. Single-quoted values and escaped dollars stay literal. Parse the
