@@ -694,6 +694,10 @@
 
 ### 修复
 
+- **渠道：** 在启用 Gateway 认证（默认配置）时，从 IM 渠道发送的 `/goal <目标>` 和
+  `/goal clear` 恢复正常。此前这两个写请求只携带内部认证令牌，而 Gateway 的 CSRF 检查不会
+  豁免内部认证，因此返回 403，渠道回复“Failed to set goal.”或“Failed to clear goal.”。
+  现在它们会发送与渠道 SDK 客户端相同的 CSRF Cookie 和请求头。`/goal` 状态查询不受影响。
 - **调度器：** 在一次性任务的执行时间之前点击“立即运行一次”，不会再取消原定的执行。此前这次试运行被当作任务本身的
   执行：任务被标记为 `running`，试运行结束后又按其结果把任务终结为 `completed`、`failed` 或 `cancelled`。轮询器只认领
   `enabled` 的任务，因此到了 `run_at` 也不会执行，尽管 `next_run_at` 仍显示该时间。现在在执行时间之前启动的试运行

@@ -804,6 +804,12 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **channels:** `/goal <objective>` and `/goal clear` from an IM channel work
+  again when Gateway auth is enabled (the default). Both sent their write with
+  the internal auth token alone, and the Gateway's CSRF check, which does not
+  exempt internal auth, answered 403, so the channel replied "Failed to set
+  goal." or "Failed to clear goal." They now send the same CSRF cookie and
+  header pair as the channel's SDK client. `/goal` status was unaffected.
 - **scheduler:** "Run once now" on a one-time task before its run time no longer
   cancels the scheduled run. The trial launched as the task's own run: the task
   was marked `running`, and the trial's outcome then finished it (`completed`,
