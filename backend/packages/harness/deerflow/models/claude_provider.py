@@ -90,6 +90,8 @@ class ClaudeChatModel(ChatAnthropic):
         if isinstance(self.rate_limiter, RequestAdmission):
             # These wrapper retries, like SDK retries, bypass BaseChatModel's
             # admission hook. Leave paced retries to the LLM middleware.
+            if self.retry_max_attempts != 1:
+                logger.warning("Request admission enabled; ignoring configured retry_max_attempts=%d; provider retries are handled by middleware", self.retry_max_attempts)
             self.retry_max_attempts = 1
 
         # Extract actual key value (SecretStr.str() returns '**********')

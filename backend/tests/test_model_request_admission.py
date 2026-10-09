@@ -1,6 +1,8 @@
 """Offline request pacing, queue lifecycle, and model-factory integration."""
 
 import asyncio
+import json
+import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -354,6 +356,109 @@ def test_claude_custom_rate_limiter_preserves_wrapper_retries():
 
     model = ClaudeChatModel(model="claude-sonnet-4-6", api_key="offline-test-key", rate_limiter=InMemoryRateLimiter(), retry_max_attempts=7)
     assert model.retry_max_attempts == 7
+
+
+@pytest.fixture
+def codex_credentials(monkeypatch):
+    from deerflow.models import openai_codex_provider as provider
+    from deerflow.models.credential_loader import CodexCliCredential
+
+    monkeypatch.setattr(provider, "load_codex_cli_credential", lambda: CodexCliCredential("offline-test-token", "offline-test-account"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize("status", [429, 500, 529])
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_codex_factory_retry_policy_respects_admission(monkeypatch, registry, codex_credentials, mode, status, enabled):
+    import httpx
+
+    from deerflow.config.app_config import AppConfig
+    from deerflow.models import openai_codex_provider as provider
+    from deerflow.models.factory import create_chat_model
+
+    config = AppConfig.model_validate(
+        {
+            "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+            "models": [
+                {
+                    "name": "codex-paced",
+                    "use": "deerflow.models.openai_codex_provider:CodexChatModel",
+                    "model": "gpt-5.4",
+                    "request_admission": {"requests_per_minute": 1, "max_wait_seconds": 0.01} if enabled else None,
+                    "retry_max_attempts": 7,
+                }
+            ],
+        }
+    )
+    model = create_chat_model("codex-paced", app_config=config, attach_tracing=False, retry_max_attempts=5)
+    calls = []
+    sleeps = []
+
+    def respond(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(status, json={"error": "synthetic error"})
+        event = {"type": "response.completed", "response": {"output": [{"type": "message", "content": [{"type": "output_text", "text": "unexpected retry"}]}], "usage": {}}}
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=f"data: {json.dumps(event)}\n\n")
+
+    client_class = httpx.Client
+    monkeypatch.setattr(provider.httpx, "Client", lambda **kwargs: client_class(transport=httpx.MockTransport(respond), **kwargs))
+    monkeypatch.setattr(provider.time, "sleep", sleeps.append)
+
+    if enabled:
+        with pytest.raises(httpx.HTTPStatusError) as caught:
+            if mode == "sync":
+                model.invoke("hello")
+            else:
+                await model.ainvoke("hello")
+        assert caught.value.response.status_code == status
+        assert len(calls) == 1
+        assert sleeps == []
+        assert isinstance(model.rate_limiter, admission.RequestAdmission)
+        assert model.retry_max_attempts == 1
+    else:
+        result = model.invoke("hello") if mode == "sync" else await model.ainvoke("hello")
+        assert result.content == "unexpected retry"
+        assert len(calls) == 2
+        assert len(sleeps) == 1
+        assert model.rate_limiter is None
+        assert model.retry_max_attempts == 5
+    assert config.get_model_config("codex-paced").retry_max_attempts == 7
+
+
+def test_codex_without_admission_preserves_default_retries(codex_credentials):
+    from deerflow.models.openai_codex_provider import CodexChatModel
+
+    assert CodexChatModel().retry_max_attempts == 3
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+@pytest.mark.parametrize("limiter_kind", ["admission", "custom", "none"])
+@pytest.mark.parametrize("attempts", [1, 7])
+def test_provider_warns_only_when_admission_overrides_retries(codex_credentials, caplog, provider, limiter_kind, attempts):
+    from langchain_core.rate_limiters import InMemoryRateLimiter
+
+    from deerflow.models.claude_provider import ClaudeChatModel
+    from deerflow.models.openai_codex_provider import CodexChatModel
+
+    limiter = None
+    if limiter_kind == "admission":
+        limiter = admission.RequestAdmission(RequestAdmissionConfig(requests_per_minute=60))
+    elif limiter_kind == "custom":
+        limiter = InMemoryRateLimiter()
+
+    model_class = ClaudeChatModel if provider == "claude" else CodexChatModel
+    kwargs = {"model": "claude-sonnet-4-6", "api_key": "offline-test-key"} if provider == "claude" else {}
+    logger_name = model_class.__module__
+    with caplog.at_level(logging.WARNING, logger=logger_name):
+        model = model_class(rate_limiter=limiter, retry_max_attempts=attempts, **kwargs)
+
+    assert model.retry_max_attempts == (1 if limiter_kind == "admission" else attempts)
+    if limiter_kind == "admission" and attempts != 1:
+        assert caplog.record_tuples == [(logger_name, logging.WARNING, f"Request admission enabled; ignoring configured retry_max_attempts={attempts}; provider retries are handled by middleware")]
+    else:
+        assert caplog.record_tuples == []
 
 
 def test_admission_failures_are_not_retried_as_provider_errors(monkeypatch):
