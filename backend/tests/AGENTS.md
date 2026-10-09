@@ -60,6 +60,12 @@ an actionable reason; cover version detection offline in `test_support_compose.p
 Real rendering and production entry-point tests use only read-only Compose calls.
 Never start or stop a stack from these tests.
 
+## Jina client options
+
+Retry/response-budget compatibility tests pin client count and caller-supplied
+`proxy`/`trust_env` settings. Additional provider-owned HTTPX options must not
+break those assertions.
+
 ## Claude provider tests
 
 `test_claude_provider_prompt_caching.py` exercises real Anthropic SDK serialization
