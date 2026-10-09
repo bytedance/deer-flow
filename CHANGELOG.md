@@ -1165,6 +1165,19 @@ This release closes that milestone with **439 merged pull requests**.
   Upgrading a release that predates `AUTH_JWT_SECRET` generates a new key and
   signs every browser session out once; the chart README shows how to seed
   the previous key into the Secret first to keep sessions. ([#6347])
+- **deploy:** The Helm chart no longer pins the sandbox provisioner to one Pod.
+  `provisioner.replicas` (default 1, unchanged) sets the replica count, the
+  provisioner Deployment gets the gateway's surge-then-drain rollout strategy
+  (`maxSurge: 1`, `maxUnavailable: 0`), and a `PodDisruptionBudget`
+  (`provisioner.podDisruptionBudget`, `minAvailable: 1`) is rendered while
+  `provisioner.replicas > 1`, so a multi-replica gateway deployment no longer
+  loses sandbox creation whenever its single provisioner Pod restarts or its
+  node drains. The provisioner itself needed no change: the labelled sandbox
+  Pods and Services are its only registry, every handler reads them back from
+  the API server, and create already tolerates the `409 AlreadyExists` a
+  concurrent creator produces. The chart README and the provisioner README
+  record what the replica count rests on and that the budget never renders
+  for a single replica.
 - **persistence:** A second Gateway instance no longer fails startup with
   `TimeoutError` while another instance runs a PostgreSQL schema migration. The
   bootstrap advisory lock was taken with a blocking `pg_advisory_lock` on the
