@@ -109,6 +109,12 @@ the production PATH lookup, including a directory containing spaces. Seed fake
 app credentials so auth completion reaches the CLI instead of returning early,
 and keep fixture filesystem work behind `asyncio.to_thread`.
 
+## Remote read fixtures
+
+Remote ranged-read fixtures pass POSIX sandbox paths to adapters and map those
+paths to native temporary files in fake transports. LocalSandbox keeps the native
+host path; do not relax remote path validation to accommodate Windows fixtures.
+
 ## Shared sandbox search contracts
 
 `test_sandbox_search_contract.py` runs shared `ls`/`glob`/`grep` scenarios through
