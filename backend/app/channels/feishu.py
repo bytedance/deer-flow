@@ -495,8 +495,12 @@ class FeishuChannel(Channel):
             uploads_dir = paths.sandbox_uploads_dir(thread_id, user_id=effective_user_id).resolve()
             with self._thread_lock:
                 seen = {entry.name for entry in uploads_dir.iterdir()}
-                unique_name = claim_unique_filename(safe_filename, seen)
-                return write_upload_file_no_symlink(uploads_dir, unique_name, content)
+                while True:
+                    unique_name = claim_unique_filename(safe_filename, seen)
+                    try:
+                        return write_upload_file_no_symlink(uploads_dir, unique_name, content, exclusive=True)
+                    except FileExistsError:
+                        continue
 
         try:
             resolved_target = await asyncio.to_thread(_persist)
