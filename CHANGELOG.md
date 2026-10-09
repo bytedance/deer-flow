@@ -1177,7 +1177,7 @@ This release closes that milestone with **439 merged pull requests**.
   the API server, and create already tolerates the `409 AlreadyExists` a
   concurrent creator produces. The chart README and the provisioner README
   record what the replica count rests on and that the budget never renders
-  for a single replica.
+  for a single replica. ([#6543])
 - **persistence:** A second Gateway instance no longer fails startup with
   `TimeoutError` while another instance runs a PostgreSQL schema migration. The
   bootstrap advisory lock was taken with a blocking `pg_advisory_lock` on the
@@ -9309,3 +9309,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6501]: https://github.com/bytedance/deer-flow/pull/6501
 [#6506]: https://github.com/bytedance/deer-flow/pull/6506
 [#6512]: https://github.com/bytedance/deer-flow/pull/6512
+[#6543]: https://github.com/bytedance/deer-flow/pull/6543
