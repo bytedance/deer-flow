@@ -11,7 +11,7 @@ import threading
 import time
 from typing import Any, Literal
 
-from app.channels.base import Channel
+from app.channels.base import Channel, ChannelStopTimeout
 from app.channels.commands import is_known_channel_command, strip_leading_mentions
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import (
@@ -283,8 +283,14 @@ class FeishuChannel(Channel):
         self._background_tasks.clear()
         self._running_card_tasks.clear()
         if self._thread:
-            self._thread.join(timeout=5)
-            self._thread = None
+            # The SDK thread only returns on a fatal error, so this join
+            # normally waits out its full timeout; keep it off the event loop.
+            thread = self._thread
+            await asyncio.to_thread(thread.join, timeout=5)
+            if thread.is_alive():
+                raise ChannelStopTimeout("Feishu SDK thread is still running after stop timeout")
+            if self._thread is thread:
+                self._thread = None
         logger.info("Feishu channel stopped")
 
     async def send(self, msg: OutboundMessage, *, _max_retries: int = 3) -> None:

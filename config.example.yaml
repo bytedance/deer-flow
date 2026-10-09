@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 50
+config_version: 57
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -430,31 +430,30 @@ models:
   #   context_window: 1048576
   #   supports_vision: true
 
-  # Example: Gemini model via OpenAI-compatible gateway (with thinking support)
+  # Example: Gemini model via Google's official OpenAI-compatible endpoint
   # Use PatchedChatOpenAI so that tool-call thought_signature values on tool_calls
   # are preserved across multi-turn tool-call conversations — required by the
   # Gemini API when thinking is enabled. See:
   # https://docs.cloud.google.com/vertex-ai/generative-ai/docs/thought-signatures
-  # - name: gemini-2.5-pro-thinking
-  #   display_name: Gemini 2.5 Pro (Thinking)
+  # Google accepts reasoning_effort, not extra_body.thinking. Gemini 3.1 Pro
+  # cannot disable thinking; dialect: none avoids emitting a thinking toggle.
+  # https://ai.google.dev/gemini-api/docs/openai#thinking
+  # - name: gemini-3.1-pro-preview
+  #   display_name: Gemini 3.1 Pro (Thinking)
   #   use: deerflow.models.patched_openai:PatchedChatOpenAI
-  #   model: google/gemini-2.5-pro-preview   # model name as expected by your gateway
+  #   model: gemini-3.1-pro-preview
   #   api_key: $GEMINI_API_KEY
-  #   base_url: https://<your-openai-compat-gateway>/v1
+  #   base_url: https://generativelanguage.googleapis.com/v1beta/openai/
   #   request_timeout: 600.0
   #   max_retries: 2
   #   max_tokens: 16384
   #   context_window: 1048576
-  #   supports_thinking: true
   #   supports_vision: true
-  #   when_thinking_enabled:
-  #     extra_body:
-  #       thinking:
-  #         type: enabled
-  #   when_thinking_disabled:
-  #     extra_body:
-  #       thinking:
-  #         type: disabled
+  #   reasoning:
+  #     thinking: required
+  #     dialect: none
+  #     effort:
+  #       values: [minimal, low, medium, high]
 
   # Example: Xiaomi MiMo model (with thinking support)
   # MiMo thinking mode returns reasoning_content and requires that field to be
@@ -762,6 +761,22 @@ models:
   #       thinking:
   #         type: disabled
 
+  # Example: Opper (OpenAI-compatible)
+  # Opper is an EU-hosted AI gateway: 700+ models from 50+ providers behind one
+  # OpenAI-compatible API, so it uses the same ChatOpenAI + base_url pattern as
+  # other OpenAI-compatible gateways. Model ids are bare names such as
+  # claude-sonnet-4-6; browse them at https://api.opper.ai/v3/models. See https://opper.ai
+  # - name: opper-claude-sonnet-4-6
+  #   display_name: Claude Sonnet 4.6 (Opper)
+  #   use: langchain_openai:ChatOpenAI
+  #   model: claude-sonnet-4-6
+  #   api_key: $OPPER_API_KEY
+  #   base_url: https://api.opper.ai/v3/compat
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 8192
+  #   temperature: 0.7
+
   # Example: vLLM 0.19.0 (OpenAI-compatible, with reasoning toggle)
   # DeerFlow's vLLM provider preserves vLLM reasoning across tool-call turns and
   # toggles Qwen-style reasoning by writing
@@ -920,6 +935,9 @@ tools:
   #   group: web
   #   use: deerflow.community.serper.tools:web_search_tool
   #   max_results: 5   # capped at 10 by the Serper provider
+  #   # base_url: https://google.serper.dev  # Overrides SERPER_BASE_URL; omit /search
+  #   include_domains: []  # Optional domain-only lists, at most 10 entries each
+  #   exclude_domains: []  # Exclusion wins; see backend/docs/CONFIGURATION.md
   #   # api_key: $SERPER_API_KEY  # Optional explicit env-var reference
 
   # Web search tool (uses Serply - Google Search API, requires SERPLY_API_KEY)
@@ -1114,7 +1132,8 @@ tools:
   #   timeout_ms: 30000                # Per-action navigation/interaction timeout
   #   viewport_width: 1280
   #   viewport_height: 720
-  #   # allow_private_addresses: false # SSRF guard: keep false in production
+  #   # allow_private_addresses: false # SSRF guard: keep false in production. Also applies to the
+  #   #                                # pinned egress proxy every launched browser connects through.
   #   # cdp_url: http://127.0.0.1:9222 # Attach to YOUR running Chrome (Codex-style)
   #   # allow_unguarded_cdp: false      # REQUIRED true with cdp_url: attaching to an
   #   #                                # existing Chrome prevents DeerFlow from
@@ -1129,7 +1148,9 @@ tools:
   #   #                                # CDP handshake. If so, use headless: false to launch
   #   #                                # Playwright's own visible browser instead.
   #   # Multi-worker note: browser sessions live in one Gateway worker's memory.
-  #   # Keep GATEWAY_WORKERS=1 while this tool group is enabled.
+  #   # Keep the Gateway to one worker process while this tool group is enabled:
+  #   # GATEWAY_WORKERS=1, and WEB_CONCURRENCY unset or 1 on the launches that pass
+  #   # uvicorn no --workers (backend/Dockerfile, scripts/serve.sh).
   # - name: browser_snapshot
   #   group: browser
   #   use: deerflow.community.browser_automation.tools:browser_snapshot_tool
@@ -1166,6 +1187,9 @@ tools:
     group: web
     use: deerflow.community.jina_ai.tools:web_fetch_tool
     timeout: 10
+    # Opt-in retries may increase upstream requests and cost.
+    # max_retries: 0
+    # retry_budget_seconds: 30
     # Optional proxy for restricted networks / Docker / WSL.
     # Use host.docker.internal instead of 127.0.0.1 when the proxy runs on the host.
     # proxy: $HTTPS_PROXY
@@ -1254,6 +1278,7 @@ tools:
   #   group: web
   #   use: deerflow.community.serper.tools:image_search_tool
   #   max_results: 5   # capped at 10 by the Serper provider
+  #   # base_url: https://google.serper.dev  # Overrides SERPER_BASE_URL; omit /images
   #   # api_key: $SERPER_API_KEY  # Optional explicit env-var reference
 
   # Image search tool (uses Brave Image Search API, requires BRAVE_SEARCH_API_KEY)
@@ -2177,6 +2202,11 @@ summarization:
 # DeerMem-private fields live under ``backend_config`` (NOT at the memory: top level):
 #   storage_path        - Data root. Empty = deer-flow base_dir (factory injects absolute
 #                         runtime_home). Absolute path = that root. Relative = CWD-relative.
+#   retrieval_index_path - Directory of the derived SQLite FTS5 retrieval index. Empty =
+#                         {storage_path}/.retrieval. Relative = below storage_path. Absolute =
+#                         as-is. Point it at instance-local disk when several Gateway
+#                         instances share storage_path (SQLite WAL is unsupported on network
+#                         filesystems; peers would rebuild or delete each other's index).
 #   model               - LLM config for memory extraction: {provider, model, api_key, base_url,
 #                         temperature}. Omit all fields = no extraction (non-LLM ops still work).
 #   debounce_seconds    - Debounce wait before processing queued updates (default: 30)
@@ -2215,7 +2245,7 @@ memory:
   manager_class: deermem
   # Memory operation mode:
   #   middleware (default) - passive background extraction after each turn.
-  #   tool - experimental opt-in; the model calls memory_search/memory_add/
+  #   tool - experimental opt-in; the model calls memory_search/memory_get/memory_add/
   #     memory_update/memory_delete directly. This gives the model agency over
   #     memory writes, but effectiveness depends on model tool-use behavior.
   # Normally only one mode runs at a time. A backend that needs conversation-
@@ -2329,6 +2359,7 @@ memory:
     manifest_filename: memory.json # user-global JSON: version/revision/time + user/history only; no facts or fact index
     file_lock_timeout_seconds: 10 # per-scope cross-process advisory lock timeout (single-machine local filesystem)
     retrieval_adapter: fts5     # fts5 (default), empty to disable, or a dotted RetrievalPort factory(config)
+    retrieval_index_path: ""    # empty = {storage_path}/.retrieval; relative = below storage_path; absolute as-is. Rebuildable derived data: keep it instance-local when Gateway instances share storage_path (the Helm chart uses an emptyDir)
     debounce_seconds: 30 # Wait time before processing queued updates
     # Backpressure cap on pending items. 0 = unlimited. At the cap, new
     # non-signal updates are rejected (QueueFull); signal updates are always
@@ -2473,6 +2504,7 @@ skill_evolution:
 #
 # checkpointer:
 #   type: sqlite
+#   # A filesystem path or ':memory:'; SQLite `file:` URIs are rejected.
 #   connection_string: checkpoints.db
 #
 # checkpointer:
@@ -2670,8 +2702,10 @@ run_events:
 #                   'sqlite' or 'postgres' (rejected at startup on 'memory').
 #
 # Switching an existing install to 'db'? Import the on-disk Custom Agents and
-# managed subagents once with:
-#     python backend/scripts/migrate_agents_to_db.py   # --dry-run to preview
+# managed subagents once from the repository root, with the installed backend
+# environment and the same runtime/configuration selectors as the Gateway:
+#     uv run --no-sync --project backend python backend/scripts/migrate_agents_to_db.py --dry-run
+# Remove --dry-run after reviewing the preview to perform the import.
 # The source files are left in place, so reverting to 'file' is a clean rollback.
 #
 # agent_storage:
@@ -2684,31 +2718,57 @@ agent_storage:
 # ============================================================================
 # Background scheduler for one-time, cron, and interval agent runs.
 # Poller fields (enabled, multi_instance, poll_interval_seconds, lease_seconds,
-# max_concurrent_runs, min_once_delay_seconds) are restart-required.
+# max_concurrent_runs, max_concurrent_runs_per_user, queue_timeout_seconds,
+# min_once_delay_seconds) are restart-required.
 # recursion_limit is read at dispatch and applies to the next scheduled run
 # without a Gateway restart. The default (1000) matches the web UI's
 # interactive budget so scheduled and interactive runs behave identically out
 # of the box. Values above max_recursion_limit are clamped.
 #
+# Execution slots are shared fairly between task owners. Each owner may hold at
+# most max_concurrent_runs_per_user launching/running scheduled runs (manual
+# "run now" included); the default 2 leaves one of the 3 default global slots
+# for everyone else. The waiting queue is drained owner by owner, so one
+# owner's backlog never pushes another owner's run out of the batch, even with
+# the per-owner cap off (0). A run that waits longer than queue_timeout_seconds
+# is skipped; its run history reads "Skipped: it waited too long for a free
+# slot" and no chat or IM notice is sent, so keep queue_timeout_seconds well
+# above an owner's typical run length.
+#
 # The scheduler is single-instance by default. Set multi_instance: true only
 # when every Gateway instance shares Postgres, run ownership heartbeats, and
 # database-backed run events; startup recovery then preserves live peer runs.
 #
+# When channel_connections.enabled is true and IM channels are running, the
+# same poll_interval_seconds also drives the notification delivery worker that
+# pushes scheduled-task updates to the owner's bound IM identities (only WeCom
+# supports proactive push today; other apps get no notices). Each occurrence
+# sends at most one message: a finished run, a failed run, a missed goal, the
+# automatic pause after three misses, a pause by the agent (stop condition met)
+# or the task finishing (all max_runs done, end_at reached). Notices are queued
+# in the same transaction that records the outcome, so runs finalized by crash
+# or lease recovery notify once. Plain manual "run now" trials and interrupted
+# runs stay silent. The text is in the owner's web UI language (else
+# channel_connections.notification_locale) and has no IDs and no links.
+#
 # scheduler:
 #   enabled: false               # Master switch for the background poller
 #   multi_instance: false        # Opt into lease-aware recovery across Gateway instances
-#   poll_interval_seconds: 5     # How often to scan for due tasks
+#   poll_interval_seconds: 5     # How often to scan for due tasks (+ IM outbox delivery)
 #   lease_seconds: 120           # Claim lease; a crashed process's task becomes reclaimable after this
 #   max_concurrent_runs: 3       # Global cap on launching/running scheduled runs across multi-instance Pods
+#   max_concurrent_runs_per_user: 2  # Per-owner cap (0 = off); never more than max_concurrent_runs
 #   queue_timeout_seconds: 3600  # Maximum durable queue wait before an occurrence fails
 #   min_once_delay_seconds: 60   # Floor for one-time run_at offset and interval every_seconds
 #   recursion_limit: 1000        # LangGraph super-step cap for scheduled runs (matches the web UI)
 scheduler:
   enabled: false
+  tool_enabled: false          # Offer schedule tools to authorized Gateway conversations
   multi_instance: false       # Opt into lease-aware recovery across Gateway instances
   poll_interval_seconds: 5
   lease_seconds: 120
   max_concurrent_runs: 3
+  max_concurrent_runs_per_user: 2
   queue_timeout_seconds: 3600
   min_once_delay_seconds: 60
   recursion_limit: 1000
@@ -2741,6 +2801,27 @@ mcp_tasks:
   tracking_degraded_after_errors: 3
   max_result_bytes: 65536
   result_preview_max_chars: 2000
+
+# ============================================================================
+# Deployment Topology
+# ============================================================================
+# Declare whether more than one Gateway instance shares this database.
+#
+# GATEWAY_WORKERS / WEB_CONCURRENCY only count the uvicorn workers of one
+# process tree, so a Kubernetes Deployment with replicas > 1 (one worker per
+# Pod) is invisible to the startup safety gate. Without this declaration each
+# Pod passes every check, and its startup orphan reconciliation writes the
+# other Pods' lease-less runs off as crashed on every rolling update.
+#
+# With multi_instance: true (or the environment variable
+# DEER_FLOW_MULTI_INSTANCE=1, which deploy tooling such as a Helm chart can
+# set from its replica count) startup requires database.backend: postgres, run_events.backend: db,
+# run_ownership.heartbeat_enabled: true and a Redis stream bridge, and refuses
+# an explicit sandbox.ownership.type: memory, process-local browser tools, and
+# scheduler.enabled: true without scheduler.multi_instance: true.
+# Restart required; apply the same value to every instance.
+deployment:
+  multi_instance: false
 
 # ============================================================================
 # Run Ownership Configuration
@@ -2803,7 +2884,7 @@ run_ownership:
 #                                # to disable. This is not a run timeout.
 #   recovered_stream_cleanup_delay_seconds: 60  # seconds to wait after
 #                                # publishing END for a recovered orphan run
-#                                # before deleting the stream key.
+#                                # before deleting the stream key (max: 86400).
 #   max_connections: 100         # optional pool ceiling. Each live SSE client
 #                                # holds one connection blocked in XREAD ... BLOCK
 #                                # for up to the configured heartbeat interval, so
@@ -2826,14 +2907,22 @@ run_ownership:
 # - Provider bot/app credentials stay under `channels.*`.
 # - `channel_connections` stores per-user bindings and one-time connect codes.
 # - Telegram uses a deep link when `bot_username` is configured.
-# - Slack, Discord, Feishu, DingTalk, WeChat, and WeCom use `/connect <code>`
+# - Slack, Discord, Feishu, DingTalk, WeChat, WeCom, and QQ use `/connect <code>`
 #   through the already-running bot/app.
+# - When enabled (and channels are running), scheduled-task updates (runs,
+#   pauses, finishes) are pushed to the owner's connected identities on apps
+#   with proactive push, WeCom today (see scheduler section above). Settings
+#   shows per app whether updates are sent there. Plain manual trials and
+#   interrupted runs do not notify. Notices carry no links.
 #
 # channel_connections:
 #   enabled: false
 #   # Security: keep this enabled unless you intentionally want legacy open-bot behavior.
 #   # Disabling it lets unbound external IM users create DeerFlow threads/runs.
 #   require_bound_identity: true
+#   # Language of scheduled-task IM notices (en-US or zh-CN) for owners without
+#   # a web UI language preference (e.g. auth disabled). Restart-required.
+#   notification_locale: en-US
 #
 #   telegram:
 #     enabled: false
@@ -2858,6 +2947,9 @@ run_ownership:
 #     enabled: false
 #
 #   buzz:
+#     enabled: false
+#
+#   qq:
 #     enabled: false
 
 # ============================================================================
@@ -2900,6 +2992,15 @@ run_ownership:
 #       is_plan_mode: false
 #       subagent_enabled: false
 #
+#   # QQ Open Platform bot; choose WebSocket in the developer console.
+#   # Text-only C2C and group @mentions; no public callback URL required.
+#   qq:
+#     enabled: false
+#     app_id: $QQ_APP_ID
+#     client_secret: $QQ_CLIENT_SECRET
+#     allowed_users: []  # QQ OpenIDs, not numeric QQ account numbers; empty allows all
+#     sandbox: false    # REST sandbox host only; console sandbox membership is separate
+#
 #   feishu:
 #     enabled: false
 #     app_id: $FEISHU_APP_ID
@@ -2916,7 +3017,7 @@ run_ownership:
 #   telegram:
 #     enabled: false
 #     bot_token: $TELEGRAM_BOT_TOKEN
-#     allowed_users: []               # empty = allow all
+#     allowed_users: []               # numeric user IDs, not @usernames; empty = allow all
 #     rich_messages: false             # Bot API 10.1 Rich Messages for final Markdown responses
 #
 #   wechat:
@@ -2929,7 +3030,7 @@ run_ownership:
 #     ilink_app_id: ""
 #     # Optional: sent as SKRouteTag header when provided
 #     route_tag: ""
-#     allowed_users: []               # empty = allow all
+#     allowed_users: []               # iLink user IDs; empty allows all; a single ID is one entry; unparseable non-empty lists fail closed
 #     # Optional: extra host suffixes inbound media downloads may come from,
 #     # in addition to the platform CDN defaults (*.qq.com and the cdn_base_url host).
 #     # Entries are suffixes: "example.com" and "*.example.com" are equivalent.
@@ -2986,12 +3087,20 @@ run_ownership:
 #     allowed_users: []               # empty = allow all
 #     card_template_id: ""            # Optional: AI Card template ID for streaming updates
 #
+#   # Discord joins as a bot; requires the `discord` dependency extra
+#   # (uv sync --extra discord) for discord.py.
 #   discord:
 #     enabled: false
 #     bot_token: $DISCORD_BOT_TOKEN
-#     allowed_guilds: []              # empty = allow all guilds; can also be a single guild ID
+#     # Allowed guild IDs: one positive numeric ID (quoted or unquoted) or a YAML list.
+#     # Unset, null, [], or a blank string allows all guilds.
+#     # Invalid entries are ignored with a warning. Any other configured value
+#     # with no valid ID denies every guild and logs an error.
+#     allowed_guilds: []
 #     mention_only: false             # If true, only respond when the bot is mentioned
-#     allowed_channels: []              # Optional: channel IDs exempt from mention_only (bot responds without mention)
+#     # Channel IDs exempt from mention_only: one ID (quoted or unquoted) or a YAML list.
+#     # Empty = no exemptions; mention_only applies to every channel when enabled.
+#     allowed_channels: []
 #     thread_mode: false               # If true, group a channel conversation into a thread
 #
 #   # Buzz (https://github.com/block/buzz) — Nostr-relay team workspace.
@@ -3142,6 +3251,10 @@ run_ownership:
 #       # resource unrestricted for the role**, so list it explicitly to
 #       # constrain it. Declared plugin pages are not gated yet: their
 #       # `plugin_pages` row ships with the page-authorization slice.
+#       #
+#       # Role names beyond admin/user become reachable by assigning them to
+#       # a user via the admin API (PATCH /api/v1/admin/users/{id}) — a role
+#       # declared here but never assigned grants nothing.
 #       roles:
 #         admin:
 #           tools: {allow: "*"}
@@ -3269,19 +3382,33 @@ authorization:
 # auth:
 #   local:
 #     allow_registration: false
-#     # Login throttling per client IP (in-process, per worker). Raise
-#     # max_login_attempts when many users share one egress IP (corporate
-#     # proxy / NAT) so shared-IP lockouts don't block the whole office;
-#     # lower it for a stricter posture (minimum 2 — one failed attempt must
-#     # never lock an IP, or a single typo would block the shared egress).
-#     # Defaults preserve the historical hardcoded policy (5 failures /
-#     # 5 minutes). Live-read per login, so a config reload applies without
-#     # a Gateway restart: lowering lockout_seconds releases an active lock
-#     # early and tightening max_login_attempts keeps already-counted
-#     # failures; a raised lockout_seconds extends a still-active lock but
-#     # never resurrects one that already expired.
+#     # Login throttling per client IP. Raise max_login_attempts when many
+#     # users share one egress IP (corporate proxy / NAT) so shared-IP
+#     # lockouts don't block the whole office; lower it for a stricter
+#     # posture (minimum 2 — one failed attempt must never lock an IP, or a
+#     # single typo would block the shared egress). Defaults preserve the
+#     # historical hardcoded policy (5 failures / 5 minutes). Live-read per
+#     # login, so a config reload applies without a Gateway restart: lowering
+#     # lockout_seconds releases an active lock early and tightening
+#     # max_login_attempts keeps already-counted failures; a raised
+#     # lockout_seconds extends a still-active lock but never resurrects one
+#     # that already expired.
 #     # max_login_attempts: 5
 #     # lockout_seconds: 300
+#     # Where the failed-login counters and lockouts live (restart required).
+#     #   auto   -- (default) the application database whenever
+#     #             database.backend is sqlite or postgres, so every Gateway
+#     #             replica sharing that database enforces one lockout per IP;
+#     #             with database.backend: memory it falls back to an
+#     #             in-process counter.
+#     #   memory -- in-process counter only. Per process: N replicas give an
+#     #             attacker N x max_login_attempts guesses and a lockout on
+#     #             one replica is invisible to the others (a multi-instance
+#     #             deployment logs a startup WARNING).
+#     #   db     -- the shared login_throttle table; falls back to memory with
+#     #             a WARNING when database.backend is memory, and refuses to
+#     #             start when the configured database's engine is unavailable.
+#     # throttle_storage: auto
 #
 #   oidc:
 #     enabled: true

@@ -1,23 +1,47 @@
 from __future__ import annotations
 
+import hashlib
 import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, exists, or_, select, update
+from sqlalchemy import and_, exists, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.run import RunRepository
 from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.scheduled_task_runs.finalization import FinalizationObserver, automatic_runs_used, end_condition_reached, finalize_occurrence, finish_task_at_end_condition, is_host_pause_marker, utc
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project
-from deerflow.persistence.scheduled_tasks.model import ACTIVE_RUN_STATUSES, ONCE_TASK_STATUS_BY_RUN_STATUS, TERMINAL_RUN_STATUSES, ScheduledTaskRow
-from deerflow.scheduler.schedules import next_run_at as compute_next_run_at
+from deerflow.persistence.scheduled_tasks.model import ACTIVE_RUN_STATUSES, LIVE_TASK_STATUSES, ONCE_TASK_STATUS_BY_RUN_STATUS, TERMINAL_RUN_STATUSES, TERMINAL_TASK_STATUSES, ScheduledTaskRow
+from deerflow.scheduler.host_notes import RUN_ERROR_END_REACHED
+from deerflow.utils.goal_objective import normalize_goal_objective
 from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
 
-TERMINAL_TASK_STATUSES: frozenset[str] = frozenset({"completed", "failed", "cancelled"})
+
+class ScheduledTaskQuotaExceeded(ValueError):
+    """A tool-created task would exceed its owner's live schedule quota."""
+
+    def __init__(self) -> None:
+        super().__init__("at most 20 live conversation-created scheduled tasks per user")
+
+
+class ScheduledTaskLimitsExhausted(ValueError):
+    """Reactivation would start a task whose safety cap is already used up.
+
+    ``limit`` is ``"end_at"`` when the end time has passed, else ``"max_runs"``.
+    Raising ``max_runs`` or moving ``end_at`` in the same update avoids it.
+    """
+
+    def __init__(self, *, limit: str, used: int, max_runs: int | None, end_at: str | None) -> None:
+        self.limit = limit
+        self.used = used
+        self.max_runs = max_runs
+        self.end_at = end_at
+        super().__init__(f"scheduled task safety cap reached ({limit})")
 
 
 class ActiveScheduledTaskMutationConflict(Exception):
@@ -38,7 +62,7 @@ def _lease_is_alive(lease_expires_at: datetime | None, *, now: datetime, grace_s
 
 # Task columns that ``_row_to_dict`` serializes as ISO strings and that every
 # write path must coerce back (``_coerce_datetime``) before binding.
-_TIMESTAMP_KEYS = frozenset({"created_at", "updated_at", "next_run_at", "last_run_at", "lease_expires_at"})
+_TIMESTAMP_KEYS = frozenset({"created_at", "updated_at", "next_run_at", "last_run_at", "lease_expires_at", "end_at"})
 
 
 def _coerce_datetime(value: datetime | str | None) -> datetime | None:
@@ -68,10 +92,14 @@ class ScheduledTaskRepository:
     ) -> None:
         self._sf = session_factory
         self._run_repository = run_repository or RunRepository(session_factory)
+        self._finalization_observer: FinalizationObserver | None = None
+
+    def set_finalization_observer(self, callback: FinalizationObserver | None) -> None:
+        self._finalization_observer = callback
 
     @staticmethod
     def _row_to_dict(row: ScheduledTaskRow) -> dict[str, Any]:
-        data = row.to_dict(exclude={"last_occurrence_seq"})
+        data = row.to_dict(exclude={"last_occurrence_seq", "unmet_streak_after_seq"})
         for key in _TIMESTAMP_KEYS:
             if data.get(key) is not None:
                 data[key] = coerce_iso(data[key])
@@ -84,6 +112,22 @@ class ScheduledTaskRepository:
         if session.get_bind().dialect.name == "sqlite":
             await session.execute(update(ScheduledTaskRow).where(ScheduledTaskRow.id == task_id).values(updated_at=ScheduledTaskRow.updated_at))
         return await session.get(ScheduledTaskRow, task_id, with_for_update=True)
+
+    @staticmethod
+    async def _serialize_owner_quota(session: AsyncSession, user_id: str) -> None:
+        dialect = session.get_bind().dialect.name
+        if dialect == "sqlite":
+            await session.execute(text("BEGIN IMMEDIATE"))
+        elif dialect == "postgresql":
+            digest = hashlib.sha256(f"scheduler-conversation-quota\x00{user_id}".encode()).digest()
+            key = int.from_bytes(digest[:8], "big") & 0x7FFFFFFFFFFFFFFF
+            await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
+
+    @staticmethod
+    async def _check_owner_quota(session: AsyncSession, user_id: str) -> None:
+        count = await session.scalar(select(func.count()).select_from(ScheduledTaskRow).where(ScheduledTaskRow.user_id == user_id, ScheduledTaskRow.origin_thread_id.is_not(None), ScheduledTaskRow.status.in_(LIVE_TASK_STATUSES)))
+        if int(count or 0) >= 20:
+            raise ScheduledTaskQuotaExceeded()
 
     async def create(
         self,
@@ -99,12 +143,32 @@ class ScheduledTaskRepository:
         schedule_spec: dict[str, Any],
         timezone: str,
         next_run_at: datetime | None,
+        origin_thread_id: str | None = None,
+        goal_objective: str | None = None,
+        max_runs: int | None = None,
+        end_at: datetime | str | None = None,
+        standing_notes: list[str] | None = None,
+        stop_condition: str | None = None,
     ) -> dict[str, Any]:
+        if goal_objective is not None:
+            normalize_goal_objective(goal_objective)
+        if goal_objective is not None and context_mode != "fresh_thread_per_run":
+            raise ValueError("goal-backed schedules require fresh_thread_per_run")
+        if max_runs is not None and (not isinstance(max_runs, int) or isinstance(max_runs, bool) or max_runs < 1):
+            raise ValueError("max_runs must be a positive integer")
+        if standing_notes is not None and (len(standing_notes) > 10 or any(not isinstance(note, str) or not note.strip() or len(note) > 500 for note in standing_notes)):
+            raise ValueError("standing notes allow at most 10 nonempty notes of 500 characters")
         now = datetime.now(UTC)
         row = ScheduledTaskRow(
             id=task_id,
             user_id=user_id,
             thread_id=thread_id,
+            origin_thread_id=origin_thread_id,
+            goal_objective=goal_objective,
+            stop_condition=stop_condition,
+            max_runs=max_runs,
+            end_at=_coerce_datetime(end_at),
+            standing_notes=list(standing_notes) if standing_notes is not None else None,
             context_mode=context_mode,
             assistant_id=assistant_id,
             title=title,
@@ -117,6 +181,9 @@ class ScheduledTaskRepository:
             updated_at=now,
         )
         async with self._sf() as session:
+            if origin_thread_id is not None:
+                await self._serialize_owner_quota(session, user_id)
+                await self._check_owner_quota(session, user_id)
             session.add(row)
             await session.commit()
             await session.refresh(row)
@@ -153,6 +220,34 @@ class ScheduledTaskRepository:
         async with self._sf() as session:
             return (await session.execute(stmt)).scalars().first()
 
+    async def active_run_status_for(self, task_ids: Sequence[str]) -> dict[str, str]:
+        """Most advanced active occurrence status per task, in one query.
+
+        A recurring task's own ``status`` is ``enabled`` while its occurrence
+        runs, so "is something running or waiting" must come from here.
+        """
+        ids = list(dict.fromkeys(task_ids))
+        if not ids:
+            return {}
+        stmt = select(ScheduledTaskRunRow.task_id, ScheduledTaskRunRow.status).where(ScheduledTaskRunRow.task_id.in_(ids), ScheduledTaskRunRow.status.in_(("queued", "launching", "running")))
+        rank = {"queued": 0, "launching": 1, "running": 2}
+        result: dict[str, str] = {}
+        async with self._sf() as session:
+            for task_id, status in (await session.execute(stmt)).all():
+                if task_id not in result or rank[status] > rank[result[task_id]]:
+                    result[task_id] = status
+        return result
+
+    async def automatic_runs_used_for(self, task_ids: Sequence[str]) -> dict[str, int]:
+        """Launched automatic runs per task (the ``max_runs`` unit); missing ids map to 0."""
+        ids = list(dict.fromkeys(task_ids))
+        if not ids:
+            return {}
+        stmt = select(ScheduledTaskRunRow.task_id, func.count()).where(ScheduledTaskRunRow.task_id.in_(ids), ScheduledTaskRunRow.trigger == "scheduled", ScheduledTaskRunRow.launch_accounted.is_(True)).group_by(ScheduledTaskRunRow.task_id)
+        async with self._sf() as session:
+            counts = {task_id: int(count) for task_id, count in (await session.execute(stmt)).all()}
+        return {task_id: counts.get(task_id, 0) for task_id in ids}
+
     async def pause_with_queue_cancellation(
         self,
         task_id: str,
@@ -161,12 +256,20 @@ class ScheduledTaskRepository:
         error: str,
         now: datetime,
     ) -> str:
-        """Pause a task and cancel its waiting occurrence in one transaction."""
+        """Pause a task and cancel its waiting occurrence in one transaction.
+
+        Returns ``"paused"``, ``"not_found"``, ``"executing"`` (an occurrence is
+        launching or running) or ``"finished"`` (a completed, failed or
+        cancelled task has no schedule left to pause; Resume reactivates it).
+        """
         async with self._sf() as session:
             task = await self._lock_task(session, task_id)
             if task is None or task.user_id != user_id:
                 await session.rollback()
                 return "not_found"
+            if task.status in TERMINAL_TASK_STATUSES:
+                await session.rollback()
+                return "finished"
             run = (
                 (
                     await session.execute(
@@ -248,10 +351,34 @@ class ScheduledTaskRepository:
         updates: dict[str, Any],
         require_mutable: bool = False,
     ) -> dict[str, Any] | None:
+        if updates.get("goal_objective") is not None:
+            normalize_goal_objective(updates["goal_objective"])
         async with self._sf() as session:
-            row = await self._lock_task(session, task_id) if require_mutable else await session.get(ScheduledTaskRow, task_id)
+            quota_transition = False
+            if updates.get("status") in LIVE_TASK_STATUSES:
+                # Read only the provenance first, without an ORM identity-map
+                # snapshot. Acquire the owner mutex before the parent lock so
+                # create and terminal reactivation share one admission order.
+                origin = await session.scalar(select(ScheduledTaskRow.origin_thread_id).where(ScheduledTaskRow.id == task_id, ScheduledTaskRow.user_id == user_id))
+                if origin is not None:
+                    await self._serialize_owner_quota(session, user_id)
+                    quota_transition = True
+            definition_changed = bool({"context_mode", "goal_objective", "prompt", "stop_condition"} & updates.keys())
+            reactivation_requested = updates.get("status") == "enabled"
+            row = await self._lock_task(session, task_id) if require_mutable or quota_transition or definition_changed or reactivation_requested else await session.get(ScheduledTaskRow, task_id)
             if row is None or row.user_id != user_id:
                 return None
+            reactivating = reactivation_requested and row.status != "enabled"
+            # A goal, instruction or stop-rule change starts a new unmet count:
+            # every occurrence so far was judged against the old definition
+            # (edits require no active occurrence). Resume does not move it.
+            moves_boundary = any(key in updates and updates[key] != getattr(row, key) for key in ("goal_objective", "prompt", "stop_condition"))
+            effective_goal = updates.get("goal_objective", row.goal_objective)
+            effective_context = updates.get("context_mode", row.context_mode)
+            if effective_goal is not None and effective_context != "fresh_thread_per_run":
+                raise ValueError("goal-backed schedules require fresh_thread_per_run")
+            if quota_transition and row.origin_thread_id is not None and row.status in TERMINAL_TASK_STATUSES:
+                await self._check_owner_quota(session, user_id)
             if require_mutable:
                 if row.status == "running":
                     await session.rollback()
@@ -273,6 +400,25 @@ class ScheduledTaskRepository:
                     # ``_row_to_dict`` returned (the PATCH route reuses an
                     # interval task's ``next_run_at`` unchanged); bind datetimes.
                     setattr(row, key, _coerce_datetime(value) if key in _TIMESTAMP_KEYS else value)
+            if moves_boundary:
+                row.unmet_streak_after_seq = row.last_occurrence_seq
+            if reactivating:
+                # Single choke point for every reactivation (REST resume, PATCH
+                # re-arm, chat update/resume). Renewal fields were applied
+                # above, so raising max_runs or moving end_at in the same
+                # request passes; history and run_count stay untouched.
+                now = datetime.now(UTC)
+                if await end_condition_reached(session, row, now=now):
+                    used = await automatic_runs_used(session, row.id)
+                    end_at = row.end_at
+                    limit = "end_at" if end_at is not None and utc(end_at) <= now else "max_runs"
+                    max_runs = row.max_runs
+                    await session.rollback()
+                    raise ScheduledTaskLimitsExhausted(limit=limit, used=used, max_runs=max_runs, end_at=coerce_iso(utc(end_at)) if end_at is not None else None)
+                if is_host_pause_marker(row.last_error):
+                    # As on resume: a later manual pause must not read as
+                    # "Paused by agent" or "Auto-paused".
+                    row.last_error = None
             row.updated_at = datetime.now(UTC)
             await session.commit()
             await session.refresh(row)
@@ -454,16 +600,26 @@ class ScheduledTaskRepository:
                 # so also protect the terminal occurrence's status/error.
                 pass
             else:
+                # A trial on a task the host paused keeps its pause reason.
+                keep_pause_marker = occurrence is not None and occurrence.trigger == "manual" and row.status == "paused" and status == "paused" and is_host_pause_marker(row.last_error)
                 row.status = status
-                row.last_error = last_error
+                if not keep_pause_marker:
+                    row.last_error = last_error
             row.next_run_at = _coerce_datetime(next_run_at)
             row.last_run_at = _coerce_datetime(last_run_at)
             row.last_run_id = last_run_id
             row.last_thread_id = last_thread_id
             if should_increment_run_count:
                 row.run_count += 1
-            row.lease_owner = None
-            row.lease_expires_at = None
+            if occurrence is None:
+                row.lease_owner = None
+                row.lease_expires_at = None
+            # else: a launch write never owns the parent lease. Scheduled
+            # admission released the due-task claim with the queue insert and a
+            # manual trial never took one, so a lease here is a newer claim
+            # (e.g. the poller claiming a once task an early trial left due,
+            # before this late write); clearing it would make that claim's
+            # admission fail as stale and strand the task in "running".
             row.updated_at = datetime.now(UTC)
             await session.commit()
             return True
@@ -478,6 +634,7 @@ class ScheduledTaskRepository:
         status: str,
         error: str | None,
         finished_at: datetime,
+        goal_verdict: dict[str, Any] | None = None,
     ) -> bool:
         """Commit occurrence completion, accounting and eligible parent outcome."""
         if status not in TERMINAL_RUN_STATUSES:
@@ -488,35 +645,9 @@ class ScheduledTaskRepository:
             if occurrence is None or occurrence.task_id != task_id or occurrence.run_id not in (None, run_id) or (task is not None and task.user_id != user_id):
                 await session.rollback()
                 return False
-            occurrence.status = status
-            occurrence.run_id = run_id
-            occurrence.error = error
-            occurrence.finished_at = finished_at
-            occurrence.lease_owner = None
-            occurrence.lease_expires_at = None
-            if task is not None:
-                account_launch(task, occurrence, run_id)
-                if can_project(task, occurrence):
-                    if task.last_run_id != run_id:
-                        # A fast callback can beat launch bookkeeping. Finalize
-                        # its association and schedule before releasing the slot.
-                        launched_at = occurrence.started_at or occurrence.scheduled_for
-                        if launched_at.tzinfo is None:
-                            launched_at = launched_at.replace(tzinfo=UTC)
-                        task.last_run_at = launched_at
-                        task.last_run_id = run_id
-                        task.last_thread_id = occurrence.thread_id
-                        task.next_run_at = compute_next_run_at(task.schedule_type, task.schedule_spec, task.timezone, now=launched_at)
-                        task.lease_owner = None
-                        task.lease_expires_at = None
-                    task.last_error = error
-                    if task.schedule_type == "once":
-                        # Only a once task consumes its parent on completion;
-                        # cron parents keep whatever status they already hold.
-                        task.status = ONCE_TASK_STATUS_BY_RUN_STATUS[status]
-                    task.updated_at = finished_at
+            accepted = await finalize_occurrence(session, task, occurrence, status=status, error=error, finished_at=finished_at, run_id=run_id, goal_verdict=goal_verdict, observer=self._finalization_observer)
             await session.commit()
-            return True
+            return accepted
 
     async def claim_dispatch_lease(
         self,
@@ -550,17 +681,111 @@ class ScheduledTaskRepository:
             return self._row_to_dict(row)
 
     async def list_by_user_and_thread(self, user_id: str, thread_id: str) -> list[dict[str, Any]]:
+        """Tasks related to a conversation: created in it, running in it, or one of its runs.
+
+        Each dict gains ``thread_relation`` (``origin`` / ``reuse`` / ``run``) and,
+        for ``run``, ``thread_run``: the latest occurrence of that task in the thread.
+        """
+        ran_in_thread = exists(select(ScheduledTaskRunRow.id).where(ScheduledTaskRunRow.task_id == ScheduledTaskRow.id, ScheduledTaskRunRow.thread_id == thread_id))
         stmt = (
             select(ScheduledTaskRow)
             .where(
                 ScheduledTaskRow.user_id == user_id,
-                ScheduledTaskRow.thread_id == thread_id,
+                or_(ScheduledTaskRow.thread_id == thread_id, ScheduledTaskRow.origin_thread_id == thread_id, ran_in_thread),
             )
             .order_by(ScheduledTaskRow.created_at.desc(), ScheduledTaskRow.id.desc())
         )
         async with self._sf() as session:
-            result = await session.execute(stmt)
-            return [self._row_to_dict(row) for row in result.scalars()]
+            rows = list((await session.execute(stmt)).scalars())
+            items: list[dict[str, Any]] = []
+            for row in rows:
+                data = self._row_to_dict(row)
+                if row.origin_thread_id == thread_id:
+                    data["thread_relation"], data["thread_run"] = "origin", None
+                elif row.thread_id == thread_id:
+                    data["thread_relation"], data["thread_run"] = "reuse", None
+                else:
+                    data["thread_relation"] = "run"
+                    data["thread_run"] = await self._latest_thread_run(session, row.id, thread_id)
+                items.append(data)
+            return items
+
+    @staticmethod
+    async def _latest_thread_run(session: AsyncSession, task_id: str, thread_id: str) -> dict[str, Any] | None:
+        from deerflow.persistence.scheduled_task_runs.sql import run_number_expression
+
+        number = run_number_expression(ScheduledTaskRunRow)
+        stmt = (
+            select(ScheduledTaskRunRow.trigger, ScheduledTaskRunRow.scheduled_for, ScheduledTaskRunRow.status, number)
+            .where(ScheduledTaskRunRow.task_id == task_id, ScheduledTaskRunRow.thread_id == thread_id)
+            .order_by(ScheduledTaskRunRow.occurrence_seq.desc().nulls_last(), ScheduledTaskRunRow.created_at.desc(), ScheduledTaskRunRow.id.desc())
+            .limit(1)
+        )
+        found = (await session.execute(stmt)).first()
+        if found is None:
+            return None
+        trigger, scheduled_for, status, run_number = found
+        return {"run_number": int(run_number) if run_number is not None else None, "trigger": trigger, "scheduled_for": coerce_iso(utc(scheduled_for)), "status": status}
+
+    async def list_by_origin_thread(self, user_id: str, origin_thread_id: str) -> list[dict[str, Any]]:
+        async with self._sf() as session:
+            rows = await session.execute(select(ScheduledTaskRow).where(ScheduledTaskRow.user_id == user_id, ScheduledTaskRow.origin_thread_id == origin_thread_id).order_by(ScheduledTaskRow.created_at.desc(), ScheduledTaskRow.id.desc()))
+            return [self._row_to_dict(row) for row in rows.scalars()]
+
+    async def list_manageable_from_thread(self, user_id: str, thread_id: str) -> list[dict[str, Any]]:
+        """Tasks a conversation may manage: created in it, or whose run it is."""
+        ran_in_thread = exists(select(ScheduledTaskRunRow.id).where(ScheduledTaskRunRow.task_id == ScheduledTaskRow.id, ScheduledTaskRunRow.thread_id == thread_id))
+        stmt = select(ScheduledTaskRow).where(ScheduledTaskRow.user_id == user_id, or_(ScheduledTaskRow.origin_thread_id == thread_id, ran_in_thread)).order_by(ScheduledTaskRow.created_at.desc(), ScheduledTaskRow.id.desc())
+        async with self._sf() as session:
+            return [self._row_to_dict(row) for row in (await session.execute(stmt)).scalars()]
+
+    async def append_standing_note(self, task_id: str, *, user_id: str, note: str, origin_thread_id: str | None = None) -> dict[str, Any] | None:
+        """Append one standing note; ``origin_thread_id`` additionally scopes the task when given."""
+        if not isinstance(note, str) or not note.strip() or len(note) > 500:
+            raise ValueError("a standing note must contain 1 to 500 characters")
+        async with self._sf() as session:
+            task = await self._lock_task(session, task_id)
+            if task is None or task.user_id != user_id or (origin_thread_id is not None and task.origin_thread_id != origin_thread_id):
+                return None
+            active = await session.scalar(select(ScheduledTaskRunRow.status).where(ScheduledTaskRunRow.task_id == task_id, ScheduledTaskRunRow.status.in_(ACTIVE_RUN_STATUSES)).limit(1))
+            if active is not None or task.status == "running":
+                raise ActiveScheduledTaskMutationConflict(active or "running")
+            notes = list(task.standing_notes or [])
+            if len(notes) >= 10:
+                raise ValueError("at most 10 standing notes per scheduled task")
+            task.standing_notes = notes + [note]
+            # New notes change what later runs are told; restart the unmet count.
+            task.unmet_streak_after_seq = task.last_occurrence_seq
+            task.updated_at = datetime.now(UTC)
+            await session.commit()
+            return self._row_to_dict(task)
+
+    async def complete_if_ended(self, task_id: str, *, user_id: str | None = None, now: datetime, scheduled_only: bool = True) -> bool:
+        """Return true when an automatic dispatch must stop at a durable limit.
+
+        Ended waiting work is cancelled; executing work keeps its slot until
+        first-terminal completion. Manual trial admission can opt out entirely.
+        """
+        if not scheduled_only:
+            return False
+        async with self._sf() as session:
+            task = await self._lock_task(session, task_id)
+            if task is None or (user_id is not None and task.user_id != user_id):
+                return False
+            if not await end_condition_reached(session, task, now=now):
+                return False
+            active = await session.scalar(select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.task_id == task_id, ScheduledTaskRunRow.status.in_(ACTIVE_RUN_STATUSES)).with_for_update())
+            if active is not None and active.status in {"launching", "running"}:
+                # Completion owns the lifecycle while work is already executing.
+                return True
+            if active is not None and active.trigger == "scheduled":
+                # Skipping the waiting row finishes the task and emits there;
+                # the helper below then only clears the lease.
+                await finalize_occurrence(session, task, active, status="skipped", error=RUN_ERROR_END_REACHED, finished_at=now, run_id=None, observer=self._finalization_observer)
+            # No queued row (or a queued manual trial): an idle finish.
+            await finish_task_at_end_condition(session, task, occurrence=None, now=now, observer=self._finalization_observer)
+            await session.commit()
+            return True
 
     @staticmethod
     async def _fetch_latest_run(session: AsyncSession, task_id: str) -> ScheduledTaskRunRow | None:

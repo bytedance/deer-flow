@@ -13,7 +13,7 @@ from agent_sandbox.core.api_error import ApiError
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
-from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
+from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path_under_root, truncate_line
 
 from .backend import sandbox_http_trust_env
 
@@ -399,6 +399,8 @@ class AioSandbox(Sandbox):
         timeout: float,
     ) -> tuple[str, int | None, str | None]:
         kwargs = {
+            # /v1/shell is a persistent PTY. Keep its command and terminal stdin
+            # intact; the broker shim already treats a TTY as non-payload input.
             "command": command,
             "no_change_timeout": self._effective_no_change_timeout(timeout),
             "hard_timeout": timeout,
@@ -916,7 +918,14 @@ class AioSandbox(Sandbox):
                 try:
                     session_id = self._create_bash_session(self._client)
                     result = self._client.bash.exec(
-                        command=command,
+                        # /v1/bash keeps a subprocess stdin pipe open for writes.
+                        # This fresh, released session is non-interactive, so close
+                        # its default input before running the original script.
+                        # Explicit pipes/heredocs/files still override fd0. A plain
+                        # prefix keeps top-level parsing (aliases/extglob) and never
+                        # appends a delimiter that a trailing backslash can consume.
+                        # Do not apply exec to the persistent PTY transport above.
+                        command=f"exec < /dev/null\n{command}",
                         session_id=session_id,
                         env=env,
                         hard_timeout=timeout,
@@ -1156,22 +1165,22 @@ class AioSandbox(Sandbox):
                 raise
 
     def glob(self, path: str, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
+        root_path = path.rstrip("/") or "/"
         if not include_dirs:
             result = self._client.file.find_files(path=path, glob=pattern)
             files = result.data.files if result.data and result.data.files else []
-            filtered = [file_path for file_path in files if not should_ignore_path(file_path)]
+            filtered = [file_path for file_path in files if not should_ignore_path_under_root(file_path, root_path)]
             truncated = len(filtered) > max_results
             return filtered[:max_results], truncated
 
         result = self._client.file.list_path(path=path, recursive=True, show_hidden=False)
         entries = result.data.files if result.data and result.data.files else []
         matches: list[str] = []
-        root_path = path.rstrip("/") or "/"
         root_prefix = root_path if root_path == "/" else f"{root_path}/"
         for entry in entries:
             if entry.path != root_path and not entry.path.startswith(root_prefix):
                 continue
-            if should_ignore_path(entry.path):
+            if should_ignore_path_under_root(entry.path, root_path):
                 continue
             rel_path = entry.path[len(root_path) :].lstrip("/")
             if path_matches(pattern, rel_path):
@@ -1223,7 +1232,7 @@ class AioSandbox(Sandbox):
         truncated = bool(data and data.truncated)
         for match in provider_matches:
             file_path = match.file
-            if should_ignore_path(file_path):
+            if should_ignore_path_under_root(file_path, root):
                 continue
             if file_path == root:
                 rel_path = file_path.rsplit("/", 1)[-1]

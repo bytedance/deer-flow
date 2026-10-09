@@ -4,7 +4,6 @@ import asyncio
 import logging
 import os
 import re
-import secrets
 import time
 import urllib.parse
 from ipaddress import ip_address, ip_network
@@ -17,6 +16,7 @@ from starlette.responses import RedirectResponse
 from app.gateway.auth import (
     UserResponse,
     create_access_token,
+    login_throttle,
 )
 from app.gateway.auth.config import get_auth_config
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
@@ -37,7 +37,9 @@ from app.gateway.auth.session_cookie_state import SKIP_AUTH_CSRF_COOKIE_STATE_AT
 from app.gateway.auth.user_provisioning import get_or_provision_oidc_user
 from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, _request_origin, auth_csrf_cookie_settings, generate_csrf_token, is_secure_request
 from app.gateway.deps import get_current_user_from_request, get_local_provider
+from app.gateway.utils import constant_time_equals
 from deerflow.config.auth_config import OIDCProviderConfig
+from deerflow.persistence.login_throttle import LoginThrottleStore
 
 logger = logging.getLogger(__name__)
 
@@ -160,27 +162,40 @@ def _set_session_cookie(response: Response, token: str, request: Request, *, rem
 
 
 # ── Rate Limiting ────────────────────────────────────────────────────────
-# In-process dict — not shared across workers.
-#
-# **Limitation**: with multi-worker deployments (e.g., gunicorn -w N), each
-# worker maintains its own lockout table, so an attacker effectively gets
-# N × max_login_attempts guesses before being locked out everywhere. For
-# production multi-worker setups, replace this with a shared store (Redis,
-# database-backed counter) to enforce a true per-IP limit.
+# Failed logins are counted per client IP in a ``LoginThrottleStore``
+# (``deerflow.persistence.login_throttle``). The store is resolved once per
+# process by ``app.gateway.auth.login_throttle`` — the Gateway lifespan
+# installs it from the startup config and the persistence engine, a bare app
+# resolves it lazily on the first throttle call — and ``auth.local.
+# throttle_storage`` picks the implementation: the shared ``login_throttle``
+# table whenever an application database exists (every replica sharing that
+# database enforces one lockout per IP), otherwise the historical in-process
+# counter (per process: N replicas give an attacker N × max_login_attempts
+# guesses; ``deps._validate_login_throttle_storage`` warns about that).
 #
 # The policy values are operator-configurable via auth.local.max_login_attempts /
 # auth.local.lockout_seconds (read live per call, matching _local_registration_enabled,
 # so a config reload applies to the next login without a Gateway restart). The
 # no-config.yaml fallback is the LocalAuthConfig model defaults — a single source
 # of truth, not a second copy of the numbers.
+#
+# A lock's stored duration always matches the policy the lock was last
+# evaluated under (its creation counts as an evaluation, and every check that
+# leaves the lock active commits the then-current duration, decreases
+# included): a lowered lockout_seconds releases an active lock early, a raised
+# one extends it — and a sentence that already served the last-evaluated
+# duration is never resurrected. The stores implement that contract
+# (``deerflow/persistence/login_throttle/base.py``); this module only sequences
+# the calls and keeps the config read off the event loop.
 
-# ip → (fail_count, locked_at, locked_duration). The stored duration always
-# matches the policy the lock was last evaluated under (its creation counts
-# as an evaluation, and every check that leaves the lock active commits the
-# then-current duration, decreases included): a lowered lockout_seconds
-# releases an active lock early, a raised one extends it — and a sentence
-# that already served the last-evaluated duration is never resurrected.
-_login_attempts: dict[str, tuple[int, float, float]] = {}
+
+async def _login_throttle_store() -> LoginThrottleStore:
+    """The process-wide store, resolving it off the loop on first use in a bare app."""
+    store = login_throttle.installed_login_throttle_store()
+    if store is None:
+        # Resolution reads config.yaml (stat + hash); never on the loop.
+        store = await asyncio.to_thread(login_throttle.resolve_and_install_from_live_config)
+    return store
 
 
 def _login_throttle_policy() -> tuple[int, float]:
@@ -271,99 +286,33 @@ def _get_client_ip(request: Request) -> str:
 async def _check_rate_limit(ip: str) -> None:
     """Raise 429 if the IP is currently locked out.
 
-    The record lookup comes before policy resolution on purpose: a clean IP
-    (no failed attempts recorded — the overwhelming majority of logins) must
-    not pay a config read, and ``get_app_config`` re-hashes config.yaml on
-    every call while this endpoint is unauthenticated. When a record exists
-    the policy is resolved off the event loop via ``asyncio.to_thread``:
-    every request from a recorded IP — including an already-locked attacker
-    flooding the endpoint — pays that read on the way to its answer, and the
-    stat + hash must not block the loop.
+    The policy is handed to the store as an async callable and resolved
+    lazily, inside the store's single session: a clean IP (no failed attempts
+    recorded — the overwhelming majority of logins) never pays the config
+    read, and ``get_app_config`` re-hashes config.yaml on every call while
+    this endpoint is unauthenticated. A recorded IP — including an
+    already-locked attacker flooding the endpoint — resolves it exactly once,
+    off the event loop via ``asyncio.to_thread`` (the stat + hash must not
+    block the loop), and the SQL store serves the probe, the resolution and
+    the decision from one connection-pool checkout instead of two.
+
+    The policy read is a yield point: another request for the same IP may
+    delete or replace the record meanwhile, so the store decides on a fresh
+    read taken after it and guards its own mutations against that snapshot —
+    a record replaced mid-flight (e.g. a successful login followed by a new
+    failure) is never clobbered by a stale decision.
     """
-    record = _login_attempts.get(ip)
-    if record is None:
-        return
-    max_attempts, lockout_seconds = await asyncio.to_thread(_login_throttle_policy)
-    # The await above is a yield point: while this coroutine was suspended,
-    # another request for the same IP may have deleted or replaced the record
-    # (the pre-async version was atomic on the loop). The pre-read served only
-    # as the cheap clean-IP skip; decide on a fresh snapshot from here on —
-    # everything below is synchronous, and every mutation is guarded by
-    # re-comparing against that snapshot so a record replaced mid-flight
-    # (e.g. a successful login followed by a new failure) is never clobbered.
-    record = _login_attempts.get(ip)
-    if record is None:
-        return
-    fail_count, locked_at, locked_duration = record
-    if fail_count < max_attempts:
-        return
-    if locked_at == 0.0:
-        # Over the *current* threshold but the lock never started under the
-        # threshold these failures accumulated under (the operator tightened
-        # max_login_attempts mid-count). Keep the record: the next failure
-        # starts the lock and a successful login clears it — deleting here
-        # would hand the IP a fresh budget under a stricter policy.
-        return
-    now = time.time()
-    if now >= locked_at + locked_duration:
-        # The lock served the full sentence of the duration in force when it
-        # started — a later duration increase must not resurrect it.
-        if _login_attempts.get(ip) == record:
-            del _login_attempts[ip]
-        return
-    if now < locked_at + lockout_seconds:
-        # Still locked. The sentence now follows the current duration, and
-        # that evaluation is committed — including decreases — so the stored
-        # sentence always matches the policy the lock was last evaluated
-        # under; a later raise can never resurrect time the lock already
-        # served under a shorter policy.
-        if lockout_seconds != locked_duration and _login_attempts.get(ip) == record:
-            _login_attempts[ip] = (fail_count, locked_at, lockout_seconds)
+    store = await _login_throttle_store()
+
+    async def policy() -> tuple[int, float]:
+        return await asyncio.to_thread(_login_throttle_policy)
+
+    remaining = await store.check(ip, policy=policy, now=time.time())
+    if remaining > 0.0:
         raise HTTPException(
             status_code=429,
             detail="Too many login attempts. Try again later.",
         )
-    # Original sentence still running, but the current (lowered) duration has
-    # already elapsed — release early.
-    if _login_attempts.get(ip) == record:
-        del _login_attempts[ip]
-
-
-_MAX_TRACKED_IPS = 10000
-
-
-def _record_failure_under_policy(ip: str, max_attempts: int, lockout_seconds: float) -> None:
-    """Apply one failed login to the counter under an explicit policy."""
-    # Evict expired lockouts when dict grows too large. Expiry is a property
-    # of each record's own committed sentence — `t > 0 and now >= t + d` —
-    # independent of the live threshold: a record locked under an old, lower
-    # threshold must still be swept once its sentence is served, even if the
-    # current max has moved past its count. Gating on the current threshold
-    # here would retain expired records while the capacity fallback below
-    # evicts live counters (they sort first), granting active offenders
-    # fresh budgets.
-    if len(_login_attempts) >= _MAX_TRACKED_IPS:
-        now = time.time()
-        expired = [k for k, (c, t, d) in _login_attempts.items() if t > 0.0 and now >= t + d]
-        for k in expired:
-            del _login_attempts[k]
-        # If still too large, evict cheapest-to-lose half ordered by each
-        # record's own expiry: never-locked counters (t + d == 0.0) first,
-        # then locked records whose committed sentence expires earliest.
-        if len(_login_attempts) >= _MAX_TRACKED_IPS:
-            by_time = sorted(_login_attempts.items(), key=lambda kv: kv[1][1] + kv[1][2])
-            for k, _ in by_time[: len(by_time) // 2]:
-                del _login_attempts[k]
-
-    record = _login_attempts.get(ip)
-    if record is None:
-        _login_attempts[ip] = (1, 0.0, 0.0)
-    else:
-        new_count = record[0] + 1
-        if new_count >= max_attempts:
-            _login_attempts[ip] = (new_count, time.time(), lockout_seconds)
-        else:
-            _login_attempts[ip] = (new_count, 0.0, 0.0)
 
 
 async def _record_login_failure(ip: str) -> None:
@@ -373,6 +322,7 @@ async def _record_login_failure(ip: str) -> None:
     this is the first config read for a previously clean IP, and the login
     endpoint is unauthenticated.
     """
+    store = await _login_throttle_store()
     try:
         max_attempts, lockout_seconds = await asyncio.to_thread(_login_throttle_policy)
     except Exception:
@@ -386,14 +336,15 @@ async def _record_login_failure(ip: str) -> None:
         from deerflow.config.auth_config import LocalAuthConfig
 
         fallback = LocalAuthConfig()
-        _record_failure_under_policy(ip, fallback.max_login_attempts, fallback.lockout_seconds)
+        await store.record_failure(ip, max_attempts=fallback.max_login_attempts, lockout_seconds=fallback.lockout_seconds, now=time.time())
         raise
-    _record_failure_under_policy(ip, max_attempts, lockout_seconds)
+    await store.record_failure(ip, max_attempts=max_attempts, lockout_seconds=lockout_seconds, now=time.time())
 
 
-def _record_login_success(ip: str) -> None:
-    """Clear failure counter for the given IP on successful login."""
-    _login_attempts.pop(ip, None)
+async def _record_login_success(ip: str) -> None:
+    """Clear the failure counter for the given IP on successful login."""
+    store = await _login_throttle_store()
+    await store.reset(ip)
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────
@@ -419,7 +370,7 @@ async def login_local(
             detail=AuthErrorResponse(code=AuthErrorCode.INVALID_CREDENTIALS, message="Incorrect email or password").model_dump(),
         )
 
-    _record_login_success(client_ip)
+    await _record_login_success(client_ip)
     token = create_access_token(str(user.id), token_version=user.token_version)
     _set_session_cookie(response, token, request, remember_me=remember_me)
 
@@ -1031,7 +982,7 @@ async def oauth_callback(
     if not state_payload:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Missing or expired OIDC state cookie")
 
-    if not secrets.compare_digest(state_payload.state, state):
+    if not constant_time_equals(state_payload.state, state):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="OIDC state mismatch")
 
     # ── Resolve redirect URI ─────────────────────────────────────────

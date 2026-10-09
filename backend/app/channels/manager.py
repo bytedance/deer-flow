@@ -9,6 +9,7 @@ import mimetypes
 import re
 import stat
 import time
+import uuid
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -23,7 +24,9 @@ from langgraph_sdk.errors import ConflictError
 
 from app.channels import buzz_run_policy as _buzz_run_policy  # noqa: F401
 from app.channels import feishu_run_policy as _feishu_run_policy  # noqa: F401
+from app.channels.capabilities import CHANNEL_CAPABILITIES
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
+from app.channels.connection_identity import lookup_thread_id
 from app.channels.dedupe_store import InboundDedupeStore, MemoryInboundDedupeStore
 from app.channels.message_bus import (
     INBOUND_FILE_CONTENT_KEY,
@@ -48,6 +51,7 @@ from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime import END_SENTINEL, StreamBridge
 from deerflow.runtime.goal import parse_goal_command
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
+from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY, make_origin
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.slash import parse_slash_skill_reference
 from deerflow.skills.storage import get_or_new_skill_storage
@@ -138,17 +142,6 @@ INBOUND_DEDUPE_METADATA_KEYS = ("event_id", "message_id", "msg_id")
 # Slack is intentionally excluded: its channel ids are not globally unique.
 CHAT_SCOPED_WORKSPACE_CHANNELS = frozenset({"telegram", "feishu", "wechat"})
 
-CHANNEL_CAPABILITIES = {
-    "buzz": {"supports_streaming": True},
-    "dingtalk": {"supports_streaming": False},
-    "discord": {"supports_streaming": False},
-    "feishu": {"supports_streaming": True},
-    "github": {"supports_streaming": False},
-    "slack": {"supports_streaming": False},
-    "telegram": {"supports_streaming": True},
-    "wechat": {"supports_streaming": False},
-    "wecom": {"supports_streaming": True},
-}
 
 InboundFileReader = Callable[[dict[str, Any], httpx.AsyncClient], Awaitable[bytes | None]]
 
@@ -910,7 +903,10 @@ def _unknown_command_reply(command: str | None = None) -> str:
 
 
 def _human_input_message(content: str, *, original_content: str | None = None, files: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    message: dict[str, Any] = {"role": "human", "content": content}
+    # The Gateway records run input as sent, but add_messages gives an id-less
+    # message a fresh uuid in the checkpoint. A web client reconnecting to the
+    # run rebuilds its input from both copies and can only match them by id.
+    message: dict[str, Any] = {"id": str(uuid.uuid4()), "role": "human", "content": content}
     if original_content is not None and original_content != content or files:
         additional_kwargs: dict[str, Any] = {}
         if original_content is not None and original_content != content:
@@ -939,6 +935,24 @@ def _apply_effective_owner(msg: InboundMessage) -> InboundMessage:
     if owner_user_id:
         msg.owner_user_id = owner_user_id
     return msg
+
+
+def _run_origin(msg: InboundMessage) -> dict[str, str] | None:
+    """Server-owned ``deerflow_origin`` for a run this manager starts.
+
+    The Gateway honours it only from internal callers (this manager's client
+    carries the internal token); a provider name outside the origin shape is
+    dropped rather than failing the message.
+    """
+    try:
+        return make_origin("github" if msg.channel_name == "github" else "im_channel", provider=msg.channel_name)
+    except ValueError:
+        return None
+
+
+def _apply_run_origin(run_kwargs: dict[str, Any], msg: InboundMessage) -> None:
+    if (origin := _run_origin(msg)) is not None:
+        run_kwargs["metadata"] = {DEERFLOW_ORIGIN_KEY: origin}
 
 
 def _owner_headers(msg: InboundMessage) -> dict[str, str] | None:
@@ -1588,6 +1602,7 @@ class ChannelManager:
                 "context": run_context,
                 "multitask_strategy": "reject",
             }
+            _apply_run_origin(run_kwargs, carrier_msg)
             if owner_headers := _owner_headers(carrier_msg):
                 run_kwargs["headers"] = owner_headers
 
@@ -1781,13 +1796,9 @@ class ChannelManager:
                 )
         return policy
 
-    def _resolve_available_skill_names(
-        self,
-        msg: InboundMessage,
-        thread_id: str | None = None,
-    ) -> set[str] | None:
-        if thread_id is None:
-            thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id) or ""
+    def _resolve_available_skill_names(self, msg: InboundMessage, thread_id: str) -> set[str] | None:
+        """*thread_id* comes from ``_lookup_thread_id`` (``""`` when unmapped); never
+        re-read the JSON store here, which holds no mapping for bound messages."""
         _, _, run_context = self._resolve_run_params(msg, thread_id)
         if run_context.get("is_bootstrap"):
             return {"bootstrap"}
@@ -2199,13 +2210,7 @@ class ChannelManager:
         await self.bus.publish_outbound(outbound)
 
     async def _lookup_thread_id(self, msg: InboundMessage) -> str | None:
-        if msg.connection_id and self._connection_repo is not None:
-            return await self._connection_repo.get_thread_id(
-                msg.connection_id,
-                msg.chat_id,
-                msg.topic_id,
-            )
-        return self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
+        return await lookup_thread_id(msg, repo=self._connection_repo, store=self.store)
 
     async def _store_thread_id(self, msg: InboundMessage, thread_id: str) -> None:
         if msg.connection_id and msg.owner_user_id and self._connection_repo is not None:
@@ -2497,6 +2502,7 @@ class ChannelManager:
             "context": run_context,
             "multitask_strategy": "reject",
         }
+        _apply_run_origin(run_kwargs, msg)
         if owner_headers := _owner_headers(msg):
             run_kwargs["headers"] = owner_headers
 
@@ -2624,6 +2630,7 @@ class ChannelManager:
             "stream_mode": list(STREAM_MODES),
             "multitask_strategy": "reject",
         }
+        _apply_run_origin(stream_kwargs, msg)
         if owner_headers := _owner_headers(msg):
             stream_kwargs["headers"] = owner_headers
 
@@ -2640,6 +2647,17 @@ class ChannelManager:
                     accumulated_text, current_message_id = _accumulate_stream_text(streamed_buffers, current_message_id, data)
                     if accumulated_text:
                         latest_text = accumulated_text
+                elif event == "error":
+                    error_data = data if isinstance(data, dict) else {}
+                    logger.warning(
+                        "[Manager] stream error frame: thread_id=%s, error=%s: %s",
+                        thread_id,
+                        error_data.get("name", "Error"),
+                        error_data.get("message", "unknown"),
+                    )
+                    # The v1 SDK yields backend errors as frames, not exceptions.
+                    # Keep draining the stream and use the existing failure path.
+                    stream_error = RuntimeError("Agent run failed.")
                 elif event == "values" and isinstance(data, (dict, list)):
                     last_values = data
                     # Clarification text is only in the values snapshot;
@@ -2807,7 +2825,7 @@ class ChannelManager:
             slash_resolution = await asyncio.to_thread(
                 lambda: _resolve_slash_skill_command(
                     raw_text,
-                    self._resolve_available_skill_names(msg, thread_id),
+                    self._resolve_available_skill_names(msg, thread_id or ""),
                     self._get_skill_storage,
                 )
             )

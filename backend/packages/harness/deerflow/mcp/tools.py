@@ -21,11 +21,19 @@ from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT, MCP_TMP_SUBDIR
 from deerflow.mcp.client import build_servers_config
 from deerflow.mcp.headers import apply_header_overrides
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors, compose_tool_interceptors
-from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
-from deerflow.mcp.session_pool import call_pooled_session_tool, get_session_pool
+from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor, get_initial_oauth_headers
+from deerflow.mcp.session_pool import (
+    MCPPoolDomain,
+    MCPSessionPool,
+    ServerBinding,
+    call_pooled_session_tool,
+    get_session_pool,
+    normalized_connection_fingerprint,
+)
 from deerflow.mcp.tasks import ORDINARY_MCP_TASK_DRIVER, TaskSubmitRequest
 from deerflow.mcp.tasks.runtime import (
     McpTaskConfigurationError,
+    get_mcp_task_oauth_token_manager,
     get_mcp_task_submitter,
     validate_mcp_task_config_snapshot,
 )
@@ -539,11 +547,15 @@ def _make_session_pool_tool(
     tool_call_timeout: float | None = None,
     session_init_timeout: float | None = None,
     tool_name_prefix: bool = True,
+    ownership_domain: MCPPoolDomain = "deployment",
+    *,
+    pool: MCPSessionPool | None = None,
+    binding: ServerBinding | None = None,
 ) -> BaseTool:
     """Wrap an MCP tool so it reuses a persistent session from the pool.
 
     Replaces the per-call session creation with pool-managed sessions scoped
-    by ``(server_name, user/thread/incarnation)``. This ensures stateful MCP servers
+    by ``(server_name, user/thread/incarnation, ownership_domain)``. This ensures stateful MCP servers
     (e.g. Playwright) keep their state across tool calls within the same thread
     while staying isolated per user.
 
@@ -557,7 +569,15 @@ def _make_session_pool_tool(
     if tool_name_prefix and original_name.startswith(prefix):
         original_name = original_name[len(prefix) :]
 
-    pool = get_session_pool()
+    if pool is None:
+        pool = get_session_pool()
+    if binding is None and isinstance(pool, MCPSessionPool):
+        binding = pool.ensure_binding(
+            server_name,
+            normalized_connection_fingerprint(connection),
+            domain=ownership_domain,
+        )
+    effective_domain = binding.domain if binding is not None else ownership_domain
 
     async def call_with_persistent_session(
         runtime: Runtime | None = None,
@@ -607,6 +627,25 @@ def _make_session_pool_tool(
             session_env.setdefault("TMP", str(tmp_dir))
             session_env.setdefault("TEMP", str(tmp_dir))
             session_connection["env"] = session_env
+        if binding is not None:
+            session_request = pool.get_session(
+                server_name,
+                scope_key,
+                session_connection,
+                binding=binding,
+            )
+        elif effective_domain == "deployment":
+            # Compatibility for direct unit-test fakes that construct this
+            # wrapper without going through get_mcp_tools(). Production
+            # discovery always supplies the explicit binding above.
+            session_request = pool.get_session(server_name, scope_key, session_connection)
+        else:
+            session_request = pool.get_session(
+                server_name,
+                scope_key,
+                session_connection,
+                domain=effective_domain,
+            )
         if session_init_timeout is not None:
             # Cancellation here is safe: MCPSessionPool.get_session owns the
             # teardown of a session stuck mid-creation (it signals close and
@@ -614,7 +653,7 @@ def _make_session_pool_tool(
             # so a hung server cannot leak a session or block the turn.
             try:
                 session = await asyncio.wait_for(
-                    pool.get_session(server_name, scope_key, session_connection),
+                    session_request,
                     timeout=session_init_timeout,
                 )
             except TimeoutError:
@@ -629,7 +668,9 @@ def _make_session_pool_tool(
                 )
                 raise
         else:
-            session = await pool.get_session(server_name, scope_key, session_connection)
+            session = await session_request
+
+        domain_kwargs = {"domain": effective_domain} if effective_domain != "deployment" else {}
 
         # Build common call_tool kwargs once — only add keys when needed so
         # existing call-sites that assert on exact arguments are not affected.
@@ -657,6 +698,7 @@ def _make_session_pool_tool(
                     tool_name=request.name,
                     arguments=request.args,
                     call_kwargs=kwargs,
+                    **domain_kwargs,
                 )
 
             handler = compose_tool_interceptors(tool_interceptors, base_handler)
@@ -677,6 +719,7 @@ def _make_session_pool_tool(
                 tool_name=original_name,
                 arguments=arguments,
                 call_kwargs=call_kwargs,
+                **domain_kwargs,
             )
 
         # The after-call snapshot diff only feeds bare-filename correlation in
@@ -838,7 +881,12 @@ def _configure_task_tools_for_server(
     return configured
 
 
-async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, personal_user_id: str | None = None) -> list[BaseTool]:
+async def get_mcp_tools(
+    extensions_config: ExtensionsConfig | None = None,
+    *,
+    personal_user_id: str | None = None,
+    session_pool: MCPSessionPool | None = None,
+) -> list[BaseTool]:
     """Get all tools from enabled MCP servers.
 
     Tools using stdio transport are wrapped with persistent-session logic so
@@ -850,6 +898,10 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
         extensions_config: Optional pre-loaded extensions config. Callers that
             must prove which config revision produced these tools pass the exact
             instance they snapshotted; ``None`` loads the latest config from disk.
+        session_pool: Optional session pool captured by the caller. Cache
+            initializers pass the exact pool their generation owns so a
+            superseded claim cannot install bindings into a replacement pool;
+            ``None`` resolves the current singleton.
 
     Returns:
         List of LangChain tools from all enabled MCP servers.
@@ -887,12 +939,29 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
         logger.info("No enabled MCP servers configured")
         return []
 
+    # Capture the exact pool and stdio binding before the first discovery await.
+    # A later reset/reconcile can supersede this capability, but a stale wrapper
+    # can never silently pair its old connection with a replacement pool/epoch.
+    pool = session_pool
+    if pool is None:
+        pool = get_session_pool()
+    ownership_domain: MCPPoolDomain = "personal" if personal_user_id is not None else "deployment"
+    server_bindings: dict[str, ServerBinding] = {}
+    for server_name, server_connection in servers_config.items():
+        if server_connection.get("transport", "stdio") == "stdio":
+            server_bindings[server_name] = pool.ensure_binding(
+                server_name,
+                normalized_connection_fingerprint(server_connection),
+                domain=ownership_domain,
+            )
+
     try:
         # Create the multi-server MCP client
         logger.info(f"Initializing MCP client with {len(servers_config)} server(s)")
 
         # Inject initial OAuth headers for server connections (tool discovery/session init)
-        initial_oauth_headers = await get_initial_oauth_headers(extensions_config)
+        oauth_token_manager = OAuthTokenManager.from_extensions_config(extensions_config) if personal_user_id is not None else get_mcp_task_oauth_token_manager(extensions_config)
+        initial_oauth_headers = await get_initial_oauth_headers(extensions_config, token_manager=oauth_token_manager)
         for server_name, auth_header in initial_oauth_headers.items():
             if server_name not in servers_config:
                 continue
@@ -906,7 +975,7 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
 
         tool_interceptors = build_mcp_tool_interceptors(
             extensions_config,
-            oauth_builder=build_oauth_tool_interceptor,
+            oauth_builder=lambda config: build_oauth_tool_interceptor(config, token_manager=oauth_token_manager),
             resolver=resolve_variable,
             target_logger=logger,
         )
@@ -917,7 +986,10 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
             tool_name_prefix=True,
         )
 
-        async def load_server_tools(server_name: str) -> list[BaseTool]:
+        async def load_server_tools(server_name: str) -> list[BaseTool] | None:
+            # ``None`` marks a server whose discovery failed, which is distinct
+            # from a server that answered with zero tools: only the latter is
+            # evidence that configured task_toolsets name missing tools.
             try:
                 server_cfg = extensions_config.mcp_servers.get(server_name)
                 tool_name_prefix = server_cfg.tool_name_prefix if server_cfg is not None else True
@@ -963,19 +1035,19 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
                             server_name,
                             session_init_timeout,
                         )
-                        return []
+                        return None
                 return await discovery
             except Exception as e:
                 logger.warning(
                     f"Skipping MCP server '{server_name}' after tool discovery failed: {e}",
                     exc_info=True,
                 )
-                return []
+                return None
 
         # Get tools from each server independently so one broken MCP server does
         # not prevent healthy servers from contributing their tools.
         tools_by_server = await asyncio.gather(*(load_server_tools(name) for name in servers_config))
-        tools = [tool for server_tools in tools_by_server for tool in server_tools]
+        tools = [tool for server_tools in tools_by_server if server_tools is not None for tool in server_tools]
         logger.info(f"Successfully loaded {len(tools)} tool(s) from MCP servers")
 
         # Wrap each tool with persistent-session logic.
@@ -990,6 +1062,11 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
         # "web_") matches "web" first), which pools the tool under the wrong server. Using the
         # source grouping makes routing exact even when a server opts out of name prefixing.
         for source_name, server_tools in zip(servers_config.keys(), tools_by_server, strict=True):
+            if server_tools is None:
+                # Discovery already logged the skip. Validating task_toolsets
+                # against a server that never answered would report every
+                # raw tool as missing and discard the healthy servers' tools.
+                continue
             transport = servers_config[source_name].get("transport", "stdio")
             server_cfg = extensions_config.mcp_servers.get(source_name)
             tool_name_prefix = server_cfg.tool_name_prefix if server_cfg is not None else True
@@ -1021,6 +1098,9 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
                             tool_call_timeout=_timeout,
                             session_init_timeout=_init_timeout,
                             tool_name_prefix=tool_name_prefix,
+                            ownership_domain=ownership_domain,
+                            pool=pool,
+                            binding=server_bindings[source_name],
                         )
                     )
                 else:

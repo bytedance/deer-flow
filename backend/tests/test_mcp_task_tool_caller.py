@@ -145,6 +145,44 @@ async def test_stdio_task_call_reuses_exact_scope_and_raw_tool_name() -> None:
 
 
 @pytest.mark.asyncio
+async def test_personal_stdio_task_call_uses_personal_pool_domain() -> None:
+    result = SimpleNamespace(structuredContent={"task_id": "remote-1", "status": "running"}, isError=False)
+    session = SimpleNamespace(call_tool=AsyncMock(return_value=result))
+    pool = MagicMock()
+    pool.get_session = AsyncMock(return_value=session)
+
+    caller = McpTaskToolCaller(ExtensionsConfig())
+    personal_caller = McpTaskToolCaller(_config())
+
+    with (
+        patch.object(caller, "_personal_caller_for", return_value=personal_caller),
+        patch("deerflow.mcp.task_tool_caller.require_personal_mcp_access", new_callable=AsyncMock),
+        patch("deerflow.mcp.task_tool_caller.get_session_pool", return_value=pool),
+        patch(
+            "deerflow.mcp.task_tool_caller._prepare_stdio_connection",
+            return_value={"transport": "stdio", "command": "report-mcp"},
+        ),
+    ):
+        actual = await caller.call_tool(
+            server_name="reports",
+            tool_name="status_report",
+            arguments={"task_id": "remote-1"},
+            user_id="user-1",
+            thread_id="thread-1",
+            connection_scope="personal",
+        )
+
+    assert actual is result
+    pool.get_session.assert_awaited_once_with(
+        "reports",
+        "user-1:thread-1",
+        {"transport": "stdio", "command": "report-mcp"},
+        domain="personal",
+    )
+    session.call_tool.assert_awaited_once_with("status_report", {"task_id": "remote-1"})
+
+
+@pytest.mark.asyncio
 @pytest.mark.no_auto_user
 @pytest.mark.parametrize("has_ambient_user", [False, True], ids=["no-user", "existing-user"])
 @pytest.mark.parametrize(

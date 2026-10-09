@@ -12,13 +12,11 @@ from deerflow.constants import CONVERSATION_TOOL_USE
 from deerflow.mcp.tasks.runtime import is_mcp_task_runtime_available
 from deerflow.reflection import resolve_variable
 from deerflow.sandbox.security import is_host_bash_allowed
+from deerflow.scheduler.runtime import SchedulerRunCapability, is_scheduler_capability, scheduler_tools_enabled
 from deerflow.subagents.batch_runtime import is_subagent_batch_runtime_available
 from deerflow.tools.builtins import (
     ask_clarification_tool,
-    batch_status,
-    batch_task,
     cancel_background_task,
-    cancel_batch,
     list_background_tasks,
     list_uploaded_files,
     present_file_tool,
@@ -78,7 +76,7 @@ def _extract_max_tokens(model_config: object | None) -> int | None:
 
     Handles ModelConfig (where max_tokens may be stored as an extra dynamic field),
     dicts, SimpleNamespace, or test stubs. Rejects booleans, mocks, non-numeric
-    values, negative numbers, zero, and None.
+    values, non-finite numbers, negative numbers, zero, and None.
     """
     if model_config is None:
         return None
@@ -88,7 +86,7 @@ def _extract_max_tokens(model_config: object | None) -> int | None:
     try:
         val = int(raw)
         return val if val > 0 else None
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return None
 
 
@@ -110,6 +108,7 @@ def get_available_tools(
     mcp_plugins: list[str] | None = None,
     include_upload_tool: bool = True,
     include_conversation_reader: bool = False,
+    scheduler_capability: SchedulerRunCapability | None = None,
     app_config: AppConfig | None = None,
     extensions=None,
     chat_model: BaseChatModel | None = None,
@@ -134,12 +133,18 @@ def get_available_tools(
         include_conversation_reader: Allow the configured conversation reader
             only when the host provides its authorized runtime capability.
             Defaults to false for embedded callers and subagents.
+        scheduler_capability: Current-run host grant for conversation schedule
+            management or own-schedule stopping. Omitted for embedded,
+            bootstrap and subagent assembly.
 
     Returns:
         List of available tools.
     """
     config = app_config or get_app_config()
     tool_configs = [tool for tool in config.tools if groups is None or tool.group in groups]
+    # These operations are assembled from the host grant below. Registering a
+    # tool path in YAML cannot widen that grant or its interaction mode.
+    tool_configs = [tool for tool in tool_configs if tool.use not in {"deerflow.tools.scheduled_tasks:schedule_task", "deerflow.tools.scheduled_tasks:stop_scheduled_task"}]
     if not include_conversation_reader:
         tool_configs = [tool for tool in tool_configs if tool.use != CONVERSATION_TOOL_USE]
 
@@ -173,6 +178,10 @@ def get_available_tools(
 
     # Conditionally add tools based on config
     builtin_tools = BUILTIN_TOOLS.copy()
+    if scheduler_tools_enabled(config) and is_scheduler_capability(scheduler_capability):
+        from deerflow.tools.scheduled_tasks import schedule_task, stop_scheduled_task
+
+        builtin_tools.append(schedule_task if scheduler_capability.mode == "interactive" else stop_scheduled_task)
     if is_mcp_task_runtime_available():
         builtin_tools.extend((list_background_tasks, cancel_background_task))
     if include_upload_tool:
@@ -187,7 +196,10 @@ def get_available_tools(
     if subagent_enabled:
         builtin_tools.extend(SUBAGENT_TOOLS)
         if is_subagent_batch_runtime_available():
-            builtin_tools.extend((batch_task, batch_status, cancel_batch))
+            from deerflow.subagents.batch_runtime import get_subagent_batch_submitter
+            from deerflow.tools.builtins.batch_task_tool import bind_batch_tools
+
+            builtin_tools.extend(bind_batch_tools(submitter_provider=get_subagent_batch_submitter, app_config=config))
         logger.info("Including native subagent tools")
 
     # If no model_name specified, use the first model (default)
@@ -207,22 +219,27 @@ def get_available_tools(
     # models configured without max_tokens.
     max_tokens = _extract_max_tokens(chat_model if chat_model is not None else model_config)
     if max_tokens is not None:
-        safe_chars = int(max_tokens * 3 * 0.7)
-        budget_note = (
-            f"\n\nPER-RESPONSE BUDGET: your output limit is {max_tokens} tokens "
-            f"(≈{safe_chars} chars). Single non-append writes above this will be truncated. "
-            "For larger documents, write the first section now, "
-            "then use append=True for subsequent sections."
-        )
-        loaded_tools = [
-            _clone_tool_with_description(
-                tool,
-                f"{getattr(tool, 'description', '') or ''}{budget_note}",
+        try:
+            safe_chars = int(max_tokens * 3 * 0.7)
+        except OverflowError:
+            # Even finite caps can be too large for this optional estimate.
+            pass
+        else:
+            budget_note = (
+                f"\n\nPER-RESPONSE BUDGET: your output limit is {max_tokens} tokens "
+                f"(≈{safe_chars} chars). Single non-append writes above this will be truncated. "
+                "For larger documents, write the first section now, "
+                "then use append=True for subsequent sections."
             )
-            if tool.name == "write_file" and hasattr(tool, "description") and "PER-RESPONSE BUDGET:" not in (getattr(tool, "description", "") or "")
-            else tool
-            for tool in loaded_tools
-        ]
+            loaded_tools = [
+                _clone_tool_with_description(
+                    tool,
+                    f"{getattr(tool, 'description', '') or ''}{budget_note}",
+                )
+                if tool.name == "write_file" and hasattr(tool, "description") and "PER-RESPONSE BUDGET:" not in (getattr(tool, "description", "") or "")
+                else tool
+                for tool in loaded_tools
+            ]
 
     # Get cached MCP tools if enabled
     # NOTE: We use ExtensionsConfig.from_file() instead of config.extensions

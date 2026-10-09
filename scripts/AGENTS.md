@@ -1,3 +1,44 @@
+## Support Bundle Runtime Home
+
+Thread manifests use a nonempty `DEER_FLOW_HOME` exclusively, resolving relative
+values from the checkout like the local launcher. Read root `.env` path settings
+without exporting secrets; dotenv overrides shell exports, including empty values.
+Expand unquoted leading tildes, preserving quoted literals. If python-dotenv is
+unavailable, retain shell/legacy lookup so troubleshooting remains usable.
+Resolve `$NAME`, `${NAME}` and `${NAME:-literal}` in unquoted/double-quoted
+values using a private environment with checkout `PWD` and earlier dotenv
+assignments. Single-quoted values and escaped dollars stay literal. Parse the
+file without sourcing it or executing command substitutions.
+When home is unset and `DEER_FLOW_PROJECT_ROOT` is configured, search the launcher's
+`backend/.deer-flow` first, then the standalone harness project root. Scan both
+legacy threads and user-scoped threads in that root. With no override, retain
+the two checkout layouts. Display an external home as `{DEER_FLOW_HOME}` rather
+than its absolute host path, and never include file contents in the manifest.
+Coverage lives in `backend/tests/test_support_bundle.py`.
+This lookup follows the local launcher's root `.env`; it does not discover
+`backend/.env` or `DEER_FLOW_ENV_FILE` used by standalone Gateway launches.
+For those launches, export the effective `DEER_FLOW_HOME` when collecting a bundle
+and ensure the checkout `.env` does not override it. Tests clear all three runtime
+path variables and compare storage defaults with the launcher's actual shell blocks.
+
+## Dependency Check Diagnostics
+
+`check.py` captures tool output as UTF-8 with replacement for malformed bytes,
+independently of the host locale. Its Python pnpm runner inherits the environment
+with `PYTHONIOENCODING=utf-8:backslashreplace`, matching the capture encoding.
+Keep Unicode failure diagnostics and exit status available to `make check`.
+Real subprocess regressions live in `backend/tests/test_check_script.py`.
+
+## Manual Claude OAuth Export
+
+`export_claude_code_oauth.py` validates Keychain JSON as an object containing an
+object `claudeAiOauth` and a nonblank string `accessToken` before any export action.
+Malformed containers use the existing token-missing error without exposing their
+contents. The loader returns the full container together with the validated token;
+export actions use that token without repeating credential-shape assumptions or
+trimming its contents. Offline CLI coverage:
+`backend/tests/test_claude_keychain_export.py`.
+
 ## Service Startup Contracts
 
 Optional browser dependency detection reads the top-level `tools:` sequence
@@ -18,6 +59,15 @@ orchestration pins Next.js to `3000`. Runtime commands launch from the already
 synchronized environment with `uv run --no-sync`. Production Compose probes
 Gateway `/health`, and `deploy.sh` waits for all services before reporting
 success; failures print Compose status and recent Gateway logs.
+
+Both compose files mark `../.env` and `../frontend/.env` optional
+(`path`/`required: false`, Compose 2.24+), so `make up`, `make down` and
+`make prod-logs` on a fresh checkout neither abort nor create them; an
+unreadable `.env` still fails. Do not seed them from the examples in
+`deploy.sh` as `docker.sh start` does: `.env.example` holds placeholder API
+keys the production Gateway would receive, and `make config` skips files that
+exist. Pinned by `backend/tests/test_compose_default_bind_host.py` and
+`backend/tests/test_gateway_startup.py`.
 
 `deploy.sh` never sources the repo-root `.env`; Compose reads it via
 `--env-file`, and shell exports outrank that file during interpolation (an
@@ -40,6 +90,14 @@ where `make up` replaced the operator's secret with a generated one.
 its real-Compose cases run against the installed `docker` CLI and against any
 standalone binaries listed in `DEER_FLOW_TEST_COMPOSE_BINARIES`.
 
+Deployment commands check `DEER_FLOW_HOME` writability before setup and check
+persisted secret readability only when shell/Compose dotenv overrides are absent.
+Both failures identify the affected path and print the recursive ownership
+recovery hint for the runtime home. Existing secrets are only read, so a
+readable, read-only file is valid. `down` skips these checks and all secret
+resolution/generation so permission damage cannot prevent teardown. Coverage:
+`backend/tests/test_deploy_home_writability.py`.
+
 `doctor.py` checks the config file the Gateway would load, not a fixed
 `<checkout>/config.yaml`. It mirrors how `serve.sh` hands the two
 config-location variables to the Gateway: `.env` values for
@@ -53,6 +111,12 @@ override the Gateway would reject (`DEER_FLOW_CONFIG_PATH` missing,
 Gateway's error, and the config-dependent checks skip. Any failure to import
 the harness is reported, never raised: doctor diagnoses broken environments.
 Pinned by `backend/tests/test_doctor.py::TestMainConfigResolution`.
+
+CLI credential JSON checks accept UTF-8 with or without a leading BOM, matching
+the runtime credential loader. Keep `_load_json_object` on `utf-8-sig`; malformed
+JSON and invalid encoding remain missing/invalid sources without exposing tokens.
+Public doctor/runtime agreement is pinned by
+`backend/tests/test_credential_file_encoding.py`.
 
 Root `make install` runs pre-commit through uv, so uv's tool bin directory
 need not be on `PATH`.
@@ -73,6 +137,14 @@ Git Bash wrapper. Shell scripts that invoke sibling repository scripts must
 likewise prefix the target with `bash`. This keeps documented `make` commands
 working when a source archive, `core.fileMode=false`, or a non-POSIX filesystem
 does not preserve executable bits.
+
+`make clean` deletes `backend/.deer-flow` (database, users, threads, uploads,
+secrets), which both compose stacks mount into `deer-flow-gateway`. Its recipe
+runs `check-data-not-in-use.sh` before `make stop` (which would stop a live
+stack's sandboxes) and refuses while that container runs; an absent or
+unreachable Docker passes. `make stop` must still run before the delete: it
+stops `deer-flow-sandbox*` containers, whose thread mounts live in that tree.
+`RUNTIME_DATA_CONTENTS` feeds both the help line and the deletion notice.
 
 Host-side pnpm calls must go through `scripts/pnpm.py`. With native Windows
 Python (`os.name == "nt"`), it checks `pnpm.cmd` before the generic `pnpm`
@@ -306,10 +378,12 @@ Memory backend async boundary:
 
 CI runs these regression tests for every pull request via [.github/workflows/backend-unit-tests.yml](../.github/workflows/backend-unit-tests.yml).
 
-Agentic browser sessions are process-local. The Gateway startup safety gate rejects
-`GATEWAY_WORKERS > 1` when `browser_navigate` is configured, because ordinary
-uvicorn worker dispatch does not provide thread affinity for browser tools, REST
-navigation, and the Live WebSocket.
+Agentic browser sessions are process-local. Browser use is refused when the Gateway runs
+more than one worker process, because ordinary uvicorn worker dispatch does not provide
+thread affinity for browser tools, REST navigation, and the Live WebSocket. Keep
+`GATEWAY_WORKERS=1`, and on the launchers that pass uvicorn no `--workers`
+(`scripts/serve.sh`, `backend/Dockerfile`) keep `WEB_CONCURRENCY` unset or `1` too — that
+is where uvicorn takes the process count from.
 
 Browser Live screenshots remain JPEG bytes inside the harness and the Gateway's
 bounded, drop-oldest frame queue. WebSocket clients that request
@@ -321,3 +395,12 @@ receive a JSON error and close code 1008.
 The support bundle's `extensions_config.json` reader accepts UTF-8 with or
 without a leading BOM, matching the runtime loader. Preserve redaction and
 avoid flagging a valid BOM-prefixed file as a syntax error in triage output.
+
+Support-bundle and doctor tool captures explicitly decode UTF-8 with replacement
+for invalid bytes. Set `PYTHONIOENCODING=utf-8:backslashreplace` only in the copied
+support-bundle child environment so Python helpers can print Unicode and escape
+surrogates without aborting diagnostics or changing the parent.
+Keep exit codes, timeouts and redaction intact; do not rely on the host locale.
+Regressions use real local children, including ASCII/GBK capture defaults,
+nonzero exits, surrogate characters and malformed output, without invoking
+provider diagnostics. Doctor covers both `_run` streams and pnpm runner capture.

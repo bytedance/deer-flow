@@ -1364,8 +1364,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     def _stop_lease_renewal(self) -> None:
         self._renewal_stop.set()
         thread = self._renewal_thread
-        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+        if thread is None or thread is threading.current_thread():
+            return
+        if thread.is_alive():
             thread.join(timeout=5)
+        if thread.is_alive():
+            raise RuntimeError("Sandbox lease-renewal thread is still running after stop timeout")
 
     def _lease_renewal_loop(self) -> None:
         interval = self._ownership_config.renewal_interval_seconds
@@ -1557,7 +1561,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         self._original_sighup = signal.getsignal(signal.SIGHUP) if hasattr(signal, "SIGHUP") else None
 
         def signal_handler(signum, frame):
-            self.shutdown()
+            try:
+                self.shutdown()
+            except Exception:
+                logger.exception("Sandbox shutdown failed while handling signal %s; forwarding signal", signum)
             if signum == signal.SIGTERM:
                 original = self._original_sigterm
             elif hasattr(signal, "SIGHUP") and signum == signal.SIGHUP:
@@ -2661,16 +2668,27 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             if self._shutdown_called:
                 return
             self._shutdown_called = True
+
+        try:
+            self._stop_idle_checker()
+            # Stop renewing before detaching tracked ownership: the destroy paths
+            # claim ownership themselves, and a renewal racing teardown can
+            # re-publish leases we are about to drop. A bounded join timeout must
+            # fail closed so a retry still owns every active and warm entry.
+            self._stop_lease_renewal()
+        except Exception:
+            with self._lock:
+                self._shutdown_called = False
+            raise
+
+        # Do not detach tracked sandboxes before both maintenance workers are
+        # known stopped. If either bounded join fails, a retry must still own
+        # every active and warm entry.
+        with self._lock:
             sandbox_ids = list(self._sandboxes.keys())
             warm_items = list(self._warm_pool.items())
             self._warm_pool.clear()
             self._warm_pool_identity.clear()
-
-        self._stop_idle_checker()
-        # Stop renewing before destroying: the destroy paths claim ownership
-        # themselves, and a renewal racing them only re-publishes leases we are
-        # about to drop.
-        self._stop_lease_renewal()
 
         logger.info(f"Shutting down {len(sandbox_ids)} active + {len(warm_items)} warm-pool sandbox(es)")
 

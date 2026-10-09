@@ -51,7 +51,15 @@ from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_
 from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE, get_trusted_internal_owner_user_id
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.run_models import RunCreateRequest
-from app.gateway.services import abuild_checkpoint_state_accessor, build_thread_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
+from app.gateway.services import (
+    abuild_checkpoint_state_accessor,
+    build_thread_checkpoint_state_accessor,
+    serialize_wait_run_status,
+    sse_consumer,
+    start_run,
+    wait_for_run_completion,
+)
+from app.gateway.sse_headers import sse_response_headers
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.middlewares.dynamic_context_middleware import strip_injected_user_message_id_suffix
@@ -61,6 +69,7 @@ from deerflow.runtime import CancelOutcome, ConflictError, RunRecord, RunStatus,
 from deerflow.runtime.runs.store.base import format_run_cursor_created_at, normalize_run_created_at_iso
 from deerflow.runtime.secret_context import redact_config_secrets, redact_metadata_secrets
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.utils.llm_text import strip_leading_think_blocks
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
 from deerflow.utils.thread_id import ThreadId
 from deerflow.workspace_changes import get_workspace_changes_response
@@ -584,10 +593,11 @@ def _run_last_ai_matches_message(record: RunRecord, message: Any) -> bool:
     last_ai_message = (record.last_ai_message or "").strip()
     if not last_ai_message:
         return False
-    target_text = _message_text(message).strip()
+    target_text = _message_text(message)
     if not target_text:
         return False
-    return last_ai_message == target_text[: len(last_ai_message)]
+    # Match both historical raw summaries and newer visible-answer summaries.
+    return any(last_ai_message == text[: len(last_ai_message)] for text in (target_text.strip(), strip_leading_think_blocks(target_text)))
 
 
 async def _find_target_run_id(
@@ -597,8 +607,9 @@ async def _find_target_run_id(
     source_human: Any,
     request: Request,
 ) -> str:
+    user_id = await _run_scope_user_id(request, thread_id)
     event_store = get_run_event_store(request)
-    rows = await event_store.list_messages(thread_id, limit=REGENERATE_HISTORY_SCAN_LIMIT)
+    rows = await event_store.list_messages(thread_id, limit=REGENERATE_HISTORY_SCAN_LIMIT, user_id=user_id)
     for row in reversed(rows):
         if row.get("event_type") not in {"ai_message", "llm.ai.response"}:
             continue
@@ -612,7 +623,6 @@ async def _find_target_run_id(
         return source_run_id
 
     run_mgr = get_run_manager(request)
-    user_id = await _run_scope_user_id(request, thread_id)
     records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=10)
     fallback_record = next(
         (record for record in records if record.status == RunStatus.success and _run_last_ai_matches_message(record, target_message)),
@@ -1003,15 +1013,10 @@ async def stream_run(
             emit_gap_on_missing_stream=record.idempotency_reused,
         ),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-            # LangGraph Platform includes run metadata in this header.
-            # The SDK uses a greedy regex to extract the run id from this path,
-            # so it must point at the canonical run resource without extra suffixes.
-            "Content-Location": f"/api/threads/{thread_id}/runs/{record.run_id}",
-        },
+        # LangGraph Platform includes run metadata in Content-Location.
+        # The SDK uses a greedy regex to extract the run id from this path,
+        # so it must point at the canonical run resource without extra suffixes.
+        headers=sse_response_headers(content_location=f"/api/threads/{thread_id}/runs/{record.run_id}"),
     )
 
 
@@ -1047,12 +1052,19 @@ async def wait_run(
     # serializing whatever checkpoint happens to exist.
     if getattr(record, "store_only", False) and not getattr(bridge, "supports_cross_process", False):
         record = await _refresh_store_backed_run(run_mgr, record)
-        return {"status": record.status.value, "error": record.error}
+        return serialize_wait_run_status(record)
 
     if record.task is not None or getattr(record, "store_only", False):
         completed = await wait_for_run_completion(bridge, record, request, run_mgr)
     else:
         completed = True
+
+    if completed:
+        record = await _refresh_store_backed_run(run_mgr, record)
+        if record.status == RunStatus.error:
+            # A failure before the first checkpoint leaves an earlier answer at
+            # the thread head. Return this run's error, never that old state.
+            return serialize_wait_run_status(record)
 
     # Idempotent reuse is not bound to a run-specific checkpoint id. The latest
     # thread head may be a later run, so do not claim it as this run's result.
@@ -1070,9 +1082,7 @@ async def wait_run(
         except Exception:
             logger.exception("Failed to fetch final state for run %s", record.run_id)
 
-    if completed:
-        record = await _refresh_store_backed_run(run_mgr, record)
-    return {"status": record.status.value, "error": record.error}
+    return serialize_wait_run_status(record)
 
 
 def _parse_run_page_created_at(value: str) -> str:
@@ -1147,10 +1157,12 @@ async def _require_run_visible_to_scope(run_id: str, thread_id: str, request: Re
     """Gate run-scoped sub-resource reads and writes (events, messages, join,
     stream, cancel, artifact archive).
 
-    These routes query or mutate by ``(thread_id, run_id)`` without a
-    per-user filter of their own. For trusted internal callers on threads
-    without established ownership, that let an internal caller acting for
-    owner A read or cancel owner B's run by id (#5448 review P1 follow-up).
+    These routes query or mutate by ``(thread_id, run_id)``; events and
+    messages add only the ``_run_scope_user_id`` data filter, which matches
+    row stamps rather than gating the run itself. For trusted internal
+    callers on threads without established ownership, a missing gate let an
+    internal caller acting for owner A read or cancel owner B's run by id
+    (#5448 review P1 follow-up).
     The run's own stamp must therefore match the acting owner's raw value (or
     the legacy ``"default"`` stamp); every other caller and every
     established-ownership thread keeps its existing semantics.
@@ -1313,11 +1325,7 @@ async def join_run(thread_id: ThreadId, run_id: str, request: Request) -> Stream
         # policy must not fire because an observer closed their connection.
         sse_consumer(bridge, record, request, run_mgr, apply_on_disconnect=False),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers=sse_response_headers(),
     )
 
 
@@ -1402,11 +1410,7 @@ async def _stream_existing_run(
         # must not fire because a joiner closed their connection.
         sse_consumer(bridge, record, request, run_mgr, apply_on_disconnect=False),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers=sse_response_headers(),
     )
 
 
@@ -1626,6 +1630,7 @@ async def list_run_messages(
     Response: { data: [...], has_more: bool }
     """
     await _require_run_visible_to_scope(run_id, thread_id, request)
+    user_id = await _run_scope_user_id(request, thread_id)
     event_store = get_run_event_store(request)
     rows = await event_store.list_messages_by_run(
         thread_id,
@@ -1633,6 +1638,7 @@ async def list_run_messages(
         limit=limit + 1,
         before_seq=before_seq,
         after_seq=after_seq,
+        user_id=user_id,
     )
     data, has_more = trim_run_message_page(rows, limit=limit, after_seq=after_seq)
 
@@ -1706,7 +1712,8 @@ def _presented_files_from_delivery(events: list[dict]) -> list[str]:
 
 
 async def _archive_presented_paths(thread_id: ThreadId, run_id: str, request: Request) -> list[str]:
-    run = await get_run_store(request).get(run_id)
+    user_id = await _run_scope_user_id(request, thread_id)
+    run = await get_run_store(request).get(run_id, user_id=user_id)
     if run is None or run.get("thread_id") != thread_id or run.get("operation_kind", "run") != "run":
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     if run.get("status") in {RunStatus.pending.value, RunStatus.running.value}:
@@ -1717,6 +1724,7 @@ async def _archive_presented_paths(thread_id: ThreadId, run_id: str, request: Re
         run_id,
         event_types=["run.delivery"],
         limit=2,
+        user_id=user_id,
     )
     return _presented_files_from_delivery(events)
 
@@ -1813,6 +1821,7 @@ async def list_run_events(
     task's persisted steps without the run-wide ``limit`` truncating the tail (#3779).
     """
     await _require_run_visible_to_scope(run_id, thread_id, request)
+    user_id = await _run_scope_user_id(request, thread_id)
     event_store = get_run_event_store(request)
     types = event_types.split(",") if event_types else None
     events = await event_store.list_events(
@@ -1822,6 +1831,7 @@ async def list_run_events(
         task_id=task_id,
         limit=limit,
         after_seq=after_seq,
+        user_id=user_id,
     )
     return [
         {
@@ -1845,6 +1855,7 @@ async def get_run_workspace_changes(
 ) -> dict:
     """Return workspace/output file changes recorded for one run."""
     await _require_run_visible_to_scope(run_id, thread_id, request)
+    user_id = await _run_scope_user_id(request, thread_id)
     event_store = get_run_event_store(request)
     return await get_workspace_changes_response(
         event_store,
@@ -1852,6 +1863,7 @@ async def get_run_workspace_changes(
         run_id,
         include_files=include_files,
         include_diff=include_diff,
+        user_id=user_id,
     )
 
 

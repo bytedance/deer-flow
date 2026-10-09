@@ -26,6 +26,7 @@ from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.runtime.secret_context import read_active_secrets
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.sandbox.env_policy import is_blocked_env_name
 from deerflow.sandbox.exceptions import (
     SandboxError,
     SandboxNotFoundError,
@@ -42,8 +43,8 @@ from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.path_patterns import build_output_mask_pattern, normalize_mask_tail, replace_output_path_matches
 from deerflow.sandbox.read_file_contract import (
     READ_FILE_EMPTY,
-    READ_FILE_EMPTY_RANGE,
     READ_FILE_INVALID_END_LINE,
+    READ_FILE_INVALID_RANGE,
     READ_FILE_INVALID_START_LINE,
     READ_FILE_START_LINE_EXCEEDS,
     READ_FILE_TRUNCATION_PREFIX,
@@ -53,6 +54,8 @@ from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provi
 from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.tools.types import Runtime
+from deerflow.utils.file_io import await_drained
+from deerflow.utils.host_paths import windows_incompatible_segment
 
 logger = logging.getLogger(__name__)
 
@@ -900,8 +903,80 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
     return result
 
 
+def _windows_incompatible_path_reason(path: str) -> str | None:
+    """Return why *path* is not portable, or None when every segment is fine."""
+    normalised = path.replace("\\", "/")
+    for segment in normalised.split("/"):
+        reason = windows_incompatible_segment(segment)
+        if reason:
+            return reason
+    return None
+
+
+def _host_path_exists(candidate: str) -> bool:
+    """Return True when *candidate* is already on the host filesystem.
+
+    ``pathlib`` and the Win32 ANSI APIs strip a trailing space or dot, so a
+    file created with those characters is checked again with the Windows
+    extended-length path prefix. Virtual ``/mnt/...`` paths are not rewritten.
+    """
+    try:
+        if os.path.lexists(candidate):
+            return True
+    except OSError:
+        pass
+    if os.name != "nt":
+        return False
+    normalized = candidate.replace("/", "\\")
+    if len(normalized) < 3 or normalized[1] != ":" or normalized[2] != "\\":
+        return False
+    if normalized.startswith("\\\\?\\"):
+        return False
+    try:
+        return os.path.lexists("\\\\?\\" + normalized)
+    except OSError:
+        return False
+
+
+def _stored_host_path_exists(path: str, thread_data: ThreadDataState | None) -> bool:
+    """Return True when *path* already names a host file or directory.
+
+    ``/mnt/user-data`` paths are resolved through *thread_data*. The literal
+    path is also checked so a name that exists inside the sandbox mount is
+    recognized. A missing mapping does not count as stored.
+    """
+    candidates: list[str] = []
+    if path == VIRTUAL_PATH_PREFIX or path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
+        if thread_data is not None:
+            try:
+                resolved = replace_virtual_path(path, thread_data)
+            except Exception:
+                resolved = None
+            if resolved and resolved != path:
+                candidates.append(resolved)
+        candidates.append(path)
+    else:
+        candidates.append(path)
+    return any(_host_path_exists(candidate) for candidate in candidates)
+
+
+def _reject_unstored_windows_incompatible_path(path: str, thread_data: ThreadDataState | None) -> None:
+    """Reject a non-portable path unless that exact path is already stored."""
+    reason = _windows_incompatible_path_reason(path)
+    if reason is None:
+        return
+    if _stored_host_path_exists(path, thread_data):
+        return
+    raise PermissionError(f"Access denied: {reason}")
+
+
 def _reject_path_traversal(path: str) -> None:
-    """Reject paths that contain '..' segments to prevent directory traversal."""
+    """Reject paths that contain '..' segments to prevent directory traversal.
+
+    Windows reserved names and trailing dots or spaces are intentionally not
+    checked here. Portability is enforced when a path is created, not on every
+    read of a name the host already stored.
+    """
     # Normalise to forward slashes, then check for '..' segments.
     normalised = path.replace("\\", "/")
     for segment in normalised.split("/"):
@@ -936,6 +1011,10 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
         raise SandboxRuntimeError("Thread data not available for local sandbox")
 
     _reject_path_traversal(path)
+    # Creating a non-portable name is rejected. Reading, and editing a file
+    # that is already stored under that name, is not.
+    if not read_only:
+        _reject_unstored_windows_incompatible_path(path, thread_data)
 
     # Skills paths — read-only access only
     if _is_skills_path(path):
@@ -1046,6 +1125,61 @@ def _split_shell_tokens(command: str) -> list[str]:
         return command.split()
 
 
+_SHELL_PATH_HARD_TERMINATORS = frozenset("\"'`;&|<>()")
+
+
+def _absolute_path_token_occurrences(command: str, tokens: list[str]) -> list[tuple[int, int, str]]:
+    """Locate contiguous occurrences of path-bearing shell tokens in *command*.
+
+    shlex strips quotes, so a quoted path with spaces is one token. Occurrences
+    stay tied to their position so a later quoted ``.../CON notes.txt`` cannot
+    excuse an earlier real ``/.../CON``. Tokens that are not a contiguous
+    substring (newline normalization, escapes) yield no occurrence.
+    """
+    occurrences: list[tuple[int, int, str]] = []
+    for token in tokens:
+        if "/" not in token:
+            continue
+        start = command.find(token)
+        while start != -1:
+            occurrences.append((start, start + len(token), token))
+            start = command.find(token, start + 1)
+    return occurrences
+
+
+def _extend_absolute_path_within_span(command: str, match_start: int, span_end: int) -> str:
+    """Continue a regex path through spaces inside one shell word.
+
+    Stop before quotes and shell metacharacters the absolute-path regex already
+    treats as boundaries, so a trailing dot is not hidden by a closing quote.
+    """
+    chars: list[str] = []
+    for char in command[match_start:span_end]:
+        if char in _SHELL_PATH_HARD_TERMINATORS:
+            break
+        chars.append(char)
+    return "".join(chars)
+
+
+def _shell_absolute_path_candidate(command: str, occurrences: list[tuple[int, int, str]], match: re.Match[str]) -> str | None:
+    """Return the path to validate for one regex match, or None if already covered.
+
+    A match that starts a shell word is validated as that whole word. A later
+    match inside that same absolute-path word is skipped. A match embedded in a
+    larger word is extended through spaces only up to a hard terminator.
+    """
+    covering = [item for item in occurrences if item[0] <= match.start() < item[1]]
+    if not covering:
+        return match.group()
+    start, end, token = max(covering, key=lambda item: item[1] - item[0])
+    if token.startswith("/") and start == match.start():
+        return token
+    if token.startswith("/") and start < match.start():
+        return None
+    extended = _extend_absolute_path_within_span(command, match.start(), end)
+    return extended or match.group()
+
+
 def _is_shell_command_separator(token: str) -> bool:
     return token in _SHELL_COMMAND_SEPARATORS
 
@@ -1061,29 +1195,41 @@ def _is_shell_assignment(token: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name))
 
 
-def _is_allowed_local_bash_absolute_path(path: str, allowed_paths: list[str], *, allow_system_paths: bool) -> bool:
+def _reject_allowed_bash_path(path: str, thread_data: ThreadDataState | None) -> None:
+    """Traversal always; portability only when the host path is not stored yet."""
+    _reject_path_traversal(path)
+    _reject_unstored_windows_incompatible_path(path, thread_data)
+
+
+def _is_allowed_local_bash_absolute_path(
+    path: str,
+    allowed_paths: list[str],
+    *,
+    allow_system_paths: bool,
+    thread_data: ThreadDataState | None,
+) -> bool:
     # Check for MCP filesystem server allowed paths
     if any(path.startswith(allowed_path) or path == allowed_path.rstrip("/") for allowed_path in allowed_paths):
-        _reject_path_traversal(path)
+        _reject_allowed_bash_path(path, thread_data)
         return True
 
     if path == VIRTUAL_PATH_PREFIX or path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
-        _reject_path_traversal(path)
+        _reject_allowed_bash_path(path, thread_data)
         return True
 
     # Allow skills container path (resolved by tools.py before passing to sandbox)
     if _is_skills_path(path):
-        _reject_path_traversal(path)
+        _reject_allowed_bash_path(path, thread_data)
         return True
 
     # Allow ACP workspace path (path-traversal check only)
     if _is_acp_workspace_path(path):
-        _reject_path_traversal(path)
+        _reject_allowed_bash_path(path, thread_data)
         return True
 
     # Allow custom mount container paths
     if _is_custom_mount_path(path):
-        _reject_path_traversal(path)
+        _reject_allowed_bash_path(path, thread_data)
         return True
 
     if allow_system_paths and any(path == prefix.rstrip("/") or path.startswith(prefix) for prefix in _LOCAL_BASH_SYSTEM_PATH_PREFIXES):
@@ -1114,7 +1260,7 @@ def _next_cd_target(tokens: list[str], start_index: int) -> tuple[str | None, in
     return None, index
 
 
-def _validate_local_bash_cwd_target(command_name: str, target: str | None, allowed_paths: list[str]) -> None:
+def _validate_local_bash_cwd_target(command_name: str, target: str | None, allowed_paths: list[str], thread_data: ThreadDataState | None) -> None:
     if target is None or target == "-":
         raise PermissionError(f"Unsafe working directory change in command: {command_name}. Use paths under {VIRTUAL_PATH_PREFIX}")
     if target.startswith(("$", "`")):
@@ -1123,7 +1269,7 @@ def _validate_local_bash_cwd_target(command_name: str, target: str | None, allow
         raise PermissionError(f"Unsafe working directory change in command: {command_name} {target}. Use paths under {VIRTUAL_PATH_PREFIX}")
     if target.startswith("/"):
         _reject_path_traversal(target)
-        if not _is_allowed_local_bash_absolute_path(target, allowed_paths, allow_system_paths=False):
+        if not _is_allowed_local_bash_absolute_path(target, allowed_paths, allow_system_paths=False, thread_data=thread_data):
             raise PermissionError(f"Unsafe working directory change in command: {command_name} {target}. Use paths under {VIRTUAL_PATH_PREFIX}")
 
 
@@ -1144,12 +1290,10 @@ def _validate_local_bash_root_path_args(command_name: str, tokens: list[str], st
         index += 1
 
 
-def _validate_local_bash_shell_tokens(command: str, allowed_paths: list[str]) -> None:
+def _validate_local_bash_shell_tokens(command: str, allowed_paths: list[str], tokens: list[str], thread_data: ThreadDataState | None) -> None:
     """Conservatively reject relative path escapes missed by absolute-path scanning."""
     if re.search(r"\$\([^)]*\b(?:cd|pushd)\b", command):
         raise PermissionError(f"Unsafe working directory change in command substitution. Use paths under {VIRTUAL_PATH_PREFIX}")
-
-    tokens = _split_shell_tokens(command)
 
     for token in tokens:
         if _is_shell_command_separator(token) or _is_shell_redirection_operator(token):
@@ -1189,7 +1333,7 @@ def _validate_local_bash_shell_tokens(command: str, allowed_paths: list[str]) ->
             wrapped_name = tokens[index + 1].rsplit("/", 1)[-1]
             if wrapped_name in _LOCAL_BASH_CWD_COMMANDS:
                 target, next_index = _next_cd_target(tokens, index + 2)
-                _validate_local_bash_cwd_target(wrapped_name, target, allowed_paths)
+                _validate_local_bash_cwd_target(wrapped_name, target, allowed_paths, thread_data)
                 index = next_index
                 continue
             _validate_local_bash_root_path_args(wrapped_name, tokens, index + 2)
@@ -1200,7 +1344,7 @@ def _validate_local_bash_shell_tokens(command: str, allowed_paths: list[str]) ->
             continue
 
         target, next_index = _next_cd_target(tokens, index + 1)
-        _validate_local_bash_cwd_target(command_name, target, allowed_paths)
+        _validate_local_bash_cwd_target(command_name, target, allowed_paths, thread_data)
         index = next_index
 
 
@@ -1270,7 +1414,10 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     config.yaml) are allowed (path-traversal checks only; write prevention
     for bash commands is not enforced here).
     A small allowlist of common system path prefixes is kept for executable
-    and device references (e.g. /bin/sh, /dev/null).
+    and device references (e.g. /bin/sh, /dev/null). Quoted shell words are
+    validated whole, so a space inside quotes is not treated as a new segment.
+    A windows-incompatible segment still rejects a path that is not already
+    stored on the host; an existing host file may be read or renamed.
     """
     if thread_data is None:
         raise SandboxRuntimeError("Thread data not available for local sandbox")
@@ -1282,7 +1429,9 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
 
     unsafe_paths: list[str] = []
     allowed_paths = _get_mcp_allowed_paths()
-    _validate_local_bash_shell_tokens(command, allowed_paths)
+    tokens = _split_shell_tokens(command)
+    _validate_local_bash_shell_tokens(command, allowed_paths, tokens, thread_data)
+    path_token_occurrences = _absolute_path_token_occurrences(command, tokens)
     url_spans = _non_file_url_spans(command)
 
     for match in _ABSOLUTE_PATH_PATTERN.finditer(command):
@@ -1291,10 +1440,13 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
         absolute_path = match.group()
         if _is_non_path_literal_fragment(absolute_path):
             continue
-        if _is_allowed_local_bash_absolute_path(absolute_path, allowed_paths, allow_system_paths=True):
+        candidate = _shell_absolute_path_candidate(command, path_token_occurrences, match)
+        if candidate is None:
+            continue
+        if _is_allowed_local_bash_absolute_path(candidate, allowed_paths, allow_system_paths=True, thread_data=thread_data):
             continue
 
-        unsafe_paths.append(absolute_path)
+        unsafe_paths.append(candidate)
 
     if unsafe_paths:
         unsafe = ", ".join(sorted(dict.fromkeys(unsafe_paths)))
@@ -1456,7 +1608,7 @@ async def _rollback_failed_sandbox_lookup_async(
         if owner_id is not None:
             await get_sandbox_lease_manager(provider).release_async(owner_id)
         else:
-            await asyncio.to_thread(provider.release, sandbox_id)
+            await await_drained(asyncio.to_thread(provider.release, sandbox_id))
     except Exception:
         logger.warning(
             "Failed to roll back sandbox after async post-acquire lookup failure: %s",
@@ -2053,6 +2205,17 @@ _CHANNEL_USER_ID_CONTEXT_KEY = "channel_user_id"
 # this is corrupt and must not bloat every sandbox command string.
 _CHANNEL_USER_ID_MAX_LEN = 256
 
+# Fixed env var exposing the authenticated DeerFlow user id to sandbox
+# commands, so skill scripts and the subprocesses they launch can scope their
+# work to the current user instead of guessing or hard-coding (#3919). An
+# identifier, not a secret.
+USER_ID_ENV = "DEERFLOW_USER_ID"
+
+# Same defensive bound as the channel identity: a real user id is short
+# (``make_safe_user_id`` output), so anything past this is corrupt and must not
+# bloat every sandbox command string.
+_USER_ID_MAX_LEN = 256
+
 
 def _is_windows() -> bool:
     return os.name == "nt"
@@ -2087,6 +2250,58 @@ def _channel_identity_prefix(runtime: Runtime) -> str | None:
     if isinstance(channel_user_id, str) and 0 < len(channel_user_id) <= _CHANNEL_USER_ID_MAX_LEN:
         return f"export {CHANNEL_USER_ID_ENV}={shlex.quote(channel_user_id)}; "
     return f"unset {CHANNEL_USER_ID_ENV}; "
+
+
+def _resolved_user_id(runtime: Runtime) -> str | None:
+    """Return the effective user id when it is publishable, else ``None``.
+
+    ``resolve_runtime_user_id`` is the authorization-grade source (see its
+    docstring): server-owned for external callers, channel-authenticated for
+    internal ones. The guards are the same defensive bound the channel identity
+    uses — a real id is short (``make_safe_user_id`` output), so an empty /
+    non-str / over-cap value is corrupt and must not reach a command.
+    """
+    user_id = resolve_runtime_user_id(runtime)
+    if isinstance(user_id, str) and 0 < len(user_id) <= _USER_ID_MAX_LEN:
+        return user_id
+    return None
+
+
+def _user_identity_prefix(runtime: Runtime) -> str:
+    """Build the command prefix that publishes the effective user id to bash.
+
+    Unlike :func:`_channel_identity_prefix`, this always returns a prefix.
+    ``resolve_runtime_user_id`` falls back to ``DEFAULT_USER_ID``, so there is
+    no "not applicable" run: every command is attributable to a user. Stating
+    the value on every command is also what keeps a skill script correct
+    regardless of what an earlier command exported into a reused shell session
+    — the same per-call discipline the channel identity needs.
+
+    - usable id (non-empty str within the length cap) → ``export VAR=<quoted>; ``
+    - unusable id (empty / non-str / over the cap) → ``unset VAR; ``
+
+    The id deliberately rides the command string instead of the
+    ``execute_command(env=...)`` channel: a non-empty ``env`` switches
+    ``AioSandbox`` to the ``bash.exec`` API (fresh session per call, image
+    >= 1.9.3 required), which is reserved for request-scoped secrets. The value
+    is an identifier, not a secret, so keeping it in the audit-visible command
+    string is fine.
+
+    **Informational, not authenticated identity.** The exported shell variable
+    is a convenience for skill scripts — exactly like
+    ``DEERFLOW_CHANNEL_USER_ID`` — not a credential and not proof of who is
+    acting. Any bash command can overwrite its own environment, and anything the
+    command sources or launches (a dependency, a sourced rc file on the
+    host-bash path) can silently re-export a different id before a skill's
+    scoping logic reads it; only the outer prefix on the *next* ``bash_tool``
+    call re-asserts the true value. Skills that need user-scoped *authorization*
+    must resolve the identity server-side via ``resolve_runtime_user_id`` rather
+    than trusting this variable.
+    """
+    user_id = _resolved_user_id(runtime)
+    if user_id is not None:
+        return f"export {USER_ID_ENV}={shlex.quote(user_id)}; "
+    return f"unset {USER_ID_ENV}; "
 
 
 def _github_env_from_runtime(runtime: Runtime) -> dict[str, str] | None:
@@ -2186,6 +2401,7 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
         command: The bash command to execute. Always use absolute paths for files and directories.
         description: Optional short explanation of this command shown in the UI.
     """
+    redaction_env = None
     try:
         sandbox = ensure_sandbox_initialized(runtime)
         # Request-scoped secrets resolved for the active skill (#3861), plus a
@@ -2194,13 +2410,20 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
         # never placed in the command string.
         injected_env = read_active_secrets(getattr(runtime, "context", None)) or None
         identity_prefix = _channel_identity_prefix(runtime)
+        user_prefix = _user_identity_prefix(runtime)
         github_env = _github_env_from_runtime(runtime)
         lark_cli_env = _lark_cli_env_from_runtime(runtime, command, sandbox_paths=not is_local_sandbox(runtime))
         if github_env:
             injected_env = {**(injected_env or {}), **github_env}
         if lark_cli_env:
             injected_env = {**(injected_env or {}), **lark_cli_env}
+        redaction_env = injected_env
         if is_local_sandbox(runtime):
+            # Match the credential-name policy used for inherited host env.
+            # Keep benign operator settings readable and redact effective
+            # credentials before execution, including any exception output.
+            redaction_env = {name: value for name, value in (getattr(sandbox, "environment", None) or {}).items() if is_blocked_env_name(name)}
+            redaction_env.update(injected_env or {})
             if not is_host_bash_allowed():
                 return f"Error: {LOCAL_HOST_BASH_DISABLED_MESSAGE}"
             ensure_thread_directories_exist(runtime)
@@ -2209,9 +2432,20 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
             command = replace_virtual_paths_in_command(command, thread_data)
             command = _apply_cwd_prefix(command, thread_data)
             # POSIX-only: the Windows local sandbox may execute via
-            # PowerShell/cmd.exe where `export` is not valid syntax.
-            if identity_prefix and not _is_windows():
-                command = identity_prefix + command
+            # PowerShell/cmd.exe where `export` is not valid syntax, so the id
+            # is published through the subprocess environment instead —
+            # LocalSandbox layers `env` into the per-process environment, and
+            # unlike AioSandbox it has no persistent shell session that could
+            # carry a stale value forward. Deliberately kept out of
+            # `injected_env`, which doubles as the secret-redaction set: an
+            # identifier is not a secret and must stay readable in output.
+            local_env = injected_env
+            if not _is_windows():
+                command = user_prefix + (identity_prefix or "") + command
+            else:
+                windows_user_id = _resolved_user_id(runtime)
+                if windows_user_id is not None:
+                    local_env = {**(injected_env or {}), USER_ID_ENV: windows_user_id}
             try:
                 from deerflow.config.app_config import get_app_config
 
@@ -2225,17 +2459,16 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
                 sandbox,
                 command,
                 runtime=runtime,
-                env=injected_env,
+                env=local_env,
                 timeout=command_timeout,
             )
             return _truncate_bash_output(
-                mask_secret_values(mask_local_paths_in_output(output, thread_data), injected_env),
+                mask_secret_values(mask_local_paths_in_output(output, thread_data), redaction_env),
                 max_chars,
             )
         ensure_thread_directories_exist(runtime)
         command = f"cd {VIRTUAL_PATH_PREFIX}/workspace; {command}"
-        if identity_prefix:
-            command = identity_prefix + command
+        command = user_prefix + (identity_prefix or "") + command
         try:
             from deerflow.config.app_config import get_app_config
 
@@ -2256,11 +2489,11 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
             max_chars,
         )
     except SandboxError as e:
-        return f"Error: {e}"
+        return mask_secret_values(f"Error: {e}", redaction_env)
     except PermissionError as e:
-        return f"Error: {e}"
+        return mask_secret_values(f"Error: {e}", redaction_env)
     except Exception as e:
-        return f"Error: Unexpected error executing command: {_sanitize_error(e, runtime)}"
+        return mask_secret_values(f"Error: Unexpected error executing command: {_sanitize_error(e, runtime)}", redaction_env)
 
 
 async def _bash_tool_async(runtime: Runtime, command: str, description: str = "") -> str:
@@ -2587,7 +2820,7 @@ def read_file_tool(
         if end_line is not None and end_line < 1:
             return READ_FILE_INVALID_END_LINE
         if end_line is not None and effective_start > end_line:
-            return READ_FILE_EMPTY_RANGE
+            return READ_FILE_INVALID_RANGE
 
         requested_path = path
         use_line_range = start_line is not None or end_line is not None
@@ -2760,6 +2993,27 @@ async def _write_file_tool_async(
 write_file_tool.coroutine = _write_file_tool_async
 
 
+def _to_crlf(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\n", "\r\n")
+
+
+def _match_line_endings(content: str, old_str: str, new_str: str) -> tuple[str, str]:
+    """Spell ``old_str`` and ``new_str`` with the CRLF line endings ``content`` uses.
+
+    Full reads return line endings as stored, but the model tends to write
+    ``\\n`` (and ranged reads join lines with ``\\n``), so a multi-line
+    ``old_str`` would never match a CRLF file and inserted lines would be LF.
+    A CRLF-only file takes both strings in CRLF; a mixed file does so only
+    when the LF spelling is absent and the CRLF one is present.
+    """
+    if "\r\n" not in content:
+        return old_str, new_str
+    crlf_old = _to_crlf(old_str)
+    if content.count("\r\n") == content.count("\n") or (old_str not in content and crlf_old in content):
+        return crlf_old, _to_crlf(new_str)
+    return old_str, new_str
+
+
 @tool("str_replace", parse_docstring=True)
 def str_replace_tool(
     runtime: Runtime,
@@ -2798,6 +3052,7 @@ def str_replace_tool(
                 # A no-op edit. str.replace("", new_str) would insert new_str at
                 # every character boundary, so this cannot fall through.
                 return "OK"
+            old_str, new_str = _match_line_endings(content, old_str, new_str)
             if not content or old_str not in content:
                 return f"Error: String to replace not found in file: {requested_path}"
             if replace_all:
