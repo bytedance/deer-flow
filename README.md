@@ -1349,6 +1349,9 @@ endpoint, and key; changing any of them clears the displayed test result.
 If the saved server test results become unreadable, Settings shows the model as
 unverified. A new test still returns its live result even if that result cannot
 be saved for later display.
+The same applies to a web-managed image model: a completed test returns its live
+result if saving test history fails. Settings keeps the last successfully saved
+verification state until another test result can be recorded.
 If the saved image-model default becomes unreadable, Settings still lists the
 profiles. An admin can select a new default to replace the damaged record.
 The old `sandbox.environment` image variables remain a fallback when the typed
