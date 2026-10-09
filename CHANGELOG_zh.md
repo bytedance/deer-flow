@@ -694,6 +694,10 @@
 
 ### 修复
 
+- **运行时：** JSONL 事件存储在末行写坏后不再丢失事件。写入中途被打断会让文件缺少结尾换行，下一次追加会接在残缺记录后面，
+  两者合成一行无法解析；被截断的多字节字符还会让整个文件解码失败，所有完好记录都读不出来，序号恢复也随之失效。现在追加前
+  若文件末尾不是换行会先补一个分隔符，读取时逐个物理行单独解码、只跳过损坏的那一行，批量追加失败时仍会截回原始大小。
+  ([#6520])
 - **渠道：** 在启用 Gateway 认证（默认配置）时，从 IM 渠道发送的 `/goal <目标>` 和
   `/goal clear` 恢复正常。此前这两个写请求只携带内部认证令牌，而 Gateway 的 CSRF 检查不会
   豁免内部认证，因此返回 403，渠道回复“Failed to set goal.”或“Failed to clear goal.”。
@@ -7555,4 +7559,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6506]: https://github.com/bytedance/deer-flow/pull/6506
 [#6512]: https://github.com/bytedance/deer-flow/pull/6512
 [#6519]: https://github.com/bytedance/deer-flow/pull/6519
+[#6520]: https://github.com/bytedance/deer-flow/pull/6520
 [#6537]: https://github.com/bytedance/deer-flow/pull/6537
