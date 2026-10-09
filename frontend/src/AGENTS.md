@@ -97,20 +97,15 @@ Language-map membership checks only own properties; inherited names such as
    retries failed items, and exports JSONL. Worker-dependent mutations stay
    disabled in read-only history mode, and persisted progress is normalized to
    a bounded percentage before reaching the UI primitive. Item pagination uses a
-   fixed page size and an explicit load-more control; full results remain available
-   through JSONL export or a selected item’s View report dialog. The latter reads
-   one immutable position through the native owner-scoped result endpoint; it never
-   downloads a result page. Result queries consume AbortSignals, include the current
-   principal in their keys, and discard cached reports on close. Thread/item/account
-   changes remove report and source dialogs. Retry invalidates result queries along
-   with batch progress. Execution and deterministic acceptance are separate states.
-   An empty criteria definition is No criteria; Unverified applies only to existing
-   criteria without conclusive verification. Offer inspection only for terminal
-   items or an item with a stored result preview.
-   Saved reports reuse `createMarkdownLinkComponent(threadId)` so output-file
-   links resolve through the current thread's artifact route alongside citations.
-   They share `MessageImage` with chat for absolute artifact images; an empty
-   artifact list prevents inferred relative images from borrowing parent artifacts.
+   fixed page size and load-more. View report reads one immutable position through
+   the owner-scoped endpoint, never a result page; JSONL remains bulk export.
+   Offer inspection for terminal/preview items. Queries use AbortSignals and
+   principal keys; close drops cached reports, scope changes remove report/source
+   dialogs, retry invalidates results/progress, and revisions close stale sources.
+   Execution and acceptance differ: absent criteria are No criteria; inconclusive
+   existing criteria are Unverified. Reuse `createMarkdownLinkComponent(threadId)`
+   and `MessageImage` for current-thread artifacts/citations. An empty image
+   artifact list prevents relative paths from borrowing parent artifacts.
    The panel must not infer batch mode from prompt text
    or inject the complete result set into chat state.
    Capability Center > Plugins > Lark uses a local generation only to suppress stale React
