@@ -1508,7 +1508,8 @@ must be configured separately; selecting a dotenv file does not provide them.
 ## Production Compose env files
 
 Set `DEER_FLOW_COMPOSE_ENV_FILE` in the launcher environment to select a
-production dotenv file for `make up`, `make build`, and `make start`:
+production dotenv file for `make up`, `make down`, and direct
+`./scripts/deploy.sh build|start|down` calls:
 
 ```bash
 DEER_FLOW_COMPOSE_ENV_FILE=/srv/deer-flow/stage.env make up
@@ -1535,7 +1536,10 @@ DEER_FLOW_COMPOSE_ENV_FILE=/srv/deer-flow/stage.env \
 Existing shell variables retain Compose's precedence. Export
 `DEER_FLOW_CONFIG_PATH`, `DEER_FLOW_EXTENSIONS_CONFIG_PATH`, and
 `DEER_FLOW_HOME` independently when choosing different configuration and state
-locations. This is a production file-selection option: Docker development,
+locations. This is a production Docker file-selection option. `make start` uses
+the local
+`serve.sh --prod` launcher, and `make docker-*` uses Docker development; those
+commands keep their repo-root `.env` handling.
 `frontend/.env`, project/container names, database separation, and tenant
 isolation are not changed. Stop an existing stack before switching its profile.
 Keep credential-bearing profiles outside the checkout or in local Git exclusions.

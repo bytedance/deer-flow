@@ -8,6 +8,7 @@ import shutil
 import subprocess
 
 import pytest
+import test_deploy_dotenv_secrets as deploy_secret_tests
 from test_deploy_dotenv_secrets import BASH, _run_deploy_build, _worktree
 from test_deploy_home_writability import _run_deploy
 from test_deploy_home_writability import deploy_fixture as deploy_fixture
@@ -155,7 +156,7 @@ def test_deploy_down_still_works_when_selected_env_file_was_removed(deploy_fixtu
     assert not list(home.iterdir())
 
 
-def test_deploy_secret_probe_reads_selected_file_through_real_compose(tmp_path):
+def test_deploy_env_file_reaches_containers_through_real_compose(tmp_path, monkeypatch):
     docker = shutil.which("docker")
     if not docker:
         pytest.skip("real Docker Compose CLI required for the native launcher probe")
@@ -167,9 +168,34 @@ def test_deploy_secret_probe_reads_selected_file_through_real_compose(tmp_path):
     (worktree / ".env").write_text("NOT_A_SECRET=default\n", encoding="utf-8")
     selected = worktree / "profiles with spaces" / "stage env"
     selected.parent.mkdir()
-    selected.write_text("BETTER_AUTH_SECRET=test-auth\nDEER_FLOW_INTERNAL_AUTH_TOKEN=test-internal\n", encoding="utf-8")
+    selected.write_text("BETTER_AUTH_SECRET=test-auth\nDEER_FLOW_INTERNAL_AUTH_TOKEN=test-internal\nDEERFLOW_ENV_SELECTION_TEST=stage\n", encoding="utf-8")
 
-    _, observed, _, _, _, home = _run_deploy_build(tmp_path, worktree, shell_env={"DEER_FLOW_COMPOSE_ENV_FILE": str(selected)}, real_docker=docker)
+    rendered = tmp_path / "rendered-project.json"
+    stub = deploy_secret_tests._FAKE_DOCKER.replace("#!/usr/bin/env sh", "#!/usr/bin/env bash", 1)
+    prefix, suffix = stub.rsplit("exit 0\n", 1)
+    stub = (
+        prefix
+        + """args=()
+for arg in "$@"; do
+    [ "$arg" != "build" ] || break
+    args+=("$arg")
+done
+"$REAL_DOCKER" "${args[@]}" config --format json > "$CAPTURE_RENDERED_PROJECT"
+exit 0
+"""
+        + suffix
+    )
+    monkeypatch.setattr(deploy_secret_tests, "_FAKE_DOCKER", stub)
+
+    _, observed, _, _, _, home = _run_deploy_build(
+        tmp_path,
+        worktree,
+        shell_env={"DEER_FLOW_COMPOSE_ENV_FILE": str(selected), "CAPTURE_RENDERED_PROJECT": str(rendered)},
+        real_docker=docker,
+    )
+    project = json.loads(rendered.read_text(encoding="utf-8"))
+    for service in ("gateway", "provisioner"):
+        assert project["services"][service]["environment"]["DEERFLOW_ENV_SELECTION_TEST"] == "stage"
 
     assert observed["BETTER_AUTH_SECRET"] == ""
     assert observed["DEER_FLOW_INTERNAL_AUTH_TOKEN"] == ""
