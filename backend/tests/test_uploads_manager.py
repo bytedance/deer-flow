@@ -233,6 +233,45 @@ class TestValidatePathTraversal:
 
 
 class TestWriteUploadFileNoSymlink:
+    @pytest.mark.parametrize("without_nofollow", [False, True])
+    def test_exclusive_write_treats_existing_hardlink_as_collision(self, tmp_path, monkeypatch, without_nofollow):
+        if without_nofollow:
+            monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+        source = tmp_path / "source.txt"
+        source.write_bytes(b"existing upload")
+        os.link(source, tmp_path / "notes.txt")
+
+        with pytest.raises(FileExistsError):
+            write_upload_file_no_symlink(tmp_path, "notes.txt", b"new attachment", exclusive=True)
+        # The default replacement path still rejects hardlinks outright.
+        with pytest.raises(UnsafeUploadPathError, match="multiple links"):
+            write_upload_file_no_symlink(tmp_path, "notes.txt", b"replacement")
+
+        assert source.read_bytes() == b"existing upload"
+        assert (tmp_path / "notes.txt").read_bytes() == b"existing upload"
+
+    @pytest.mark.parametrize("without_nofollow", [False, True])
+    def test_exclusive_write_preserves_existing_file(self, tmp_path, monkeypatch, without_nofollow):
+        if without_nofollow:
+            monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+        dest = tmp_path / "notes.txt"
+        dest.write_bytes(b"previous upload")
+
+        with pytest.raises(FileExistsError):
+            write_upload_file_no_symlink(tmp_path, "notes.txt", b"new attachment", exclusive=True)
+
+        assert dest.read_bytes() == b"previous upload"
+
+    @pytest.mark.parametrize("without_nofollow", [False, True])
+    def test_exclusive_write_creates_new_file(self, tmp_path, monkeypatch, without_nofollow):
+        if without_nofollow:
+            monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+
+        dest = write_upload_file_no_symlink(tmp_path, "notes.txt", b"new attachment", exclusive=True)
+
+        assert dest == tmp_path / "notes.txt"
+        assert dest.read_bytes() == b"new attachment"
+
     def test_writes_new_file(self, tmp_path):
         dest = write_upload_file_no_symlink(tmp_path, "notes.txt", b"hello")
 

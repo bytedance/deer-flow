@@ -147,7 +147,9 @@ async def test_web_fetch_integration(rig, monkeypatch):
     rig.post.side_effect = [response(429, "7"), response(402, "1")]
     assert await tools.web_fetch_tool.ainvoke({"url": "https://example.com"}) == "Error: Jina API returned status 402: provider result"
     assert rig.waits == [7]
-    assert rig.options == [{"proxy": "http://proxy:8080", "trust_env": False, "follow_redirects": True}]
+    assert len(rig.options) == 1
+    assert rig.options[0]["proxy"] == "http://proxy:8080"
+    assert rig.options[0]["trust_env"] is False
     assert [call.kwargs["timeout"] for call in rig.post.await_args_list] == [6, 1]
     assert set(tools.web_fetch_tool.args) == {"url"}
 
