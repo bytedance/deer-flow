@@ -240,11 +240,29 @@ and key reuses the existing run instead of executing the input again. The key is
 shared across `/runs`, `/runs/stream`, and `/runs/wait` for a given user and
 thread, so the same key string cannot back two different calls even across those
 endpoints. Reuse is bound to the original `input`, `assistant_id` and
-`conversation_references`; a retry that changes them returns 409. Generate a new key for every intentional user
+`conversation_references`; a retry that changes them returns 409. When
+`command.resume` takes precedence over `input`, reuse instead requires the same
+resume value, assistant and conversation references. Resume values must be strict
+JSON with finite numbers, with or without an idempotency key; booleans, integers
+and floats remain distinct when comparing keyed retries. Generate a new key for every intentional user
 action; reuse a key only when retrying that same action after an uncertain HTTP
 result. Keys may be at most 255 characters. Stateless `/api/langgraph/runs/*`
 endpoints do not support this header because requests without an explicit thread
 create a new temporary conversation.
+
+**Rolling upgrades and keyed resume:** route all initial submissions and retries
+containing both `command.resume` and `Idempotency-Key` to upgraded Gateway workers
+only, across `/runs`, `/runs/stream` and `/runs/wait`, until every worker serving
+these endpoints is upgraded. Older workers ignore `runs.idempotency_request_json`
+and compare only `input`, so with `input: null` they can reuse an `approve` run
+for a conflicting `deny` request. If version-aware routing is unavailable, pause
+keyed resume traffic until the rollout completes, or replace all old workers
+before accepting it again. The additive migration preserves old-reader run-history
+compatibility, not mixed-version resume admission safety. Upgraded workers return
+409 for identity-less legacy resume rows, including identical decisions; inspect
+the original run and current thread state before submitting a new intentional
+action with a fresh key. Removing the header is not a retry workaround: it makes
+the request non-idempotent.
 
 Retrying a still-running run that this worker cannot stream returns 409 from
 `/runs/stream` (`Run ... is not active on this worker and cannot be streamed`)

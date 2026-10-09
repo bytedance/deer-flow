@@ -86,6 +86,7 @@ _artifact_archive_slots = asyncio.Semaphore(4)
 _MISSING_REGENERATE_BASE_DETAIL = "Could not find an addressable checkpoint before the target user message"
 _UNSAFE_REGENERATE_LINEAGE_DETAIL = "Could not safely resolve the checkpoint before the target user message"
 THREAD_MESSAGE_LEGACY_SCAN_BATCH = 201
+_LEGACY_IDEMPOTENCY_REQUEST_KEY = "idempotency_request"
 
 
 IdempotencyKeyHeader = Annotated[
@@ -369,6 +370,12 @@ async def _raise_lease_valid_elsewhere(
 
 def _record_to_response(record: RunRecord) -> RunResponse:
     kwargs = dict(record.kwargs or {})
+    legacy_idempotency_request = kwargs.pop(_LEGACY_IDEMPOTENCY_REQUEST_KEY, None)
+    if isinstance(legacy_idempotency_request, dict) and legacy_idempotency_request.get("kind") == "resume":
+        # Readers may outlive rows written by the pre-0034 rolling-upgrade
+        # fence. Keep its private digest and synthetic input out of every
+        # public run response; new writers use the dedicated ORM column.
+        kwargs["input"] = None
     if "config" in kwargs:
         kwargs["config"] = redact_config_secrets(kwargs["config"])
 
