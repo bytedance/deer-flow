@@ -33,6 +33,14 @@ def test_boolean_limits_fail_at_the_field(field, value):
     assert "boolean" in exc.value.errors()[0]["msg"]
 
 
+@pytest.mark.parametrize("field", LIMIT_FIELDS)
+def test_boolean_limit_message_names_the_field(field):
+    with pytest.raises(ValidationError) as exc:
+        ToolOutputConfig.model_validate({field: True})
+
+    assert f"{field} must be an integer, not a boolean" in str(exc.value)
+
+
 @pytest.mark.parametrize("value", [True, False, -1, "-1"])
 def test_invalid_override_identifies_the_tool(value):
     with pytest.raises(ValidationError) as exc:

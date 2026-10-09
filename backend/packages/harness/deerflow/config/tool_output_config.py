@@ -5,15 +5,14 @@ from __future__ import annotations
 import os
 from typing import Annotated
 
-from pydantic import BaseModel, BeforeValidator, Field, field_validator
+from pydantic import BaseModel, BeforeValidator, Field, ValidationInfo, field_validator
 
+from deerflow.config._boolean_guards import reject_boolean
 from deerflow.constants import TOOL_RESULTS_DIRNAME
 
 
-def _reject_boolean_limit(value: object) -> object:
-    if isinstance(value, bool):
-        raise ValueError("must be an integer, not a boolean")
-    return value
+def _reject_boolean_limit(value: object, info: ValidationInfo) -> object:
+    return reject_boolean(value, info, kind="an integer")
 
 
 _OutputLimit = Annotated[int, BeforeValidator(_reject_boolean_limit), Field(ge=0)]
