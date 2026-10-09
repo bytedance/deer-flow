@@ -130,6 +130,52 @@ async def test_invalid_legacy_settings_with_stale_default_keep_profiles_visible(
     assert [(item["source"], item["enabled"]) for item in listed["profiles"]] == [("managed", False)]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_server", [False, True])
+async def test_corrupt_default_can_be_replaced_without_hiding_healthy_profiles(store, monkeypatch, with_server):
+    from app.gateway.routers import image_generation as router
+    from deerflow.config.image_generation import ImageGenerationDefaultStore, image_profile_identity
+
+    web = store.save(profile(), expected_revision=None)
+    environment = {"GEMINI_API_KEY": "synthetic-server-key"} if with_server else {}
+    config = AppConfig.model_validate({"sandbox": {"use": "test", "environment": environment}})
+    monkeypatch.setattr(router, "get_app_config", lambda: config)
+    default_store = ImageGenerationDefaultStore()
+    default_store.save("managed", target_identity=image_profile_identity(web), expected_revision=None, environment=environment)
+    default_store.path.write_bytes(b"{invalid synthetic default")
+    admin = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
+
+    assert (await router.image_generation_status(admin))["status"] == "invalid_config"
+    listed = await router.list_image_profiles(admin)
+    assert listed["status"]["default_revision"] is None
+    assert listed["status"]["default_active"] is False
+    assert listed["status"]["choice_required"] is with_server
+    assert {item["source"] for item in listed["profiles"]} == ({"managed", "config"} if with_server else {"managed"})
+
+    with pytest.raises(HTTPException) as stale:
+        await router.set_image_default(
+            admin,
+            router.SetImageDefaultRequest(source="managed", target_identity=image_profile_identity(web), expected_revision="stale-revision"),
+        )
+    assert stale.value.status_code == 409
+    assert default_store.path.read_bytes() == b"{invalid synthetic default"
+
+    with pytest.raises(HTTPException) as wrong_target:
+        await router.set_image_default(
+            admin,
+            router.SetImageDefaultRequest(source="managed", target_identity="unknown-model", expected_revision=None),
+        )
+    assert wrong_target.value.status_code == 409
+    assert default_store.path.read_bytes() == b"{invalid synthetic default"
+
+    replaced = await router.set_image_default(
+        admin,
+        router.SetImageDefaultRequest(source="managed", target_identity=image_profile_identity(web), expected_revision=None),
+    )
+    assert default_store.read().revision == replaced["revision"]
+    assert (await router.list_image_profiles(admin))["status"]["default_active"] is True
+
+
 def test_profile_catalog_marks_the_effective_source_when_server_and_web_both_exist(store, monkeypatch):
     from app.gateway.routers import image_generation as router
 

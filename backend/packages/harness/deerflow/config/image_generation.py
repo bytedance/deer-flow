@@ -294,7 +294,12 @@ class ImageGenerationDefaultStore:
         if not managed_image_profiles_enabled():
             raise ImageConfigurationError("Web-managed image profiles are disabled")
         with _lock, extensions_config_file_lock(self.path):
-            current = self.read()
+            try:
+                current = self.read()
+            except ValueError:
+                if expected_revision is not None:
+                    raise FileExistsError("Image model default changed; reload before saving") from None
+                current = None
             if (current.revision if current else None) != expected_revision:
                 raise FileExistsError("Image model default changed; reload before saving")
             managed = [item for item in ManagedImageGenerationProfileStore().list() if item.enabled]

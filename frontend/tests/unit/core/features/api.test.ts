@@ -32,9 +32,16 @@ describe("image management feature", () => {
     await expect(fetchImageGenerationManagementEnabled()).resolves.toBe(false);
   });
 
-  it("keeps the existing UI available with an older Gateway", async () => {
+  it("hides management when an older Gateway omits the feature", async () => {
     mockedFetch.mockResolvedValueOnce(
       jsonResponse({ agents_api: { enabled: true } }),
+    );
+    await expect(fetchImageGenerationManagementEnabled()).resolves.toBe(false);
+  });
+
+  it("shows management when the Gateway enables it", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse({ image_generation_management: { enabled: true } }),
     );
     await expect(fetchImageGenerationManagementEnabled()).resolves.toBe(true);
   });

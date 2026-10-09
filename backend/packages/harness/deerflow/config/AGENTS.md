@@ -27,7 +27,10 @@ catalog primitive as managed chat models. The image catalog lives at
 `runtime_home()/managed-image-profiles/catalog.enc` with an adjacent `key`, not
 in SQL or `config.yaml`. The admin-selected default lives in the adjacent
 `default.json` and contains source/model identities but no credentials. Both
-files need backup. One profile may be enabled; its revision fences
+files need backup. An unreadable default does not hide the admin profile list;
+an explicit save with no expected revision can replace it after validating the
+selected profile, while a stale revision remains a conflict. One profile may be
+enabled; its revision fences
 updates and capability test results. When a usable server image model and an
 enabled usable web profile coexist without a valid saved default, image
 generation requires a chat choice regardless of configuration order. The
