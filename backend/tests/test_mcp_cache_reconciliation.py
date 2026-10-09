@@ -675,6 +675,77 @@ async def test_repeated_identical_revision_does_not_retire_again(reconciler, mon
 
 
 @pytest.mark.asyncio
+async def test_committed_reload_failure_fences_before_config_lock_release(reconciler, monkeypatch, tmp_path):
+    """A post-write reload failure must still detach state before releasing the config lock."""
+    cfg = tmp_path / "extensions_config.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "remote": {
+                        "enabled": False,
+                        "type": "http",
+                        "url": "https://example.test/mcp",
+                    }
+                },
+                "skills": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    pool.ensure_binding("remote", "old-fingerprint", domain="deployment")
+
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda _config_path=None: cfg)
+
+    async def _noop_admin(_request, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(mcp_router, "require_admin_user", _noop_admin)
+
+    def fail_reload():
+        raise RuntimeError("reload boom")
+
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", fail_reload)
+
+    before_generation = cache_module._cache_generation
+    fallback_installed = threading.Event()
+    release_fallback = threading.Event()
+    real_fail = cache_module.fail_mcp_reconciliation
+
+    def fail_and_wait(exc):
+        pending = real_fail(exc)
+        fallback_installed.set()
+        assert release_fallback.wait(timeout=5)
+        return pending
+
+    monkeypatch.setattr(mcp_router, "fail_mcp_reconciliation", fail_and_wait)
+
+    task = asyncio.create_task(
+        mcp_router.update_mcp_server_state(
+            request=None,
+            body=McpServerStateUpdateRequest(server_name="remote", enabled=True),
+        )
+    )
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(task), timeout=1)
+        assert fallback_installed.is_set()
+        assert extensions_config_write_lock.locked() is True
+        assert cache_module._cache_generation > before_generation
+        assert cache_module._applied_mcp_revision is None
+        assert pool._retired is True
+    finally:
+        release_fallback.set()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await task
+    assert exc_info.value.status_code == 500
+    assert json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]["remote"]["enabled"] is True
+
+
+@pytest.mark.asyncio
 async def test_committed_handoff_failure_fences_before_config_lock_release(reconciler, monkeypatch, tmp_path):
     """A post-write fallback reset must detach state while the config lock is still held."""
     cfg = tmp_path / "extensions_config.json"

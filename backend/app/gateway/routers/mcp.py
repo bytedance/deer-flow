@@ -1240,8 +1240,8 @@ def _commit_mcp_config_write(
         check_installation_ids=check_installation_ids,
     )
     atomic_write_extensions_config(config_path, raw_data)
-    reload_extensions_config()
     try:
+        reload_extensions_config()
         return prepare_mcp_reconciliation(candidate, config_path=config_path)
     except Exception as exc:
         # The file is already committed. Detach local state under the cache
