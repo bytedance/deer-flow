@@ -274,9 +274,14 @@ def extract_artifacts_from_result(
        become concrete ``file``/``task`` entries; when no known key matches, the
        whole payload becomes a complete JSON ``data`` entry only within the
        4096-byte, 1024-node and 32-level limits. Empty/oversized payloads are skipped.
-    2. ``content`` blocks of type ``file`` / ``image`` with a URL source become
+    2. ``artifact["resource_links"]`` — the ``{"name", "uri", "mime_type"}``
+       entries the MCP conversion layer writes for downgraded ``ResourceLink``
+       results — become ``file`` entries, subject to the same
+       referenceability gate as every other ref source (``data:``/``blob:``
+       and other unresolvable URIs are skipped).
+    3. ``content`` blocks of type ``file`` / ``image`` with a URL source become
        ``file`` / ``image`` entries.
-    3. ``content`` text blocks and plain-string results are scanned
+    4. ``content`` text blocks and plain-string results are scanned
        conservatively for sandbox paths and remote file URLs (gated by
        ``detect_refs_in_text``).
 
@@ -307,6 +312,25 @@ def extract_artifacts_from_result(
                     encoded = _serialize_bounded_data(structured)
                     if encoded is not None:
                         entries.append(sink.add(artifact_type="data", display_name=f"{tool_name} structured result", real_ref=encoded))
+
+        resource_links = artifact.get("resource_links")
+        if isinstance(resource_links, list):
+            for link in resource_links:
+                if not isinstance(link, dict):
+                    continue
+                uri = link.get("uri")
+                if not isinstance(uri, str) or not _is_referenceable_url(uri):
+                    continue
+                name = link.get("name")
+                mime = link.get("mime_type")
+                entries.append(
+                    sink.add(
+                        artifact_type="file",
+                        display_name=name if isinstance(name, str) and name else _display_name_for_ref(uri),
+                        real_ref=uri,
+                        mime_type=mime if isinstance(mime, str) and mime else None,
+                    )
+                )
 
     content = result.content
     if isinstance(content, str):
