@@ -30,6 +30,9 @@ Each successful summary result emits a `middleware:summarize` journal event with
 
 - `noop`: the result is byte-identical to the previous summary.
 - `llm_call_skipped`: this result came from the no-op cache.
+- `summary_chars`: length of the new summary.
+- `previous_summary_chars`: length of the previous summary, or `null` when there was none.
+- `summarized_message_count`: messages folded into this summary.
 - `call_count`: completed summary results, including cache reuse and canned results.
 - `noop_count`: completed results identical to the previous summary.
 - `skip_count`: completed results reused from the no-op cache.

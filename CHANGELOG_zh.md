@@ -3415,6 +3415,13 @@
   时，为 `extension-api` 增加通用钩子并以扩展实现，而不是把业务逻辑硬编码
   进核心。([#6178])
 
+- **文档：** 让运行事件与扩展示例文档重新与代码一致。
+  `backend/docs/RUN_EVENT_STREAM.md` 现在列出目录与契约中早已存在的
+  `summarize` 中间件标签并说明 `middleware:summarize` 事件，并新增测试将文档中
+  的标签列表固定为 `MIDDLEWARE_EVENT_TAGS`；`backend/docs/summarization.md`
+  补充该事件缺失的三个 `changes` 字段。扩展示例不再声称覆盖全部贡献类型：
+  它演示八种中的五种，README 为其余类型指向观察者指南和 bookmarks 插件示例。
+
 ### 内部改进
 
 - **测试：** 为 run-change 时钟修复及其回滚补充历史回归覆盖。从已

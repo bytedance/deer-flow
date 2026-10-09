@@ -4355,6 +4355,15 @@ This release closes that milestone with **439 merged pull requests**.
   changes, and a generic `extension-api` hook plus an extension when existing
   contribution points cannot express the feature. ([#6178])
 
+- **docs:** Bring the run-event and extension-example docs back in line with
+  the code. `backend/docs/RUN_EVENT_STREAM.md` now lists the `summarize`
+  middleware tag that the catalog and contract already carried, describes the
+  `middleware:summarize` event, and a test pins the documented tag list to
+  `MIDDLEWARE_EVENT_TAGS`; `backend/docs/summarization.md` lists the event's
+  three missing `changes` fields. The extension example no longer claims to
+  cover every contribution kind: it shows five of the eight, and its README
+  points to the observers guide and the bookmarks plugin for the rest.
+
 ### Internal
 
 - **persistence:** Add historical regression coverage for the run-change clock repair
