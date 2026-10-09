@@ -398,6 +398,10 @@ def install_native_dispatch(app, host):
 
 
 class NativeWorkerHost:
+    # Role policy belongs to the executor; native Scheduler stays configured
+    # for owner-bound tools/completion, with claims owned by control Gateways.
+    scheduler_dispatch_enabled = False
+
     def __init__(self, app, config):
         self.app, self.config = app, config
         import fcntl

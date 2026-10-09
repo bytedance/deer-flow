@@ -34,7 +34,7 @@ def test_native_http_remote_model_tool_and_peer_cancel(tmp_path):
     _native_http_acceptance(tmp_path)
 
 
-def _native_http_acceptance(tmp_path, *, dependency_mode=False):
+def _native_http_acceptance(tmp_path, *, dependency_mode=False, scheduled_mode=False):
     backend = Path(__file__).resolve().parents[1]
     run_id = uuid.uuid4().hex[:12]
     names, processes, handles = [], [], []
@@ -102,7 +102,7 @@ def _native_http_acceptance(tmp_path, *, dependency_mode=False):
             "run_ownership": {"heartbeat_enabled": True, "lease_seconds": 120},
             "stream_bridge": {"type": "redis", "redis_url": "$C_NATIVE_REDIS_URL", "heartbeat_interval_seconds": 1},
             "memory": {"enabled": False},
-            "scheduler": {"enabled": False},
+            "scheduler": {"enabled": True, "tool_enabled": True, "multi_instance": True, "poll_interval_seconds": 1, "min_once_delay_seconds": 1, "max_concurrent_runs": 1} if scheduled_mode else {"enabled": False},
             "mcp_tasks": {"enabled": dependency_mode, "poll_interval_seconds": 1},
         }
         native = {
@@ -156,7 +156,7 @@ def _native_http_acceptance(tmp_path, *, dependency_mode=False):
                 from test_ecs_executor_bc_main import _run_dependency_main, _setup_dependency_pool
 
                 _setup_dependency_pool(backend, tmp_path, environment, native, owner, processes, handles, central_port, worker_port)
-                _run_dependency_main(client, headers, owner, tmp_path, environment, run_id)
+                _run_dependency_main(client, headers, owner, tmp_path, environment, run_id, scheduled_mode=scheduled_mode)
                 return
             thread = "native-c-" + run_id
             response = client.post("/api/threads", json={"thread_id": thread}, headers=headers)

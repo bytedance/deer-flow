@@ -133,6 +133,14 @@ def test_real_native_c_mcp_b_same_goal_c(tmp_path):
     _native_http_acceptance(tmp_path, dependency_mode=True)
 
 
+@pytest.mark.live
+@pytest.mark.skipif(os.environ.get("ECS_NATIVE_LIVE") != "1", reason="Explicit native live acceptance opt-in required")
+def test_real_scheduled_native_c_mcp_b_same_occurrence_goal_c(tmp_path):
+    from test_ecs_executor_c_live import _native_http_acceptance
+
+    _native_http_acceptance(tmp_path, dependency_mode=True, scheduled_mode=True)
+
+
 def _setup_dependency_pool(backend, tmp_path, environment, native, owner, processes, handles, central_port, worker_port):
     import httpx
     from test_ecs_executor_c_live import _port
@@ -226,35 +234,69 @@ def _setup_dependency_pool(backend, tmp_path, environment, native, owner, proces
                 raise AssertionError("Dependency Gateway readiness timed out")
 
 
-def _run_dependency_main(client, headers, owner, tmp_path, environment, suffix):
+def _run_dependency_main(client, headers, owner, tmp_path, environment, suffix, *, scheduled_mode=False):
     from sqlalchemy import create_engine, text
 
     thread = "native-bc-" + suffix
     assert client.post("/api/threads", json={"thread_id": thread}, headers=headers).status_code in {200, 201}
     objective = "Submit the delegated B command once; when its actual output is available, read the B output file and deliver it with native present_files. The delivered file must contain dependency-proof-338350."
-    goal_response = client.put(f"/api/threads/{thread}/goal", json={"objective": objective}, headers=headers)
-    assert goal_response.status_code == 200, goal_response.text[:300]
-    original_goal = goal_response.json()["goal"]
+    if not scheduled_mode:
+        goal_response = client.put(f"/api/threads/{thread}/goal", json={"objective": objective}, headers=headers)
+        assert goal_response.status_code == 200, goal_response.text[:300]
+        original_goal = goal_response.json()["goal"]
     prompt = (
         "Use the ecs submit tool (discover it via tool_search if necessary) ONCE with request_key='bc-main', profile='small', "
         "argv=['sh','-c','sleep 2; printf dependency-proof-338350 > /output/b.txt']. This job executes outside your current native run. "
         "End this turn immediately after durable submission; do not poll, sleep or simulate its output. Wait for the automatic terminal notification. "
         "On that later notification, find its published /mnt/user-data/outputs/<job-id>/files/b.txt using native tools, read it and present_files that exact file to achieve the active goal."
     )
-    started = client.post(
-        f"/api/threads/{thread}/runs",
-        headers=headers,
-        json={
-            "assistant_id": "lead_agent",
-            "input": {"messages": [{"role": "user", "content": prompt}]},
-            "metadata": {"deerflow_origin": {"kind": "schedule"}},
-            "context": {"model_name": "deepseek-chat", "non_interactive": True},
-            "on_disconnect": "continue",
-            "config": {"recursion_limit": 100},
-        },
-    )
-    assert started.status_code == 200, started.text[:300]
-    source_id = started.json()["run_id"]
+    if scheduled_mode:
+        from datetime import UTC, datetime, timedelta
+
+        created = client.post(
+            "/api/scheduled-tasks",
+            headers=headers,
+            json={
+                "title": "Native scheduled dependency proof",
+                "prompt": prompt,
+                "goal_objective": objective,
+                "schedule_type": "once",
+                "schedule_spec": {"run_at": (datetime.now(UTC) + timedelta(seconds=3)).isoformat()},
+                "timezone": "UTC",
+                "assistant_id": "lead_agent",
+            },
+        )
+        assert created.status_code in {200, 201}, created.text[:300]
+        task_id = created.json()["id"]
+        observation = create_engine(environment["C_NATIVE_EXECUTOR_DATABASE_URL"])
+        try:
+            for _ in range(180):
+                with observation.connect() as connection:
+                    occurrence = connection.execute(text("select id,thread_id,run_id,status from scheduled_task_runs where task_id=:id"), {"id": task_id}).mappings().one_or_none()
+                if occurrence and occurrence["run_id"]:
+                    break
+                time.sleep(0.5)
+            assert occurrence and occurrence["run_id"], "Actual ScheduledTaskService did not automatically launch its occurrence"
+            thread, source_id = occurrence["thread_id"], occurrence["run_id"]
+            occurrence_id = occurrence["id"]
+            print(f"Actual scheduled main handle: task={task_id} occurrence={occurrence_id} source_run={source_id}", flush=True)
+        finally:
+            observation.dispose()
+    else:
+        started = client.post(
+            f"/api/threads/{thread}/runs",
+            headers=headers,
+            json={
+                "assistant_id": "lead_agent",
+                "input": {"messages": [{"role": "user", "content": prompt}]},
+                "metadata": {"deerflow_origin": {"kind": "schedule"}},
+                "context": {"model_name": "deepseek-chat", "non_interactive": True},
+                "on_disconnect": "continue",
+                "config": {"recursion_limit": 100},
+            },
+        )
+        assert started.status_code == 200, started.text[:300]
+        source_id = started.json()["run_id"]
     sql = create_engine(environment["C_NATIVE_EXECUTOR_DATABASE_URL"])
     try:
         for _ in range(480):
@@ -268,6 +310,24 @@ def _run_dependency_main(client, headers, owner, tmp_path, environment, suffix):
         source = next(job for job in jobs if job.get("kind") == "C" and job["native"]["run_id"] == source_id)
         delegated = next(job for job in jobs if job.get("kind", "B") == "B")
         continuation = next(job for job in jobs if job.get("kind") == "C" and job["native"]["run_id"] != source_id)
+        if scheduled_mode:
+            # Native run_agent builds the scheduled goal on first execution;
+            # admission must not invent an ordinary goal ahead of that authority.
+            assert source["native"]["goal"] is None
+            original_goal = source["dependency_wait"]["goal"]
+            assert original_goal["objective"] == objective
+            runtime = source["native"]["execution"]["scheduled_task_runtime"]
+            assert runtime["goal_objective"] == objective
+            assert runtime["task_id"] == task_id and runtime["occurrence_id"] == occurrence_id
+            assert continuation["native"]["execution"]["scheduled_task_runtime"] == runtime
+            with sql.connect() as connection:
+                final_occurrences = list(connection.execute(text("select id,run_id,status,launch_accounted,occurrence_seq from scheduled_task_runs where task_id=:id"), {"id": task_id}).mappings())
+                final_task = connection.execute(text("select status,run_count from scheduled_tasks where id=:id"), {"id": task_id}).mappings().one()
+            assert len(final_occurrences) == 1 and final_occurrences[0]["id"] == occurrence_id
+            assert final_occurrences[0]["run_id"] == continuation["native"]["run_id"] and final_occurrences[0]["status"] == "success"
+            assert final_occurrences[0]["launch_accounted"] and final_occurrences[0]["occurrence_seq"] == 1
+            assert final_task["status"] == "completed" and final_task["run_count"] == 1
+            assert "Native worker accepts signed existing admissions only" not in (tmp_path / "worker-bc.log").read_text()
         assert source["dependency_wait"]["goal"]["created_at"] == original_goal["created_at"]
         assert source["physical_stopped"] and delegated["started_at"] >= source["physical_stopped_at"]
         assert source["node_id"] == delegated["node_id"] == continuation["node_id"] == "one"

@@ -9,7 +9,7 @@
 | 原生 submit 身份 | 真实 ToolNode / ordinary driver / interceptor 调用链，SPEC 与质量审查通过 | 不单独证明物理执行 |
 | B 程序主干 | 原生任务持久跟踪、真实 TCP/PostgreSQL/Docker、输入快照、原生结果文件、重启与取消通过 | 不证明云 NAS 或 C |
 | B/C 共享资源池 | PostgreSQL、两个出站 worker、三条真实程序任务，排队与容量复用通过 | 此用例中的 C 只验证准入 |
-| C 原生执行 | 两个真实 Gateway、DeepSeek、AIO 工具、checkpoint/events、Redis END、affinity、跨实例取消与 STOP 通过 | 完整浏览器/记忆/Scheduler 仍待集成 |
+| C 原生执行 | 两个真实 Gateway、DeepSeek、AIO 工具、checkpoint/events、Redis END、affinity、跨实例取消与 STOP 通过 | Scheduler 配置验收见下文；完整浏览器/记忆仍待集成 |
 | C→B→C | 最新真实主干 1 passed / 142.71 秒；冻结收口 282 passed / 1 live deselected | SPEC 与质量复审通过；完整配置及部署仍待验收 |
 | fork 升级、启动/回滚与云 | 待完成 | 两台 ECS 保持停机，本轮未部署 |
 
@@ -103,3 +103,30 @@ make test-blocking-io
 本地共享临时目录不能证明跨 ECS NAS 锁或 Linux Gateway cgroup。云阶段重启资源前，还需可复用部署脚本、Jenkins 发布入口、健康检查、NAS 和 cgroup 证据、重启与回滚记录。由用户重新授权启动后再运行。
 
 关联：[架构](ecs-native-architecture.md)、[库表](ecs-native-database.md)、[全程证据](superpowers/plans/2026-10-08-ecs-native-reuse-audit-notes.md)。
+
+## 配置完整的原生 Scheduler 主干（2026-10-09）
+
+真实认证 API 创建 once 定时任务，由控制端原生 ScheduledTaskService 自动派发到出站 C 工作机，经 ordinary MCP/Docker B 继续原目标 C。唯一此轮模型主干：1 passed / 72.92 秒；测试拥有的容器和进程已清理。检查同一 occurrence、恰好两个原生 Run、run_count=1、原生目标与累计预算、C 物理收尾先于 B 启动、同一 2CPU/4GiB 节点、B attempt=1、present_files 交付和最终目标清理。
+
+两端保持 scheduler.enabled/tool_enabled/multi_instance；可信工作机仅关闭后台派发，保留原生前台工具与完成回调。UI 入口为控制端。此证据不包含浏览器、记忆或云部署。
+
+从 backend/ 复验，仅选择这一条 live 用例，模型配置路径沿用前文只读私有输入：
+
+```bash
+ECS_NATIVE_LIVE=1 PYTHONPATH=.:packages/ecs-executor .venv/bin/python -m pytest \
+  tests/test_ecs_executor_bc_main.py::test_real_scheduled_native_c_mcp_b_same_occurrence_goal_c -q -s --tb=short
+```
+
+冻结回归 528 passed / 2 live deselected / 1 已有 Starlette-httpx 警告，17.52 秒：
+
+```bash
+PYTHONPATH=.:packages/ecs-executor uv run --no-sync pytest \
+  tests/test_ecs_native_scheduler.py tests/test_scheduler_tools.py \
+  tests/test_scheduler_capability_access.py tests/test_scheduled_task_service.py \
+  tests/test_gateway_lifespan_shutdown.py tests/test_scheduled_task_router_behavior.py \
+  tests/test_scheduled_task_cron_preview.py tests/test_ecs_executor_bc_main.py \
+  tests/test_multi_worker_postgres_gate.py tests/test_features_router.py \
+  tests/test_harness_boundary.py -m 'not live' -q
+```
+
+root 独立复验 test_ecs_native_scheduler.py：5 passed / 1.95 秒。首试缺少 ECS 包 PYTHONPATH，4 passed / 1 import failure；按扩展文档修正命令后通过。12 个改动 Python 文件 Ruff lint/format 与 diff check 通过。独立 SPEC 与质量审查 PASS。完整 Task4 和 Task6 保持未完成。

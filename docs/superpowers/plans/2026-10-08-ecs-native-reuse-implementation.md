@@ -70,3 +70,5 @@ Files: native deployment/test docs, minimal operator scripts, final migration/in
 ## Evidence and completion
 
 A protocol unit test is not B acceptance; multi_instance configuration is not C scheduling; native notification alone is not dependency coordination. All tasks remain unchecked until actual evidence covers their full scope. No IMPLEMENTED marker or overall completion while main features are pending.
+
+Task4 configured Scheduler slice accepted: actual authenticated once task automatically launched by native ScheduledTaskService, remote C -> ordinary MCP B -> same native goal C; 1 passed / 72.92 seconds. Same occurrence/two Runs/run_count=1, goal budget, physical drain-before-B, files and final cleanup verified. Optional trusted worker contract suppresses dispatch only; foreground native tools, manual durable queue and completion remain available. Frozen native/API regressions: 528 passed, 2 live deselected / 17.52s; root independently 5 passed / 1.95s after correcting extension PYTHONPATH. Ruff 12 Python files and diff checks passed; independent SPEC then quality PASS. Task4 browser/memory and Task6 remain unchecked. No cloud or remote operation.

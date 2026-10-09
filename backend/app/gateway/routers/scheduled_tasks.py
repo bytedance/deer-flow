@@ -18,7 +18,7 @@ from app.gateway.deps import (
     get_scheduled_task_run_repo,
     get_scheduled_task_service,
     get_thread_store,
-    is_scheduler_running,
+    is_scheduler_available,
 )
 from app.gateway.scheduled_task_errors import active_occurrence_error, active_occurrence_message, repository_error, scheduler_error
 from app.gateway.scheduled_task_validation import prepare_resume_updates, validate_scheduled_task_create, validate_scheduled_task_update
@@ -226,9 +226,10 @@ async def create_scheduled_task(request: Request, body: ScheduledTaskCreateReque
         assistant_resolver=resolve_scheduled_task_assistant_id,
         now=datetime.now(UTC),
     )
-    # After validation, so a bad request still reports what to fix: a task
-    # created while this process's poller is off would silently never run.
-    if not is_scheduler_running(request):
+    # Validate first so bad definitions still report what to fix. Native
+    # foreground hosts may enqueue for a control poller; an unavailable
+    # service cannot guarantee scheduled dispatch.
+    if not is_scheduler_available(request):
         raise scheduler_error(
             409,
             "scheduler_not_running",

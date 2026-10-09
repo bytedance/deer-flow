@@ -28,3 +28,22 @@ owner; do not use a model-supplied owner ID. The combined executable example is
 full C finalization, B attempt 1, exactly two native runs, same-goal budgets and
 native artifact delivery. These shell examples do not enable browser/memory; full
 configured capabilities and cloud deployment acceptance remain separate gates.
+
+For the configured native Scheduler slice, retain the same shared infrastructure
+and add these settings to both normal native Gateway configurations:
+
+```yaml
+scheduler:
+  enabled: true
+  tool_enabled: true
+  multi_instance: true
+```
+
+The central role runs native background dispatch. The execution-only worker keeps
+native foreground schedule tools and completion hooks while its trusted host
+disables background claims. Manual triggers there persist in the same queue for
+central dispatch. Browser/UI ingress stays on the control Gateway. See
+[Native Scheduler roles](../../backend/packages/ecs-executor/README.md#native-scheduler-roles)
+for readiness semantics and the exact single-case acceptance command; its fixture
+reuses the same owned PostgreSQL/Redis/AIO infrastructure and automatically
+launches a genuine scheduled occurrence before C→ordinary MCP B→same-goal C.

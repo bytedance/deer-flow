@@ -1,6 +1,6 @@
 # 原生 DeerFlow ECS 工作池架构
 
-更新：2026-10-09。本文对应 `codex/ecs-native-reuse` 的实际实现。B 主干及 C 执行部分已通过本地验证和独立审查；C→B→C 依赖合同已通过本地主干与独立审查。完整浏览器、记忆、调度器能力、fork 合并、运维及云验收仍待完成。本文不是部署完成声明。
+更新：2026-10-09。本文对应 `codex/ecs-native-reuse` 的实际实现。B 主干及 C 执行部分已通过本地验证和独立审查；C→B→C 依赖合同已通过本地主干与独立审查。原生 Scheduler 已通过真实自动派发组合主干与独立审查；完整浏览器、记忆、fork 合并、运维及云验收仍待完成。本文不是部署完成声明。
 
 ## 需求与职责
 
@@ -85,7 +85,7 @@ flowchart LR
 
 当前 C 提交 B 后，需要持久保存原生任务成员和目标 identity/revision，在 checkpoint、工作区及完整原生收尾后释放可释放额度。B 结果经原生 McpTaskService 的既有通知通道触发一次有效续跑。
 
-目标、线程 incarnation、用户取消、新消息及累计预算必须重新校验；重复事件不能创建竞争 run。等待 B 时也必须保留原生 Scheduler occurrence 的 overlap 保护。最新实际组合主干通过：1 passed / 142.71 秒，检查同节点、真实 C 收尾在 B 启动之前、B attempt=1、两个原生 Run、原目标预算及文件交付。定时任务接点有原生运行时和 SQL 合同验证；SPEC 与质量复审通过，冻结代码相关回归 282 passed；完整 Scheduler 配置验收仍待完成。不能把此证据视为完整功能已交付。
+目标、线程 incarnation、用户取消、新消息及累计预算必须重新校验；重复事件不能创建竞争 run。等待 B 时也必须保留原生 Scheduler occurrence 的 overlap 保护。最新实际组合主干通过：1 passed / 142.71 秒，检查同节点、真实 C 收尾在 B 启动之前、B attempt=1、两个原生 Run、原目标预算及文件交付。定时任务接点有原生运行时和 SQL 合同验证；SPEC 与质量复审通过，冻结代码相关回归 282 passed；完整 Scheduler 配置验收见下文实际自动派发主干。不能把此证据视为完整功能已交付。
 
 ## 扩展边界与后续同步原仓库
 
@@ -102,3 +102,11 @@ flowchart LR
 fork 迁移、旧 Fleet 数据处置、版本回滚、可复用启动/停止脚本和部署/测试记录仍属交付范围。两台上海 ECS 保持用户要求的停机状态；本轮没有部署或推送。
 
 关联：[库表文档](ecs-native-database.md)、[实现计划](superpowers/plans/2026-10-08-ecs-native-reuse-implementation.md)、[证据与审查记录](superpowers/plans/2026-10-08-ecs-native-reuse-audit-notes.md)。
+
+## 原生 Scheduler 的执行端角色
+
+控制端运行原生 ScheduledTaskService 的后台恢复、领取和派发。工作机保持 scheduler.enabled/tool_enabled/multi_instance，并由可信 NativeWorkerHost 设置 scheduler_dispatch_enabled=False；原生服务的 dispatch_enabled 默认 True，无 ECS host 时仍沿用原行为。
+
+工作机前台 schedule_task/stop_scheduled_task 和完成回调保持可用；manual trial/trigger 写入同一原生持久 occurrence 队列，由控制端处理。is_running 表示本地 poller，is_available 表示前台能力；停止服务会清除前台 readiness。角色不由模型参数或请求 context 决定。用户 UI 入口仍为控制端。
+
+实际自动 once 定时 C→MCP B→C 主干通过：1 passed / 72.92 秒，保留同 occurrence、一次计数、原目标预算和原生文件交付。SPEC 与质量审查 PASS。浏览器、记忆、fork 运维和云验收仍待完成。

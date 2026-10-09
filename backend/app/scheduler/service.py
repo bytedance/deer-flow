@@ -218,6 +218,7 @@ class ScheduledTaskService:
         notification_repo=None,
         own_stop_available: bool | None = None,
         dependency_wait_reconciler=None,
+        dispatch_enabled: bool = True,
     ) -> None:
         self._task_repo = task_repo
         self._task_run_repo = task_run_repo
@@ -231,6 +232,8 @@ class ScheduledTaskService:
         self._max_concurrent_runs_per_user = min(max_concurrent_runs_per_user, max_concurrent_runs) if max_concurrent_runs_per_user > 0 else 0
         self._queue_timeout_seconds = queue_timeout_seconds
         self._multi_instance = multi_instance
+        self._dispatch_enabled = dispatch_enabled
+        self._foreground_ready = False
         self._run_lease_grace_seconds = run_lease_grace_seconds
         # Notification outbox wiring (issue #4254): both repos must be present
         # for IM notices. The finalization observer stages them in the outcome's
@@ -272,6 +275,11 @@ class ScheduledTaskService:
     def is_running(self) -> bool:
         """Whether this process's poller is running (automatic runs fire here)."""
         return self._task is not None and not self._task.done()
+
+    @property
+    def is_available(self) -> bool:
+        """Foreground tools remain available on a trusted execution-only host."""
+        return self.is_running or self._foreground_ready
 
     def _install_finalization_observers(self) -> None:
         # Always installed: chat events need no outbox. The IM step checks the
@@ -402,6 +410,8 @@ class ScheduledTaskService:
         self._install_finalization_observers()
 
     async def run_once(self, *, now: datetime) -> None:
+        if not self._dispatch_enabled:
+            return
         if self._multi_instance:
             if self._skip_next_lease_reconciliation:
                 self._skip_next_lease_reconciliation = False
@@ -561,6 +571,8 @@ class ScheduledTaskService:
             "thread_id": execution_thread_id,
             "trigger": trigger,
         }
+        if not self._dispatch_enabled:
+            return self._queued_result(task_run_id, execution_thread_id)
         return await self._attempt_queued_run(task, queued, now=now)
 
     async def _release_admission_lease(self, task: dict[str, Any], *, trigger: str) -> None:
@@ -982,6 +994,11 @@ class ScheduledTaskService:
         )
 
     async def start(self) -> None:
+        if not self._dispatch_enabled:
+            # Shared control hosts own recovery and claims. This host only
+            # mutates owner-bound schedules and observes native completions.
+            self._foreground_ready = True
+            return
         if self._task is not None:
             return
         restart_error = _RESTART_RECOVERY_ERROR
@@ -1044,6 +1061,7 @@ class ScheduledTaskService:
             logger.exception("Failed to reconcile once tasks with leases")
 
     async def stop(self) -> None:
+        self._foreground_ready = False
         if self._task is None:
             return
         self._stop.set()

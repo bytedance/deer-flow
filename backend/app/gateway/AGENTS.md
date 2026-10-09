@@ -243,3 +243,10 @@ Skill listing authorization mirrors the models pattern: `routers/skills.py` rout
 Batch workers pin `app.state.extensions`; never persist snapshots.
 
 Personal MCP uses owner-only files/calls; platform MCP stays shared.
+
+Native Scheduler host contract: operator-installed admission hosts may set
+`scheduler_dispatch_enabled=False`. Gateway still starts the native service for
+foreground owner-bound tools and completion hooks, without recovery or claims.
+Manual triggers enqueue in the shared native occurrence queue for control hosts.
+`is_running` retains local poller semantics; `is_available` gates foreground
+capabilities/API creation. No request field or serialized context selects this role.

@@ -146,7 +146,7 @@ def _scheduled_tasks_feature(request: Request, config: AppConfig) -> ScheduledTa
     return ScheduledTasksFeature(
         available=getattr(state, "scheduled_task_repo", None) is not None,
         running=running,
-        tool_enabled=running and scheduler_tools_enabled(config),
+        tool_enabled=bool(getattr(service, "is_available", running)) and scheduler_tools_enabled(config),
         min_interval_seconds=int(getattr(scheduler, "min_once_delay_seconds", 60)),
     )
 

@@ -933,6 +933,13 @@ def is_scheduler_running(request: Request) -> bool:
     return bool(getattr(service, "is_running", False))
 
 
+def is_scheduler_available(request: Request) -> bool:
+    """Native foreground operations or dispatch are ready in this process."""
+    state = getattr(getattr(request, "app", None), "state", None)
+    service = getattr(state, "scheduled_task_service", None)
+    return bool(getattr(service, "is_available", getattr(service, "is_running", False)))
+
+
 def get_mcp_task_repo(request: Request):
     val = getattr(request.app.state, "mcp_task_repo", None)
     if val is None:

@@ -28,7 +28,7 @@ from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
 @pytest.fixture(autouse=True)
 def scheduler_running(monkeypatch):
     """Creation requires this process's poller (409 scheduler_not_running otherwise)."""
-    monkeypatch.setattr(scheduled_tasks, "is_scheduler_running", lambda _request: True)
+    monkeypatch.setattr(scheduled_tasks, "is_scheduler_available", lambda _request: True)
 
 
 @pytest.mark.parametrize(
@@ -1779,7 +1779,7 @@ async def test_pause_of_a_finished_task_is_task_finished(http, terminal):
 
 @pytest.mark.asyncio
 async def test_create_and_duplicate_need_a_running_scheduler_but_validate_first(http, monkeypatch):
-    monkeypatch.setattr(scheduled_tasks, "is_scheduler_running", lambda _request: False)
+    monkeypatch.setattr(scheduled_tasks, "is_scheduler_available", lambda _request: False)
     coded(await http.client.post("/api/scheduled-tasks", json={**_CREATE, "schedule_spec": {"every_seconds": 1}}), 422, "interval_too_short")
     detail = coded(await http.client.post("/api/scheduled-tasks", json=_CREATE), 409, "scheduler_not_running")
     assert "this Gateway process" in detail["message"]

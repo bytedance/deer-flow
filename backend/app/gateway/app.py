@@ -687,6 +687,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     max_concurrent_runs_per_user=startup_config.scheduler.max_concurrent_runs_per_user,
                     queue_timeout_seconds=startup_config.scheduler.queue_timeout_seconds,
                     multi_instance=startup_config.scheduler.multi_instance,
+                    dispatch_enabled=getattr(getattr(app.state, "native_run_admission_host", None), "scheduler_dispatch_enabled", True),
                     run_lease_grace_seconds=startup_config.run_ownership.grace_seconds,
                     connection_repo=notification_connection_repo,
                     notification_repo=scheduled_notification_repo,

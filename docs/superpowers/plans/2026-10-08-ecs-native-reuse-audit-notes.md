@@ -166,3 +166,13 @@ Root frozen-code closure command: backend/.venv/bin/python -m pytest tests/test_
 Cancellation semantics: native goal clear stops the overall goal and invalidates the receipt; native MCP cancel stops one B subtask, permitting its terminal cancellation result to be delivered and the still-active goal to decide next work. Existing scheduled continuation is acknowledged only after durable occurrence association; expired pending admissions use native lease CAS and deferred instance-safe cleanup.
 
 Task5 plan and OpenSpec item checked. Full configured C browser/memory/Scheduler, fork migration/integration, operation scripts, full final backend/blocking gates and later cloud acceptance remain required. Goal/objective is not marked complete. No remote push/cloud operation.
+
+## Task4 configured native Scheduler slice, 2026-10-09
+
+Frozen optional host contract: NativeWorkerHost.scheduler_dispatch_enabled=False selects native ScheduledTaskService foreground-only operation; dispatch_enabled defaults True. Worker retains real native schedule/stop capabilities and completion hooks while control performs recovery, claims and automatic launches. Manual trial/trigger queues the same native occurrence. is_running preserves daemon semantics and is_available expresses foreground readiness; no request authority selects role. UI ingress remains control.
+
+Sole live session 98786: 1 passed / 72.92s. Authenticated once schedule actually launched by native poller, remote C -> ordinary MCP Alpine B -> same-goal C. Assertions cover one occurrence/count, two Runs, goal/budget, physical drain-before-B, one shared 2CPU/4GiB node, B attempt1, native present_files and goal cleanup. Owned runtime and UUID Docker inventory cleaned; sanitized diagnostic directories retained. No recurring/live-self-stop matrix was added.
+
+Frozen native/API/startup/boundary regression: 528 passed, 2 live deselected, 1 existing Starlette/httpx deprecation warning / 17.52s. Exact command in docs/ecs-native-testing.md; /tmp/ecs-native-scheduler-offline.txt stores output only. Root independent actual backend/.venv Scheduler file: 5 passed / 1.95s. Initial command omitted extension PYTHONPATH (4 passed/1 import failure), corrected documented path passed. All 12 changed Python files Ruff lint/format and diff check PASS.
+
+Independent SPEC reviewer PASS by read-only code review, no extra model run. Fresh quality review PASS after read-only review of role selection, start/stop readiness, manual queuing, API/tool gates and native completion. Full Task4 browser/memory and Task6 remain pending; no cloud, fetch/push or integration performed.

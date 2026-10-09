@@ -295,7 +295,7 @@ old containers remain; default provider behavior is unchanged. One native role
 holds a separate NAS node lock, allowing the ordinary B daemon on the same node.
 
 The initial real main acceptance config explicitly enables native bash/file tools
-and disables browser, memory, and scheduler. It proves actual model and isolated
+and disables browser and memory. Its ordinary path leaves Scheduler disabled. It proves actual model and isolated
 native tools, original Run ownership, peer events/checkpoints, and affinity. Full
 configured browser capability remains subject to the native multi-instance gate;
 Native dependency notifications now forward outbound into the same central native
@@ -319,8 +319,8 @@ still required before claiming full remote deployment completion.
 
 The combined local main uses the same owned PostgreSQL/Redis/native HTTP fixture,
 one node and one dynamic slot, actual DeepSeek, Alpine Docker B, native file tools
-and `present_files`. Run `tests/test_ecs_executor_bc_main.py -m live` with the same
-environment below. Scheduler goal/occurrence recovery is covered by focused native
+and `present_files`. Run `tests/test_ecs_executor_bc_main.py::test_real_native_c_mcp_b_same_goal_c`
+with the same environment below to select only the ordinary combined main. Scheduler goal/occurrence recovery is covered by focused native
 runtime and SQL contracts. This is an independent package with explicit optional
 core hooks, rather than a fully portable extension plugin.
 
@@ -337,3 +337,37 @@ original Run/worker owner and native tool calls, verifies container-local warm
 state on a later interactive admission, then requests central cancellation and
 checks physical Docker STOP. It cleans only its own infrastructure. Model secrets
 stay in child environments and are not persisted in the execution snapshot.
+
+### Native Scheduler roles
+
+With `scheduler.enabled: true`, `scheduler.tool_enabled: true`, and
+`scheduler.multi_instance: true` on both native Gateways, control hosts run the
+existing `ScheduledTaskService` poller. Execution-only outbound workers retain
+the same native foreground service and completion hook, but do not recover,
+claim, or launch occurrences. Their trusted host sets
+`scheduler_dispatch_enabled=False`; core defaults to normal dispatch when no
+host supplies this optional contract. Native schedule creation and own-occurrence
+stop tools remain owner-bound. Manual trials/triggers on an execution host enter
+the shared durable occurrence queue for the control poller. Shared Postgres,
+DB run events, ownership heartbeats, and all Scheduler switches remain required.
+Browser/UI ingress remains the control Gateway, whose features report
+`running=true`; execution-only workers report `running=false` and may report
+`tool_enabled=true`. Their foreground APIs/tools do not imply a local poller.
+
+The opt-in `test_real_scheduled_native_c_mcp_b_same_occurrence_goal_c` reuses the
+existing owned live fixture. An authenticated once task is launched automatically
+by the real Scheduler into the original pending native Run, executes on the
+fixed remote C worker, waits for ordinary MCP B, then resumes C with the same
+occurrence and native goal budget. Final native file delivery settles the once
+task with one occurrence/count and clears its goal. Browser/memory and cloud
+acceptance remain separate work.
+
+Run only the actual scheduled main from `backend/` (Docker images and the locked
+backend environment must already exist; credentials are read-only inputs):
+
+```bash
+ECS_NATIVE_LIVE=1 ECS_NATIVE_MODEL_CONFIG=/private/config.yaml \
+  ECS_NATIVE_MODEL_ENV=/private/.env PYTHONPATH=.:packages/ecs-executor \
+  uv run --no-sync pytest \
+  tests/test_ecs_executor_bc_main.py::test_real_scheduled_native_c_mcp_b_same_occurrence_goal_c -q -s
+```

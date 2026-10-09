@@ -644,8 +644,9 @@ async def prepare_scheduler_capability(
         service = get_scheduled_task_service(request)
     except HTTPException:
         return None
-    # A task made while this process's poller is off would never run on schedule.
-    if getattr(service, "is_running", False) is not True:
+    # Trusted execution-only hosts keep foreground operations available while
+    # a control host drains the same durable native queue.
+    if getattr(service, "is_available", getattr(service, "is_running", False)) is not True:
         return None
     mode = interaction_policy.mode
     task_id = occurrence_id = None
