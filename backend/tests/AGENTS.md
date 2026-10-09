@@ -188,3 +188,21 @@ assignment. Use offline transports. Detection is not behavioral defense; do not 
 the final model input from an isolated hook test. `test_jev_screening_policy.py` uses
 the host descriptor builder to pin policy identity; hash endpoint/prompt text and
 never project credential values.
+
+## Deploy home permission tests
+
+`test_deploy_home_writability.py` covers the production deploy permission
+preflight. It runs the complete script with a recording Docker stub and
+isolated runtime paths. Permission cases remove directory write bits or secret
+file read bits and restore them during teardown; they skip on Windows, as root,
+or when the filesystem does not enforce those bits. Cover both persisted
+secrets, shell/Compose dotenv overrides, readable read-only secrets, and teardown
+without secret exports. `down` must not probe, read, or generate secrets.
+Writable-directory cases remain portable.
+
+## Workspace text cache
+
+`test_scanner_text_cache_atomic.py` verifies complete publication and preservation
+of an existing entry on failure. A cleanup failure must preserve the original
+publish exception, including interruption. Import the scanner during fixture
+setup, after the autouse fixtures initialize runtime, to avoid the package cycle.

@@ -135,7 +135,7 @@ they resolve from the `secrets` map):
 
 ```yaml
 config: |
-  config_version: 55
+  config_version: 57
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI
@@ -307,6 +307,17 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   `persistence.home.accessMode: ReadWriteMany` on multi-node clusters (thread
   uploads, outputs, memory and `extensions_config.json` live on that volume)
   and `agent_storage.backend: db` so custom agents are visible on every Pod.
+  Memory itself is multi-instance safe on that volume (per-user file locks,
+  journaled writes, and a Pod re-syncs a user's search index on its next
+  search after a peer writes), but DeerMem's derived SQLite FTS5 index is
+  not: SQLite WAL is unsupported on network filesystems, every Pod start would
+  rebuild a shared index under its peers, and one Pod's corruption recovery
+  would delete it from under them. The default `config` therefore sets
+  `memory.backend_config.retrieval_index_path: /var/lib/deerflow/memory-index`,
+  a Pod-local `emptyDir` the gateway Deployment mounts; keep that line when you
+  override `config:` — a multi-instance gateway that leaves the index under
+  the memory root logs a warning at startup. The index is rebuilt from the
+  Markdown facts on every Pod start, so losing the emptyDir loses nothing.
   A `PodDisruptionBudget` (`minAvailable: 1`) is rendered automatically for a
   multi-instance gateway (same rule), and the rollout strategy is
   surge-then-drain (`maxSurge: 1`, `maxUnavailable: 0`).

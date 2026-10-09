@@ -694,6 +694,12 @@
 
 ### 修复
 
+- **调度器：** 在一次性任务的执行时间之前点击“立即运行一次”，不会再取消原定的执行。此前这次试运行被当作任务本身的
+  执行：任务被标记为 `running`，试运行结束后又按其结果把任务终结为 `completed`、`failed` 或 `cancelled`。轮询器只认领
+  `enabled` 的任务，因此到了 `run_at` 也不会执行，尽管 `next_run_at` 仍显示该时间。现在在执行时间之前启动的试运行
+  不会改变任务的状态和 `next_run_at`，与周期任务的试运行一致，其结果只记录在试运行自己的运行记录上。执行时间已过之后
+  的试运行仍算作任务本身的执行。若试运行的启动记录在轮询器认领已到期的任务之后才写入，也不会再清除该认领的租约；此前这会让
+  该认领的入队失败，任务停留在 `running` 且没有任何待执行的运行。([#6512])
 - **技能：** `/技能名` 激活现在在模型调用重试时不再丢失。此前激活在调用模型之前就被标记为已完成，因此调用失败
   （限流、过载、超时）或返回空响应而重试时，重试请求不再包含 `SKILL.md` 正文，而该技能的工具限制仍然生效。现在重试
   会携带与首次尝试相同的激活内容，不会重新读取技能或重复记录激活，重试得到的响应也保留技能使用记录。([#6506])
@@ -724,6 +730,10 @@
   同步检查点保存器定义了异步方法，但调用时会抛出 `NotImplementedError`，而目标读写只要异步方法存在就会调用它，因此
   `/goal` 只会显示 "Could not set goal."，`get_goal`/`set_goal`/`clear_goal` 则直接抛出异常。现在目标读写在这类保存器上
   会改用同步方法。Web UI 不受影响。([#6448])
+- **community：** Browserless 的 `web_fetch` 提供方现在可以通过认证。此前它把配置的令牌放在 `/content` 请求的 JSON 正文里，
+  而 Browserless 只从 `token` 查询参数或 `Authorization` 请求头读取令牌，并在读取正文之前完成校验。按照配置指南设置
+  `BROWSERLESS_TOKEN` 后，每次 `web_fetch` 都返回 `Browserless HTTP 401`（对未设置 `TOKEN` 启动的实例则因正文模式拒绝
+  未知字段而返回 HTTP 400），而使用同一令牌的 `web_capture` 正常工作。现在两个工具都以查询参数发送令牌。([#6484])
 - **mcp：** 配置了 `task_toolsets` 的 MCP 服务器在工具发现时无法连接或超时，不再导致所有 MCP 工具丢失。此前发现阶段以空
   工具列表跳过失败的服务器，随后任务工具集检查把它的 submit、status、cancel 工具报告为缺失，抛出的错误连同所有正常服务器
   的工具一起丢弃；由于缓存从未发布，每次构建智能体都会重新发现全部服务器，重启 stdio 服务器并重新请求 OAuth 令牌。现在发现
@@ -7531,4 +7541,6 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6448]: https://github.com/bytedance/deer-flow/pull/6448
 [#6450]: https://github.com/bytedance/deer-flow/pull/6450
 [#6481]: https://github.com/bytedance/deer-flow/pull/6481
+[#6484]: https://github.com/bytedance/deer-flow/pull/6484
 [#6506]: https://github.com/bytedance/deer-flow/pull/6506
+[#6512]: https://github.com/bytedance/deer-flow/pull/6512
