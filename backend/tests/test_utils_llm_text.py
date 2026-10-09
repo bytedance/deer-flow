@@ -8,9 +8,27 @@ import pytest
 
 from deerflow.utils.llm_text import (
     extract_response_text,
+    strip_leading_think_blocks,
     strip_markdown_code_fence,
     strip_think_blocks,
 )
+
+
+@pytest.mark.parametrize("cleaner", [strip_think_blocks, strip_leading_think_blocks])
+@pytest.mark.parametrize("tag", ['<think note=">"/>', "<think note='>'/>", '<THINK note="a > b" />'])
+def test_self_closing_think_attributes_preserve_answer(cleaner, tag):
+    assert cleaner(tag + '{"answer":"yes"}') == '{"answer":"yes"}'
+
+
+@pytest.mark.parametrize("cleaner", [strip_think_blocks, strip_leading_think_blocks])
+def test_quoted_slash_angle_is_not_a_self_closing_tag(cleaner):
+    assert cleaner('<think note="/>">reasoning</think>answer') == "answer"
+
+
+@pytest.mark.parametrize("cleaner", [strip_think_blocks, strip_leading_think_blocks])
+def test_many_quoted_delimiters_in_empty_think_tag(cleaner):
+    assert cleaner('<think note="' + ">" * 100000 + '"/>answer') == "answer"
+
 
 # ---------------------------------------------------------------------------
 # strip_think_blocks
