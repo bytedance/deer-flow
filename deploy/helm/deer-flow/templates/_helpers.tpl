@@ -99,7 +99,12 @@ imagePullSecrets:
      named in the error). `int` on "50%" is 0 -- a budget that protects
      nothing -- so a YAML number renders as an integer, a digit string from
      --set-string becomes that integer, a percentage is preserved quoted, and
-     0, "0%", more than 100% or anything else fails the render. */}}
+     0, "0%", more than 100% or anything else fails the render. Anything that
+     is not a plain Go number is normalized with toString before the string
+     branches: Helm 3.18.0 loads YAML numbers as json.Number, whose kind is
+     "string" but which regexMatch and friends reject at argument validation,
+     so the unoverridden default would otherwise fail every multi-replica
+     render on that release. */}}
 {{- define "deer-flow.pdbMinAvailable" -}}
 {{- $raw := .value -}}
 {{- if kindIs "invalid" $raw -}}{{- $raw = 1 -}}{{- end -}}
@@ -107,19 +112,18 @@ imagePullSecrets:
 {{- if or (kindIs "float64" $raw) (kindIs "int64" $raw) (kindIs "int" $raw) -}}
 {{- if or (lt (int $raw) 1) (ne (float64 (int $raw)) (float64 $raw)) -}}{{- fail $hint -}}{{- end -}}
 {{- int $raw -}}
-{{- else if kindIs "string" $raw -}}
-{{- if regexMatch "^[0-9]+$" $raw -}}
-{{- if lt (atoi $raw) 1 -}}{{- fail $hint -}}{{- end -}}
-{{- atoi $raw -}}
-{{- else if regexMatch "^[0-9]+%$" $raw -}}
-{{- $percent := atoi (trimSuffix "%" $raw) -}}
+{{- else -}}
+{{- $text := toString $raw -}}
+{{- if regexMatch "^[0-9]+$" $text -}}
+{{- if lt (atoi $text) 1 -}}{{- fail $hint -}}{{- end -}}
+{{- atoi $text -}}
+{{- else if regexMatch "^[0-9]+%$" $text -}}
+{{- $percent := atoi (trimSuffix "%" $text) -}}
 {{- if or (lt $percent 1) (gt $percent 100) -}}{{- fail $hint -}}{{- end -}}
-{{- $raw | quote -}}
+{{- $text | quote -}}
 {{- else -}}
 {{- fail $hint -}}
 {{- end -}}
-{{- else -}}
-{{- fail $hint -}}
 {{- end -}}
 {{- end -}}
 

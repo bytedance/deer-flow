@@ -175,17 +175,36 @@ def test_both_budgets_render_min_available_through_the_shared_helper(component: 
     assert "default 1" not in template, "the fallback lives in the helper so both budgets share it"
 
 
-def test_min_available_helper_preserves_percentages_and_fails_on_zero() -> None:
+def _helper_block() -> str:
     helpers = HELPERS_TEMPLATE.read_text(encoding="utf-8")
     start = helpers.index('{{- define "deer-flow.pdbMinAvailable" -}}')
     end = helpers.find("{{- define ", start + 1)
-    helper = helpers[start:] if end == -1 else helpers[start:end]
+    return helpers[start:] if end == -1 else helpers[start:end]
+
+
+def test_min_available_helper_preserves_percentages_and_fails_on_zero() -> None:
+    helper = _helper_block()
     assert 'regexMatch "^[0-9]+%$"' in helper, "a percentage is preserved, not cast"
     assert 'regexMatch "^[0-9]+$"' in helper, "a digit string from --set-string becomes an integer"
     assert "quote" in helper, "the percentage must stay a YAML string"
     assert "fail" in helper, "zero and unsupported values refuse to render instead of yielding 0"
     assert 'kindIs "invalid"' in helper, "an unset value still falls back to 1"
     assert re.search(r"\|\s*int\s*-?\}\}", helper) is None, "no branch may pipe the raw value through int"
+
+
+def test_min_available_helper_normalizes_named_numbers_before_string_functions() -> None:
+    """Helm 3.18.0 loads YAML numbers as ``json.Number``: its kind is "string", so a ``kindIs "string"``
+    gate lets it through, but ``regexMatch`` and the other string-typed functions reject it at argument
+    validation -- and the unoverridden default ``minAvailable: 1`` then fails every multi-replica render."""
+    helper = _helper_block()
+    assert "$text := toString $raw" in helper, "whatever is not a plain Go number is normalized into a plain string first"
+    assert 'kindIs "string"' not in helper, "json.Number passes a kind gate without being a plain string"
+    string_calls = [line for line in helper.splitlines() if re.search(r"\b(regexMatch|atoi|trimSuffix|quote)\b", line)]
+    assert string_calls, "the digit and percentage branches must still exist"
+    for line in string_calls:
+        assert "$raw" not in line, f"string-typed function applied to the raw value: {line.strip()}"
+        assert "$text" in line, f"string-typed function must take the normalized value: {line.strip()}"
+    assert re.search(r"printf .*\(got %v\).*\$raw", helper), "the hint still shows the raw value the operator supplied"
 
 
 def test_operator_notes_document_the_provisioner_replicas() -> None:
@@ -225,6 +244,8 @@ def test_rendered_provisioner_follows_the_replica_count(replicas: int) -> None:
     assert (pdb is not None) is (replicas > 1), "a budget of 1 on a single replica would block every node drain"
     assert _find(documents, "PodDisruptionBudget", "-gateway") is None, "the gateway stays at one replica in this render"
     if pdb is not None:
+        # Also a Helm 3.18.0 json.Number regression guard for the unoverridden YAML default; the
+        # explicit gateway + provisioner case is test_rendered_budget_keeps_the_unoverridden_default.
         assert pdb["spec"]["minAvailable"] == values["podDisruptionBudget"]["minAvailable"]
         assert pdb["spec"]["selector"]["matchLabels"] == deployment["spec"]["selector"]["matchLabels"]
         assert pdb["spec"]["selector"]["matchLabels"] == deployment["spec"]["template"]["metadata"]["labels"]
@@ -256,6 +277,15 @@ def test_provisioner_budget_can_be_disabled_independently() -> None:
     documents = _render_chart("provisioner.replicas=2", "provisioner.podDisruptionBudget.enabled=false")
     assert _by_kind(documents, "Deployment", "-provisioner")["spec"]["replicas"] == 2
     assert _find(documents, "PodDisruptionBudget", "-provisioner") is None
+
+
+@pytest.mark.parametrize("component", sorted(PDB_TEMPLATES))
+def test_rendered_budget_keeps_the_unoverridden_default(component: str) -> None:
+    """Helm 3.18.0 json.Number regression guard: with only the replica count set, the chart's own
+    ``minAvailable: 1`` must render as the integer 1 -- that release loads YAML numbers as a named
+    string type that string-typed template functions reject unless the helper normalizes it first."""
+    documents = _render("--set", f"{component}.replicas=2")
+    assert _by_kind(documents, "PodDisruptionBudget", f"-{component}")["spec"]["minAvailable"] == 1
 
 
 @pytest.mark.parametrize("component", sorted(PDB_TEMPLATES))
