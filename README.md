@@ -315,6 +315,8 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
 
    OpenRouter and similar OpenAI-compatible gateways should be configured with `langchain_openai:ChatOpenAI` plus `base_url`. If you prefer a provider-specific environment variable name, point `api_key` at that variable explicitly (for example `api_key: $OPENROUTER_API_KEY`).
 
+   The `write_file` tool's output-budget hint uses the active model's effective `max_tokens`. Missing or unusable limits, including YAML `.inf`, `-.inf`, `.nan`, and values too large for the character estimate, omit this hint without failing tool assembly; provider-specific model validation still applies.
+
    To route OpenAI models through `/v1/responses`, keep using `langchain_openai:ChatOpenAI` and set `use_responses_api: true` with `output_version: responses/v1`.
 
    Models whose provider contract differs from DeerFlow's generic thinking/effort assumptions can declare a per-model mapping-valued `reasoning:` block (thinking `unsupported`/`optional`/`required`, the accepted effort values with aliases and a default, the payload dialect, and the reasoning-history requirement). The setup wizard's Z.AI GLM-5.3-Flash profile uses it: thinking stays on for every foreground and background call, and the effort selector offers the model's own `low`/`high`/`max` levels. Ollama's existing boolean `reasoning: true` remains a native provider setting and is forwarded to ChatOllama. When migrating a profile to a custom effort `path`, remove any old `reasoning_effort` setting from the profile and thinking templates; configuration validation rejects the leftover key. The chat UI drops a remembered provider-specific effort when switching to a legacy model that does not advertise it. Profiles without the block keep their existing provider behavior. See `config.example.yaml` for the shape and the equivalent manual configuration.
@@ -545,6 +547,20 @@ currently use, run `git pull --ff-only`, then start the same mode again. Do not 
 version requires configuration changes, run `make config-upgrade` before restarting.
 See [Operations and Troubleshooting](frontend/src/content/en/application/operations-and-troubleshooting.mdx#upgrading-an-existing-checkout)
 for the commands for each mode.
+
+When rolling out the resume-command idempotency fix across multiple Gateway
+workers or Pods, route **all keyed resume submissions and retries** (`command.resume`
+with `Idempotency-Key`, on thread-scoped `/runs`, `/runs/stream`, or `/runs/wait`)
+only to upgraded workers until every worker serving these endpoints is upgraded.
+Older workers ignore the private resume identity and compare only `input`: with
+`input: null`, retrying `deny` can incorrectly reuse an earlier `approve` run.
+If the load balancer cannot isolate upgraded workers, pause keyed resume traffic
+until the rollout finishes, or stop all old workers before restarting on the new
+version. The additive database migration keeps old run-history readers compatible;
+it does not make old workers safe for resume admission. An upgraded worker returns
+409 when retrying an identity-less legacy resume run, even for the same decision;
+inspect that run and the current thread state before deciding to submit a new
+action. See the [run API contract](backend/docs/API.md#create-run).
 
 #### Option 2: Local Development
 
@@ -850,6 +866,11 @@ DeerFlow can also expose user-owned IM channel connections in the workspace UI. 
 | QQ | WebSocket (text-only C2C and group @mentions; four/five passive replies per source) | Moderate |
 | DingTalk | Stream Push (WebSocket) | Moderate |
 | Buzz | Nostr relay (WebSocket, NIP-42) | Moderate |
+
+Attachments saved by the shared IM ingestion pipeline or Feishu/DingTalk's
+embedded downloads keep distinct filenames, including when concurrent uploads
+choose the same name. The final filename is passed to the agent and used for
+sandbox sync; an existing conversation file is not overwritten.
 
 **Configuration in `config.yaml`:**
 
@@ -1752,7 +1773,7 @@ Rebuild with `make up` after changing the managed extension set. See
 
 Gateway-generated follow-up suggestions now normalize both plain-string model output and block/list-style rich content before parsing the JSON array response, so provider-specific content wrappers do not silently drop suggestions.
 
-Backend response cleanup preserves unrelated tag names such as `<think-tank>` and `<think:note>` in follow-up suggestions and polished drafts; only the exact `<think>` name (optionally followed by attributes) starts a reasoning block. Self-closing `<think/>` and `<think />` tags are empty reasoning blocks and leave the following answer intact.
+Backend response cleanup preserves unrelated tag names such as `<think-tank>` and `<think:note>` in follow-up suggestions and polished drafts; only the exact `<think>` name (optionally followed by attributes) starts a reasoning block. Self-closing `<think/>` and `<think />` tags are empty reasoning blocks and leave the following answer intact. Delimiters inside quoted attributes, such as `<think note=">"/>`, also leave the following answer intact.
 
 The Web UI composer can polish draft input before sending. The rewrite runs as a short Gateway LLM request using the `input_polish` model configuration, keeps slash skill prefixes such as `/data-analysis`, and only replaces the local draft after the user clicks the polish button; it does not create a thread run or persist a message.
 
@@ -2108,7 +2129,10 @@ Each task gets its own execution environment with a full filesystem view — ski
 
 The read-before-write gate ties each read mark to that `read_file` call's result, including custom tools returning multi-message `Command` updates. An unrelated result cannot authorize a write after a failed read or hide a successful read.
 
+Concurrent reads and writes to the same file share a gate across synchronous and asynchronous tool calls. Async callers waiting for that gate do not occupy worker threads needed to finish the current read or write. Cancelling a waiting call leaves the current operation running; a call that already started file inspection still waits for that work to finish before releasing its gate.
+
 The built-in `grep` tool searches either one text file or all matching text files below a directory, so an agent can search an uploaded document directly without first broadening the request to the entire uploads directory.
+E2B's `glob` filter preserves spaces, quotes, and dollar signs in filename patterns, while wildcard matching and root-relative directory scoping remain unchanged.
 
 Remote `ls` excludes ignored descendants before applying its 500-entry listing limit, so dependency and build trees do not crowd out visible files. Explicitly listing an ignored directory still lists its contents; normal depth and output limits remain in effect.
 
@@ -2232,6 +2256,11 @@ or promotion to the shelf; an older shelf document with a reserved name
 remains downloadable but cannot be attached directly. Download it, rename it,
 and upload it to the thread. This change does not recover or migrate older
 thread uploads that already match the staging pattern.
+
+Upload listings remain available during concurrent cleanup: removed files are
+omitted, and if the upload directory disappears or is replaced by a file, the
+listing returns any entries already collected. Permission and other operational
+errors still surface.
 
 This is the difference between a chatbot with tool access and an agent with an actual execution environment.
 
