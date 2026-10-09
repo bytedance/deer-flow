@@ -698,6 +698,16 @@
   两者合成一行无法解析；被截断的多字节字符还会让整个文件解码失败，所有完好记录都读不出来，序号恢复也随之失效。现在追加前
   若文件末尾不是换行会先补一个分隔符，读取时逐个物理行单独解码、只跳过损坏的那一行，批量追加失败时仍会截回原始大小。
   ([#6520])
+- **渠道：** 在启用 Gateway 认证（默认配置）时，从 IM 渠道发送的 `/goal <目标>` 和
+  `/goal clear` 恢复正常。此前这两个写请求只携带内部认证令牌，而 Gateway 的 CSRF 检查不会
+  豁免内部认证，因此返回 403，渠道回复“Failed to set goal.”或“Failed to clear goal.”。
+  现在它们会发送与渠道 SDK 客户端相同的 CSRF Cookie 和请求头。`/goal` 状态查询不受影响。([#6537])
+- **认证：** 在 Docker 部署中，某个客户端输错 5 次密码不会再让所有用户 5 分钟内无法登录。登录失败按客户端 IP 计数，而 Gateway
+  只在 TCP peer 属于 `AUTH_TRUSTED_PROXIES` 时信任 `X-Real-IP`，compose 文件却从未设置该变量；所有浏览器请求都经由 `nginx`
+  容器到达 Gateway，因此所有登录共用 nginx 的地址和同一个锁定。现在 `AUTH_TRUSTED_PROXIES` 也接受主机名，在事件循环外解析并
+  缓存 10 秒（包括解析失败），两个 compose 文件默认将其设为内置的 `nginx` 服务。nginx 在每个转发到 Gateway 的路由上都用
+  `$remote_addr` 覆盖 `X-Real-IP`，客户端无法自选地址。`.env` 中设置的 `AUTH_TRUSTED_PROXIES` 仍然优先，`make docker-start` 也是如此：它现在会像代理变量一样导出该值供 Compose 插值。位于其他反向代理之后的
+  部署还需要为该代理配置 nginx 的 `real_ip` 模块，详见 `.env.example`。([#6519])
 - **调度器：** 在一次性任务的执行时间之前点击“立即运行一次”，不会再取消原定的执行。此前这次试运行被当作任务本身的
   执行：任务被标记为 `running`，试运行结束后又按其结果把任务终结为 `completed`、`failed` 或 `cancelled`。轮询器只认领
   `enabled` 的任务，因此到了 `run_at` 也不会执行，尽管 `next_run_at` 仍显示该时间。现在在执行时间之前启动的试运行
@@ -7548,4 +7558,6 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6484]: https://github.com/bytedance/deer-flow/pull/6484
 [#6506]: https://github.com/bytedance/deer-flow/pull/6506
 [#6512]: https://github.com/bytedance/deer-flow/pull/6512
+[#6519]: https://github.com/bytedance/deer-flow/pull/6519
 [#6520]: https://github.com/bytedance/deer-flow/pull/6520
+[#6537]: https://github.com/bytedance/deer-flow/pull/6537
