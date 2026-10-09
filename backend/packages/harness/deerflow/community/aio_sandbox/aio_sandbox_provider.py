@@ -2518,10 +2518,15 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                         if not isinstance(current, SandboxInfo) or current.sandbox_id != sandbox_id:
                             raise RuntimeError(f"Runtime inspection returned invalid identity for sandbox {sandbox_id}")
                         # A replacement can share the logical ID while its Service
-                        # is still unavailable. Retain the old records without
-                        # stopping that unquarantined runtime; create can repair
-                        # its endpoint and validate the actual provisioning mode.
+                        # is still unavailable. Do not stop that unquarantined
+                        # runtime; create can repair its endpoint and validate the
+                        # actual provisioning mode. The replacement itself proves
+                        # the fenced generations are absent (logical IDs are unique
+                        # per Pod/container), so prune only those stale records —
+                        # a full retire() would also wipe a fence a peer may have
+                        # just written for this live generation.
                         if not store.contains(current):
+                            store.retire_replaced_generations(current)
                             return
                         # Inspection recovers runtime identity, but replacement
                         # cleanup must also remove its previous policy resources.
@@ -2788,7 +2793,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         logger.info(f"Released sandbox {sandbox_id} to warm pool (container still running)")
 
-    def destroy(self, sandbox_id: str) -> None:
+    def destroy(self, sandbox_id: str) -> bool:
         """Destroy a sandbox: stop the container and free all resources.
 
         Unlike release(), this actually stops the container.  Use this for
@@ -2800,8 +2805,14 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         Args:
             sandbox_id: The ID of the sandbox to destroy.
+
+        Returns:
+            True when the container was destroyed. False when teardown was
+            deferred because an execution/upload holder or a peer teardown is
+            still active — the sandbox stays tracked and the deferred destroy
+            is retried by the release/idle paths once the holders drain.
         """
-        self._destroy_tracked(sandbox_id, still_reapable=lambda: True)
+        return self._destroy_tracked(sandbox_id, still_reapable=lambda: True)
 
     def _destroy_tracked(self, sandbox_id: str, *, still_reapable: Callable[[], bool], force: bool = False) -> bool:
         """``destroy()`` with a caller-supplied "is this still reapable" gate.

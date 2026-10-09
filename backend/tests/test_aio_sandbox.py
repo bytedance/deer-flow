@@ -119,6 +119,17 @@ def test_lark_cli_broker_defaults_to_unverified(sandbox):
     assert sandbox.lark_cli_broker is None
 
 
+def test_sandbox_info_from_dict_keeps_missing_broker_attestation_unverified():
+    """A legacy record without the field must rehydrate as unverified (None),
+    never as attested non-broker — otherwise a future persistence path would
+    silently undo the fail-closed contract (#6436 review)."""
+    from deerflow.community.aio_sandbox.sandbox_info import SandboxInfo
+
+    info = SandboxInfo.from_dict({"sandbox_id": "s", "sandbox_url": "http://x"})
+    assert info.lark_cli_broker is None
+    assert SandboxInfo.from_dict({"sandbox_id": "s", "sandbox_url": "http://x", "lark_cli_broker": False}).lark_cli_broker is False
+
+
 def test_exec_command_appends_exit_marker_when_failure_has_output(sandbox):
     """The legacy exec path must propagate the structured exit_code into the
     output text (LocalSandbox parity) instead of discarding it."""

@@ -2193,6 +2193,35 @@ def test_absent_teardown_removes_leftover_networks_and_allows_restricted_creatio
     assert backend._start_restricted_sandbox("existing", "sandbox-existing", 18080, None, config_mount_exclusion_root=None, relay_token="token") == "replacement-generation"
 
 
+@pytest.mark.parametrize(
+    "stderr, absent",
+    [
+        ("Error response from daemon: network sandbox-net-x not found", True),
+        ("error: network sandbox-net-x not found", True),  # Docker 29 lowercase
+        ("Error: No such network: sandbox-net-x", True),
+        # A different network's absence, a context failure, or a lookalike
+        # must raise instead of reading as absent.
+        ("Error response from daemon: network sandbox-net-x-extra not found", False),
+        ('context "sandbox-net-x": context not found', False),
+        ("command not found: docker network inspect", False),
+    ],
+)
+def test_inspect_network_uses_strict_missing_network_parser(monkeypatch, stderr, absent):
+    """The non-strict inspect path shares the strict parser: context-name
+    collisions and wrong-target errors raise instead of reading as absent."""
+    backend = _restricted_backend()
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *a, **k: SimpleNamespace(stdout="[]", stderr=stderr, returncode=1),
+    )
+
+    if absent:
+        assert backend._inspect_network("sandbox-net-x") is None
+    else:
+        with pytest.raises(RuntimeError):
+            backend._inspect_network("sandbox-net-x")
+
+
 @pytest.mark.parametrize("error_kind", ["context", "wrong-target", "wrong-target-lowercase", "case-drift", "active-endpoint", "prefix", "suffix", "mixed-stderr", "empty"])
 def test_absent_teardown_preserves_pending_port_on_unknown_network_cleanup_error(monkeypatch, error_kind):
     backend = _restricted_backend()

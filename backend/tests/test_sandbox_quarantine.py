@@ -61,3 +61,32 @@ def test_retired_quarantine_allows_replacements_without_generation(tmp_path):
     assert not restarted.contains(old)
     assert not restarted.contains(SandboxInfo(old.sandbox_id, old.sandbox_url, container_id="new-generation"))
     assert restarted.contains(other)
+
+
+def test_retire_replaced_generations_drops_only_absent_fences(tmp_path):
+    """A live replacement proves the fenced old generation is gone; its record
+    is pruned while the live generation's own fence survives."""
+    store = SandboxQuarantine(tmp_path, "provisioner")
+    old = SandboxInfo("thread-sandbox", "http://sandbox", container_id="old-generation")
+    live = SandboxInfo("thread-sandbox", "http://sandbox", container_id="new-generation")
+    store.mark(old)
+    directory = tmp_path / store._key("provisioner") / store._key("thread-sandbox")
+
+    store.retire_replaced_generations(live)
+
+    assert not store.contains(old)
+    assert not directory.exists()  # fully pruned, no stale record strands future creates
+    directory.mkdir()  # a peer fences the live generation mid-flight
+    directory.joinpath(store._key("new-generation")).touch()
+    store.retire_replaced_generations(live)
+    assert store.contains(live)
+
+
+def test_retire_replaced_generations_keeps_unversioned_crash_fence(tmp_path):
+    store = SandboxQuarantine(tmp_path, "provisioner")
+    store.mark(SandboxInfo("thread-sandbox", "http://sandbox"))  # container_id-less mark → "unknown"
+    directory = tmp_path / store._key("provisioner") / store._key("thread-sandbox")
+
+    store.retire_replaced_generations(SandboxInfo("thread-sandbox", "http://sandbox", container_id="new-generation"))
+
+    assert (directory / "unknown").exists()

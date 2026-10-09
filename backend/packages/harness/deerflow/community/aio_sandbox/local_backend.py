@@ -789,8 +789,7 @@ class LocalContainerBackend(SandboxBackend):
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
             raise RuntimeError(f"Failed to inspect restricted sandbox network {network_name}") from exc
         if result.returncode != 0:
-            stderr = (result.stderr or "").lower()
-            if "not found" in stderr and (network_name.lower() in stderr or "network" in stderr):
+            if _is_no_such_network_error(result.stderr or "", network_name):
                 return None
             raise RuntimeError(f"Failed to inspect restricted sandbox network {network_name}: {(result.stderr or '').strip()}")
         try:

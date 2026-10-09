@@ -81,6 +81,9 @@ LARK_CLI_BROKER_IMAGE = os.environ.get("LARK_CLI_BROKER_IMAGE", "")
 # capability observation for this endpoint. Keep in sync with
 # deerflow.integrations.lark_cli.PROVISIONER_CAPABILITY_REFRESH_HEADER.
 CAPABILITY_REFRESH_HEADER = "X-DeerFlow-Capability-Refresh"
+# Marker value for lark broker capability changes. Keep in sync with
+# deerflow.integrations.lark_cli.PROVISIONER_CAPABILITY_REFRESH_LARK_BROKER.
+CAPABILITY_REFRESH_LARK_BROKER = "lark-broker"
 # Optional comma-separated lark-cli subcommand denylist forwarded to the broker
 # sidecar (issue #4338 hardening). Empty ⇒ no subcommand is blocked. See the
 # broker README's "subcommand denylist" section.
@@ -292,7 +295,7 @@ def _validate_lark_provisioning_request(runtime: bool, broker: bool) -> None:
     # Both conflicts mean the Gateway's cached capability observation no longer
     # matches this deployment's configuration; the marker tells it to re-probe
     # on the next acquire instead of repeating the failure for the cache TTL.
-    conflict_headers = {CAPABILITY_REFRESH_HEADER: "lark-broker"}
+    conflict_headers = {CAPABILITY_REFRESH_HEADER: CAPABILITY_REFRESH_LARK_BROKER}
     if broker and not LARK_CLI_BROKER_IMAGE:
         raise HTTPException(
             status_code=503,
@@ -1213,9 +1216,15 @@ def _sandbox_response(
             detail="Existing sandbox shell capacity is below the requested value; replacement must be coordinated by the Gateway",
         )
     if required_broker is not None and broker is not required_broker:
+        # Post-build conflicts (idempotent re-create, attestation drift,
+        # post-create verification) reach the Gateway through the same 409
+        # handling as the pre-build validation, so they must carry the
+        # capability-refresh marker too — otherwise a broker-mode deploy
+        # change lives out the Gateway's cache TTL instead of re-probing.
         raise HTTPException(
             status_code=409,
             detail="Existing sandbox has an incompatible Lark broker mode; replacement must be coordinated by the Gateway",
+            headers={CAPABILITY_REFRESH_HEADER: CAPABILITY_REFRESH_LARK_BROKER},
         )
     metadata = getattr(pod, "metadata", None)
     status = "Terminating" if getattr(metadata, "deletion_timestamp", None) else pod.status.phase or "Unknown"

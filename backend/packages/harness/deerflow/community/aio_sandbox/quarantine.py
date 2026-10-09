@@ -63,6 +63,31 @@ class SandboxQuarantine:
             # check and the listing: the fence is gone, exactly as _exists reports.
             return False
 
+    def retire_replaced_generations(self, current: SandboxInfo) -> None:
+        """Drop fences a live replacement proves absent; never the live one.
+
+        An observed runtime under the same logical ID with a *different*
+        generation proves the fenced generations are gone (K8s Pod names and
+        Docker container names are unique per logical ID). Their records are
+        unreferenced garbage that would otherwise keep every future create on
+        the inspect-and-defer path. The live generation's own record — and an
+        unversioned ``unknown`` crash fence — are kept: deleting those could
+        silently drop a fence a peer has just written.
+        """
+        directory = self._directory(current)
+        if not self._exists(directory):
+            return
+        keep = self._key(current.container_id) if current.container_id else None
+        for record in directory.iterdir():
+            if record.name == "unknown" or (keep is not None and record.name == keep):
+                continue
+            record.unlink()
+        try:
+            directory.rmdir()
+        except OSError:
+            # A live or freshly fenced generation still has its record.
+            pass
+
     def retire(self, info: SandboxInfo) -> None:
         """Remove fences only after the caller proves the logical ID is absent.
 

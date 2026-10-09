@@ -66,6 +66,51 @@ def test_sandbox_response_rejects_terminating_pod_when_create_requirements_prese
     assert "terminating" in error.value.detail
 
 
+def test_sandbox_response_broker_conflict_carries_capability_refresh_marker(monkeypatch, provisioner_module):
+    """A post-build broker-mode 409 must also tell the Gateway to drop its cached
+    capability observation, or the change lives out the negative cache TTL."""
+    core = MagicMock()
+    core.read_namespaced_pod.return_value = _pod(broker=False)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module._sandbox_response("sandbox-1", "http://sandbox", required_broker=True)
+
+    assert error.value.status_code == 409
+    assert error.value.headers[provisioner_module.CAPABILITY_REFRESH_HEADER] == provisioner_module.CAPABILITY_REFRESH_LARK_BROKER
+
+
+@pytest.mark.parametrize("broker", [False, True])
+def test_sandbox_response_attests_pattern_a_and_b_modes(monkeypatch, provisioner_module, broker):
+    """Pod observation attests both real layouts: Pattern A (init image only)
+    reads attested non-broker; Pattern B (shim + sidecar) reads broker."""
+    if broker:
+        pod = _pod(broker=True)
+    else:
+        # Pattern A: the init container is `lark-cli-init` (not the broker's
+        # shim-init), no sidecar, credentials mounted on the sandbox container.
+        pod = SimpleNamespace(
+            metadata=SimpleNamespace(uid="pod-generation", deletion_timestamp=None),
+            status=SimpleNamespace(phase="Running"),
+            spec=SimpleNamespace(
+                containers=[
+                    SimpleNamespace(
+                        name="sandbox",
+                        volume_mounts=[SimpleNamespace(mount_path=f"{provisioner_module.LARK_CLI_CONFIG_CONTAINER_PATH}/u")],
+                    )
+                ],
+                init_containers=[SimpleNamespace(name="lark-cli-init")],
+            ),
+        )
+    core = MagicMock()
+    core.read_namespaced_pod.return_value = pod
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+
+    response = provisioner_module._sandbox_response("sandbox-1", "http://sandbox", required_broker=broker)
+
+    assert response.lark_cli_broker is broker
+
+
 def test_sandbox_response_reports_terminating_status_without_requirements(monkeypatch, provisioner_module):
     """get/list pass no requirements: the phase is data, not an error."""
     core = MagicMock()

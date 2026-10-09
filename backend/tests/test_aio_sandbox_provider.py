@@ -2316,7 +2316,10 @@ async def test_old_quarantine_does_not_destroy_replacement_when_endpoint_is_miss
     assert acquired == old.sandbox_id
     provider._backend.destroy.assert_not_called()
     assert provider._sandbox_infos[acquired] is replacement
-    assert provider._quarantine_store().contains(old)
+    # The live replacement proves the fenced old generation is absent, so its
+    # stale record is pruned instead of stranding every future create on the
+    # inspect-and-defer path. The replacement itself stays unfenced.
+    assert not provider._quarantine_store().contains(old)
     assert not provider._quarantine_store().contains(replacement)
     provider._backend.complete_absent_teardown.assert_not_called()
 
@@ -2991,6 +2994,42 @@ def test_destroy_closes_cached_sandbox_client(tmp_path):
     backend_destroy.assert_called_once()
     assert "sandbox-destroy" not in provider._sandboxes
     assert "sandbox-destroy" not in provider._sandbox_infos
+
+
+def test_destroy_reports_false_when_teardown_is_deferred(tmp_path):
+    """An explicit destroy under an active execution lease must surface the
+    deferral instead of letting the caller assume the container is gone."""
+    import threading
+
+    from deerflow.sandbox.lease import get_sandbox_lease_manager
+
+    provider, sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "sandbox-destroy-defer")
+    manager = get_sandbox_lease_manager(provider)
+    # reserve_idle_teardown is re-entrant per worker, so the competing
+    # reservation must come from another thread to force the deferral.
+    hold = threading.Event()
+    release = threading.Event()
+
+    def hold_teardown():
+        with manager.reserve_idle_teardown("sandbox-destroy-defer") as reserved:
+            assert reserved
+            hold.set()
+            release.wait(5)
+
+    worker = threading.Thread(target=hold_teardown, daemon=True)
+    worker.start()
+    assert hold.wait(5)
+    try:
+        assert provider.destroy("sandbox-destroy-defer") is False
+    finally:
+        release.set()
+        worker.join(5)
+
+    provider._backend.destroy.assert_not_called()
+    sandbox.close.assert_not_called()
+    assert "sandbox-destroy-defer" in provider._sandboxes
+    assert provider.destroy("sandbox-destroy-defer") is True
+    provider._backend.destroy.assert_called_once()
 
 
 def test_shutdown_closes_all_active_sandbox_clients(tmp_path):

@@ -51,5 +51,5 @@ class SandboxInfo:
             container_name=data.get("container_name"),
             container_id=data.get("container_id"),
             created_at=data.get("created_at", time.time()),
-            lark_cli_broker=data.get("lark_cli_broker", False),
+            lark_cli_broker=data.get("lark_cli_broker"),  # Missing attestation stays unverified (None), never silently attested non-broker.
         )
