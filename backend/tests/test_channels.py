@@ -748,20 +748,6 @@ def _mock_gateway_models(monkeypatch, model_names):
     monkeypatch.setattr("app.channels.manager.httpx.AsyncClient", MockAsyncClient)
 
 
-def _make_allowlist_exc(model: str):
-    """Build the 400 admission error a stale model selection produces."""
-    import httpx
-    from langgraph_sdk.errors import BadRequestError
-
-    request = httpx.Request("POST", "http://gateway/api/runs")
-    response = httpx.Response(400, request=request)
-    return BadRequestError(
-        f"Model {model!r} is not in the configured model allowlist",
-        response=response,
-        body={"detail": f"Model {model!r} is not in the configured model allowlist"},
-    )
-
-
 async def _make_channel_connection_repo(tmp_path: Path):
     from deerflow.persistence.channel_connections import ChannelConnectionRepository, ChannelCredentialCipher
     from deerflow.persistence.engine import get_session_factory, init_engine
@@ -4358,6 +4344,18 @@ class TestChannelManager:
 
         _run(go())
 
+    def _make_allowlist_exc(self, model: str):
+        import httpx
+        from langgraph_sdk.errors import BadRequestError
+
+        request = httpx.Request("POST", "http://gateway/api/runs")
+        response = httpx.Response(400, request=request)
+        return BadRequestError(
+            f"Model {model!r} is not in the configured model allowlist",
+            response=response,
+            body={"detail": f"Model {model!r} is not in the configured model allowlist"},
+        )
+
     def test_stale_model_pin_admission_failure_resets_pin(self, monkeypatch):
         """A run rejected because the pinned model left the allowlist must not
         leave the conversation bricked: the rejected selection is cleared
@@ -4381,11 +4379,9 @@ class TestChannelManager:
                 text="hello",
             )
 
-            recovery = await manager._stale_pin_recovery(msg, _make_allowlist_exc("gone-model"), expected_pin="gone-model", thread_id="thread-1")
+            text = await manager._stale_pin_recovery(msg, self._make_allowlist_exc("gone-model"), expected_pin="gone-model")
 
-            assert recovery is not None and recovery.resolved is True
-            text = recovery.text
-            assert "gone-model" in text and "/model" in text
+            assert text and "gone-model" in text and "/model" in text
             assert "not processed" in text
             assert manager._thread_model_names["thread-1"] is None
             mock_client.threads.update.assert_awaited_once()
@@ -4416,63 +4412,11 @@ class TestChannelManager:
                 text="hello",
             )
 
-            recovery = await manager._stale_pin_recovery(msg, _make_allowlist_exc("gone-model"), expected_pin="gone-model", thread_id="thread-1")
+            text = await manager._stale_pin_recovery(msg, self._make_allowlist_exc("gone-model"), expected_pin="gone-model")
 
-            assert recovery is not None and recovery.resolved is True
-            text = recovery.text
-            assert "gone-model" in text and "model-b" in text and "unchanged" in text
+            assert text and "gone-model" in text and "model-b" in text and "unchanged" in text
             assert manager._thread_model_names["thread-1"] == "model-b"
             mock_client.threads.update.assert_not_awaited()
-
-        _run(go())
-
-    def test_stale_pin_recovery_rechecks_pin_under_the_lock(self, monkeypatch):
-        """The under-lock re-check is the last line of defense: a /model write
-        that commits while recovery waits on _model_pin_lock must win over the
-        stale rejection. Without it, recovery persists a clear that silently
-        erases the user's fresh selection from durable metadata. (The sibling
-        test covers replacement visible at read time; this one covers the
-        replacement landing in the lock-wait window — the only window the
-        re-check exists for, and the one the background drain task is most
-        exposed to since it holds no serialized-run lock.)"""
-        from app.channels.manager import ChannelManager
-
-        _mock_gateway_models(monkeypatch, ["model-a"])
-
-        async def go():
-            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
-            store.set_thread_id("test", "chat1", "thread-1")
-            manager = ChannelManager(bus=MessageBus(), store=store)
-            manager._remember_thread_model("thread-1", "gone-model")
-            mock_client = _make_mock_langgraph_client(thread_id="thread-1")
-            mock_client.threads.update = AsyncMock(return_value={"thread_id": "thread-1"})
-            manager._client = mock_client
-            msg = InboundMessage(
-                channel_name="test",
-                chat_id="chat1",
-                user_id="platform-user",
-                text="hello",
-            )
-
-            # Hold the lock like an in-flight /model write does; recovery
-            # reads the stale cache value, then parks on the lock.
-            await manager._model_pin_lock.acquire()
-            recovery_task = asyncio.create_task(manager._stale_pin_recovery(msg, _make_allowlist_exc("gone-model"), expected_pin="gone-model", thread_id="thread-1"))
-            # Everything before the lock is synchronous, so one yield parks
-            # recovery on the acquire; the simulated write then publishes its
-            # value under the lock exactly like the real /model path.
-            await asyncio.sleep(0)
-            manager._remember_thread_model("thread-1", "new-model")
-            manager._model_pin_lock.release()
-
-            recovery = await recovery_task
-
-            # The re-check saw the newer pin: recovery persisted nothing, and
-            # the user's fresh selection survives — cache and durable alike.
-            assert recovery is not None and recovery.resolved is True
-            mock_client.threads.update.assert_not_awaited()
-            assert manager._thread_model_names["thread-1"] == "new-model"
-            assert "new-model" in recovery.text and "unchanged" in recovery.text
 
         _run(go())
 
@@ -4496,17 +4440,14 @@ class TestChannelManager:
             )
 
             # Unrelated error.
-            assert await manager._stale_pin_recovery(msg, RuntimeError("boom"), expected_pin="gone-model", thread_id="thread-1") is None
+            assert await manager._stale_pin_recovery(msg, RuntimeError("boom"), expected_pin="gone-model") is None
             # Allowlist rejection, but the caller cannot name the run's selection.
-            assert await manager._stale_pin_recovery(msg, _make_allowlist_exc("gone-model"), expected_pin=None, thread_id="thread-1") is None
+            assert await manager._stale_pin_recovery(msg, self._make_allowlist_exc("gone-model"), expected_pin=None) is None
             # Allowlist rejection for a selection this thread does not hold
-            # (session-config-caused): nothing to clear, and the reply names
-            # the configuration source instead of claiming a default takeover.
-            recovery = await manager._stale_pin_recovery(msg, _make_allowlist_exc("cfg-model"), expected_pin="cfg-model", thread_id="thread-1")
-            assert recovery is not None and recovery.resolved is False
-            text = recovery.text
-            assert "cfg-model" in text and "session configuration" in text
-            assert "configured default" not in text
+            # (session-config-caused): nothing to clear, but the caller still
+            # gets the reassurance reply instead of the generic error.
+            text = await manager._stale_pin_recovery(msg, self._make_allowlist_exc("cfg-model"), expected_pin="cfg-model")
+            assert text and "cfg-model" in text
 
         _run(go())
 
@@ -4531,7 +4472,7 @@ class TestChannelManager:
 
             def failing_stream(*args, **kwargs):
                 async def gen():
-                    raise _make_allowlist_exc("gone-model")
+                    raise self._make_allowlist_exc("gone-model")
                     yield  # pragma: no cover
 
                 return gen()
@@ -5606,39 +5547,6 @@ class TestGithubFireAndForget:
         _run(go())
 
 
-def _stale_pin_drain_setup(thread_id, *, model, pin=None, session_model=None):
-    """Assemble the shared drain-recovery fixture: a manager with one buffered
-    follow-up whose ``runs.create`` rejects *model* with an allowlist 400.
-
-    Returns ``(manager, carrier_msg, mock_client, bus)``; each test customizes
-    the durable-thread mocks it asserts on.
-    """
-    from app.channels.manager import ChannelManager
-
-    bus = MessageBus()
-    store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
-    store.set_thread_id("github", "zhfeng/llm-gateway", thread_id)
-    manager = ChannelManager(bus=bus, store=store)
-    if pin is not None:
-        manager._remember_thread_model(thread_id, pin)
-    if session_model is not None:
-        manager._default_session = {"context": {"model_name": session_model}}
-
-    carrier_msg = InboundMessage(
-        channel_name="github",
-        chat_id="zhfeng/llm-gateway",
-        user_id="zhfeng",
-        owner_user_id="agent-owner-1",
-        text="queued comment",
-    )
-    manager._buffer_followup(thread_id, carrier_msg)
-
-    mock_client = MagicMock()
-    mock_client.runs.create = AsyncMock(side_effect=_make_allowlist_exc(model))
-    manager._client = mock_client
-    return manager, carrier_msg, mock_client, bus
-
-
 class TestGithubFollowupBuffer:
     """Tests for issue #4121 Slice 2: buffer-and-drain of concurrent GitHub
     comments that arrive while a run is already active on the thread.
@@ -5979,153 +5887,6 @@ class TestGithubFollowupBuffer:
             await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
 
             assert len(manager._followup_buffers[thread_id]) == 1
-
-        _run(go())
-
-    def test_drain_clears_stale_model_pin_and_requeues(self, monkeypatch, caplog):
-        """A drained run rejected for a stale /model pin must clear the pin —
-        the drain is a run-creation path like _handle_chat, so the self-clear
-        invariant covers it too. The batch is still requeued: with the pin
-        gone, the next drain cycle succeeds instead of looping on the same
-        admission failure."""
-        _mock_gateway_models(monkeypatch, ["model-a"])
-
-        async def go():
-            thread_id = "gh-thread-stale-pin"
-            manager, carrier_msg, mock_client, bus = _stale_pin_drain_setup(thread_id, model="gone-model", pin="gone-model")
-            mock_client.threads.update = AsyncMock(return_value={"thread_id": thread_id})
-
-            outbounds = []
-
-            async def capture_outbound(message):
-                outbounds.append(message)
-
-            bus.subscribe_outbound(capture_outbound)
-
-            with caplog.at_level(logging.INFO):
-                await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
-
-            # Pin self-cleared, batch requeued for the next cycle. The recovery
-            # is logged, NOT sent: the buffered messages are retried
-            # automatically, so a "please resend" reply would double-process
-            # them (and the only buffering channel, GitHub, is log-only anyway).
-            assert manager._thread_model_names[thread_id] is None
-            assert len(manager._followup_buffers[thread_id]) == 1
-            mock_client.threads.update.assert_awaited_once()
-            assert mock_client.threads.update.await_args.kwargs["metadata"] == {"channel_model_name": None}
-            assert outbounds == []
-            # Anchored to the resolved branch: the WARNING branch prints the
-            # rejected model too, so the model name alone would not prove
-            # which path ran.
-            assert "recovered from stale model" in caplog.text
-            assert "could not self-recover" not in caplog.text
-
-        _run(go())
-
-    def test_drain_after_concurrent_model_replacement_persists_nothing(self, monkeypatch, caplog):
-        """A /model committed while the drained run was in flight makes the
-        rejected selection stale-but-already-replaced: recovery must NOT clear
-        anything (the newer choice wins) and the log verb must stay neutral —
-        "recovered", not "cleared" — because no reset ever happened."""
-        _mock_gateway_models(monkeypatch, ["model-a"])
-
-        async def go():
-            thread_id = "gh-thread-replaced"
-            manager, carrier_msg, mock_client, _bus = _stale_pin_drain_setup(thread_id, model="gone-model", pin="gone-model")
-            mock_client.threads.update = AsyncMock()
-
-            async def reject_after_replacement(*args, **kwargs):
-                # The user pins a working model while the run rejection is in flight.
-                manager._remember_thread_model(thread_id, "new-model")
-                raise _make_allowlist_exc("gone-model")
-
-            mock_client.runs.create = AsyncMock(side_effect=reject_after_replacement)
-
-            with caplog.at_level(logging.INFO):
-                await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
-
-            # The replacement selection is untouched and no durable write ran…
-            assert manager._thread_model_names[thread_id] == "new-model"
-            mock_client.threads.update.assert_not_awaited()
-            # …but the batch is still requeued and the log does not claim a clear.
-            assert len(manager._followup_buffers[thread_id]) == 1
-            assert "recovered from stale model" in caplog.text
-            assert "cleared" not in caplog.text
-            assert "could not self-recover" not in caplog.text
-
-        _run(go())
-
-    def test_drain_recovery_uses_caller_thread_id_despite_lookup_failure(self, monkeypatch):
-        """Recovery takes the caller's authoritative thread_id and never
-        re-derives it from the message: even with the store lookup raising,
-        the stale pin is still cleared for the right conversation. (Before the
-        caller-thread_id contract, this same hiccup silently meant "no
-        recovery" — the failure mode no longer exists.)"""
-        from app.channels.manager import ChannelManager
-
-        _mock_gateway_models(monkeypatch, ["model-a"])
-
-        async def go():
-            thread_id = "gh-thread-lookup-boom"
-            manager, carrier_msg, mock_client, _bus = _stale_pin_drain_setup(thread_id, model="gone-model", pin="gone-model")
-            mock_client.threads.update = AsyncMock(return_value={"thread_id": thread_id})
-
-            async def _boom(self, msg):
-                raise RuntimeError("connection repo down")
-
-            monkeypatch.setattr(ChannelManager, "_lookup_thread_id", _boom)
-
-            await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
-
-            # Recovery never consults the store: the pin is cleared for the
-            # caller's thread, the batch is requeued, the durable reset ran.
-            assert manager._thread_model_names[thread_id] is None
-            assert len(manager._followup_buffers[thread_id]) == 1
-            mock_client.threads.update.assert_awaited_once()
-
-        _run(go())
-
-    def test_drain_logs_warning_when_stale_pin_persist_fails(self, monkeypatch, caplog):
-        """When the durable pin reset fails, recovery returns without clearing,
-        so the next drain cycle rejects identically: the drain must keep an
-        operator-visible WARNING instead of a per-cycle INFO "recovered" line."""
-        _mock_gateway_models(monkeypatch, ["model-a"])
-
-        async def go():
-            thread_id = "gh-thread-persist-fails"
-            manager, carrier_msg, mock_client, _bus = _stale_pin_drain_setup(thread_id, model="gone-model", pin="gone-model")
-            mock_client.threads.update = AsyncMock(side_effect=RuntimeError("store down"))
-
-            with caplog.at_level(logging.INFO):
-                await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
-
-            # Nothing cleared: pin and batch both intact, WARNING emitted.
-            assert manager._thread_model_names[thread_id] == "gone-model"
-            assert len(manager._followup_buffers[thread_id]) == 1
-            assert "could not self-recover from stale model" in caplog.text
-
-        _run(go())
-
-    def test_drain_logs_warning_when_rejection_comes_from_session_config(self, monkeypatch, caplog):
-        """When the drained run's stale model came from session configuration
-        (no /model pin held), recovery has nothing to clear and the next cycle
-        rejects identically — the drain must surface that as WARNING, not as a
-        per-cycle INFO "recovered" line, while still requeueing the batch."""
-        _mock_gateway_models(monkeypatch, ["model-a"])
-
-        async def go():
-            thread_id = "gh-thread-session-cfg"
-            manager, carrier_msg, mock_client, _bus = _stale_pin_drain_setup(thread_id, model="cfg-model", session_model="cfg-model")
-            mock_client.threads.get = AsyncMock(return_value={"thread_id": thread_id, "metadata": {}})
-            mock_client.threads.update = AsyncMock()
-
-            with caplog.at_level(logging.INFO):
-                await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
-
-            # Nothing to clear (no pin): batch requeued, WARNING emitted, no durable write.
-            assert len(manager._followup_buffers[thread_id]) == 1
-            mock_client.threads.update.assert_not_awaited()
-            assert "could not self-recover from stale model" in caplog.text
 
         _run(go())
 

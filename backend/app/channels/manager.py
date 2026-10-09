@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from html import escape
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any
 from urllib.parse import quote, urlparse
 
 import httpx
@@ -100,23 +100,6 @@ THREAD_BUSY_MESSAGE = "This conversation is already processing another request. 
 # Recovery replies must say the turn was dropped: the run was rejected before
 # starting, so the triggering message never reached the agent.
 _STALE_PIN_RETRY_NOTE = "Your message was not processed — please send it again."
-
-
-class StalePinRecovery(NamedTuple):
-    """Outcome of a handled stale-pin admission failure.
-
-    ``text`` is the user-facing reply; ``resolved`` tells requeueing callers
-    (the follow-up drain) whether the next attempt is free of *this*
-    rejection — True when the pin was cleared or a different selection is now
-    current, False when nothing was cleared and the next attempt rejects
-    identically (the durable reset failed, or the selection came from session
-    configuration, which still carries it).
-    """
-
-    text: str
-    resolved: bool
-
-
 BOUND_IDENTITY_REQUIRED_MESSAGE = "Connect this channel from DeerFlow Settings, complete the in-channel connect step, then send your message again."
 BOUND_IDENTITY_UNAVAILABLE_MESSAGE = "Channel connection verification is temporarily unavailable. Please try again later or contact the DeerFlow operator."
 # Inbound-redelivery dedup window. The dedupe state lives in
@@ -1725,11 +1708,6 @@ class ChannelManager:
             len(entries),
             thread_id,
         )
-        # Initialized before the try: ``_resolve_run_params`` itself is covered
-        # by the except below, and a failure there has no submitted selection
-        # for stale-pin recovery to compare (``expected_pin=None`` short-circuits
-        # it), so the batch simply requeues as before.
-        expected_pin: str | None = None
         try:
             # Everything from here through runs.create is covered by the
             # same except below: a pre-create failure (e.g. the target agent
@@ -1738,12 +1716,6 @@ class ChannelManager:
             # a runs.create failure does — none of these steps get to
             # silently drop entries that were already popped off the buffer.
             assistant_id, run_config, run_context = self._resolve_run_params(carrier_msg, thread_id)
-            # Same stale-pin contract as ``_handle_chat_on_thread``: the drained
-            # run submits the pinned model too, so an allowlist rejection here
-            # must clear the pin instead of requeueing the batch into the same
-            # failure on every drain cycle.
-            pinned_model_value = run_context.get("model_name")
-            expected_pin = pinned_model_value.strip() if isinstance(pinned_model_value, str) and pinned_model_value.strip() else None
             await self._apply_channel_policy(carrier_msg, run_context)
 
             human_message = _human_input_message(_format_followup_block(entries))
@@ -1765,35 +1737,6 @@ class ChannelManager:
                     thread_id,
                     len(entries),
                 )
-            elif recovery := await self._stale_pin_recovery(carrier_msg, exc, expected_pin=expected_pin, thread_id=thread_id):
-                # Log structured facts only: the recovery text ends with a
-                # "please resend" note meant for chat replies, but the buffered
-                # messages are retried automatically — echoing it here would
-                # invite double-processing. GitHub, the only buffering channel
-                # today, delivers outbound sends log-only anyway.
-                if recovery.resolved:
-                    # Pin cleared, or a newer selection already current: the
-                    # requeued batch goes out on the next cycle. The verb
-                    # stays neutral — ``resolved`` covers both sub-cases, and
-                    # in the replacement case nothing was actually cleared.
-                    logger.info(
-                        "[Manager] follow-up drain recovered from stale model %r (thread_id=%s); re-buffering %d entries for automatic retry",
-                        expected_pin,
-                        thread_id,
-                        len(entries),
-                    )
-                else:
-                    # Nothing was cleared — the durable reset failed, or the
-                    # selection came from session configuration, which still
-                    # carries it — so the next drain cycle rejects identically.
-                    # Keep an operator-visible signal instead of a per-cycle
-                    # INFO line; the batch is still requeued, never dropped.
-                    logger.warning(
-                        "[Manager] follow-up drain could not self-recover from stale model %r (thread_id=%s); re-buffering %d entries into a repeated admission failure",
-                        expected_pin,
-                        thread_id,
-                        len(entries),
-                    )
             else:
                 logger.exception(
                     "[Manager] follow-up drain failed for thread_id=%s; re-buffering %d entries",
@@ -2466,13 +2409,11 @@ class ChannelManager:
         as "no pin".
 
         The ``threads.get`` deliberately runs *outside* ``_model_pin_lock``:
-        one slow GET must not serialize every conversation's preload and every
-        ``/model`` write process-wide. Writes are the deliberate exception:
-        ``/model`` writes and stale-pin resets hold the lock across the durable
-        ``threads.update`` itself (see ``_persist_model_pin``), so the durable
-        write and the cache publication stay atomic against a cold load's
-        older snapshot — and the post-GET re-check below then sees the fresh
-        value, so the older snapshot loses.
+        a manager-wide lock must not span a network call, or one slow GET
+        would serialize every conversation's preload and every ``/model``
+        write process-wide. The lock only guards cache publication — a
+        ``/model`` write publishes under it, so the post-GET re-check below
+        sees the fresh value and the older snapshot loses.
         """
         if thread_id in self._thread_model_names:
             return self._thread_model_names[thread_id]
@@ -2579,8 +2520,7 @@ class ChannelManager:
         )
         if assistant_id != DEFAULT_ASSISTANT_ID:
             try:
-                agent_config = await asyncio.to_thread(
-                    load_agent_config,
+                agent_config = load_agent_config(
                     _normalize_custom_agent_name(assistant_id),
                     user_id=_channel_storage_user_id(msg),
                 )
@@ -2894,8 +2834,8 @@ class ChannelManager:
                         await self._release_inbound_dedupe_key(msg)
                     await self._send_error(msg, THREAD_BUSY_MESSAGE)
                     return
-                if recovery := await self._stale_pin_recovery(msg, exc, expected_pin=expected_pin, thread_id=thread_id):
-                    await self._send_error(msg, recovery.text)
+                if recovery_text := await self._stale_pin_recovery(msg, exc, expected_pin=expected_pin):
+                    await self._send_error(msg, recovery_text)
                     await self._release_inbound_dedupe_key(msg)
                     return
                 raise
@@ -2918,9 +2858,9 @@ class ChannelManager:
                 await self._release_inbound_dedupe_key(msg)
                 await self._send_error(msg, THREAD_BUSY_MESSAGE)
                 return
-            if recovery := await self._stale_pin_recovery(msg, exc, expected_pin=expected_pin, thread_id=thread_id):
+            if recovery_text := await self._stale_pin_recovery(msg, exc, expected_pin=expected_pin):
                 await self._release_inbound_dedupe_key(msg)
-                await self._send_error(msg, recovery.text)
+                await self._send_error(msg, recovery_text)
                 return
             raise
 
@@ -3066,8 +3006,7 @@ class ChannelManager:
                 # stale-pin recovery must run in this path — _handle_message's
                 # generic handler never sees streaming failures. The text is
                 # delivered as the single final outbound in the finally block.
-                pin_recovery = await self._stale_pin_recovery(msg, exc, expected_pin=expected_pin, thread_id=thread_id)
-                pin_recovery_text = pin_recovery.text if pin_recovery else None
+                pin_recovery_text = await self._stale_pin_recovery(msg, exc, expected_pin=expected_pin)
         finally:
             result = last_values if last_values is not None else {"messages": [{"type": "ai", "content": latest_text}]}
             response_text = _extract_response_text(result)
@@ -3296,8 +3235,7 @@ class ChannelManager:
         exc: BaseException,
         *,
         expected_pin: str | None,
-        thread_id: str,
-    ) -> StalePinRecovery | None:
+    ) -> str | None:
         """Turn a stale ``/model`` pin admission failure into an actionable reply.
 
         Run admission rejects any run whose carried ``model_name`` is not in
@@ -3305,15 +3243,14 @@ class ChannelManager:
         run actually submitted (read from its run context), so recovery only
         ever clears *that* selection: a delayed rejection for an old pin must
         not erase a newer selection committed while the rejected run was in
-        flight. ``thread_id`` is the caller-authoritative conversation: every
-        call site already holds it, so it is never re-derived from *msg* — a
-        store-mapping rewrite between dispatch and recovery can never make
-        this clear a different conversation's pin. Returns a
-        :class:`StalePinRecovery` when *exc* was handled here (the caller owns
-        outbound delivery); returns None when the error is not the allowlist
-        rejection or no safe recovery exists.
+        flight. Returns the reply text when *exc* was handled here (the caller
+        owns outbound delivery); returns None when the error is not the
+        allowlist rejection or no safe recovery exists.
         """
         if expected_pin is None or not _is_model_allowlist_error(exc):
+            return None
+        thread_id = await self._lookup_thread_id(msg)
+        if not thread_id:
             return None
         client = self._get_client()
         current: str | None = self._thread_model_names.get(thread_id)
@@ -3339,36 +3276,22 @@ class ChannelManager:
                         self._remember_thread_model(thread_id, None)
                         cleared = True
             if cleared:
-                return StalePinRecovery(
+                return (
                     f"The model '{expected_pin}' selected for this conversation is no longer available, "
                     "so I reset the model selection. This conversation now follows the configured default. "
-                    f"Use /model <name> to pick a different model. {_STALE_PIN_RETRY_NOTE}",
-                    True,
+                    f"Use /model <name> to pick a different model. {_STALE_PIN_RETRY_NOTE}"
                 )
             current = self._thread_model_names.get(thread_id)
             if current == expected_pin:
                 # State unchanged but the durable write failed.
-                return StalePinRecovery(
-                    f"The model '{expected_pin}' is no longer available, but I could not reset the selection automatically. Send /model default, then pick another model with /model <name>. {_STALE_PIN_RETRY_NOTE}",
-                    False,
-                )
+                return f"The model '{expected_pin}' is no longer available, but I could not reset the selection automatically. Send /model default, then pick another model with /model <name>. {_STALE_PIN_RETRY_NOTE}"
         # The rejected selection is no longer current (replaced by a newer
         # /model, already reset, or never pinned — e.g. the rejection came
         # from session configuration): reassure without touching the current
         # selection.
         if current:
-            return StalePinRecovery(
-                f"That message used model '{expected_pin}', which is no longer available. The current selection '{current}' is unchanged. {_STALE_PIN_RETRY_NOTE}",
-                True,
-            )
-        # No pin is held for this thread, so the rejected selection came from
-        # the session configuration — which still carries it, so the next
-        # message would fail identically. Name the real source and the fix
-        # instead of claiming a default takeover that did not happen.
-        return StalePinRecovery(
-            f"That message used model '{expected_pin}' from the session configuration, which is no longer available. Update the configured model, or pin a working one for this conversation with /model <name>. {_STALE_PIN_RETRY_NOTE}",
-            False,
-        )
+            return f"That message used model '{expected_pin}', which is no longer available. The current selection '{current}' is unchanged. {_STALE_PIN_RETRY_NOTE}"
+        return f"That message used model '{expected_pin}', which is no longer available. This conversation now follows the configured default. {_STALE_PIN_RETRY_NOTE}"
 
     async def _handle_model_command(self, msg: InboundMessage, args: str) -> str:
         """Show, pin, or reset the model used by the current conversation.
