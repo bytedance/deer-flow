@@ -118,6 +118,11 @@ def run_is_before_cursor(
 
 
 class RunStore(abc.ABC):
+    # A create_thread_operation_atomic override that accepts the resume
+    # identity only through **kwargs must opt in on that same class. Explicit
+    # idempotency_request parameters are capability declarations themselves.
+    supports_idempotency_request_kwargs = False
+
     async def list_changed(
         self,
         *,

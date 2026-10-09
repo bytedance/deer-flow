@@ -1168,6 +1168,59 @@ async def test_keyed_input_remains_compatible_with_legacy_explicit_atomic_signat
 
 
 @pytest.mark.anyio
+async def test_keyed_resume_rejects_ambiguous_kwargs_store_before_admission():
+    from deerflow.runtime import RunIdempotencyUnsupported
+
+    class DroppingKwargsStore(MemoryRunStore):
+        async def create_thread_operation_atomic(self, run_id, **kwargs):
+            kwargs.pop("idempotency_request", None)
+            return await super().create_thread_operation_atomic(run_id, **kwargs)
+
+    store = DroppingKwargsStore()
+    manager = RunManager(store=store)
+
+    with pytest.raises(RunIdempotencyUnsupported, match="does not support keyed resume"):
+        await manager.create_or_reject(
+            "thread-1",
+            idempotency_key="http-run:resume",
+            idempotency_request={
+                "version": 1,
+                "kind": "resume",
+                "sha256": "a" * 64,
+            },
+        )
+
+    assert await store.list_by_thread("thread-1") == []
+
+
+@pytest.mark.anyio
+async def test_keyed_resume_allows_explicit_kwargs_store_capability():
+    class ForwardingKwargsStore(MemoryRunStore):
+        supports_idempotency_request_kwargs = True
+
+        async def create_thread_operation_atomic(self, run_id, **kwargs):
+            return await super().create_thread_operation_atomic(run_id, **kwargs)
+
+    store = ForwardingKwargsStore()
+    manager = RunManager(store=store)
+    identity = {
+        "version": 1,
+        "kind": "resume",
+        "sha256": "a" * 64,
+    }
+
+    record = await manager.create_or_reject(
+        "thread-1",
+        idempotency_key="http-run:resume",
+        idempotency_request=identity,
+    )
+
+    persisted = await store.get(record.run_id)
+    assert persisted is not None
+    assert persisted["idempotency_request"] == identity
+
+
+@pytest.mark.anyio
 async def test_wait_retry_after_later_run_does_not_return_later_checkpoint(monkeypatch):
     """Complete two runs, then retry the first key: /wait must not return run B."""
     first_input = {"messages": [{"role": "user", "content": "one"}]}

@@ -196,8 +196,16 @@ def _store_accepts_idempotency_request(store: RunStore) -> bool:
     try:
         parameters = inspect.signature(callable_).parameters
     except (TypeError, ValueError):
+        return False
+    if "idempotency_request" in parameters:
         return True
-    return "idempotency_request" in parameters or any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+    if not any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+        return False
+    implementation_owner = next(
+        (candidate for candidate in type(store).__mro__ if "create_thread_operation_atomic" in candidate.__dict__),
+        None,
+    )
+    return bool(implementation_owner and implementation_owner.__dict__.get("supports_idempotency_request_kwargs", False))
 
 
 @dataclass
