@@ -501,6 +501,13 @@ def _convert_call_tool_result(
             url = _resolve_link_url(str(item.uri))
             if mime and mime.startswith("image/") and url.lower().startswith(("http://", "https://")):
                 lc_content.append(create_image_block(url=url, mime_type=mime))
+            elif url.lower().startswith("data:"):
+                # A ``data:`` URI embeds the whole payload, so inlining it
+                # would put megabytes of base64 into the model-visible text —
+                # and into ``resource_links``, which is checkpointed state.
+                # Repo policy: ``data:``/``blob:`` URIs never enter state, so
+                # the raw URI is dropped from the artifact channel too.
+                lc_content.append(create_text_block(text=f"[Resource: {item.name or 'unnamed'} ({mime or 'unknown type'}) embedded inline]"))
             else:
                 # URL-sourced file blocks are rejected by Chat Completions
                 # serialization (langchain-core), which bricks the thread once

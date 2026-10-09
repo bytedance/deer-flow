@@ -792,6 +792,23 @@ class TestConvertCallToolResultRewrites:
         assert content[0]["url"] == url
         assert artifact is None
 
+    def test_remote_image_resource_link_with_uppercase_scheme_stays_image_block(self, paths: Paths):
+        url = "HTTPS://example.com/remote.png"
+        result = CallToolResult(
+            content=[ResourceLink(type="resource_link", name="r", uri=url, mimeType="image/png")],
+            isError=False,
+        )
+
+        with _patch_paths(paths):
+            content, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
+
+        # Scheme matching is case-insensitive: the link stays an image block,
+        # not a text placeholder. The block's URL validation normalizes the
+        # scheme to lowercase; the passthrough itself is what matters.
+        assert content[0]["type"] == "image"
+        assert content[0]["url"] == "https://example.com/remote.png"
+        assert artifact is None
+
     def test_ui_resource_link_becomes_text_placeholder(self, paths: Paths):
         # Regression guard: an MCP Apps UI card must not produce any block the
         # Chat Completions translator rejects (any URL-sourced file block).
@@ -837,6 +854,30 @@ class TestConvertCallToolResultRewrites:
         assert content[0]["type"] == "text"
         assert content[0]["text"] == f"[Resource: unnamed (unknown type) available at {url}]"
         assert artifact == {"resource_links": [{"name": "", "uri": url, "mime_type": None}]}
+
+    def test_data_uri_resource_link_never_enters_model_text_or_state(self, paths: Paths):
+        payload = "QUFB" + "A" * 500
+        url = f"data:application/pdf;base64,{payload}"
+        result = CallToolResult(
+            content=[
+                ResourceLink(type="resource_link", name="report", uri=url, mimeType="application/pdf"),
+                ResourceLink(type="resource_link", name="", uri="data:image/png;base64,QUJD", mimeType=None),
+            ],
+            isError=False,
+        )
+
+        with _patch_paths(paths):
+            content, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
+
+        # The URI embeds the whole payload: it must not be inlined into the
+        # model-visible text nor checkpointed inside resource_links.
+        assert content[0]["type"] == "text"
+        assert content[0]["text"] == "[Resource: report (application/pdf) embedded inline]"
+        assert content[1]["type"] == "text"
+        assert content[1]["text"] == "[Resource: unnamed (unknown type) embedded inline]"
+        assert all(payload not in block.get("text", "") for block in content)
+        assert all("data:" not in block.get("text", "") for block in content)
+        assert artifact is None
 
     def test_resource_links_merge_with_structured_content_artifact(self, paths: Paths):
         url = "https://example.com/report.pdf"
