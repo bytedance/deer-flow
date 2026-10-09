@@ -892,6 +892,27 @@ async def test_committed_delete_then_identical_readd_installs_a_new_epoch(reconc
 
 
 @pytest.mark.asyncio
+async def test_first_committed_revision_races_late_binding_creation(reconciler, tmp_path):
+    """An in-flight discovery keeps the fast path off and fences a late old binding."""
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    cache_module._initializing_generation = cache_module._cache_generation
+
+    _write_config(cfg, {"A": _stdio("cmd-A2")})
+    committed = ExtensionsConfig.from_file(str(cfg))
+    cache_module.finish_mcp_reconciliation(cache_module.prepare_mcp_reconciliation(committed, config_path=cfg))
+
+    assert _binding(pool, "A").fingerprint == _fingerprint({"A": _stdio("cmd-A2")}, "A")
+    with pytest.raises(StaleMCPBindingError):
+        pool.ensure_binding(
+            "A",
+            _fingerprint({"A": _stdio("cmd-A1")}, "A"),
+            domain="deployment",
+        )
+
+
+@pytest.mark.asyncio
 async def test_committed_handoff_tombstones_durable_only_binding_without_cache(reconciler, tmp_path):
     """A pre-discovery durable binding is local state even when tools never published."""
     cfg = tmp_path / "extensions_config.json"
