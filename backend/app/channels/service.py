@@ -210,10 +210,9 @@ class ChannelService:
         generation = self._shutdown_generation
         await self.manager.start()
         if generation != self._shutdown_generation:
-            # A concurrent stop owns manager cleanup until it finishes.
-            # If shutdown already returned, drain the late manager startup.
-            if not self._stopping:
-                await self.manager.stop()
+            # The concurrent stop may already have drained the manager before
+            # this startup completed, so always drain the late start.
+            await self.manager.stop()
             return
         self._running = True
 
