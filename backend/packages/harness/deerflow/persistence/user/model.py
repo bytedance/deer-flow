@@ -68,6 +68,12 @@ class UserRow(Base):
     needs_setup: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     token_version: Mapped[int] = mapped_column(nullable=False, default=0)
 
+    # Account lifecycle (RFC #4063 / issue #3462 gap 3): an operator-disabled
+    # account is rejected at every authentication surface (password login,
+    # JWT session resolution, PAT, OAuth) — the row is retained with its
+    # credentials and role so re-enabling restores exactly what was suspended.
+    disabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("0"))
+
     __table_args__ = (
         # sqlite_where alone is a SQLAlchemy dialect-specific kwarg -- it
         # does not apply on the postgresql dialect, so a table created

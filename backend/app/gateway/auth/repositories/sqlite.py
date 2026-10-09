@@ -21,7 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.gateway.auth.models import User
-from app.gateway.auth.repositories.base import LastAdminRemainsError, UserNotFoundError, UserRepository
+from app.gateway.auth.repositories.base import LastActiveAdminError, LastAdminRemainsError, UserNotFoundError, UserRepository
 from deerflow.persistence.user.model import OAUTH_IDENTITY_INDEX_NAME, UserRow
 
 # ``email`` is ``mapped_column(unique=True, index=True)``, which SQLAlchemy
@@ -161,6 +161,7 @@ class SQLiteUserRepository(UserRepository):
             oauth_id=row.oauth_id,
             needs_setup=row.needs_setup,
             token_version=row.token_version,
+            disabled=row.disabled,
         )
 
     @staticmethod
@@ -175,6 +176,7 @@ class SQLiteUserRepository(UserRepository):
             oauth_id=user.oauth_id,
             needs_setup=user.needs_setup,
             token_version=user.token_version,
+            disabled=user.disabled,
         )
 
     # ── CRUD ──────────────────────────────────────────────────────────
@@ -322,6 +324,23 @@ class SQLiteUserRepository(UserRepository):
             await session.commit()
             return self._row_to_user(row)
 
+    async def set_disabled(self, user_id: str, disabled: bool) -> User:
+        """Serialized single-column account enable/disable (see base contract)."""
+        async with self._sf() as session:
+            # Same serialization idiom as update_system_role: the
+            # active-admin count and the column write share one transaction.
+            await self._serialize_account_role_mutation(session)
+            row = await session.get(UserRow, user_id)
+            if row is None:
+                raise UserNotFoundError(f"User {user_id} no longer exists")
+            if disabled and not row.disabled and row.system_role == "admin":
+                active_admins = await session.scalar(select(func.count()).select_from(UserRow).where(UserRow.system_role == "admin", UserRow.disabled.is_(False)))
+                if active_admins is None or active_admins <= 1:
+                    raise LastActiveAdminError("cannot disable the last remaining active admin")
+            row.disabled = disabled
+            await session.commit()
+            return self._row_to_user(row)
+
     @staticmethod
     async def _serialize_account_role_mutation(session: AsyncSession) -> None:
         """Serialize role mutations before the admin count is read.
@@ -375,6 +394,9 @@ class SQLiteUserRepository(UserRepository):
             # Role changes go through update_system_role, which likewise
             # never touches credentials.
             user.system_role = row.system_role
+            # disabled is account-lifecycle state: only set_disabled writes
+            # it (same field-scoping as the role column).
+            user.disabled = row.disabled
             row.oauth_provider = user.oauth_provider
             row.oauth_id = user.oauth_id
             row.needs_setup = user.needs_setup

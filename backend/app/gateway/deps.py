@@ -1129,6 +1129,15 @@ async def get_current_user_from_request(request: Request):
             detail=AuthErrorResponse(code=AuthErrorCode.TOKEN_INVALID, message="Token revoked (password changed)").model_dump(),
         )
 
+    # Operator-disabled account (#3462 gap 3): existing sessions die at the
+    # next request, on every authentication surface (the password and PAT
+    # paths reject below; OAuth provisioning rejects at resolve time).
+    if getattr(user, "disabled", False):
+        raise HTTPException(
+            status_code=401,
+            detail=AuthErrorResponse(code=AuthErrorCode.ACCOUNT_DISABLED, message="Account disabled").model_dump(),
+        )
+
     return user
 
 

@@ -50,6 +50,19 @@ class _FakeRepo:
         self.users[str(user.id)] = user
         return user
 
+    async def set_disabled(self, user_id: str, disabled: bool) -> User:
+        from app.gateway.auth.repositories.base import LastActiveAdminError, UserNotFoundError
+
+        user = self.users.get(user_id)
+        if user is None:
+            raise UserNotFoundError(f"User {user_id} no longer exists")
+        if disabled and not getattr(user, "disabled", False) and user.system_role == "admin":
+            if sum(1 for u in self.users.values() if u.system_role == "admin" and not getattr(u, "disabled", False)) <= 1:
+                raise LastActiveAdminError("cannot disable the last remaining active admin")
+        user.disabled = disabled
+        self.updates.append((user_id, f"disabled={disabled}"))
+        return user
+
     async def update_system_role(self, user_id: str, system_role: str) -> User:
         from app.gateway.auth.repositories.base import LastAdminRemainsError, UserNotFoundError
 
@@ -303,3 +316,131 @@ def test_assignment_reaches_principal_permissions():
     principal = build_principal_from_context({"user_id": "u1", "user_role": "guest"}, default_role="user")
 
     assert principal.role == "guest"
+
+
+def test_admin_disables_and_reenables_account(monkeypatch):
+    admin = _make_user(system_role="admin")
+    target = _make_user(system_role="guest")
+    repo = _FakeRepo([admin, target])
+    client = _make_client(monkeypatch, caller=admin, repo=repo, roles={"admin", "user", "guest"})
+
+    disabled = client.patch(f"/api/v1/admin/users/{target.id}", json={"disabled": True})
+    assert disabled.status_code == 200
+    assert disabled.json()["disabled"] is True
+
+    reenabled = client.patch(f"/api/v1/admin/users/{target.id}", json={"disabled": False})
+    assert reenabled.status_code == 200
+    assert reenabled.json()["disabled"] is False
+
+
+def test_cannot_disable_last_active_admin(monkeypatch):
+    admin = _make_user(system_role="admin")
+    repo = _FakeRepo([admin])
+    client = _make_client(monkeypatch, caller=admin, repo=repo)
+
+    response = client.patch(f"/api/v1/admin/users/{admin.id}", json={"disabled": True})
+
+    assert response.status_code == 409
+    assert repo.users[str(admin.id)].disabled is False
+
+
+def test_empty_account_update_rejected(monkeypatch):
+    admin = _make_user(system_role="admin")
+    target = _make_user()
+    repo = _FakeRepo([admin, target])
+    client = _make_client(monkeypatch, caller=admin, repo=repo)
+
+    assert client.patch(f"/api/v1/admin/users/{target.id}", json={}).status_code == 422
+
+
+def test_combined_role_and_disable(monkeypatch):
+    admin = _make_user(system_role="admin")
+    other = _make_user(system_role="admin", email="b@example.com")
+    target = _make_user()
+    repo = _FakeRepo([admin, other, target])
+    client = _make_client(monkeypatch, caller=admin, repo=repo, roles={"admin", "user", "guest"})
+
+    response = client.patch(f"/api/v1/admin/users/{target.id}", json={"system_role": "guest", "disabled": True})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["system_role"] == "guest" and body["disabled"] is True
+
+
+def test_repo_set_disabled_field_scoped_and_last_active_admin():
+    """Real-repo slice: set_disabled is a single-column write (role and
+    credentials untouched; the credential writer never touches lifecycle
+    state), and the last-ACTIVE-admin guard fires inside the serialized
+    write — a disabled admin does not count as active, and re-enabling is
+    always allowed."""
+    import asyncio
+    import tempfile
+
+    from app.gateway.auth.repositories.base import LastActiveAdminError
+    from deerflow.persistence.engine import close_engine
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        repo = _make_sqlite_repo(tmpdir)
+
+        async def _run():
+            first = await repo.create_user(User(email="a@example.com", system_role="admin", password_hash="h1"))
+            second = await repo.create_user(User(email="b@example.com", system_role="admin", password_hash="h2"))
+
+            disabled_first = await repo.set_disabled(str(first.id), True)
+            assert disabled_first.disabled is True
+            assert disabled_first.password_hash == "h1"
+            assert disabled_first.system_role == "admin"
+
+            # The credential writer never touches lifecycle state: a stale
+            # snapshot with disabled=False does not re-enable the account.
+            stale = User(id=first.id, email=first.email, password_hash="h3", system_role="admin")
+            after = await repo.update_user(stale)
+            assert after.password_hash == "h3"
+            assert after.disabled is True
+
+            # Only one ACTIVE admin remains: disabling it raises, row intact.
+            try:
+                await repo.set_disabled(str(second.id), True)
+            except LastActiveAdminError:
+                pass
+            else:
+                raise AssertionError("disabling the last active admin must raise")
+            assert (await repo.get_user_by_id(str(second.id))).disabled is False
+
+            restored = await repo.set_disabled(str(first.id), False)
+            assert restored.disabled is False
+
+        try:
+            asyncio.run(_run())
+        finally:
+            asyncio.run(close_engine())
+
+
+def test_disabled_account_rejected_at_login_and_flagged_for_resolvers():
+    """Password login never compares credentials for a disabled account,
+    and lookups return the flag so the JWT resolver can reject."""
+    import asyncio
+    import tempfile
+
+    from app.gateway.auth.local_provider import LocalAuthProvider
+    from deerflow.persistence.engine import close_engine
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        repo = _make_sqlite_repo(tmpdir)
+
+        async def _run():
+            from app.gateway.auth.password import hash_password
+
+            user = await repo.create_user(User(email="d@example.com", system_role="user", password_hash=hash_password("correct-horse")))
+            await repo.set_disabled(str(user.id), True)
+            provider = LocalAuthProvider(repository=repo)
+
+            # The CORRECT password: only the disabled gate can reject it.
+            assert await provider.authenticate({"email": "d@example.com", "password": "correct-horse"}) is None
+            fetched = await provider.get_user(str(user.id))
+            assert fetched is not None and fetched.disabled is True
+
+        try:
+            asyncio.run(_run())
+        finally:
+            asyncio.run(close_engine())
