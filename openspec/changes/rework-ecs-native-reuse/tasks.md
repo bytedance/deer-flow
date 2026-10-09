@@ -3,7 +3,7 @@
 - [x] 1. Trusted native MCP submission scope and genuine native call-path verification.
 - [x] 2. B ordinary MCP service with durable execution and actual Docker main path.
 - [x] 3. Shared node/resource scheduling and outbound worker transport.
-- [ ] 4. C native Gateway execution and cross-instance ownership/cancellation.
+- [x] 4. C native Gateway execution and cross-instance ownership/cancellation.
 - [x] 5. Native goal/dependency C→B→C continuation and stale-event rejection.
 - [ ] 6. Fork integration, reproducible operations, local evidence and later cloud acceptance.
 
@@ -12,3 +12,5 @@ Task 1 verified: 63 focused/native regression tests passed, independent SPEC and
 Task4 configured Scheduler slice accepted: actual authenticated once task automatically launched by native ScheduledTaskService, remote C -> ordinary MCP B -> same native goal C; 1 passed / 72.92 seconds. Same occurrence/two Runs/run_count=1, goal budget, physical drain-before-B, files and final cleanup verified. Optional trusted worker contract suppresses dispatch only; foreground native tools, manual durable queue and completion remain available. Frozen native/API regressions: 528 passed, 2 live deselected / 17.52s; root independently 5 passed / 1.95s after correcting extension PYTHONPATH. Ruff 12 Python files and diff checks passed; independent SPEC then quality PASS. Task4 browser/memory and Task6 remain unchecked. No cloud or remote operation.
 
 Task4 native memory configuration/acceptance slice accepted: no runtime/storage/protocol changes; native DeerMem canonical shared owner facts and local per-instance FTS indexes. Initial actualmain1passed43.66s, necessary same-case delivery-assertion rerun1passed46.71s; real memory_search/get/add, hidden receipt, peer visibility/other-owner exclusion, original remote Run ownership, no NAS SQLite, successful present_files/state artifacts/HTTP body. Native loader/safe merge verified; prior focused61passed4.59s and identity27passed1.24s, final loader2passed0.95s and root2passed1.02s. Ruff/diff and independent SPEC/quality PASS. Task4 browser and Task6 remain unchecked; no cloud/remotes.
+
+Task4 local contract accepted after native execution/Scheduler/memory and browser slices: browser model/tools/file/delivery steps actually demonstrated, while original model selector did not finish GREEN. Final zero-model native HTTP/Live control selector1passed19.50s covers state/input/isolation/capacity/no-replay/deletion/fresh session; ownedcleanup complete. Independent SPEC and quality PASS, root lifecycle6PASS1.68s/physical races2PASS1.34s,15changedPythonRuff/formatPASS. Startup defaults, scoped identity, bounded state, physical retirement and finalizer order preserved. Task4 checked for local capability contract only. Task6 integration/operations/full gates/cloud remains unchecked; historical earlier pending statements remain chronological records.

@@ -406,3 +406,90 @@ worker ownership, DB events, canonical Markdown files and two separate local
 indexes are checked. The ordinary shell/BC/Scheduler fixture modes retain their
 existing defaults. This local shared-directory acceptance does not prove cloud
 NAS behavior, browser support, or Linux Gateway cgroups.
+
+## Native browser affinity/control
+
+Browser control is an explicit operator hook implemented by this package. It is
+not a public packaged-extension contribution point. Install the native locked
+`browser` extra and Chromium in the matching Gateway image/environment. Add this
+section to **both** role JSON files selected by `ECS_NATIVE_CONFIG`:
+
+```json
+"browser_control": {
+  "provider": "ecs_executor.browser:build_browser_control_provider"
+}
+```
+
+Enable the normal native browser tools on both roles (see the partial overlay
+`examples/ecs-native/native-browser.yaml`). Keep `allow_private_addresses: false`
+and CDP disabled. The startup provider snapshot is read once, validated before
+multi-instance admission, then bound to the native host. Ordinary deployments
+without the provider keep the process-local browser startup rejection; multiple
+uvicorn workers remain unsupported even with the provider.
+
+The central role admits all native C origins to its fixed serial worker when
+browser control is enabled. UI navigation before the first Agent turn places the
+same owner/thread/incarnation affinity without creating a Run. The worker opens
+an outbound WebSocket to the existing central Gateway at
+`/api/native-workers/{node}/browser-control`; no worker listener or direct
+controller-to-worker HTTP connection is introduced. Production requires HTTPS /
+WSS. The explicit `test_only_allow_loopback_plaintext: true` flag exists only for
+literal-loopback local fixtures and must not be used in deployment examples.
+The existing reverse proxy must forward WebSocket upgrades on this central route;
+deployment routing and Linux cgroup evidence belong to deployment acceptance.
+
+Control permits only native navigate and native Live operations, with signed
+owner/thread/incarnation, operation/argument digest, fixed node/tunnel owner,
+expiry, and original header digest. Actual cookies/Authorization/Origin/Host
+travel in memory through TLS into the worker's existing ASGI routes. Both sides
+run native auth, permissions, exact thread ownership, and Origin admission; a
+signed executor identity never replaces user authentication. Browser state,
+cookies, and control credentials are not written to SQL, Redis, or logs. Input
+and frame queues/message sizes are bounded. Disconnect cancels the operation;
+effectful input is never replayed after reconnect. Canonical deletion/reset
+retires scoped sessions and streams; a restarted worker has fresh browser state.
+
+Tools and UI use the same native guarded Playwright session, keyed by verified
+owner/thread/incarnation through a host-only ContextVar. Native subagent/task and
+thread hops preserve the binding. The opt-in one-session physical-capacity mode
+counts retained, closing, and uncertain sessions. Unpinned LRU retirement rejects
+the new operation with retryable capacity until native close confirms disconnect;
+pinned/uncertain sessions cannot be replaced. Shutdown retains the worker node
+lock when physical browser closure is unknown. Cross-process physical containment
+still requires the Gateway container cgroup and complete container STOP.
+
+The normal readiness endpoint probes native infrastructure, not worker browser
+connectivity. A central provider may start before the worker, avoiding bootstrap
+cycles; browser operations return 503 while no verified tunnel is connected.
+Use the opt-in single-case local acceptance command (credentials stay in memory):
+
+```bash
+ECS_NATIVE_LIVE=1 ECS_NATIVE_MODEL_CONFIG=/read-only/config.yaml \
+ECS_NATIVE_MODEL_ENV=/read-only/.env \
+  .venv/bin/python -m pytest \
+  tests/test_ecs_executor_c_live.py::test_native_remote_browser_model_and_control_share_session \
+  -q -s --no-showlocals --tb=short
+```
+
+This fixture reuses owned PostgreSQL/Redis/AIO, uses only required model/process
+settings in browser child environments, and suppresses local-variable failure
+dumps for the explicit live session. Local Chromium closure/session behavior
+is evidence separate from cloud cgroup/reverse-proxy deployment acceptance.
+
+The worker watcher registry retains only manager-retained physical identities
+(including closing/unknown), bounded active relay operations, and the one active
+native task. Unused or LRU-retired identities are pruned. Canonical deletion/reset
+cancels and drains only operations for the same verified scope; cancelled HTTP
+operations return an unknown-outcome terminal response and are never replayed.
+Worker browser teardown belongs to the native host deferred release after native
+finalizers, including when its bounded shutdown drain allowance expires.
+
+Production tunnel admission requires the actual ASGI scheme `wss`. When TLS
+terminates at nginx, configure restricted trusted proxy forwarded-proto handling;
+WebSocket Upgrade alone does not establish this. The literal-loopback fixture
+exception is not production TLS evidence.
+
+Strict session retirement is permanent: held Live/tool references cannot rebuild
+Chromium after close. Initialization is shielded through private-loop settlement,
+and physical close shares its initialization lock, so an in-flight launch cannot
+outlive a successful capacity release. Default session behavior is unchanged.

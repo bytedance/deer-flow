@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field
 
 from app.gateway.authz import Permissions, require_permission, resolve_route_permissions
 from app.gateway.browser_capability import browser_capability
+from app.gateway.browser_control import get_browser_control
+from deerflow.community.browser_automation.session import BrowserSessionCapacityError, browser_session_scope
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id, reset_current_user, set_current_user
 from deerflow.utils.file_io import await_drained
@@ -88,6 +90,14 @@ async def navigate_browser(thread_id: ThreadId, body: BrowserNavigateRequest, re
     if not _browser_tools_enabled():
         raise HTTPException(status_code=404, detail="Browser automation is not enabled")
 
+    provider = get_browser_control(request.app)
+    scope = None
+    if provider is not None:
+        remote = await provider.navigate(request, thread_id, body.url)
+        if remote is not None:
+            return BrowserNavigateResponse(**remote)
+        scope = await provider.session_scope(thread_id, user_id)
+
     try:
         from deerflow.community.browser_automation import navigate_and_capture, redact_browser_url
     except ImportError as exc:  # Playwright is an optional dependency.
@@ -99,7 +109,10 @@ async def navigate_browser(thread_id: ThreadId, body: BrowserNavigateRequest, re
 
     outputs_path = get_paths().sandbox_outputs_dir(thread_id, user_id=get_effective_user_id())
     try:
-        result = await navigate_and_capture(thread_id=thread_id, url=url, outputs_path=outputs_path)
+        with browser_session_scope(scope) if scope is not None else contextlib.nullcontext():
+            result = await navigate_and_capture(thread_id=thread_id, url=url, outputs_path=outputs_path)
+    except BrowserSessionCapacityError as exc:
+        raise HTTPException(status_code=429, detail="Browser capacity unavailable; retry after closure", headers={"Retry-After": "1"}) from exc
     except ValueError as exc:
         # SSRF / URL validation failure.
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -257,6 +270,26 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
         await websocket.close(code=4404)
         return
 
+    provider = get_browser_control(websocket.app)
+    scope = None
+    if provider is not None:
+        try:
+            if await provider.stream(websocket, thread_id, str(user.id)):
+                return
+            scope = await provider.session_scope(thread_id, str(user.id))
+        except HTTPException as exc:
+            await websocket.close(code=4404 if exc.status_code == 404 else 4503)
+            return
+        except Exception:
+            with contextlib.suppress(Exception):
+                await websocket.close(code=4501)
+            return
+    with browser_session_scope(scope) if scope is not None else contextlib.nullcontext():
+        await _local_browser_stream(websocket, thread_id, user)
+
+
+async def _local_browser_stream(websocket: WebSocket, thread_id: ThreadId, user) -> None:
+    """Native Live implementation shared unchanged by local and ASGI control."""
     try:
         from deerflow.community.browser_automation import (
             BrowserLiveViewerError,

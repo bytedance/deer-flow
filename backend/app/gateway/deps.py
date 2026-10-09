@@ -129,7 +129,7 @@ def _stream_bridge_is_cross_process(config: AppConfig) -> bool:
     return bool((os.environ.get("DEER_FLOW_STREAM_BRIDGE_REDIS_URL") or "").strip())
 
 
-def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
+def _enforce_postgres_for_multi_worker(config: AppConfig, *, browser_control=None) -> None:
     """Refuse unsafe multi-process configurations before persistence starts.
 
     A deployment counts as multi-process when ``GATEWAY_WORKERS`` /
@@ -190,7 +190,10 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
         workers, _worker_env = _gateway_worker_count()
         if workers > 1 and multi_instance_declaration(config) is None:
             raise SystemExit(browser_multi_worker_error(workers))
-        raise SystemExit(f"{reason} cannot enable agentic browser tools: browser sessions are process-local and a request can land on any instance. {rollback} or disable the browser_navigate tool.")
+        from app.gateway.browser_control import has_browser_affinity
+
+        if workers > 1 or not has_browser_affinity(browser_control):
+            raise SystemExit(f"{reason} cannot enable agentic browser tools: browser sessions are process-local and a request can land on any instance. {rollback} or disable the browser_navigate tool.")
 
     if backend != "postgres":
         raise SystemExit(f"{reason} requires database.backend='postgres', but database.backend is '{backend}'. SQLite cannot support concurrent multi-process access. {rollback} or switch to Postgres.")
@@ -565,7 +568,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
     # Multi-worker safety gate: reject SQLite when GATEWAY_WORKERS > 1.
     # SQLite write-locks cannot support concurrent multi-process access.
     # ------------------------------------------------------------------
-    _enforce_postgres_for_multi_worker(startup_config)
+    _enforce_postgres_for_multi_worker(startup_config, browser_control=getattr(app.state, "browser_control_snapshot", None))
     # Reject agent_storage.backend='db' on a non-durable database, and warn on
     # node-divergent file storage under multi-worker Postgres.
     _validate_agent_storage(startup_config)
@@ -783,7 +786,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         native_host = await prepare_native_host(app, config)
         if native_host is not None:
-            stack.push_async_callback(native_host.stop)
+            _register_native_host_cleanup(stack, app, native_host)
 
         # Startup recovery: mark inflight runs whose lease has expired as error.
         # In single-worker mode (SQLite / backend=memory), no run has a lease, so
@@ -1165,3 +1168,15 @@ async def get_current_user(request: Request) -> str | None:
     """
     user = await get_optional_user_from_request(request)
     return str(user.id) if user else None
+
+
+def _register_native_host_cleanup(stack, app, native_host):
+    from app.gateway.browser_control import get_browser_control
+
+    browser_control = get_browser_control(app)
+    snapshot = getattr(app.state, "browser_control_snapshot", None)
+    if browser_control is not None and snapshot.native_config.get("role") == "central":
+        stack.push_async_callback(browser_control.stop)
+    # Workers own browser teardown in their deferred release after all native
+    # finalizers, even when host.stop's bounded drain allowance expires.
+    stack.push_async_callback(native_host.stop)

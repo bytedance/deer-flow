@@ -24,6 +24,18 @@ pytestmark = [pytest.mark.live, pytest.mark.skipif(os.environ.get("ECS_NATIVE_LI
 IMAGE = "enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0"
 
 
+class _PrivateMapping(dict):
+    """Prevent pytest --showlocals from dumping test-owned credentials."""
+
+    def __repr__(self):
+        return "<private test mapping>"
+
+
+class _PrivateString(str):
+    def __repr__(self):
+        return "<private test string>"
+
+
 def _port():
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -49,14 +61,19 @@ def test_native_remote_memory_shared_facts_and_owner_isolation(tmp_path):
     _native_http_acceptance(tmp_path, memory_mode=True)
 
 
-def _native_http_acceptance(tmp_path, *, dependency_mode=False, scheduled_mode=False, memory_mode=False):
+def _native_http_acceptance(tmp_path, *, dependency_mode=False, scheduled_mode=False, memory_mode=False, browser_mode=False, browser_control_only=False):
     backend = Path(__file__).resolve().parents[1]
     run_id = uuid.uuid4().hex[:12]
     names, processes, handles = [], [], []
-    private_env = dotenv_values(os.environ["ECS_NATIVE_MODEL_ENV"])
-    source_config = yaml.safe_load(Path(os.environ["ECS_NATIVE_MODEL_CONFIG"]).read_text())
-    model = next(value.copy() for value in source_config["models"] if value["name"] == "deepseek-chat")
-    environment = {**os.environ, **{key: value for key, value in private_env.items() if value is not None}}
+    private_env = _PrivateMapping(dotenv_values(os.environ["ECS_NATIVE_MODEL_ENV"]))
+    model = next(value.copy() for value in yaml.safe_load(Path(os.environ["ECS_NATIVE_MODEL_CONFIG"]).read_text())["models"] if value["name"] == "deepseek-chat")
+    environment = _PrivateMapping({**os.environ, **{key: value for key, value in private_env.items() if value is not None}})
+    if browser_mode:
+        # Browser main needs only system process settings and references in its
+        # one model; unrelated private source credentials never enter children.
+        process_keys = {"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY"}
+        model_keys = set(re.findall(r'"\$([A-Za-z_][A-Za-z0-9_]*)"', json.dumps(model)))
+        environment = _PrivateMapping({key: value for key, value in environment.items() if key in process_keys | model_keys})
     # The generated config contains only references. Credentials stay in memory
     # and child environments; never write provider secrets into test files.
     for key in ("api_key", "base_url"):
@@ -120,6 +137,16 @@ def _native_http_acceptance(tmp_path, *, dependency_mode=False, scheduled_mode=F
             "scheduler": {"enabled": True, "tool_enabled": True, "multi_instance": True, "poll_interval_seconds": 1, "min_once_delay_seconds": 1, "max_concurrent_runs": 1} if scheduled_mode else {"enabled": False},
             "mcp_tasks": {"enabled": dependency_mode, "poll_interval_seconds": 1},
         }
+        if browser_mode:
+            config["tools"].extend(
+                {
+                    "name": "browser_" + action,
+                    "group": "browser",
+                    "use": "deerflow.community.browser_automation.tools:browser_" + action + "_tool",
+                    **({"allow_private_addresses": True, "viewport_width": 800, "viewport_height": 600} if action == "navigate" else {}),
+                }
+                for action in ("navigate", "snapshot", "click", "get_text", "close")
+            )
         native = {
             "enabled": True,
             "role": "central",
@@ -132,6 +159,8 @@ def _native_http_acceptance(tmp_path, *, dependency_mode=False, scheduled_mode=F
             "worker_credential_env": {"one": "C_NATIVE_NODE_SECRET"},
             "remote_origins": ["schedule"],
         }
+        if browser_mode:
+            native["browser_control"] = {"provider": "ecs_executor.browser:build_browser_control_provider", "test_only_allow_loopback_plaintext": True}
         if dependency_mode:
             native["nodes"]["one"]["profiles"].append("small")
         for role, port in (("central", central_port), ("worker", worker_port)):
@@ -141,7 +170,17 @@ def _native_http_acceptance(tmp_path, *, dependency_mode=False, scheduled_mode=F
             dispatch_path = tmp_path / (role + "-native.json")
             dispatch_path.write_text(
                 json.dumps(
-                    native if role == "central" else {"enabled": True, "role": "worker", "artifact_root": str(artifacts), "executor_url": f"http://127.0.0.1:{central_port}", "node_id": "one", "credential_env": "C_NATIVE_NODE_SECRET"}
+                    native
+                    if role == "central"
+                    else {
+                        "enabled": True,
+                        "role": "worker",
+                        "artifact_root": str(artifacts),
+                        "executor_url": f"http://127.0.0.1:{central_port}",
+                        "node_id": "one",
+                        "credential_env": "C_NATIVE_NODE_SECRET",
+                        **({"browser_control": native["browser_control"]} if browser_mode else {}),
+                    }
                 )
             )
             log = (tmp_path / (role + ".log")).open("w")
@@ -166,7 +205,10 @@ def _native_http_acceptance(tmp_path, *, dependency_mode=False, scheduled_mode=F
             initialized = client.post("/api/v1/auth/initialize", json={"email": "native-c@example.com", "password": "NativeC!" + secrets.token_urlsafe(20)}, headers={"Origin": central})
             assert initialized.status_code == 201, initialized.status_code
             owner = initialized.json()["id"]
-            headers = {"X-DeerFlow-Internal-Token": environment["DEER_FLOW_INTERNAL_AUTH_TOKEN"], "X-DeerFlow-Owner-User-Id": owner, "Authorization": "Bearer internal-test"}
+            headers = _PrivateMapping({"X-DeerFlow-Internal-Token": environment["DEER_FLOW_INTERNAL_AUTH_TOKEN"], "X-DeerFlow-Owner-User-Id": owner, "Authorization": "Bearer internal-test"})
+            if browser_mode:
+                _run_browser_main(client, worker, headers, owner, tmp_path, environment, run_id, control_only=browser_control_only)
+                return
             if memory_mode:
                 _run_memory_main(client, worker, headers, owner, tmp_path, environment, run_id)
                 return
@@ -399,3 +441,215 @@ def _run_memory_main(client, worker, headers, owner, tmp_path, environment, run_
     finally:
         sql.dispose()
     print("Native memory receipt: one remote original Run; actual memory_search/get/add and file delivery; shared per-owner Markdown facts, peer revision visibility, other-owner isolation; two local FTS indexes and no NAS SQLite/WAL.")
+
+
+def test_native_remote_browser_model_and_control_share_session(tmp_path):
+    _native_http_acceptance(tmp_path, browser_mode=True)
+
+
+def _run_browser_main(client, worker, headers, owner, tmp_path, environment, run_id, *, control_only=False):
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import parse_qs, urlsplit
+
+    from websockets.exceptions import InvalidStatus
+    from websockets.sync.client import connect
+
+    receipt = "browser-receipt-" + uuid.uuid4().hex
+    signals = []
+    signal_changed = threading.Condition()
+    page = f"""<!doctype html><title>Native browser acceptance</title>
+    <button style="width:180px;height:60px" onclick="increment()">Increment</button><p id="state"></p>
+    <script>
+    let identity=localStorage.getItem('identity');if(!identity){{identity=crypto.randomUUID();localStorage.setItem('identity',identity)}}
+    let count=Number(localStorage.getItem('count')||0);
+    function render(){{document.title='native-{run_id}-'+count;document.getElementById('state').innerText='Receipt {receipt} count '+count}}
+    function increment(){{count++;localStorage.setItem('count',String(count));render();fetch('/signal?id='+identity+'&count='+count)}}
+    render();
+    </script>""".encode()
+
+    class Page(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path.startswith("/signal?"):
+                with signal_changed:
+                    signals.append(parse_qs(urlsplit(self.path).query))
+                    signal_changed.notify_all()
+                content = b"ok"
+            else:
+                content = page
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Page)
+    serving = threading.Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    page_url = f"http://127.0.0.1:{server.server_port}/{run_id}"
+    try:
+        thread = "native-browser-" + run_id
+        assert client.post("/api/threads", headers=headers, json={"thread_id": thread}).status_code in (200, 201)
+        central = str(client.base_url).rstrip("/")
+        csrf = _PrivateString(client.cookies.get("csrf_token") or "")
+        ui_headers = _PrivateMapping({"Origin": central, **({"X-CSRF-Token": csrf} if csrf else {})})
+        # UI establishes affinity without admitting an Agent Run.
+        preview = client.post(f"/api/threads/{thread}/browser/navigate", headers=ui_headers, json={"url": page_url})
+        assert preview.status_code == 200 and preview.json()["title"] == "native-" + run_id + "-0"
+        if control_only:
+            # Same fixture/control path; native UI supplies initial count1.
+            # No Run admission or model invocation occurs in this case.
+            cookie = _PrivateString("; ".join(key + "=" + value for key, value in client.cookies.items()))
+            stream_url = central.replace("http://", "ws://") + f"/api/threads/{thread}/browser/stream?frame_format=binary"
+            with connect(stream_url, additional_headers={"Cookie": cookie}, origin=central, open_timeout=15) as initial:
+                _receive_native_browser_frame(initial)
+                _click_native_browser_until_title(initial, "native-" + run_id + "-1")
+            with signal_changed:
+                assert signal_changed.wait_for(lambda: len(signals) >= 1, timeout=5)
+            admitted = None
+            model_seconds = 0
+        else:
+            prompt = (
+                f"Actually invoke native browser_navigate on {page_url}. Use native browser_click on the Increment button once. "
+                "Then invoke native browser_get_text to read the receipt and count from the page. "
+                "Use native write_file to write that full receipt/count text into /mnt/user-data/outputs/native_browser_receipt.txt. "
+                "Use native read_file to verify it, then native present_files to deliver that exact file. "
+                "Finally answer with the receipt and count. Leave the browser open for my Live panel."
+            )
+            started_at = time.monotonic()
+            started = client.post(
+                f"/api/threads/{thread}/runs",
+                headers=headers,
+                json={
+                    "assistant_id": "lead_agent",
+                    "input": {"messages": [{"role": "user", "content": prompt}]},
+                    "context": {"model_name": "deepseek-chat", "non_interactive": True},
+                    "stream_mode": ["values", "messages-tuple", "custom"],
+                    "on_disconnect": "continue",
+                    "config": {"recursion_limit": 100},
+                },
+            )
+            assert started.status_code == 200, started.status_code
+            admitted = started.json()["run_id"]
+            joined = httpx.get(worker + f"/api/threads/{thread}/runs/{admitted}/join", headers=headers, timeout=240)
+            assert joined.status_code == 200 and "event: end" in joined.text
+            result = client.get(f"/api/threads/{thread}/runs/{admitted}", headers=headers).json()
+            assert result["status"] == "success", {key: result.get(key) for key in ("status", "error", "stop_reason")}
+            state = client.get(f"/api/threads/{thread}/state", headers=headers).json()
+            messages = state.get("values", {}).get("messages", [])
+            calls = [call for message in messages for call in message.get("tool_calls", [])]
+            assert {"browser_navigate", "browser_click", "browser_get_text", "write_file", "read_file", "present_files"} <= {call["name"] for call in calls}
+            tools = [message for message in messages if message.get("type") == "tool" or message.get("role") == "tool"]
+            assert any(message.get("name") == "browser_get_text" and receipt in str(message.get("content")) and "count 1" in str(message.get("content")) for message in tools)
+            presented = "/mnt/user-data/outputs/native_browser_receipt.txt"
+            assert presented in state.get("values", {}).get("artifacts", [])
+            present_ids = {call["id"] for call in calls if call["name"] == "present_files" and call["args"].get("filepaths") == [presented]}
+            assert any(message.get("tool_call_id") in present_ids and message.get("content") == "Successfully presented files" for message in tools)
+            delivery = client.get(f"/api/threads/{thread}/artifacts/{presented.lstrip('/')}", headers=headers)
+            assert delivery.status_code == 200 and receipt in delivery.text and "count 1" in delivery.text
+            assert any(receipt in str(message.get("content")) for message in messages if message.get("type") == "ai" or message.get("role") == "assistant")
+            model_seconds = time.monotonic() - started_at
+        central = str(client.base_url).rstrip("/")
+        csrf = _PrivateString(client.cookies.get("csrf_token") or "")
+        ui_headers = _PrivateMapping({"Origin": central, **({"X-CSRF-Token": csrf} if csrf else {})})
+        navigate = client.post(f"/api/threads/{thread}/browser/navigate", headers=ui_headers, json={"url": page_url})
+        assert navigate.status_code == 200, (navigate.status_code, navigate.text[:150])
+        assert navigate.json()["title"] == "native-" + run_id + "-1", "Control HTTP created a different native session"
+        assert navigate.json()["screenshot"]
+        cookie = _PrivateString("; ".join(key + "=" + value for key, value in client.cookies.items()))
+        stream_url = central.replace("http://", "ws://") + f"/api/threads/{thread}/browser/stream?frame_format=binary"
+        with pytest.raises(InvalidStatus):
+            with connect(stream_url, additional_headers={"Cookie": cookie}, origin="https://untrusted.invalid", open_timeout=10):
+                pass
+        other = httpx.Client(base_url=central, timeout=60)
+        registered = other.post("/api/v1/auth/register", headers={"Origin": central}, json={"email": "browser-peer@example.com", "password": "NativeB!" + secrets.token_urlsafe(20)})
+        assert registered.status_code == 201
+        other_cookie = _PrivateString("; ".join(key + "=" + value for key, value in other.cookies.items()))
+        other_csrf = _PrivateString(other.cookies.get("csrf_token") or "")
+        other_ui = _PrivateMapping({"Origin": central, "X-CSRF-Token": other_csrf})
+        assert other.post(f"/api/threads/{thread}/browser/navigate", headers=other_ui, json={"url": page_url}).status_code == 404
+        with pytest.raises(InvalidStatus):
+            with connect(stream_url, additional_headers={"Cookie": other_cookie}, origin=central, open_timeout=10):
+                pass
+        other_thread = "native-browser-peer-" + run_id
+        assert other.post("/api/threads", headers=other_ui, json={"thread_id": other_thread}).status_code in (200, 201)
+        saw_frame = saw_mutation = False
+        with connect(stream_url, additional_headers={"Cookie": cookie}, origin=central, open_timeout=15) as live:
+            _receive_native_browser_frame(live)
+            saw_frame = True
+            # Pinned native Live cannot be evicted for another authenticated owner.
+            assert other.post(f"/api/threads/{other_thread}/browser/navigate", headers=other_ui, json={"url": page_url}).status_code == 429
+            _click_native_browser_until_title(live, "native-" + run_id + "-2")
+            saw_mutation = True
+        assert saw_frame and saw_mutation
+        with signal_changed:
+            assert signal_changed.wait_for(lambda: len(signals) >= 2, timeout=5), "Native page callback did not settle"
+        assert len(signals) == 2 and signals[0]["id"] == signals[1]["id"] and [value["count"][0] for value in signals] == ["1", "2"]
+        # Disconnect releases the native Live lease and never replays click.
+        with connect(stream_url, additional_headers={"Cookie": cookie}, origin=central, open_timeout=15) as resumed:
+            assert any(isinstance(resumed.recv(timeout=10), bytes) for _ in range(8))
+        assert len(signals) == 2
+        sql = create_engine(environment["C_NATIVE_EXECUTOR_DATABASE_URL"])
+        try:
+            with sql.connect() as connection:
+                jobs = list(connection.execute(text("select record from ecs_execution_jobs")).scalars())
+                assert len(jobs) == 0 if control_only else len(jobs) == 1 and jobs[0]["native"]["run_id"] == admitted and jobs[0]["node_id"] == "one"
+                worker_identity = re.search(r"Run lease heartbeat started for worker ([^\n]+)", (tmp_path / "worker.log").read_text()).group(1)
+                if control_only:
+                    assert connection.execute(text("select count(*) from runs where thread_id=:thread"), {"thread": thread}).scalar_one() == 0
+                else:
+                    assert connection.execute(text("select owner_worker_id from runs where run_id=:id"), {"id": admitted}).scalar_one() == worker_identity
+                    assert connection.execute(text("select count(*) from run_events where run_id=:id"), {"id": admitted}).scalar_one() > 0
+                assert connection.execute(text("select count(*) from ecs_native_affinities where user_id=:owner and thread_id=:thread"), {"owner": owner, "thread": thread}).scalar_one() == 1
+        finally:
+            sql.dispose()
+        assert client.delete(f"/api/threads/{thread}", headers=ui_headers).status_code in (200, 204)
+        for _ in range(80):
+            fresh = other.post(f"/api/threads/{other_thread}/browser/navigate", headers=other_ui, json={"url": page_url})
+            if fresh.status_code != 429:
+                break
+            time.sleep(0.1)
+        assert fresh.status_code == 200 and fresh.json()["title"] == "native-" + run_id + "-0"
+        assert other.delete(f"/api/threads/{other_thread}", headers=other_ui).status_code in (200, 204)
+        other.close()
+        if control_only:
+            print(
+                "Native browser control receipt: zero Runs/jobs/model invocations; HTTP retained same state; "
+                "native Live JPEG/input count2; owner/Origin denial and pinned429; reconnect without click replay; "
+                "canonical delete retirement and fresh other-owner count0."
+            )
+        else:
+            print(f"Native browser model receipt: actual navigate/click/text/file/delivery {model_seconds:.2f}s and same-session native control flow.")
+    finally:
+        server.shutdown()
+        server.server_close()
+        serving.join(timeout=5)
+
+
+def _receive_native_browser_frame(live):
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        frame = live.recv(timeout=max(0.1, deadline - time.monotonic()))
+        if isinstance(frame, bytes):
+            assert frame.startswith(b"\xff\xd8")
+            return
+    raise AssertionError("Native Live JPEG was not received")
+
+
+def _click_native_browser_until_title(live, expected):
+    live.send(json.dumps({"type": "click", "nx": 0.1, "ny": 35 / 600}))
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        event = live.recv(timeout=max(0.1, deadline - time.monotonic()))
+        if isinstance(event, str):
+            value = json.loads(event)
+            if value.get("type") == "tabs" and any(tab["title"] == expected for tab in value["tabs"]):
+                return
+    raise AssertionError("Native Live input did not mutate the retained browser")
+
+
+def test_native_browser_control_without_model(tmp_path):
+    _native_http_acceptance(tmp_path, browser_mode=True, browser_control_only=True)

@@ -45,10 +45,10 @@ Files: ecs_executor/nodes.py, scheduling.py, dispatch.py and private migrations;
 
 Files: ecs_executor/agent_dispatch.py, minimal native internal admission adapter only if existing contracts are insufficient; examples/ecs-native/config examples; backend/tests/test_ecs_executor_c_main.py.
 
-- [ ] Run unchanged native Gateway lifecycle on worker instances with PostgreSQL, DB events, Redis bridge and run ownership heartbeats. Use native multi_instance gates and compatible checkpoint configuration.
-- [ ] Deliver signed owner/thread launch capability through outbound dispatcher to local runtime. Admit the execution run once; central queued dispatch is not an already-running duplicate run. Preserve thread operation serialization across local and remote paths.
-- [ ] Confirm actual model/tool execution, read events/result from another instance, and cross-instance cancellation. Stateful browser capabilities require affinity/provider handling rather than being silently removed.
-- [ ] Keep placement, queue and physical STOP as executor responsibilities; no independent graph loop/checkpointer/event stack.
+- [x] Run unchanged native Gateway lifecycle on worker instances with PostgreSQL, DB events, Redis bridge and run ownership heartbeats. Use native multi_instance gates and compatible checkpoint configuration.
+- [x] Deliver signed owner/thread launch capability through outbound dispatcher to local runtime. Admit the execution run once; central queued dispatch is not an already-running duplicate run. Preserve thread operation serialization across local and remote paths.
+- [x] Confirm actual model/tool execution, read events/result from another instance, and cross-instance cancellation. Stateful browser capabilities require affinity/provider handling rather than being silently removed.
+- [x] Keep placement, queue and physical STOP as executor responsibilities; no independent graph loop/checkpointer/event stack.
 
 ## Task 5: Native goal and B/C dependency coordination
 
@@ -74,3 +74,5 @@ A protocol unit test is not B acceptance; multi_instance configuration is not C 
 Task4 configured Scheduler slice accepted: actual authenticated once task automatically launched by native ScheduledTaskService, remote C -> ordinary MCP B -> same native goal C; 1 passed / 72.92 seconds. Same occurrence/two Runs/run_count=1, goal budget, physical drain-before-B, files and final cleanup verified. Optional trusted worker contract suppresses dispatch only; foreground native tools, manual durable queue and completion remain available. Frozen native/API regressions: 528 passed, 2 live deselected / 17.52s; root independently 5 passed / 1.95s after correcting extension PYTHONPATH. Ruff 12 Python files and diff checks passed; independent SPEC then quality PASS. Task4 browser/memory and Task6 remain unchecked. No cloud or remote operation.
 
 Task4 native memory configuration/acceptance slice accepted: no runtime/storage/protocol changes; native DeerMem canonical shared owner facts and local per-instance FTS indexes. Initial actualmain1passed43.66s, necessary same-case delivery-assertion rerun1passed46.71s; real memory_search/get/add, hidden receipt, peer visibility/other-owner exclusion, original remote Run ownership, no NAS SQLite, successful present_files/state artifacts/HTTP body. Native loader/safe merge verified; prior focused61passed4.59s and identity27passed1.24s, final loader2passed0.95s and root2passed1.02s. Ruff/diff and independent SPEC/quality PASS. Task4 browser and Task6 remain unchecked; no cloud/remotes.
+
+Task4 local contract accepted: native execution, configured Scheduler and native memory slices already accepted; browser final zero-model control1passed19.50s, with actual model/browser/file/delivery steps separately evidenced (original model selector not overall GREEN). Fixed-scoped native tool/Live session, strict physical closure and bounded outbound control passed independent SPEC/quality. Root independently8 focused lifecycle/physical regressions. Full final gates, fork migration/operations and cloudWSS/cgroups/NAS remain Task6; no complete-project marker.

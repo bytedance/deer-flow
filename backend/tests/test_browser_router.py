@@ -417,3 +417,15 @@ def test_browser_stream_acquires_the_session_with_pinned_egress():
         pass
 
     assert manager.acquire_session.call_args.kwargs["egress_resolver"] is resolve_browser_egress
+
+
+def test_browser_navigate_capacity_is_retryable_without_executing_action():
+    from deerflow.community.browser_automation.session import BrowserSessionCapacityError
+
+    user = User(email="browser@example.com", password_hash="x", system_role="user")
+    app = make_authed_test_app(user_factory=lambda: user)
+    app.include_router(browser_router.router)
+    app.state.thread_store.get = AsyncMock(return_value={"thread_id": "thread-1", "user_id": str(user.id)})
+    with patch.object(browser_router, "_browser_tools_enabled", return_value=True), patch("deerflow.community.browser_automation.navigate_and_capture", new=AsyncMock(side_effect=BrowserSessionCapacityError("closing"))):
+        response = TestClient(app).post("/api/threads/thread-1/browser/navigate", json={"url": "https://example.com"})
+    assert response.status_code == 429

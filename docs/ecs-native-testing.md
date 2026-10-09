@@ -9,7 +9,7 @@
 | 原生 submit 身份 | 真实 ToolNode / ordinary driver / interceptor 调用链，SPEC 与质量审查通过 | 不单独证明物理执行 |
 | B 程序主干 | 原生任务持久跟踪、真实 TCP/PostgreSQL/Docker、输入快照、原生结果文件、重启与取消通过 | 不证明云 NAS 或 C |
 | B/C 共享资源池 | PostgreSQL、两个出站 worker、三条真实程序任务，排队与容量复用通过 | 此用例中的 C 只验证准入 |
-| C 原生执行 | 两个真实 Gateway、DeepSeek、AIO 工具、checkpoint/events、Redis END、affinity、跨实例取消与 STOP 通过 | Scheduler 配置验收见下文；原生记忆验收见下文；完整浏览器仍待集成 |
+| C 原生执行 | 两个真实 Gateway、DeepSeek、AIO 工具、checkpoint/events、Redis END、affinity、跨实例取消与 STOP 通过 | Scheduler 配置验收见下文；原生记忆验收见下文；浏览器模型步骤与完整无模型控制主干分段验收见下文 |
 | C→B→C | 最新真实主干 1 passed / 142.71 秒；冻结收口 282 passed / 1 live deselected | SPEC 与质量复审通过；完整配置及部署仍待验收 |
 | fork 升级、启动/回滚与云 | 待完成 | 两台 ECS 保持停机，本轮未部署 |
 
@@ -23,7 +23,7 @@ B 最新真实主干 1 passed，16.48 秒。资源池最终真实主干 2 passed
 
 ```bash
 cd backend
-uv sync --locked --extra postgres --extra redis
+uv sync --locked --extra postgres --extra redis --extra browser
 ```
 
 主干使用 Docker。已用镜像：postgres:16-alpine、redis:7-alpine、alpine:3.20、原生 AIO 1.11.0。测试使用自己生成的 UUID 容器前缀、临时端口、目录与数据库；清理只能删除本用例拥有的资源。
@@ -62,7 +62,7 @@ ECS_EXECUTOR_DOCKER_TEST=1 ECS_EXECUTOR_TCP_TEST=1 \
 export ECS_NATIVE_MODEL_CONFIG=/absolute/private/config.yaml
 export ECS_NATIVE_MODEL_ENV=/absolute/private/.env
 ECS_NATIVE_LIVE=1 .venv/bin/python -m pytest \
-  tests/test_ecs_executor_c_live.py -m live -q -s --tb=short
+  tests/test_ecs_executor_c_live.py::test_native_http_remote_model_tool_and_peer_cancel -q -s --no-showlocals --tb=short
 ```
 
 用例启动自己的 PostgreSQL、Redis、两个正常原生 Gateway 和 AIO 沙箱。必须确认：
@@ -80,7 +80,7 @@ ECS_NATIVE_LIVE=1 .venv/bin/python -m pytest \
 
 ```bash
 ECS_NATIVE_LIVE=1 .venv/bin/python -m pytest \
-  tests/test_ecs_executor_bc_main.py -m live -q -s --tb=short
+  tests/test_ecs_executor_bc_main.py::test_real_native_c_mcp_b_same_goal_c -q -s --no-showlocals --tb=short
 ```
 
 本次依赖合同已验证：同一最小工作机上 C 提交 B，C 真实释放动态容量，B 执行并发布结果，经既有原生通知继续原目标；旧目标、取消、新消息及重复事件不得造成错误续跑。累计预算和 Scheduler overlap 保护必须保持。
@@ -114,7 +114,7 @@ make test-blocking-io
 
 ```bash
 ECS_NATIVE_LIVE=1 PYTHONPATH=.:packages/ecs-executor .venv/bin/python -m pytest \
-  tests/test_ecs_executor_bc_main.py::test_real_scheduled_native_c_mcp_b_same_occurrence_goal_c -q -s --tb=short
+  tests/test_ecs_executor_bc_main.py::test_real_scheduled_native_c_mcp_b_same_occurrence_goal_c -q -s --no-showlocals --tb=short
 ```
 
 冻结回归 528 passed / 2 live deselected / 1 已有 Starlette-httpx 警告，17.52 秒：
@@ -141,7 +141,7 @@ root 独立复验 test_ecs_native_scheduler.py：5 passed / 1.95 秒。首试缺
 
 ```bash
 ECS_NATIVE_LIVE=1 PYTHONPATH=.:packages/ecs-executor .venv/bin/python -m pytest \
-  tests/test_ecs_executor_c_live.py::test_native_remote_memory_shared_facts_and_owner_isolation -q -s
+  tests/test_ecs_executor_c_live.py::test_native_remote_memory_shared_facts_and_owner_isolation -q -s --no-showlocals --tb=short
 ```
 
 此前原生记忆/隔离/边界回归 61 passed / 4.59 秒、用户身份 27 passed / 1.24 秒。配置测试经 SPEC 修正，实际 AppConfig loader 解析本地路径环境变量并验证基础 model/database/auth/Redis 保留：实现者 2 passed / 0.95 秒，root 独立 2 passed / 1.02 秒。61 用例命令在项目根目录执行：
@@ -154,4 +154,24 @@ backend/.venv/bin/python -m pytest backend/tests/test_ecs_native_memory_config.p
 backend/.venv/bin/python -m pytest backend/tests/test_user_context.py -q
 ```
 
-配置叠加文件与安全合并命令见 examples/ecs-native/README.md；memory-only 文件不能直接作为完整启动配置。独立 SPEC 与质量审查 PASS。浏览器和 Task6 仍待完成。
+配置叠加文件与安全合并命令见 examples/ecs-native/README.md；memory-only 文件不能直接作为完整启动配置。独立 SPEC 与质量审查 PASS。浏览器验收见下文；Task6 仍待完成。
+
+## 原生浏览器：分段主干证据（2026-10-09）
+
+原生 Chromium 的 URL/egress/真实关闭探针通过（8.10 秒）。真实模型测试已证明 native navigate/click/get_text、write/read/present_files、最终原生文件交付、首次 UI affinity、HTTP 同状态、Live JPEG/实际鼠标输入、owner/Origin 隔离和 pinned 429。原模型选择器没有整体 GREEN：早期 ASGI method 缺陷已修，随后 fixture 输入参数、可选 psutil 检查和异步 signal 检查先后阻断完整用例；没有把这些失败计为 passed。fixture 修正后停止重复模型调用。
+
+最终无模型 control 主干 1 passed / 19.50 秒，零 Run、零 job、零模型调用：首次 UI affinity、同状态 HTTP、Live JPEG/输入 count2、用户与 Origin 拒绝、pinned 429、断线重连不重复点击、canonical deletion 后释放及另一用户新会话 count0。两端 Gateway 正常退出，ERROR/Traceback 为零，本用例拥有的 Docker 残留为零。此前无模型失败暴露了 stale watcher 误取消其他身份操作，已定点修复并经最终主干验证。
+
+独立 SPEC 与质量审查 PASS，修复登记上限、精确撤销、native finalizers 后清理、unknown 提示和旧 Live 会话重新创建未登记浏览器的问题。root 独立生命周期 6 passed / 1.68 秒、物理关闭竞态 2 passed / 1.34 秒；15 个改动 Python 文件 Ruff lint/format 通过。最终全后端门禁仍属 Task6。
+
+从 backend/ 执行，使用前文只读配置环境与已安装 browser extra/Chromium：
+
+```bash
+ECS_NATIVE_LIVE=1 PYTHONPATH=.:packages/ecs-executor .venv/bin/python -m pytest \
+  tests/test_ecs_executor_c_live.py::test_native_browser_control_without_model \
+  -q -s --no-showlocals --tb=short
+```
+
+该控制用例不调用模型。模型完整选择器及配置步骤见 ecs-executor README；本轮不再次运行。所有显式 ECS_NATIVE_LIVE 测试强制关闭 showlocals；浏览器子进程只继承所选模型需要的私有环境项，不携带其他服务凭据。首次失败曾将非目标服务凭据输出到工具诊断，已向用户告知并建议更换；现有自有诊断已检查/脱敏，但历史已发输出不能撤回。不要粘贴原始失败局部变量。
+
+本地目录、进程和 loopback 明文隧道不证明云 NAS、容器 cgroup 或生产 WSS；Task6 和云验收保持待完成。

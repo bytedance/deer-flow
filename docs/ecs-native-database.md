@@ -122,3 +122,7 @@ Scheduler 复用 scheduled_tasks 与 scheduled_task_runs，active occurrence 的
 记忆继续由原生 DeerMem 管理，不新增 ECS 记忆表。默认 DEER_FLOW_HOME 下 users/{user_id}/memory.json 保存共享摘要、revision 与时间；users/{user_id}/agents/{agent}/facts/{prefix}/{fact_id}.md 保存事实。事实写入沿用原生跨进程锁、revision 和恢复日志。省略 memory.backend_config.storage_path，保持正常原生用户路径。
 
 memory.backend_config.retrieval_index_path 指向每实例独立的本地目录。SQLite FTS 及 WAL/SHM 是可重建检索数据，不放 NAS，不作为事实来源。examples/ecs-native/native-memory.yaml 通过 DEER_FLOW_MEMORY_INDEX_PATH 提供此目录；只合并 memory 段到完整配置。实际两 Gateway 主干验证共享事实、原生工具/身份、另一用户隔离和两份不同的本地索引；真实云 NAS 仍待验收。
+
+## 浏览器状态边界
+
+浏览器复用 ecs_native_affinities 的 owner/thread/incarnation 节点绑定，不新增浏览器持久表。Live 连接、原始 Cookie/Authorization、页面状态和有界会话登记保持进程内存。删除/reset 通过原生线程 incarnation 撤销对应会话；进程重启不从数据库恢复页面或重放输入。

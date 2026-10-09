@@ -250,3 +250,23 @@ foreground owner-bound tools and completion hooks, without recovery or claims.
 Manual triggers enqueue in the shared native occurrence queue for control hosts.
 `is_running` retains local poller semantics; `is_available` gates foreground
 capabilities/API creation. No request field or serialized context selects this role.
+
+### Optional native browser affinity/control provider
+
+`browser_control.py` loads an explicit operator factory from the one immutable
+`ECS_NATIVE_CONFIG` startup snapshot before browser/multi-instance gates, then
+binds it to the native host. This is a trusted Gateway hook, not a public
+extension contribution point. No-provider/default rejection and multi-worker
+rejection remain intact. Browser routes delegate only after original native
+HTTP/WS auth, permission, exact owner, and Origin checks. Worker ASGI forwarding
+must preserve actual user credentials/Origin/Host and run those native checks
+again; executor signatures do not authenticate a browser user. Host-only browser
+scope binds verified owner/thread/incarnation before native task creation.
+The executor owns fixed-node transport and placement. No generic proxy URL,
+worker inbound listener, credential persistence, or effectful disconnect replay.
+Infrastructure readiness may precede worker tunnel connectivity; absent tunnel
+fails browser operations 503. See package README and `test_ecs_native_browser.py`.
+
+Only central provider teardown is independently registered in Gateway cleanup.
+Worker teardown belongs to native host release after native finalizers, including
+deferred drain; never close its browser through a second cleanup callback.

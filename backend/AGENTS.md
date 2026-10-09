@@ -13,8 +13,12 @@ pass; with no host, native recovery settles historical waits normally. Exact
 scheduled-source receipt lookup avoids ordinary waits masking recovery. Occurrence
 RunId transfer precedes physical queue activation and
 preserves original accounting. Superseded notifications report results with no
-goal injection, model tools or tool execution. Browser/memory configuration and
-cloud cgroup/NAS deployment acceptance remain separate work.
+goal injection, model tools or tool execution. Native memory retains shared owner facts and local per-instance indexes. Optional
+browser control uses an immutable operator provider snapshot, native scoped
+Playwright sessions and an outbound native HTTP/Live relay. Worker teardown is
+owned by native-host release after finalizers; strict retired sessions cannot
+reinitialize. See the Gateway and tools guides. Cloud WSS/cgroup/NAS acceptance
+remains separate work.
 
 The backend runs a LangGraph-based super agent with sandbox execution, persistent memory, subagent delegation, and extensible tools in isolated per-thread environments.
 

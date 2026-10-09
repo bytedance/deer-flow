@@ -134,7 +134,7 @@ class NativeDispatchHost:
             thread = await self.app.state.thread_store.get(record.thread_id, user_id=record.user_id)
             if thread is not None:
                 node = await asyncio.to_thread(_affinity, self.pool.store, record.user_id, record.thread_id, thread["incarnation"])
-        if node is None and origin.get("kind") not in self.config.get("remote_origins", ["schedule"]):
+        if node is None and getattr(self, "browser_control", None) is None and origin.get("kind") not in self.config.get("remote_origins", ["schedule"]):
             return False
         node = node or self.config["native_node"]
         snapshot = await snapshot_factory(transport_node=node, transport_secret=self.credentials[node])
@@ -325,6 +325,7 @@ def install_native_dispatch(app, host):
         finally:
             temporary.unlink()
     mount_id = marker.read_text(encoding="ascii")
+    host.mount_id = mount_id
 
     async def dispatch(request):
         try:
@@ -531,6 +532,15 @@ class NativeWorkerHost:
             self.check_admission()
             self.adopting = asyncio.current_task()
             try:
+                browser = getattr(self, "browser_control", None)
+                if browser is not None:
+                    # Verify the launch before its identity may bind browser
+                    # state; adoption itself verifies it again at the native fence.
+                    native = verify_native_launch(job, token, self.secret)
+                    with await browser.execution_scope(native) as attach_browser_task:
+                        record = await adopt_native_run(self.app, job, token, self.secret, admission_check=self.check_admission)
+                        attach_browser_task(record.task)
+                        return record
                 return await adopt_native_run(self.app, job, token, self.secret, admission_check=self.check_admission)
             finally:
                 self.adopting = None
@@ -664,6 +674,11 @@ class NativeWorkerHost:
         waiting = native_tasks + stops + wrappers
 
         async def release():
+            browser = getattr(self, "browser_control", None)
+            if browser is not None:
+                # Native finalizers have drained. Physical browser uncertainty
+                # retains this worker's node lock until process/container STOP.
+                await browser.stop()
             await self.client.aclose()
             self.node_lock.close()
 

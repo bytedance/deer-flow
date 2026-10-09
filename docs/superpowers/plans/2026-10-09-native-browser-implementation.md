@@ -1,0 +1,11 @@
+# Native browser affinity/control implementation
+
+Approved implementation refinement for Task 4. The root plan and acceptance authority remain with the coordinator.
+
+1. Add an opt-in public harness browser session scope and pre-initialization strict capacity configuration. Native tools and UI retain Playwright, URL validation, pinned egress, and ordinary defaults. Strict mode caps active, closing, and unknown sessions; replacement requires observed successful close/disconnection and rejects CDP.
+2. Add a minimal optional Gateway browser provider protocol and immutable startup snapshot, explicitly selected by an operator factory in ECS_NATIVE_CONFIG. Read once before startup guards, then bind to the existing native host. Ordinary multi-instance browser rejection and all multi-worker rejection stay in force without a validated provider.
+3. Implement ECS fixed-node placement and bounded outbound WebSocket tunnel into the existing central Gateway. Signed requests bind operation/arguments, owner/thread/incarnation, node/tunnel-owner, expiry, and forwarded-header digest. Preserve actual native authentication, permissions, owner and Origin checks on both Gateways using in-process ASGI forwarding to only navigate/Live routes. No new worker listener, arbitrary routes, credential persistence, or effectful replay.
+4. Bind verified native model and UI work to the same scoped native manager key. Browser-enabled central admission sends every C origin to the fixed serial worker. Pre-first-turn UI can place affinity without a Run. Poll canonical thread incarnation to revoke stale streams and close retired sessions. Worker restart exposes fresh browser state honestly.
+5. Extend the existing opt-in native live fixture with one UUID test page and one actual model case proving browser navigate/text/click plus native file/delivery, then control navigate and Live state/frame/input, isolation, and cleanup. Run focused default guards/security/session tests, formatting, harness boundary checks; coordinator owns independent SPEC/quality reviews.
+
+Production tunnel requires TLS. Only an explicit literal-loopback fixture exception permits local plaintext. Nginx WebSocket routing and Linux cgroup evidence remain Task 6 deployment acceptance.

@@ -7,6 +7,7 @@ issues when unit-testing lightweight config/registry code in isolation.
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -182,3 +183,10 @@ def _auto_user_context(request):
         yield
     finally:
         reset_current_user(token)
+
+
+def pytest_configure(config):
+    # Native live fixtures hold provider/transport credentials only in memory.
+    # Repository-wide --showlocals must never render those frames on failure.
+    if os.environ.get("ECS_NATIVE_LIVE") == "1":
+        config.option.showlocals = False

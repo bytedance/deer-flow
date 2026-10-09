@@ -204,7 +204,8 @@ async def prepare_native_host(app, startup_config):
     path = os.environ.get("ECS_NATIVE_CONFIG")
     if not path:
         return None
-    config = json.loads(Path(path).read_text(encoding="utf-8"))
+    snapshot = getattr(app.state, "browser_control_snapshot", None)
+    config = snapshot.native_config if snapshot is not None else json.loads(Path(path).read_text(encoding="utf-8"))
     if config.get("enabled") is not True:
         return None
     from ecs_executor.agent_dispatch import _AFFINITY_METADATA, NativeDispatchHost, NativeWorkerHost, install_native_dispatch
@@ -259,4 +260,13 @@ async def prepare_native_host(app, startup_config):
     else:
         raise ValueError("Enabled native dispatch requires central or worker role")
     app.state.native_run_admission_host = host
+    from app.gateway.browser_control import get_browser_control
+
+    provider = get_browser_control(app)
+    if provider is not None:
+        try:
+            await provider.bind(app, host)
+        except BaseException:
+            await host.stop()
+            raise
     return host

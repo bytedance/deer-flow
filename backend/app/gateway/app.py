@@ -562,6 +562,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             subagent_batches_config = SubagentBatchesConfig()
         configure_subagent_execution_capacity(subagent_runtime_config)
         configure_logging(startup_config)
+        from app.gateway.browser_control import load_browser_control_snapshot
+
+        app.state.browser_control_snapshot = load_browser_control_snapshot(startup_config)
         ensure_browser_runtime_available(startup_config)
         logger.info("Configuration loaded successfully")
         warn_if_auth_disabled_enabled()

@@ -110,3 +110,15 @@ ECS_NATIVE_LIVE=1 ECS_NATIVE_MODEL_CONFIG=/private/config.yaml \
 This local two-process acceptance uses a shared directory as the canonical NAS
 stand-in. Actual cloud NAS locking/durability and Gateway cgroups still require
 cloud deployment acceptance. The memory overlay does not enable browser tools.
+
+For native browser control, append the tools in `native-browser.yaml` to the
+normal Gateway tools list and add `browser_control.provider` with
+`ecs_executor.browser:build_browser_control_provider` to both role JSON files.
+The overlay preserves production SSRF/egress guards and never enables CDP.
+The fixed serial worker opens an outbound TLS WebSocket to central; the UI stays
+on central and reaches the same native session as model tools. The new provider
+is a trusted optional Gateway hook, not a public extension. See the package's
+[Native browser affinity/control](../../backend/packages/ecs-executor/README.md#native-browser-affinitycontrol)
+for startup, authentication, physical-capacity, reverse-proxy, and acceptance
+boundaries. The central and worker JSON examples remain browser-disabled by
+default; explicitly merge the provider section only when browser tools are enabled.

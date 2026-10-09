@@ -88,3 +88,24 @@ from captured child tool messages only when the final/partial report cites those
 opaque source links. This preserves retrieval evidence across the delegation
 boundary without placing provider IDs in model-visible text. Never reconstruct
 source records from the child's prose or replace them with fresh provider reads.
+
+Opt-in browser hosts may configure `configure_browser_session_manager` only
+before manager initialization. `strict_physical_capacity=True` keeps active,
+closing and unknown physical sessions charged; LRU retirement returns retryable
+capacity and admits a replacement only after native close/disconnection succeeds.
+It rejects all CDP attachments. Default native LRU/close behavior stays unchanged.
+`BrowserSessionScope` and `browser_session_scope` are host-only ContextVar
+bindings for verified owner/thread/incarnation; never derive them from caller
+context/headers. Wrong-thread access fails closed. Watchers outside the original
+scope use the public `close_scoped_session` API; never close an unscoped thread ID.
+Strict shutdown includes outstanding closing futures and fails on unknown
+physical state. Tests: `test_browser_affinity_capacity.py`.
+
+`retained_session_keys()` exposes a locked immutable identity snapshot including
+closing/unknown reservations, so host watchers can prune retired identities
+without weakening physical capacity accounting.
+
+Strict session retirement is permanent: held Live/tool references cannot rebuild
+Chromium after close. Initialization is shielded through private-loop settlement,
+and physical close shares its initialization lock, so an in-flight launch cannot
+outlive a successful capacity release. Default session behavior is unchanged.

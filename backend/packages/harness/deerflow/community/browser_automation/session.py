@@ -16,12 +16,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import json
 import logging
 import os
 import threading
 import time
 from collections.abc import Callable, Coroutine
 from concurrent.futures import Future
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from urllib.parse import urlparse
@@ -35,6 +38,48 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 ScreenshotType = Literal["png", "jpeg", "webp"]
+
+
+@dataclass(frozen=True)
+class BrowserSessionScope:
+    """Host-verified identity; never constructed from client context."""
+
+    user_id: str
+    thread_id: str
+    incarnation: str
+
+    def __post_init__(self) -> None:
+        if any(not isinstance(value, str) or not value or len(value) > 255 for value in (self.user_id, self.thread_id, self.incarnation)):
+            raise ValueError("Invalid browser session scope")
+
+    @property
+    def key(self) -> str:
+        return "scoped:" + hashlib.sha256(json.dumps([self.user_id, self.thread_id, self.incarnation], separators=(",", ":")).encode()).hexdigest()
+
+
+_browser_scope: ContextVar[BrowserSessionScope | None] = ContextVar("deerflow_browser_scope", default=None)
+
+
+@contextlib.contextmanager
+def browser_session_scope(scope: BrowserSessionScope):
+    """Bind native tools/UI to one verified owner/thread/incarnation."""
+    if not isinstance(scope, BrowserSessionScope):
+        raise ValueError("Invalid browser session scope")
+    token = _browser_scope.set(scope)
+    try:
+        yield
+    finally:
+        _browser_scope.reset(token)
+
+
+def browser_session_key(thread_id: str | None) -> str:
+    scope = _browser_scope.get()
+    if scope is not None:
+        if thread_id != scope.thread_id:
+            raise ValueError("Browser session thread does not match verified scope")
+        return scope.key
+    return thread_id or "default"
+
 
 # Element roles/tags treated as interactive when building a page snapshot. The
 # model addresses elements by the ``data-df-ref`` index this snapshot stamps, so
@@ -313,8 +358,11 @@ class BrowserSession:
         url_guard: Callable[[str], str | None] | None = None,
         egress_resolver: EgressResolver | None = None,
         on_activity: Callable[[], None] | None = None,
+        strict_physical_capacity: bool = False,
     ) -> None:
         self._loop = loop
+        self._strict_physical_capacity = strict_physical_capacity
+        self._retired = False
         self._headless = headless
         self._timeout_ms = timeout_ms
         self._viewport = viewport
@@ -406,9 +454,20 @@ class BrowserSession:
             self._unpin()
 
     async def _ensure_page(self) -> Page:
-        if self._page is not None and not self._page.is_closed():
+        if not self._strict_physical_capacity:
+            return await self._initialize_page()
+        # Keep initialization holding its private-loop lock until launch settles,
+        # even if the caller disconnects/cancels. Physical close waits that lock.
+        initialization = asyncio.create_task(self._initialize_page())
+        initialization.add_done_callback(_consume_future_exception)
+        return await asyncio.shield(initialization)
+
+    async def _initialize_page(self) -> Page:
+        if not self._strict_physical_capacity and self._page is not None and not self._page.is_closed():
             return self._page
         async with self._ensure_page_lock:
+            if self._strict_physical_capacity and self._retired:
+                raise RuntimeError("Browser session is permanently retired")
             if self._page is not None and not self._page.is_closed():
                 return self._page
             from playwright.async_api import async_playwright
@@ -726,6 +785,23 @@ class BrowserSession:
             await self._rebind_screencast()
 
     async def _close(self) -> None:
+        if self._strict_physical_capacity:
+            self._retired = True
+            async with self._ensure_page_lock:
+                # Retain all handles and the capacity reservation on any failure.
+                await self._stop_screencast()
+                if self._context is not None:
+                    await self._context.close()
+                if self._browser is not None:
+                    await self._browser.close()
+                    if self._browser.is_connected():
+                        raise RuntimeError("Browser close did not confirm disconnect")
+                if self._playwright is not None:
+                    await self._playwright.stop()
+                if self._egress_proxy is not None:
+                    await self._egress_proxy.close()
+                self._clear_closed_state()
+            return
         try:
             with contextlib.suppress(Exception):
                 await self._stop_screencast()
@@ -749,18 +825,21 @@ class BrowserSession:
                 with contextlib.suppress(Exception):
                     await self._egress_proxy.close()
         finally:
-            self._egress_proxy = None
-            self._playwright = None
-            self._browser = None
-            self._context = None
-            self._page = None
-            self._screencast_page = None
-            self._connected_over_cdp = False
-            self._on_frame = None
-            self._settle_live_frames_pending = False
-            self._input_live_frame_generation += 1
-            self._page_listener_bound = False
-            self._request_guard_bound = False
+            self._clear_closed_state()
+
+    def _clear_closed_state(self) -> None:
+        self._egress_proxy = None
+        self._playwright = None
+        self._browser = None
+        self._context = None
+        self._page = None
+        self._screencast_page = None
+        self._connected_over_cdp = False
+        self._on_frame = None
+        self._settle_live_frames_pending = False
+        self._input_live_frame_generation += 1
+        self._page_listener_bound = False
+        self._request_guard_bound = False
 
     async def _start_screencast(self, on_frame: Callable[[bytes], None]) -> None:
         """Start Live mode and send an initial JPEG frame.
@@ -946,7 +1025,11 @@ class BrowserSessionManager:
     blocks the caller; the just-requested thread is always kept.
     """
 
-    def __init__(self, *, max_sessions: int = _DEFAULT_MAX_SESSIONS, idle_timeout_s: float = _DEFAULT_IDLE_TIMEOUT_S) -> None:
+    def __init__(self, *, max_sessions: int = _DEFAULT_MAX_SESSIONS, idle_timeout_s: float = _DEFAULT_IDLE_TIMEOUT_S, strict_physical_capacity: bool = False) -> None:
+        if strict_physical_capacity and max_sessions < 1:
+            raise ValueError("Strict browser capacity requires a positive bound")
+        self._strict_physical_capacity = strict_physical_capacity
+        self._closing: dict[str, Future[Any] | None] = {}
         self._loop: _PlaywrightLoopThread | None = None
         self._sessions: dict[str, BrowserSession] = {}
         self._last_used: dict[str, float] = {}
@@ -978,15 +1061,23 @@ class BrowserSessionManager:
         pin: bool = False,
     ) -> BrowserSession:
         ensure_browser_worker_compatibility()
+        if cdp_url and self._strict_physical_capacity:
+            raise ValueError("Strict physical browser capacity does not support CDP")
         if cdp_url and not allow_unguarded_cdp:
             raise RuntimeError("cdp_url uses a browser context where DeerFlow cannot enforce its SSRF request guard; set allow_unguarded_cdp: true only for an explicitly trusted local Chrome session")
-        key = thread_id or "default"
+        key = browser_session_key(thread_id)
+        if self._strict_physical_capacity:
+            self._retire_lru_for_capacity(key)
         now = time.monotonic()
         evicted: list[BrowserSession] = []
         with self._lock:
             session = self._sessions.get(key)
             if session is None:
-                evicted.extend(self._collect_idle_locked(keep_key=key, now=now))
+                if self._strict_physical_capacity:
+                    if key in self._closing or len(self._sessions) + len(self._closing) >= self._max_sessions:
+                        raise BrowserSessionCapacityError("Physical browser capacity is full or close remains unconfirmed")
+                else:
+                    evicted.extend(self._collect_idle_locked(keep_key=key, now=now))
                 if self._max_sessions > 0 and len(self._sessions) >= self._max_sessions:
                     lru = self._pop_lru_unpinned_locked(excluded_keys={key})
                     if lru is None:
@@ -1001,6 +1092,7 @@ class BrowserSessionManager:
                     url_guard=url_guard,
                     egress_resolver=egress_resolver,
                     on_activity=lambda: self._touch_session(key),
+                    strict_physical_capacity=self._strict_physical_capacity,
                 )
                 self._sessions[key] = session
             if pin:
@@ -1014,16 +1106,15 @@ class BrowserSessionManager:
     @contextlib.contextmanager
     def acquire_session(self, thread_id: str | None, **kwargs: Any):
         """Acquire an atomically pinned session for one browser operation."""
-        key = thread_id or "default"
-        session = self.get_session(key, pin=True, **kwargs)
+        session = self.get_session(thread_id, pin=True, **kwargs)
         try:
             yield session
         finally:
-            self.release_session(key, session)
+            self.release_session(thread_id, session)
 
     def release_session(self, thread_id: str | None, session: BrowserSession) -> None:
         """Release a lease and restore idle/LRU bounds when it becomes evictable."""
-        key = thread_id or "default"
+        key = browser_session_key(thread_id)
         session._unpin()
         now = time.monotonic()
         with self._lock:
@@ -1039,6 +1130,8 @@ class BrowserSessionManager:
         session. Lease release passes ``None`` so newly unpinned sessions can
         restore the configured bounds without waiting for another request.
         """
+        if self._strict_physical_capacity:
+            return []
         to_close: list[BrowserSession] = []
         to_close.extend(self._collect_idle_locked(keep_key=keep_key, now=now))
         if self._max_sessions > 0:
@@ -1084,16 +1177,84 @@ class BrowserSessionManager:
             loop.submit(session._close())
 
     async def close_session(self, thread_id: str | None) -> bool:
-        key = thread_id or "default"
+        return await self._close_session_key(browser_session_key(thread_id))
+
+    async def _close_session_key(self, key: str) -> bool:
         with self._lock:
             session = self._sessions.pop(key, None)
+            if session is not None and self._strict_physical_capacity:
+                self._closing[key] = None
             self._last_used.pop(key, None)
         if session is None:
             return False
-        await session.close()
+        if not self._strict_physical_capacity:
+            await session.close()
+            return True
+        future = self._start_strict_close(key, session)
+        wrapped = asyncio.wrap_future(future)
+        wrapped.add_done_callback(_consume_future_exception)
+        await asyncio.shield(wrapped)
         return True
 
+    def _start_strict_close(self, key: str, session: BrowserSession) -> Future[Any]:
+        # The caller has already charged the closing reservation under the lock.
+        future = session._submit_close()
+        with self._lock:
+            self._closing[key] = future
+
+        def release_closed(completed: Future[Any]) -> None:
+            try:
+                completed.result()
+            except BaseException:
+                return
+            with self._lock:
+                if self._closing.get(key) is completed:
+                    self._closing.pop(key)
+
+        future.add_done_callback(release_closed)
+        return future
+
+    def _retire_lru_for_capacity(self, requested_key: str) -> None:
+        with self._lock:
+            if requested_key in self._sessions or len(self._sessions) + len(self._closing) < self._max_sessions:
+                return
+            candidates = [(stamp, key) for key, stamp in self._last_used.items() if not self._sessions[key].active_refs]
+            if not candidates:
+                return
+            _, key = min(candidates)
+            session = self._sessions.pop(key)
+            self._last_used.pop(key)
+            self._closing[key] = None
+        try:
+            self._start_strict_close(key, session)
+        except Exception:
+            pass  # Unknown submission retains the closing reservation.
+        # This call has not executed a new action. Caller may retry only once
+        # the private loop confirms retirement; never overlap Chromium launch.
+        raise BrowserSessionCapacityError("Previous browser is closing; retry after physical closure")
+
+    def retained_session_keys(self) -> frozenset[str]:
+        """Host watcher identities, including closing/unknown physical reservations."""
+        with self._lock:
+            return frozenset(self._sessions) | frozenset(self._closing)
+
+    async def close_scoped_session(self, scope: BrowserSessionScope) -> bool:
+        """Allow a host watcher outside the original task scope to retire it."""
+        return await self._close_session_key(scope.key)
+
     async def close_all_sessions(self) -> int:
+        if self._strict_physical_capacity:
+            with self._lock:
+                keys = list(self._sessions)
+            await asyncio.gather(*(self._close_session_key(key) for key in keys))
+            with self._lock:
+                closing = list(self._closing.values())
+            if any(future is None for future in closing):
+                raise RuntimeError("Physical browser close remains unknown")
+            if closing:
+                # Cancellation cannot cancel a private-loop physical finalizer.
+                await asyncio.shield(asyncio.gather(*(asyncio.wrap_future(future) for future in closing)))
+            return len(keys)
         with self._lock:
             sessions = list(self._sessions.values())
             self._sessions.clear()
@@ -1116,6 +1277,18 @@ class BrowserSessionManager:
 
 _manager: BrowserSessionManager | None = None
 _manager_lock = threading.Lock()
+_manager_options: dict[str, Any] = {}
+
+
+def configure_browser_session_manager(*, max_sessions: int = _DEFAULT_MAX_SESSIONS, strict_physical_capacity: bool = False) -> None:
+    """Operator-only startup configuration, before the first manager access."""
+    global _manager_options
+    if type(max_sessions) is not int or max_sessions < 1 or type(strict_physical_capacity) is not bool:
+        raise ValueError("Invalid browser manager capacity configuration")
+    with _manager_lock:
+        if _manager is not None:
+            raise RuntimeError("Browser session manager is already initialized")
+        _manager_options = {"max_sessions": max_sessions, "strict_physical_capacity": strict_physical_capacity}
 
 
 def get_browser_session_manager() -> BrowserSessionManager:
@@ -1123,12 +1296,13 @@ def get_browser_session_manager() -> BrowserSessionManager:
     if _manager is None:
         with _manager_lock:
             if _manager is None:
-                _manager = BrowserSessionManager()
+                _manager = BrowserSessionManager(**_manager_options)
     return _manager
 
 
 def reset_browser_session_manager() -> None:
     """Test hook: drop the process-local manager without closing sessions."""
-    global _manager
+    global _manager, _manager_options
     with _manager_lock:
         _manager = None
+        _manager_options = {}
