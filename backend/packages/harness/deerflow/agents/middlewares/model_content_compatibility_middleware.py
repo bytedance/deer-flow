@@ -16,8 +16,11 @@ The conversion layer no longer emits those blocks for new results. This
 middleware covers the other time window — history written before the fix — by
 rewriting the *request view* at the model boundary:
 
-- a ``{"type": "file", "url": ...}`` block becomes a plain text placeholder
-  ``[Resource ({mime or "unknown type"}) available at {url}]``;
+- a ``{"type": "file"}`` block carrying a ``url`` KEY becomes a plain text
+  placeholder — ``[Resource ({mime or "unknown type"}) available at {url}]``
+  when the URL is a non-empty string, ``[Resource ({mime or "unknown type"})]``
+  when it is empty or ``None`` (langchain-core raises on the key, not the
+  value);
 - an ``{"type": "image", "url": ...}`` block whose URL scheme the provider
   cannot fetch (anything outside ``http``/``https``/``data``) becomes the same
   placeholder — local images are meant to reach the model through the
@@ -63,6 +66,11 @@ def _placeholder_text(mime_type: object, url: str) -> str:
     return f"[Resource ({mime}) available at {url}]"
 
 
+def _locationless_placeholder_text(mime_type: object) -> str:
+    mime = mime_type if isinstance(mime_type, str) and mime_type else "unknown type"
+    return f"[Resource ({mime})]"
+
+
 def _sanitize_block(block: Any) -> Any:
     """Return *block* unchanged, or its text-placeholder replacement.
 
@@ -73,12 +81,17 @@ def _sanitize_block(block: Any) -> Any:
         return block
     block_type = block.get("type")
     if block_type == "file":
-        # URL-sourced file blocks are rejected by Chat Completions regardless of
-        # scheme; base64/file_id blocks are fine and stay untouched.
+        # URL-sourced file blocks are rejected by Chat Completions whenever a
+        # ``url`` KEY is present — langchain-core raises even for an empty
+        # string or None — so gate on key presence, not truthiness. Base64 /
+        # file_id blocks carry no ``url`` key and stay untouched. A present but
+        # unusable URL ("" / None) gets a location-less placeholder.
+        if "url" not in block:
+            return block
         url = block.get("url")
         if isinstance(url, str) and url:
             return {"type": "text", "text": _placeholder_text(block.get("mime_type"), url)}
-        return block
+        return {"type": "text", "text": _locationless_placeholder_text(block.get("mime_type"))}
     if block_type == "image":
         url = block.get("url")
         if isinstance(url, str) and url and urlparse(url).scheme.lower() not in _FETCHABLE_IMAGE_SCHEMES:

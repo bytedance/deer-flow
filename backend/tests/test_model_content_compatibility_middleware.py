@@ -133,6 +133,21 @@ class TestUrlFileBlocksBecomeTextPlaceholders:
         assert isinstance(content, list)
         assert not any(isinstance(block, dict) and block.get("type") == "file" and "url" in block for block in content)
 
+    def test_file_block_with_empty_string_url_is_rewritten(self):
+        """langchain-core raises on ANY ``file`` block carrying a ``url`` key — an
+        empty string included — so key presence, not truthiness, must drive the
+        rewrite. With no usable location the placeholder drops the suffix."""
+        message = _tool_message([{"type": "file", "url": "", "mime_type": "application/pdf"}])
+        prepared = _run_sync(ModelContentCompatibilityMiddleware(), _model_request([message]))
+
+        assert prepared.messages[0].content == [{"type": "text", "text": "[Resource (application/pdf)]"}]
+
+    def test_file_block_with_none_url_is_rewritten(self):
+        message = _tool_message([{"type": "file", "url": None, "mime_type": "image/png"}])
+        prepared = _run_sync(ModelContentCompatibilityMiddleware(), _model_request([message]))
+
+        assert prepared.messages[0].content == [{"type": "text", "text": "[Resource (image/png)]"}]
+
 
 class TestImageBlockSchemeGating:
     def test_image_block_with_non_fetchable_scheme_is_downgraded(self):
