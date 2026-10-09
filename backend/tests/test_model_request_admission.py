@@ -433,6 +433,75 @@ def test_codex_without_admission_preserves_default_retries(codex_credentials):
     assert CodexChatModel().retry_max_attempts == 3
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize("reason_phrase", [b"", b"Upstream error"])
+async def test_codex_529_middleware_retry_reenters_admission(monkeypatch, registry, clock, codex_credentials, mode, reason_phrase):
+    import httpx
+    from langchain.agents import create_agent
+
+    from deerflow.agents.middlewares import llm_error_handling_middleware as errors
+    from deerflow.config.app_config import AppConfig
+    from deerflow.models import openai_codex_provider as provider
+    from deerflow.models.factory import create_chat_model
+
+    monkeypatch.setattr(errors, "_PROCESS_LIMITER", None)
+    monkeypatch.setattr(errors, "_CAP_RESOLVED", False)
+    config = AppConfig.model_validate(
+        {
+            "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+            "llm_call": {"retry_max_attempts": 2, "retry_base_delay_ms": 25, "retry_cap_delay_ms": 25},
+            "models": [
+                {
+                    "name": "codex-paced",
+                    "use": "deerflow.models.openai_codex_provider:CodexChatModel",
+                    "model": "gpt-5.4",
+                    "request_admission": {"requests_per_minute": 60, "max_wait_seconds": 2},
+                }
+            ],
+        }
+    )
+    model = create_chat_model("codex-paced", app_config=config, attach_tracing=False)
+    calls = []
+    sleeps = []
+
+    def respond(request):
+        calls.append(clock[0])
+        if len(calls) == 1:
+            # HTTPStatusError omits this body; retry must recognize the status
+            # even when the reason phrase carries no overload/busy wording.
+            return httpx.Response(529, extensions={"reason_phrase": reason_phrase}, json={"error": "overloaded"})
+        event = {"type": "response.completed", "response": {"output": [{"type": "message", "content": [{"type": "output_text", "text": "recovered"}]}], "usage": {}}}
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=f"data: {json.dumps(event)}\n\n")
+
+    def sleep(delay):
+        sleeps.append(delay)
+        clock[0] += delay
+
+    real_async_sleep = asyncio.sleep
+
+    async def async_sleep(delay):
+        sleep(delay)
+        await real_async_sleep(0)
+
+    client_class = httpx.Client
+    monkeypatch.setattr(provider.httpx, "Client", lambda **kwargs: client_class(transport=httpx.MockTransport(respond), **kwargs))
+    monkeypatch.setattr(provider.time, "sleep", sleep)
+    monkeypatch.setattr(asyncio, "sleep", async_sleep)
+    agent = create_agent(model=model, tools=[], middleware=[errors.LLMErrorHandlingMiddleware(app_config=config)])
+    inputs = {"messages": [{"role": "user", "content": "hello"}]}
+    result = agent.invoke(inputs) if mode == "sync" else await agent.ainvoke(inputs)
+
+    assert result["messages"][-1].content == "recovered"
+    assert model.retry_max_attempts == 1
+    # Middleware's 25ms backoff alone cannot satisfy the one-second pacing
+    # interval: the second HTTP attempt must also wait for admission.
+    assert calls == pytest.approx([0, 1])
+    assert sleeps[0] == pytest.approx(0.025)
+    assert len(sleeps) > 1
+    assert all(0 <= delay <= 0.05 for delay in sleeps)
+
+
 @pytest.mark.parametrize("provider", ["claude", "codex"])
 @pytest.mark.parametrize("limiter_kind", ["admission", "custom", "none"])
 @pytest.mark.parametrize("attempts", [1, 7])

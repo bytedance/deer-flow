@@ -85,9 +85,9 @@ construction instead of resetting a live budget.
 When enabled, exposed SDK `max_retries` settings are set to zero: SDK retries
 would bypass the admission hook. Claude and Codex also set their provider-internal
 `retry_max_attempts` to one, regardless of config or caller overrides, and log a
-warning when reducing a larger value. Agent middleware retries still work and
-each new attempt is paced. Calls outside that middleware no longer get SDK or
-Claude/Codex wrapper retries.
+warning when reducing a larger value. Agent middleware retries still work,
+including HTTP 529 overloads, and each new attempt is paced. Calls outside that
+middleware no longer get SDK or Claude/Codex wrapper retries.
 Custom providers that bypass BaseChatModel admission hooks or perform hidden
 retries need their own integration. A caller-supplied `rate_limiter` cannot be
 combined with `request_admission`.
