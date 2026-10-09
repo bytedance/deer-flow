@@ -98,8 +98,8 @@ export async function fetchMcpTasksEnabled(): Promise<boolean> {
 }
 
 export async function fetchImageGenerationManagementEnabled(): Promise<boolean> {
-  // Older Gateways always expose this API and do not report the flag.
-  return (await fetchFeatures()).image_generation_management?.enabled ?? true;
+  // Gateways without this flag also lack the image-management routes.
+  return (await fetchFeatures()).image_generation_management?.enabled ?? false;
 }
 
 export async function fetchSubagentBatchesCapability(): Promise<SubagentBatchesCapability> {

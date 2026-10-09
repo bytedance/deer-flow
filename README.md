@@ -1349,6 +1349,8 @@ endpoint, and key; changing any of them clears the displayed test result.
 If the saved server test results become unreadable, Settings shows the model as
 unverified. A new test still returns its live result even if that result cannot
 be saved for later display.
+If the saved image-model default becomes unreadable, Settings still lists the
+profiles. An admin can select a new default to replace the damaged record.
 The old `sandbox.environment` image variables remain a fallback when the typed
 block is absent. Do not define image settings in both places; configuration
 loading rejects that conflict. The server entry can coexist with web profiles,
@@ -1370,7 +1372,8 @@ Docker container to apply the value. This removes
 the `/api/image-generation` management and test routes, hides the image-model
 Settings section, and makes the Agent use only the server image model. Existing
 web profiles and saved defaults stay on disk but are ignored until the switch
-is turned back on. The switch defaults to `true`. The static website build
+is turned back on. The switch defaults to `true`; an older Gateway without this
+feature flag also leaves the Settings section hidden. The static website build
 continues to use its local fixtures and does not request this Gateway feature.
 
 Local AIO images with `/v1/bash/exec` receive web credentials per command.

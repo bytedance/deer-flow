@@ -66,6 +66,7 @@ Chat pages pass `useThreadScheduledTaskEvents` data to `MessageList` (`scheduled
 
 The administrator-only Models settings page also renders an image provider
 section when `/api/features.image_generation_management.enabled` is true.
+An absent flag hides the section because older Gateways lack its management API.
 The feature query is disabled for non-admins and static website builds. It calls
 `/api/image-generation/profiles`, stores no API key in browser
 state after save, and shows separate generation and reference-edit test

@@ -119,7 +119,12 @@ def _list_profiles() -> dict:
     except (ImageConfigurationError, ValueError):
         legacy = None
     status = _status()
-    current_default = ImageGenerationDefaultStore().read()
+    try:
+        current_default = ImageGenerationDefaultStore().read()
+        default_unreadable = False
+    except ValueError:
+        current_default = None
+        default_unreadable = True
     status["default_revision"] = current_default.revision if current_default else None
     if current_default is None or (legacy is None and not any(item.enabled for item in stored_profiles)):
         default_source = None
@@ -129,7 +134,11 @@ def _list_profiles() -> dict:
         except ImageConfigurationError:
             default_source = None
     status["default_active"] = current_default is not None and default_source == current_default.source
-    choice_required = legacy is not None and image_profile_choice_needed(get_app_config().image_generation_environment)
+    if default_unreadable:
+        enabled = [item for item in stored_profiles if item.enabled]
+        choice_required = legacy is not None and legacy.usable() and len(enabled) == 1 and enabled[0].usable()
+    else:
+        choice_required = legacy is not None and image_profile_choice_needed(get_app_config().image_generation_environment)
     status["choice_required"] = choice_required
     managed_selected = status["source"] == "managed"
     for item in profiles:

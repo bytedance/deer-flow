@@ -2,6 +2,23 @@ import { expect, test } from "@playwright/test";
 
 import { mockLangGraphAPI } from "./utils/mock-api";
 
+test("hides image model settings when management is disabled", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page, {
+    features: { imageGenerationManagementEnabled: false },
+  });
+  await page.goto("/workspace/chats/new");
+  const sidebar = page.locator("[data-sidebar='sidebar']");
+  await sidebar.getByRole("button", { name: /Settings and more/ }).click();
+  await page.getByRole("menuitem", { name: "Settings" }).click();
+  const settings = page.getByRole("dialog", { name: "Settings", exact: true });
+  await settings.getByRole("button", { name: "Models" }).click();
+  await expect(settings.getByText("Image models", { exact: true })).toHaveCount(
+    0,
+  );
+});
+
 test("administrator selects a persistent image default in Settings", async ({
   page,
 }, testInfo) => {
