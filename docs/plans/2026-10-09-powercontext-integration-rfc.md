@@ -66,17 +66,26 @@ These are proposed acceptance scenarios, not measured results.
 
 | Included | Deferred |
 | --- | --- |
-| One explicitly bound DeerFlow user and one existing personal Scope | Multi-user credential provisioning and project/agent-specific Scopes |
+| One explicitly bound, authenticated DeerFlow user and one existing personal Scope | Auth-disabled deployments, multi-user credential provisioning and project/agent-specific Scopes |
 | Automatic recall at the host's existing initial-context boundary | Refresh on every turn or after a mid-conversation edit |
 | Explicit save through a package-contributed model tool | Automatic transcript capture and background extraction |
 | Bounded HTTP calls, citations, isolated credentials and useful diagnostics | Handoff/Continue, Task Outcome, Profile, Experience and Skill workflows |
 | Local and Docker install/restart/rollback instructions | DeerMem-compatible memory-management UI and automatic data migration |
 
-The pilot exercises normal Gateway web conversations with the default lead
-agent. All allowed agents/tools acting as the configured owner share the same
-personal Scope; this is **not** an agent or project isolation contract. Scheduled
-tasks, IM channels, standalone embedded clients and independent subagent memory
-flows are outside the initial acceptance claim.
+Same-user sharing across Gateway web, IM and scheduled-task runs is intentional:
+whenever the host resolves a run to the configured owner's trusted identity,
+recall uses the same personal Scope and the save tool is available if host tool
+policy admits it. The adapter does not impose a web-only gate. This is **not**
+an agent, project or channel isolation contract. A scheduled run can save when
+its user-authored task explicitly requests saving; there is no interactive
+confirmation, and non-interactive execution does not itself authorize a save.
+
+The first live dogfood covers ordinary Gateway web conversations with the default
+lead agent. Deterministic host-contract tests cover the same-owner and rejected
+identity paths for IM and scheduled runs; live transport testing for those
+surfaces remains later work. Standalone embedding and independent subagent
+memory lifecycles are outside the supported host scope. Where Gateway admits a
+plugin tool to a delegated agent, that tool follows the same owner/Scope rule.
 
 Passive `add`, `aadd` and `add_nowait` are explicit no-ops in the first adapter.
 Installing it therefore does not upload existing chats or automatically learn
@@ -89,6 +98,8 @@ This proposal was checked against DeerFlow
 `127c2c220c30d875b2995e95608b98d86db6bc13` and PowerContext
 `4d3165f87e3d5780fa9aeab3d9b8c5fa4bc17ed2`. DeerFlow's local revision matched
 upstream `main` when checked on 2026-10-09.
+The review revision also checked configuration rewriting and identity fallback
+against PR head `79ea52fc174fe707709c79babd88d2852c36fad1`.
 
 | Existing contract | Consequence for this proposal |
 | --- | --- |
@@ -134,9 +145,11 @@ persistence implementations. The tool uses `deerflow_extension_api`.
 
 ### Recall
 
-`get_context` checks the resolved host user against the configured owner before
-any request. Missing or different users receive no context and cause no remote
-request. Agent names do not select a different Scope in this pilot.
+`get_context` first rejects absent, blank, whitespace-padded or `default` user
+IDs, then requires an exact match with the configured owner before any request.
+Rejected identities receive no context and cause no remote request. The literal
+`default` is also DeerFlow's missing-identity fallback, so it cannot be an owner
+binding. Agent names do not select a different Scope in this pilot.
 
 It sends `POST /v1/context/prepare` with the configured `scope_id`, the current
 `query`, `max_bytes: 8000`, and a memory-only assembly:
@@ -187,8 +200,10 @@ normalization and an allowed `kind` such as `fact` or `preference`. The tool
 description prohibits saving secrets and directs the agent to call it only for an
 explicit user request to save information; this instruction is not a new
 human-approval or intent-verification mechanism. Host tool policy still applies.
-The handler checks `ToolContext.principal.user_id` against the configured owner,
-then calls `POST /v1/memory/remember` with `scope_id`, `kind` and `text`.
+The handler applies the same identity rejection and exact-owner check to
+`ToolContext.principal.user_id`, then calls `POST /v1/memory/remember` with
+`scope_id`, `kind` and `text`. Rejected identities return a tool error without a
+remote request, including when missing runtime identity has become `default`.
 
 Validate the successful response before reporting success. For a newly stored
 entry, return its exact citation. An identical active entry can produce HTTP 200
@@ -215,6 +230,8 @@ principal; a Scope ID is a data boundary, not authentication. Prefer a dedicated
 PowerContext deployment/credential for the single-user pilot. A multi-user
 release needs a separate design for authenticated principals and Scope grants.
 
+### One configuration source for recall and saving
+
 The proposed package exposes a `deerflow.extensions` installation entry point.
 Use the existing extension manager to install it and retain its locked dependency
 in local and Docker environments. A bare environment-only `pip install` is not
@@ -228,34 +245,71 @@ memory:
   mode: middleware
   injection_enabled: true
   manager_class: powercontext_deerflow.memory:PowerContextMemoryManager
-  backend_config: &powercontext_config
-    base_url: https://powercontext.example.com
-    token_env: POWERCONTEXT_DEERFLOW_TOKEN
-    owner_user_id: "<actual-gateway-user-id>"
-    scope_id: "<existing-authorized-scope>"
-    max_bytes: 8000
-    recall_timeout_seconds: 2.0
-    remember_timeout_seconds: 5.0
+  backend_config: {}
 
 plugins:
   - use: powercontext_deerflow:install
     enabled: true
-    config: *powercontext_config
+    config: {}
 ```
 
-The YAML anchor shares one binding between the backend and tool. These private
-adapter fields are proposed; the enclosing `memory` and `plugins` mechanisms
-already exist. Preserve unrelated configuration and existing plugin entries.
-Resolve `token_env` server-side, validate non-empty binding fields and positive
-finite deadlines, and reject insecure remote transport. A loopback-only HTTP
-development exception can be documented explicitly. Tokens must never enter
+Preserve unrelated configuration and existing plugin entries. The empty private
+maps are deliberate: the package reads one fixed set of Gateway-process
+environment variables, rather than two YAML copies of the binding:
+
+```dotenv
+# PROPOSED package settings; supply to the Gateway process/container.
+POWERCONTEXT_DEERFLOW_BASE_URL=https://powercontext.example.com
+POWERCONTEXT_DEERFLOW_OWNER_USER_ID=<actual-authenticated-user-id>
+POWERCONTEXT_DEERFLOW_SCOPE_ID=<existing-authorized-scope>
+POWERCONTEXT_DEERFLOW_MAX_BYTES=8000
+POWERCONTEXT_DEERFLOW_RECALL_TIMEOUT_SECONDS=2.0
+POWERCONTEXT_DEERFLOW_REMEMBER_TIMEOUT_SECONDS=5.0
+# Supply POWERCONTEXT_DEERFLOW_TOKEN through the deployment's secret mechanism.
+```
+
+Both `from_config()` and `install()` use the same package-owned settings loader.
+It reads and validates these variables once per process and shares one immutable
+snapshot containing endpoint, credential, owner, Scope, budget and deadlines.
+Initialization must be thread-safe; neither consumer independently refreshes
+the environment. Missing or invalid required settings prevent both components
+from becoming usable, with no fallback to a different owner or Scope. The
+adapter rejects binding/transport overrides in either YAML private map rather
+than silently applying them; the host-supplied memory `storage_path` remains
+accepted. It does not inspect DeerFlow's private configuration singleton.
+
+The extension manager serializes the `plugins` subtree during mutations, and
+configuration APIs may rewrite YAML. Neither operation may create an independent
+binding copy. A YAML anchor is not a durable source of shared configuration.
+Rotating credentials or changing the Scope requires updating the Gateway
+environment and restarting every Gateway process; hot reload is unsupported.
+For Docker, provision the variables in the actual Gateway container, not only
+the shell that invokes Compose. There is no browser-editable binding.
+
+Validate non-empty binding fields, `max_bytes` in the API's 512–32768 range and
+positive finite deadlines, and reject insecure remote transport. A loopback-only
+HTTP development exception can be documented explicitly. Tokens must never enter
 model arguments, browser-visible fields, model messages or diagnostic logs.
 
-One binding admits only the configured owner. Unknown users must not fall back
-to that owner's Scope. User IDs come from Gateway authentication; thread titles,
-prompt text, `agent_name` and user-submitted Scope strings cannot grant access.
-The current model-tool context does not carry `agent_name`, so this design does
-not claim a separate default-agent-only authorization boundary.
+### Authenticated owner, not the fallback user
+
+The pilot requires normal Gateway authentication. Deployments with
+`DEER_FLOW_AUTH_DISABLED=1` are unsupported; operators must bind an actual signed-in
+user's persisted ID. The package rejects an absent, blank, whitespace-padded or
+literal `default` owner at configuration initialization. It applies the same
+rejection to runtime IDs before comparing them with the owner. Do not normalize
+an anonymous caller into the owner or treat a constructed `ToolContext.principal`
+as proof of authentication: the current resolver can return `default` when no
+identity exists. Tests must exercise that actual fallback path.
+
+These public callbacks do not carry an authentication-source attestation. The
+design therefore relies on the authenticated Gateway to establish a trusted
+non-default owner, including its owner-bound IM and scheduler launch paths; it
+does not establish an authentication boundary for arbitrary embedded callers.
+Thread titles, prompt text, `agent_name` and user-submitted Scope strings cannot
+grant access. Neither `MemoryManager.get_context` nor `ToolContext` carries a
+caller-surface discriminator, and the latter also lacks `agent_name`. This design
+therefore does not claim a default-agent-only or web-only authorization boundary.
 
 The deployment switch is opt-in. Recall and the explicit-save tool have separate
 host switches: setting `memory.enabled: false` does not disable the plugin tool.
@@ -329,12 +383,15 @@ flows and approval semantics; saving a Memory is not handing off a running task.
 | Repeat the identical explicit save | HTTP 200 with `entry: null` is handled as a successful no-op; no invented citation or mutation retry |
 | Other host → DeerFlow | Seed using an existing authorized PowerContext client, then observe the same evidence in a fresh DeerFlow chat |
 | Disabled integration | No PowerContext requests; normal DeerFlow behavior with the previous backend restored |
-| Different/missing user | No read/write request to the configured Scope and no cross-user content |
+| Different/missing/fallback user | Reject invalid configured owners, including `default`; exercise the real resolver's missing-identity-to-`default` path in recall and tool dispatch, with no remote reads/writes |
+| Auth-disabled deployment | Unsupported configuration; synthetic `default` callers cannot access the configured Scope, even when a non-default owner is supplied |
+| Same-owner IM/scheduled run | Host-contract fixtures verify the same Scope and tool policy as web runs; an explicit scheduled save needs no interactive confirmation, and live transport coverage is reported separately |
 | Recall timeout, 401/403, malformed/oversized response | Chat continues within the budget, no new memory is injected, no secrets appear in diagnostics |
 | Save timeout after possible commit | Visible unknown outcome and no automatic mutation retry |
 | Untrusted text and long/multibyte data | Existing user-role memory boundary and citations are preserved; API/budget limits are respected |
 | Second turn, retirement and restart | No claim of per-turn refresh; fresh-chat read observes remote state; restart preserves the configured binding |
 | Local and Docker installation/rollback | Locked package survives normal startup; restoration succeeds without migrating DeerMem data |
+| Config rewrite and rotation | Exercise extension upgrade/enable/disable and a config-API rewrite; both consumers keep one settings snapshot. After an environment change and process restart, both use the new binding; YAML overrides are rejected |
 | Passive capture excluded | Neither normal turns nor compaction submit transcript Sources |
 
 Use deterministic HTTP/host-message fixtures for adapter and host-contract tests
@@ -343,8 +400,12 @@ live dogfood is separate evidence. A small paired integration-off/on workload ma
 report convention adherence and added latency with denominators; it does not
 justify general claims about accuracy, token savings or task success.
 
-**Validation of this RFC:** source and public API inspection only. No adapter,
-remote memory calls or end-to-end integration were executed for this document.
+**Validation of this RFC:** source/public API inspection and offline document
+checks. A reproduction using the unchanged host YAML-rewrite functions confirmed
+the original alias loss and the revised empty-map behavior. The production user
+resolver was exercised with a no-runnable-context fixture to confirm its
+`default` fallback. No adapter, remote memory calls or live end-to-end integration
+were executed for this document.
 
 ## References
 
@@ -355,5 +416,8 @@ remote memory calls or end-to-end integration were executed for this document.
 - [Python extension contract and deployment](../../backend/packages/harness/deerflow/extensions/AGENTS.md)
 - [Full-stack contributions, including tools-only packages](../full-stack-plugins.md)
 - [Public tool context](../../backend/packages/extension-api/deerflow_extension_api/plugins.py)
+- [Extension manager configuration rewriting](../../backend/packages/harness/deerflow/extensions/manager.py)
+- [Runtime identity and fallback](../../backend/packages/harness/deerflow/runtime/user_context.py)
+- [Gateway auth-disabled mode](../../backend/app/gateway/auth_disabled.py)
 - [PowerContext canonical API at the reviewed revision](https://github.com/oceanbase/powercontext/blob/4d3165f87e3d5780fa9aeab3d9b8c5fa4bc17ed2/openapi/powercontext.yaml)
 - [PowerContext configuration and processing prerequisites](https://github.com/oceanbase/powercontext/blob/4d3165f87e3d5780fa9aeab3d9b8c5fa4bc17ed2/docs/en/docs/operate/configuration.md)
