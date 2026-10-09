@@ -4127,7 +4127,7 @@ class TestChannelManager:
                 msg_type=InboundMessageType.COMMAND,
             )
 
-            reported = manager._resolve_configured_model_name(msg)
+            reported, _ = await manager._resolve_configured_model_name(manager._client, msg, "thread-1")
 
             # Replay the manager's run params through the real Gateway merge.
             _, run_config, run_context = manager._resolve_run_params(msg, "thread-1")
@@ -4168,7 +4168,7 @@ class TestChannelManager:
                 msg_type=InboundMessageType.COMMAND,
             )
 
-            reported = manager._resolve_configured_model_name(msg)
+            reported, _ = await manager._resolve_configured_model_name(manager._client, msg, "thread-1")
 
             _, run_config, run_context = manager._resolve_run_params(msg, "thread-1")
             gateway_config = build_run_config("thread-1", run_config, None)
@@ -4178,6 +4178,226 @@ class TestChannelManager:
             assert reported is None and runtime_model is None
             reply = await manager._handle_model_command(msg, "")
             assert reply == "Current model: server default. Use /models to list available models."
+
+        _run(go())
+
+    def test_model_status_reports_custom_agent_model(self, monkeypatch):
+        """A conversation pinned to a custom agent whose config sets ``model:``
+        runs that model — the agent factory falls back to it when the request
+        carries none — so the status reply must report it, not 'server default'."""
+        from types import SimpleNamespace
+
+        from app.channels import manager as manager_module
+        from app.channels.manager import ChannelManager
+
+        monkeypatch.setattr(
+            manager_module,
+            "load_agent_config",
+            lambda name, *, user_id=None: SimpleNamespace(model="agent-model"),
+        )
+
+        async def go():
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(bus=MessageBus(), store=store, channel_sessions={"test": {}})
+            mock_client = _make_mock_langgraph_client(thread_id="thread-1")
+            mock_client.threads.get = AsyncMock(return_value={"thread_id": "thread-1", "metadata": {"channel_agent_name": "coder"}})
+            manager._client = mock_client
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="/model",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            reply = await manager._handle_model_command(msg, "")
+
+            assert reply == "Current model: agent-model (from agent configuration)."
+            # Session layer wins over the agent fallback (requested > agent_model_name).
+            manager._channel_sessions["test"]["context"] = {"model_name": "session-model"}
+            reply = await manager._handle_model_command(msg, "")
+            assert reply == "Current model: session-model (from channel configuration)."
+
+        _run(go())
+
+    def test_model_status_agent_without_configured_model(self, monkeypatch):
+        """A custom agent with no ``model:`` (or an unloadable config) leaves the
+        conversation on the server default; the status must say so, not crash."""
+        from types import SimpleNamespace
+
+        from app.channels import manager as manager_module
+        from app.channels.manager import ChannelManager
+
+        monkeypatch.setattr(
+            manager_module,
+            "load_agent_config",
+            lambda name, *, user_id=None: SimpleNamespace(model=None),
+        )
+
+        async def go():
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(bus=MessageBus(), store=store)
+            mock_client = _make_mock_langgraph_client(thread_id="thread-1")
+            mock_client.threads.get = AsyncMock(return_value={"thread_id": "thread-1", "metadata": {"channel_agent_name": "coder"}})
+            manager._client = mock_client
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="/model",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            reply = await manager._handle_model_command(msg, "")
+
+            assert reply == "Current model: server default. Use /models to list available models."
+
+            # An unloadable agent config (deleted agent) degrades the same way.
+            def _raise(name, *, user_id=None):
+                raise FileNotFoundError(name)
+
+            monkeypatch.setattr(manager_module, "load_agent_config", _raise)
+            reply = await manager._handle_model_command(msg, "")
+            assert reply == "Current model: server default. Use /models to list available models."
+
+        _run(go())
+
+    def test_model_pin_write_does_not_wait_for_in_flight_cold_load(self, monkeypatch):
+        """The cold threads.get runs outside _model_pin_lock: a /model write must
+        commit while a slow GET is still in flight instead of queueing behind it,
+        and the finished GET must then lose to the committed write."""
+        from app.channels.manager import ChannelManager
+
+        _mock_gateway_models(monkeypatch, ["new-model"])
+
+        async def go():
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(bus=MessageBus(), store=store)
+            get_started = asyncio.Event()
+            release_get = asyncio.Event()
+
+            async def slow_get(thread_id, **kwargs):
+                get_started.set()
+                await release_get.wait()
+                return {"thread_id": thread_id, "metadata": {"channel_model_name": "old-model"}}
+
+            mock_client = _make_mock_langgraph_client(thread_id="thread-1")
+            mock_client.threads.get = AsyncMock(side_effect=slow_get)
+            mock_client.threads.update = AsyncMock(return_value={"thread_id": "thread-1"})
+            manager._client = mock_client
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="/model",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            load_task = asyncio.ensure_future(manager._load_thread_model(mock_client, msg, "thread-1"))
+            await get_started.wait()
+            # With the GET outside the pin lock this write completes without
+            # releasing the blocked GET.
+            reply = await asyncio.wait_for(manager._handle_model_command(msg, "new-model"), timeout=5)
+            assert reply == "Model 'new-model' selected. It applies to this conversation from the next message."
+            assert manager._thread_model_names["thread-1"] == "new-model"
+            # The stale snapshot arriving after the write must not overwrite it.
+            release_get.set()
+            assert await load_task == "new-model"
+            assert manager._thread_model_names["thread-1"] == "new-model"
+
+        _run(go())
+
+    def test_stale_model_pin_admission_failure_resets_pin(self, monkeypatch):
+        """A run rejected because the pinned model left the allowlist must not
+        leave the conversation bricked on the generic error: the pin is cleared
+        (durable write plus cache) and the reply names the model and recovery."""
+        import httpx
+        from langgraph_sdk.errors import BadRequestError
+
+        from app.channels.manager import ChannelManager
+
+        _mock_gateway_models(monkeypatch, ["model-a"])
+
+        def make_exc() -> BadRequestError:
+            request = httpx.Request("POST", "http://gateway/api/runs")
+            response = httpx.Response(400, request=request)
+            return BadRequestError(
+                "Model 'gone-model' is not in the configured model allowlist",
+                response=response,
+                body={"detail": "Model 'gone-model' is not in the configured model allowlist"},
+            )
+
+        async def go():
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(bus=MessageBus(), store=store)
+            manager._remember_thread_model("thread-1", "gone-model")
+            mock_client = _make_mock_langgraph_client(thread_id="thread-1")
+            mock_client.threads.update = AsyncMock(return_value={"thread_id": "thread-1"})
+            manager._client = mock_client
+            manager._send_error = AsyncMock()
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="hello",
+            )
+
+            handled = await manager._recover_stale_model_pin(msg, make_exc())
+
+            assert handled is True
+            assert manager._thread_model_names["thread-1"] is None
+            mock_client.threads.update.assert_awaited_once()
+            assert mock_client.threads.update.await_args.kwargs["metadata"] == {"channel_model_name": None}
+            manager._send_error.assert_awaited_once()
+            text = manager._send_error.await_args.args[1]
+            assert "gone-model" in text and "/model" in text
+
+        _run(go())
+
+    def test_stale_model_pin_recovery_ignores_other_failures(self, monkeypatch):
+        """Only the allowlist rejection with a real pin is auto-recovered: other
+        errors, and allowlist rejections caused by session config rather than a
+        pin, fall through to the generic error path."""
+        import httpx
+        from langgraph_sdk.errors import BadRequestError
+
+        from app.channels.manager import ChannelManager
+
+        _mock_gateway_models(monkeypatch, ["model-a"])
+
+        def make_exc() -> BadRequestError:
+            request = httpx.Request("POST", "http://gateway/api/runs")
+            response = httpx.Response(400, request=request)
+            return BadRequestError(
+                "Model 'cfg-model' is not in the configured model allowlist",
+                response=response,
+                body={"detail": "Model 'cfg-model' is not in the configured model allowlist"},
+            )
+
+        async def go():
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(bus=MessageBus(), store=store)
+            manager._client = _make_mock_langgraph_client(thread_id="thread-1")
+            manager._send_error = AsyncMock()
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="hello",
+            )
+
+            # No pin anywhere: session-config-caused rejection is not ours.
+            assert await manager._recover_stale_model_pin(msg, make_exc()) is False
+            manager._send_error.assert_not_awaited()
+
+            # An unrelated error is not touched at all.
+            assert await manager._recover_stale_model_pin(msg, RuntimeError("boom")) is False
+            manager._send_error.assert_not_awaited()
 
         _run(go())
 
