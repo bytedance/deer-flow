@@ -26,12 +26,13 @@ def test_extract_article_falls_back_when_readability_js_fails(monkeypatch):
         "deerflow.utils.readability.simple_json_from_html_string",
         _fake_simple_json_from_html_string,
     )
+    monkeypatch.setattr("deerflow.utils.readability._readability_js_available", lambda: True)
 
-    article = ReadabilityExtractor().extract_article("<html><body>test</body></html>")
+    article = ReadabilityExtractor().extract_article("<html><head><title>Fallback Title</title></head><body><p>Fallback Content</p></body></html>")
 
-    assert calls == [True, False]
+    assert calls == [True]
     assert article.title == "Fallback Title"
-    assert article.html_content == "<p>Fallback Content</p>"
+    assert "Fallback Content" in article.html_content
 
 
 def test_extract_article_re_raises_unexpected_exception(monkeypatch):
@@ -49,10 +50,36 @@ def test_extract_article_re_raises_unexpected_exception(monkeypatch):
         "deerflow.utils.readability.simple_json_from_html_string",
         _fake_simple_json_from_html_string,
     )
+    monkeypatch.setattr("deerflow.utils.readability._readability_js_available", lambda: True)
 
     with pytest.raises(RuntimeError, match="unexpected parser failure"):
         ReadabilityExtractor().extract_article("<html><body>test</body></html>")
     assert calls == [True]
+
+
+def test_availability_probe_failure_uses_fallback_and_is_cached(monkeypatch, caplog):
+    from deerflow.utils import readability
+
+    calls = 0
+
+    def fail_probe():
+        nonlocal calls
+        calls += 1
+        raise subprocess.CalledProcessError(1, "npm install")
+
+    readability._readability_js_available.cache_clear()
+    monkeypatch.setattr(readability, "have_node", fail_probe)
+    html = '<html><head><title>Guide</title></head><body><a href="/next">Next</a></body></html>'
+
+    try:
+        article = ReadabilityExtractor().extract_article(html, url="https://example.com/current")
+        ReadabilityExtractor().extract_article(html, url="https://example.com/current")
+    finally:
+        readability._readability_js_available.cache_clear()
+
+    assert calls == 1
+    assert "[Next](https://example.com/next)" in article.to_markdown()
+    assert "availability probe failed" in caplog.text
 
 
 def test_article_to_message_with_images():

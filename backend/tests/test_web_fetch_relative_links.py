@@ -90,18 +90,72 @@ def test_python_extraction_fallback_preserves_article_text(monkeypatch):
 
     from deerflow.utils import readability
 
-    original = readability.simple_json_from_html_string
+    calls = []
 
     def extract(html, *, use_readability):
-        if use_readability:
-            raise subprocess.CalledProcessError(1, "node")
-        return original(html, use_readability=False)
+        calls.append(use_readability)
+        raise subprocess.CalledProcessError(1, "node")
 
     monkeypatch.setattr(readability, "simple_json_from_html_string", extract)
+    monkeypatch.setattr(readability, "_readability_js_available", lambda: True)
     article = ReadabilityExtractor().extract_article(_article('<a href="../next">Next</a>'), url=PAGE_URL)
-    # The existing Python fallback strips link markup; preserve its text contract.
-    assert "Next" in article.to_markdown()
+    assert calls == [True]
+    assert "[Next](https://example.com/next)" in article.to_markdown()
     assert "This article explains the documentation" in article.to_markdown()
+
+
+def test_unavailable_readability_preserves_resolved_link_and_image_destinations(monkeypatch, caplog):
+    from deerflow.utils import readability
+
+    calls = []
+
+    def extract(html, *, use_readability):
+        calls.append(use_readability)
+        return {
+            "title": "Guide",
+            "content": '<article><p>Article body</p><a>Next</a><img alt="Chart"></article>',
+        }
+
+    availability_probe = getattr(readability, "_readability_js_available", None)
+    if availability_probe is not None:
+        availability_probe.cache_clear()
+    monkeypatch.setattr(readability, "have_node", lambda: False, raising=False)
+    monkeypatch.setattr(readability, "simple_json_from_html_string", extract)
+
+    try:
+        article = ReadabilityExtractor().extract_article(
+            _article('<a href="../next">Next</a> <img src="images/chart.png" alt="Chart">'),
+            url=PAGE_URL,
+        )
+    finally:
+        if availability_probe is not None:
+            availability_probe.cache_clear()
+
+    assert "# Guide" in article.to_markdown()
+    assert "[Next](https://example.com/next)" in article.to_markdown()
+    assert "![Chart](https://example.com/docs/images/chart.png)" in article.to_markdown()
+    assert "This article explains the documentation" in article.to_markdown()
+    assert "Readability.js is unavailable" in caplog.text
+    assert calls == []
+
+
+def test_python_fallback_keeps_content_outside_empty_main_and_uses_article_title(monkeypatch):
+    from deerflow.utils import readability
+
+    monkeypatch.setattr(readability, "_readability_js_available", lambda: False)
+    html = """<html><head><title>Example Site</title></head><body>
+    <nav><a href="/home">Home</a></nav><main></main>
+    <article><h1>Real Story</h1><p>Article details.</p><a href="/next">Next</a></article>
+    <footer>Site footer</footer></body></html>"""
+
+    article = ReadabilityExtractor().extract_article(html, url=PAGE_URL)
+    markdown = article.to_markdown()
+
+    assert markdown.startswith("# Real Story")
+    assert "Article details." in markdown
+    assert "[Next](https://example.com/next)" in markdown
+    assert "Home" not in markdown
+    assert "Site footer" not in markdown
 
 
 @pytest.mark.parametrize("base", ["http://[broken", "data:text/plain,invalid", "javascript:void(0)", "about:blank", "mailto:help@example.com", "blob:https://example.com/id"])

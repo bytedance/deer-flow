@@ -1,6 +1,7 @@
 import logging
 import re
 import subprocess
+from functools import lru_cache
 from html import escape, unescape
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse, uses_relative
@@ -8,8 +9,41 @@ from urllib.parse import urljoin, urlparse, uses_relative
 from bs4 import BeautifulSoup
 from markdownify import markdownify as md
 from readabilipy import simple_json_from_html_string
+from readabilipy.extractors import extract_title
+from readabilipy.simple_json import have_node
 
 logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=1)
+def _readability_js_available() -> bool:
+    try:
+        available = have_node()
+    except (subprocess.CalledProcessError, OSError, ValueError):
+        available = False
+        logger.warning("Readability.js availability probe failed; using the link-preserving Python fallback", exc_info=True)
+    if not available:
+        logger.warning("Readability.js is unavailable; using the link-preserving Python fallback")
+    return available
+
+
+def _python_fallback_article(html: str) -> dict[str, str | None]:
+    soup = BeautifulSoup(html, "html5lib")
+    og_title = soup.find("meta", property="og:title") or soup.find("meta", attrs={"name": "og:title"})
+    og_title_text = og_title.get("content") if og_title else None
+    for tag in soup(["script", "style", "template", "svg", "head"]):
+        tag.decompose()
+    body = soup.body or soup
+    main = body.find("main")
+    container = main if main is not None and main.get_text(strip=True) else body
+    if container is body:
+        for tag in body.find_all(["nav", "footer", "aside"]):
+            if tag.find_parent(["article", "main"]) is None:
+                tag.decompose()
+    article_container = container.find("article")
+    heading = article_container.find("h1") if article_container else container.find("h1")
+    title = og_title_text or (heading.get_text(" ", strip=True) if heading else None) or extract_title(html)
+    return {"title": title, "content": str(container)}
 
 
 class Article:
@@ -154,20 +188,23 @@ class ReadabilityExtractor:
     def extract_article(self, html: str, *, url: str | None = None) -> Article:
         if url:
             html = _resolve_html_urls(html, url)
-        try:
-            article = simple_json_from_html_string(html, use_readability=True)
-        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-            stderr = getattr(exc, "stderr", None)
-            if isinstance(stderr, bytes):
-                stderr = stderr.decode(errors="replace")
-            stderr_info = f"; stderr={stderr.strip()}" if isinstance(stderr, str) and stderr.strip() else ""
-            logger.warning(
-                "Readability.js extraction failed with %s%s; falling back to pure-Python extraction",
-                type(exc).__name__,
-                stderr_info,
-                exc_info=True,
-            )
-            article = simple_json_from_html_string(html, use_readability=False)
+        article = None
+        if _readability_js_available():
+            try:
+                article = simple_json_from_html_string(html, use_readability=True)
+            except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+                stderr = getattr(exc, "stderr", None)
+                if isinstance(stderr, bytes):
+                    stderr = stderr.decode(errors="replace")
+                stderr_info = f"; stderr={stderr.strip()}" if isinstance(stderr, str) and stderr.strip() else ""
+                logger.warning(
+                    "Readability.js extraction failed with %s%s; using the link-preserving Python fallback",
+                    type(exc).__name__,
+                    stderr_info,
+                    exc_info=True,
+                )
+        if article is None:
+            article = _python_fallback_article(html)
 
         html_content = article.get("content")
         if not html_content or not str(html_content).strip():
