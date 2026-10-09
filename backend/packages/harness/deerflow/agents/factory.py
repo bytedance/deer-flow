@@ -438,10 +438,14 @@ def _assemble_from_features(
             chain.append(TokenBudgetMiddleware.from_config(TokenBudgetConfig(enabled=True)))
 
     # --- [13a] ModelContentCompatibility (always) ---
-    # Read-time sanitizer: rewrites persisted URL-sourced file/image blocks in
-    # ToolMessage content into text placeholders in the request view only, so
+    # Read-time sanitizer: rewrites URL-sourced file/image blocks in list-form
+    # message content into text placeholders in the request view only, so
     # threads poisoned before the conversion-layer fix heal on the next model
-    # call. Placed just before Clarification to see the near-final request.
+    # call. Placement contract: after every built-in content transform so it
+    # sees the near-final request, and before the custom/extension injection
+    # point (_insert_extra) and the terminal tail — in the lead chain it is
+    # followed by configured extensions, terminal-response and finish-reason
+    # middlewares, and the always-last ClarificationMiddleware.
     from deerflow.agents.middlewares.model_content_compatibility_middleware import ModelContentCompatibilityMiddleware
 
     chain.append(ModelContentCompatibilityMiddleware())
