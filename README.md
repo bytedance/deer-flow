@@ -2436,7 +2436,8 @@ For database-backed run events, deleting a run preserves its thread's sequence w
 Single-process JSONL event storage also retains the thread sequence watermark
 across run deletion and restarts, so clients using `after_seq` do not miss later
 messages. Keep `runs/.seq-watermark` with the run files when backing up this
-backend. Deleting the complete thread removes the watermark and resets allocation.
+backend. New or replaced watermarks inherit the deleted run file's permission bits.
+Deleting the complete thread removes the watermark and resets allocation.
 
 Thread IDs may be supplied by callers and do not have to be UUIDs. Explicit
 IDs must contain 1–64 ASCII letters, digits, hyphens, or underscores

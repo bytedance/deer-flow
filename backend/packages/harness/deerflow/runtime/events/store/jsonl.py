@@ -154,16 +154,19 @@ class JsonlRunEventStore(RunEventStore):
             raise ValueError(f"Invalid JSONL sequence watermark in {path}")
         return seq
 
-    def _save_seq_watermark(self, thread_id: str, seq: int) -> None:
+    def _save_seq_watermark(self, thread_id: str, seq: int, run_id: str) -> None:
         """Publish the allocation floor before deleting records (blocking I/O)."""
         if seq <= self._read_seq_watermark(thread_id):
             return
         path = self._thread_dir(thread_id) / ".seq-watermark"
+        run_mode = self._run_file(thread_id, run_id).stat().st_mode & 0o777
         temporary: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, prefix=".seq-", suffix=".tmp", delete=False) as file:
                 temporary = Path(file.name)
                 file.write(str(seq))
+            # Match the run's access policy before atomically publishing the floor.
+            temporary.chmod(run_mode)
             temporary.replace(path)
         finally:
             if temporary is not None:
@@ -509,7 +512,7 @@ class JsonlRunEventStore(RunEventStore):
             count = len(events)
             if count:
                 await self._ensure_seq_loaded(thread_id)
-                await asyncio.to_thread(self._save_seq_watermark, thread_id, self._seq_counters[thread_id])
+                await asyncio.to_thread(self._save_seq_watermark, thread_id, self._seq_counters[thread_id], run_id)
             await asyncio.to_thread(self._delete_run_file, thread_id, run_id)
             return count
 

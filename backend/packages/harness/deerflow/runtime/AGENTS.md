@@ -123,8 +123,10 @@ URL IDs through); writes still raise.
 **JSONL sequence watermark:** before deleting a non-empty run, save the thread's
 allocation floor with atomic replacement of `runs/.seq-watermark`, off-loop under
 the existing mutation fence. Recovery takes the maximum of that floor and surviving
-run files, including legacy directories without a watermark. Failed publication
-must leave the run intact; unreadable/corrupt watermarks fail closed. Complete
+run files, including legacy directories without a watermark. Copy the deleted run's
+permission bits onto the temporary watermark before publication, preserving both
+shared-read and restrictive modes. Failed permission setup or publication must leave
+the run intact; unreadable/corrupt watermarks fail closed. Complete
 thread deletion removes the watermark only after deleting all run files, including
 when no events remain. This does not add multi-process JSONL support. Coverage:
 `tests/test_jsonl_event_store_seq_watermark.py` and the mutation cancellation suite.

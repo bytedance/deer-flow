@@ -1,5 +1,6 @@
 """Durable cursor allocation after JSONL run deletion and store reopening."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -110,6 +111,63 @@ async def test_failed_watermark_publish_keeps_previous_floor_and_run(tmp_path, m
     assert (runs / ".seq-watermark").read_text(encoding="utf-8") == "1"
     assert not list(runs.glob(".seq-*.tmp"))
     assert (await JsonlRunEventStore(tmp_path).put(**event("r3")))["seq"] == 3
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are not supported on Windows")
+@pytest.mark.parametrize("run_mode", [0o600, 0o640, 0o644])
+@pytest.mark.parametrize("replace_existing", [False, True])
+async def test_watermark_matches_run_permissions_before_publication(tmp_path, monkeypatch, run_mode, replace_existing):
+    store = JsonlRunEventStore(tmp_path)
+    if replace_existing:
+        await store.put(**event("r0"))
+        await store.delete_by_run("t1", "r0")
+    last = await store.put(**event("r1"))
+    runs = tmp_path / "threads" / "t1" / "runs"
+    (runs / "r1.jsonl").chmod(run_mode)
+    replace = Path.replace
+
+    def check_permissions(path, target):
+        if Path(target).name == ".seq-watermark":
+            assert path.stat().st_mode & 0o777 == run_mode
+        return replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", check_permissions)
+    assert await store.delete_by_run("t1", "r1") == 1
+    watermark = runs / ".seq-watermark"
+    assert watermark.stat().st_mode & 0o777 == run_mode
+    assert watermark.read_text(encoding="utf-8") == str(last["seq"])
+    assert not (runs / "r1.jsonl").exists()
+    assert (await JsonlRunEventStore(tmp_path).put(**event("r2")))["seq"] == last["seq"] + 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("replace_existing", [False, True])
+async def test_failed_watermark_permissions_keep_previous_floor_and_run(tmp_path, monkeypatch, replace_existing):
+    store = JsonlRunEventStore(tmp_path)
+    if replace_existing:
+        await store.put(**event("r1"))
+        await store.delete_by_run("t1", "r1")
+    last = await store.put(**event("r2"))
+    chmod = Path.chmod
+
+    def fail_permissions(path, mode, **kwargs):
+        if path.name.startswith(".seq-") and path.suffix == ".tmp":
+            raise OSError("synthetic watermark permission failure")
+        return chmod(path, mode, **kwargs)
+
+    monkeypatch.setattr(Path, "chmod", fail_permissions)
+    with pytest.raises(OSError, match="permission failure"):
+        await store.delete_by_run("t1", "r2")
+    assert len(await store.list_events("t1", "r2")) == 1
+    runs = tmp_path / "threads" / "t1" / "runs"
+    watermark = runs / ".seq-watermark"
+    if replace_existing:
+        assert watermark.read_text(encoding="utf-8") == "1"
+    else:
+        assert not watermark.exists()
+    assert not list(runs.glob(".seq-*.tmp"))
+    assert (await JsonlRunEventStore(tmp_path).put(**event("r3")))["seq"] == last["seq"] + 1
 
 
 @pytest.mark.anyio
