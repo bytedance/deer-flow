@@ -70,7 +70,9 @@ class _FakeRepo:
         if user is None:
             raise UserNotFoundError(f"User {user_id} no longer exists")
         if user.system_role == "admin" and system_role != "admin":
-            if await self.count_admin_users() <= 1:
+            # Active admins only (disabled admins cannot authenticate).
+            active = sum(1 for u in self.users.values() if u.system_role == "admin" and not getattr(u, "disabled", False))
+            if active <= 1:
                 raise LastAdminRemainsError("cannot demote the last remaining admin")
         user.system_role = system_role
         self.updates.append((user_id, system_role))
@@ -367,6 +369,127 @@ def test_combined_role_and_disable(monkeypatch):
     assert body["system_role"] == "guest" and body["disabled"] is True
 
 
+def test_disable_then_demote_self_strands_no_admin(monkeypatch):
+    """[P1 regression] "Disable B, then demote self" and the combined
+    {system_role, disabled} self-update must both be rejected: the role
+    demotion counts ACTIVE admins only, so with B disabled the self-demotion
+    would strand zero usable management credentials."""
+    admin = _make_user(system_role="admin")
+    other = _make_user(system_role="admin", email="b@example.com")
+    repo = _FakeRepo([admin, other])
+    client = _make_client(monkeypatch, caller=admin, repo=repo, roles={"admin", "user"})
+
+    # Disable B first.
+    assert client.patch(f"/api/v1/admin/users/{other.id}", json={"disabled": True}).status_code == 200
+
+    # Self-demotion now strands: only A remains active.
+    demote = client.patch(f"/api/v1/admin/users/{admin.id}", json={"system_role": "user"})
+    assert demote.status_code == 409
+    assert repo.users[str(admin.id)].system_role == "admin"
+
+    # Combined self demote+disable has the same outcome (role write first,
+    # active-count guard fires).
+    combined = client.patch(f"/api/v1/admin/users/{admin.id}", json={"system_role": "user", "disabled": True})
+    assert combined.status_code == 409
+    assert repo.users[str(admin.id)].system_role == "admin"
+
+
+def test_shared_session_validator_verdicts():
+    """The one post-lookup verdict helper every JWT surface routes through."""
+    from types import SimpleNamespace as NS
+
+    from app.gateway.auth.errors import AuthErrorCode
+    from app.gateway.deps import validate_resolved_session_user
+
+    user = NS(token_version=3, disabled=False)
+    assert validate_resolved_session_user(user, NS(ver=3)) is None
+
+    stale = NS(token_version=4, disabled=False)
+    assert validate_resolved_session_user(stale, NS(ver=3)) is AuthErrorCode.TOKEN_INVALID
+
+    suspended = NS(token_version=3, disabled=True)
+    assert validate_resolved_session_user(suspended, NS(ver=3)) is AuthErrorCode.ACCOUNT_DISABLED
+
+
+def test_langgraph_authenticate_rejects_suspended_session():
+    """The standalone LangGraph authenticate callback rejects a still-valid
+    cookie whose account was suspended — admission, not just login."""
+    import asyncio
+    import tempfile
+
+    import pytest
+
+    from app.gateway.auth.jwt import create_access_token
+    from deerflow.persistence.engine import close_engine
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        repo = _make_sqlite_repo(tmpdir)
+
+        async def _run():
+            user = await repo.create_user(User(email="lg@example.com", system_role="user"))
+            token = create_access_token(str(user.id), token_version=user.token_version)
+            await repo.set_disabled(str(user.id), True)
+
+            import app.gateway.deps as deps_module
+            from app.gateway import langgraph_auth
+
+            # Point the cached provider at THIS test's repo (module-level
+            # caches otherwise leak a previous test's closed engine).
+            deps_module._cached_repo = repo
+            deps_module._cached_local_provider = None
+
+            request = NS_stub_request(token)
+
+            with pytest.raises(langgraph_auth.Auth.exceptions.HTTPException) as exc_info:
+                await langgraph_auth.authenticate(request)
+            assert exc_info.value.status_code == 401
+            assert "disabled" in str(exc_info.value.detail).lower()
+
+        def NS_stub_request(token_value):
+            from types import SimpleNamespace as NS
+
+            return NS(cookies={"access_token": token_value}, headers={}, method="GET", url=NS(path="/"), client=NS(host="test"))
+
+        try:
+            asyncio.run(_run())
+        finally:
+            asyncio.run(close_engine())
+
+
+def test_browser_ws_authenticator_rejects_suspended_session():
+    """The WebSocket authenticator (browser streaming bypasses
+    AuthMiddleware) rejects a suspended account's still-valid cookie."""
+    import asyncio
+    import tempfile
+
+    from app.gateway.auth.jwt import create_access_token
+    from deerflow.persistence.engine import close_engine
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        repo = _make_sqlite_repo(tmpdir)
+
+        async def _run():
+            user = await repo.create_user(User(email="ws@example.com", system_role="user"))
+            token = create_access_token(str(user.id), token_version=user.token_version)
+            await repo.set_disabled(str(user.id), True)
+
+            from types import SimpleNamespace as NS
+
+            import app.gateway.deps as deps_module
+            from app.gateway.routers.browser import _authenticate_ws
+
+            deps_module._cached_repo = repo
+            deps_module._cached_local_provider = None
+
+            websocket = NS(cookies={"access_token": token}, headers={})
+            assert await _authenticate_ws(websocket) is None
+
+        try:
+            asyncio.run(_run())
+        finally:
+            asyncio.run(close_engine())
+
+
 def test_repo_set_disabled_field_scoped_and_last_active_admin():
     """Real-repo slice: set_disabled is a single-column write (role and
     credentials untouched; the credential writer never touches lifecycle
@@ -409,6 +532,19 @@ def test_repo_set_disabled_field_scoped_and_last_active_admin():
 
             restored = await repo.set_disabled(str(first.id), False)
             assert restored.disabled is False
+
+            # The role-demotion guard counts ACTIVE admins only: disable
+            # one of two, then demoting the remaining active admin raises.
+            await repo.set_disabled(str(first.id), True)
+            from app.gateway.auth.repositories.base import LastAdminRemainsError as _LAR
+
+            try:
+                await repo.update_system_role(str(second.id), "user")
+            except _LAR:
+                pass
+            else:
+                raise AssertionError("demoting the last ACTIVE admin must raise")
+            assert (await repo.get_user_by_id(str(second.id))).system_role == "admin"
 
         try:
             asyncio.run(_run())

@@ -37,7 +37,7 @@ def _has_column() -> bool:
 
 def upgrade() -> None:
     if not _has_column():
-        op.add_column(_TABLE, sa.Column(_COLUMN, sa.Boolean(), nullable=False, server_default=sa.text("0")))
+        op.add_column(_TABLE, sa.Column(_COLUMN, sa.Boolean(), nullable=False, server_default=sa.false()))
 
 
 def downgrade() -> None:

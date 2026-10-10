@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 from fastapi import FastAPI, HTTPException, Request
 from langgraph.types import Checkpointer
 
+from app.gateway.auth.errors import AuthErrorCode
 from deerflow.community.browser_automation.session import browser_multi_worker_error
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.deployment_config import multi_instance_declaration
@@ -1132,13 +1133,32 @@ async def get_current_user_from_request(request: Request):
     # Operator-disabled account (#3462 gap 3): existing sessions die at the
     # next request, on every authentication surface (the password and PAT
     # paths reject below; OAuth provisioning rejects at resolve time).
-    if getattr(user, "disabled", False):
+    error = validate_resolved_session_user(user, payload)
+    if error is not None:
         raise HTTPException(
             status_code=401,
-            detail=AuthErrorResponse(code=AuthErrorCode.ACCOUNT_DISABLED, message="Account disabled").model_dump(),
+            detail=AuthErrorResponse(code=error, message="Account disabled" if error is AuthErrorCode.ACCOUNT_DISABLED else "Token revoked (password changed)").model_dump(),
         )
 
     return user
+
+
+def validate_resolved_session_user(user, payload) -> AuthErrorCode | None:
+    """Shared post-lookup session validation for EVERY JWT authenticator.
+
+    The Gateway's HTTP dependency, the WebSocket authenticator (browser
+    streaming bypasses AuthMiddleware), and the standalone LangGraph
+    ``authenticate`` callback all resolve cookie → JWT → user; this helper
+    is the one place the post-lookup verdicts live so a lifecycle change
+    (token_version bump, account suspension) lands everywhere at once.
+    Returns the failure code, or ``None`` when the session is valid —
+    callers map it to their own exception surface.
+    """
+    if user.token_version != payload.ver:
+        return AuthErrorCode.TOKEN_INVALID
+    if getattr(user, "disabled", False):
+        return AuthErrorCode.ACCOUNT_DISABLED
+    return None
 
 
 async def is_admin_user(request: Request) -> bool:

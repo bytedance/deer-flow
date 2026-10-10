@@ -317,8 +317,12 @@ class SQLiteUserRepository(UserRepository):
             if row is None:
                 raise UserNotFoundError(f"User {user_id} no longer exists")
             if row.system_role == "admin" and system_role != "admin":
-                admin_count = await session.scalar(select(func.count()).select_from(UserRow).where(UserRow.system_role == "admin"))
-                if admin_count is None or admin_count <= 1:
+                # Count ACTIVE admins only: a disabled admin cannot
+                # authenticate, so counting them would let "disable B, then
+                # demote self" (or a combined role+disable request) strand
+                # the deployment with zero usable management credentials.
+                active_admins = await session.scalar(select(func.count()).select_from(UserRow).where(UserRow.system_role == "admin", UserRow.disabled.is_(False)))
+                if active_admins is None or active_admins <= 1:
                     raise LastAdminRemainsError("cannot demote the last remaining admin")
             row.system_role = system_role
             await session.commit()
