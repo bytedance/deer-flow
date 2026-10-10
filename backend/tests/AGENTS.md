@@ -2,6 +2,12 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+`test_skills_custom_multiprocess.py` starts independent spawn workers sharing a
+temporary custom-skill root. Park edit/rollback before the write and before the
+history append, observe the peer reaching the mutation lock, then check both
+exclusion and the persisted predecessor chain. Always release and reap workers
+on assertion failures; do not replace this with two threads sharing a mutex.
+
 Search coercion ownership tests audit executable helper bodies/call sites and
 inline integer assignments. Include Exa and SearXNG in the deferred census;
 pin new-provider copies and docstring false positives with source fixtures.

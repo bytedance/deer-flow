@@ -172,6 +172,8 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
 
    The wizard also lets you configure an optional web search provider, or skip it for now.
 
+   Brave web search preserves valid entries in mixed result lists. Malformed response containers or lists containing no usable entries return a structured format error; missing, null, or empty results keep the existing "No results found" response. Format errors also log the malformed container's path and type, or the absence of usable result objects, without including search queries, credentials, or payload values.
+
    Jina, Browserless, and InfoQuest web fetches resolve relative links and image sources using the requested page URL (or a usable HTML base URL), so returned Markdown includes complete destinations. Link resolution preserves the surrounding HTML source, including malformed-page formatting.
 
    Jina fetches support opt-in bounded retries via `max_retries` (default `0`) and `retry_budget_seconds` (default `30`) in the tool configuration. Valid `Retry-After` hints set a minimum wait for HTTP 429/503; 429 without a valid hint stays terminal. Hints that cannot fit the remaining budget stop retries. Local backoff remains randomized. Retries may increase upstream requests and cost; see [Jina fetch retries](backend/docs/CONFIGURATION.md#jina-fetch-retries).
@@ -1083,6 +1085,7 @@ Once a channel is connected, you can interact with DeerFlow directly from the ch
 | `/new` | Start a new conversation |
 | `/status` | Show current thread info |
 | `/models` | List available models |
+| `/model [name\|default]` | Show or pin the current conversation's model |
 | `/memory` | View memory |
 | `/agent list` | List your Custom Agents |
 | `/agent use <name>` | Start a new conversation with a Custom Agent |
@@ -1092,6 +1095,8 @@ Once a channel is connected, you can interact with DeerFlow directly from the ch
 
 Agent selection is conversation-scoped: `/agent use <name>` starts a fresh conversation and pins that Custom Agent in the thread metadata. Existing conversations never switch agents midway, the selection survives a Gateway restart, and opening the IM-created thread in the Web UI continues through the same Custom Agent.
 Use `/agent use lead_agent` to return to the default agent in a new conversation.
+
+Model selection is conversation-scoped too: `/model <name>` pins a model to the *current* conversation — validated against the caller-visible model list, persisted in the thread metadata so it survives a Gateway restart, and applied from the next message without starting a new conversation. `/model` shows the effective model and its source, `/model default` clears the pin, and `/models` reports the pinned model.
 
 #### Request Trace Correlation
 
@@ -1466,6 +1471,13 @@ there are no refill requests. This selects sources, not factual accuracy or a
 global URL-access policy. The model arguments and image search are unchanged.
 See [Serper configuration](backend/docs/CONFIGURATION.md#serper-source-filters)
 for validation and query-length limits.
+
+Serper web and image search support opt-in transient recovery with
+`max_retries: 1` (default `0`, maximum `3`) in each tool's configuration.
+`retry_budget_seconds` bounds retry scheduling, not active synchronous requests.
+Budget exhaustion is logged separately while the tool returns the last error.
+Extra requests may consume quota or incur cost. See
+[Serper retries](backend/docs/CONFIGURATION.md#serper-retries).
 
 When using Tavily for `web_fetch`, extracted pages without a title use their URL
 as the heading; their content remains available to the agent.
@@ -2142,6 +2154,8 @@ Concurrent reads and writes to the same file share a gate across synchronous and
 
 The built-in `grep` tool searches either one text file or all matching text files below a directory, so an agent can search an uploaded document directly without first broadening the request to the entire uploads directory.
 E2B's `glob` filter preserves spaces, quotes, and dollar signs in filename patterns, while wildcard matching and root-relative directory scoping remain unchanged.
+E2B `grep` also preserves colons in file and directory names when reporting matching paths and line numbers.
+E2B `glob` and `grep` preserve non-LF separator characters, such as vertical tabs and Unicode line separators, inside returned paths; `grep` also preserves them inside matched text.
 
 Remote `ls` excludes ignored descendants before applying its 500-entry listing limit, so dependency and build trees do not crowd out visible files. Explicitly listing an ignored directory still lists its contents; normal depth and output limits remain in effect.
 
