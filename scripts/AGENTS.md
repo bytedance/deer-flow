@@ -112,6 +112,14 @@ Gateway's error, and the config-dependent checks skip. Any failure to import
 the harness is reported, never raised: doctor diagnoses broken environments.
 Pinned by `backend/tests/test_doctor.py::TestMainConfigResolution`.
 
+Doctor screens Browserless fetch/capture and Crawl4AI, Firecrawl, and fastCRW
+fetch backends with the runtime's `validate_delegated_backend_url`, before
+provider success shortcuts. Keep endpoint defaults, `CRW_API_URL` precedence,
+config environment resolution, and isolation acknowledgement coercion aligned
+with those tools. `allow_private_addresses` affects targets only. Doctor reports
+refused delegation with the deployment guide; it does not verify egress policies.
+Offline coverage lives in `backend/tests/test_doctor.py`.
+
 CLI credential JSON checks accept UTF-8 with or without a leading BOM, matching
 the runtime credential loader. Keep `_load_json_object` on `utf-8-sig`; malformed
 JSON and invalid encoding remain missing/invalid sources without exposing tokens.

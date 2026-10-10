@@ -841,7 +841,41 @@ retrieval behavior. No paid API calls are needed for the regression suite.
 - `str_replace` - String replacement in files
 - `bash` - Execute bash commands
 
-Browserless can be configured as an opt-in visual capture tool:
+#### Delegated Fetch Backend Isolation
+
+Browserless, Crawl4AI, Firecrawl, and fastCRW perform navigation, redirects,
+DNS resolution, and subresource loading in the backend's own network namespace.
+Checking the submitted URL in the Gateway cannot constrain these later requests.
+For `web_fetch`, and Browserless `web_capture`, DeerFlow therefore refuses to
+delegate to a private, loopback, or otherwise unverifiable backend by default.
+HTTP(S) backend endpoints resolving only to public addresses do not require an
+isolation acknowledgement.
+
+The backend endpoint is the tool's `base_url`. Browserless defaults to
+`http://localhost:3032`, Crawl4AI to `http://localhost:11235`, and Firecrawl to
+its SDK's public cloud endpoint when `base_url` is unset. fastCRW uses
+`base_url`, then `CRW_API_URL`, then `https://fastcrw.com/api`. The guard checks
+the effective endpoint, including environment references in the config.
+
+Before enabling a self-hosted backend, enforce an outbound policy on that
+service that blocks private, loopback, link-local, shared (`100.64.0.0/10`),
+other non-global, and cloud-metadata destinations, including redirects and
+subresources. Then set `network_isolation_confirmed: true` on each tool using
+that backend. Browserless fetch and capture are separate tool entries and each
+needs the setting. Run `make doctor` to check for configurations that would be
+refused. Existing localhost deployments need this migration before fetching or
+capturing pages after an upgrade.
+
+`network_isolation_confirmed` is an operator acknowledgement; it does not
+install or verify an egress policy. `allow_private_addresses: true` controls
+the submitted target URL only and never bypasses backend screening. Reserve it
+for intentional internal targets and explicitly account for those destinations
+in the backend's outbound policy. Neither setting relaxes the HTTP(S) requirement.
+Backend DNS screening happens at validation time and does not pin the subsequent
+client connection, so it cannot by itself close a DNS-rebinding window.
+
+Browserless can be configured as an opt-in visual capture tool after its egress
+policy is in place:
 
 ```yaml
 tools:
@@ -850,6 +884,7 @@ tools:
     use: deerflow.community.browserless.tools:web_capture_tool
     base_url: http://localhost:3032
     # token: $BROWSERLESS_TOKEN
+    network_isolation_confirmed: true  # Only after isolating Browserless egress
     output_format: png
     full_page: true
     viewport_width: 1280
@@ -873,8 +908,12 @@ Browserless instance. You can point `base_url` at [Browserless Cloud](https://ww
 # match the default base_url (http://localhost:3032). Recent Browserless
 # images always require a token — if you don't pass one, a random token is
 # generated and requests without it are rejected — so set it explicitly.
-docker run -d --name browserless -p 3032:3000 -e "TOKEN=local-dev-token" ghcr.io/browserless/chromium
+docker run -d --name browserless -p 127.0.0.1:3032:3000 -e "TOKEN=local-dev-token" ghcr.io/browserless/chromium
 ```
+
+Publishing a port does not isolate outbound traffic. Apply the egress policy
+appropriate to your container platform before setting
+`network_isolation_confirmed: true`; the command above only starts the service.
 
 Then set the same token so the tool sends it (uncomment `token: $BROWSERLESS_TOKEN`
 in the config above):

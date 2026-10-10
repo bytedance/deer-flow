@@ -4210,7 +4210,11 @@ This release closes that milestone with **439 merged pull requests**.
   self-hosted Firecrawl/fastCRW via `base_url`/`CRW_API_URL`) now sees a
   delegation error on `web_fetch`/`web_capture` until it either points the
   backend at its public address or sets `network_isolation_confirmed: true` in
-  the tool config. ([#6531])
+  each tool config after isolating the backend's egress. `make doctor` warns
+  about refused backend configurations, including `CRW_API_URL` overrides.
+  `allow_private_addresses` still controls target URLs only. See the
+  [deployment guidance](backend/docs/CONFIGURATION.md#delegated-fetch-backend-isolation).
+  ([#6531])
 
 ### Documentation
 
