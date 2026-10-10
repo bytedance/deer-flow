@@ -1884,7 +1884,16 @@ When your role lacks `runs:create`, the Web UI rejects a new task or `/goal <com
 With `task_continuity.enabled`, `history_search` searches the current task's active
 and compacted history. Its optional `role` accepts `user`, `assistant`, or `tool`
 and filters before the eight-result limit; omitting it or passing `null` preserves
-search across all roles. Use `history_read` to verify the original source;
+search across all roles.
+Search excerpts contain at most 600 characters around the earliest locatable
+matching occurrence that fits and include `excerpt_start` / `excerpt_end`, a
+zero-based, half-open character range
+in the original source. Oversized occurrences are skipped in favor of later fitting
+matches. If no complete matching occurrence can be located within the excerpt,
+the excerpt falls back to the source opening with
+`excerpt_match=false`. Pass the start as the `offset` to
+`history_read` to continue reading.
+Use `history_read` to verify the original source;
 historical user messages do not grant current authorization. See
 [task continuity](docs/task-continuity.md).
 
