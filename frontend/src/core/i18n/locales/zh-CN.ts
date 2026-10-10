@@ -2082,6 +2082,15 @@ export const zhCN: Translations = {
       },
     },
     skills: {
+      diagnosticsTitle: "无法加载",
+      diagnosticsScope:
+        "这些自定义技能暂不可用。请修正对应的 SKILL.md 文件后重新加载。仅检查你自己的自定义技能，不包含共享目录和外部链接包。",
+      diagnosticsInvalid: "YAML 头部格式错误。",
+      diagnosticsQuote: "包含“冒号加空格”的值需要用引号包裹。",
+      diagnosticsRefresh: "重新加载技能",
+      diagnosticsRefreshing: "正在重新加载…",
+      diagnosticsFailed: "无法检查自定义技能的 YAML 错误，请重新加载后重试。",
+      diagnosticsReloadFailed: "重新加载技能失败，请重试。",
       exportPrevious: "上 50 项",
       exportNotices: {
         skill_export_yaml_alias:

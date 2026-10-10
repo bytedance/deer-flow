@@ -231,6 +231,12 @@ delete helper accepts remote 404 (not 403) before retrying local cleanup, and
 
 ## Capability Center
 
+`skill-diagnostics.tsx` mounts only for administrators outside static demos. Its
+user-keyed diagnostics query is separate from `useSkills()` and every picker.
+Reload posts `/api/skills/reload` before invalidating both normal skills and
+diagnostics; failures retain the warning and show localized retry feedback.
+Never interpret raw parser exception wording in the UI.
+
 `/workspace/capabilities` owns Plugins and Skills navigation. Plugins composes the
 MCP manager and a lazily loaded Lark configuration dialog; installation, OAuth,
 mutation permissions, and cache ownership remain in the existing hooks. Skill display names/summaries are presentation
