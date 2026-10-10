@@ -351,6 +351,20 @@ This release closes that milestone with **439 merged pull requests**.
   redis` or `DEER_FLOW_STREAM_BRIDGE_REDIS_URL` (docker-compose and the Helm
   chart already inject it). ([#6328])
 
+- **dev:** `scripts/dev_multi_instance.sh` (`make dev-multi`, `make dev-multi-check`,
+  `make dev-multi-down`) runs two Gateways as one local multi-instance cluster:
+  throwaway Postgres and Redis containers on loopback, Gateway A on port 8001 and
+  Gateway B on 8011 sharing one `DEER_FLOW_HOME` and generated `AUTH_JWT_SECRET`,
+  `DEER_FLOW_INTERNAL_AUTH_TOKEN` and `DEER_FLOW_CREDENTIALS_KEY` values, each with
+  its own DeerMem retrieval index, and an optional round-robin nginx on port 2027.
+  The config is the developer's own `config.yaml` (or `config.example.yaml`) plus
+  the settings the multi-instance startup gate requires; settings the gate refuses
+  are changed and reported. `check` automates the scriptable cross-instance
+  checks: readiness, shared sessions and internal token, thread, upload and
+  artifact visibility, skill toggles, nginx balancing, and SSE `Last-Event-ID`
+  resume across instances. See "Local two-Gateway harness" in
+  `backend/docs/CONFIGURATION.md`.
+
 - **config:** `DEER_FLOW_ENV_FILE` selects one explicit UTF-8 dotenv file for the backend at
   startup, shared by configuration loading, authentication startup, and the debug entry
   point; relative paths resolve from the backend process working directory, existing process

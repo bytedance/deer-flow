@@ -274,6 +274,17 @@
   `stream_bridge.type: redis` 或 `DEER_FLOW_STREAM_BRIDGE_REDIS_URL`
   （docker-compose 与 Helm chart 已自动注入）。([#6328])
 
+- **开发：** 新增 `scripts/dev_multi_instance.sh`（`make dev-multi`、`make dev-multi-check`、
+  `make dev-multi-down`），在本机把两个 Gateway 作为一个多实例集群运行：回环地址上的
+  临时 Postgres 与 Redis 容器，Gateway A（8001 端口）与 Gateway B（8011 端口）共享同一
+  `DEER_FLOW_HOME` 以及生成的 `AUTH_JWT_SECRET`、`DEER_FLOW_INTERNAL_AUTH_TOKEN` 与
+  `DEER_FLOW_CREDENTIALS_KEY`，各自使用独立的 DeerMem 检索索引，并可选在 2027 端口启动
+  轮询 nginx。配置取开发者自己的 `config.yaml`（或 `config.example.yaml`），叠加多实例
+  启动门控要求的设置；门控拒绝的设置会被修改并逐项提示。`check` 自动执行可脚本化的跨实例
+  检查：就绪探针、共享会话与内部令牌、线程/上传/产物可见性、技能开关、nginx 负载均衡，
+  以及跨实例的 SSE `Last-Event-ID` 续接。详见 `backend/docs/CONFIGURATION.md` 的
+  “Local two-Gateway harness”一节。
+
 - **配置：** 新增 `DEER_FLOW_ENV_FILE`，在后端启动时选择一个显式的 UTF-8 dotenv 文件，配置
   加载、认证启动和调试入口共用；相对路径以后端进程工作目录解析，已有进程环境变量保持
   优先，选择为空、缺失、不可读或编码无效时直接报错而不回退。不设置时保持默认 dotenv 发现；

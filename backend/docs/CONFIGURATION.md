@@ -594,6 +594,41 @@ Notes:
 - With the default DeerMem backend, the declaration also warns when the derived SQLite retrieval index sits inside the shared `storage_path` (the default `{storage_path}/.retrieval`). Set `memory.backend_config.retrieval_index_path` to an instance-local directory (relative values resolve against `storage_path`): SQLite WAL is unsupported on network filesystems, and the index is rebuilt from the Markdown facts at startup and re-synced per user scope after a peer writes.
 - Restart-required: the gate runs once at startup. Restart all Gateway instances together after changing it.
 
+#### Local two-Gateway harness
+
+`scripts/dev_multi_instance.sh` (also `make dev-multi`, `make dev-multi-check`, `make dev-multi-down`) runs this topology on one machine, so cross-instance behavior can be checked without a cluster:
+
+- Throwaway `postgres:17-alpine` and `redis:7-alpine` containers (`deerflow-mi-postgres`, `deerflow-mi-redis`) on `127.0.0.1:55432` and `127.0.0.1:56379`, Gateway A on `127.0.0.1:8001` and Gateway B on `127.0.0.1:8011` (8002 stays free for the provisioner). When nginx is installed, `http://localhost:2027` round-robins `/api` over both Gateways, names the Gateway that answered in an `X-DeerFlow-Upstream` response header, and forwards `/` to a frontend on port 3000 if you start one. Ports, container names and images are overridable; see `--help`.
+- The generated `config.yaml` is your own `config.yaml` (otherwise `config.example.yaml`; `DEERFLOW_MI_BASE_CONFIG` picks another file) plus `deployment.multi_instance: true`, `database.backend: postgres`, `run_events.backend: db`, `run_ownership.heartbeat_enabled: true` and `stream_bridge.type: redis`. Settings the startup gate refuses are changed and reported: process-local browser tools are removed, an explicit `sandbox.ownership.type: memory` or a non-Postgres `checkpointer` section is dropped, and an enabled scheduler gets `scheduler.multi_instance: true`. Enabled IM channels are disabled because both Gateways would connect the same bot; `DEERFLOW_MI_KEEP_CHANNELS=1` keeps them.
+- Both processes share one `DEER_FLOW_HOME`, one copy of `extensions_config.json` (MCP and skill edits never reach your own file), and generated `AUTH_JWT_SECRET`, `DEER_FLOW_INTERNAL_AUTH_TOKEN` and `DEER_FLOW_CREDENTIALS_KEY` values. Each process keeps its own DeerMem `retrieval_index_path`, which the shared config reads from `$DEERFLOW_MI_RETRIEVAL_INDEX_PATH`.
+- Gateway B starts only after A answers `/health`. Alembic migrations are serialized by an advisory lock, but the LangGraph checkpointer and store `setup()` that runs next is not, so two cold starts against an empty database could race.
+- State lives in `.deer-flow/multi-instance/` (gitignored). `down` stops the Gateways and nginx, removes the containers (they have no volumes) and deletes everything there except `logs/`. Do not run `make dev` or `make stop` alongside the harness: both reclaim port 8001 and this checkout's Gateway processes.
+
+```bash
+scripts/dev_multi_instance.sh up             # containers, config, Gateway A, then B, then nginx
+scripts/dev_multi_instance.sh check          # automated cross-instance checks (below)
+scripts/dev_multi_instance.sh stop b --kill  # SIGKILL B to simulate a crash; `start b` brings it back
+scripts/dev_multi_instance.sh logs a -f
+scripts/dev_multi_instance.sh down
+```
+
+`check` signs in as a throwaway account it creates on first use (on a fresh database it becomes the first admin, which the skill toggle needs; the credentials are in `.deer-flow/multi-instance/check-user.json`) and verifies that:
+
+- `GET /health/ready` reports `ready` and `stream_bridge: ok` on both Gateways;
+- B accepts a session issued by A, and both accept the shared internal token while refusing a wrong one;
+- a thread created on A is readable on B, and a file uploaded on A is listed on B, which serves identical bytes from `GET /api/threads/{id}/artifacts/{path}`;
+- a public skill toggled with `PUT /api/skills/{name}` on A shows the new state on B within 30 s (the toggle is reverted afterwards);
+- nginx reaches both Gateways;
+- a run created on A can be joined on B and resumed on A from a `Last-Event-ID`. With no model configured the run fails before any LLM call; with models configured this check is skipped unless you pass `check --with-llm`.
+
+These still need a manual pass:
+
+- stop B with `stop b --kill` while A has an active run: A's run must not turn `error`;
+- cancel a run on B from A: it takes effect within about one heartbeat (~10 s; a lower `run_ownership.lease_seconds` makes the boundary easier to observe);
+- change an MCP filesystem server's args on A: B's local-bash allowlist follows;
+- edit a skill on A: B's system-prompt skills section changes within 30 s;
+- the IM channel gates (one leader per platform, failover after killing the leader, runtime-config changes), once channel leader election lands; run them with `DEERFLOW_MI_KEEP_CHANNELS=1`.
+
 ### Agent Storage
 
 Custom agent **definitions** (`config.yaml` + `SOUL.md`) are stored per-user on
