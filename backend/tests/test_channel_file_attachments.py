@@ -611,7 +611,7 @@ class TestInboundFileSandboxPerms:
             # the out-of-dir target immediately after lstat (the TOCTOU race).
             if path == upload:
                 os.unlink(path)
-                os.symlink(target, path)
+                symlink_or_skip(path, target)
             return st
 
         monkeypatch.setattr(os, "lstat", racing_lstat)
