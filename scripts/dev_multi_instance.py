@@ -39,8 +39,8 @@ from typing import Any
 RETRIEVAL_INDEX_ENV_VAR = "DEERFLOW_MI_RETRIEVAL_INDEX_PATH"
 
 # Every Gateway process must see identical values. DEER_FLOW_CREDENTIALS_KEY is
-# exported ahead of the at-rest credential encryption work that reads it; a
-# Gateway that does not read it yet ignores it.
+# the at-rest credentials key: without one shared value a declared
+# multi-instance pair with channel_connections enabled refuses to start.
 SHARED_SECRET_NAMES = (
     "AUTH_JWT_SECRET",
     "DEER_FLOW_INTERNAL_AUTH_TOKEN",

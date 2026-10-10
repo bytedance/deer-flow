@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 
 import pytest
+from support.symlinks import symlink_or_skip
 
 import deerflow.config.shared_reset_marker as shared_reset_marker_module
 from deerflow.config.extensions_config import ExtensionsConfig
@@ -58,7 +59,7 @@ def test_marker_path_is_hidden_sibling_of_the_config(config_path: Path) -> None:
 def test_marker_path_follows_a_symlinked_config(tmp_path: Path, config_path: Path) -> None:
     link = tmp_path / "linked" / "extensions_config.json"
     link.parent.mkdir()
-    link.symlink_to(config_path)
+    symlink_or_skip(link, config_path)
 
     assert SharedResetMarker("skills-cache-reset").path_for(link) == config_path.parent / ".extensions_config.json.skills-cache-reset.json"
 

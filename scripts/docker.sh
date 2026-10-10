@@ -150,9 +150,10 @@ ensure_env_files() {
 # start runs Compose from docker/ without --env-file, so ${VAR} interpolation in
 # docker-compose-dev.yaml sees the shell only, never the checkout .env. Export
 # the .env values that interpolation consumes; a value already set in the shell
-# (even empty) wins, as it does for Compose. AUTH_TRUSTED_PROXIES belongs here
-# because the Gateway's `environment:` entry, which defaults to nginx, outranks
-# the same key loaded through env_file and would replace the operator's list.
+# (even empty) wins, as it does for Compose. AUTH_TRUSTED_PROXIES and
+# DEER_FLOW_CREDENTIALS_KEY belong here because the Gateway's `environment:`
+# entries (defaulting to nginx and to empty) outrank the same keys loaded through
+# env_file and would replace the operator's values.
 load_proxy_env_from_dotenv() {
     local env_file="$PROJECT_ROOT/.env"
     local var
@@ -163,7 +164,7 @@ load_proxy_env_from_dotenv() {
         return
     fi
 
-    for var in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy AUTH_TRUSTED_PROXIES; do
+    for var in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy AUTH_TRUSTED_PROXIES DEER_FLOW_CREDENTIALS_KEY; do
         if [ -z "${!var+x}" ]; then
             line="$(grep -E "^[[:space:]]*${var}=" "$env_file" | tail -n 1 || true)"
             if [ -n "$line" ]; then

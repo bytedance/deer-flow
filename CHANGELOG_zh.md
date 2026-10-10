@@ -3367,6 +3367,19 @@
   文件。此前带一个杂散字节的 `hooks/install.jse` 既得不到静态分析，也
   不经过可执行代码审查。([#6321])
 
+- **脚本：** 本地 `make dev` / `make start` 改为绑定回环地址。此前 `serve.sh`
+  和 `backend/Makefile` 以 `--host 0.0.0.0` 启动 Gateway，`nginx.local.conf`
+  监听所有网卡，Next.js 在 Windows 之外也沿用监听所有网卡的默认值，因此在局域网
+  或 VPN 中，其他机器可以访问 `2026`、`8001` 和 `3000` 端口，包括首个管理员创建
+  之前的 `/setup`。Docker 部署栈和 README 的部署模型原本就只监听回环地址。现在
+  Gateway 和前端绑定 `127.0.0.1`，nginx 监听 `127.0.0.1` 和 `[::1]`，除非设置了
+  `BIND_HOST`（与 Docker 部署栈使用同一个变量）。`BIND_HOST` 无效时，会在停止任何
+  正在运行的服务之前报错退出。([#6587])
+
+  **行为变更：** 需要从其他设备访问本地部署时，请设置 `BIND_HOST`（例如在 `.env`
+  中设置 `BIND_HOST=0.0.0.0`）并使用 `2026` 入口；Gateway 和前端端口不再对其他
+  机器开放。
+
 - **技能：** `review_skill_package` 不再能读取其他用户的技能。此前本地路径
   目标只要位于 Gateway 工作目录或 `/tmp` 之下即被放行，而所有文档化的部署都把
   `DEER_FLOW_HOME` 放在工作目录之下，因此知道他人用户 id 的用户可以传入
@@ -3382,6 +3395,17 @@
   的匹配行会在该字符处被截断。现在这三个提供者只按 `"
 "` 切分，与共享解析器
   既有的约定以及 LocalSandbox、AIO 后端、E2B 的行为一致。([#6595])
+- **安全：** 新增仅从环境变量读取的静态凭据加密密钥 `DEER_FLOW_CREDENTIALS_KEY`。
+  按连接存储的 IM 渠道凭据此前虽有加密路径，但没有任何生产代码接入，既无法写入
+  也无法读取，Slack 因而始终使用部署级 bot token。现在 Gateway 在启动时加载该密钥
+  （逗号分隔的 Fernet 密钥：第一个用于加密，全部用于解密，以支持轮换；密文带
+  `fernet:v2:` 前缀，旧的 `fernet:v1:` 密文仍可读取），并传给所有渠道连接仓库；
+  无法解密的值按缺失处理。未设置时单实例会生成 `{DEER_FLOW_HOME}/.credentials_key`；
+  声明为多实例且启用 `channel_connections` 的部署在缺少密钥时拒绝启动，格式错误的
+  密钥同样会被拒绝且不会回显。Helm chart 将密钥生成到 app Secret 并在升级时保留，
+  `make up` 将其持久化到运行时目录，两个 compose 文件都会把它传给 Gateway。
+  `.jwt_secret`（以及托管模型密钥）现在以独占方式创建并回读，共享卷上同时冷启动的
+  副本不再各自保留不同的会话签名密钥。 ([#6611])
 
 ### 文档
 
@@ -7650,7 +7674,9 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6556]: https://github.com/bytedance/deer-flow/pull/6556
 [#6580]: https://github.com/bytedance/deer-flow/pull/6580
 [#6582]: https://github.com/bytedance/deer-flow/pull/6582
+[#6587]: https://github.com/bytedance/deer-flow/pull/6587
 [#6588]: https://github.com/bytedance/deer-flow/pull/6588
 [#6590]: https://github.com/bytedance/deer-flow/pull/6590
 [#6595]: https://github.com/bytedance/deer-flow/pull/6595
+[#6611]: https://github.com/bytedance/deer-flow/pull/6611
 [#6613]: https://github.com/bytedance/deer-flow/pull/6613
