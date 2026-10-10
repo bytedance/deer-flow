@@ -742,9 +742,11 @@ DeerFlow's built-in custom events are available through both LangGraph streaming
 #### Sandbox Mode
 
 DeerFlow supports multiple sandbox execution modes:
+
 - **Local Execution** (runs sandbox code directly on the host machine)
 - **Docker Execution** (runs sandbox code in isolated Docker containers)
 - **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service)
+- **Smol Machines microVMs** (runs agent code locally on KVM/macOS or on Smol Cloud)
 
 Sandbox references in conversation state are server-owned. External run and
 thread-state APIs reject caller-supplied `sandbox` values; when restoring a
@@ -761,6 +763,12 @@ ports from the configured starting port are occupied, allocation reports
 that no port is available instead of attempting an out-of-range bind.
 
 See the [Sandbox Configuration Guide](backend/docs/CONFIGURATION.md#sandbox) to configure your preferred mode.
+
+With the optional [Smol Machines sandbox provider](backend/docs/CONFIGURATION.md#sandbox),
+you can run agent threads in microVMs on your own machine or use the same tools
+on Smol Cloud. It keeps a VM warm for the same user and thread between turns;
+local mode does not need a Docker daemon. Install `deerflow-harness[smol]`
+before selecting the provider.
 
 Remote directory listings report traversal failures (for example, unreadable
 directories) as incomplete results, even when no entries were returned. A
@@ -2189,14 +2197,14 @@ Each task gets its own execution environment with a full filesystem view — ski
 
 The read-before-write gate ties each read mark to that `read_file` call's result, including custom tools returning multi-message `Command` updates. An unrelated result cannot authorize a write after a failed read or hide a successful read.
 
-Ranged `read_file` calls count lines the same way on every sandbox provider: a line ends only at a newline. On E2B, BoxLite, Tenki, and OpenSandbox, a file with bare carriage returns (such as a saved progress log), form feeds, or Unicode line separators therefore returns the same lines as on the local sandbox, and the `start_line` a truncated read suggests points at the next unread line.
+Ranged `read_file` calls count lines the same way on every sandbox provider: a line ends only at a newline. On E2B, BoxLite, Tenki, OpenSandbox, and Smol, a file with bare carriage returns (such as a saved progress log), form feeds, or Unicode line separators therefore returns the same lines as on the local sandbox, and the `start_line` a truncated read suggests points at the next unread line.
 
 Concurrent reads and writes to the same file share a gate across synchronous and asynchronous tool calls. Async callers waiting for that gate do not occupy worker threads needed to finish the current read or write. Cancelling a waiting call leaves the current operation running; a call that already started file inspection still waits for that work to finish before releasing its gate.
 
 The built-in `grep` tool searches either one text file or all matching text files below a directory, so an agent can search an uploaded document directly without first broadening the request to the entire uploads directory.
 E2B's `glob` filter preserves spaces, quotes, and dollar signs in filename patterns, while wildcard matching and root-relative directory scoping remain unchanged.
 E2B `grep` also preserves colons in file and directory names when reporting matching paths and line numbers.
-`glob` and `grep` preserve non-LF separator characters, such as vertical tabs and Unicode line separators, inside returned paths on E2B, BoxLite, Tenki, and OpenSandbox; `grep` also preserves them inside matched text.
+`glob` and `grep` preserve non-LF separator characters, such as vertical tabs and Unicode line separators, inside returned paths on E2B, BoxLite, Tenki, OpenSandbox, and Smol; `grep` also preserves them inside matched text.
 
 Remote `ls` excludes ignored descendants before applying its 500-entry listing limit, so dependency and build trees do not crowd out visible files. Explicitly listing an ignored directory still lists its contents; normal depth and output limits remain in effect.
 
