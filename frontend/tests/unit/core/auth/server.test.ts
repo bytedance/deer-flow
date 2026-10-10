@@ -177,6 +177,79 @@ describe("getServerSideUser — gateway_unavailable contract (issue #3493)", () 
   });
 });
 
+// ── account_disabled contract (RFC #4063 gap 3) ────────────────────
+
+describe("getServerSideUser — account_disabled contract", () => {
+  let saved: EnvSnapshot;
+
+  beforeEach(() => {
+    saved = snapshotEnv();
+    setEnv("DEER_FLOW_AUTH_DISABLED", undefined);
+    setEnv("NEXT_PUBLIC_STATIC_WEBSITE_ONLY", undefined);
+    rs.doMock("next/headers", () => ({
+      cookies: rs.fn(async () => ({
+        get: (name: string) =>
+          name === "access_token" ? { value: "stub-token" } : undefined,
+      })),
+    }));
+  });
+
+  afterEach(() => {
+    restoreEnv(saved);
+    rs.unstubAllGlobals();
+    rs.doUnmock("next/headers");
+  });
+
+  function stubMeResponse(body: unknown, status = 401) {
+    rs.stubGlobal(
+      "fetch",
+      rs.fn(async () =>
+        new Response(JSON.stringify(body), {
+          status,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+  }
+
+  test("maps a 401 account_disabled session to the account_disabled tag", async () => {
+    stubMeResponse({
+      detail: { code: "account_disabled", message: "Account disabled" },
+    });
+
+    const { getServerSideUser } = await loadFreshServerAuth();
+
+    await expect(getServerSideUser()).resolves.toEqual({
+      tag: "account_disabled",
+    });
+  });
+
+  test("keeps every other 401 a plain unauthenticated result", async () => {
+    stubMeResponse({
+      detail: { code: "token_expired", message: "Token expired" },
+    });
+
+    const { getServerSideUser } = await loadFreshServerAuth();
+
+    await expect(getServerSideUser()).resolves.toEqual({
+      tag: "unauthenticated",
+    });
+  });
+
+  test("a non-JSON 401 body still degrades to unauthenticated", async () => {
+    rs.stubGlobal(
+      "fetch",
+      rs.fn(async () => new Response("nope", { status: 401 })),
+    );
+
+    const { getServerSideUser } = await loadFreshServerAuth();
+
+    await expect(getServerSideUser()).resolves.toEqual({
+      tag: "unauthenticated",
+    });
+  });
+});
+
 // ── system_role contract (RFC #4063 gap 2) ─────────────────────────
 
 describe("userSchema system_role", () => {

@@ -38,4 +38,23 @@ describe("api fetcher unauthorized redirect", () => {
       "/artifacts/view?path=%2Fmnt%2Fuser-data%2Foutputs%2Freport.md&thread_id=t-1",
     );
   });
+
+  it("redirects an account_disabled 401 to a login page that states the reason", async () => {
+    globalThis.fetch = rs.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            detail: { code: "account_disabled", message: "Account disabled" },
+          }),
+          { status: 401, headers: { "Content-Type": "application/json" } },
+        ),
+    ) as unknown as typeof globalThis.fetch;
+    window.history.replaceState({}, "", "/workspace");
+
+    await expect(apiFetch("/api/v1/auth/me")).rejects.toThrow();
+
+    expect(window.location.href).toContain("/login?error=account_disabled");
+    // A disabled account cannot sign back in, so no return target is kept.
+    expect(window.location.href).not.toContain("next=");
+  });
 });

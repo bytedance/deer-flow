@@ -1531,8 +1531,26 @@ export interface Translations {
       tool_call_missing: string;
       connection_failed: string;
     };
+    users: {
+      title: string;
+      description: string;
+      adminOnly: string;
+      loading: string;
+      failed: string;
+      reload: string;
+      empty: string;
+      email: string;
+      role: string;
+      status: string;
+      active: string;
+      disabled: string;
+      disable: string;
+      enable: string;
+      updateFailed: string;
+    };
     sections: {
       models: string;
+      users: string;
       account: string;
       appearance: string;
       channels: string;
@@ -1920,6 +1938,7 @@ export interface Translations {
       sso_cancelled: string;
       sso_account_exists: string;
       sso_not_allowed: string;
+      account_disabled: string;
     };
   };
 }

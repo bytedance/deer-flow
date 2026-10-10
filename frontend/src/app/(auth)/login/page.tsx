@@ -179,7 +179,13 @@ export default function LoginPage() {
       if (!res.ok) {
         const data = await res.json();
         const authError = parseAuthError(data);
-        setError(authError.message);
+        // account_disabled is the one code with user-facing copy of its own
+        // (#4063 gap 3): the backend message is not localized.
+        setError(
+          authError.code === "account_disabled"
+            ? t.login.errors.account_disabled
+            : authError.message,
+        );
         // On a failed login with SSO configured, surface a hint pointing at the
         // SSO buttons — the "wrong password" may really mean "this is an SSO account".
         if (isLogin && ssoProviders.length > 0) {

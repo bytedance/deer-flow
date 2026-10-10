@@ -1808,8 +1808,27 @@ export const enUS: Translations = {
       connection_failed:
         "Connection test failed. Check the endpoint, credentials, model ID and streaming/tool support.",
     },
+    users: {
+      title: "User management",
+      description:
+        "Suspend or restore sign-in for accounts on this deployment. A disabled account is rejected by every authentication surface; its active sessions end immediately.",
+      adminOnly: "Only administrators can manage users.",
+      loading: "Loading users…",
+      failed: "Failed to load users.",
+      reload: "Reload",
+      empty: "No users yet.",
+      email: "Email",
+      role: "Role",
+      status: "Status",
+      active: "Active",
+      disabled: "Disabled",
+      disable: "Disable",
+      enable: "Enable",
+      updateFailed: "Failed to update the account.",
+    },
     sections: {
       models: "Models",
+      users: "Users",
       account: "Account",
       appearance: "Appearance",
       channels: "Channels",
@@ -2361,6 +2380,8 @@ export const enUS: Translations = {
         "An account with this email already exists. Please sign in with your password or contact your administrator.",
       sso_not_allowed:
         "SSO login is not allowed for your account. Contact your administrator.",
+      account_disabled:
+        "This account has been disabled. Contact your administrator.",
     },
   },
 };

@@ -1702,8 +1702,27 @@ export const zhCN: Translations = {
       connection_failed:
         "连接测试失败，请检查接口地址、凭据、模型 ID 以及流式输出和工具调用支持。",
     },
+    users: {
+      title: "用户管理",
+      description:
+        "停用或恢复本部署中的账号登录。被停用的账号在所有认证入口都会被拒绝，其现有会话立即失效。",
+      adminOnly: "只有管理员可以管理用户。",
+      loading: "正在加载用户…",
+      failed: "用户列表加载失败。",
+      reload: "重新加载",
+      empty: "暂无用户。",
+      email: "邮箱",
+      role: "角色",
+      status: "状态",
+      active: "正常",
+      disabled: "已停用",
+      disable: "停用",
+      enable: "启用",
+      updateFailed: "账号更新失败。",
+    },
     sections: {
       models: "模型",
+      users: "用户",
       account: "账号",
       appearance: "外观",
       channels: "渠道",
@@ -2223,6 +2242,7 @@ export const zhCN: Translations = {
       sso_account_exists:
         "该邮箱对应的账号已存在。请使用密码登录或联系管理员。",
       sso_not_allowed: "你的账号不允许使用 SSO 登录。请联系管理员。",
+      account_disabled: "账号已停用，请联系管理员。",
     },
   },
 };

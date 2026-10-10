@@ -31,6 +31,9 @@ export default async function AuthLayout({
       break;
     case "system_setup_required":
     case "unauthenticated":
+    case "account_disabled":
+      // account_disabled renders the login page too: when the redirect
+      // carried ?error=account_disabled the form surfaces the reason.
       content = <AuthProvider initialUser={null}>{children}</AuthProvider>;
       break;
     case "gateway_unavailable":

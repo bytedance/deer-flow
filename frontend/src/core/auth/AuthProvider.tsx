@@ -12,7 +12,12 @@ import React, {
 
 import { isStaticWebsiteOnly } from "../static-mode";
 
-import { type User, buildLoginUrl } from "./types";
+import {
+  ACCOUNT_DISABLED_LOGIN_URL,
+  type User,
+  buildLoginUrl,
+  parseAuthError,
+} from "./types";
 
 // Re-export for consumers
 export type { User };
@@ -79,10 +84,19 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
         const data = await res.json();
         setUser(data);
       } else if (res.status === 401) {
-        // Session expired or invalid
         setUser(null);
-        // Redirect to login if on a protected route
-        if (pathname?.startsWith("/workspace")) {
+        const code = await res
+          .json()
+          .then((data) => parseAuthError(data).code)
+          .catch(() => null);
+        if (code === "account_disabled") {
+          // Operator-disabled account (#4063 gap 3): the login page states
+          // the reason. Unlike an expired session there is nothing to come
+          // back to, so no `next` is preserved and the path gate does not
+          // apply — every authenticated page is equally unreachable.
+          router.push(ACCOUNT_DISABLED_LOGIN_URL);
+        } else if (pathname?.startsWith("/workspace")) {
+          // Session expired or invalid — redirect on protected routes
           router.push(buildLoginUrl(pathname));
         }
       }
