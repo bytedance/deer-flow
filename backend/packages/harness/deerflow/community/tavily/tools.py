@@ -1,10 +1,15 @@
 import json
+import logging
 
 from langchain.tools import tool
 from tavily import AsyncTavilyClient
 
 from deerflow.community.search_time_range import SearchTimeRange
 from deerflow.config import get_app_config
+
+logger = logging.getLogger(__name__)
+
+_FORMAT_ERROR = "Tavily returned an unexpected response format"
 
 
 def _get_tavily_client(tool_name: str = "web_search") -> AsyncTavilyClient:
@@ -13,6 +18,29 @@ def _get_tavily_client(tool_name: str = "web_search") -> AsyncTavilyClient:
     if config is not None and "api_key" in config.model_extra:
         api_key = config.model_extra.get("api_key")
     return AsyncTavilyClient(api_key=api_key)
+
+
+def _response_objects(data: object, container: str) -> list[dict] | None:
+    """Return the object entries of a Tavily response container, or None if malformed.
+
+    A missing or null container is empty; a container that is not a list, or a
+    non-empty list holding no objects, is malformed: the caller reports a format
+    error rather than returning a result the agent would misread.
+    """
+    if not isinstance(data, dict):
+        logger.error("Tavily returned unexpected payload type: %s", type(data).__name__)
+        return None
+    value = data.get(container)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        logger.error("Tavily returned unexpected '%s' payload type: %s", container, type(value).__name__)
+        return None
+    objects = [item for item in value if isinstance(item, dict)]
+    if value and not objects:
+        logger.error("Tavily returned '%s' with no usable result objects", container)
+        return None
+    return objects
 
 
 @tool("web_search", parse_docstring=True)
@@ -42,13 +70,16 @@ async def web_search_tool(query: str, time_range: SearchTimeRange | None = None)
         res = await client.search(query, **search_kwargs)
     finally:
         await client.close()
+    results = _response_objects(res, "results")
+    if results is None:
+        return json.dumps({"error": _FORMAT_ERROR, "query": query}, ensure_ascii=False)
     normalized_results = [
         {
-            "title": result["title"],
-            "url": result["url"],
-            "snippet": result["content"],
+            "title": result.get("title", ""),
+            "url": result.get("url", ""),
+            "snippet": result.get("content", ""),
         }
-        for result in res["results"]
+        for result in results
     ]
     json_results = json.dumps(normalized_results, indent=2, ensure_ascii=False)
     return json_results
@@ -70,12 +101,21 @@ async def web_fetch_tool(url: str) -> str:
         res = await client.extract([url])
     finally:
         await client.close()
-    if "failed_results" in res and len(res["failed_results"]) > 0:
-        return f"Error: {res['failed_results'][0]['error']}"
-    elif "results" in res and len(res["results"]) > 0:
-        result = res["results"][0]
-        # Extract results guarantee a URL and content, but not a page title.
-        title = result.get("title") or result.get("url") or url
-        return f"# {title}\n\n{result['raw_content'][:4096]}"
-    else:
+    failed = _response_objects(res, "failed_results")
+    if failed is None:
+        return f"Error: {_FORMAT_ERROR}"
+    if failed:
+        error = failed[0].get("error")
+        return f"Error: {error}" if error else "Error: Extraction failed"
+    results = _response_objects(res, "results")
+    if results is None:
+        return f"Error: {_FORMAT_ERROR}"
+    if not results:
         return "Error: No results found"
+    result = results[0]
+    # Extract results guarantee a URL and content, but not a page title.
+    title = result.get("title") or result.get("url") or url
+    raw_content = result.get("raw_content")
+    if not isinstance(raw_content, str):
+        raw_content = "" if raw_content is None else str(raw_content)
+    return f"# {title}\n\n{raw_content[:4096]}"
