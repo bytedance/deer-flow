@@ -21,7 +21,8 @@ REVISION = "0034_run_event_seq_watermark"
 PREVIOUS = "0033_batch_result_artifact"
 LOGIN_THROTTLE = "0035_login_throttle"
 IDEMPOTENCY = "0036_run_idempotency_request"
-CURRENT_HEAD = "0037_project_document_summaries"
+DOCUMENT_SUMMARIES = "0037_project_document_summaries"
+CURRENT_HEAD = "0038_channel_thread_bindings"
 TABLE = "run_event_thread_seq"
 pytestmark = pytest.mark.asyncio
 
@@ -32,7 +33,8 @@ async def test_0034_remains_in_the_single_migration_chain():
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     assert script.get_revision(LOGIN_THROTTLE).down_revision == REVISION
     assert script.get_revision(IDEMPOTENCY).down_revision == LOGIN_THROTTLE
-    assert script.get_revision(CURRENT_HEAD).down_revision == IDEMPOTENCY
+    assert script.get_revision(DOCUMENT_SUMMARIES).down_revision == IDEMPOTENCY
+    assert script.get_revision(CURRENT_HEAD).down_revision == DOCUMENT_SUMMARIES
     assert len(REVISION) <= 32
 
 

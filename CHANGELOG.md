@@ -833,6 +833,29 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **channels:** IM conversations now keep their DeerFlow thread across Gateway
+  replicas. The `ChannelManager` kept its chat-to-thread bindings
+  (`channel_name:chat_id[:topic_id]` → `thread_id`) in a per-process JSON file,
+  `channels/store.json`, loaded once and rewritten whole on every change, so
+  with several Gateway instances a binding created on one was invisible to the
+  others — the next message for the same chat landing elsewhere opened a second
+  thread — and concurrent writers clobbered each other's file. The bindings now
+  live in the shared `channel_thread_bindings` table (migration
+  `0038_channel_thread_bindings`) whenever `database.backend` is `sqlite` or
+  `postgres`; `memory` keeps the JSON file. On the first start after upgrading,
+  an existing `store.json` is imported once into an empty table (`INSERT … ON
+  CONFLICT DO NOTHING`, so two replicas importing at the same time cannot
+  duplicate a binding) and renamed `store.json.migrated`; a populated table
+  leaves the file untouched; entries whose key components exceed the table's
+  column widths are skipped and counted instead of failing the whole import.
+  The store API is async so the database never blocks the Gateway loop;
+  Feishu's synchronous lark callback bridges its lookups to that loop with a
+  short bounded wait, and a lookup the database does not answer in time is
+  retried on the Gateway loop (up to 30 s, then the message is dropped with a
+  warning) rather than routed as a missing mapping onto a new thread; such
+  deferred messages hold a slot of the bounded inbound queue
+  (`channels.inbound_queue_maxsize`), so a database outage cannot grow the
+  backlog, and one that cannot be admitted is dropped with a warning. ([#6558])
 - **runtime:** The JSONL event store no longer loses events after a torn final
   line. A write interrupted mid-record left the file without a trailing newline,
   so the next append was glued onto the partial record and both became one
@@ -9426,5 +9449,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6537]: https://github.com/bytedance/deer-flow/pull/6537
 [#6543]: https://github.com/bytedance/deer-flow/pull/6543
 [#6556]: https://github.com/bytedance/deer-flow/pull/6556
+[#6558]: https://github.com/bytedance/deer-flow/pull/6558
 [#6580]: https://github.com/bytedance/deer-flow/pull/6580
 [#6582]: https://github.com/bytedance/deer-flow/pull/6582

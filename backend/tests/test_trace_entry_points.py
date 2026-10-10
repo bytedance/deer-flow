@@ -20,7 +20,7 @@ import pytest
 
 from app.channels.manager import ChannelManager
 from app.channels.message_bus import InboundMessage, MessageBus
-from app.channels.store import ChannelStore
+from app.channels.store import JsonChannelStore
 from app.scheduler.service import ScheduledTaskService
 from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 from deerflow.trace_context import get_current_trace_id, request_trace_context
@@ -199,7 +199,7 @@ async def test_inbound_messages_are_handled_under_distinct_trace_scopes(tmp_path
     bus = MessageBus(inbound_queue_maxsize=4)
     manager = ChannelManager(
         bus=bus,
-        store=ChannelStore(path=tmp_path / "store.json"),
+        store=JsonChannelStore(path=tmp_path / "store.json"),
         max_concurrency=1,
     )
     seen: list[str | None] = []
