@@ -97,11 +97,15 @@ export function AgentSettingsDialog({
   const [initialSelections] = useState(() => ({
     plugins: agent.mcp_plugins ?? null,
     skills: agent.skills ?? null,
+    toolGroups: agent.tool_groups ?? null,
   }));
   const [plugins, setPlugins] = useState<string[] | null>(
     agent.mcp_plugins ?? null,
   );
   const [skills, setSkills] = useState<string[] | null>(agent.skills ?? null);
+  const [toolGroups, setToolGroups] = useState<string[] | null>(
+    agent.tool_groups ?? null,
+  );
   const [displayName, setDisplayName] = useState(agent.display_name ?? "");
 
   const [model, setModel] = useState(agent.model ?? DEFAULT_MODEL_VALUE);
@@ -204,6 +208,9 @@ export function AgentSettingsDialog({
             mcp_plugins: plugins,
           }),
           ...(!sameSelection(skills, initialSelections.skills) && { skills }),
+          ...(!sameSelection(toolGroups, initialSelections.toolGroups) && {
+            tool_groups: toolGroups,
+          }),
           model: model === DEFAULT_MODEL_VALUE ? null : model,
           model_settings: parsedSettings.modelSettings,
           thinking_enabled: supportsThinking
@@ -239,8 +246,10 @@ export function AgentSettingsDialog({
           <AgentCapabilitySelection
             plugins={plugins}
             skills={skills}
+            toolGroups={toolGroups}
             onPluginsChange={setPlugins}
             onSkillsChange={setSkills}
+            onToolGroupsChange={setToolGroups}
           />
           {(scopeSelectionEnabled || agent.knowledge_scope) && (
             <div className="space-y-1.5 rounded-md border p-3">
@@ -259,8 +268,7 @@ export function AgentSettingsDialog({
                 unavailableReason={
                   !scopeSelectionEnabled
                     ? t.knowledge.scope.loadFailed
-                    : agent.tool_groups != null &&
-                        !agent.tool_groups.includes("knowledge")
+                    : toolGroups != null && !toolGroups.includes("knowledge")
                       ? t.knowledge.scope.agentUnavailable
                       : undefined
                 }

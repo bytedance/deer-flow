@@ -1,5 +1,6 @@
 "use client";
 
+import { useAgentToolGroups } from "@/core/agents";
 import { capabilityCopy } from "@/core/capabilities/copy";
 import { useCapabilityInstallations } from "@/core/capabilities/hooks";
 import { useI18n } from "@/core/i18n/hooks";
@@ -71,16 +72,84 @@ function Selection({
     </fieldset>
   );
 }
+
+function ToolGroupSelection({
+  value,
+  onChange,
+}: {
+  value: string[] | null;
+  onChange: (value: string[] | null) => void;
+}) {
+  const { t } = useI18n();
+  const { toolGroups, isLoading, error } = useAgentToolGroups();
+  const options = new Map(toolGroups.map((name) => [name, name]));
+  for (const name of value ?? []) {
+    if (!options.has(name)) {
+      options.set(name, `${name} (${t.agents.settingsToolGroupUnavailable})`);
+    }
+  }
+
+  return (
+    <fieldset className="space-y-2 rounded-lg border p-3">
+      <legend className="px-1 text-sm font-medium">
+        {t.agents.settingsToolGroups}
+      </legend>
+      <p className="text-muted-foreground text-xs leading-5">
+        {t.agents.settingsToolGroupsHint}
+      </p>
+      <label className="flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={value === null}
+          onChange={(event) => onChange(event.target.checked ? null : [])}
+        />
+        {t.agents.settingsToolGroupsAll}
+      </label>
+      {isLoading && (
+        <p className="text-muted-foreground text-xs">{t.common.loading}</p>
+      )}
+      {error && (
+        <p role="alert" className="text-destructive text-xs">
+          {t.agents.settingsToolGroupsLoadFailed}
+        </p>
+      )}
+      {value !== null && (
+        <div className="max-h-44 space-y-2 overflow-y-auto">
+          {[...options].map(([name, label]) => (
+            <label key={name} className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={value.includes(name)}
+                onChange={(event) =>
+                  onChange(
+                    event.target.checked
+                      ? [...value, name]
+                      : value.filter((item) => item !== name),
+                  )
+                }
+              />
+              {label}
+            </label>
+          ))}
+        </div>
+      )}
+    </fieldset>
+  );
+}
 export function AgentCapabilitySelection({
   plugins,
   skills,
+  toolGroups,
   onPluginsChange,
   onSkillsChange,
+  onToolGroupsChange,
 }: {
   plugins: string[] | null;
   skills: string[] | null;
+  toolGroups: string[] | null;
   onPluginsChange: (value: string[] | null) => void;
   onSkillsChange: (value: string[] | null) => void;
+  onToolGroupsChange: (value: string[] | null) => void;
 }) {
   const { locale } = useI18n();
   const copy = capabilityCopy(locale);
@@ -92,6 +161,7 @@ export function AgentCapabilitySelection({
       <p className="text-muted-foreground text-xs leading-5">{copy.hint}</p>
       <Selection adapter="mcp" value={plugins} onChange={onPluginsChange} />
       <Selection adapter="skills" value={skills} onChange={onSkillsChange} />
+      <ToolGroupSelection value={toolGroups} onChange={onToolGroupsChange} />
     </details>
   );
 }

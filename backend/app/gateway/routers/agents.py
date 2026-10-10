@@ -6,10 +6,11 @@ import re
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.gateway.authz import require_permission
+from app.gateway.deps import get_config
 from app.gateway.persistent_writes import run_drained_write
 from deerflow.agents.memory.manager import get_memory_manager
 from deerflow.config.agents_api_config import get_agents_api_config
@@ -22,7 +23,7 @@ from deerflow.config.agents_config import (
     load_agent_soul,
     preserve_non_managed_fields,
 )
-from deerflow.config.app_config import get_app_config
+from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.paths import get_paths
 from deerflow.knowledge_scope import KnowledgeScope, canonicalize_knowledge_scope
 from deerflow.persistence.agents import AgentDeleteOutcome, AgentExistsError, get_agent_store
@@ -64,6 +65,12 @@ class AgentsListResponse(BaseModel):
     """Response model for listing all custom agents."""
 
     agents: list[AgentResponse]
+
+
+class ToolGroupsResponse(BaseModel):
+    """Configured tool groups safe to present in Agent settings."""
+
+    tool_groups: list[str]
 
 
 class AgentCreateRequest(BaseModel):
@@ -266,6 +273,11 @@ def _build_agent_config(body: AgentCreateRequest, normalized_name: str, *, memor
     return config_data
 
 
+def _configured_tool_group_names(config: AppConfig) -> list[str]:
+    """Project configured group names without exposing tool definitions."""
+    return list(dict.fromkeys(group.name for group in config.tool_groups))
+
+
 async def _persist_new_agent(body: AgentCreateRequest, normalized_name: str, user_id: str, *, memory_enabled: bool = True) -> AgentResponse:
     """Atomically create and reload one user-scoped agent."""
     config_data = _build_agent_config(body, normalized_name, memory_enabled=memory_enabled)
@@ -309,6 +321,22 @@ async def list_agents(request: Request) -> AgentsListResponse:
     except Exception as e:
         logger.error(f"Failed to list agents: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to list agents: {str(e)}")
+
+
+@router.get(
+    "/agent-tool-groups",
+    response_model=ToolGroupsResponse,
+    summary="List Agent Tool Groups",
+    description="List configured tool-group names available for custom-agent allowlists.",
+)
+@require_permission("agents", "read")
+async def list_agent_tool_groups(
+    request: Request,
+    config: AppConfig = Depends(get_config),
+) -> ToolGroupsResponse:
+    """Return names only; tool implementations and configuration stay private."""
+    _require_agents_api_enabled()
+    return ToolGroupsResponse(tool_groups=_configured_tool_group_names(config))
 
 
 @router.get(

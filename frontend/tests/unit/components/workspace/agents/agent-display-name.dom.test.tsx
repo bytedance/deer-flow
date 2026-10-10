@@ -17,6 +17,11 @@ const { mutateAsync } = rs.hoisted(() => ({
   mutateAsync: rs.fn().mockResolvedValue({}),
 }));
 rs.mock("@/core/agents", () => ({
+  useAgentToolGroups: () => ({
+    toolGroups: ["web", "file:read"],
+    isLoading: false,
+    error: null,
+  }),
   useUpdateAgent: () => ({ mutateAsync, isPending: false }),
 }));
 rs.mock("@/core/features", () => ({
@@ -198,5 +203,65 @@ describe("capability selection update isolation", () => {
     };
     expect(request).not.toHaveProperty("mcp_plugins");
     expect(request).not.toHaveProperty("skills");
+  });
+});
+
+describe("custom agent tool groups", () => {
+  it("saves an explicit tool-group allowlist", async () => {
+    render(<AgentSettingsDialog agent={agent} open onOpenChange={rs.fn()} />);
+
+    fireEvent.click(screen.getByLabelText("Use every configured tool group"));
+    fireEvent.click(screen.getByLabelText("web"));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalled());
+    const { request } = mutateAsync.mock.calls[0]![0] as {
+      request: Record<string, unknown>;
+    };
+    expect(request.tool_groups).toEqual(["web"]);
+  });
+
+  it("keeps unavailable selected groups visible so they can be removed", async () => {
+    render(
+      <AgentSettingsDialog
+        agent={{ ...agent, tool_groups: ["legacy-tools"] }}
+        open
+        onOpenChange={rs.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByLabelText("legacy-tools (unavailable)"));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalled());
+    const { request } = mutateAsync.mock.calls[0]![0] as {
+      request: Record<string, unknown>;
+    };
+    expect(request.tool_groups).toEqual([]);
+  });
+
+  it("omits untouched tool groups after a concurrent agent refresh", async () => {
+    const opened = { ...agent, tool_groups: ["web"] };
+    const { rerender } = render(
+      <AgentSettingsDialog agent={opened} open onOpenChange={rs.fn()} />,
+    );
+    rerender(
+      <AgentSettingsDialog
+        agent={{ ...opened, tool_groups: ["file:read"] }}
+        open
+        onOpenChange={rs.fn()}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("Display name"), {
+      target: { value: "Rename only" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalled());
+    const { request } = mutateAsync.mock.calls[0]![0] as {
+      request: Record<string, unknown>;
+    };
+    expect(request).not.toHaveProperty("tool_groups");
   });
 });
