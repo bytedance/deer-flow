@@ -575,9 +575,14 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 | `/models` | 列出可用模型 |
 | `/model [name\|default]` | 查看或固定当前会话使用的模型 |
 | `/memory` | 查看 memory |
+| `/agent list` | 列出你的自定义智能体 |
+| `/agent use <name>` | 用自定义智能体开启一个新对话 |
 | `/help` | 查看帮助 |
 
 > 没有命令前缀的消息会被当作普通聊天处理。DeerFlow 会自动创建 thread，并以对话方式回复。
+
+智能体选择是会话级的：`/agent use <name>` 会开启一个新对话，并将该自定义智能体固定到 thread 元数据中。已有对话不会在中途切换智能体；该选择在 Gateway 重启后仍然有效，在 Web UI 中打开 IM 创建的 thread 时，也会继续使用同一个自定义智能体。
+使用 `/agent use lead_agent` 可在新对话中回到默认智能体。
 
 模型选择是会话级的：`/model <name>` 将模型固定到**当前**会话——会按调用方可见的模型列表校验，选择写入 thread 元数据（Gateway 重启后仍有效），从下一条消息开始生效，无需新开对话。`/model` 查看当前生效模型及其来源，`/model default` 清除固定，`/models` 会报告当前固定的模型。
 
