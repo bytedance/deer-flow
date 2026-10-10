@@ -143,18 +143,22 @@ def _agent_path(env: dict[str, str] | None) -> str | None:
 
 
 def _resolve_agent_command(command: str, path: str | None = None) -> str:
-    """Return the host path to spawn for a configured ACP agent command.
+    r"""Return the host path to spawn for a configured ACP agent command.
 
     ``asyncio.create_subprocess_exec``, which the ACP SDK's stdio transport
     uses, does not apply ``PATHEXT`` on Windows: a bare ``npx`` or ``mcode``
     raises ``FileNotFoundError`` even though the npm shim (``npx.cmd``) is on
-    ``PATH``. Resolve the name the way the MCP Python SDK normalizes stdio
-    commands, and keep the configured value when nothing matches so the
-    not-found remediation still fires.
+    ``PATH``, and an absolute ``C:\npm\mcode`` spawns npm's extensionless shell
+    script instead of ``mcode.CMD`` and dies with ``WinError 193``. Resolve
+    the command the way the MCP Python SDK normalizes stdio commands, and keep
+    the configured value when nothing matches so the not-found remediation
+    still fires.
 
-    Only bare names are resolved. A configured path is handed to the spawn
-    unchanged, so the spawn -- not ``shutil.which`` -- decides what it refers
-    to.
+    Bare names and absolute paths are resolved. A relative configured path is
+    handed to the spawn unchanged: it refers to the ACP workspace the spawn
+    runs in, not to the Gateway's cwd. An absolute path keeps its own
+    directory -- ``shutil.which`` searches that directory and probes
+    ``PATHEXT`` there.
 
     ``path`` is the ``PATH`` the agent subprocess will actually see (see
     ``_agent_path``); the Gateway's own is only the fallback. A successful
@@ -166,7 +170,7 @@ def _resolve_agent_command(command: str, path: str | None = None) -> str:
     The lookup stats the filesystem (``shutil.which`` -> ``os.access``), so
     callers must run it off the event loop.
     """
-    if os.path.dirname(command):
+    if os.path.dirname(command) and not os.path.isabs(command):
         return command
     try:
         resolved = shutil.which(command, path=path)
