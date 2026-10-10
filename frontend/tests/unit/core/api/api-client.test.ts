@@ -1251,3 +1251,118 @@ test("short-circuits reconnect to an interrupted (user-cancelled) run", async ()
   expect(fetchFn).toHaveBeenCalledTimes(1);
   expect(sessionStorage.removeItem).toHaveBeenCalledWith("lg:stream:thread-1");
 });
+
+test.each(["initial", "join"] as const)(
+  "rejects replay gaps for another run on the %s stream",
+  async (source) => {
+    const sessionStorage = makeSessionStorage();
+    sessionStorage.setItem("lg:stream:thread-guard", "run-newer");
+    sessionStorage.removeItem.mockClear();
+    sessionStorage.setItem.mockClear();
+    const gap = {
+      code: "stream_replay_gap",
+      run_id: "run-other",
+      requested_event_id: "1-0",
+      earliest_available_event_id: "2-0",
+      latest_available_event_id: "3-0",
+      recovery: "reload_durable_state",
+    };
+    const fetchFn = rs.fn(async (url: string | URL) => {
+      const path = new URL(url.toString()).pathname;
+      if (path.endsWith("/runs/run-guard")) {
+        return new Response(JSON.stringify({ status: "running" }));
+      }
+      if (
+        path.endsWith("/runs/stream") ||
+        path.endsWith("/runs/run-guard/stream")
+      ) {
+        return makeSSEResponse(`event: gap\ndata: ${JSON.stringify(gap)}\n\n`, {
+          "Content-Location": "/threads/thread-guard/runs/run-guard",
+        });
+      }
+      return new Response(JSON.stringify({ values: { messages: [] } }));
+    });
+    rs.stubGlobal("window", {
+      location: { origin: "http://localhost:2026" },
+      sessionStorage,
+    });
+    rs.stubGlobal("fetch", fetchFn);
+
+    const client = getAPIClient(true);
+    const stream =
+      source === "initial"
+        ? client.runs.stream("thread-guard", "lead_agent", {})
+        : client.runs.joinStream("thread-guard", "run-guard");
+
+    await expect(stream.next()).rejects.toThrow(
+      "Stream replay gap does not match the active thread run.",
+    );
+    expect(fetchFn).toHaveBeenCalledTimes(source === "initial" ? 1 : 2);
+    expect(sessionStorage.getItem("lg:stream:thread-guard")).toBe("run-newer");
+    expect(sessionStorage.removeItem).not.toHaveBeenCalled();
+    expect(sessionStorage.setItem).not.toHaveBeenCalled();
+  },
+);
+
+test.each(["initial", "join"] as const)(
+  "propagates cancellation during %s stream gap recovery without rejoining",
+  async (source) => {
+    const sessionStorage = makeSessionStorage();
+    sessionStorage.setItem("lg:stream:thread-abort", "run-abort");
+    sessionStorage.setItem.mockClear();
+    const controller = new AbortController();
+    const abortError = new DOMException(
+      "AbortError: Recovery cancelled",
+      "AbortError",
+    );
+    const gap = {
+      code: "stream_replay_gap",
+      run_id: "run-abort",
+      requested_event_id: "1-0",
+      earliest_available_event_id: "2-0",
+      latest_available_event_id: "3-0",
+      recovery: "reload_durable_state",
+    };
+    const fetchFn = rs.fn(async (url: string | URL, init?: RequestInit) => {
+      const path = new URL(url.toString()).pathname;
+      if (path.endsWith("/runs/run-abort")) {
+        return new Response(JSON.stringify({ status: "running" }));
+      }
+      if (
+        path.endsWith("/runs/stream") ||
+        path.endsWith("/runs/run-abort/stream")
+      ) {
+        return makeSSEResponse(`event: gap\ndata: ${JSON.stringify(gap)}\n\n`, {
+          "Content-Location": "/threads/thread-abort/runs/run-abort",
+        });
+      }
+      if (path.endsWith("/threads/thread-abort/state")) {
+        expect(init?.signal).toBe(controller.signal);
+        controller.abort();
+        throw abortError;
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    rs.stubGlobal("window", {
+      location: { origin: "http://localhost:2026" },
+      sessionStorage,
+    });
+    rs.stubGlobal("fetch", fetchFn);
+
+    const client = getAPIClient(true);
+    const options = { signal: controller.signal };
+    const stream =
+      source === "initial"
+        ? client.runs.stream("thread-abort", "lead_agent", options)
+        : client.runs.joinStream("thread-abort", "run-abort", options);
+
+    await expect(stream.next()).resolves.toMatchObject({
+      done: false,
+      value: { event: "custom", data: { type: "stream_replay_gap", ...gap } },
+    });
+    await expect(stream.next()).rejects.toBe(abortError);
+    expect(fetchFn).toHaveBeenCalledTimes(source === "initial" ? 2 : 3);
+    expect(sessionStorage.getItem("lg:stream:thread-abort")).toBeNull();
+    expect(sessionStorage.setItem).not.toHaveBeenCalled();
+  },
+);
