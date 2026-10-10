@@ -105,6 +105,8 @@ async def list_mcp_tasks(
         thread_id: Thread whose tasks are listed.
         request: Incoming request, used for auth and repository access.
         limit: Maximum number of tasks to return (1-100).
+        status: Optional task status filter applied in SQL before the limit.
+        active_only: Restrict to submitted, working, and input_required tasks; intersects with status.
 
     Returns:
         Tasks in repository order, each projected onto the list view.
