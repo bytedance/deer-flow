@@ -4312,7 +4312,7 @@ This release closes that milestone with **439 merged pull requests**.
   loopback-only. The Gateway and frontend now bind `127.0.0.1`, and nginx
   listens on `127.0.0.1` and `[::1]` unless `BIND_HOST` is set, the same
   variable the Docker stack honors. An invalid `BIND_HOST` fails before any
-  running service is stopped.
+  running service is stopped. ([#6587])
 
   **Behavior change:** a local stack opened from another device needs
   `BIND_HOST` (e.g. `BIND_HOST=0.0.0.0` in `.env`) and the `2026` entry; the
@@ -9432,3 +9432,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6543]: https://github.com/bytedance/deer-flow/pull/6543
 [#6556]: https://github.com/bytedance/deer-flow/pull/6556
 [#6582]: https://github.com/bytedance/deer-flow/pull/6582
+[#6587]: https://github.com/bytedance/deer-flow/pull/6587

@@ -3352,7 +3352,7 @@
   之前的 `/setup`。Docker 部署栈和 README 的部署模型原本就只监听回环地址。现在
   Gateway 和前端绑定 `127.0.0.1`，nginx 监听 `127.0.0.1` 和 `[::1]`，除非设置了
   `BIND_HOST`（与 Docker 部署栈使用同一个变量）。`BIND_HOST` 无效时，会在停止任何
-  正在运行的服务之前报错退出。
+  正在运行的服务之前报错退出。([#6587])
 
   **行为变更：** 需要从其他设备访问本地部署时，请设置 `BIND_HOST`（例如在 `.env`
   中设置 `BIND_HOST=0.0.0.0`）并使用 `2026` 入口；Gateway 和前端端口不再对其他
@@ -7617,3 +7617,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6537]: https://github.com/bytedance/deer-flow/pull/6537
 [#6556]: https://github.com/bytedance/deer-flow/pull/6556
 [#6582]: https://github.com/bytedance/deer-flow/pull/6582
+[#6587]: https://github.com/bytedance/deer-flow/pull/6587
