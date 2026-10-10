@@ -954,6 +954,14 @@ tools:
   #   # hl: en                       # Optional interface language
   #   # api_key: $SERPLY_API_KEY     # Optional if the env var is set
 
+  # News search tool (uses Webz.io News Search, requires WEBZ_API_KEY)
+  # Recent news coverage, not general web search. Replace the active web_search entry.
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.webz.tools:web_search_tool
+  #   max_results: 5  # Clamped to 1-100
+  #   # api_key: $WEBZ_API_KEY  # Otherwise read from WEBZ_API_KEY
+
   # Web search tool (uses Brave Search API, requires BRAVE_SEARCH_API_KEY)
   # Brave Search returns results from an independent index. Sign up at
   # https://brave.com/search/api/ to get a key. Unlike the DuckDuckGo
@@ -1059,6 +1067,10 @@ tools:
   #   # token: $BROWSERLESS_TOKEN        # API token (required for Browserless Cloud; optional for self-hosted)
   #   timeout_s: 30                       # Request timeout in seconds
   #   # allow_private_addresses: false    # SSRF guard: keep false in production. Set true ONLY for intentional internal targets.
+  #   # network_isolation_confirmed: false # SSRF guard: the Browserless server resolves URLs, follows redirects,
+  #   #                                    # and loads subresources on its own side, so the target-URL guard above
+  #   #                                    # cannot be enforced end-to-end. Set true ONLY when its outbound network
+  #   #                                    # is isolated from private and cloud-metadata networks.
   #   # wait_for_event: "networkidle"    # Wait for a page event before returning (e.g. "load", "networkidle")
   #   # wait_for_timeout_ms: 2000        # Extra wait after page load in milliseconds
   #   # wait_for_selector: "article"     # CSS selector to wait for before returning
@@ -1089,6 +1101,10 @@ tools:
   #   token: $CRAWL4AI_TOKEN              # Bearer token; required by Crawl4AI >= 0.9
   #   timeout: 30                         # Request timeout in seconds
   #   # allow_private_addresses: false     # SSRF guard: keep false in production. Set true ONLY for intentional internal targets.
+  #   # network_isolation_confirmed: false # SSRF guard: the Crawl4AI server resolves URLs, follows redirects,
+  #   #                                    # and loads subresources on its own side, so the target-URL guard above
+  #   #                                    # cannot be enforced end-to-end. Set true ONLY when its outbound network
+  #   #                                    # is isolated from private and cloud-metadata networks.
   #   # filter: fit                       # Markdown filter: fit (default) | raw | bm25 | llm
 
   # Web capture tool (uses Browserless /screenshot to render a page as an artifact)
@@ -1113,6 +1129,11 @@ tools:
   #   # best_attempt: true                  # Continue with current page state if waits time out
   #   # allow_private_addresses: false      # SSRF guard: keep false in production. Set true ONLY to
   #   #                                     # capture internal/private targets (loopback, RFC1918, etc.)
+  #   # network_isolation_confirmed: false  # SSRF guard: the Browserless server resolves URLs, follows
+  #   #                                     # redirects, and loads subresources on its own side, so the
+  #   #                                     # target-URL guard above cannot be enforced end-to-end. Set true
+  #   #                                     # ONLY when its outbound network is isolated from private and
+  #   #                                     # cloud-metadata networks.
 
   # Agentic browser control (stateful navigate → observe → click/type loop).
   # Unlike web_fetch/web_capture (read-only, stateless), these tools keep a live
@@ -1214,6 +1235,11 @@ tools:
   #   use: deerflow.community.firecrawl.tools:web_fetch_tool
   #   # api_key: $FIRECRAWL_API_KEY
   #   # base_url: http://<host>:3002  # optional: self-hosted Firecrawl; no cloud API key needed
+  #   # allow_private_addresses: false      # SSRF guard: keep false in production. Set true ONLY for intentional internal targets.
+  #   # network_isolation_confirmed: false  # SSRF guard: the Firecrawl server resolves URLs, follows redirects,
+  #   #                                     # and loads subresources on its own side, so the target-URL guard above
+  #   #                                     # cannot be enforced end-to-end. Set true ONLY when its outbound network
+  #   #                                     # is isolated from private and cloud-metadata networks.
 
   # Web fetch tool (uses GroundRoute, requires GROUNDROUTE_API_KEY)
   # Fetches a page's extracted text via GroundRoute mode=page.
@@ -1234,6 +1260,10 @@ tools:
   #   # api_key: $CRW_API_KEY
   #   # base_url: https://fastcrw.com/api   # default cloud; set to e.g. http://localhost:3000 for self-host
   #   # allow_private_addresses: false      # SSRF guard: keep false in production. Set true ONLY for intentional internal targets.
+  #   # network_isolation_confirmed: false  # SSRF guard: the fastCRW server resolves URLs, follows redirects,
+  #   #                                     # and loads subresources on its own side, so the target-URL guard above
+  #   #                                     # cannot be enforced end-to-end. Set true ONLY when its outbound network
+  #   #                                     # is isolated from private and cloud-metadata networks.
 
   # Web fetch tool (uses Sofya, requires SOFYA_API_KEY)
   # Returns the page as markdown. Also handles PDF, DOCX and other documents.

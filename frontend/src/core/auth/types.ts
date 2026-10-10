@@ -12,6 +12,10 @@ export const userSchema = z.object({
   // other value is simply non-admin.
   system_role: z.string().min(1),
   needs_setup: z.boolean().optional().default(false),
+  // Account lifecycle (RFC #4063 gap 3): true when the account is
+  // operator-suspended. Optional so pre-gap-3 backends (and test literals)
+  // parse unchanged — absent means not disabled.
+  disabled: z.boolean().optional(),
   oauth_provider: z.string().nullable().optional().default(null),
   // Effective route permissions (RFC #4063 Phase 4). Optional + nullable:
   // absent = pre-Phase-4 backend, null = credential-creation response that

@@ -4337,6 +4337,39 @@ This release closes that milestone with **439 merged pull requests**.
   package. Previously a `hooks/install.jse` carrying one stray byte received
   no static analysis and no executable review. ([#6321])
 
+- **community:** Delegated `web_fetch`/`web_capture` backends fail closed by
+  default. Browserless, Crawl4AI, Firecrawl, and fastCRW resolve the target URL
+  in the backend's own network namespace, so the target-URL SSRF screen cannot
+  be enforced end-to-end. Each entry point now screens its resolved backend
+  base URL (config key, env fallback, and default) before delegating: a public
+  backend still works unchanged, but a loopback, private, or unverifiable
+  backend is refused unless the operator confirms its egress isolation.
+  **Upgrade note:** a deployment using the documented defaults (Browserless at
+  `http://localhost:3032`, Crawl4AI at `http://localhost:11235`, or a
+  self-hosted Firecrawl/fastCRW via `base_url`/`CRW_API_URL`) now sees a
+  delegation error on `web_fetch`/`web_capture` until it either points the
+  backend at its public address or sets `network_isolation_confirmed: true` in
+  each tool config after isolating the backend's egress. `make doctor` warns
+  about refused backend configurations, including `CRW_API_URL` overrides.
+  `allow_private_addresses` still controls target URLs only. See the
+  [deployment guidance](backend/docs/CONFIGURATION.md#delegated-fetch-backend-isolation).
+  ([#6531])
+
+- **scripts:** Bind local `make dev` / `make start` to loopback. `serve.sh` and
+  `backend/Makefile` started the Gateway with `--host 0.0.0.0`,
+  `nginx.local.conf` listened on every interface, and Next.js kept its
+  all-interfaces default outside Windows, so on a LAN or VPN other machines could
+  reach ports `2026`, `8001`, and `3000`, including `/setup` before the first
+  admin existed. The Docker stack and the README's deployment model were already
+  loopback-only. The Gateway and frontend now bind `127.0.0.1`, and nginx
+  listens on `127.0.0.1` and `[::1]` unless `BIND_HOST` is set, the same
+  variable the Docker stack honors. An invalid `BIND_HOST` fails before any
+  running service is stopped. ([#6587])
+
+  **Behavior change:** a local stack opened from another device needs
+  `BIND_HOST` (e.g. `BIND_HOST=0.0.0.0` in `.env`) and the `2026` entry; the
+  Gateway and frontend ports are no longer reachable from other machines.
+
 - **skills:** Stop `review_skill_package` from reading other users' skills.
   Local path targets were allowed anywhere under the Gateway cwd or `/tmp`,
   and every documented deployment keeps `DEER_FLOW_HOME` under the cwd, so a
@@ -4346,6 +4379,15 @@ This release closes that milestone with **439 merged pull requests**.
   always available, so skill tool policy could not remove it. Local targets
   are now confined to the configured skills root and the caller's own user
   directory; `skill://` and `inline://` targets are unchanged. ([#6580])
+- **sandbox:** `glob` and `grep` on the BoxLite, OpenSandbox and Tenki providers frame
+  their records with `str.splitlines()`, which also ends a line at a bare carriage
+  return, form feed, vertical tab, file/group/record separator, next-line, and
+  U+2028/U+2029 — all legal inside Linux filenames and inside matched text. A file
+  named `notes\x0bdraft.txt` was therefore reported as two unrelated paths (one of
+  them nonexistent), and a matched line such as `const s = "a\u2028b";` came back
+  truncated at that character. These providers now split on `"
+"` only, as the shared parser already documents and as
+  LocalSandbox, the AIO backend and E2B already do. ([#6595])
 
 ### Documentation
 
@@ -4602,6 +4644,14 @@ This release closes that milestone with **439 merged pull requests**.
   coverage stays excluded. A new test pins the concurrent startup and the
   wait-for-every-shard failure reporting with offline worker doubles.
   ([#6324])
+- **integrations:** Lark/Feishu CLI output is decoded as UTF-8 instead of with
+  the host locale. `lark-cli` (a native binary shipped through the
+  `@larksuite/cli` npm package) and npm both write UTF-8 to a pipe, but every
+  capture in `lark_cli.py` passed `text=True` without an `encoding`, so a host
+  whose ANSI code page is not UTF-8 (cp936, cp1252) silently mangled non-ASCII
+  fields — `auth status --json` returned a garbled `userName`, and an
+  undecodable byte could kill the reader thread and leave `stdout` as `None`,
+  reporting a healthy CLI as unavailable. ([#6590])
 
 ## [2.1.0] — 2026-09-24
 
@@ -9463,4 +9513,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6558]: https://github.com/bytedance/deer-flow/pull/6558
 [#6580]: https://github.com/bytedance/deer-flow/pull/6580
 [#6582]: https://github.com/bytedance/deer-flow/pull/6582
+[#6587]: https://github.com/bytedance/deer-flow/pull/6587
 [#6588]: https://github.com/bytedance/deer-flow/pull/6588
+[#6590]: https://github.com/bytedance/deer-flow/pull/6590
+[#6595]: https://github.com/bytedance/deer-flow/pull/6595

@@ -447,6 +447,113 @@ def test_protected_post_with_internal_auth_header_passes():
     assert res.status_code == 200
 
 
+def test_internal_auth_owner_header_of_suspended_account_rejected(tmp_path):
+    """(#3462 gap 3) IM-channel dispatch surface: the internal principal is
+    synthesized from trusted headers without a users-row lookup, so the
+    middleware itself rejects an owner-bound internal call whose account was
+    suspended — at the very next request, like every other surface."""
+    import asyncio
+    import json
+
+    from starlette.requests import Request as StarletteRequest
+    from starlette.responses import PlainTextResponse
+
+    from app.gateway.auth.models import User
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+    from app.gateway.auth_middleware import AuthMiddleware
+    from app.gateway.internal_auth import create_internal_auth_headers
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+
+    async def _dispatch(owner_user_id: str):
+        headers = create_internal_auth_headers(owner_user_id=owner_user_id)
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/threads/abc/runs/stream",
+            "root_path": "",
+            "query_string": b"",
+            "headers": [(name.lower().encode(), value.encode()) for name, value in headers.items()],
+        }
+
+        async def call_next(_request):
+            return PlainTextResponse("route-reached")
+
+        response = await AuthMiddleware(None).dispatch(StarletteRequest(scope), call_next)
+        body = json.loads(response.body) if response.status_code != 200 else {}
+        return response.status_code, body
+
+    async def _run():
+        await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path}/users.db", sqlite_dir=str(tmp_path))
+        repo = SQLiteUserRepository(get_session_factory())
+        owner = await repo.create_user(User(email="channel-owner@example.com", system_role="user"))
+        await repo.set_disabled(str(owner.id), True)
+
+        import app.gateway.deps as deps_module
+
+        saved_repo, saved_provider = deps_module._cached_repo, deps_module._cached_local_provider
+        deps_module._cached_repo = repo
+        deps_module._cached_local_provider = None
+        try:
+            status_code, body = await _dispatch(str(owner.id))
+            assert status_code == 401
+            assert body["detail"]["code"] == "account_disabled"
+
+            # Unknown owner ids stay allowed: an account that does not exist
+            # in the users store cannot be suspended.
+            status_code, body = await _dispatch("no-such-owner")
+            assert status_code == 200
+
+            # Re-enabling restores the internal surface immediately.
+            await repo.set_disabled(str(owner.id), False)
+            status_code, body = await _dispatch(str(owner.id))
+            assert status_code == 200
+        finally:
+            deps_module._cached_repo = saved_repo
+            deps_module._cached_local_provider = saved_provider
+
+    try:
+        asyncio.run(_run())
+    finally:
+        asyncio.run(close_engine())
+
+
+def test_internal_auth_owner_gate_skipped_in_auth_disabled_mode(monkeypatch):
+    """Auth-disabled mode sends the synthetic auth-disabled identity as the
+    internal owner; deployments may have no users store at all there, so the
+    suspension gate must not attempt a lookup (it would fail the request)."""
+    import asyncio
+
+    from starlette.requests import Request as StarletteRequest
+    from starlette.responses import PlainTextResponse
+
+    from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID
+    from app.gateway.auth_middleware import AuthMiddleware
+    from app.gateway.internal_auth import create_internal_auth_headers
+
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+
+    async def _run():
+        headers = create_internal_auth_headers(owner_user_id=AUTH_DISABLED_USER_ID)
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/threads/abc/runs/stream",
+            "root_path": "",
+            "query_string": b"",
+            "headers": [(name.lower().encode(), value.encode()) for name, value in headers.items()],
+        }
+
+        async def call_next(_request):
+            return PlainTextResponse("route-reached")
+
+        # No engine / users store is configured on purpose: a lookup here
+        # would raise and 500 the request.
+        response = await AuthMiddleware(None).dispatch(StarletteRequest(scope), call_next)
+        assert response.status_code == 200
+
+    asyncio.run(_run())
+
+
 def test_protected_post_with_non_ascii_internal_auth_header_returns_401(client):
     from app.gateway.internal_auth import INTERNAL_AUTH_HEADER_NAME
 

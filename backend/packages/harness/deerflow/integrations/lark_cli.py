@@ -97,6 +97,14 @@ INTEGRATION_ID = "lark-cli"
 FALLBACK_LARK_CLI_VERSION = "v1.0.65"
 LARK_CLI_NPM_VERSION = FALLBACK_LARK_CLI_VERSION.removeprefix("v")
 LARK_CLI_NPM_PACKAGE = "@larksuite/cli"
+# ``lark-cli`` is a native binary (installed by the npm package's Node wrapper)
+# and npm itself always write UTF-8 to a pipe, so every capture of their output
+# must be decoded as UTF-8 rather than with the host locale. On a host whose ANSI
+# code page is not UTF-8 (cp936, cp1252) the locale decode silently mangles every
+# non-ASCII field -- ``auth status --json`` reports a CJK ``userName``, documents
+# titles come back garbled -- and can kill the pipe reader thread outright when a
+# byte sequence is invalid in the code page, leaving ``stdout`` as ``None``.
+LARK_CLI_SUBPROCESS_ENCODING = "utf-8"
 LARK_CLI_GITHUB_REPO = "larksuite/cli"
 LARK_CLI_LATEST_RELEASE_API = f"https://api.github.com/repos/{LARK_CLI_GITHUB_REPO}/releases/latest"
 LARK_CLI_SOURCE_ARCHIVE_ENV = "DEER_FLOW_LARK_CLI_SKILLS_ARCHIVE"
@@ -1534,6 +1542,8 @@ def _probe_lark_cli_at_path(path: str) -> LarkCliProbe:
             check=False,
             capture_output=True,
             text=True,
+            encoding=LARK_CLI_SUBPROCESS_ENCODING,
+            errors="replace",
             timeout=5,
         )
     except Exception as exc:  # noqa: BLE001 - probe boundary
@@ -1569,6 +1579,8 @@ def probe_lark_auth(user_id: str, *, verify: bool = False) -> LarkAuthProbe:
             check=False,
             capture_output=True,
             text=True,
+            encoding=LARK_CLI_SUBPROCESS_ENCODING,
+            errors="replace",
             timeout=8,
             env=lark_cli_env(user_id),
         )
@@ -2339,6 +2351,8 @@ def _install_managed_gateway_lark_cli(version: str) -> LarkCliProbe:
         check=False,
         capture_output=True,
         text=True,
+        encoding=LARK_CLI_SUBPROCESS_ENCODING,
+        errors="replace",
         timeout=LARK_CLI_NPM_INSTALL_TIMEOUT_SECONDS,
         env={**os.environ, "npm_config_update_notifier": "false"},
     )
@@ -2491,6 +2505,8 @@ def _run_lark_config_init(*, app_id: str, app_secret: str, brand: str, env: dict
             check=False,
             capture_output=True,
             text=True,
+            encoding=LARK_CLI_SUBPROCESS_ENCODING,
+            errors="replace",
             timeout=15,
             env=env,
         )
@@ -2593,6 +2609,8 @@ def _revoke_lark_auth_from_snapshot(snapshot: Path) -> None:
             check=False,
             capture_output=True,
             text=True,
+            encoding=LARK_CLI_SUBPROCESS_ENCODING,
+            errors="replace",
             timeout=15,
             env=_lark_cli_env_for_directories(config_dir=snapshot / "config", data_dir=data_dir),
         )
@@ -2619,6 +2637,8 @@ def _run_lark_cli_json(
                 check=False,
                 capture_output=True,
                 text=True,
+                encoding=LARK_CLI_SUBPROCESS_ENCODING,
+                errors="replace",
                 timeout=timeout,
                 env=lark_cli_env(user_id),
             )
