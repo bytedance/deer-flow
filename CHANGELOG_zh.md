@@ -3345,6 +3345,14 @@
   文件。此前带一个杂散字节的 `hooks/install.jse` 既得不到静态分析，也
   不经过可执行代码审查。([#6321])
 
+- **技能：** `review_skill_package` 不再能读取其他用户的技能。此前本地路径
+  目标只要位于 Gateway 工作目录或 `/tmp` 之下即被放行，而所有文档化的部署都把
+  `DEER_FLOW_HOME` 放在工作目录之下，因此知道他人用户 id 的用户可以传入
+  `.deer-flow/users/<id>/skills/custom/<skill>`，在模型响应中拿到该技能的
+  `SKILL.md` 与 `references/` 内容。该工具始终可用，技能工具策略也无法移除它。
+  现在本地目标仅限于配置的技能根目录和调用者自己的用户目录；`skill://` 与
+  `inline://` 目标不受影响。([#6580])
+
 ### 文档
 
 - **文档：** 修正 Apple Container 的验证说明。
@@ -3452,6 +3460,13 @@
   以及 agent 循环、记忆、上下文压缩和鉴权相关的变更；既有贡献点无法表达
   时，为 `extension-api` 增加通用钩子并以扩展实现，而不是把业务逻辑硬编码
   进核心。([#6178])
+
+- **文档：** 让运行事件与扩展示例文档重新与代码一致。
+  `backend/docs/RUN_EVENT_STREAM.md` 现在列出目录与契约中早已存在的
+  `summarize` 中间件标签并说明 `middleware:summarize` 事件，并新增测试将文档中
+  的标签列表固定为 `MIDDLEWARE_EVENT_TAGS`；`backend/docs/summarization.md`
+  补充该事件缺失的三个 `changes` 字段。扩展示例不再声称覆盖全部贡献类型：
+  它演示八种中的五种，README 为其余类型指向观察者指南和 bookmarks 插件示例。([#6582])
 
 ### 内部改进
 
@@ -7596,3 +7611,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6520]: https://github.com/bytedance/deer-flow/pull/6520
 [#6537]: https://github.com/bytedance/deer-flow/pull/6537
 [#6556]: https://github.com/bytedance/deer-flow/pull/6556
+[#6580]: https://github.com/bytedance/deer-flow/pull/6580
+[#6582]: https://github.com/bytedance/deer-flow/pull/6582

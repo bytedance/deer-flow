@@ -172,6 +172,8 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
 
    The wizard also lets you configure an optional web search provider, or skip it for now.
 
+   Brave web search preserves valid entries in mixed result lists. Malformed response containers or lists containing no usable entries return a structured format error; missing, null, or empty results keep the existing "No results found" response. Format errors also log the malformed container's path and type, or the absence of usable result objects, without including search queries, credentials, or payload values.
+
    Jina, Browserless, and InfoQuest web fetches resolve relative links and image sources using the requested page URL (or a usable HTML base URL), so returned Markdown includes complete destinations. Link resolution preserves the surrounding HTML source, including malformed-page formatting.
 
    Jina fetches support opt-in bounded retries via `max_retries` (default `0`) and `retry_budget_seconds` (default `30`) in the tool configuration. Valid `Retry-After` hints set a minimum wait for HTTP 429/503; 429 without a valid hint stays terminal. Hints that cannot fit the remaining budget stop retries. Local backoff remains randomized. Retries may increase upstream requests and cost; see [Jina fetch retries](backend/docs/CONFIGURATION.md#jina-fetch-retries).
@@ -786,6 +788,7 @@ In plan mode, malformed TODO statuses return normal tool-validation errors witho
 Tool-produced paths and URLs can be retained as short artifact handles across context compaction (`tool_artifacts` in `config.yaml`). Handles distinguish separate tool-result occurrences, even when a provider reuses call IDs. Detected file URLs preserve their query strings and fragments. When PII redaction is enabled, model-visible artifact labels follow that policy; internal references stay intact for tool argument resolution. The configured registry limit retains the newest artifacts, while checkpointed processing identities prevent evicted results from being recaptured after restart. Resolution runs before authorization and write-safety checks; unknown or expired handles return an error without executing the tool. Small unknown structured results may be retained as complete JSON up to 4096 UTF-8 bytes; empty or oversized payloads are skipped. Handles are agent-local: task arguments resolve parent handles to concrete references, and delegated reports must return concrete references rather than child-local handles. A truncated model projection reports how many handles are omitted.
 
 DeerFlow supports configurable MCP servers and skills to extend its capabilities.
+When durable MCP background tasks are enabled, agents can use `list_background_tasks(status="failed")` or `status="input_required"` to find failed tasks or tasks awaiting input in the current chat. Other supported statuses are `submitted`, `working`, `completed`, and `cancelled`; omitting the status preserves existing behavior. The database applies the filter before limiting results to the 20 most recent matching tasks. When combined with `active_only=true`, both filters apply: active statuses are `submitted`, `working`, and `input_required`, so terminal statuses return an empty list. `GET /api/threads/{thread_id}/mcp-tasks` supports the same `status` and `active_only` filters before its `limit` (default 50, range 1–100); for example, `?status=failed&limit=20`. Unknown statuses return 422, and omitting the filters preserves the existing response.
 For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`, `refresh_token`).
 Missing, malformed, or out-of-range token response `expires_in` values use a one-hour default lifetime. This includes lifetimes that cannot be added to the current time without overflowing the expiry timestamp.
 Durable HTTP/SSE task status and cancellation calls select configured `user_auth` credentials using the persisted task owner, including after restart; per-request secrets are not retained for background calls. If a request-scoped credential overrides submit authentication, both credentials must authorize access to the same remote task.
@@ -1082,6 +1085,7 @@ Once a channel is connected, you can interact with DeerFlow directly from the ch
 | `/new` | Start a new conversation |
 | `/status` | Show current thread info |
 | `/models` | List available models |
+| `/model [name\|default]` | Show or pin the current conversation's model |
 | `/memory` | View memory |
 | `/agent list` | List your Custom Agents |
 | `/agent use <name>` | Start a new conversation with a Custom Agent |
@@ -1091,6 +1095,8 @@ Once a channel is connected, you can interact with DeerFlow directly from the ch
 
 Agent selection is conversation-scoped: `/agent use <name>` starts a fresh conversation and pins that Custom Agent in the thread metadata. Existing conversations never switch agents midway, the selection survives a Gateway restart, and opening the IM-created thread in the Web UI continues through the same Custom Agent.
 Use `/agent use lead_agent` to return to the default agent in a new conversation.
+
+Model selection is conversation-scoped too: `/model <name>` pins a model to the *current* conversation — validated against the caller-visible model list, persisted in the thread metadata so it survives a Gateway restart, and applied from the next message without starting a new conversation. `/model` shows the effective model and its source, `/model default` clears the pin, and `/models` reports the pinned model.
 
 #### Request Trace Correlation
 
@@ -2018,6 +2024,44 @@ For example, independent read-only research can run concurrently when the wall-c
 
 ### Sandbox & File System
 
+AIO sandboxes recycle after an uncertain implicit-shell outcome or session
+creation; a confirmed `hard_timeout` remains eligible for warm reuse. The Gateway
+waits for all execution and upload holders to finish, including command-session
+cleanup. An in-flight session creation alone does not trigger recycling or
+interrupt a concurrent run. Before recycling, the Gateway records the container ID or Pod UID under
+`{DEER_FLOW_HOME}/sandbox-quarantine`. These records survive failed stops and
+Gateway restarts. Gateways sharing AIO containers must share this home in
+addition to their ownership store. A new runtime instance can reuse the thread's
+sandbox ID; an unverifiable generation fails closed against existing records.
+Before recreating a quarantined ID, the Gateway retires its old records only
+after the backend confirms that no container or Pod remains, while holding the
+normal teardown fences. This also permits recovery when a runtime cannot report
+a generation. If a partial deletion leaves a container or a Pod behind, the
+Gateway inspects it independently of health checks and Service availability,
+then retries cleanup only for a quarantined generation. A replacement generation
+keeps its resources. A delete acknowledgement or failed health check is
+insufficient to clear the records.
+Recovery also clears leftover local proxy and network resources before recreation.
+
+Lark broker provisioning requires confirmed capabilities. Probe failures cannot
+select credential mounts or overwrite a known broker requirement. Update the
+Gateway and provisioner together: the provisioner reports each Pod's actual
+broker mode, and incompatible Pods are replaced through the normal ownership
+fences before reuse. Lark commands use that admitted mode.
+If an older provisioner omits a Pod's broker mode, the Gateway refuses reuse
+with an explicit upgrade error and preserves the Pod. An omitted mode is not
+evidence that the existing runtime needs replacement.
+Capability probes share one request per provisioner and briefly back off after
+failure. A Pod mode that contradicts the cache triggers a fresh observation
+before replacement. Failed admission after creation uses ownership-fenced cleanup.
+A create request whose lark provisioning mode conflicts with the provisioner's
+current configuration is marked as a capability refresh; the Gateway drops its
+cached observation so the next acquire re-probes instead of repeating the
+failure until the cache entry expires.
+On sandboxes without an attested broker mode, lark-cli
+commands fail with an explicit unverified-mode error instead of running
+against an unauthenticated profile.
+
 Host-externalized tool outputs use the Gateway's normal file-creation umask.
 Host and sandbox outputs use deterministic filenames hashed from the raw tool
 call ID and output content. Missing, colliding, or oversized IDs cannot overwrite
@@ -2096,6 +2140,8 @@ DeerFlow doesn't just *talk* about doing things. It has its own computer.
 Each task gets its own execution environment with a full filesystem view — skills, workspace, uploads, outputs. The agent reads, writes, and edits files. It can view images and, when configured safely, execute shell commands.
 
 The read-before-write gate ties each read mark to that `read_file` call's result, including custom tools returning multi-message `Command` updates. An unrelated result cannot authorize a write after a failed read or hide a successful read.
+
+Ranged `read_file` calls count lines the same way on every sandbox provider: a line ends only at a newline. On E2B, BoxLite, Tenki, and OpenSandbox, a file with bare carriage returns (such as a saved progress log), form feeds, or Unicode line separators therefore returns the same lines as on the local sandbox, and the `start_line` a truncated read suggests points at the next unread line.
 
 Concurrent reads and writes to the same file share a gate across synchronous and asynchronous tool calls. Async callers waiting for that gate do not occupy worker threads needed to finish the current read or write. Cancelling a waiting call leaves the current operation running; a call that already started file inspection still waits for that work to finish before releasing its gate.
 
@@ -2443,6 +2489,12 @@ editing the saved agent configuration to refresh the selection.
 DeerFlow can be used as an embedded Python library without running the full HTTP services. The `DeerFlowClient` provides direct in-process access to all agent and Gateway capabilities, returning the same response schemas as the HTTP Gateway API. The HTTP Gateway also exposes `DELETE /api/threads/{thread_id}` to remove DeerFlow-managed local thread data after the LangGraph thread itself has been deleted:
 
 For database-backed run events, deleting a run preserves its thread's sequence watermark. Thread deletion removes that watermark once no events remain, allowing a recreated thread to restart at sequence 1. Owner-scoped deletion preserves the watermark when another owner's events remain.
+
+Single-process JSONL event storage also retains the thread sequence watermark
+across run deletion and restarts, so clients using `after_seq` do not miss later
+messages. Keep `runs/.seq-watermark` with the run files when backing up this
+backend. New or replaced watermarks inherit the deleted run file's permission bits.
+Deleting the complete thread removes the watermark and resets allocation.
 
 Thread IDs may be supplied by callers and do not have to be UUIDs. Explicit
 IDs must contain 1–64 ASCII letters, digits, hyphens, or underscores

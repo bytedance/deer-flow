@@ -1043,6 +1043,16 @@ This release closes that milestone with **439 merged pull requests**.
   The handler now rejects after the toast, and the queued first send settles the
   submit with its own outcome, so the draft stays for a retry and clears only
   once the message is sent. ([#6407])
+- **sandbox:** AIO sandboxes no longer trust unverified state for credential
+  placement or container reuse. A failed provisioner capability probe no longer
+  reads as "broker off" (which bind-mounted plaintext lark credential dirs into
+  brokerless Pods for the negative-cache TTL); broker mode is attested per Pod
+  from the provisioner's atomic observation, lark provisioning-config conflicts
+  carry a capability-refresh marker so a deployment change self-heals on the
+  next acquire, and containers whose implicit shell ended ambiguously are fenced
+  by a persistent quarantine (`{DEER_FLOW_HOME}/sandbox-quarantine`) across warm
+  reuse, rediscovery and restarts, recycled under the existing ownership and
+  teardown fences, with records retired only after confirmed absence. ([#6436])
 - **frontend:** A failed reconnect after a page refresh is now retried in the same
   tab. The SDK reconnects once from the tab's `lg:stream` pointer and keeps that
   pointer on error, and active-run recovery skipped any run with a matching
@@ -4293,6 +4303,16 @@ This release closes that milestone with **439 merged pull requests**.
   package. Previously a `hooks/install.jse` carrying one stray byte received
   no static analysis and no executable review. ([#6321])
 
+- **skills:** Stop `review_skill_package` from reading other users' skills.
+  Local path targets were allowed anywhere under the Gateway cwd or `/tmp`,
+  and every documented deployment keeps `DEER_FLOW_HOME` under the cwd, so a
+  user who knew another user's id could pass
+  `.deer-flow/users/<id>/skills/custom/<skill>` and get that skill's
+  `SKILL.md` and `references/` back in the model response. The tool is
+  always available, so skill tool policy could not remove it. Local targets
+  are now confined to the configured skills root and the caller's own user
+  directory; `skill://` and `inline://` targets are unchanged. ([#6580])
+
 ### Documentation
 
 - **docs:** Fix the Apple Container verification instructions. The guide
@@ -4412,6 +4432,15 @@ This release closes that milestone with **439 merged pull requests**.
   fixes and agent-loop, memory, context-compaction, and authentication
   changes, and a generic `extension-api` hook plus an extension when existing
   contribution points cannot express the feature. ([#6178])
+
+- **docs:** Bring the run-event and extension-example docs back in line with
+  the code. `backend/docs/RUN_EVENT_STREAM.md` now lists the `summarize`
+  middleware tag that the catalog and contract already carried, describes the
+  `middleware:summarize` event, and a test pins the documented tag list to
+  `MIDDLEWARE_EVENT_TAGS`; `backend/docs/summarization.md` lists the event's
+  three missing `changes` fields. The extension example no longer claims to
+  cover every contribution kind: it shows five of the eight, and its README
+  points to the observers guide and the bookmarks plugin for the rest. ([#6582])
 
 ### Internal
 
@@ -9379,6 +9408,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6407]: https://github.com/bytedance/deer-flow/pull/6407
 [#6412]: https://github.com/bytedance/deer-flow/pull/6412
 [#6426]: https://github.com/bytedance/deer-flow/pull/6426
+[#6436]: https://github.com/bytedance/deer-flow/pull/6436
 [#6441]: https://github.com/bytedance/deer-flow/pull/6441
 [#6445]: https://github.com/bytedance/deer-flow/pull/6445
 [#6447]: https://github.com/bytedance/deer-flow/pull/6447
@@ -9396,3 +9426,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6537]: https://github.com/bytedance/deer-flow/pull/6537
 [#6543]: https://github.com/bytedance/deer-flow/pull/6543
 [#6556]: https://github.com/bytedance/deer-flow/pull/6556
+[#6580]: https://github.com/bytedance/deer-flow/pull/6580
+[#6582]: https://github.com/bytedance/deer-flow/pull/6582

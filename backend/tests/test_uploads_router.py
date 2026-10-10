@@ -965,10 +965,13 @@ def test_upload_files_does_not_sync_non_local_sandbox_when_total_size_exceeds_li
     assert exc_info.value.status_code == 413
     provider.acquire.assert_not_called()
     provider.acquire_async.assert_awaited_once_with("thread-aio", user_id="owner-upload")
-    assert provider.get.call_count == 2
     assert all(call.args == ("aio-1",) for call in provider.get.call_args_list)
+    sandbox.release_command_scope.assert_called_once()
+    assert get_sandbox_lease_manager(provider).binding_for(sandbox.release_command_scope.call_args.args[0]) is None
     provider.release.assert_called_once_with("aio-1")
     sandbox.update_file.assert_not_called()
+    assert not (thread_uploads_dir / "first.txt").exists()
+    assert not (thread_uploads_dir / "second.txt").exists()
 
 
 def test_upload_files_does_not_sync_non_local_sandbox_when_conversion_fails(tmp_path):
@@ -996,8 +999,9 @@ def test_upload_files_does_not_sync_non_local_sandbox_when_conversion_fails(tmp_
     assert exc_info.value.status_code == 500
     provider.acquire.assert_not_called()
     provider.acquire_async.assert_awaited_once_with("thread-aio", user_id="owner-upload")
-    assert provider.get.call_count == 2
     assert all(call.args == ("aio-1",) for call in provider.get.call_args_list)
+    sandbox.release_command_scope.assert_called_once()
+    assert get_sandbox_lease_manager(provider).binding_for(sandbox.release_command_scope.call_args.args[0]) is None
     provider.release.assert_called_once_with("aio-1")
     sandbox.update_file.assert_not_called()
     assert not (thread_uploads_dir / "report.pdf").exists()
