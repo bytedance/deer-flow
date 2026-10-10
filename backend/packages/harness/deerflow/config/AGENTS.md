@@ -138,9 +138,10 @@ drives both Gateway loading and the multi-instance refusal.
 
 **Secret files** (`secret_file.py`): `read_or_create_secret_file` is the one way
 to create a shared secret file (`.credentials_key`, `.jwt_secret`, the managed
-model key): `O_EXCL` create (`0600`) plus read-back, so concurrent creators
-converge. It waits a bounded window for a peer's in-flight write, replaces an
-abandoned empty file, and refuses (never overwrites) a non-empty invalid one.
+model key): write a `0600` temp file, then hard-link it exclusively and read
+back, so the name is never empty or partial and concurrent creators converge.
+No hard links (SMB) or an abandoned empty file (older releases): single-winner
+`<name>.replacing` claim plus rename. Never overwrites a non-empty invalid file.
 Tests: `tests/test_secret_file.py`, `tests/test_credentials_key.py`.
 
 ### Config Schema

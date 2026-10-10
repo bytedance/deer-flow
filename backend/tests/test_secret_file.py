@@ -90,7 +90,7 @@ def test_concurrent_creators_converge_on_one_value(tmp_path: Path) -> None:
 
 
 def test_waits_for_a_peer_that_has_created_but_not_yet_written(tmp_path: Path) -> None:
-    """``O_EXCL`` publishes the name before the content: an empty file may be a creator mid-write."""
+    """Older releases published the name before its content: an empty file may be one of them mid-write."""
     path = tmp_path / ".secret"
     path.touch()
     writer = threading.Timer(0.1, lambda: path.write_text("late-value", encoding="utf-8"))
@@ -207,7 +207,7 @@ def test_a_claim_left_by_a_crashed_replacer_is_refused_after_a_bounded_wait(tmp_
     claim = tmp_path / ".secret.replacing"
     claim.touch()
 
-    with pytest.raises(InvalidSecretFileError, match="interrupted replacement"):
+    with pytest.raises(InvalidSecretFileError, match="interrupted creation"):
         read_or_create_secret_file(path, lambda: "our-value", settle_seconds=0.05)
 
     assert path.read_text(encoding="utf-8") == ""
@@ -217,9 +217,9 @@ def test_a_late_replacer_does_not_overwrite_a_published_replacement(tmp_path: Pa
     """A process that saw the empty file before a peer's replacement landed must back off."""
     path = tmp_path / ".secret"
     path.write_text("peer-value", encoding="utf-8")
-    from deerflow.config.secret_file import _replace_abandoned
+    from deerflow.config.secret_file import _publish_under_claim
 
-    assert _replace_abandoned(path, lambda: "late-value") is True
+    assert _publish_under_claim(path, lambda: "late-value", replace_empty=True) is True
     assert path.read_text(encoding="utf-8") == "peer-value"
     assert not (tmp_path / ".secret.replacing").exists()
 
@@ -253,3 +253,99 @@ def test_a_failed_write_leaves_no_empty_file_for_peers_to_wait_on(tmp_path: Path
         read_or_create_secret_file(path, lambda: "value")
 
     assert not path.exists()
+
+
+def _pause_one_creator(monkeypatch: pytest.MonkeyPatch, thread_name: str, *, fail: bool = False) -> tuple[threading.Event, threading.Event]:
+    """Hold ``thread_name`` inside its secret write until released; the other threads write normally."""
+    import deerflow.config.secret_file as secret_file
+
+    entered = threading.Event()
+    release = threading.Event()
+    original_write_all = secret_file._write_all
+
+    def write_all(fd: int, data: bytes) -> None:
+        if threading.current_thread().name == thread_name:
+            entered.set()
+            assert release.wait(timeout=10)
+            if fail:
+                raise OSError("disk full")
+        original_write_all(fd, data)
+
+    monkeypatch.setattr(secret_file, "_write_all", write_all)
+    return entered, release
+
+
+@pytest.mark.parametrize("fail", [False, True], ids=["paused-then-writes", "paused-then-fails"])
+def test_a_paused_creator_never_exposes_a_file_a_peer_could_replace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail: bool) -> None:
+    """A creator stalled mid-write must not leave a visible empty file behind.
+
+    Otherwise a peer treats it as abandoned after the settle window and
+    publishes its own value; the resumed creator then returns a value nobody
+    persisted, or (when its write fails) deletes the peer's valid file.
+    """
+    path = tmp_path / ".secret"
+    entered, release = _pause_one_creator(monkeypatch, "first", fail=fail)
+    results: dict[str, str | BaseException] = {}
+
+    def run(name: str) -> None:
+        try:
+            results[name] = read_or_create_secret_file(path, lambda: f"{name}-value", settle_seconds=0.05)
+        except BaseException as exc:  # noqa: BLE001 - asserted below
+            results[name] = exc
+
+    first = threading.Thread(target=run, args=("first",), name="first")
+    first.start()
+    assert entered.wait(timeout=10)
+    peer = threading.Thread(target=run, args=("peer",), name="peer")
+    peer.start()
+    peer.join(timeout=10)
+    release.set()
+    first.join(timeout=10)
+
+    assert results["peer"] == "peer-value"
+    assert path.read_text(encoding="utf-8") == "peer-value", "the peer's published value must survive"
+    if fail:
+        assert isinstance(results["first"], OSError)
+    else:
+        assert results["first"] == "peer-value", "the resumed creator must adopt the persisted value"
+
+
+def test_creation_without_hard_links_still_converges(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Filesystems without hard links (SMB shares) publish through the replacement claim instead."""
+    import errno
+
+    def no_hard_links(*_args, **_kwargs):
+        raise OSError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(os, "link", no_hard_links)
+    path = tmp_path / ".secret"
+    workers = 8
+    barrier = threading.Barrier(workers)
+    results: list[str] = []
+    lock = threading.Lock()
+
+    def run(index: int) -> None:
+        barrier.wait(timeout=10)
+        value = read_or_create_secret_file(path, lambda: f"value-{index}", settle_seconds=0.05)
+        with lock:
+            results.append(value)
+
+    threads = [threading.Thread(target=run, args=(index,)) for index in range(workers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert len(results) == workers
+    assert len(set(results)) == 1, f"creators diverged: {sorted(set(results))}"
+    assert path.read_text(encoding="utf-8") == results[0]
+    assert not (tmp_path / ".secret.replacing").exists()
+    if os.name == "posix":
+        assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_no_temporary_files_are_left_behind(tmp_path: Path) -> None:
+    path = tmp_path / ".secret"
+    read_or_create_secret_file(path, lambda: "value")
+
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == [".secret"]
