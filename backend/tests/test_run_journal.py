@@ -70,6 +70,39 @@ async def test_cross_thread_middleware_events_are_serialized_on_owner_loop():
     assert events[0]["content"]["changes"]["to_phase"] == "warned"
 
 
+@pytest.mark.anyio
+async def test_close_commits_cross_thread_event_still_pending_when_flush_starts():
+    """A hop queued by a worker that already returned must survive close(flush=True).
+
+    The worker runs on a raw thread and is joined with no await in between, so
+    its ``call_soon_threadsafe`` hop is provably still pending when ``close()``
+    starts. Without the yield at the top of ``flush()`` the flush executes zero
+    awaits, detach runs first and ``_put`` drops the event on ``_closed``; this
+    pins the behaviour on every Python version, not only on 3.13+ where
+    ``asyncio.to_thread`` can resume before the hop runs.
+    """
+    store = MemoryRunEventStore()
+    journal = RunJournal("r-pending", "t-pending", store, flush_threshold=100)
+
+    def record_from_tool_worker() -> None:
+        journal.record_middleware(
+            "tool_progress",
+            name="ToolProgressMiddleware",
+            hook="wrap_tool_call",
+            action="warn",
+            changes={"from_phase": "active", "to_phase": "warned"},
+        )
+
+    worker = threading.Thread(target=record_from_tool_worker)
+    worker.start()
+    worker.join()
+
+    await journal.close(flush=True)
+
+    events = await store.list_events("t-pending", "r-pending")
+    assert [event["event_type"] for event in events] == ["middleware:tool_progress"]
+
+
 def test_middleware_event_without_owner_loop_keeps_cross_thread_append():
     store = MemoryRunEventStore()
     journal = RunJournal("r-sync", "t-sync", store, flush_threshold=100)
@@ -2218,12 +2251,93 @@ class TestChatModelStartHumanMessage:
         assert len(human_events) == 1
 
     @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        "content",
+        [
+            pytest.param("", id="empty-text"),
+            pytest.param([{"type": "image_url", "image_url": {"url": "data:image/png;base64,aW1hZ2U="}}], id="image-only"),
+        ],
+    )
+    async def test_textless_human_input_is_captured_once(self, journal_setup, content):
+        """A missing display summary must not duplicate input on later model calls."""
+        j, store = journal_setup
+        message = HumanMessage(content=content, id="user-image")
+        for _ in range(2):
+            j.on_chat_model_start({}, [[message]], run_id=uuid4(), tags=["lead_agent"])
+            await j.flush()
+
+        events = await store.list_events("t1", "r1")
+        human_events = [event for event in events if event["event_type"] == "llm.human.input"]
+        assert len(human_events) == 1
+        assert human_events[0]["content"]["content"] == content
+        assert j.get_completion_data()["message_count"] == 1
+        assert j.get_completion_data()["first_human_message"] is None
+
+    @pytest.mark.anyio
+    async def test_textless_input_stops_capture_before_older_batches(self, journal_setup):
+        j, store = journal_setup
+        image = HumanMessage(content=[{"type": "image_url", "image_url": {"url": "data:image/png;base64,aW1hZ2U="}}], id="latest-input")
+        j.on_chat_model_start(
+            {},
+            [[HumanMessage(content="Older question", id="old-input")], [image]],
+            run_id=uuid4(),
+            tags=["lead_agent"],
+        )
+        await j.flush()
+
+        events = await store.list_events("t1", "r1")
+        human_events = [event for event in events if event["event_type"] == "llm.human.input"]
+        assert [event["content"]["id"] for event in human_events] == ["latest-input"]
+        assert j.get_completion_data()["first_human_message"] is None
+        assert j.get_completion_data()["message_count"] == 1
+
+    @pytest.mark.anyio
     async def test_empty_messages_no_crash(self, journal_setup):
         """on_chat_model_start with empty messages does not crash."""
         j, store = journal_setup
         j.on_chat_model_start({}, [], run_id=uuid4(), tags=["lead_agent"])
         await j.flush()
         assert j._first_human_msg is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["full", "delta"])
+async def test_image_input_is_journaled_once_across_graph_model_calls(mode):
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import StateGraph
+
+    from deerflow.agents.thread_state import get_thread_state_schema
+    from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
+
+    store = MemoryRunEventStore()
+    journal = RunJournal("image-run", "image-thread", store)
+    model = FakeMessagesListChatModel(responses=[AIMessage(content="First response", id="a1"), AIMessage(content="Final response", id="a2")])
+
+    async def answer(state):
+        return {"messages": [await model.ainvoke(state["messages"])]}
+
+    builder = StateGraph(get_thread_state_schema(mode))
+    builder.add_node("first", answer)
+    builder.add_node("second", answer)
+    builder.set_entry_point("first")
+    builder.add_edge("first", "second")
+    builder.set_finish_point("second")
+    saver = InMemorySaver()
+    graph = builder.compile(checkpointer=saver)
+    accessor = CheckpointStateAccessor.bind(graph, saver, mode=mode)
+    image_content = [{"type": "image_url", "image_url": {"url": "data:image/png;base64,aW1hZ2U="}}]
+    config = {"configurable": {"thread_id": "image-thread"}, "callbacks": [journal]}
+
+    await graph.ainvoke({"messages": [HumanMessage(content=image_content, id="h1")]}, config)
+    await journal.flush()
+    events = await store.list_messages("image-thread")
+    assert [event["content"]["id"] for event in events] == ["h1", "a1", "a2"]
+    assert events[0]["content"]["content"] == image_content
+    assert journal.get_completion_data()["message_count"] == 3
+    snapshot = await accessor.aget(config)
+    assert [message.id for message in snapshot.values["messages"]] == ["h1", "a1", "a2"]
+    await journal.close()
 
 
 class TestDeliveryTracking:

@@ -36,6 +36,11 @@ type VirtualMessageListProps = {
   groups: readonly MessageGroup[];
   isLoading: boolean;
   renderGroup: (group: MessageGroup, index: number) => ReactNode;
+  /**
+   * Extra content rendered after a group inside its row (e.g. schedule event
+   * lines at the end of a turn), so it is measured and scrolled with it.
+   */
+  renderAfterGroup?: (index: number) => ReactNode;
   onActiveGroupChange?: (groupIndex: number) => void;
 };
 
@@ -55,7 +60,7 @@ export const VirtualMessageList = forwardRef<
   VirtualMessageListHandle,
   VirtualMessageListProps
 >(function VirtualMessageList(
-  { groups, isLoading, renderGroup, onActiveGroupChange },
+  { groups, isLoading, renderGroup, renderAfterGroup, onActiveGroupChange },
   ref,
 ) {
   const { isAtBottom, scrollRef, scrollToBottom, stopScroll } =
@@ -302,6 +307,7 @@ export const VirtualMessageList = forwardRef<
         {groups.map((group, index) => (
           <div key={getItemKey(index)} data-message-group-index={index}>
             {renderGroup(group, index)}
+            {renderAfterGroup?.(index)}
           </div>
         ))}
       </div>
@@ -327,6 +333,7 @@ export const VirtualMessageList = forwardRef<
             style={{ transform: `translateY(${virtualRow.start}px)` }}
           >
             {renderGroup(group, virtualRow.index)}
+            {renderAfterGroup?.(virtualRow.index)}
           </div>
         );
       })}

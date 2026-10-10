@@ -1,6 +1,12 @@
 # DeerFlow Production Environment
 # Usage: make up
 #
+# Requires Docker Compose >= 2.24. ../.env and ../frontend/.env are gitignored,
+# so a fresh checkout has neither; the env_file entries below use the long-form
+# path/required syntax so Compose loads them when present instead of aborting
+# with "env file ... not found". Older clients reject this file with:
+#   services.<name>.env_file.0 must be a string
+#
 # Services:
 #   - nginx:       Reverse proxy (port 2026, configurable via PORT env var)
 #   - frontend:    Next.js production server
@@ -54,9 +60,20 @@ services:
       - "${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf.template:ro
-    command: >
-      sh -c "cp /etc/nginx/nginx.conf.template /etc/nginx/nginx.conf
-      && nginx -g 'daemon off;'"
+    # Same launcher as the dev compose file and the Helm chart: nginx.conf
+    # listens on [::]:2026 as well, and on a host with IPv6 disabled that
+    # listen makes nginx exit at startup (socket() ... 97: Address family not
+    # supported by protocol), so the container restart-loops and `make up`
+    # never becomes healthy. Strip the IPv6 listen when the kernel has no
+    # IPv6, and exec nginx so it is PID 1 for signal handling.
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        cp /etc/nginx/nginx.conf.template /etc/nginx/nginx.conf
+        test -e /proc/net/if_inet6 || sed -i '/^[[:space:]]*listen[[:space:]]\+\[::\]:2026[[:space:]]/d' /etc/nginx/nginx.conf
+        exec nginx -g 'daemon off;'
     depends_on:
       frontend:
         condition: service_started
@@ -80,7 +97,8 @@ services:
       - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
       - DEER_FLOW_INTERNAL_GATEWAY_BASE_URL=http://gateway:8001
     env_file:
-      - ../frontend/.env
+      - path: ../frontend/.env
+        required: false
     networks:
       - deer-flow
     restart: unless-stopped
@@ -98,13 +116,25 @@ services:
         NPM_REGISTRY: ${NPM_REGISTRY:-}
         LARK_CLI_NPM_VERSION: ${LARK_CLI_NPM_VERSION:-1.0.65}
     container_name: deer-flow-gateway
-    # Gateway hosts the agent runtime with in-process RunManager + StreamBridge
-    # singletons -- run state lives in this worker's memory. Default to a single
-    # worker: the Redis stream bridge solves cross-worker SSE delivery and
-    # reconnect, but run cancel, request dedup, and per-worker IM channel
-    # services remain worker-local. Override GATEWAY_WORKERS only when the
-    # Redis stream bridge is enabled and those limitations are acceptable.
-    command: sh -c "cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${GATEWAY_WORKERS:-1}"
+    # Gateway hosts the agent runtime (RunManager + StreamBridge) in process.
+    # Default to a single worker: GATEWAY_WORKERS > 1 is supported only with
+    # Postgres (database.backend: postgres, run_events.backend: db,
+    # run_ownership.heartbeat_enabled: true) and the Redis stream bridge wired
+    # below -- the Gateway refuses to start otherwise. IM channels, the WeChat
+    # QR login and browser tools stay worker-local, so keep one worker while
+    # they are enabled. --timeout-graceful-shutdown bounds how long open SSE
+    # connections may delay lifespan shutdown after SIGTERM; stop_grace_period
+    # below must cover that bound plus the lifespan's worst case: seven hooks
+    # bounded at 5s each (trash sweep, notification worker, channel service,
+    # scheduled task service, subagent batch service, browser sessions,
+    # MCP session pool), the 1s retrieval-warm wait, the 5s
+    # run drain and the 30s memory flush (memory.shutdown_flush_timeout_seconds)
+    # -- about 71s -- plus slack. backend/tests/_gateway_shutdown_budget.py
+    # pins the arithmetic.
+    command: sh -c "cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${GATEWAY_WORKERS:-1} --timeout-graceful-shutdown 10"
+    # Docker's 10s default SIGKILLed the 30s memory queue flush
+    # (memory.shutdown_flush_timeout_seconds) on every restart.
+    stop_grace_period: 90s
     volumes:
       - ${DEER_FLOW_CONFIG_PATH}:/app/backend/config.yaml:ro
       # Writable on purpose: the Gateway edits this file at runtime (MCP
@@ -138,20 +168,31 @@ services:
       # DooD path/network translation
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
+      # The login lockout counts failures per client IP, but every browser
+      # request reaches the Gateway from nginx. Trust nginx's X-Real-IP (it
+      # overwrites the header on every Gateway route) so one client's wrong
+      # passwords cannot lock everyone out. Hostname, re-resolved every 10s.
+      # `:-` on purpose: an empty value also means nginx, because every browser
+      # request arrives through it, so direct mode would only bring back the
+      # shared lockout. Set another list in .env to change whom to trust.
+      - AUTH_TRUSTED_PROXIES=${AUTH_TRUSTED_PROXIES:-nginx}
       # Proxy values (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY) are inherited from ../.env via env_file.
       # Only NO_PROXY is declared here so internal service hostnames are always exempt from the proxy.
       - NO_PROXY=${NO_PROXY:-}${NO_PROXY:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,openviking,host.docker.internal
       - no_proxy=${no_proxy:-}${no_proxy:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,openviking,host.docker.internal
     env_file:
-      - ../.env
+      - path: ../.env
+        required: false
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
       redis:
         condition: service_healthy
     healthcheck:
-      # /health/ready runs both probes concurrently within a 3s endpoint
-      # deadline; the client timeout must stay above that bound.
+      # /health/ready runs its probes (database, checkpointer, Redis stream
+      # bridge, provisioner) concurrently within a 3s endpoint deadline; the
+      # client timeout must stay above that bound. The gateway is unhealthy
+      # while Redis is unreachable; the provisioner verdict is report-only.
       test: ["CMD", "python", "-c", "import urllib.request; response = urllib.request.urlopen('http://127.0.0.1:8001/health/ready', timeout=5); raise SystemExit(0 if response.status == 200 else 1)"]
       interval: 5s
       timeout: 5s
@@ -190,7 +231,8 @@ services:
       - NODE_HOST=host.docker.internal
       - K8S_API_SERVER=https://host.docker.internal:26443
     env_file:
-      - ../.env
+      - path: ../.env
+        required: false
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:

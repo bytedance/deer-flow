@@ -1,11 +1,15 @@
 import json
+import logging
 import os
 
 from firecrawl import FirecrawlApp
 from langchain.tools import tool
 
+from deerflow.community.search_max_results import DEFAULT_MAX_RESULTS, coerce_max_results
 from deerflow.community.url_safety import validate_public_http_url
 from deerflow.config import get_app_config
+
+logger = logging.getLogger(__name__)
 
 # fastCRW is a Firecrawl-compatible web data engine (single Rust binary; self-host
 # or cloud). Because the REST API is Firecrawl-compatible, this provider reuses the
@@ -56,9 +60,9 @@ def web_search_tool(query: str) -> str:
     """
     try:
         config = get_app_config().get_tool_config("web_search")
-        max_results = 5
+        max_results = DEFAULT_MAX_RESULTS
         if config is not None:
-            max_results = config.model_extra.get("max_results", max_results)
+            max_results = coerce_max_results(config.model_extra.get("max_results", max_results), provider="fastCRW", logger=logger)
 
         client = _get_fastcrw_client("web_search")
         result = client.search(query, limit=max_results)

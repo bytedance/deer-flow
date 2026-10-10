@@ -1,6 +1,7 @@
 import asyncio
 import json
 import tempfile
+import threading
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -163,6 +164,47 @@ def test_feishu_is_not_running_when_ws_thread_exits():
     channel._thread.is_alive.return_value = False
 
     assert channel.is_running is False
+
+
+def test_feishu_stop_joins_ws_thread_off_the_event_loop():
+    async def go():
+        channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+        release = threading.Event()
+        # lark's ws client never returns from start(), so the join in stop()
+        # waits out its timeout; this thread blocks the same way, bounded so a
+        # join run on the event loop fails the assertion below instead of
+        # hanging the test.
+        ws_thread = threading.Thread(target=release.wait, args=(2,), daemon=True)
+        ws_thread.start()
+        channel._thread = ws_thread
+        channel._running = True
+
+        stop_task = asyncio.create_task(channel.stop())
+        await asyncio.sleep(0.05)
+        assert not stop_task.done()
+
+        release.set()
+        await stop_task
+        assert channel._thread is None
+
+    asyncio.run(go())
+
+
+def test_feishu_stop_retains_live_ws_thread_after_join_timeout():
+    async def go():
+        channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+        thread = MagicMock()
+        thread.is_alive.return_value = True
+        channel._thread = thread
+        channel._running = True
+
+        with pytest.raises(RuntimeError, match="still running after stop timeout"):
+            await channel.stop()
+
+        thread.join.assert_called_once_with(timeout=5)
+        assert channel._thread is thread
+
+    asyncio.run(go())
 
 
 def test_feishu_event_handler_ignores_non_content_message_events():
@@ -385,12 +427,12 @@ def test_feishu_receive_file_path_traversal_failure_is_per_attachment(tmp_path, 
         real_write = feishu_module.write_upload_file_no_symlink
         call_count = 0
 
-        def flaky_write(base_dir, filename, data):
+        def flaky_write(base_dir, filename, data, *, exclusive=False):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
                 raise PathTraversalError("Path traversal detected")
-            return real_write(base_dir, filename, data)
+            return real_write(base_dir, filename, data, exclusive=exclusive)
 
         monkeypatch.setattr(feishu_module, "write_upload_file_no_symlink", flaky_write)
         msg = InboundMessage(
