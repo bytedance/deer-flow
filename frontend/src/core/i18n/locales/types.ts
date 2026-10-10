@@ -1806,6 +1806,14 @@ export interface Translations {
       };
     };
     skills: {
+      diagnosticsTitle: string;
+      diagnosticsScope: string;
+      diagnosticsInvalid: string;
+      diagnosticsQuote: string;
+      diagnosticsRefresh: string;
+      diagnosticsRefreshing: string;
+      diagnosticsFailed: string;
+      diagnosticsReloadFailed: string;
       exportPrevious: string;
       exportNotices: Record<string, string>;
       exportSkill: string;

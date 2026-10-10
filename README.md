@@ -1278,6 +1278,21 @@ view. Built-in and user-created/imported skills are listed separately. The
 Community tab supports importing `.skill` archives into My skills.
 General preferences remain in Settings.
 
+Administrators can see **Could not load** warnings in Capability Center > Skills
+when their own custom skill's `SKILL.md` contains invalid YAML. Warnings show the
+package-relative file and, when available, its line and column, with a quoting
+hint for unquoted colon values. Fix the file on disk and select **Reload skills**
+to refresh the list and invalidate skill prompt caches for subsequent runs;
+active runs retain their existing snapshot. This covers caller-owned custom
+skills only, excluding legacy/global, public, integration, and external linked
+packages. These warnings cover YAML syntax errors only: missing frontmatter,
+non-mapping metadata, missing/invalid name or description, invalid allowed-tools
+or required-secrets declarations, non-UTF-8 files, and file-read failures
+(including permission denied) are not reported. A missing warning does not
+establish that a package is valid or readable. The scope note remains visible
+even when there are no YAML warnings; check Gateway logs for other load failures.
+Parsing remains strict and invalid skills stay unavailable to agents.
+
 Skills are what make DeerFlow do *almost anything*.
 
 A standard Agent Skill is a structured capability module — a Markdown file that defines a workflow, best practices, and references to supporting resources. DeerFlow ships with built-in skills for research, report generation, slide creation, web pages, image and video generation, and more. But the real power is extensibility: add your own skills, replace the built-in ones, or combine them into compound workflows.
