@@ -3,6 +3,7 @@ import json
 import tempfile
 import threading
 import time
+from collections import deque
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -692,18 +693,23 @@ def test_feishu_on_message_drops_a_store_backed_message_without_a_running_gatewa
     consulted, so the message is dropped with a warning — an unresolved lookup is never
     routed as a miss onto the unknown root (nothing could dispatch it without the loop anyway)."""
     store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
-    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test", "channel_store": store})
+    bus = MessageBus()
+    channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test", "channel_store": store})
     event = _make_text_event("prod", message_id="msg_reply", root_id="om_root", parent_id="om_card")
 
     with pytest.MonkeyPatch.context() as m:
-        mock_make_inbound = MagicMock()
-        m.setattr(channel, "_make_inbound", mock_make_inbound)
+        schedule = MagicMock()
+        batch = MagicMock()
+        m.setattr(channel, "_schedule_prepare_inbound", schedule)
+        m.setattr(channel, "_queue_file_inbound_batch", batch)
         with caplog.at_level("WARNING", logger="app.channels.feishu"):
             channel._on_message(event)
 
-    mock_make_inbound.assert_not_called()
+    schedule.assert_not_called()
+    batch.assert_not_called()
     assert "main loop not running, cannot resolve_topic_mapping" in caplog.text
     assert "dropping message msg_reply" in caplog.text
+    assert len(bus._inbound_reservations) == 0  # the intake slot taken before routing came back
 
 
 def test_feishu_slow_store_defers_the_reply_until_it_resolves_to_the_mapped_parent_thread(monkeypatch, caplog):
@@ -762,6 +768,101 @@ def test_feishu_store_that_never_answers_drops_the_message_instead_of_opening_a_
         assert dispatched == []  # never routed as a miss
         assert await inner.get_thread_id("feishu", "chat_1", topic_id="om_card") == "thread-a"
         assert store.lookups >= 2  # it kept retrying up to the total budget before giving up
+
+    _run(go())
+
+
+def _reply_event(msg_id: str):
+    return _make_text_event("answer", message_id=msg_id, root_id="om_unknown_root", parent_id="om_card")
+
+
+def test_feishu_deferred_burst_is_bounded_by_inbound_queue_maxsize(monkeypatch, caplog):
+    """#6558 review: deferred messages must hold a bus intake slot. A burst during a store
+    outage retains exactly ``inbound_queue_maxsize`` messages, drops the rest immediately
+    with a warning, and returns the capacity once the store answers and the messages are
+    consumed from the bus."""
+
+    async def go():
+        _fast_store_budgets(monkeypatch, total=30.0)
+        inner = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        await inner.set_thread_id("feishu", "chat_1", "thread-a", topic_id="om_card", user_id="user_1")
+        gate = asyncio.Event()
+        store = _GatedStore(inner, gate)
+        bus = MessageBus(inbound_queue_maxsize=3)
+        channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test", "channel_store": store})
+        channel._add_reaction = AsyncMock()
+        channel._ensure_running_card_started = MagicMock()
+
+        with caplog.at_level("WARNING", logger="app.channels.feishu"):
+            for i in range(6):
+                await _on_message_from_sdk_loop(channel, _reply_event(f"msg_{i}"))
+            await asyncio.sleep(0.3)
+            assert bus.inbound_queue.qsize() == 0  # nothing routed as a miss
+            retained = len(bus._inbound_reservations)
+            assert retained == 3  # exactly the configured bound is retained (one slot per deferred message)
+            dropped = [line for line in caplog.text.splitlines() if "dropping message" in line]
+            assert len(dropped) == 3 and all("intake capacity" in line for line in dropped)
+
+            gate.set()
+            delivered = [await asyncio.wait_for(bus.get_inbound(), timeout=5) for _ in range(3)]
+        assert [m.thread_ts for m in delivered] == ["msg_0", "msg_1", "msg_2"]  # FIFO, the oldest survivors
+        assert all(m.topic_id == "om_card" for m in delivered)
+        await _eventually(lambda: len(bus._inbound_reservations) == 0)
+        assert bus.inbound_queue.qsize() == 0
+        # Capacity is back: the bound can be reserved again in full.
+        probes = [bus.reserve_inbound(delivered[0]) for _ in range(3)]
+        for probe in probes:
+            probe.release()
+        assert await inner.get_thread_id("feishu", "chat_1", topic_id="om_card") == "thread-a"
+
+    _run(go())
+
+
+def test_feishu_deferred_message_budget_runs_from_arrival_and_releases_capacity_on_drop(monkeypatch, caplog):
+    """The retry budget is per message from its arrival, not from when it reaches the queue
+    head: an expired message is dropped without another lookup and its intake slot is freed."""
+
+    async def go():
+        _fast_store_budgets(monkeypatch, total=0.5)
+        inner = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        store = _GatedStore(inner, asyncio.Event())  # never answers
+        bus = MessageBus(inbound_queue_maxsize=4)
+        channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test", "channel_store": store})
+        channel._main_loop = asyncio.get_running_loop()
+        parsed = channel._parse_message_event(_reply_event("msg_expired"))
+        reservation = bus.reserve_inbound(channel._make_inbound(chat_id="chat_1", user_id="user_1", text="x", msg_type=feishu_module.InboundMessageType.CHAT, thread_ts="msg_expired"))
+        attempt = feishu_module._RoutingAttempt(parsed, reservation=reservation, arrived_at=time.monotonic() - 100.0)
+        queue = deque([attempt])
+        channel._deferred_routing["chat_1"] = queue
+        lookups_before = store.lookups
+
+        with caplog.at_level("WARNING", logger="app.channels.feishu"):
+            await channel._drain_deferred_routing("chat_1", queue, None)
+
+        assert store.lookups == lookups_before  # expired at the head: no retry spent on it
+        assert "dropping message msg_expired" in caplog.text
+        assert len(bus._inbound_reservations) == 0  # the slot came back
+        assert "chat_1" not in channel._deferred_routing
+
+    _run(go())
+
+
+def test_feishu_stop_releases_deferred_intake_reservations(monkeypatch, caplog):
+    async def go():
+        _fast_store_budgets(monkeypatch, total=30.0)
+        inner = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        store = _GatedStore(inner, asyncio.Event())  # never answers
+        bus = MessageBus(inbound_queue_maxsize=4)
+        channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test", "channel_store": store})
+        await _on_message_from_sdk_loop(channel, _reply_event("msg_0"))
+        await _on_message_from_sdk_loop(channel, _reply_event("msg_1"))
+        assert len(bus._inbound_reservations) == 2
+
+        with caplog.at_level("WARNING", logger="app.channels.feishu"):
+            await channel._close_and_drain_threadsafe_futures()  # what stop() does to in-flight work
+        assert len(bus._inbound_reservations) == 0
+        assert channel._deferred_routing == {}
+        assert "dropping 2 deferred messages for chat chat_1" in caplog.text or "dropping 1 deferred messages for chat chat_1" in caplog.text
 
     _run(go())
 

@@ -852,7 +852,10 @@ This release closes that milestone with **439 merged pull requests**.
   Feishu's synchronous lark callback bridges its lookups to that loop with a
   short bounded wait, and a lookup the database does not answer in time is
   retried on the Gateway loop (up to 30 s, then the message is dropped with a
-  warning) rather than routed as a missing mapping onto a new thread. ([#6558])
+  warning) rather than routed as a missing mapping onto a new thread; such
+  deferred messages hold a slot of the bounded inbound queue
+  (`channels.inbound_queue_maxsize`), so a database outage cannot grow the
+  backlog, and one that cannot be admitted is dropped with a warning. ([#6558])
 - **runtime:** The JSONL event store no longer loses events after a torn final
   line. A write interrupted mid-record left the file without a trailing newline,
   so the next append was glued onto the partial record and both became one

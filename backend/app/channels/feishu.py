@@ -13,7 +13,7 @@ from collections import deque
 from collections.abc import Callable, Coroutine
 from concurrent.futures import CancelledError as FutureCancelledError
 from concurrent.futures import Future
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, TypeVar
 
 from app.channels.base import Channel, ChannelStopTimeout
@@ -55,6 +55,11 @@ FEISHU_STORE_BRIDGE_TIMEOUT_SECONDS = FEISHU_STORE_LOOKUP_TIMEOUT_SECONDS + 1.0
 # the message is deferred to the Gateway loop, which retries with backoff up to
 # the database's own command budget and then drops it rather than opening a new
 # conversation for a reply whose mapping the database could still have served.
+# The budget runs from the message's arrival, not from when it reaches its
+# chat's queue head, and every deferred message holds a bus intake reservation
+# taken before routing, so the deferred backlog is bounded by
+# ``inbound_queue_maxsize`` exactly like live messages (a message that cannot be
+# admitted is dropped with a warning, never queued).
 FEISHU_STORE_RESOLVE_TOTAL_BUDGET_SECONDS = 30.0
 FEISHU_STORE_RESOLVE_RETRY_BACKOFF_SECONDS = 1.0
 FEISHU_STORE_RESOLVE_RETRY_MAX_BACKOFF_SECONDS = 8.0
@@ -103,11 +108,23 @@ class _Routing:
 
 @dataclass(slots=True)
 class _RoutingAttempt:
-    """Retry state for one message: once a pending clarification is consumed the route is decided."""
+    """Retry state for one message: once a pending clarification is consumed the route is decided.
+
+    ``reservation`` is the bus intake slot taken before routing; it travels with
+    the message into dispatch (committed there) or is released on every drop.
+    ``arrived_at`` anchors the per-message retry budget.
+    """
 
     parsed: _ParsedMessage
+    reservation: InboundReservation | None = None
+    arrived_at: float = field(default_factory=time.monotonic)
     pending: dict[str, Any] | None = None
     attempted: bool = False
+
+    def release_reservation(self) -> None:
+        if self.reservation is not None:
+            self.reservation.release()
+            self.reservation = None
 
 
 FEISHU_INBOUND_BATCH_WINDOW_SECONDS = 0.75
@@ -1009,20 +1026,23 @@ class FeishuChannel(Channel):
             await store.set_thread_id(self.name, parsed.chat_id, thread_id, topic_id=pending_topic_id, user_id=parsed.sender_id)
         return _Routing(pending_topic_id, False, True)
 
-    async def _resolve_routing_bounded(self, attempt: _RoutingAttempt) -> _Routing:
-        """``_resolve_routing`` under the store deadline; no answer in time (or a store error) is *unresolved*."""
+    async def _resolve_routing_bounded(self, attempt: _RoutingAttempt) -> _Routing | StoreLookupUnresolved:
+        """``_resolve_routing`` under the store deadline; no answer in time (or a store error) is *unresolved*.
+
+        The unresolved outcome is *returned*, not raised: this coroutine runs as a
+        tracked submission whose failure the base class reports at ERROR, and an
+        unanswered lookup during a store outage is an expected, handled outcome.
+        """
         attempt.attempted = True
         try:
             return await asyncio.wait_for(self._resolve_routing(attempt), FEISHU_STORE_LOOKUP_TIMEOUT_SECONDS)
         except TimeoutError:
-            raise StoreLookupUnresolved(f"channel store did not answer within {FEISHU_STORE_LOOKUP_TIMEOUT_SECONDS:.0f}s") from None
-        except StoreLookupUnresolved:
-            raise
+            return StoreLookupUnresolved(f"channel store did not answer within {FEISHU_STORE_LOOKUP_TIMEOUT_SECONDS:g}s")
         except Exception as exc:
             # A failing store is not "no mapping": routing on it would open a new
             # conversation for a reply whose thread the database still knows.
             logger.warning("[Feishu] channel store call failed for message %s (%s); treating the lookup as unresolved", attempt.parsed.msg_id, exc.__class__.__name__, exc_info=True)
-            raise StoreLookupUnresolved(f"channel store error: {exc.__class__.__name__}") from exc
+            return StoreLookupUnresolved(f"channel store error: {exc.__class__.__name__}")
 
     async def _first_stored_topic(self, store: Any, chat_id: str, candidates: list[str]) -> str | None:
         """The first candidate topic id the store already maps to a thread, in priority order."""
@@ -1042,6 +1062,7 @@ class FeishuChannel(Channel):
         parsed = attempt.parsed
         loop = self._main_loop
         if loop is None or not loop.is_running():
+            attempt.release_reservation()
             logger.warning("[Feishu] dropping message %s for chat %s: %s and no Gateway loop to defer it to", parsed.msg_id, parsed.chat_id, unresolved.reason)
             return
         queue: deque[_RoutingAttempt] = deque([attempt])
@@ -1061,6 +1082,7 @@ class FeishuChannel(Channel):
             with self._thread_lock:
                 if self._deferred_routing.get(parsed.chat_id) is queue:
                     del self._deferred_routing[parsed.chat_id]
+            attempt.release_reservation()
             logger.warning("[Feishu] dropping message %s for chat %s: %s and the channel is stopping", parsed.msg_id, parsed.chat_id, unresolved.reason)
             return
         logger.info("[Feishu] deferred message %s for chat %s: %s; retrying on the Gateway loop for up to %.0fs", parsed.msg_id, parsed.chat_id, unresolved.reason, FEISHU_STORE_RESOLVE_TOTAL_BUDGET_SECONDS)
@@ -1081,53 +1103,70 @@ class FeishuChannel(Channel):
                     # the coroutine's); use that answer before spending retries.
                     pending_first, first_future = first_future, None
                     try:
-                        routing = await asyncio.shield(asyncio.wrap_future(pending_first))
+                        outcome = await asyncio.shield(asyncio.wrap_future(pending_first))
                     except StoreLookupUnresolved:
-                        routing = None
+                        outcome = None
+                    routing = outcome if isinstance(outcome, _Routing) else None
                 if routing is None:
                     routing = await self._retry_routing(attempt)
                 try:
                     if routing is None:
+                        attempt.release_reservation()
                         logger.warning(
-                            "[Feishu] dropping message %s for chat %s: the channel store did not answer within %.0fs; not routing it as a new conversation",
+                            "[Feishu] dropping message %s for chat %s: the channel store did not answer within %gs of its arrival; not routing it as a new conversation",
                             attempt.parsed.msg_id,
                             chat_id,
                             FEISHU_STORE_RESOLVE_TOTAL_BUDGET_SECONDS,
                         )
                     else:
-                        self._dispatch_inbound(attempt.parsed, routing)
+                        self._dispatch_inbound(attempt.parsed, routing, reservation=attempt.reservation)
+                        attempt.reservation = None
                 finally:
                     with self._thread_lock:
                         if queue and queue[0] is attempt:
                             queue.popleft()
         finally:
             with self._thread_lock:
-                leftover = len(queue)
+                leftovers = list(queue)
                 queue.clear()
                 if self._deferred_routing.get(chat_id) is queue:
                     del self._deferred_routing[chat_id]
-            if leftover:
-                logger.warning("[Feishu] dropping %d deferred messages for chat %s: the channel is stopping", leftover, chat_id)
+            for leftover in leftovers:
+                leftover.release_reservation()
+            if leftovers:
+                logger.warning("[Feishu] dropping %d deferred messages for chat %s: the channel is stopping", len(leftovers), chat_id)
 
     async def _retry_routing(self, attempt: _RoutingAttempt) -> _Routing | None:
-        """Retry the bounded resolution with backoff until the total budget; ``None`` when it never answered."""
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + FEISHU_STORE_RESOLVE_TOTAL_BUDGET_SECONDS
+        """Retry the bounded resolution with backoff until the message's own budget; ``None`` when it never answered.
+
+        The budget is ``FEISHU_STORE_RESOLVE_TOTAL_BUDGET_SECONDS`` from the message's
+        arrival, so a message that waited behind others in its chat's queue does not
+        start a fresh budget at the head: one whose budget is already spent is dropped
+        without another lookup.
+        """
+        deadline = attempt.arrived_at + FEISHU_STORE_RESOLVE_TOTAL_BUDGET_SECONDS
         backoff = FEISHU_STORE_RESOLVE_RETRY_BACKOFF_SECONDS
         while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
             if attempt.attempted:
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    return None
                 await asyncio.sleep(min(backoff, remaining))
                 backoff = min(backoff * 2, FEISHU_STORE_RESOLVE_RETRY_MAX_BACKOFF_SECONDS)
-            try:
-                return await self._resolve_routing_bounded(attempt)
-            except StoreLookupUnresolved as exc:
-                logger.debug("[Feishu] retrying routing for message %s: %s", attempt.parsed.msg_id, exc.reason)
+                if time.monotonic() >= deadline:
+                    return None
+            outcome = await self._resolve_routing_bounded(attempt)
+            if isinstance(outcome, _Routing):
+                return outcome
+            logger.debug("[Feishu] retrying routing for message %s: %s", attempt.parsed.msg_id, outcome.reason)
 
-    def _dispatch_inbound(self, parsed: _ParsedMessage, routing: _Routing) -> None:
-        """Build the inbound for a routed message and hand it to batching / the Gateway loop."""
+    def _dispatch_inbound(self, parsed: _ParsedMessage, routing: _Routing, *, reservation: InboundReservation | None = None) -> None:
+        """Build the inbound for a routed message and hand it to batching / the Gateway loop.
+
+        ``reservation`` is the intake slot taken before routing; it is handed to
+        ``_schedule_prepare_inbound`` (committed or released there) or released on the
+        batch path (the batch flush reserves when it publishes) and on failure.
+        """
         try:
             source_preview = None
             if self._should_include_source_preview(chat_type=parsed.chat_type, root_id=parsed.root_id, parent_id=parsed.parent_id, thread_id=parsed.feishu_thread_id):
@@ -1164,11 +1203,15 @@ class FeishuChannel(Channel):
                 parent_id=parsed.parent_id,
                 thread_id=parsed.feishu_thread_id,
             ):
+                if reservation is not None:
+                    reservation.release()
                 self._queue_file_inbound_batch(parsed.msg_id, inbound)
                 return
 
-            self._schedule_prepare_inbound(parsed.msg_id, inbound)
+            self._schedule_prepare_inbound(parsed.msg_id, inbound, reservation=reservation)
         except Exception:
+            if reservation is not None:
+                reservation.release()
             logger.exception("[Feishu] error dispatching message %s", parsed.msg_id)
 
     @staticmethod
@@ -1189,11 +1232,13 @@ class FeishuChannel(Channel):
         inbound: InboundMessage,
         *,
         source_message_ids: list[str] | None = None,
+        reservation: InboundReservation | None = None,
     ) -> None:
         if self._main_loop and self._main_loop.is_running():
-            reservation = self._reserve_inbound(inbound)
             if reservation is None:
-                return
+                reservation = self._reserve_inbound(inbound)
+                if reservation is None:
+                    return
             logger.info("[Feishu] publishing inbound message to bus (type=%s, msg_id=%s)", inbound.msg_type.value, msg_id)
             scheduled = self._submit_threadsafe_coroutine(
                 self._prepare_inbound(
@@ -1210,6 +1255,8 @@ class FeishuChannel(Channel):
             if not scheduled:
                 logger.info("[Feishu] main loop stopped before reserved inbound could be scheduled")
         else:
+            if reservation is not None:
+                reservation.release()
             logger.warning("[Feishu] main loop not running, cannot publish inbound message")
 
     def _schedule_batch_flush(self, key: tuple[str, str], source_message_id: str) -> None:
@@ -1519,7 +1566,16 @@ class FeishuChannel(Channel):
                 self._dispatch_inbound(parsed, self._route_without_store(parsed))
                 return
 
-            attempt = _RoutingAttempt(parsed)
+            # Reserve bounded intake *before* routing: a message that may be deferred
+            # while the store is slow holds a real slot of the inbound queue, so the
+            # deferred backlog shares ``inbound_queue_maxsize`` with live messages.
+            # The placeholder only feeds the bus's capacity warning.
+            placeholder = self._make_inbound(chat_id=chat_id, user_id=sender_id, text=parsed.text, msg_type=parsed.msg_type, thread_ts=msg_id, files=parsed.files)
+            reservation = self._reserve_inbound(placeholder)
+            if reservation is None:
+                logger.warning("[Feishu] dropping message %s for chat %s: inbound intake capacity exhausted", msg_id, chat_id)
+                return
+            attempt = _RoutingAttempt(parsed, reservation=reservation)
             with self._thread_lock:
                 queue = self._deferred_routing.get(chat_id)
                 if queue is not None:
@@ -1528,10 +1584,12 @@ class FeishuChannel(Channel):
                     logger.info("[Feishu] queued message %s behind a deferred message for chat %s", msg_id, chat_id)
                     return
             try:
-                routing = self._run_store_call(lambda: self._resolve_routing_bounded(attempt), name="resolve_topic_mapping", msg_id=msg_id)
+                outcome = self._run_store_call(lambda: self._resolve_routing_bounded(attempt), name="resolve_topic_mapping", msg_id=msg_id)
             except StoreLookupUnresolved as unresolved:
-                self._defer_routing(attempt, unresolved)
+                outcome = unresolved
+            if isinstance(outcome, StoreLookupUnresolved):
+                self._defer_routing(attempt, outcome)
                 return
-            self._dispatch_inbound(parsed, routing)
+            self._dispatch_inbound(parsed, outcome, reservation=attempt.reservation)
         except Exception:
             logger.exception("[Feishu] error processing message")
