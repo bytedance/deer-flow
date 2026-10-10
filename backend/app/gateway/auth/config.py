@@ -64,7 +64,10 @@ def get_auth_config() -> AuthConfig:
     if _auth_config is None:
         from dotenv import load_dotenv
 
-        load_dotenv()
+        from deerflow.env import load_selected_env_file
+
+        if not load_selected_env_file():
+            load_dotenv()
         jwt_secret = os.environ.get("AUTH_JWT_SECRET")
         if not jwt_secret:
             jwt_secret = _load_or_create_secret()
@@ -72,7 +75,8 @@ def get_auth_config() -> AuthConfig:
             logger.warning(
                 "⚠ AUTH_JWT_SECRET is not set — using an auto-generated secret "
                 "persisted to .jwt_secret. Sessions will survive restarts. "
-                "For production, add AUTH_JWT_SECRET to your .env file: "
+                "For production, add AUTH_JWT_SECRET to your dotenv file "
+                "(the DEER_FLOW_ENV_FILE target, or .env by default): "
                 'python -c "import secrets; print(secrets.token_urlsafe(32))"'
             )
         _auth_config = AuthConfig(jwt_secret=jwt_secret)

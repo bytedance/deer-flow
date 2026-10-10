@@ -46,18 +46,26 @@ from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths, join_host_path
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.integrations.lark_cli import INTEGRATION_ID as LARK_CLI_INTEGRATION_ID
-from deerflow.integrations.lark_cli import LARK_CLI_SANDBOX_CONFIG_DIR, LARK_CLI_SANDBOX_DATA_DIR, LARK_CLI_SANDBOX_LOCKS_DIR, LARK_CLI_SANDBOX_RUNTIME_DIR, ensure_lark_cli_credential_tree, lark_skills_installed
+from deerflow.integrations.lark_cli import (
+    LARK_CLI_SANDBOX_CONFIG_DIR,
+    LARK_CLI_SANDBOX_DATA_DIR,
+    LARK_CLI_SANDBOX_LOCKS_DIR,
+    LARK_CLI_SANDBOX_RUNTIME_DIR,
+    LarkBrokerCapabilityUnknownError,
+    ensure_lark_cli_credential_tree,
+    lark_skills_installed,
+)
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.acquire_serialization import AcquireSerializer
 from deerflow.sandbox.identity import derive_sandbox_scope_token
-from deerflow.sandbox.lease import run_sync_lifecycle_operation
+from deerflow.sandbox.lease import discard_sandbox_lease_manager, get_sandbox_lease_manager, run_sync_lifecycle_operation
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 from deerflow.skills.types import SkillCategory
 from deerflow.utils.file_io import await_drained
 
 from .aio_sandbox import AioSandbox
-from .backend import SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT, SandboxBackend, wait_for_sandbox_ready, wait_for_sandbox_ready_async
+from .backend import SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT, SandboxBackend, SandboxCreationError, wait_for_sandbox_ready, wait_for_sandbox_ready_async
 from .local_backend import LocalContainerBackend
 from .ownership import (
     OwnershipBackendError,
@@ -68,6 +76,7 @@ from .ownership import (
     make_sandbox_ownership_store,
     resolve_ownership_config,
 )
+from .quarantine import SandboxQuarantine
 from .remote_backend import RemoteSandboxBackend, _normalize_skills_container_path
 from .sandbox_info import SandboxInfo
 
@@ -100,10 +109,19 @@ class SandboxBeingDestroyedError(RuntimeError):
 
 
 class SandboxPolicyReplacementDeferredError(RuntimeError):
-    """An incompatible sandbox cannot be replaced until it is a true orphan."""
+    """A quarantined or incompatible sandbox cannot be replaced until it is a true orphan."""
+
+    def __init__(self, sandbox_id: str, *, reason: str | None = None) -> None:
+        detail = reason or "has an incompatible provisioning policy; replacement is deferred until its current owner releases it"
+        super().__init__(f"sandbox {sandbox_id} {detail}")
+        self.sandbox_id = sandbox_id
+
+
+class SandboxBrokerModeUnverifiedError(RuntimeError):
+    """An existing runtime lacks the attestation needed for Lark admission."""
 
     def __init__(self, sandbox_id: str) -> None:
-        super().__init__(f"sandbox {sandbox_id} has an incompatible provisioning policy; replacement is deferred until its current owner releases it")
+        super().__init__(f"sandbox {sandbox_id} Lark broker mode is unverified; update the provisioner before retrying; the existing runtime is preserved")
         self.sandbox_id = sandbox_id
 
 
@@ -845,6 +863,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         deferred = 0
 
         for info in running:
+            if self._quarantine_store().contains(info):
+                info.requires_replacement = True
             age = current_time - info.created_at if info.created_at > 0 else float("inf")
             if info.requires_replacement:
                 if self._replace_incompatible_sandbox(info, current_time):
@@ -1260,7 +1280,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             return False
 
     @staticmethod
-    def _lark_broker_active(user_id: str | None = None) -> bool:
+    def _lark_broker_active(user_id: str | None = None, *, observed_mode: bool | None = None) -> bool:
         """Whether this user's sandbox should use the lark-cli broker (Pattern B).
 
         True only when the Lark pack is installed AND the remote provisioner
@@ -1268,15 +1288,49 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         credentials in a sidecar and the sandbox gets only a shim, so the
         Gateway-side credential-mount overlay must not run either.
         """
-        try:
-            if not AioSandboxProvider._lark_integration_active(user_id):
-                return False
-            from deerflow.integrations.lark_cli import sandbox_lark_broker_active
-
-            return sandbox_lark_broker_active()
-        except Exception as e:  # pragma: no cover - defensive
-            logger.warning(f"Could not determine Lark broker state: {e}")
+        if not AioSandboxProvider._lark_integration_active(user_id):
             return False
+        from deerflow.integrations.lark_cli import sandbox_lark_broker_active
+
+        return sandbox_lark_broker_active(observed_mode=observed_mode) if observed_mode is not None else sandbox_lark_broker_active()
+
+    def _quarantine_store(self) -> SandboxQuarantine:
+        store = getattr(self, "_quarantine", None)
+        if store is None:
+            scope = (self._config.get("provisioner_url") or "").rstrip("/") or f"local:{self._config.get('container_prefix', DEFAULT_CONTAINER_PREFIX)}"
+            store = SandboxQuarantine(get_paths().base_dir / "sandbox-quarantine", scope)
+            self._quarantine = store
+        return store
+
+    def _check_sandbox_reuse_policy(self, info: SandboxInfo, user_id: str) -> None:
+        if self._quarantine_store().contains(info):
+            info.requires_replacement = True
+        if info.requires_replacement:
+            return
+        if isinstance(self._backend, RemoteSandboxBackend) and self._lark_integration_active(user_id):
+            # Unknown is not evidence of drift. An older provisioner cannot
+            # create an attested replacement either, so refuse admission without
+            # destroying the user's existing runtime or probing deployment mode.
+            if info.lark_cli_broker is None:
+                raise SandboxBrokerModeUnverifiedError(info.sandbox_id)
+            # A contradictory Pod observation bypasses the cache, sharing one
+            # refresh with other workers before deciding on replacement.
+            try:
+                required_broker = self._lark_broker_active(user_id, observed_mode=info.lark_cli_broker)
+            except LarkBrokerCapabilityUnknownError:
+                # The Pod's own attestation decides how it executes lark-cli, and
+                # execution uses that attested mode. An unavailable deployment-level
+                # probe only delays drift detection (replacement); it must not deny
+                # reuse of a healthy runtime whose mode is attested. The drift
+                # check re-runs on every later acquire once the probe recovers.
+                logger.warning(
+                    "Lark broker capability probe unavailable; reusing sandbox %s with its attested mode %s",
+                    info.sandbox_id,
+                    info.lark_cli_broker,
+                )
+                return
+            if info.lark_cli_broker is not required_broker:
+                info.requires_replacement = True
 
     @staticmethod
     def _get_lark_cli_runtime_mounts(*, user_id: str | None = None) -> list[tuple[str, str, bool]]:
@@ -1364,8 +1418,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     def _stop_lease_renewal(self) -> None:
         self._renewal_stop.set()
         thread = self._renewal_thread
-        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+        if thread is None or thread is threading.current_thread():
+            return
+        if thread.is_alive():
             thread.join(timeout=5)
+        if thread.is_alive():
+            raise RuntimeError("Sandbox lease-renewal thread is still running after stop timeout")
 
     def _lease_renewal_loop(self) -> None:
         interval = self._ownership_config.renewal_interval_seconds
@@ -1557,7 +1615,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         self._original_sighup = signal.getsignal(signal.SIGHUP) if hasattr(signal, "SIGHUP") else None
 
         def signal_handler(signum, frame):
-            self.shutdown()
+            try:
+                self.shutdown()
+            except Exception:
+                logger.exception("Sandbox shutdown failed while handling signal %s; forwarding signal", signum)
             if signum == signal.SIGTERM:
                 original = self._original_sigterm
             elif hasattr(signal, "SIGHUP") and signum == signal.SIGHUP:
@@ -1645,8 +1706,28 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 effective_user_id,
                 thread_id,
             )
-            self.destroy(stale_id)
+            if not self._destroy_tracked(stale_id, still_reapable=lambda: self._thread_sandboxes.get(key) == stale_id):
+                raise SandboxPolicyReplacementDeferredError(stale_id, reason="has an outdated skills identity but is still in use or cannot be destroyed; retry shortly")
             return None
+
+        if info is not None:
+            self._check_sandbox_reuse_policy(info, effective_user_id)
+            if info.requires_replacement:
+                if self._recycle_fenced_tracked_sandbox(existing_id):
+                    return None
+                raise SandboxPolicyReplacementDeferredError(
+                    existing_id,
+                    reason="is quarantined or carries an incompatible policy and its fenced recycle did not complete; retry shortly",
+                )
+        with self._lock:
+            recycle_candidate = self._sandboxes.get(existing_id)
+        if recycle_candidate is not None and getattr(recycle_candidate, "requires_container_recycle", False) is True:
+            if self._recycle_fenced_tracked_sandbox(existing_id):
+                return None
+            raise SandboxPolicyReplacementDeferredError(
+                existing_id,
+                reason="is quarantined after an uncertain shell outcome and its fenced recycle did not complete; retry shortly",
+            )
 
         alive = self._check_tracked_sandbox_alive(existing_id, info) if info is not None else True
         if alive is False:
@@ -1680,6 +1761,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             self._forget_lost_sandbox(existing_id)
             return None
 
+        if info is not None:
+            self._check_sandbox_reuse_policy(info, effective_user_id)
+            if info.requires_replacement:
+                raise SandboxPolicyReplacementDeferredError(existing_id)
         with self._lock:
             if self._being_torn_down_locally(existing_id):
                 # The first reservation check ran before the backend health
@@ -1700,7 +1785,45 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 # fresh client, and the lease we just took is already ours.
                 logger.info("Cached sandbox %s was dropped while publishing ownership; falling through to discovery", existing_id)
                 return None
+            if getattr(self._sandboxes[existing_id], "requires_container_recycle", False) is True:
+                raise SandboxPolicyReplacementDeferredError(
+                    existing_id,
+                    reason="became quarantined while ownership was published; the next acquire recycles it",
+                )
         return existing_id
+
+    def _recycle_fenced_tracked_sandbox(self, sandbox_id: str) -> bool:
+        """Destroy a fenced sandbox still tracked by this instance (inline recycle).
+
+        A failed ``release()`` recycle leaves the sandbox tracked with its fence
+        marked, and neither orphan reconciliation nor the idle reaper owns tracked
+        active entries — deferring here would fail every acquire until some later
+        release retried. Recycling inline turns that wedge into one slow acquire.
+        A live execution holder turns the answer back into a deferral: destroying
+        the runtime under a running run would tear it down mid-turn, so the
+        recycle waits for the holders to finish — their release retries it, and
+        a later acquire retries inline if that failed too.
+        Returns True when the residue is gone and the caller may fall through to
+        discovery/create; False when the destroy did not complete (the fence is
+        retained and the caller must defer).
+        """
+        with self._lock:
+            sandbox = self._sandboxes.get(sandbox_id)
+            info = self._sandbox_infos.get(sandbox_id)
+        if sandbox is None:
+            return True
+        try:
+            # Persist genuine uncertainty even when a live holder postpones
+            # destruction. Pending creates never reach this path on their own.
+            if getattr(sandbox, "requires_container_recycle", False) is True:
+                if info is None:
+                    raise RuntimeError(f"Cannot quarantine sandbox {sandbox_id} without its runtime metadata")
+                info.requires_replacement = True
+                self._quarantine_store().mark(info)
+            return self._destroy_tracked(sandbox_id, still_reapable=lambda: self._sandboxes.get(sandbox_id) is sandbox)
+        except Exception:
+            logger.warning("Failed to recycle fenced sandbox %s during acquire; deferring", sandbox_id, exc_info=True)
+            return False
 
     def _reclaim_warm_pool_sandbox(
         self,
@@ -1729,6 +1852,17 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
             info, _ = self._warm_pool[sandbox_id]
 
+        self._check_sandbox_reuse_policy(info, effective_user_id)
+        if info.requires_replacement:
+            if not self._destroy_warm_entry(
+                sandbox_id,
+                info,
+                reason="incompatible provisioning policy",
+                still_reapable=lambda: self._warm_pool.get(sandbox_id, (None,))[0] is info,
+            ):
+                raise SandboxPolicyReplacementDeferredError(sandbox_id)
+            return None
+
         alive = self._check_tracked_sandbox_alive(sandbox_id, info)
         if alive is False:
             self._drop_unhealthy_sandbox(
@@ -1749,6 +1883,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             self._forget_lost_sandbox(sandbox_id)
             return None
 
+        self._check_sandbox_reuse_policy(info, effective_user_id)
+        if info.requires_replacement:
+            raise SandboxPolicyReplacementDeferredError(sandbox_id)
         with self._lock:
             if self._being_torn_down_locally(sandbox_id):
                 # Re-checked, because the first check was before the round trip.
@@ -1771,6 +1908,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 base_url=info.sandbox_url,
                 request_headers=info.request_headers,
                 default_command_timeout=self._config.get("command_timeout", AioSandbox._DEFAULT_HARD_TIMEOUT),
+                lark_cli_broker=info.lark_cli_broker,
             )
             self._sandboxes[sandbox_id] = sandbox
             self._sandbox_infos[sandbox_id] = info
@@ -1803,6 +1941,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 prevent. The window is a peer's in-flight container stop, so the
                 thread's next turn discovers nothing and cold-starts cleanly.
         """
+        self._check_sandbox_reuse_policy(info, user_id)
         if info.requires_replacement:
             raise SandboxPolicyReplacementDeferredError(info.sandbox_id)
         key = self._thread_key(thread_id, user_id)
@@ -1821,6 +1960,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             base_url=info.sandbox_url,
             request_headers=info.request_headers,
             default_command_timeout=self._config.get("command_timeout", AioSandbox._DEFAULT_HARD_TIMEOUT),
+            lark_cli_broker=info.lark_cli_broker,
         )
         # Ownership first, so a failure cannot leave a tracked-but-unowned sandbox.
         # There is no container to roll back (we did not create it), but the
@@ -1828,6 +1968,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         # same close-on-failure as `_register_created_sandbox`.
         try:
             self._publish_ownership(info.sandbox_id)
+            self._check_sandbox_reuse_policy(info, user_id)
+            if info.requires_replacement:
+                raise SandboxPolicyReplacementDeferredError(info.sandbox_id)
             with self._lock:
                 if self._being_torn_down_locally(info.sandbox_id):
                     # The pre-publish reservation check is only an early-out: a
@@ -1851,11 +1994,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 self._active_sandbox_identity[info.sandbox_id] = key
                 self._last_activity[info.sandbox_id] = time.time()
                 self._thread_sandboxes[key] = info.sandbox_id
-        except (
-            OwnershipBackendError,
-            SandboxBeingDestroyedError,
-            SandboxIdentityCollisionError,
-        ):
+        except Exception:
             try:
                 sandbox.close()
             except Exception as e:
@@ -1867,28 +2006,22 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     def _register_created_sandbox(self, thread_id: str | None, sandbox_id: str, info: SandboxInfo, *, user_id: str | None = None) -> str:
         """Track a newly-created sandbox in the active maps."""
-        sandbox = AioSandbox(
-            id=sandbox_id,
-            base_url=info.sandbox_url,
-            request_headers=info.request_headers,
-            default_command_timeout=self._config.get("command_timeout", AioSandbox._DEFAULT_HARD_TIMEOUT),
-        )
-        key = (
-            self._thread_key(
-                thread_id,
-                self._effective_acquire_user_id(user_id),
-            )
-            if thread_id
-            else None
-        )
-        # Ownership first. Unlike the discover path there IS something to roll
-        # back: we just started this container, and an unowned running container
-        # is exactly what a peer's reconciliation adopts. Leaking it would hand a
-        # peer a container this instance is about to use.
-        # SandboxBeingDestroyedError is possible even here: a peer that died
-        # mid-stop leaves a teardown marker until its TTL lapses. Roll back on
-        # both, or the container we just started is leaked.
+        sandbox: AioSandbox | None = None
+        # Everything after backend.create belongs to the same rollback boundary.
+        # Creation can return an existing Pod, so cleanup must still respect
+        # peer ownership and this provider's active/warm reservations.
         try:
+            self._check_sandbox_reuse_policy(info, self._effective_acquire_user_id(user_id))
+            if info.requires_replacement:
+                raise SandboxPolicyReplacementDeferredError(sandbox_id)
+            sandbox = AioSandbox(
+                id=sandbox_id,
+                base_url=info.sandbox_url,
+                request_headers=info.request_headers,
+                default_command_timeout=self._config.get("command_timeout", AioSandbox._DEFAULT_HARD_TIMEOUT),
+                lark_cli_broker=info.lark_cli_broker,
+            )
+            key = self._thread_key(thread_id, self._effective_acquire_user_id(user_id)) if thread_id else None
             if key is not None:
                 with self._lock:
                     self._assert_active_identity_available_locked(sandbox_id, key)
@@ -1908,19 +2041,16 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 self._last_activity[sandbox_id] = time.time()
                 if key is not None:
                     self._thread_sandboxes[key] = sandbox_id
-        except (
-            OwnershipBackendError,
-            SandboxBeingDestroyedError,
-            SandboxIdentityCollisionError,
-        ):
+        except Exception:
             logger.error(
                 "Could not register new sandbox %s; attempting ownership-fenced cleanup",
                 sandbox_id,
             )
-            try:
-                sandbox.close()
-            except Exception as e:
-                logger.warning(f"Error closing sandbox {sandbox_id} during ownership rollback: {e}")
+            if sandbox is not None:
+                try:
+                    sandbox.close()
+                except Exception as e:
+                    logger.warning(f"Error closing sandbox {sandbox_id} during ownership rollback: {e}")
             self._destroy_unready_sandbox(sandbox_id, info)
             raise
 
@@ -2232,6 +2362,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 # Backend discovery: another process may have created the container.
                 discovered = self._backend.discover(sandbox_id)
                 if discovered is not None:
+                    self._check_sandbox_reuse_policy(discovered, effective_user_id)
                     if discovered.requires_replacement:
                         if not self._replace_incompatible_sandbox(discovered, time.time()):
                             raise SandboxPolicyReplacementDeferredError(sandbox_id)
@@ -2274,6 +2405,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             # Docker and perform a health check; keep it off the event loop.
             discovered = await run_sync_lifecycle_operation(self._backend.discover, sandbox_id)
             if discovered is not None:
+                await run_sync_lifecycle_operation(self._check_sandbox_reuse_policy, discovered, effective_user_id)
                 if discovered.requires_replacement:
                     replaced = await run_sync_lifecycle_operation(
                         self._replace_incompatible_sandbox,
@@ -2356,6 +2488,62 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         finally:
             self._finish_local_teardown(sandbox_id)
 
+    def _retire_absent_quarantine(self, sandbox_id: str) -> None:
+        """Retry fenced cleanup and retire records only after confirmed absence."""
+        info = SandboxInfo(sandbox_id, "")
+        store = self._quarantine_store()
+        if not store.contains(info):
+            return
+        if not self._reserve_local_teardown(
+            sandbox_id,
+            lambda: sandbox_id not in self._sandboxes and sandbox_id not in self._sandbox_infos and sandbox_id not in self._warm_pool,
+        ):
+            raise SandboxPolicyReplacementDeferredError(
+                sandbox_id,
+                reason="is quarantined and still tracked; its cleanup is deferred until the in-flight teardown finishes",
+            )
+        try:
+            if not self._claim_ownership(sandbox_id, for_destroy=True):
+                raise SandboxPolicyReplacementDeferredError(
+                    sandbox_id,
+                    reason="is quarantined and owned by a peer; its cleanup is deferred until that owner releases it",
+                )
+            with self._held_teardown_lease(sandbox_id):
+                if self._backend.is_absent(sandbox_id) is not True:
+                    inspect_runtime = getattr(self._backend, "inspect_runtime", None)
+                    if not callable(inspect_runtime):
+                        raise RuntimeError(f"Runtime inspection is unavailable for sandbox {sandbox_id}")
+                    current = inspect_runtime(sandbox_id)
+                    if current is not None:
+                        if not isinstance(current, SandboxInfo) or current.sandbox_id != sandbox_id:
+                            raise RuntimeError(f"Runtime inspection returned invalid identity for sandbox {sandbox_id}")
+                        # A replacement can share the logical ID while its Service
+                        # is still unavailable. Do not stop that unquarantined
+                        # runtime; create can repair its endpoint and validate the
+                        # actual provisioning mode. The replacement itself proves
+                        # the fenced generations are absent (logical IDs are unique
+                        # per Pod/container), so prune only those stale records —
+                        # a full retire() would also wipe a fence a peer may have
+                        # just written for this live generation.
+                        if not store.contains(current):
+                            store.retire_replaced_generations(current)
+                            return
+                        # Inspection recovers runtime identity, but replacement
+                        # cleanup must also remove its previous policy resources.
+                        current.requires_replacement = True
+                        self._backend.destroy(current)
+                    # DELETE acceptance cannot prove the Pod/container vanished.
+                    # Also recheck when it disappeared between our observations.
+                    if self._backend.is_absent(sandbox_id) is not True:
+                        raise SandboxPolicyReplacementDeferredError(
+                            sandbox_id,
+                            reason="is quarantined and its previous runtime is still present; the fence is retained",
+                        )
+                self._backend.complete_absent_teardown(sandbox_id)
+                store.retire(info)
+        finally:
+            self._finish_local_teardown(sandbox_id)
+
     def _create_sandbox(self, thread_id: str | None, sandbox_id: str, *, user_id: str | None = None) -> str:
         """Create a new sandbox via the backend.
 
@@ -2369,6 +2557,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         Raises:
             RuntimeError: If sandbox creation or readiness check fails.
         """
+        self._retire_absent_quarantine(sandbox_id)
         effective_user_id = self._effective_acquire_user_id(user_id)
         extra_mounts = self._get_extra_mounts(thread_id, user_id=effective_user_id)
         provision_lark_cli_runtime = self._lark_integration_active(effective_user_id)
@@ -2390,15 +2579,19 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             create_kwargs["config_mount_exclusion_root"] = config_mount_exclusion_root
         if isinstance(self._backend, RemoteSandboxBackend):
             create_kwargs["skills_container_path"] = self._configured_skills_container_path()
-        info = self._backend.create(
-            thread_id,
-            sandbox_id,
-            extra_mounts=extra_mounts or None,
-            user_id=effective_user_id,
-            provision_lark_cli_runtime=provision_lark_cli_runtime,
-            provision_lark_cli_broker=provision_lark_cli_broker,
-            **create_kwargs,
-        )
+        try:
+            info = self._backend.create(
+                thread_id,
+                sandbox_id,
+                extra_mounts=extra_mounts or None,
+                user_id=effective_user_id,
+                provision_lark_cli_runtime=provision_lark_cli_runtime,
+                provision_lark_cli_broker=provision_lark_cli_broker,
+                **create_kwargs,
+            )
+        except SandboxCreationError as exc:
+            self._destroy_unready_sandbox(sandbox_id, exc.info)
+            raise
 
         # Wait for sandbox to be ready
         readiness_kwargs = {"headers": info.request_headers} if info.request_headers else {}
@@ -2414,6 +2607,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     async def _create_sandbox_async(self, thread_id: str | None, sandbox_id: str, *, user_id: str | None = None) -> str:
         """Async counterpart to ``_create_sandbox``."""
+        await run_sync_lifecycle_operation(self._retire_absent_quarantine, sandbox_id)
         effective_user_id = self._effective_acquire_user_id(user_id)
         extra_mounts = await run_sync_lifecycle_operation(self._get_extra_mounts, thread_id, user_id=effective_user_id)
         provision_lark_cli_runtime = await run_sync_lifecycle_operation(self._lark_integration_active, effective_user_id)
@@ -2436,16 +2630,20 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             create_kwargs["config_mount_exclusion_root"] = config_mount_exclusion_root
         if isinstance(self._backend, RemoteSandboxBackend):
             create_kwargs["skills_container_path"] = self._configured_skills_container_path()
-        info = await run_sync_lifecycle_operation(
-            self._backend.create,
-            thread_id,
-            sandbox_id,
-            extra_mounts=extra_mounts or None,
-            user_id=effective_user_id,
-            provision_lark_cli_runtime=provision_lark_cli_runtime,
-            provision_lark_cli_broker=provision_lark_cli_broker,
-            **create_kwargs,
-        )
+        try:
+            info = await run_sync_lifecycle_operation(
+                self._backend.create,
+                thread_id,
+                sandbox_id,
+                extra_mounts=extra_mounts or None,
+                user_id=effective_user_id,
+                provision_lark_cli_runtime=provision_lark_cli_runtime,
+                provision_lark_cli_broker=provision_lark_cli_broker,
+                **create_kwargs,
+            )
+        except SandboxCreationError as exc:
+            await run_sync_lifecycle_operation(self._destroy_unready_sandbox, sandbox_id, exc.info)
+            raise
 
         # Wait for sandbox to be ready without blocking the event loop.
         readiness_kwargs = {"headers": info.request_headers} if info.request_headers else {}
@@ -2509,10 +2707,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     def release(self, sandbox_id: str) -> None:
         """Release a sandbox from active use.
 
-        Healthy sandboxes are parked in the warm pool for fast reuse. Sandboxes
-        quarantined after an ambiguous session-creation outcome are destroyed
-        instead so unresolved server-side session state is never deliberately
-        reused.
+        Healthy sandboxes are parked in the warm pool for fast reuse. An unsafe
+        implicit shell or ambiguous session creation is quarantined by runtime
+        generation before destruction, so a failed stop cannot make discovery
+        or a restarted Gateway erase unresolved server-side state.
 
         Release is best-effort at turn teardown: recycle failures are logged
         rather than propagated to the completed agent run.
@@ -2520,12 +2718,24 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         Args:
             sandbox_id: The ID of the sandbox to release.
         """
+        with get_sandbox_lease_manager(self).reserve_idle_teardown(sandbox_id) as reserved:
+            if not reserved:
+                logger.info("Deferring release of sandbox %s: an execution holder or another teardown is still active", sandbox_id)
+                return
+            self._release_idle_sandbox(sandbox_id)
+
+    def _release_idle_sandbox(self, sandbox_id: str) -> None:
+        """Park or recycle while new execution bindings are excluded."""
         with self._lock:
             recycle_sandbox = self._sandboxes.get(sandbox_id)
 
-        if recycle_sandbox is not None and recycle_sandbox.requires_container_recycle:
+        # At this boundary every admitted operation has drained. Any remaining
+        # pending create is abandoned, so conservatively retire its runtime.
+        # Read pending first so a pending -> ambiguous transition cannot slip
+        # between the two checks and accidentally enter the warm pool.
+        if recycle_sandbox is not None and (getattr(recycle_sandbox, "has_pending_session_creates", False) is True or recycle_sandbox.requires_container_recycle):
             logger.warning(
-                "Recycling sandbox %s instead of returning it to the warm pool after ambiguous session creation",
+                "Recycling sandbox %s instead of returning it to the warm pool after an uncertain shell outcome",
                 sandbox_id,
             )
             try:
@@ -2535,7 +2745,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 )
             except Exception:
                 logger.error(
-                    "Failed to recycle sandbox %s after ambiguous session creation",
+                    "Failed to recycle quarantined sandbox %s",
                     sandbox_id,
                     exc_info=True,
                 )
@@ -2583,7 +2793,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         logger.info(f"Released sandbox {sandbox_id} to warm pool (container still running)")
 
-    def destroy(self, sandbox_id: str) -> None:
+    def destroy(self, sandbox_id: str) -> bool:
         """Destroy a sandbox: stop the container and free all resources.
 
         Unlike release(), this actually stops the container.  Use this for
@@ -2595,10 +2805,16 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         Args:
             sandbox_id: The ID of the sandbox to destroy.
-        """
-        self._destroy_tracked(sandbox_id, still_reapable=lambda: True)
 
-    def _destroy_tracked(self, sandbox_id: str, *, still_reapable: Callable[[], bool]) -> None:
+        Returns:
+            True when the container was destroyed. False when teardown was
+            deferred because an execution/upload holder or a peer teardown is
+            still active — the sandbox stays tracked and the deferred destroy
+            is retried by the release/idle paths once the holders drain.
+        """
+        return self._destroy_tracked(sandbox_id, still_reapable=lambda: True)
+
+    def _destroy_tracked(self, sandbox_id: str, *, still_reapable: Callable[[], bool], force: bool = False) -> bool:
         """``destroy()`` with a caller-supplied "is this still reapable" gate.
 
         Callers that decided to destroy *earlier* (the idle checker) pass their
@@ -2606,22 +2822,38 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         section that reserves the teardown. ``destroy()`` itself passes a
         constant: an explicit destroy is a decision made now.
         """
-        if not self._reserve_local_teardown(sandbox_id, still_reapable):
-            logger.info("Skipping destroy of sandbox %s: re-acquired by this instance or already being torn down", sandbox_id)
-            return
+        reservation = contextlib.nullcontext(True) if force else get_sandbox_lease_manager(self).reserve_idle_teardown(sandbox_id)
+        with reservation as reserved:
+            if not reserved:
+                logger.info("Deferring destroy of sandbox %s: an execution holder or another teardown is still active", sandbox_id)
+                return False
+            if not self._reserve_local_teardown(sandbox_id, still_reapable):
+                logger.info("Skipping destroy of sandbox %s: re-acquired by this instance or already being torn down", sandbox_id)
+                return False
+            try:
+                return self._destroy_reserved(sandbox_id)
+            finally:
+                self._finish_local_teardown(sandbox_id)
 
-        try:
-            self._destroy_reserved(sandbox_id)
-        finally:
-            self._finish_local_teardown(sandbox_id)
+    def _destroy_reserved(self, sandbox_id: str) -> bool:
+        with self._lock:
+            sandbox = self._sandboxes.get(sandbox_id)
+            info = self._sandbox_infos.get(sandbox_id)
+        if getattr(sandbox, "has_pending_session_creates", False) is True or getattr(sandbox, "requires_container_recycle", False) is True:
+            if info is None:
+                raise RuntimeError(f"Cannot quarantine sandbox {sandbox_id} without its runtime metadata")
+            # All destroy paths must persist before claiming/untracking. If
+            # storage fails, retain the dirty client and its renewal lease so
+            # a later idle/shutdown/explicit destroy retries this same fence.
+            info.requires_replacement = True
+            self._quarantine_store().mark(info)
 
-    def _destroy_reserved(self, sandbox_id: str) -> None:
         # Claim before untracking. The reverse order loses the container on a
         # refused claim: still running, and no longer in any of our maps, so
         # nothing here would ever reap or reclaim it.
         if not self._claim_ownership(sandbox_id, for_destroy=True):
             logger.warning("Refusing to destroy sandbox %s: owned by another instance", sandbox_id)
-            return
+            return False
 
         sandbox, info, _ = self._remove_tracked_sandbox(sandbox_id)
 
@@ -2649,9 +2881,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             # marker the claim above wrote, so an untracked id cannot leave a
             # lease stuck in `del:`.
             self._release_ownership(sandbox_id)
+        return True
 
     def reset(self) -> None:
         """Release process-local acquire workers when this instance is detached."""
+        discard_sandbox_lease_manager(self)
         self._acquire_serializer.close()
         self._acquire_worker_executor.shutdown(wait=False, cancel_futures=True)
 
@@ -2661,22 +2895,35 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             if self._shutdown_called:
                 return
             self._shutdown_called = True
+
+        try:
+            self._stop_idle_checker()
+            # Stop renewing before detaching tracked ownership: the destroy paths
+            # claim ownership themselves, and a renewal racing teardown can
+            # re-publish leases we are about to drop. A bounded join timeout must
+            # fail closed so a retry still owns every active and warm entry.
+            self._stop_lease_renewal()
+        except Exception:
+            with self._lock:
+                self._shutdown_called = False
+            raise
+
+        # Do not detach tracked sandboxes before both maintenance workers are
+        # known stopped. If either bounded join fails, a retry must still own
+        # every active and warm entry.
+        with self._lock:
             sandbox_ids = list(self._sandboxes.keys())
             warm_items = list(self._warm_pool.items())
             self._warm_pool.clear()
             self._warm_pool_identity.clear()
 
-        self._stop_idle_checker()
-        # Stop renewing before destroying: the destroy paths claim ownership
-        # themselves, and a renewal racing them only re-publishes leases we are
-        # about to drop.
-        self._stop_lease_renewal()
-
         logger.info(f"Shutting down {len(sandbox_ids)} active + {len(warm_items)} warm-pool sandbox(es)")
 
         for sandbox_id in sandbox_ids:
             try:
-                self.destroy(sandbox_id)
+                # Shutdown has stopped the maintenance workers and closes the
+                # entire provider. It must clean up even unfinished executions.
+                self._destroy_tracked(sandbox_id, still_reapable=lambda: True, force=True)
             except Exception as e:
                 logger.error(f"Failed to destroy sandbox {sandbox_id} during shutdown: {e}")
 
@@ -2693,5 +2940,6 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         except Exception as e:
             logger.warning(f"Error closing sandbox ownership store during shutdown: {e}")
 
+        discard_sandbox_lease_manager(self)
         self._acquire_serializer.close()
         self._acquire_worker_executor.shutdown(wait=False, cancel_futures=True)

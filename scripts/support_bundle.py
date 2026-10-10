@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import re
 import subprocess
@@ -180,6 +181,12 @@ def _run_command(args: list[str], cwd: Path, timeout_s: int = 10) -> dict[str, A
             cwd=cwd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            # Python helpers (doctor, pnpm) must emit the encoding we capture,
+            # even when the host or inherited stdio setting is not UTF-8.
+            # Escape surrogate characters rather than aborting diagnostics.
+            env={**os.environ, "PYTHONIOENCODING": "utf-8:backslashreplace"},
             timeout=timeout_s,
             check=False,
         )
@@ -255,13 +262,75 @@ def _validate_thread_id(thread_id: str) -> None:
         raise ValueError(f"Invalid thread_id: {thread_id!r}")
 
 
+def _expand_launcher_variables(value: str, environment: dict[str, str]) -> str:
+    """Expand simple shell references in one pass, without executing shell syntax."""
+
+    def replace(match: re.Match[str]) -> str:
+        if match[0].startswith("\\"):
+            return match[0][1:]
+        name = match[1] or match[3]
+        resolved = environment.get(name, "")
+        return match[2] if match[2] is not None and not resolved else resolved
+
+    return re.sub(r"\\?\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}|([A-Za-z_][A-Za-z0-9_]*))", replace, value)
+
+
+def _thread_data_roots(project_root: Path) -> list[tuple[Path, str]]:
+    """Resolve launcher-relative runtime paths without exporting .env secrets."""
+    env_file = project_root / ".env"
+    names = ("DEER_FLOW_HOME", "DEER_FLOW_PROJECT_ROOT")
+    values = {name: os.environ.get(name) for name in names}
+    if env_file.is_file():
+        try:
+            from dotenv.parser import parse_stream
+        except ImportError:
+            # Diagnostics must still work in an incomplete backend environment.
+            pass
+        else:
+            # serve.sh changes to the checkout before sourcing .env. Keep its
+            # assignment order in a private mapping; never export parsed secrets.
+            environment = {**os.environ, "PWD": str(project_root.resolve())}
+            with env_file.open(encoding="utf-8-sig") as stream:
+                for binding in parse_stream(stream):
+                    if not binding.key or binding.value is None or binding.error:
+                        continue
+                    quote = binding.original.string.split("=", 1)[-1].lstrip()[:1]
+                    value = binding.value
+                    if quote != "'":
+                        if quote != '"':
+                            value = os.path.expanduser(value)
+                        value = _expand_launcher_variables(value, environment)
+                    environment[binding.key] = value
+                    if binding.key in names:
+                        # Even an empty .env assignment overrides inherited exports.
+                        values[binding.key] = value
+    home = values["DEER_FLOW_HOME"]
+    runtime_project = values["DEER_FLOW_PROJECT_ROOT"]
+    if home:
+        return [((project_root / home).resolve(), "{DEER_FLOW_HOME}")]
+    if runtime_project:
+        # The local launcher pins this home independently of the project root.
+        # Keep the standalone harness location as a second candidate.
+        return [
+            (project_root / "backend" / ".deer-flow", ""),
+            (
+                (project_root / runtime_project).resolve() / ".deer-flow",
+                "{DEER_FLOW_PROJECT_ROOT}/.deer-flow",
+            ),
+        ]
+    return [
+        (project_root / ".deer-flow", ""),
+        (project_root / "backend" / ".deer-flow", ""),
+    ]
+
+
 def _candidate_thread_data_dirs(project_root: Path, thread_id: str) -> list[Path]:
     _validate_thread_id(thread_id)
-    candidates = [
-        project_root / ".deer-flow" / "threads" / thread_id / "user-data",
-        project_root / "backend" / ".deer-flow" / "threads" / thread_id / "user-data",
-    ]
-    for base in (project_root / ".deer-flow" / "users", project_root / "backend" / ".deer-flow" / "users"):
+    roots = _thread_data_roots(project_root)
+    candidates = []
+    for root, _ in roots:
+        candidates.append(root / "threads" / thread_id / "user-data")
+        base = root / "users"
         if base.exists():
             candidates.extend(user_dir / "threads" / thread_id / "user-data" for user_dir in base.iterdir() if user_dir.is_dir())
     return candidates
@@ -271,6 +340,12 @@ def _display_path(path: Path, project_root: Path) -> str:
     try:
         return path.resolve().relative_to(project_root.resolve()).as_posix()
     except (OSError, ValueError):
+        for root, marker in _thread_data_roots(project_root):
+            if marker:
+                try:
+                    return marker + "/" + path.resolve().relative_to(root.resolve()).as_posix()
+                except (OSError, ValueError):
+                    pass
         return redact_text(path.as_posix())
 
 
@@ -304,7 +379,8 @@ def _file_manifest(root: Path, *, max_files: int = 500) -> list[dict[str, Any]]:
 
 def collect_thread_summary(project_root: Path, thread_id: str) -> dict[str, Any]:
     """Collect a thread file manifest without reading user file contents."""
-    for data_dir in _candidate_thread_data_dirs(project_root, thread_id):
+    candidates = _candidate_thread_data_dirs(project_root, thread_id)
+    for data_dir in candidates:
         if data_dir.exists():
             return {
                 "thread_id": thread_id,
@@ -317,7 +393,7 @@ def collect_thread_summary(project_root: Path, thread_id: str) -> dict[str, Any]
     return {
         "thread_id": thread_id,
         "found": False,
-        "checked_layouts": [_display_path(path, project_root) for path in _candidate_thread_data_dirs(project_root, thread_id)],
+        "checked_layouts": [_display_path(path, project_root) for path in candidates],
     }
 
 

@@ -31,6 +31,26 @@ export interface GoalState {
   };
 }
 
+/**
+ * The record of the latest met goal (the `goal_outcome` channel). Only the
+ * checkpoint write that clears a satisfied goal writes it, and every other
+ * goal write removes it; `contracts/thread_goal_contract.json` pins the keys.
+ * Named apart from the scheduled-run `GoalOutcome` in `core/scheduled-tasks`.
+ */
+export interface ThreadGoalOutcome {
+  status: "achieved";
+  objective: string;
+  /** The met goal's `created_at`; empty for a goal stored without one. */
+  goal_created_at: string;
+  achieved_at: string;
+  continuation_count: number;
+  max_continuations: number;
+  reason: string;
+  relied_on_assumption: boolean;
+  /** The reply the verdict judged: the latest visible AI message with text. */
+  reply_message_id: string | null;
+}
+
 export interface ArtifactEntry {
   handle: string;
   tool_name: string;
@@ -50,6 +70,7 @@ export interface AgentThreadState extends Record<string, unknown> {
   artifacts?: string[];
   todos?: Todo[];
   goal?: GoalState | null;
+  goal_outcome?: ThreadGoalOutcome | null;
   tool_artifacts?: ArtifactEntry[];
 }
 
@@ -65,6 +86,12 @@ export interface AgentThreadContext extends Record<string, unknown> {
 
 export interface AgentThread extends Thread<AgentThreadState> {
   context?: AgentThreadContext;
+  /**
+   * Thread search only: a server-originated run of the viewer (schedule, IM,
+   * GitHub, extension) changed since the viewer last opened the thread.
+   * `null`/absent when unknown (another endpoint, or no SQL read state).
+   */
+  unread?: boolean | null;
 }
 
 export interface RunMessage {

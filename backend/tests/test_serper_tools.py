@@ -1,6 +1,7 @@
 """Unit tests for the Serper community web search tool."""
 
 import json
+import logging
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -8,10 +9,11 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def reset_api_key_warned():
+def reset_api_key_warned(monkeypatch):
     """Reset the module-level warning flag before each test."""
     import deerflow.community.serper.tools as serper_mod
 
+    monkeypatch.delenv("SERPER_BASE_URL", raising=False)
     serper_mod._api_key_warned = set()
     yield
     serper_mod._api_key_warned = set()
@@ -47,6 +49,98 @@ def _make_serper_images_response(images: list) -> MagicMock:
     mock_resp.json.return_value = {"images": images}
     mock_resp.raise_for_status = MagicMock()
     return mock_resp
+
+
+class TestSerperBaseUrl:
+    @pytest.mark.parametrize(("tool_name", "route"), [("web_search_tool", "search"), ("image_search_tool", "images")])
+    @pytest.mark.parametrize(
+        ("base_url", "expected_base"),
+        [
+            (None, "https://google.serper.dev"),
+            ("", "https://google.serper.dev"),
+            (" \t\r\n", "https://google.serper.dev"),
+            ("https://proxy.example", "https://proxy.example"),
+            ("https://proxy.example/", "https://proxy.example"),
+            (" \thttps://proxy.example/// \r\n", "https://proxy.example"),
+            ("https://proxy.example/api/v1/", "https://proxy.example/api/v1"),
+            ("http://127.0.0.1:8080/", "http://127.0.0.1:8080"),
+        ],
+    )
+    def test_tools_post_to_configured_endpoint(self, monkeypatch, mock_config_with_key, tool_name: str, route: str, base_url: str | None, expected_base: str) -> None:
+        import deerflow.community.serper.tools as serper_mod
+
+        if base_url is not None:
+            monkeypatch.setenv("SERPER_BASE_URL", base_url)
+        response = MagicMock()
+        response.json.return_value = {
+            "organic": [{"title": "Example", "link": "https://example.com", "snippet": "Result"}],
+            "images": [{"title": "Example", "imageUrl": "https://example.com/image.jpg"}],
+        }
+        with patch("deerflow.community.serper.tools.httpx.Client") as client_class:
+            post = client_class.return_value.__enter__.return_value.post
+            post.return_value = response
+            result = json.loads(getattr(serper_mod, tool_name).invoke({"query": "https://model-input.invalid"}))
+
+        assert "error" not in result
+        post.assert_called_once()
+        assert post.call_args.args[0] == f"{expected_base}/{route}"
+        assert post.call_args.kwargs["headers"] == {"X-API-KEY": "test-serper-key", "Content-Type": "application/json"}
+        assert post.call_args.kwargs["json"] == {"q": "https://model-input.invalid", "num": 5}
+        assert "params" not in post.call_args.kwargs
+        assert "test-serper-key" not in post.call_args.args[0]
+
+    @pytest.mark.parametrize("route", ["search", "images"])
+    def test_endpoint_is_resolved_before_transport(self, monkeypatch, route: str) -> None:
+        import deerflow.community.serper.tools as serper_mod
+
+        monkeypatch.setenv("SERPER_BASE_URL", "https://first.example/")
+        with patch("deerflow.community.serper.tools.httpx.Client") as client_class:
+            client = MagicMock()
+            client.post.return_value = _make_serper_response([])
+
+            def enter_client():
+                monkeypatch.setenv("SERPER_BASE_URL", "https://later.example/")
+                return client
+
+            client_class.return_value.__enter__.side_effect = enter_client
+            data, error = serper_mod._serper_post(f"https://google.serper.dev/{route}", "test-key", "test", 5, time_range="week")
+
+        assert error is None
+        assert data == {"organic": []}
+        assert client.post.call_args.args[0] == f"https://first.example/{route}"
+        assert client.post.call_args.kwargs["json"] == {"q": "test", "num": 5, "tbs": "qdr:w"}
+
+    @pytest.mark.parametrize("route", ["search", "images"])
+    @pytest.mark.parametrize("redact_urls", [False, True], ids=["plain-log", "redacted-log"])
+    def test_override_diagnostic_omits_credentials(self, monkeypatch, caplog, route: str, redact_urls: bool) -> None:
+        import deerflow.community.serper.tools as serper_mod
+        from deerflow.logging_config import UrlRedactionFilter
+
+        if redact_urls:
+            # Production logging installs this filter on root handlers; another
+            # test may already have enabled it before this test runs in a shard.
+            monkeypatch.setattr(caplog.handler, "filters", [*caplog.handler.filters, UrlRedactionFilter()])
+
+        monkeypatch.setenv("SERPER_BASE_URL", "https://user:password@proxy.example:8443/api/v1/")
+        with caplog.at_level(logging.DEBUG, logger=serper_mod.__name__), patch("deerflow.community.serper.tools.httpx.Client") as client_class:
+            post = client_class.return_value.__enter__.return_value.post
+            post.return_value = _make_serper_response([])
+            _, error = serper_mod._serper_post(f"https://google.serper.dev/{route}", "test-secret-api-key", "test", 5)
+
+        assert error is None
+        post.assert_called_once()
+        assert post.call_args.args[0] == f"https://user:password@proxy.example:8443/api/v1/{route}"
+        records = [record for record in caplog.records if "SERPER_BASE_URL" in record.getMessage()]
+        assert len(records) == 1
+        diagnostic = records[0].getMessage()
+        assert diagnostic in {
+            f"Serper endpoint from base_url/SERPER_BASE_URL: https://proxy.example:8443/api/v1/{route}",
+            "Serper endpoint from base_url/SERPER_BASE_URL: https://proxy.example:8443/<redacted>",
+        }
+        if redact_urls:
+            assert "<redacted>" in diagnostic
+        assert "user:password" not in caplog.text
+        assert "test-secret-api-key" not in caplog.text
 
 
 class TestGetApiKey:
@@ -1219,3 +1313,63 @@ def test_coerce_max_results_inf_falls_back_to_default():
     import deerflow.community.serper.tools as serper_mod
 
     assert serper_mod._coerce_max_results(float("inf")) == 5
+
+
+class TestSearchTimeRange:
+    @pytest.mark.parametrize(("time_range", "expected_tbs"), [("day", "qdr:d"), ("week", "qdr:w"), ("month", "qdr:m"), ("year", "qdr:y")])
+    def test_forwards_native_time_filter(self, mock_config_with_key, time_range, expected_tbs):
+        from deerflow.community.serper.tools import web_search_tool
+
+        with patch("deerflow.community.serper.tools.httpx.Client") as client:
+            post = client.return_value.__enter__.return_value.post
+            post.return_value = _make_serper_response([{"title": "Recent result", "link": "https://example.com", "snippet": "Recent content"}])
+            result = json.loads(web_search_tool.invoke({"query": " recent releases ", "time_range": time_range}))
+
+        assert post.call_args.args == ("https://google.serper.dev/search",)
+        assert post.call_args.kwargs["json"] == {"q": "recent releases", "num": 5, "tbs": expected_tbs}
+        assert result == {"query": "recent releases", "total_results": 1, "results": [{"title": "Recent result", "url": "https://example.com", "content": "Recent content"}]}
+
+    @pytest.mark.parametrize("arguments", [{"query": "releases"}, {"query": "releases", "time_range": None}])
+    def test_omitted_or_null_keeps_original_request(self, mock_config_with_key, arguments):
+        from deerflow.community.serper.tools import web_search_tool
+
+        with patch("deerflow.community.serper.tools.httpx.Client") as client:
+            post = client.return_value.__enter__.return_value.post
+            post.return_value = _make_serper_response([])
+            web_search_tool.invoke(arguments)
+
+        assert post.call_args.kwargs["json"] == {"q": "releases", "num": 5}
+
+    @pytest.mark.parametrize("time_range", ["hour", "", "WEEK", 7])
+    def test_invalid_time_range_rejected_before_http(self, mock_config_with_key, time_range):
+        from pydantic import ValidationError
+
+        from deerflow.community.serper.tools import web_search_tool
+
+        with patch("deerflow.community.serper.tools.httpx.Client") as client:
+            client.return_value.__enter__.return_value.post.return_value = _make_serper_response([])
+            with pytest.raises(ValidationError):
+                web_search_tool.invoke({"query": "releases", "time_range": time_range})
+            client.assert_not_called()
+
+    def test_tool_schema_advertises_optional_shared_values(self):
+        from deerflow.community.serper.tools import web_search_tool
+
+        schema = web_search_tool.args_schema.model_json_schema()
+        parameter = schema["properties"]["time_range"]
+        assert "time_range" not in schema["required"]
+        assert parameter["default"] is None
+        assert {"$ref": "#/$defs/SearchTimeRange"} in parameter["anyOf"]
+        assert schema["$defs"]["SearchTimeRange"]["enum"] == ["day", "week", "month", "year"]
+
+    def test_image_search_keeps_its_schema_and_payload(self, mock_config_with_key):
+        from deerflow.community.serper.tools import image_search_tool
+
+        assert "time_range" not in image_search_tool.args_schema.model_json_schema()["properties"]
+        with patch("deerflow.community.serper.tools.httpx.Client") as client:
+            post = client.return_value.__enter__.return_value.post
+            post.return_value = _make_serper_images_response([])
+            image_search_tool.invoke({"query": "landscape"})
+
+        assert post.call_args.args == ("https://google.serper.dev/images",)
+        assert post.call_args.kwargs["json"] == {"q": "landscape", "num": 5}

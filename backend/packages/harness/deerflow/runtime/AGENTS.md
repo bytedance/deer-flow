@@ -22,14 +22,29 @@ Checkpointer storage runs in one of two channel modes, selected by `checkpoint_c
 
 **Wholesale state replacement uses a state-only mutation graph + `Overwrite`.** `update_state` values pass through channel reducers (`add_messages` merge in full, append in delta), so replacing reducer values requires `Overwrite` rather than an ordinary update. Full-mode rollback and context compaction replace `messages`; delta resume and delta rollback replace every materialized channel and reset current-head-only channels to their schema default (or `None`). These writes go through `build_state_mutation_graph(as_node, mode, state_schema)`, and `state_schema` MUST be the thread's effective schema (`graph_state_schema(assistant_graph)`), because the base-ThreadState fallback silently discards written channels contributed by custom `AgentMiddleware.state_schema`. Channels absent from a full-mode fork write inherit the parent's channel blobs, so middleware channels survive rollback/compaction (locked by `test_rollback_preserves_middleware_contributed_channels` and `test_compact_thread_context_preserves_middleware_contributed_channels`). The compiled mutation graph has one no-op node (entry = finish) whose checkpoint machinery (channels/versions/metadata) is identical to the agent graph's but schedules no pending tasks, so the restored/compacted head stays idle instead of re-triggering the agent. Never hand-write checkpoints via `checkpointer.aput` for this; raw writers elsewhere must preserve checkpoint parentage — severed ancestry breaks delta replay (see `runtime/runs/worker.py` writer parenting and `checkpoint_patches.py`).
 
-**Run rollback flow** (`runtime/runs/worker.py`): `_capture_rollback_point` materializes the complete pre-run state via the accessor and captures raw `pending_writes` via `aget_tuple` into an immutable `RollbackPoint` before the run starts — capture failure disables rollback (fail-closed), never restores partial state. In `full` mode, cancel-with-rollback forks from the pre-run checkpoint via the mutation graph and inherits non-message channels from that parent. In `delta` mode, forking is unsafe once the cancelled path has attached sibling writes to the pre-run checkpoint, so rollback replaces every captured channel on the current head, using `Overwrite` for reducers and schema defaults for current-head-only channels. Resume and rollback state rewrites copy only the selected/captured checkpoint's server-authored agent binding; missing or malformed bindings remain unbound. Both modes reattach only the captured pre-run pending writes to the restored checkpoint. Edit replay runs (`metadata.replay_kind="edit"`) also restore the pre-run checkpoint on failed, timed-out, or interrupted completion and publish the restored `values` snapshot to the stream before `end`, so clients do not remain on a transient edited branch when the replay did not produce a successful replacement.
+**Run rollback flow** (`runtime/runs/worker.py`): `_capture_rollback_point` materializes the complete pre-run state via the accessor and captures raw `pending_writes` via `aget_tuple` into an immutable `RollbackPoint` before the run starts — capture failure, including cancellation delivered before or during the capture await, disables rollback (fail-closed), never restores partial state, and never deletes the thread; only a capture that completes and finds no checkpoint may reset the thread to empty. In `full` mode, cancel-with-rollback forks from the pre-run checkpoint via the mutation graph and inherits non-message channels from that parent. In `delta` mode, forking is unsafe once the cancelled path has attached sibling writes to the pre-run checkpoint, so rollback replaces every captured channel on the current head, using `Overwrite` for reducers and schema defaults for current-head-only channels. Resume and rollback state rewrites copy only the selected/captured checkpoint's server-authored agent binding; missing or malformed bindings remain unbound. Both modes reattach only the captured pre-run pending writes to the restored checkpoint. Edit replay runs (`metadata.replay_kind="edit"`) also restore the pre-run checkpoint on failed, timed-out, or interrupted completion and publish the restored `values` snapshot to the stream before `end`, so clients do not remain on a transient edited branch when the replay did not produce a successful replacement.
 
 **Message sequence placement:** Keep backend and frontend message identity rules aligned. Details: `backend/docs/runtime-guidance-details.md`.
 
-**Human-input capture** (`runtime/journal.py`): track capture separately from
-the optional display summary. Image-only input has no text but must still stop
-the batch scan and later model calls from appending another human-input event.
-`tests/test_run_journal.py` covers callback and full/delta graph paths.
+**Thread message cursors:** `list_messages` applies both exclusive bounds before `limit`, paging forward whenever `after_seq` is supplied.
+
+**Journal capture**: Image-only input stops batch scans and later human-event
+capture despite an empty summary. AI summaries strip leading think sections
+before the 2000-character cap, preserving events, literal answer tags, and
+prior useful summaries. Tests: `test_run_journal*.py` (callbacks, full/delta).
+
+**Per-call LLM telemetry** (`runtime/journal.py`): `RunJournal` adds observation-only keys
+to `llm.ai.response` metadata and to `llm.error` metadata (previously empty): `langchain_run_id`,
+`langchain_parent_run_id`, `caller_category` (`lead_agent` / `middleware` / `subagent` /
+`fallback` / `other`), `provider`, `model`, `stop_reason`, `status`, provider-reported token counts,
+and the rendered request size measured at `on_chat_model_start` (`request_chars`,
+`request_message_chars`, `request_tools_chars`, `request_message_count`, `request_started_at`).
+Sizes count string-leaf characters without serializing the request (the callback runs inline on
+the event loop); there is no pre-call token count, so `input_tokens` is the provider's figure.
+Unavailable values are `None` or absent, never estimated. Every helper fails soft: a telemetry
+error is logged and must not change the call, the staged events' existing fields, or token
+accounting. The contract lists the optional keys in `contracts/run_event_stream_contract.json`.
+Retries are not distinguishable from first attempts.
 
 **LLM response callback coalescing** (`runtime/journal.py`): a provider may fire
 `on_llm_end` twice for one LangChain run id, first without usage (or with all token
@@ -41,7 +56,9 @@ It must not retain provider-owned message objects because a provider may mutate 
 reuse the same response for the usage replay. Usage metadata is deep-snapshotted,
 including nested token-detail mappings, before it enters a staged or buffered event.
 An adjacent same-id positive-usage replay may enrich only each corresponding staged
-event's metadata/content usage fields. Replay
+event's metadata/content usage fields, including the `input_tokens`, `output_tokens`,
+and `total_tokens` aliases derived from the accepted usage snapshot. Request size,
+identity, caller, stop reason, and status retain their canonical values. Replay
 generation-count differences never add, remove, or replace canonical messages. The next
 unrelated event, an effective buffer size (committed plus pending events) reaching the
 flush threshold, or an explicit flush commits the staged unit and updates the message
@@ -53,7 +70,14 @@ from `on_llm_end` before inspecting the response or touching any run state.
 **Skill history:** `record_skill_usage` saves lead-run snapshots on terminal
 answers for paginated history. See `docs/skill-usage-ui.md`.
 
-**Run delivery receipts:** Journal artifact evidence and terminal status must finalize before a satisfied goal is cleared. Goal cleanup uses a durable checkpoint-write reservation; delivery failure retains the goal without another continuation. Details: `backend/docs/runtime-guidance-details.md`.
+**Run delivery receipts:** Journal artifact evidence and terminal status must finalize before an ordinary satisfied goal is cleared. That cleanup uses a durable checkpoint-write reservation; delivery failure retains the ordinary goal without another continuation. Only that clear passes `outcome` to `write_thread_goal`, which removes `goal_outcome` on every other goal write. The scheduled-only exception is described below. Details: `backend/docs/runtime-guidance-details.md`.
+
+**Deferred terminal commit:** With an event store, the worker stages its terminal
+status locally and commits it only after finalization's receipt and duration
+writes. `RunRecord.terminal_commit_pending` keeps `_renew_leases()` renewing that
+still-active row until the commit is attempted; a renewal rejected by the worker's
+own commit is confirmed by re-reading the row, while a peer claim fences the run.
+Never select runs for renewal by local status alone.
 
 **Deferred-tool promotion event deduplication** (`runtime/journal.py`): one
 `RunJournal` owns the lead graph's run-scoped atomic promotion claim. Parallel
@@ -76,7 +100,10 @@ producers (currently slash-skill activation via `asyncio.to_thread`) schedule
 journal mutation directly onto its owning event loop; they never mutate or
 flush `RunJournal._buffer` from the worker thread. The task-tool subagent proxy
 rejects a loop that differs from the journal owner, so its close fence always
-drains the only scheduling hop.
+drains the only scheduling hop. `flush()` yields to the loop once before
+draining: since Python 3.13 an awaited executor future can complete without a
+loop iteration, so a hop queued by a worker that already returned may still be
+pending when flush starts.
 The persisted projection accepts
 only framework-defined error/action values and strict booleans (using null for
 invalid values) from the producer-supplied tool stamp; tool content, args,
@@ -90,6 +117,19 @@ run reads, and sequence recovery split on physical newlines. Do not use
 part of the record. Preserve existing UTF-8 files and the writer format.
 `tests/test_jsonl_event_store_unicode.py` covers Unicode values, reopening,
 idempotent writes, LF/CRLF, blank lines, and malformed records.
+Reads and deletes treat a run ID writes reject as an unknown run (routes pass
+URL IDs through); writes still raise.
+
+**JSONL sequence watermark:** before deleting a non-empty run, save the thread's
+allocation floor with atomic replacement of `runs/.seq-watermark`, off-loop under
+the existing mutation fence. Recovery takes the maximum of that floor and surviving
+run files, including legacy directories without a watermark. Copy the deleted run's
+permission bits onto the temporary watermark before publication, preserving both
+shared-read and restrictive modes. Failed permission setup or publication must leave
+the run intact; unreadable/corrupt watermarks fail closed. Complete
+thread deletion removes the watermark only after deleting all run files, including
+when no events remain. This does not add multi-process JSONL support. Coverage:
+`tests/test_jsonl_event_store_seq_watermark.py` and the mutation cancellation suite.
 
 **Targeted run-event attribution** (`runtime/events/store/`):
 `RunEventStore.find_latest_ai_message_run_ids()` has a complete-or-error
@@ -105,6 +145,13 @@ timeout: releasing ownership while the worker can still read files would let a
 writer enter the supposedly stable snapshot. The default and JSONL paths share the public
 `normalize_message_ids()` and `match_ai_message_run_id()` helpers from
 `events/store/base.py`. Database owner filtering is inherited on every page.
+
+**Run-event read identity**: `list_messages`, `list_events` and
+`list_messages_by_run` accept `user_id` on every backend (DB filters;
+memory/JSONL accept it for parity). `start_run` stamps rows with the raw trusted
+owner, but `AUTO` resolves to the internal user's `make_safe_user_id` form, so
+Gateway thread/run reads (including run-row lookups) must pass
+`_run_scope_user_id()` explicitly.
 
 **Event-store mutation fence** (`runtime/events/store/`): every thread mutation —
 `put`, `put_batch`, `put_if_absent`, `delete_by_thread`, `delete_by_run` — shares
@@ -124,6 +171,12 @@ checkpoint-write admission boundary must repeat the complete audit after
 admission; a pre-admission exact hit can be superseded by a later event just as
 a pre-admission miss can become an exact hit.
 
+**DB run-event sequence watermark:** Run deletion retains `run_event_thread_seq`.
+Thread deletion removes it in the same mutation-fenced transaction only when no
+events remain for the thread, including owner-scoped and zero-row deletions.
+Check all owners and categories; surviving rows retain the allocation floor.
+`tests/test_run_event_store.py` pins cleanup, recreation and cursor visibility.
+
 **Changed-run discovery:** Use the durable `(change_seq, run_id)` cursor and repeat history audits after admission. Details: `backend/docs/runtime-guidance-details.md`.
 
 **Terminal run cleanup:** Close streams, journals, and graph references even on cancellation. Details: `backend/docs/runtime-guidance-details.md`.
@@ -139,6 +192,8 @@ a pre-admission miss can become an exact hit.
 - `agents/thread_state.py` — `ThreadState`/`DeltaThreadState`, `delta_messages_field` / `DELTA_MESSAGES_FIELD` (`DeltaChannel` at the configured `snapshot_frequency`, default 10), schema adaptation helpers
 - `runtime/context_compaction.py` — compaction via accessor + mutation graph (reference consumer). Runs stamp their effective agent into server-owned checkpoint metadata; manual compaction uses that binding—not request `agent_name`—for memory policy and bucket. Missing/invalid legacy bindings and unreadable agent configs fail closed by skipping the optional flush while compaction may continue with the default model; a missing pre-binding checkpoint emits a warning so the skipped write is observable.
 - `runtime/checkpoint_cache/` + `runtime/checkpointer/cached_saver.py` — delta-mode checkpoint history cache; checkpoint state reads MUST go through `CheckpointStateAccessor`, and the checkpointer may be a `CachedHistorySaver` wrapper — never rely on concrete saver types
+- `runtime/checkpointer/thread_spans.py` — thread enumeration for `DeerFlowClient.list_threads`, ordered by `checkpoint_id` (goal writes keep the old `ts`). SQLite/Postgres savers (unwrapped from `CachedHistorySaver`) use the primary-key index; any other saver walks `list(None)`. Saver type selects speed, never correctness
+- `runtime/goal.py` `_call_checkpointer_method` — tries the async saver method and falls back to the sync one only on `NotImplementedError`: every saver defines the async methods, but the sync TUI/embedded `SqliteSaver`/`PostgresSaver` (also behind `CachedHistorySaver`) raise from them. Sync writes stay in `await_drained`
 - Tests: `tests/test_checkpoint_mode.py` (freeze/detect/gate), `tests/test_checkpoint_state.py` (accessor/mutation graph), `tests/test_delta_channel_checkpointers.py` (saver parity), `tests/test_threads_checkpoint_mode.py`, `tests/test_gateway_checkpoint_mode.py` (dual-mode e2e parity), `tests/test_context_compaction.py` (mutation-graph write, no scheduling), `tests/test_run_worker_rollback.py`, `tests/test_cached_history_saver.py` + `tests/test_cached_history_saver_integration.py` (history cache)
 
 **Checkpoint benchmarks:** Paired full/delta cases and production-shaped runs are documented in `backend/docs/runtime-guidance-details.md`.
@@ -150,6 +205,65 @@ rejects caller-supplied `__conversation_reader` values in both context carriers,
 installs only the host value, and releases it during terminal cleanup. The
 callback is not checkpoint state and must never be recovered from an earlier
 run or serialized into run kwargs.
+
+## Scheduled run capabilities and goal outcomes
+
+`RunContext.scheduler_capability` is another per-run host capability. The worker
+installs it under `__scheduler_capability`, rejects caller copies in both context
+carriers, and releases it during terminal cleanup. `scheduled_task_runtime` is a
+separate private occurrence snapshot: its owner, task ID, occurrence ID, and goal
+objective must match the admitted record before the worker may install a goal.
+Run metadata and hidden conversation-reference messages are display data and
+never confer either capability. An interactive grant manages the owner's tasks
+created in its thread plus tasks that ran an occurrence there (re-checked per
+call); a scheduled grant only stops its own occurrence's task. The Gateway
+grants neither while its scheduler poller is stopped. The scheduled prompt's
+`deerflow_scheduled_origin` message metadata is server-owned display data.
+
+A scheduled goal is installed before the first turn, only in a fresh thread,
+using the existing goal writer and default continuation budgets. Terminal
+cleanup clears only that occurrence's goal instance, through the ordinary
+goal lock and expected-checkpoint guard while its own durable run slot is still
+active, before terminal status commits. A process-local scheduled cleanup barrier
+defers local cancel persistence and refuses premature replacement admissions;
+lease renewal continues through this barrier. This scheduled-only exception closes
+the handoff race where a peer could inherit the occurrence's goal. No ORM writer
+transaction spans a checkpointer write. Ordinary user goals retain terminal-first
+completion and delivery cleanup.
+Accepted cancellation during cleanup is applied again after the saver returns,
+including rollback, before terminal persistence; later requests arbitrate through
+the existing durable `cancel_action` compare-and-set.
+
+Scheduled goal `created_at` is the admitted run's timestamp, canonicalized to UTC
+with six microsecond digits. Recovery and ordinary-worker preflight match only an
+exact owner/thread/timestamp/normalized-objective terminal scheduled run, using
+`RunStore.list_by_thread_created_at` without bounded history pagination. Ambiguous
+or unavailable identity fails closed; source metadata must remain server-stamped
+at Gateway admission. `clear_recovered_scheduled_goal` uses the existing idle-thread
+checkpoint-write reservation; a busy thread defers to the next worker's preflight.
+Preflight source-resolution errors stop before graph execution with an explicit
+recovery error and preserve the goal; do not copy idle recovery's catch-and-defer
+behavior into an executing run. Cancellation continues to propagate unchanged.
+Newer user goals and ownership/lease loss always win. Failed cleanup remains
+recoverable through this durable instance tuple without new GoalState fields.
+
+`RunRecord.goal_verdict` / nullable `runs.goal_verdict` preserve the final
+evaluator outcome, including strict boolean `relied_on_assumption`. Persist it
+in the same terminal-status update, including durable cancellation arbitration,
+so recovery need not inspect mutable thread state. All non-interactive policies
+allow disclosed, low-risk reversible assumptions only with achievement evidence;
+their evaluator responses must explicitly provide the assumption boolean.
+
+Goal evaluator usage crosses a JSON-safe sink into
+`RunJournal.record_external_llm_usage_records` before response parsing or observer
+notification can fail. Critic tokens/cache reads and distinct calls belong to
+`middleware:goal_evaluator`; critic responses never enter visible history and
+graph journal callbacks are withheld to prevent double counting. External
+`count_call`/`usage_missing` flags default off for existing subagent consumers;
+missing critic usage adds `missing_usage_calls` to the model bucket, making the
+run's full cost unpriced instead of reporting a partial total as complete.
+Accounting includes critic usage, while the graph token-budget middleware does
+not gate standalone critic calls. A graph token limit is not a strict billing cap.
 
 ## JSONL mutation cancellation
 

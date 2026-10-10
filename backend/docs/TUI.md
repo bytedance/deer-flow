@@ -36,6 +36,13 @@ Launch modes:
 If no TTY is available and no headless flag is given, `deerflow` prints guidance
 instead of hanging.
 
+Provider failures (for example an expired credential) usually do not raise: the
+LLM error middleware turns them into a final AI message flagged
+`deerflow_error_fallback`. Headless runs treat that as a failure too — `--print`
+still writes the fallback text to stdout, then prints
+`Error: LLM request failed (error_type=…, error_reason=…)` to stderr; `--json`
+appends the same terminal `{"type": "error"}` record. Both exit `1`.
+
 Transparent rendering is opt-in; the solid DeerFlow palette remains the default.
 The transparent mode uses Textual's `ansi_default` background for the main
 screen, header, transcript, status, palette, composer, and modal surfaces while
@@ -61,7 +68,9 @@ for trusted embedded CLI runs.
   smooth on long threads.
 - **Status line** — run state + animated spinner, model, thread title, token
   usage, and an `esc interrupt` hint while a run is active.
-- **Composer** — rounded input box. `/` opens the command palette.
+- **Composer** — rounded multiline input box. `/` opens the command palette.
+  Pasted code, stack traces, and multi-paragraph prompts retain their line
+  breaks and indentation; `Enter` sends the complete document.
 
 ### Keys
 
@@ -69,12 +78,21 @@ for trusted embedded CLI runs.
 |---|---|
 | `Enter` | Send message / accept palette selection |
 | `/` | Open the slash-command palette |
-| `↑` / `↓` | Palette navigation, or input history when the palette is closed |
+| `↑` / `↓` | Palette navigation; otherwise move inside multiline input, then use history at the first/last row (wrapped rows included) |
 | `PageUp` / `PageDown` | Scroll the transcript without moving focus from the composer |
 | `Tab` | Complete the highlighted command (adds a trailing space) |
 | `Esc` | Close the palette / overlay |
 | `Ctrl+C` | Interrupt the active run, or quit when idle |
 | `Ctrl+L` | Redraw · `Ctrl+U` clear composer |
+
+At the last input row, `↓` preserves the current draft unless you are browsing
+history. After `↑` recalls history, `↓` moves forward and restores the saved
+draft when it passes the newest entry.
+
+At the first input row, `↑` leaves the draft, cursor, and undo history untouched
+when no input history is available.
+Recalling an entry or saved draft identical to the current input also preserves
+the cursor and undo history.
 
 Transcript updates follow new output while the view is at the bottom. After you
 scroll upward, streaming refreshes preserve the reading position until you
@@ -82,12 +100,27 @@ return to the bottom with `PageDown`.
 
 ### Slash commands
 
-`/help` `/new` `/clear` `/goal` `/threads` (`/switch`) `/model` `/skills` `/tools`
+`/help` `/new` `/clear` `/goal` `/resume` `/threads` (`/switch`) `/model` `/skills` `/tools`
 `/mcp` `/memory` `/uploads` `/usage` `/config` `/quit`, plus
 `/<skill-name> task` to activate any enabled skill for the current turn (same
 semantics as elsewhere in DeerFlow). `/model` and `/threads` open modal pickers.
 
 `/clear` removes the current transcript rows from the terminal display only; it keeps the active thread and persisted conversation intact. During an active run, `/new` and `/clear` ask you to wait for the run to finish instead of resetting in-flight display state.
+
+`/resume <id-or-title>` switches conversations, while `/resume` without an argument
+opens the thread picker. During an active run, `/resume`, `/threads`, and `/switch`
+ask you to wait instead of switching away from in-flight output. An invalid
+`/resume` reference displays an error and leaves the current conversation intact.
+After an interrupt, late stream actions from the previous run are discarded when
+they reach the UI, even if the next prompt uses the same conversation. Its final
+usage, title, and completion event cannot replace those of the new run.
+An interrupted run cannot be stopped mid-step, so a tool call already in progress
+(a long shell command, for example) finishes first. Until it does, sending to the
+same conversation shows a notice instead of starting a second run there — two runs
+on one thread would overwrite each other's history. Send again once it finishes,
+or use `/new` or `/resume` to continue in another conversation meanwhile.
+If a run cannot start, the TUI reports an error and returns to idle so you can retry.
+
 Use `/goal <condition>` to set the active thread goal, `/goal` to show it, and
 `/goal clear` to clear it.
 
@@ -108,13 +141,14 @@ render.py       Rich renderers for header / transcript / status / palette (pure)
 theme.py        palette + symbols
 app.py          Textual App: composes widgets, drives runs on a worker thread,
                 marshals actions back to the UI thread, renders ViewState
+widgets/        Textual widgets (the multiline composer)
 persistence.py  writes threads_meta so sessions appear in the Web UI (below)
 ```
 
 `DeerFlowClient.stream()` is a **synchronous** generator, so the app runs it on a
 Textual worker *thread* and marshals each yielded action back to the UI thread
-via `call_from_thread`. The pure layers (everything except `app.py`) have no
-Textual dependency and are unit-tested directly with synthetic `StreamEvent`s.
+via `call_from_thread`. The pure layers (everything except `app.py` and `widgets/`)
+have no Textual dependency and are unit-tested directly with synthetic `StreamEvent`s.
 
 ## Web UI visibility (shared persistence)
 

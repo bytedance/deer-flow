@@ -1,10 +1,17 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import { afterEach, describe, expect, it, rs } from "@rstest/core";
-import { cleanup, render } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from "@testing-library/react";
 
 import { MessageListItem } from "@/components/workspace/messages/message-list-item";
 import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
+import { zhCN } from "@/core/i18n/locales/zh-CN";
 import * as messageUtils from "@/core/messages/utils";
 
 // The unit under test is the row's copy-data memo, not message rendering.
@@ -114,5 +121,117 @@ describe("MessageListItem copy-data derivation guard", () => {
     renderRow(message, { showCopyButton: true, isLoading: true });
 
     expect(copyDataCalls.mock.calls.length).toBeGreaterThan(0);
+  });
+});
+
+describe("MessageListItem conversation reference chip", () => {
+  it.each([
+    ["en-US", enUS, "Untitled"],
+    ["zh-CN", zhCN, "未命名"],
+  ] as const)(
+    "names an untitled referenced chat in the UI language (%s)",
+    (locale, t, expected) => {
+      const message = {
+        id: "human-ref",
+        type: "human",
+        content: "compare these",
+        additional_kwargs: {
+          conversation_references: [{ thread_id: "thread-2", title: "" }],
+        },
+      } as unknown as Message;
+      const view = render(
+        <I18nContext.Provider value={{ locale, setLocale: () => undefined, t }}>
+          <MessageListItem
+            message={message}
+            threadId="thread-1"
+            showCopyButton={false}
+            isLoading={false}
+          />
+        </I18nContext.Provider>,
+      );
+      const chips = view.getByTestId("message-conversation-references");
+      expect(chips.textContent).toBe(expected);
+    },
+  );
+});
+
+describe("MessageListItem edit lock while a goal is set", () => {
+  function renderHumanRow(
+    flags: { canEdit?: boolean; editLockedByGoal?: boolean },
+    locale: "en-US" | "zh-CN" = "en-US",
+  ) {
+    return render(
+      <I18nContext.Provider
+        value={{
+          locale,
+          setLocale: () => undefined,
+          t: locale === "en-US" ? enUS : zhCN,
+        }}
+      >
+        <MessageListItem
+          message={makeMessage("human")}
+          threadId="thread-1"
+          showCopyButton
+          onEditAndRegenerate={async () => true}
+          {...flags}
+        />
+      </I18nContext.Provider>,
+    );
+  }
+
+  it("shows a locked pencil that explains itself and opens no editor", async () => {
+    const view = renderHumanRow({ editLockedByGoal: true });
+    const pencil = screen.getByRole("button", { name: "Edit and rerun" });
+    expect(pencil.getAttribute("aria-disabled")).toBe("true");
+    // Only the icon is dimmed, so the keyboard focus ring keeps full contrast.
+    expect(pencil.className.split(" ")).not.toContain(
+      "aria-disabled:opacity-50",
+    );
+    expect(pencil.querySelector("svg")?.getAttribute("class")).toContain(
+      "opacity-50",
+    );
+    const description = document.getElementById(
+      pencil.getAttribute("aria-describedby")!,
+    );
+    expect(description?.textContent).toBe(
+      "Editing is off while a goal is set. Run /goal clear to edit.",
+    );
+
+    fireEvent.click(pencil);
+    expect(view.container.querySelector("textarea")).toBeNull();
+
+    // The tooltip opens on keyboard focus, and the toolbar shows while focus
+    // is inside it, so the locked pencil is visible to keyboard users.
+    await act(async () => {
+      pencil.focus();
+    });
+    expect(
+      (await screen.findAllByText(enUS.inputBox.goalBar.editLocked)).length,
+    ).toBeGreaterThan(1);
+    expect(screen.getByTestId("message-toolbar").className).toContain(
+      "focus-within:opacity-100",
+    );
+  });
+
+  it("explains the lock in zh-CN", () => {
+    renderHumanRow({ editLockedByGoal: true }, "zh-CN");
+    const pencil = screen.getByRole("button", { name: "编辑并重新运行" });
+    expect(
+      document.getElementById(pencil.getAttribute("aria-describedby")!)
+        ?.textContent,
+    ).toBe("设置了目标时不能编辑，先运行 /goal clear 清除目标。");
+  });
+
+  it("keeps the normal pencil when edit is allowed", () => {
+    const view = renderHumanRow({ canEdit: true });
+    const pencil = screen.getByRole("button", { name: "Edit and rerun" });
+    expect(pencil.hasAttribute("aria-disabled")).toBe(false);
+    fireEvent.click(pencil);
+    expect(view.container.querySelector("textarea")).not.toBeNull();
+  });
+
+  it("renders no pencil when neither flag is set", () => {
+    renderHumanRow({});
+    expect(screen.queryByRole("button", { name: "Edit and rerun" })).toBeNull();
   });
 });

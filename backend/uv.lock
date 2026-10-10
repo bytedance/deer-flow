@@ -803,7 +803,7 @@ wheels = [
 
 [[package]]
 name = "deer-flow"
-version = "2.2.0dev"
+version = "2.2.0.dev0"
 source = { virtual = "." }
 dependencies = [
     { name = "bcrypt" },
@@ -824,6 +824,7 @@ dependencies = [
     { name = "sse-starlette" },
     { name = "starlette" },
     { name = "uvicorn", extra = ["standard"] },
+    { name = "websockets" },
     { name = "wecom-aibot-python-sdk" },
 ]
 
@@ -855,6 +856,7 @@ redis = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "anthropic" },
     { name = "blockbuster" },
     { name = "hypothesis" },
     { name = "jsonschema" },
@@ -896,12 +898,14 @@ requires-dist = [
     { name = "sse-starlette", specifier = ">=2.1.0" },
     { name = "starlette", specifier = ">=1.3.1,<2" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
+    { name = "websockets", specifier = ">=16.0,<17" },
     { name = "wecom-aibot-python-sdk", specifier = ">=0.1.6" },
 ]
 provides-extras = ["postgres", "redis", "discord", "buzz", "monocle", "ollama", "browser", "memory-zh"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "anthropic", specifier = ">=0.97.0" },
     { name = "blockbuster", specifier = ">=1.5.26,<1.6" },
     { name = "hypothesis", specifier = ">=6.100,<7" },
     { name = "jsonschema", specifier = ">=4.26.0" },
@@ -918,7 +922,7 @@ extensions = []
 
 [[package]]
 name = "deerflow-extension-api"
-version = "0.2.4"
+version = "0.2.5"
 source = { editable = "packages/extension-api" }
 
 [[package]]
@@ -1064,7 +1068,7 @@ requires-dist = [
     { name = "redis", marker = "extra == 'redis'", specifier = ">=5.0.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0,<3.0" },
     { name = "tavily-python", specifier = ">=0.7.17" },
-    { name = "tenki", marker = "extra == 'tenki'", specifier = ">=1.0.0" },
+    { name = "tenki", marker = "extra == 'tenki'", specifier = ">=1.4.0" },
     { name = "textual", marker = "extra == 'tui'", specifier = ">=0.80" },
     { name = "tiktoken", specifier = ">=0.8.0" },
     { name = "tzdata", specifier = ">=2025.1" },
@@ -2322,7 +2326,7 @@ wheels = [
 
 [[package]]
 name = "langgraph-sdk"
-version = "0.4.2"
+version = "0.4.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
@@ -2331,9 +2335,9 @@ dependencies = [
     { name = "orjson" },
     { name = "websockets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b4/2b/bd8ac26d4e97f6df88ef05ce5b6a38945a3903e1025d926f4752aa88aa97/langgraph_sdk-0.4.2.tar.gz", hash = "sha256:b88f0f5f6328ac0680d6790614a905b2bcfa257f2276dba4e38f0e86db0aa738", size = 348327, upload-time = "2026-06-01T17:51:19.856Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/3f/ae/91446c1fffa04a2dc1f81afbfb5bfff3590452891a72bd9098a656ab2657/langgraph_sdk-0.4.4.tar.gz", hash = "sha256:4e651ffa09de695681579396375377bdde23bedbc8e35b070e615cbd5af7da8b", size = 345789, upload-time = "2026-08-27T21:25:22.593Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a0/05/aac507337cceae773c2cc9ab91eb6301963af7aeeb55b4217a00e15aff17/langgraph_sdk-0.4.2-py3-none-any.whl", hash = "sha256:75fa5096c1177ce39c847096a8fe3745ffd480ddb412995f836e9f5f884c43dd", size = 160521, upload-time = "2026-06-01T17:51:18.849Z" },
+    { url = "https://files.pythonhosted.org/packages/43/d5/2ad7f3a835c6fcebf58b6669552536ecd52d2dfe4cf49c6c36648fd83572/langgraph_sdk-0.4.4-py3-none-any.whl", hash = "sha256:39afe416c91742925e6f8a93715f566d499b36e1b636b804a4ffe3190e4f4e64", size = 162270, upload-time = "2026-08-27T21:25:21.072Z" },
 ]
 
 [[package]]
@@ -2491,14 +2495,14 @@ wheels = [
 
 [[package]]
 name = "mako"
-version = "1.3.12"
+version = "1.4.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "markupsafe" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/00/62/791b31e69ae182791ec67f04850f2f062716bbd205483d63a215f3e062d3/mako-1.3.12.tar.gz", hash = "sha256:9f778e93289bd410bb35daadeb4fc66d95a746f0b75777b942088b7fd7af550a", size = 400219, upload-time = "2026-04-28T19:01:08.512Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/05/7f/0b891a82379ffd96d2d8cc6d435fb1055cdaed52829287f81d2a43fd71cb/mako-1.4.2.tar.gz", hash = "sha256:7227a060ee3af55a493af61d73d6beef13044b81dba9586736c13945f09464ce", size = 412231, upload-time = "2026-09-22T20:40:55.06Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/bc/b1/a0ec7a5a9db730a08daef1fdfb8090435b82465abbf758a596f0ea88727e/mako-1.3.12-py3-none-any.whl", hash = "sha256:8f61569480282dbf557145ce441e4ba888be453c30989f879f0d652e39f53ea9", size = 78521, upload-time = "2026-04-28T19:01:10.393Z" },
+    { url = "https://files.pythonhosted.org/packages/f0/bb/0e4c30a18858adebc75496ea8a8c3fb65cbf4b36ea1c5028ed8a0a5fa196/mako-1.4.2-py3-none-any.whl", hash = "sha256:e70a2a4308952b33a21208bfd6725da79fae5a8c224578f8cfdeb60e5ace03df", size = 80163, upload-time = "2026-09-22T20:40:56.423Z" },
 ]
 
 [[package]]
@@ -3856,11 +3860,11 @@ wheels = [
 
 [[package]]
 name = "pyjwt"
-version = "2.13.0"
+version = "2.15.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/3b/81/58d0ac84e1ef3a3843791d6954d94c0b33d526c75eeb1efbce9d0a4c4077/pyjwt-2.13.0.tar.gz", hash = "sha256:41571c89ca91598c79e8ef18a2d07367d4810fbbd6f637794879baf1b7703423", size = 107515, upload-time = "2026-05-21T19:54:36.618Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/02/a5/5197bfd06417837ac079921c66fa6393f1dea3557272a263cebfef69e432/pyjwt-2.15.0.tar.gz", hash = "sha256:b11c5f9791d7bf51c2b39a81ed669f6b2dbbd669df2942f6c60167e9e3d1abe4", size = 120513, upload-time = "2026-09-23T16:56:00.689Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a3/5e/ecf12fdb62546d64385c158514e9b2b671f7832108ef2ecd2020ce0af2d1/pyjwt-2.13.0-py3-none-any.whl", hash = "sha256:66adcc2aff09b3f1bbd95fc1e1577df8ac8723c978552fd43304c8a290ac5728", size = 31274, upload-time = "2026-05-21T19:54:35.362Z" },
+    { url = "https://files.pythonhosted.org/packages/e8/55/40e45bf052ee8ee12a4dfd785519660f8effa7b065442b91646ec6828619/pyjwt-2.15.0-py3-none-any.whl", hash = "sha256:7a3742debf6b879e912dbb9819ceec1594be812452b78c5f2e2dfc56564954f8", size = 33680, upload-time = "2026-09-23T16:55:59.241Z" },
 ]
 
 [package.optional-dependencies]
@@ -4653,16 +4657,16 @@ wheels = [
 
 [[package]]
 name = "tenki"
-version = "1.0.2"
+version = "1.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "grpcio" },
     { name = "protobuf" },
     { name = "websocket-client" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/68/d9/1669b9ffe9b729a854985918ec84f39abf1ba032764a00bd105459e7e97d/tenki-1.0.2.tar.gz", hash = "sha256:131947e54758674f814a66699d3b65518adc9f093a62ea6dddbd4394cbc771c4", size = 240024, upload-time = "2026-08-27T19:40:32.85Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/62/64/232ea63ec1473c8ee8050881cb547e4176ea63fe1c1591a3bf19e111e379/tenki-1.4.0.tar.gz", hash = "sha256:eec11071341c2da5c439ad4316896c04bf29abe92e8ab4fd229011dd5499930e", size = 288846, upload-time = "2026-09-30T04:51:36.806Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/98/ef/06486b129744c3f7293f9b1f1ea60055104db4d4ad03483c6857c57c0bbb/tenki-1.0.2-py3-none-any.whl", hash = "sha256:6259651ed243e071e88d789fa86a7c570954ec5f0372a40bcccc2d4b9ae2e342", size = 164788, upload-time = "2026-08-27T19:40:30.915Z" },
+    { url = "https://files.pythonhosted.org/packages/28/5b/c435195220f11ee46cb0a585f4abc4770f69a32626211523acb9b1a43798/tenki-1.4.0-py3-none-any.whl", hash = "sha256:8a2c4da58d807313d6f4da7d0bc0aa7c3db4001bbd751f84aac0130437624b2f", size = 198601, upload-time = "2026-09-30T04:51:35.24Z" },
 ]
 
 [[package]]
@@ -4791,11 +4795,11 @@ wheels = [
 
 [[package]]
 name = "urllib3"
-version = "2.7.0"
+version = "2.8.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/53/0c/06f8b233b8fd13b9e5ee11424ef85419ba0d8ba0b3138bf360be2ff56953/urllib3-2.7.0.tar.gz", hash = "sha256:231e0ec3b63ceb14667c67be60f2f2c40a518cb38b03af60abc813da26505f4c", size = 433602, upload-time = "2026-05-07T16:13:18.596Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e3/05/b17359e1cefb4f909b5e40b1b90a496d987258916dbbf88e842c729f510e/urllib3-2.8.0.tar.gz", hash = "sha256:63bf2ead4c879426ebf22ef2a781eeb4aa3b4ae798a0435506f8687fd5bb9b63", size = 458972, upload-time = "2026-09-15T19:29:36.253Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7f/3e/5db95bcf282c52709639744ca2a8b149baccf648e39c8cc87553df9eae0c/urllib3-2.7.0-py3-none-any.whl", hash = "sha256:9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897", size = 131087, upload-time = "2026-05-07T16:13:17.151Z" },
+    { url = "https://files.pythonhosted.org/packages/92/9d/c4e665119135114480843e7ab388fa94d8480650450e6f8e26b70d323a4c/urllib3-2.8.0-py3-none-any.whl", hash = "sha256:0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3", size = 135717, upload-time = "2026-09-15T19:29:34.577Z" },
 ]
 
 [[package]]
