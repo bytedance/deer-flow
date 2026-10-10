@@ -692,6 +692,14 @@ SEARCH_PROVIDERS: list[SearchProvider] = [
         extra_config={"max_results": 5},
     ),
     SearchProvider(
+        name="webz",
+        display_name="Webz.io News Search",
+        description="Recent news search (not general web search), API key required",
+        use="deerflow.community.webz.tools:web_search_tool",
+        env_var="WEBZ_API_KEY",
+        extra_config={"max_results": 5},
+    ),
+    SearchProvider(
         name="youcom",
         display_name="You.com",
         description="Own index with extracted page snippets, free tier needs no key",

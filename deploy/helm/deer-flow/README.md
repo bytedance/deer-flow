@@ -135,7 +135,7 @@ they resolve from the `secrets` map):
 
 ```yaml
 config: |
-  config_version: 57
+  config_version: 58
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI
@@ -242,7 +242,8 @@ curl http://localhost:2026/health/ready    # readiness: database, checkpointer, 
 Postgres or the Redis stream bridge is unreachable (`stream_bridge: unreachable`),
 so those pods leave the Service instead of accepting runs they cannot stream.
 The `provisioner` field reports the provisioner's own `/health` but never
-changes the status code: every gateway pod shares that one provisioner.
+changes the status code: every gateway pod reaches the same `provisioner`
+Service, whichever replica answers.
 
 Hit the Ingress host (map it in `/etc/hosts` for local clusters) to load the UI.
 
@@ -318,9 +319,33 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   override `config:` — a multi-instance gateway that leaves the index under
   the memory root logs a warning at startup. The index is rebuilt from the
   Markdown facts on every Pod start, so losing the emptyDir loses nothing.
-  A `PodDisruptionBudget` (`minAvailable: 1`) is rendered automatically for a
-  multi-instance gateway (same rule), and the rollout strategy is
-  surge-then-drain (`maxSurge: 1`, `maxUnavailable: 0`).
+  A `PodDisruptionBudget` (`minAvailable: 1`; an integer or a percentage
+  string such as `"50%"`, while `0` fails the render -- disable the budget
+  instead) is rendered automatically for a multi-instance gateway (same rule),
+  and the rollout strategy is surge-then-drain (`maxSurge: 1`,
+  `maxUnavailable: 0`). The sandbox
+  provisioner is not on the single-instance list: it scales independently
+  (next item).
+- **Provisioner replicas.** `provisioner.replicas` (default 1) scales the
+  sandbox provisioner. It keeps no state of its own between requests: the
+  sandbox Pods and Services it creates carry the labels
+  (`app=deer-flow-sandbox`, `sandbox-id`) that are its only registry; create,
+  discover, list and destroy all read them back from the API server; create
+  tolerates the `409 AlreadyExists` a concurrent creator on another replica
+  produces (several gateway Pods already run that race against one
+  provisioner) and destroy tolerates `404`; and NodePorts are allocated by the
+  API server, not the provisioner. The `provisioner` Service therefore spreads
+  the gateway's calls over any number of replicas without affinity. At 1
+  replica it is the last single point of failure in a multi-replica gateway
+  deployment: while its Pod restarts or its node drains no sandbox can be
+  created or discovered (running sandboxes are unaffected; the gateway talks
+  to them directly). A `PodDisruptionBudget` (`provisioner.podDisruptionBudget`,
+  `minAvailable: 1`) is rendered only while `provisioner.replicas > 1` -- on a
+  single replica it would block every node drain -- and the rollout strategy
+  is surge-then-drain (`maxSurge: 1`, `maxUnavailable: 0`), both mirroring
+  the gateway. There is no `multiInstance` switch for the provisioner because
+  nothing else in the chart renders differently per replica count; scaling it
+  with `kubectl scale` only leaves it without the budget.
 - **App secret.** `<release>-app` holds `BETTER_AUTH_SECRET`,
   `DEER_FLOW_INTERNAL_AUTH_TOKEN`, `AUTH_JWT_SECRET` (the session-cookie
   signing key) and `PROVISIONER_API_KEY` (the key the gateway presents to the
@@ -353,6 +378,25 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   ```bash
   JWT=$(kubectl -n deer-flow exec deploy/deer-flow-gateway -- cat /app/backend/.deer-flow/.jwt_secret)
   kubectl -n deer-flow patch secret deer-flow-app -p "{\"stringData\":{\"AUTH_JWT_SECRET\":\"$JWT\"}}"
+  ```
+- **Credentials key.** The app Secret also holds `DEER_FLOW_CREDENTIALS_KEY`,
+  the Fernet key the gateway encrypts stored credentials with (per-connection
+  IM channel credentials today). The chart generates it once (32 random bytes,
+  urlsafe base64) and preserves it across upgrades via `lookup`; every gateway
+  Pod reads the same value. **Back it up**: deleting the Secret or the release
+  generates a new key, and credentials stored under the old one become
+  unreadable (they are treated as missing, never as an error). To rotate,
+  prepend a new key — `new,old` — and keep the old one listed until stored
+  values have been rewritten. An `existingAppSecret` should carry it; the env
+  entry is optional, so without it a single Pod falls back to an auto-generated
+  `.credentials_key` on the home volume, while a multi-instance gateway with
+  `channel_connections.enabled` refuses to start. If you add the key to an
+  `existingAppSecret` later, copy that file's value so stored credentials stay
+  readable:
+
+  ```bash
+  KEY=$(kubectl -n deer-flow exec deploy/deer-flow-gateway -- cat /app/backend/.deer-flow/.credentials_key)
+  kubectl -n deer-flow patch secret my-app-secret -p "{\"stringData\":{\"DEER_FLOW_CREDENTIALS_KEY\":\"$KEY\"}}"
   ```
 - **Scheduled task recovery.** If a deployment explicitly enables
   `scheduler.multi_instance: true`, it must use shared Postgres,
@@ -468,7 +512,7 @@ but not file mode — so a PVC written by an earlier **root** run (e.g. a cluste
 that ran the gateway as root before enabling this hardening, or a backup restore
 of root-owned files) will keep files like `.jwt_secret` at `0600 root:root`. The
 non-root gateway (uid 1000) then can't read them and crashes on the first auth
-request with `RuntimeError: Failed to read JWT secret from .../​.jwt_secret`.
+request with `RuntimeError: Failed to read or persist the JWT secret at .../​.jwt_secret`.
 
 **Fresh installs are unaffected** — uid 1000 creates every file as `1000:1000`.
 

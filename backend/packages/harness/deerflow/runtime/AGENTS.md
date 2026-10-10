@@ -22,7 +22,7 @@ Checkpointer storage runs in one of two channel modes, selected by `checkpoint_c
 
 **Wholesale state replacement uses a state-only mutation graph + `Overwrite`.** `update_state` values pass through channel reducers (`add_messages` merge in full, append in delta), so replacing reducer values requires `Overwrite` rather than an ordinary update. Full-mode rollback and context compaction replace `messages`; delta resume and delta rollback replace every materialized channel and reset current-head-only channels to their schema default (or `None`). These writes go through `build_state_mutation_graph(as_node, mode, state_schema)`, and `state_schema` MUST be the thread's effective schema (`graph_state_schema(assistant_graph)`), because the base-ThreadState fallback silently discards written channels contributed by custom `AgentMiddleware.state_schema`. Channels absent from a full-mode fork write inherit the parent's channel blobs, so middleware channels survive rollback/compaction (locked by `test_rollback_preserves_middleware_contributed_channels` and `test_compact_thread_context_preserves_middleware_contributed_channels`). The compiled mutation graph has one no-op node (entry = finish) whose checkpoint machinery (channels/versions/metadata) is identical to the agent graph's but schedules no pending tasks, so the restored/compacted head stays idle instead of re-triggering the agent. Never hand-write checkpoints via `checkpointer.aput` for this; raw writers elsewhere must preserve checkpoint parentage — severed ancestry breaks delta replay (see `runtime/runs/worker.py` writer parenting and `checkpoint_patches.py`).
 
-**Run rollback flow** (`runtime/runs/worker.py`): `_capture_rollback_point` materializes the complete pre-run state via the accessor and captures raw `pending_writes` via `aget_tuple` into an immutable `RollbackPoint` before the run starts — capture failure disables rollback (fail-closed), never restores partial state. In `full` mode, cancel-with-rollback forks from the pre-run checkpoint via the mutation graph and inherits non-message channels from that parent. In `delta` mode, forking is unsafe once the cancelled path has attached sibling writes to the pre-run checkpoint, so rollback replaces every captured channel on the current head, using `Overwrite` for reducers and schema defaults for current-head-only channels. Resume and rollback state rewrites copy only the selected/captured checkpoint's server-authored agent binding; missing or malformed bindings remain unbound. Both modes reattach only the captured pre-run pending writes to the restored checkpoint. Edit replay runs (`metadata.replay_kind="edit"`) also restore the pre-run checkpoint on failed, timed-out, or interrupted completion and publish the restored `values` snapshot to the stream before `end`, so clients do not remain on a transient edited branch when the replay did not produce a successful replacement.
+**Run rollback flow** (`runtime/runs/worker.py`): `_capture_rollback_point` materializes the complete pre-run state via the accessor and captures raw `pending_writes` via `aget_tuple` into an immutable `RollbackPoint` before the run starts — capture failure, including cancellation delivered before or during the capture await, disables rollback (fail-closed), never restores partial state, and never deletes the thread; only a capture that completes and finds no checkpoint may reset the thread to empty. In `full` mode, cancel-with-rollback forks from the pre-run checkpoint via the mutation graph and inherits non-message channels from that parent. In `delta` mode, forking is unsafe once the cancelled path has attached sibling writes to the pre-run checkpoint, so rollback replaces every captured channel on the current head, using `Overwrite` for reducers and schema defaults for current-head-only channels. Resume and rollback state rewrites copy only the selected/captured checkpoint's server-authored agent binding; missing or malformed bindings remain unbound. Both modes reattach only the captured pre-run pending writes to the restored checkpoint. Edit replay runs (`metadata.replay_kind="edit"`) also restore the pre-run checkpoint on failed, timed-out, or interrupted completion and publish the restored `values` snapshot to the stream before `end`, so clients do not remain on a transient edited branch when the replay did not produce a successful replacement.
 
 **Message sequence placement:** Keep backend and frontend message identity rules aligned. Details: `backend/docs/runtime-guidance-details.md`.
 
@@ -70,14 +70,20 @@ from `on_llm_end` before inspecting the response or touching any run state.
 **Skill history:** `record_skill_usage` saves lead-run snapshots on terminal
 answers for paginated history. See `docs/skill-usage-ui.md`.
 
-**Run delivery receipts:** Journal artifact evidence and terminal status must finalize before an ordinary satisfied goal is cleared. That cleanup uses a durable checkpoint-write reservation; delivery failure retains the ordinary goal without another continuation. The scheduled-only exception is described below. Details: `backend/docs/runtime-guidance-details.md`.
+**Run delivery receipts:** Journal artifact evidence and terminal status must finalize before an ordinary satisfied goal is cleared. That cleanup uses a durable checkpoint-write reservation; delivery failure retains the ordinary goal without another continuation. Only that clear passes `outcome` to `write_thread_goal`, which removes `goal_outcome` on every other goal write. The scheduled-only exception is described below. Details: `backend/docs/runtime-guidance-details.md`.
 
 **Deferred terminal commit:** With an event store, the worker stages its terminal
 status locally and commits it only after finalization's receipt and duration
 writes. `RunRecord.terminal_commit_pending` keeps `_renew_leases()` renewing that
 still-active row until the commit is attempted; a renewal rejected by the worker's
 own commit is confirmed by re-reading the row, while a peer claim fences the run.
-Never select runs for renewal by local status alone.
+Never select runs for renewal by local status alone. Shutdown's drain treats the
+same state as active: such runs are awaited (never cancelled — cancellation would
+skip their terminal tail) so the duration checkpoint and terminal commit land
+before checkpointer teardown. A drain timeout leaves staged statuses and commit
+barriers intact without persisting `interrupted`. A finalizer that raises is
+logged with its run ID, staged status and exception while the other runs continue
+draining. Coverage: `tests/test_gateway_run_drain_shutdown.py`.
 
 **Deferred-tool promotion event deduplication** (`runtime/journal.py`): one
 `RunJournal` owns the lead graph's run-scoped atomic promotion claim. Parallel
@@ -100,7 +106,10 @@ producers (currently slash-skill activation via `asyncio.to_thread`) schedule
 journal mutation directly onto its owning event loop; they never mutate or
 flush `RunJournal._buffer` from the worker thread. The task-tool subagent proxy
 rejects a loop that differs from the journal owner, so its close fence always
-drains the only scheduling hop.
+drains the only scheduling hop. `flush()` yields to the loop once before
+draining: since Python 3.13 an awaited executor future can complete without a
+loop iteration, so a hop queued by a worker that already returned may still be
+pending when flush starts.
 The persisted projection accepts
 only framework-defined error/action values and strict booleans (using null for
 invalid values) from the producer-supplied tool stamp; tool content, args,
@@ -116,6 +125,17 @@ part of the record. Preserve existing UTF-8 files and the writer format.
 idempotent writes, LF/CRLF, blank lines, and malformed records.
 Reads and deletes treat a run ID writes reject as an unknown run (routes pass
 URL IDs through); writes still raise.
+
+**JSONL sequence watermark:** before deleting a non-empty run, save the thread's
+allocation floor with atomic replacement of `runs/.seq-watermark`, off-loop under
+the existing mutation fence. Recovery takes the maximum of that floor and surviving
+run files, including legacy directories without a watermark. Copy the deleted run's
+permission bits onto the temporary watermark before publication, preserving both
+shared-read and restrictive modes. Failed permission setup or publication must leave
+the run intact; unreadable/corrupt watermarks fail closed. Complete
+thread deletion removes the watermark only after deleting all run files, including
+when no events remain. This does not add multi-process JSONL support. Coverage:
+`tests/test_jsonl_event_store_seq_watermark.py` and the mutation cancellation suite.
 
 **Targeted run-event attribution** (`runtime/events/store/`):
 `RunEventStore.find_latest_ai_message_run_ids()` has a complete-or-error

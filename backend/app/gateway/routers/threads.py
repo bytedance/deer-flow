@@ -31,7 +31,11 @@ from app.gateway.checkpoint_lineage import (
     CheckpointParentMissingError,
     find_checkpoint_before_message,
     find_checkpoint_before_message_chronologically,
+    history_parent_index,
     is_duration_only_checkpoint,
+    parent_from_history_index,
+    resolve_history_versions,
+    resolve_stamp_candidate_versions,
 )
 from app.gateway.deps import get_checkpointer, get_run_event_store, get_run_manager, get_run_store
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
@@ -61,9 +65,11 @@ from deerflow.runtime.context_keys import checkpoint_agent_binding_metadata
 from deerflow.runtime.events.message_seq import stamp_messages_with_seq
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
+    GOAL_OUTCOME_CHANNEL,
     build_goal_state,
     ensure_thread_checkpoint,
     goal_thread_lock,
+    is_active_goal,
     read_thread_goal,
     write_thread_goal,
 )
@@ -131,6 +137,7 @@ _BRANCH_TITLE_SEQUENCE_METADATA_KEY = "branch_title_sequence"
 # task_history binds source batches to the parent's archive scope. Notes may
 # carry over, but the branch must not advertise that archive as available.
 _BRANCH_EXCLUDED_CHANNELS = frozenset({"sandbox", "thread_data", "task_history"})
+_BRANCH_GOAL_CHANNELS = frozenset({"goal", GOAL_OUTCOME_CHANNEL})
 _BRANCH_HISTORY_SCAN_LIMIT = 200
 _BRANCH_HISTORY_RAW_SCAN_LIMIT = _BRANCH_HISTORY_SCAN_LIMIT * 2
 _BRANCH_TITLE_MAX_LENGTH = 256
@@ -227,8 +234,13 @@ async def _find_branch_checkpoint(
     target_message_ids: set[str],
 ) -> Any:
     try:
-        for snapshot in await accessor.ahistory(config, limit=_BRANCH_HISTORY_RAW_SCAN_LIMIT):
-            if is_duration_only_checkpoint(snapshot):
+        history = await accessor.ahistory(config, limit=_BRANCH_HISTORY_RAW_SCAN_LIMIT)
+        history_index = history_parent_index(history)
+        version_cache: dict[tuple[str, str, str], Any] = {}
+        for snapshot in history:
+            parent = parent_from_history_index(snapshot, history_index)
+            versions, parent_versions = await resolve_stamp_candidate_versions(accessor, snapshot, parent, version_cache)
+            if is_duration_only_checkpoint(snapshot, parent=parent, versions=versions, parent_versions=parent_versions):
                 continue
             if _matches_branch_target(_checkpoint_messages(snapshot), target_message_ids):
                 return snapshot
@@ -248,8 +260,13 @@ async def _branch_targets_latest_turn(
 ) -> bool:
     """Return whether the target turn is the final visible turn."""
     try:
-        for snapshot in await accessor.ahistory(config, limit=_BRANCH_HISTORY_RAW_SCAN_LIMIT):
-            if is_duration_only_checkpoint(snapshot):
+        history = await accessor.ahistory(config, limit=_BRANCH_HISTORY_RAW_SCAN_LIMIT)
+        history_index = history_parent_index(history)
+        version_cache: dict[tuple[str, str, str], Any] = {}
+        for snapshot in history:
+            parent = parent_from_history_index(snapshot, history_index)
+            versions, parent_versions = await resolve_stamp_candidate_versions(accessor, snapshot, parent, version_cache)
+            if is_duration_only_checkpoint(snapshot, parent=parent, versions=versions, parent_versions=parent_versions):
                 continue
             messages = _checkpoint_messages(snapshot)
             if not messages:
@@ -306,7 +323,7 @@ async def _find_branch_replay_base(
         logger.exception("Failed to scan replay checkpoint history for thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to inspect checkpoint history") from exc
 
-    replay_base, target_found = find_checkpoint_before_message_chronologically(history, target_human_id)
+    replay_base, target_found = find_checkpoint_before_message_chronologically(history, target_human_id, history_versions=await resolve_history_versions(accessor, history))
     if not target_found:
         logger.warning(
             "Could not locate branch user message %s in chronological history for thread %s",
@@ -1136,15 +1153,22 @@ async def _branch_thread_with_reservation(
     if branch_reducer_fields is None:
         branch_reducer_fields = THREAD_STATE_REDUCER_FIELDS
 
-    def branch_values(source_snapshot: Any) -> dict[str, Any]:
+    def branch_values(source_snapshot: Any, *, replaces: Any = None) -> dict[str, Any]:
+        source_values = dict(source_snapshot.values)
         values: dict[str, Any] = {}
-        for key, value in dict(source_snapshot.values).items():
+        for key, value in source_values.items():
             if key in _BRANCH_EXCLUDED_CHANNELS:
                 continue
             if key in branch_reducer_fields:
                 values[key] = Overwrite(list(value) if key == "messages" and isinstance(value, list) else value)
             else:
                 values[key] = value
+        if replaces is not None:
+            # The head write lands on the replay base, so goal state the head
+            # lacks (write_thread_goal pops goal and goal_outcome) would keep
+            # the base's value. Clear it so the branch matches its source turn.
+            for key in (_BRANCH_GOAL_CHANNELS & dict(replaces.values).keys()) - source_values.keys():
+                values[key] = Overwrite(None) if key in branch_reducer_fields else None
         if display_name is not None:
             values["title"] = display_name
         return values
@@ -1170,7 +1194,7 @@ async def _branch_thread_with_reservation(
             head_config.setdefault("metadata", {}).update(checkpoint_metadata_updates)
         await branch_accessor.aupdate(
             head_config,
-            branch_values(snapshot),
+            branch_values(snapshot, replaces=replay_base_tuple),
             as_node="branch",
         )
     except _CHECKPOINT_MODE_ERRORS as exc:
@@ -1647,6 +1671,9 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
     if reducer_fields is None:
         reducer_fields = THREAD_STATE_REDUCER_FIELDS
     updates = {key: Overwrite(value) if key in reducer_fields else value for key, value in values.items()}
+    if "goal" in values and (writable_channels is None or GOAL_OUTCOME_CHANNEL in writable_channels):
+        # This goal writer bypasses write_thread_goal; drop the met record the same way.
+        updates[GOAL_OUTCOME_CHANNEL] = None
     try:
         async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
             source_metadata = await accessor.aget_metadata(read_config)
@@ -1810,7 +1837,9 @@ async def get_thread_history(
     """Get materialized graph state history for a thread.
 
     Only the latest (first) checkpoint carries the ``messages`` key to
-    avoid duplicating the complete conversation across every entry.
+    avoid duplicating the complete conversation across every entry. It also
+    carries an active ``goal`` and an achieved ``goal_outcome``, because
+    ``useStream`` rebuilds thread values from this head after every run.
     """
     checkpointer = get_checkpointer(request)
     try:
@@ -1842,6 +1871,11 @@ async def get_thread_history(
                 values["thread_data"] = thread_data
 
             if is_latest_checkpoint:
+                if is_active_goal(goal := materialized_values.get("goal")):
+                    values["goal"] = goal
+                outcome = materialized_values.get(GOAL_OUTCOME_CHANNEL)
+                if isinstance(outcome, dict) and outcome.get("status") == "achieved":
+                    values[GOAL_OUTCOME_CHANNEL] = outcome
                 messages = materialized_values.get("messages")
                 if messages:
                     serialized_msgs = serialize_channel_values_for_api({"messages": messages}).get("messages", [])

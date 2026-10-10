@@ -14,6 +14,16 @@ class LastAdminRemainsError(RuntimeError):
     """
 
 
+class LastActiveAdminError(RuntimeError):
+    """Raised when an account write would disable the last active admin.
+
+    "Active" = an enabled admin row: disabled admins cannot authenticate, so
+    they cannot restore the deployment's management access. Raised inside the
+    same serialized transaction that would perform the write (see
+    ``LastAdminRemainsError`` for the race this closes).
+    """
+
+
 class UserNotFoundError(LookupError):
     """Raised when a user repository operation targets a non-existent row.
 
@@ -90,6 +100,17 @@ class UserRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def set_disabled(self, user_id: str, disabled: bool) -> User:
+        """Enable/disable an account as a single-column, serialized write.
+
+        Origin: admin user-management surface (RFC #4063 / #3462 gap 3).
+        Field-scoped like :meth:`update_system_role` — account-lifecycle
+        state has exactly one writer, and credential/role writers never
+        touch it. Disabling the last remaining ACTIVE admin raises
+        :class:`LastActiveAdminError` (re-enabling is always allowed).
+        """
+        raise NotImplementedError
+
     async def update_system_role(self, user_id: str, system_role: str) -> User:
         """Assign a user's system role as a single-column, serialized write.
 
