@@ -149,6 +149,17 @@ uv run python scripts/benchmark/concurrency/run_concurrency_bench.py \
 uv run pytest tests/test_bench_concurrency.py tests/test_bench_worker.py -q
 ```
 
+`scripts/benchmark/progress_scoring/` is the offline #2805 policy comparison.
+It imports baseline middleware from this checkout and the fixed PR #5851
+candidate from an explicit local checkout in isolated subprocesses; never copy
+the candidate policy or wire it into runtime as part of this benchmark.
+Fixtures and scores are synthetic/hand-authored. Source pins normalize UTF-8
+newlines, workers validate import isolation, and token counts need an explicit
+SHA-256-verified local vocabulary (no automatic downloads). Record detection
+rates with denominators and distinguish fixed-trace replay from actual agent
+behavior. See its README for commands, report limits, and optional candidate
+regression tests in `tests/test_bench_progress_scoring.py`.
+
 ## Commands
 
 **Root directory** (for full application):

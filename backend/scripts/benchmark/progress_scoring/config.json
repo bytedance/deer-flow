@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "clock": "2026-10-02T00:00:00Z",
+  "seed": 0,
+  "baseline_revision": "63e399f2bdf6ad1269724c10cfc98bb40c7550d3",
+  "candidate_revision": "974f8fc6a5edce3b1ee5aa478351b6f3cc572ea9",
+  "tokenizer_sha256": "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7",
+  "source_hashes": {
+    "baseline": {
+      "backend/packages/harness/deerflow/agents/middlewares/loop_detection_middleware.py": "3189f26582fbca19a23749e791a869ca0944438fbad5103cd2c928b1676f3433",
+      "backend/packages/harness/deerflow/agents/middlewares/tool_progress_middleware.py": "9d8c49b1c0e14d54d0b18c3ba96b7e33331c15950500f28dfb23b7989636a903",
+      "backend/packages/harness/deerflow/agents/middlewares/tool_result_meta.py": "40f8ff0d3edd8339abeb1aae6117966f1e8c14528815e26901dd62af157a62b0",
+      "backend/packages/harness/deerflow/agents/middlewares/audit_context.py": "612bee0df25259bf63797f0336aa90bfeb7a2b79d062c429b4a686eaeb91bcd9"
+    },
+    "candidate": {
+      "backend/packages/harness/deerflow/agents/middlewares/loop_detection_middleware.py": "31d52620aa4889f25036527d7712d6ea6d55097153a64fe6aeed8b533f50dc62",
+      "backend/packages/harness/deerflow/agents/middlewares/tool_progress_middleware.py": "9d8c49b1c0e14d54d0b18c3ba96b7e33331c15950500f28dfb23b7989636a903",
+      "backend/packages/harness/deerflow/agents/middlewares/tool_result_meta.py": "40f8ff0d3edd8339abeb1aae6117966f1e8c14528815e26901dd62af157a62b0",
+      "backend/packages/harness/deerflow/agents/middlewares/audit_context.py": "612bee0df25259bf63797f0336aa90bfeb7a2b79d062c429b4a686eaeb91bcd9",
+      "backend/packages/harness/deerflow/agents/middlewares/progress_scoring_middleware.py": "0e9cc277b7e6d66b1afec1cb1c5f067e330a5eb978085a32959638e6e7a620f3",
+      "backend/packages/harness/deerflow/agents/middlewares/progress_eval_protocol.py": "74b638fa94233f961d46835163ff306980111205d0b40d2cc8dd471087561c0b",
+      "backend/packages/harness/deerflow/runtime/events/catalog.py": "2f5763b1d720ec75b187604904e3b6fdbfc0decb789321db5c0113a69f91f0fa"
+    }
+  },
+  "policies": {
+    "loop_detection": {
+      "warn_threshold": 3,
+      "hard_limit": 5,
+      "window_size": 20,
+      "max_tracked_threads": 100,
+      "tool_freq_warn": 30,
+      "tool_freq_hard_limit": 50,
+      "tool_freq_overrides": {}
+    },
+    "tool_progress": {
+      "stagnation_threshold": 3,
+      "warn_escalation_count": 2,
+      "inject_assessment": true,
+      "jaccard_threshold": 0.8,
+      "min_words": 10,
+      "max_tracked_threads": 100
+    },
+    "progress_scoring": {
+      "window_size": 8,
+      "min_evals": 3,
+      "progress_floor": 1.0,
+      "rearm_progress": 2.0,
+      "repetition_threshold": 0.6,
+      "noncompliance_threshold": 3,
+      "max_tracked_threads": 100
+    }
+  }
+}
