@@ -32,6 +32,11 @@ import { isSidecarThread, SIDECAR_METADATA_KEY } from "../sidecar/thread";
 import { useSubtaskContext, useUpdateSubtask } from "../tasks/context";
 import { taskEventToSubtaskUpdate } from "../tasks/lifecycle";
 import { messageToStep } from "../tasks/steps";
+import {
+  type ToolOutputChunkEvent,
+  toolStreamUpdateFromEvent,
+  useToolStreaming,
+} from "../tasks/tool-streaming";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 import { uuid } from "../utils/uuid";
 
@@ -1952,6 +1957,11 @@ export function useThreadStream({
   const threadIdRef = useRef<string | null>(threadId ?? null);
   const startedRef = useRef(false);
   const pendingUsageBaselineMessageIdsRef = useRef<Set<string>>(new Set());
+  // The tool call ids THIS stream has put into the shared tool-streaming map.
+  // That provider is mounted once per route while the sidecar panel streams a
+  // different thread through the same map, so a run-end teardown has to name
+  // the entries it owns instead of resetting the map for everyone (#4150).
+  const ownedToolCallIdsRef = useRef<Set<string>>(new Set());
   const pendingPreparedReplayRef = useRef<PendingPreparedReplayMask | null>(
     null,
   );
@@ -2042,6 +2052,21 @@ export function useThreadStream({
   const queryClient = useQueryClient();
   const { tasksRef, setTasks } = useSubtaskContext();
   const updateSubtask = useUpdateSubtask();
+  const { updateToolStream, clearToolStream } = useToolStreaming();
+
+  /**
+   * Drop the streaming entries this stream owns — not the whole shared map,
+   * which also holds the sidecar's in-flight output.
+   */
+  const clearOwnedToolStream = useCallback(() => {
+    const ownedToolCallIds = ownedToolCallIdsRef.current;
+    if (ownedToolCallIds.size === 0) {
+      return;
+    }
+    const toolCallIds = [...ownedToolCallIds];
+    ownedToolCallIds.clear();
+    clearToolStream(toolCallIds);
+  }, [clearToolStream]);
 
   const scheduleActiveRunRejoinRetry = useCallback(
     (run: Pick<Run, "thread_id" | "run_id"> | undefined) => {
@@ -2239,6 +2264,11 @@ export function useThreadStream({
         localTurnAnchorRef.current = null;
         tasksRef.current = {};
         setTasks({});
+        // A gap means start/final chunks may have been dropped, so this
+        // stream's entries can no longer be completed — without this they
+        // would keep their spinner rendered for the rest of the provider's
+        // lifetime.
+        clearOwnedToolStream();
         invalidateStoppedThreadCaches(queryClient, threadIdRef.current, isMock);
         toast.warning(t.conversation.streamReplayGap);
         return;
@@ -2267,6 +2297,22 @@ export function useThreadStream({
         return;
       }
 
+      if (eventType === "tool_output_chunk") {
+        const e = event as ToolOutputChunkEvent;
+        // Partial chunks upsert/accumulate; final and error chunks tear the
+        // entry down (the canonical ToolMessage carries the full result), so
+        // the streaming map only ever holds actively-streaming tool calls
+        // instead of growing for the lifetime of the thread.
+        const output = toolStreamUpdateFromEvent(e);
+        if (output === null) {
+          ownedToolCallIdsRef.current.delete(e.tool_call_id);
+        } else {
+          ownedToolCallIdsRef.current.add(e.tool_call_id);
+        }
+        updateToolStream(e.tool_call_id, output);
+        return;
+      }
+
       if (eventType === "llm_retry") {
         const e = event as { type: "llm_retry"; message?: unknown };
         if (typeof e.message === "string" && e.message.trim()) {
@@ -2274,11 +2320,22 @@ export function useThreadStream({
         }
       }
     },
+    onStop() {
+      // A user cancellation never reaches onError (the SDK swallows
+      // AbortError) nor onFinish (it only fires on a successful refetch, and
+      // the aborted run cannot refetch), so this is the only place the aborted
+      // run's in-flight tool entries can be torn down.
+      clearOwnedToolStream();
+    },
     onError(error, run) {
       scheduleActiveRunRejoinRetry(run);
       setOptimisticMessages([]);
       setOptimisticThreadId(null);
       setLiveMessagesThreadId(null);
+      // The run errored, so the final chunk for an in-flight tool call may
+      // never arrive.  Drop this stream's entries here rather than leaving
+      // their streaming cards spinning until the provider remounts.
+      clearOwnedToolStream();
       pendingPreparedReplayRef.current = null;
       setPendingSupersededRunIds(new Set());
       setPendingSupersededMessageIds(new Set());
@@ -2303,6 +2360,10 @@ export function useThreadStream({
       }
       settleActiveRunRejoin();
       listeners.current.onFinish?.(state.values);
+      // A tool call can finish without its final chunk ever reaching us (it was
+      // emitted before a disconnect, or the run ended first).  Teardown is tied
+      // to the run, not to that chunk, so the streaming cards cannot outlive it.
+      clearOwnedToolStream();
       pendingPreparedReplayRef.current = null;
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
