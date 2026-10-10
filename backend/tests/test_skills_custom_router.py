@@ -1803,7 +1803,7 @@ def _gate_first_write(monkeypatch) -> tuple[threading.Event, threading.Event]:
             # Without serialization the gate releases as soon as the test
             # signals that the second PUT has fully completed, leaving the
             # first entry's prev_content stale.
-            second_put_done.wait(timeout=10)
+            second_put_done.wait(timeout=2)
         return original_write(self, name, relative_path, content)
 
     monkeypatch.setattr(UserScopedSkillStorage, "write_custom_skill", _gated_write)

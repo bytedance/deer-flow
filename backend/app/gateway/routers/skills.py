@@ -2,7 +2,8 @@ import asyncio
 import logging
 import tempfile
 import threading
-from collections.abc import AsyncGenerator, Callable, Coroutine
+from collections.abc import AsyncGenerator, Callable, Coroutine, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, BinaryIO, Literal
 
@@ -55,6 +56,12 @@ from deerflow.utils.file_io import await_drained
 from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
+    import msvcrt
 
 router = APIRouter(prefix="/api", tags=["skills"])
 
@@ -163,7 +170,7 @@ class SkillRollbackRequest(BaseModel):
 # critical section — two requests can both be inside their own workers — so
 # the cooperating mutation paths share a lock around the whole sequence.
 #
-# The lock is scoped to the owning user's storage, not to the process: the
+# The lock is scoped to the owning user's storage: the
 # critical section includes write_custom_skill's projection rebuild, which
 # copies that user's whole skill tree (including a large linked package) and
 # waits on the user's projection lock. A process-wide lock would therefore
@@ -177,9 +184,10 @@ _custom_skill_mutation_locks_guard = threading.Lock()
 
 
 def _custom_skill_mutation_lock(storage: SkillStorage) -> threading.Lock:
-    """Return the read → write → append mutex for ``storage``'s owning user."""
+    """Return the process-local part of the owning user's mutation lock."""
+    scope = _custom_skill_mutation_scope(storage)
     with _custom_skill_mutation_locks_guard:
-        return _custom_skill_mutation_locks.setdefault(_custom_skill_mutation_scope(storage), threading.Lock())
+        return _custom_skill_mutation_locks.setdefault(scope, threading.Lock())
 
 
 def _custom_skill_mutation_scope(storage: SkillStorage) -> str:
@@ -187,13 +195,49 @@ def _custom_skill_mutation_scope(storage: SkillStorage) -> str:
 
     User-scoped storage reports the canonical root its mutations touch, so two
     users never share a lock while two storage objects for one user always do.
-    Anything else — the global legacy singleton, or a test double — has exactly
-    one scope, and a single shared lock is correct for it.
+    Legacy local storage uses its global custom root. Non-filesystem test
+    doubles have one process-local scope.
     """
     get_user_custom_root = getattr(storage, "get_user_custom_root", None)
     if callable(get_user_custom_root):
-        return str(get_user_custom_root())
+        return str(Path(get_user_custom_root()).resolve())
+    get_skills_root_path = getattr(storage, "get_skills_root_path", None)
+    if callable(get_skills_root_path):
+        return str((Path(get_skills_root_path()) / SkillCategory.CUSTOM.value).resolve())
     return "global"
+
+
+@contextmanager
+def _custom_skill_mutation(storage: SkillStorage) -> Iterator[None]:
+    """Hold read → write → history across threads and peer Gateway processes.
+
+    Use a stable sidecar outside the skill tree, distinct from projection's
+    lock: write/delete acquire the projection lock while this one is held.
+    Acquiring that same file lock twice would deadlock on POSIX. Both locks
+    are acquired and released in the drained mutation worker, off the loop.
+    """
+    with _custom_skill_mutation_lock(storage):
+        scope = _custom_skill_mutation_scope(storage)
+        if scope == "global":
+            yield
+            return
+        root = Path(scope)
+        lock_path = root.parent / f".{root.name}.mutation.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a", encoding="utf-8") as lock_file:
+            if fcntl is not None:
+                fcntl.flock(lock_file, fcntl.LOCK_EX)
+            else:  # pragma: no cover - Windows
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(lock_file, fcntl.LOCK_UN)
+                else:  # pragma: no cover - Windows
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def _skill_to_response(skill: Skill) -> SkillResponse:
@@ -714,7 +758,7 @@ async def update_custom_skill(skill_name: str, body: CustomSkillUpdateRequest, r
                 # what this mutation actually overwrites, or the overwritten
                 # revision silently drops out of the history chain and becomes
                 # unreachable by rollback.
-                with _custom_skill_mutation_lock(storage):
+                with _custom_skill_mutation(storage):
                     prev_content = storage.read_custom_skill(skill_name)
                     storage.write_custom_skill(skill_name, SKILL_MD_FILE, body.content)
                     storage.append_history(
@@ -764,7 +808,7 @@ async def delete_custom_skill(skill_name: str, request: Request, config: AppConf
             # joins the owning user's mutation lock so it cannot interleave with
             # a concurrent edit or rollback's read → write → append sequence.
             def _delete_and_record() -> None:
-                with _custom_skill_mutation_lock(storage):
+                with _custom_skill_mutation(storage):
                     storage.delete_custom_skill(
                         skill_name,
                         history_meta={
@@ -878,7 +922,7 @@ async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, req
                 # path): the recorded prev_content must be what this rollback
                 # actually overwrites, which requires that no concurrent mutation
                 # can land between the predecessor read and the write.
-                with _custom_skill_mutation_lock(storage):
+                with _custom_skill_mutation(storage):
                     current_content = _read_current_content()
                     storage.write_custom_skill(skill_name, SKILL_MD_FILE, target_content)
                     storage.append_history(
