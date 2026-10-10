@@ -2561,7 +2561,14 @@ class RunManager:
                 if task not in pending and not task.cancelled():
                     # Completed on its own — retrieve any surfaced exception so it
                     # is not reported as "never retrieved", and keep its status.
-                    task.exception()  # type: ignore[union-attr]  # done & not cancelled
+                    error = task.exception()  # type: ignore[union-attr]  # done & not cancelled
+                    if error is not None and record.run_id in finalizing_ids:
+                        logger.warning(
+                            "Run %s failed during terminal finalization on shutdown; staged status %s may not be committed",
+                            record.run_id,
+                            record.status.value,
+                            exc_info=(type(error), error, error.__traceback__),
+                        )
                     continue
                 if record.run_id in finalizing_ids:
                     # The staged terminal status is committed by the run's own

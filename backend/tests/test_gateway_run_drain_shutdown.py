@@ -22,15 +22,18 @@ precondition for the signal-reentrancy deadlock guarded by
 from __future__ import annotations
 
 import asyncio
+import logging
 import operator
 from contextlib import asynccontextmanager, suppress
 from types import SimpleNamespace
 from typing import Annotated, TypedDict
+from unittest.mock import AsyncMock
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 
 from deerflow.runtime import RunManager, RunStatus
+from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 
 # Module-level so langgraph's get_type_hints (which resolves annotations against
@@ -452,6 +455,114 @@ async def test_shutdown_awaits_staged_terminal_finalization_without_cancelling()
             record.task.cancel()
             with suppress(asyncio.CancelledError):
                 await record.task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [RunStatus.success, RunStatus.error])
+@pytest.mark.parametrize("barrier", ["terminal_commit_pending", "scheduled_goal_cleanup_pending"])
+async def test_shutdown_preserves_staged_terminal_status_after_drain_timeout(monkeypatch, caplog, status, barrier):
+    """A blocked terminal tail must survive shutdown's bounded drain untouched."""
+    store = MemoryRunStore()
+    rm = RunManager(store=store)
+    record = await rm.create("t-finalizing-timeout")
+    await rm.set_status(record.run_id, RunStatus.running)
+    await rm.set_status(record.run_id, status, persist=False)
+    setattr(record, barrier, True)
+    persist_status = AsyncMock(wraps=rm._persist_status)
+    monkeypatch.setattr(rm, "_persist_status", persist_status)
+
+    started = asyncio.Event()
+    allow_finish = asyncio.Event()
+
+    async def finalizer() -> None:
+        started.set()
+        await allow_finish.wait()
+
+    record.task = asyncio.create_task(finalizer())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        with caplog.at_level(logging.WARNING, logger="deerflow.runtime.runs.manager"):
+            await asyncio.wait_for(rm.shutdown(timeout=0.01), timeout=1.0)
+
+        assert not record.task.done()
+        assert record.task.cancelling() == 0
+        assert not record.abort_event.is_set()
+        assert record.status == status
+        assert getattr(record, barrier) is True
+        persist_status.assert_not_awaited()
+        assert (await store.get(record.run_id))["status"] == "running"
+        assert "run task(s) still active" in caplog.text
+        # Without the finalizing skip, shutdown incorrectly queues this staged
+        # record for interrupted persistence, even though the budget is spent.
+        assert "before persisting" not in caplog.text
+    finally:
+        allow_finish.set()
+        await asyncio.gather(record.task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [RunStatus.success, RunStatus.error])
+async def test_shutdown_warns_when_staged_terminal_finalization_fails(monkeypatch, caplog, status):
+    """Surface a lost terminal tail without changing its status or aborting drain."""
+    store = MemoryRunStore()
+    rm = RunManager(store=store)
+    failed = await rm.create("t-finalizing-failed")
+    healthy = await rm.create("t-finalizing-healthy")
+    for record in (failed, healthy):
+        await rm.set_status(record.run_id, RunStatus.running)
+        await rm.set_status(record.run_id, status, persist=False)
+        record.terminal_commit_pending = True
+    persist_status = AsyncMock(wraps=rm._persist_status)
+    monkeypatch.setattr(rm, "_persist_status", persist_status)
+
+    drain_started = asyncio.Event()
+    allow_finish = asyncio.Event()
+    failure = RuntimeError("terminal commit failed")
+    stop_heartbeat = rm.stop_heartbeat
+
+    async def observed_stop_heartbeat(*, timeout):
+        await stop_heartbeat(timeout=timeout)
+        drain_started.set()
+
+    monkeypatch.setattr(rm, "stop_heartbeat", observed_stop_heartbeat)
+
+    async def finalizer(record) -> None:
+        await allow_finish.wait()
+        if record is failed:
+            raise failure
+        record.terminal_commit_pending = False
+
+    failed.task = asyncio.create_task(finalizer(failed))
+    healthy.task = asyncio.create_task(finalizer(healthy))
+    shutdown_task = None
+    try:
+        with caplog.at_level(logging.WARNING, logger="deerflow.runtime.runs.manager"):
+            shutdown_task = asyncio.create_task(rm.shutdown(timeout=1.0))
+            await asyncio.wait_for(drain_started.wait(), timeout=1.0)
+            allow_finish.set()
+            await asyncio.wait_for(shutdown_task, timeout=1.0)
+
+        assert failed.task.exception() is failure
+        assert failed.status == status
+        assert failed.terminal_commit_pending is True
+        assert (await store.get(failed.run_id))["status"] == "running"
+        assert healthy.task.done() and not healthy.task.cancelled()
+        assert healthy.terminal_commit_pending is False
+        assert healthy.status == status
+        persist_status.assert_not_awaited()
+        warnings = [entry for entry in caplog.records if entry.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        warning = warnings[0]
+        assert failed.run_id in warning.getMessage()
+        assert healthy.run_id not in warning.getMessage()
+        assert status.value in warning.getMessage()
+        assert warning.exc_info is not None and warning.exc_info[1] is failure
+    finally:
+        allow_finish.set()
+        tasks = [failed.task, healthy.task]
+        if shutdown_task is not None:
+            tasks.append(shutdown_task)
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @pytest.mark.asyncio
