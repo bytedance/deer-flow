@@ -21,9 +21,10 @@ PREVIOUS = "0036_run_idempotency_request"
 pytestmark = pytest.mark.asyncio
 
 
-async def test_0037_chains_after_0036_and_is_single_head():
+async def test_0037_chains_after_0036_in_single_migration_chain():
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
-    assert script.get_heads() == [REVISION]
+    assert len(script.get_heads()) == 1
+    assert REVISION in {revision.revision for revision in script.walk_revisions()}
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     # alembic_version.version_num is VARCHAR(32).
     assert len(REVISION) <= 32

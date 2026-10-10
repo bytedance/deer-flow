@@ -12,6 +12,8 @@ create-only: collisions return 409, never overwrite or upsert. Ordinary creation
 and import share `_persist_new_agent`, which uses `run_drained_write` so a
 cancelled request still drains the owned persistence worker.
 
+Skill mutation operation lists return `next_cursor: null` when `has_more` is false, including empty pages after a supplied `after_id`. The next cursor is the final returned operation only when a further page exists.
+
 Custom-skill edit, delete and rollback hold the owning root's process mutex and
 `.custom.mutation.lock` sidecar across predecessor read, storage mutation and
 history append. Peer Gateway processes sharing that root must use this same

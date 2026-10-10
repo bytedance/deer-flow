@@ -28,6 +28,7 @@ from deerflow_extension_api.compaction import (
     CompactionEvent,
     ContextCompactionObserver,
 )
+from deerflow_extension_api.completed_run_evidence import CompletedRunEvent, CompletedRunEventPage, CompletedRunEvidenceReader, CompletedRunSnapshot, EvidenceLimits
 from deerflow_extension_api.contracts import (
     ExtensionInstall,
     ExtensionRegistry,
@@ -44,6 +45,7 @@ from deerflow_extension_api.contracts import (
     TaskOutcome,
     extension,
 )
+from deerflow_extension_api.host_capabilities import HostCapabilityError
 from deerflow_extension_api.model_invocation import (
     ModelInvocationError,
     ModelInvocationFailed,
@@ -95,11 +97,12 @@ from deerflow_extension_api.runtime_bridge import (
     task_store_from_runtime,
 )
 from deerflow_extension_api.settings import SettingsField
+from deerflow_extension_api.skill_mutations import AssessmentRef, AssetRevision, BundleFile, HostCheckResult, MutationCapabilities, Operation, Proposal, ProposalBundle, SkillMutationService, SkillRevisionView
 from deerflow_extension_api.state import ExtensionData
 
 #: Contract version. Before 1.0, minors may break and patches are additive.
 #: From 1.0 on, bump the major for breaking changes.
-API_VERSION = "0.2.5"
+API_VERSION = "0.2.6"
 
 __all__ = [
     "AGENT_RUNS_CONTEXT_KEY",
@@ -125,8 +128,24 @@ __all__ = [
     "BrowserModule",
     "ModelTool",
     "PluginContribution",
-    "ToolContext",
     "SettingsField",
+    "ToolContext",
+    "CompletedRunEvent",
+    "CompletedRunEventPage",
+    "CompletedRunEvidenceReader",
+    "CompletedRunSnapshot",
+    "EvidenceLimits",
+    "HostCapabilityError",
+    "AssessmentRef",
+    "AssetRevision",
+    "BundleFile",
+    "HostCheckResult",
+    "MutationCapabilities",
+    "Operation",
+    "Proposal",
+    "ProposalBundle",
+    "SkillMutationService",
+    "SkillRevisionView",
     "API_VERSION",
     "EXTENSION_PLUGIN_AUTHZ_RESOLVER_ASYNC_KEY",
     "EXTENSION_PLUGIN_AUTHZ_RESOLVER_KEY",

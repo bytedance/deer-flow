@@ -1668,6 +1668,22 @@ classifies the sanitized text a remote tool result shows the model, PII-redacted
 `pii_redaction` is enabled, and adds an advisory warning through a lifecycle state
 update; it imports only the extension contract.
 
+Extensions may opt into owner-scoped completed-run evidence and safe updates to
+existing user-custom skills through `host_access` in operator-controlled
+`config.yaml`. These optional APIs stage an immutable candidate, check its exact
+contents, and publish with version conflict detection and crash recovery. They
+do **not** implement a learning/evolution plugin. Automatic changes are limited to
+the body and description of `SKILL.md`; changing permissions, supporting files,
+or enabled state is out of scope. The host contract requires `deerflow-extension-api==0.2.6`. See [Skill evolution host API](docs/skill-evolution-host.md)
+for deployment requirements, grants, recovery, and the plugin integration flow.
+Once an owner is enrolled, use the Gateway for skill management: standalone SDK
+processes without its durable mutation runtime refuse enrolled skill access.
+Skill discovery preserves user scope when the caller uses the default configuration.
+Admin operation lists return `next_cursor: null` at the end of pagination.
+Keyed resume retries preserve the original run's evidence origin and agent identity.
+This host slice follows up the [Skill Self-Evolution RFC](https://github.com/bytedance/deer-flow/issues/1865)
+and the bilingual [Plugin Host APIs RFC](https://github.com/bytedance/deer-flow/issues/5539).
+
 Full-stack contributions can additionally provide browser pages, conversation actions,
 authenticated backend operations and model tools through the
 [plugin APIs](docs/full-stack-plugins.md). The independent

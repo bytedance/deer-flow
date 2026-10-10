@@ -276,6 +276,9 @@ async def test_sql_runtime_shares_run_repository_with_scheduler(monkeypatch):
     async def noop(*_args, **_kwargs):
         return None
 
+    # This test asserts repository identity, not SQL startup/recovery. Its
+    # session factory is intentionally an opaque sentinel, not a usable DB.
+    monkeypatch.setattr("deerflow.extensions.host_capabilities.HostCapabilities.start", noop)
     monkeypatch.setattr(engine_module, "init_engine_from_config", noop)
     monkeypatch.setattr(engine_module, "get_session_factory", lambda: session_factory)
     monkeypatch.setattr(engine_module, "close_engine", noop)

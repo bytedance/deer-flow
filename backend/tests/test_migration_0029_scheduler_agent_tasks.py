@@ -23,7 +23,6 @@ from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
 
 REVISION = "0029_scheduler_agent_tasks"
-CURRENT_HEAD = "0037_project_document_summaries"
 NEXT = "0030_notification_claim_tokens"
 PREVIOUS = "0028_parked_attempts"
 TASK_FIELDS = {"origin_thread_id", "goal_objective", "max_runs", "end_at", "standing_notes"}
@@ -33,7 +32,8 @@ pytestmark = pytest.mark.asyncio
 
 async def test_0029_remains_in_the_single_migration_chain():
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
-    assert script.get_heads() == [CURRENT_HEAD]
+    assert len(script.get_heads()) == 1
+    assert REVISION in {revision.revision for revision in script.walk_revisions()}
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     assert script.get_revision(NEXT).down_revision == REVISION
     assert len(REVISION) <= 32
@@ -75,7 +75,7 @@ async def test_0029_preserves_legacy_fields_and_downgrades_unmet(tmp_path, migra
             assert all(columns[table][field]["nullable"] and columns[table][field]["default"] is None for field in fields)
         # Compare with the ORM at the current head: later revisions add
         # scheduled_tasks columns (0031) that the model already declares.
-        await asyncio.to_thread(command.upgrade, cfg, CURRENT_HEAD)
+        await asyncio.to_thread(command.upgrade, cfg, "head")
         async with engine.connect() as conn:
 
             def scheduler_schema_diff(sync):
@@ -130,7 +130,7 @@ async def test_0029_preserves_legacy_fields_and_downgrades_unmet(tmp_path, migra
             assert (await conn.execute(sa.text("SELECT run_count FROM scheduled_tasks WHERE id='legacy'"))).scalar_one() == 7
         # The ORM model carries later scheduled_tasks columns (0031), so read
         # it back at the current head.
-        await asyncio.to_thread(command.upgrade, cfg, CURRENT_HEAD)
+        await asyncio.to_thread(command.upgrade, cfg, "head")
         assert (await repo.get("new", user_id="owner"))["origin_thread_id"] is None
     finally:
         if schema:

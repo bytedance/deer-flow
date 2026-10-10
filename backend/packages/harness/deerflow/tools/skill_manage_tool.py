@@ -23,7 +23,7 @@ from deerflow.skills.security_static_scanner import (
     enforce_static_scan,
 )
 from deerflow.skills.storage import get_or_new_user_skill_storage
-from deerflow.skills.storage.skill_storage import SkillStorage, read_text_or_none
+from deerflow.skills.storage.skill_storage import SkillStorage
 from deerflow.skills.types import SKILL_MD_FILE
 from deerflow.tools.sync import make_sync_tool_wrapper
 from deerflow.tools.types import Runtime
@@ -93,7 +93,10 @@ async def _scan_static_candidate_or_raise(name: str, updates: dict[str, str], sk
             if skill_storage is None:
                 skill_dir.mkdir(parents=True)
             else:
-                shutil.copytree(skill_storage.get_custom_skill_dir(name), skill_dir)
+                from deerflow.skills.mutations.guard import managed_read
+
+                with managed_read(skill_storage):
+                    shutil.copytree(skill_storage.get_custom_skill_dir(name), skill_dir)
             for relative_path, content in updates.items():
                 target = skill_dir / relative_path
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -167,8 +170,7 @@ async def _skill_manage_impl(
             static_findings = await _scan_static_candidate_or_raise(name, {SKILL_MD_FILE: content})
             scan = await _scan_or_raise(content, executable=False, location=f"{name}/{SKILL_MD_FILE}", static_findings=static_findings)
             scan["static_findings"] = static_findings
-            skill_file = skill_storage.get_custom_skill_file(name)
-            prev_content = await _to_thread(skill_file.read_text, encoding="utf-8")
+            prev_content = await _to_thread(skill_storage.read_custom_skill, name)
             await _to_thread(skill_storage.write_custom_skill, name, SKILL_MD_FILE, content)
             await _to_thread(
                 skill_storage.append_history,
@@ -182,8 +184,7 @@ async def _skill_manage_impl(
             await _to_thread(skill_storage.ensure_custom_skill_is_editable, name)
             if find is None or replace is None:
                 raise ValueError("find and replace are required for patch.")
-            skill_file = skill_storage.get_custom_skill_file(name)
-            prev_content = await _to_thread(skill_file.read_text, encoding="utf-8")
+            prev_content = await _to_thread(skill_storage.read_custom_skill, name)
             occurrences = prev_content.count(find)
             if occurrences == 0:
                 raise ValueError("Patch target not found in SKILL.md.")
@@ -227,10 +228,9 @@ async def _skill_manage_impl(
             target = await _to_thread(skill_storage.ensure_safe_support_path, name, path)
             if await _to_thread(target.is_dir):
                 raise ValueError(f"Supporting file path '{path}' is a directory, not a file.")
-            exists = await _to_thread(target.exists)
-            # A binary asset (e.g. from a .skill archive) has no previous *text*;
-            # the history record takes None rather than aborting the write.
-            prev_content = await _to_thread(read_text_or_none, target) if exists else None
+            from deerflow.skills.mutations.guard import read_optional_text
+
+            prev_content = await _to_thread(read_optional_text, skill_storage, target)
             executable = "scripts/" in path or path.startswith("scripts/")
             static_findings = await _scan_static_candidate_or_raise(name, {path: content}, skill_storage)
             scan = await _scan_or_raise(content, executable=executable, location=f"{name}/{path}", static_findings=static_findings)

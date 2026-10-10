@@ -14,9 +14,10 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from deerflow_extension_api import API_VERSION
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from deerflow.extensions.model_access import ExtensionHostAccess, ModelInvocationScope
+from deerflow.extensions.host_access import HostAccess, bind_host_access
+from deerflow.extensions.model_access import ModelInvocationScope
 from deerflow.extensions.registry import ExtensionRegistry, LoadedExtensions
 from deerflow.persistence.migrations._env_filters import register_extension_table_prefix
 from deerflow.reflection import resolve_variable
@@ -44,11 +45,18 @@ class ExtensionSpec(BaseModel):
         description="Installed Python distribution recorded by the extension manager",
     )
     use: str = Field(description="Entry point path, e.g. 'my_extension:install'")
-    host_access: ExtensionHostAccess = Field(default_factory=ExtensionHostAccess)
     config: dict[str, Any] = Field(
         default_factory=dict,
         description="Extension-private configuration, passed to install() verbatim",
     )
+    host_access: HostAccess = Field(default_factory=HostAccess)
+
+    @model_validator(mode="after")
+    def _validate_host_identity(self):
+        if self.host_access.granted and (not self.name or self.name.strip() != self.name or len(self.name) > 128):
+            raise ValueError("host_access requires an explicit stable plugin name")
+        return self
+
     required: bool = Field(
         default=False,
         description="When true, a load failure aborts startup instead of being skipped",
@@ -156,6 +164,8 @@ def load_extensions(specs: Sequence[ExtensionSpec]) -> tuple[LoadedExtensions, l
     the Gateway still starts. `required: true` flips that to fail-closed for
     extensions whose absence changes behaviour rather than just observability.
     """
+    # Validate attribution before importing any extension, even optional ones.
+    bind_host_access(specs)
     registry = ExtensionRegistry()
     diagnostics: list[Diagnostic] = []
     loaded_sources: list[str] = []

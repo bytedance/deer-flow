@@ -282,6 +282,14 @@ def get_enabled_skills_for_config(app_config: AppConfig | None = None, user_id: 
     to load public + user-level custom skills. Otherwise falls back to the
     global storage (public + global custom fallback).
     """
+    from deerflow.skills.mutations.guard import owner_is_managed
+
+    if user_id is not None and (app_config is None or owner_is_managed(user_id)):
+        # Without an explicit config, resolve the user storage on each call.
+        # Enrolled owners also bypass the process-local LRU. The guarded loader
+        # checks durable readiness, so peer publications cannot leave a stale
+        # catalog or treat PREPARED bytes as a committed generation.
+        return list(get_or_new_user_skill_storage(user_id, app_config=app_config).load_skills(enabled_only=True))
     if app_config is None:
         return _get_enabled_skills()
 

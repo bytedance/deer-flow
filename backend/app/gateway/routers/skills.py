@@ -890,12 +890,12 @@ async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, req
         await asyncio.to_thread(storage.validate_skill_markdown_content, skill_name, target_content)
         static_findings = await _scan_static_skill_markdown_or_raise(skill_name, target_content, app_config=config)
         scan = await scan_skill_content(target_content, executable=False, location=f"{skill_name}/{SKILL_MD_FILE}", app_config=config, static_findings=static_findings)
+        from deerflow.skills.mutations.guard import read_optional_text
 
         def _read_current_content() -> str | None:
-            # Worker thread: the post-scan read of the file being replaced is
-            # blocking filesystem IO (#5747), same rule as the history read.
-            skill_file = storage.get_custom_skill_file(skill_name)
-            return skill_file.read_text(encoding="utf-8") if skill_file.exists() else None
+            # Called off-loop, inside the mutation critical section for writes.
+            # Preserve managed-owner readiness and projection-lock admission.
+            return read_optional_text(storage, storage.get_custom_skill_file(skill_name))
 
         if scan.decision == "block":
             # The blocked path overwrites nothing, so the entry is purely
@@ -1001,12 +1001,12 @@ def _write_extensions_skill_state(
     """Read-modify-write a skill's enabled state in the shared extensions_config.json.
 
     Blocking filesystem IO: always call this via ``asyncio.to_thread``. It takes
-    the public projection lock before the process-local and cross-process
-    extensions config locks. The first keeps the enabled-only view synchronized
-    across workers; the latter two prevent this router and the MCP router from
-    interleaving writes to the shared file. All locks are held by the worker, so
-    request cancellation cannot release them while the write or projection
-    rebuild is still running.
+    the same-name mutation fence before the public projection, process-local,
+    and cross-process extensions config locks. The projection lock keeps the
+    enabled-only view synchronized across workers; the latter two prevent this
+    router and the MCP router from interleaving writes to the shared file. All
+    locks are held by the worker, so request cancellation cannot release them
+    while the write or projection rebuild is still running.
     """
     from contextlib import nullcontext
 
@@ -1020,7 +1020,9 @@ def _write_extensions_skill_state(
         config_path = Path.cwd().parent / "extensions_config.json"
         logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
 
-    with projection_update:
+    from deerflow.skills.mutations.guard import managed_global_state_write
+
+    with managed_global_state_write(storage, skill_name), projection_update:
         with extensions_config_write_lock, extensions_config_file_lock(config_path):
             # The projection lock is cross-process, but the singleton cache is
             # not. Existing files are therefore re-read under the lock, raw, so

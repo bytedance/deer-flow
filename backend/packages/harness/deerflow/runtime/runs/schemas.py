@@ -1,6 +1,9 @@
-"""Run status and disconnect mode enums."""
+"""Run status, disconnect modes and host-owned evidence provenance."""
 
 from enum import StrEnum
+
+# Shared by Gateway admission and RunManager; values remain wire-format strings.
+EVIDENCE_ORIGINS = frozenset({"interactive", "scheduled", "extension_evaluation", "unknown"})
 
 
 class ThreadOperationKind(StrEnum):

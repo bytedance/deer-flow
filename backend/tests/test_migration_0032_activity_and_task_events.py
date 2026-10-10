@@ -20,8 +20,7 @@ REVISION = "0032_activity_and_task_events"
 NEXT = "0033_batch_result_artifact"
 AFTER_NEXT = "0034_run_event_seq_watermark"
 LOGIN_THROTTLE = "0035_login_throttle"
-IDEMPOTENCY = "0036_run_idempotency_request"
-CURRENT_HEAD = "0037_project_document_summaries"
+RUN_IDEMPOTENCY = "0036_run_idempotency_request"
 PREVIOUS = "0031_scheduled_streak_boundary"
 TABLES = {"thread_read_markers", "thread_read_versions", "scheduled_task_events"}
 INDEXES = {
@@ -34,13 +33,13 @@ pytestmark = pytest.mark.asyncio
 
 async def test_0032_remains_in_the_single_migration_chain():
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
-    assert script.get_heads() == [CURRENT_HEAD]
+    assert len(script.get_heads()) == 1
+    assert REVISION in {revision.revision for revision in script.walk_revisions()}
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     assert script.get_revision(NEXT).down_revision == REVISION
     assert script.get_revision(AFTER_NEXT).down_revision == NEXT
     assert script.get_revision(LOGIN_THROTTLE).down_revision == AFTER_NEXT
-    assert script.get_revision(IDEMPOTENCY).down_revision == LOGIN_THROTTLE
-    assert script.get_revision(CURRENT_HEAD).down_revision == IDEMPOTENCY
+    assert script.get_revision(RUN_IDEMPOTENCY).down_revision == LOGIN_THROTTLE
     # alembic_version.version_num is VARCHAR(32).
     assert len(REVISION) <= 32
 

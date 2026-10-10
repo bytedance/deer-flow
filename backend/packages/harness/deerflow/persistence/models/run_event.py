@@ -25,6 +25,9 @@ class RunEventRow(Base):
     category: Mapped[str] = mapped_column(String(RUN_EVENT_CATEGORY_MAX_LENGTH), nullable=False)
     # Category values and semantics are defined by runtime/events/catalog.py
     content: Mapped[str] = mapped_column(Text, default="")
+    # Digest of the exact persisted UTF-8 content, after serialization/truncation.
+    # NULL denotes legacy ingestion; event metadata is never trusted as a digest.
+    content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     event_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
     seq: Mapped[int] = mapped_column(nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
