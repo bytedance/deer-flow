@@ -30,8 +30,10 @@ _HANDLE_LENGTH = 8
 # inside the mounted user-data tree).
 _SANDBOX_PATH_PATTERN = re.compile(r"/mnt/user-data/\S+")
 
-# Conservative URL-with-file-extension match for remote references.
-_REMOTE_FILE_URL_PATTERN = re.compile(r"https?://[^\s\"'`<>]+\.(?:png|jpg|jpeg|gif|html|pdf|csv|json|txt|log|md|xlsx?|docx?|zip)(?:[?#][^\s\"'`<>]*)?")
+# Scan complete URLs before checking the path, so extensions in query strings
+# cannot truncate a reference or turn a non-file URL into a file artifact.
+_REMOTE_URL_PATTERN = re.compile(r"https?://[^\s\"'`<>]+")
+_REMOTE_FILE_EXTENSION_PATTERN = re.compile(r"\.(?:png|jpg|jpeg|gif|html|pdf|csv|json|txt|log|md|xlsx?|docx?|zip)\Z", re.IGNORECASE)
 
 # Structured-content keys whose string values are treated as concrete
 # references (paths, URLs, remote task ids) rather than opaque payload.
@@ -43,8 +45,10 @@ _STRUCTURED_TASK_KEYS = frozenset({"task_id", "job_id"})
 
 # Characters stripped from detected refs: prose punctuation plus the closing
 # quotes/brackets/backticks that markdown- and JSON-formatted tool output
-# commonly wraps paths in. `\S+` would otherwise consume them into `real_ref`.
-_REF_TRAILING_NOISE_CHARS = ".,;:)]}\"'`"
+# commonly wraps paths in, including CJK punctuation. `\S+` would otherwise
+# consume them into `real_ref`.
+_REF_TRAILING_NOISE_CHARS = ".,;:)]}\"'`\u3002\uff0c\uff1b\uff1a\u3001\uff09\u3011\u300b\u201d\u2019"
+_CJK_CLOSING_DELIMITERS = {"）": "（", "】": "【", "》": "《", "”": "“", "’": "‘"}
 
 # Content-block and structured-key refs are trusted only in these shapes.
 # `data:`/`blob:` URIs can carry arbitrarily large embedded payloads (MCP
@@ -126,12 +130,30 @@ def _make_entry(
     return entry
 
 
+def _strip_ref_trailing_noise(raw: str) -> str:
+    """Strip prose closers while preserving paired CJK characters inside a ref."""
+    end = len(raw.rstrip(_REF_TRAILING_NOISE_CHARS))
+    if end == len(raw):
+        return raw
+
+    unmatched_openers = dict.fromkeys(_CJK_CLOSING_DELIMITERS.values(), 0)
+    for index, char in enumerate(raw):
+        if char in unmatched_openers:
+            unmatched_openers[char] += 1
+        elif (opener := _CJK_CLOSING_DELIMITERS.get(char)) and unmatched_openers[opener]:
+            unmatched_openers[opener] -= 1
+            # An opener outside the detected token is prose; an opener inside
+            # it makes this closer part of a literal directory name or URL.
+            end = max(end, index + 1)
+    return raw[:end]
+
+
 def _detect_refs_in_text(text: str) -> list[dict[str, str]]:
     """Conservatively detect file paths and remote file URLs in free text."""
     refs: list[dict[str, str]] = []
     seen: set[str] = set()
     for match in _SANDBOX_PATH_PATTERN.finditer(text):
-        raw = match.group(0).rstrip(_REF_TRAILING_NOISE_CHARS)
+        raw = _strip_ref_trailing_noise(match.group(0))
         if raw in seen or not _is_referenceable_url(raw):
             continue
         seen.add(raw)
@@ -142,9 +164,11 @@ def _detect_refs_in_text(text: str) -> list[dict[str, str]]:
                 "display": raw.split("/")[-1],
             }
         )
-    for match in _REMOTE_FILE_URL_PATTERN.finditer(text):
-        raw = match.group(0).rstrip(_REF_TRAILING_NOISE_CHARS)
+    for match in _REMOTE_URL_PATTERN.finditer(text):
+        raw = _strip_ref_trailing_noise(match.group(0))
         if raw in seen or not _is_referenceable_url(raw):
+            continue
+        if not _REMOTE_FILE_EXTENSION_PATTERN.search(urlsplit(raw).path):
             continue
         seen.add(raw)
         refs.append(

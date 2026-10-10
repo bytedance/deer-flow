@@ -8,6 +8,8 @@ rewrites it to the real reference at the tool-call boundary.
 import re
 from typing import Any
 
+import httpx
+import pytest
 from _agent_e2e_helpers import FakeToolCallingModel
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage
@@ -122,3 +124,100 @@ def test_handle_projected_into_model_context():
     durable_blocks = [message.content for message in round3 if getattr(message, "additional_kwargs", {}).get("durable_context_data")]
     handle = next(e["handle"] for e in result["tool_artifacts"] if e["tool_call_id"] == "call_make")
     assert any(handle in content for content in durable_blocks), "captured handle never reached the model-facing durable context block"
+
+
+@pytest.mark.parametrize(
+    ("url", "closing_punctuation"),
+    [
+        ("https://files.example/report.pdf?token=part.csvX", "]"),
+        ("https://files.example/report.pdf?token=abc&download=copy.csvX#page=2", "]"),
+        ("https://files.example/report.pdf?token=abc", "]"),
+        pytest.param("https://files.example/report.pdf?token=part.csvX#page=2", "\u3002\u201d\uff09", id="cjk-punctuation"),
+        pytest.param("https://files.example/report.PdF?token=part.csvX#page=2", "]", id="mixed-case-extension"),
+    ],
+)
+def test_remote_url_survives_capture_checkpoint_and_resolved_download(url, closing_punctuation):
+    """Exercise the real agent graph with a fake model and offline HTTP transport."""
+    downloaded = []
+
+    @tool("make_file")
+    def remote_report(name: str) -> str:
+        """Create a remotely hosted report."""
+        return f"Download [{url}{closing_punctuation}"
+
+    def serve_report(request: httpx.Request) -> httpx.Response:
+        downloaded.append(request.url)
+        return httpx.Response(200 if request.url.query == httpx.URL(url).query else 403, content=b"report")
+
+    @tool("read_file")
+    def download_report(path: str) -> str:
+        """Download a report by its URL or artifact handle."""
+        assert path == url
+        with httpx.Client(transport=httpx.MockTransport(serve_report)) as client:
+            response = client.get(path)
+            response.raise_for_status()
+        return response.text
+
+    agent = create_agent(
+        model=_cycle_model(),
+        tools=[remote_report, download_report],
+        middleware=[DurableContextMiddleware(), ArtifactCaptureMiddleware(), ArtifactResolutionMiddleware()],
+        state_schema=ThreadState,
+        checkpointer=InMemorySaver(),
+    )
+    config = {"configurable": {"thread_id": THREAD_ID}}
+
+    result = agent.invoke({"messages": [HumanMessage(content="make then download")]}, config, context={"thread_id": THREAD_ID})
+
+    assert downloaded == [httpx.URL(url)]
+    made = next(entry for entry in result["tool_artifacts"] if entry["tool_call_id"] == "call_make")
+    assert made["real_ref"] == url
+    assert made["consumed_by"] == ["call_read"]
+    persisted = next(entry for entry in agent.get_state(config).values["tool_artifacts"] if entry["tool_call_id"] == "call_make")
+    assert persisted["real_ref"] == url
+
+
+def test_glob_directory_survives_capture_checkpoint_and_resolved_listing(tmp_path):
+    from deerflow.sandbox.tools import _format_glob_results
+
+    directory_name = "项目（归档）"
+    real_ref = f"/mnt/user-data/workspace/{directory_name}"
+    directory = tmp_path / directory_name
+    directory.mkdir()
+    (directory / "report.txt").write_text("report", encoding="utf-8")
+    listed = []
+
+    @tool("glob")
+    def glob_directory(path: str, include_dirs: bool) -> str:
+        """Find a directory using the sandbox's numbered glob result format."""
+        assert path == "/mnt"
+        assert include_dirs is True
+        return _format_glob_results(path, [real_ref], truncated=False)
+
+    @tool("ls")
+    def list_directory(path: str) -> str:
+        """List a directory by its sandbox path or artifact handle."""
+        listed.append(path)
+        return "\n".join(sorted(child.name for child in (tmp_path / path.rsplit("/", 1)[-1]).iterdir()))
+
+    model = _cycle_model()
+    model.responses[0].tool_calls[0].update(name="glob", args={"path": "/mnt", "include_dirs": True}, id="call_glob")
+    model.responses[1].tool_calls[0].update(name="ls", id="call_ls")
+    agent = create_agent(
+        model=model,
+        tools=[glob_directory, list_directory],
+        middleware=[DurableContextMiddleware(), ArtifactCaptureMiddleware(), ArtifactResolutionMiddleware()],
+        state_schema=ThreadState,
+        checkpointer=InMemorySaver(),
+    )
+    config = {"configurable": {"thread_id": THREAD_ID}}
+
+    result = agent.invoke({"messages": [HumanMessage(content="find then list the archive directory")]}, config, context={"thread_id": THREAD_ID})
+
+    assert listed == [real_ref]
+    assert next(message.content for message in result["messages"] if getattr(message, "tool_call_id", None) == "call_ls") == "report.txt"
+    found = next(entry for entry in result["tool_artifacts"] if entry["tool_call_id"] == "call_glob")
+    assert found["real_ref"] == real_ref
+    assert found["consumed_by"] == ["call_ls"]
+    persisted = next(entry for entry in agent.get_state(config).values["tool_artifacts"] if entry["tool_call_id"] == "call_glob")
+    assert persisted["real_ref"] == real_ref

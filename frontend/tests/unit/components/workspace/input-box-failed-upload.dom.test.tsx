@@ -7,6 +7,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import { toast } from "sonner";
 
 import { PromptInputProvider } from "@/components/ai-elements/prompt-input";
 import { InputBox } from "@/components/workspace/input-box";
@@ -14,9 +15,14 @@ import { ThreadContext } from "@/components/workspace/messages/context";
 import { AuthProvider } from "@/core/auth/AuthProvider";
 import { DEFAULT_LOCALE } from "@/core/i18n";
 import { I18nProvider } from "@/core/i18n/context";
+import { enUS } from "@/core/i18n/locales/en-US";
 import { stageProjectAttachment } from "@/core/projects/composer-attach";
 import type { AttachProjectDocumentResult } from "@/core/projects/types";
 import { DEFAULT_LOCAL_SETTINGS } from "@/core/settings/local";
+import {
+  buildComposerDraftKey,
+  readComposerDraft,
+} from "@/core/threads/composer-draft";
 import { useThreadStream } from "@/core/threads/hooks";
 import type { UploadResponse } from "@/core/uploads/api";
 
@@ -202,4 +208,81 @@ it("retries a failed upload with the staged project attachment still attached", 
     ATTACHMENT.virtual_path,
     "/mnt/user-data/uploads/notes.txt",
   ]);
+});
+
+it("keeps the draft through a failed upload and a busy /goal, then runs the goal's objective once", async () => {
+  // A /goal the Gateway refuses with 409 never reaches sendMessage, so like
+  // a failed upload it must leave the composer and its stored draft alone.
+  const goalStatuses: number[] = [];
+  const baseFetch = globalThis.fetch;
+  rs.stubGlobal("fetch", async (input: unknown, init?: RequestInit) => {
+    if (String(input).endsWith("/api/threads/thread-1/goal")) {
+      const status = goalStatuses.length === 0 ? 409 : 200;
+      goalStatuses.push(status);
+      return status === 409
+        ? json({ detail: "Thread has a run in flight." }, 409)
+        : json({ goal: { objective: "finish all tests", status: "active" } });
+    }
+    return baseFetch(input as RequestInfo, init);
+  });
+  const error = rs.spyOn(toast, "error");
+  const draftKey = buildComposerDraftKey({
+    userId: "user-1",
+    threadId: "thread-1",
+  });
+  const storedDraft = () =>
+    readComposerDraft(window.sessionStorage, draftKey)?.text;
+  const textbox = () => screen.getByRole<HTMLTextAreaElement>("textbox");
+  const { container } = renderChat();
+  const submit = () => fireEvent.submit(container.querySelector("form")!);
+
+  fireEvent.change(textbox(), { target: { value: "summarize it" } });
+  fireEvent.change(document.querySelector('input[type="file"]')!, {
+    target: {
+      files: [new File(["notes"], "notes.txt", { type: "text/plain" })],
+    },
+  });
+  await screen.findByText("notes.txt");
+  await waitFor(() => expect(storedDraft()).toBe("summarize it"));
+  submit();
+  await waitFor(() => expect(uploadAttempts).toBe(1));
+  await waitFor(() => expect(textbox().disabled).toBe(false));
+  expect(textbox().value).toBe("summarize it");
+  expect(storedDraft()).toBe("summarize it");
+
+  fireEvent.click(screen.getByRole("button", { name: "Remove attachment" }));
+  fireEvent.change(textbox(), {
+    target: { value: "/goal finish all tests" },
+  });
+  await waitFor(() => expect(storedDraft()).toBe("/goal finish all tests"));
+  submit();
+  await waitFor(() =>
+    expect(error).toHaveBeenCalledWith(enUS.inputBox.goalBar.busy),
+  );
+  // Let PromptInput settle the rejected submit before reading the composer.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(textbox().value).toBe("/goal finish all tests");
+  expect(storedDraft()).toBe("/goal finish all tests");
+  expect(mocks.submit).not.toHaveBeenCalled();
+
+  submit();
+  await waitFor(() => expect(mocks.submit).toHaveBeenCalledTimes(1));
+  expect(goalStatuses).toEqual([409, 200]);
+  expect(uploadAttempts).toBe(1);
+  const [input] = mocks.submit.mock.calls[0] as unknown as [
+    {
+      messages: Array<{
+        content: unknown;
+        additional_kwargs?: { files?: unknown };
+      }>;
+    },
+  ];
+  const sent = input.messages.at(-1);
+  expect(JSON.stringify(sent?.content)).toContain("finish all tests");
+  expect(JSON.stringify(sent?.content)).not.toContain("/goal");
+  expect(sent?.additional_kwargs?.files).toBeUndefined();
+  await waitFor(() => expect(textbox().value).toBe(""));
+  // Past the draft-save delay: nothing writes the sent text back.
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  expect(storedDraft()).toBeUndefined();
 });

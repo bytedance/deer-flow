@@ -2,6 +2,18 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+`test_skills_custom_multiprocess.py` starts independent spawn workers sharing a
+temporary custom-skill root. Park edit/rollback before the write and before the
+history append, observe the peer reaching the mutation lock, then check both
+exclusion and the persisted predecessor chain. Always release and reap workers
+on assertion failures; do not replace this with two threads sharing a mutex.
+
+Search coercion ownership tests audit executable helper bodies/call sites and
+inline integer assignments. Include Exa and SearXNG in the deferred census;
+pin new-provider copies and docstring false positives with source fixtures.
+This pattern gate does not establish arbitrary provider semantics or change
+deferred providers' validation policy.
+
 Mixed-version resume admission in `test_thread_run_idempotency.py` uses a real
 shared SQL repository and an old-column projection. The frozen pre-6499 helper
 models only null-input resume retry matching from `02ce9ab2`; do not update it
@@ -68,6 +80,12 @@ an actionable reason; cover version detection offline in `test_support_compose.p
 Real rendering and production entry-point tests use only read-only Compose calls.
 Never start or stop a stack from these tests.
 
+## Jina client options
+
+Retry/response-budget compatibility tests pin client count and caller-supplied
+`proxy`/`trust_env` settings. Additional provider-owned HTTPX options must not
+break those assertions.
+
 ## Claude provider tests
 
 `test_claude_provider_prompt_caching.py` exercises real Anthropic SDK serialization
@@ -96,6 +114,12 @@ script on Windows and an executable shell script on POSIX. Resolve it through
 the production PATH lookup, including a directory containing spaces. Seed fake
 app credentials so auth completion reaches the CLI instead of returning early,
 and keep fixture filesystem work behind `asyncio.to_thread`.
+
+## Remote read fixtures
+
+Remote ranged-read fixtures pass POSIX sandbox paths to adapters and map those
+paths to native temporary files in fake transports. LocalSandbox keeps the native
+host path; do not relax remote path validation to accommodate Windows fixtures.
 
 ## Shared sandbox search contracts
 
