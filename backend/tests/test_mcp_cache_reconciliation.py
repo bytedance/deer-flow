@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 from pathlib import Path
 
@@ -717,6 +718,53 @@ async def test_committed_response_failure_still_finishes_retired_pool(reconciler
     assert "response boom" not in exc_info.value.detail
     assert close_calls == [True]
     assert pool._retired is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["reload", "prepare"])
+async def test_committed_reconciliation_failure_logs_once(reconciler, monkeypatch, tmp_path, caplog, failure_stage):
+    """The recovery layer owns the diagnostic even when the drained write fails."""
+    cfg = tmp_path / "extensions_config.json"
+    _write_config(cfg, {"remote": _http(enabled=False)})
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    pool.ensure_binding("remote", "old-fingerprint", domain="deployment")
+    close_calls = []
+    real_close = pool.close_all_sync
+
+    def record_close():
+        close_calls.append(extensions_config_write_lock.locked())
+        real_close()
+
+    async def noop_admin(_request, **_kwargs):
+        return None
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("sensitive-reconciliation-error")
+
+    monkeypatch.setattr(pool, "close_all_sync", record_close)
+    monkeypatch.setattr(mcp_router, "require_admin_user", noop_admin)
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda _config_path=None: cfg)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", lambda: None)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config" if failure_stage == "reload" else "prepare_mcp_reconciliation", fail)
+
+    with caplog.at_level(logging.WARNING), pytest.raises(HTTPException) as exc_info:
+        await mcp_router.update_mcp_server_state(
+            request=None,
+            body=McpServerStateUpdateRequest(server_name="remote", enabled=True),
+        )
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == "MCP configuration was saved, but local cache reconciliation failed; retry or restart DeerFlow before relying on the changed server."
+    assert json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]["remote"]["enabled"] is True
+    assert close_calls == [False]
+    assert [(record.name, record.levelno, record.getMessage()) for record in caplog.records] == [
+        (
+            cache_module.logger.name,
+            logging.WARNING,
+            "MCP committed transition could not be reconciled (RuntimeError); retiring local cache state conservatively",
+        )
+    ]
 
 
 @pytest.mark.asyncio

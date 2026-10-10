@@ -1256,13 +1256,14 @@ async def _run_drained_mcp_apply[**P, T](action: str, apply: Callable[P, T], /, 
     The worker installs the committed transition while the extensions-config
     locks are held, then finishes teardown after those locks are released.
     ``await_drained`` keeps both phases attached to the request even when the
-    client disconnects. Caller-facing ``HTTPException`` contracts re-raise
-    unlogged while the caller is still connected.
+    client disconnects. Caller-facing ``HTTPException`` contracts and committed
+    reconciliation failures already logged by the recovery layer re-raise
+    unlogged through the persistence helper.
     """
 
     async def _apply_and_finish() -> T:
         try:
-            return await run_drained_write(action, apply, (HTTPException,), *args)
+            return await run_drained_write(action, apply, (HTTPException, _McpCommittedReconciliationError), *args)
         except _McpCommittedReconciliationError as exc:
             # The write landed, but local state was only detached. Finish the
             # conservative teardown outside the config locks, then report the
