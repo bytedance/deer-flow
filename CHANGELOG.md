@@ -4156,6 +4156,16 @@ This release closes that milestone with **439 merged pull requests**.
   missing; `verify-versions.yml` installs the uv version the backend image pins.
   ([#6588])
 
+- **tui:** `deerflow --print` and `--json` no longer drop words of an unquoted
+  message. Each flag took a single value and never read the positional words,
+  so `deerflow --print summarize this repo` sent only `summarize`,
+  `deerflow summarize this repo --print` exited 2 asking for a message on a
+  terminal, and with piped stdin the typed words were silently ignored. Both flags now take every word
+  that follows them and fall back to words given before them, as `--cli` does;
+  a typed message wins over piped stdin. A message split around the flag
+  (`deerflow hello --print there`) exits 2 with a hint to quote it, since its
+  word order cannot be recovered.
+
 ### Security
 
 - **authz:** Enforce permission checks on routes that only had authentication, and

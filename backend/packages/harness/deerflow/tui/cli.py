@@ -55,12 +55,11 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="Extension management: deerflow extensions --help",
         add_help=True,
     )
-    parser.add_argument("message", nargs="*", help="initial prompt for the TUI, or message in --cli mode")
+    parser.add_argument("message", nargs="*", help="initial prompt for the TUI, or the message for --print, --json or --cli")
     parser.add_argument(
         "--print",
         dest="print",
-        nargs="?",
-        const=None,
+        nargs="*",
         default=_UNSET,
         metavar="MESSAGE",
         help="headless one-shot: print the final answer and exit (reads stdin if no MESSAGE)",
@@ -68,8 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--json",
         dest="json",
-        nargs="?",
-        const=None,
+        nargs="*",
         default=_UNSET,
         metavar="MESSAGE",
         help="headless streaming: emit newline-delimited JSON StreamEvents and exit",
@@ -100,6 +98,18 @@ def _strip_chat(argv: Sequence[str]) -> list[str]:
     return argv
 
 
+def _headless_message(parser: argparse.ArgumentParser, flag: str, values: list[str], positional: str | None) -> str | None:
+    """Return the words after a ``--print``/``--json`` flag, or else the positional words.
+
+    argparse loses the order between the flag's words and positional words, so a
+    message split around the flag is refused instead of reassembled by guess.
+    """
+    message = " ".join(values).strip() or None
+    if message and positional:
+        parser.error(f'{flag}: pass the message in one place, e.g. deerflow {flag} "your question"')
+    return message or positional
+
+
 def _truthy(value: object) -> bool:
     return isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "on"}
 
@@ -122,7 +132,7 @@ def plan_launch(
         parser.error("--recursion-limit requires --print, --json, or --cli")
 
     if args.print is not _UNSET:
-        message = args.print if isinstance(args.print, str) else None
+        message = _headless_message(parser, "--print", args.print, positional)
         if message is None and stdin_isatty:
             return LaunchPlan(mode="headless-help", reason="--print needs a MESSAGE argument or piped stdin.")
         return LaunchPlan(
@@ -135,7 +145,7 @@ def plan_launch(
         )
 
     if args.json is not _UNSET:
-        message = args.json if isinstance(args.json, str) else None
+        message = _headless_message(parser, "--json", args.json, positional)
         if message is None and stdin_isatty:
             return LaunchPlan(mode="headless-help", reason="--json needs a MESSAGE argument or piped stdin.")
         return LaunchPlan(
