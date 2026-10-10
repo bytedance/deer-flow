@@ -15,4 +15,5 @@ cd "$REPO_ROOT"
 mkdir -p logs
 mkdir -p temp/client_body_temp temp/proxy_temp temp/fastcgi_temp temp/uwsgi_temp temp/scgi_temp
 
-exec nginx -g 'daemon off;' -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT"
+NGINX_CONF="$(bash "$REPO_ROOT/scripts/nginx-local-conf.sh")"
+exec nginx -g 'daemon off;' -c "$NGINX_CONF" -p "$REPO_ROOT"

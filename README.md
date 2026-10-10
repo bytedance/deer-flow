@@ -174,7 +174,11 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
 
    Brave web search preserves valid entries in mixed result lists. Malformed response containers or lists containing no usable entries return a structured format error; missing, null, or empty results keep the existing "No results found" response. Format errors also log the malformed container's path and type, or the absence of usable result objects, without including search queries, credentials, or payload values.
 
+   GroundRoute web search and fetch contain malformed HTTP-success payloads the same way: a non-object payload, a `results` container that is not a list, or a non-empty list with no object entries returns the provider's format error, while non-object entries in an otherwise valid list are skipped in order. Missing, null, or empty results keep the existing "No results found" response.
+
    Jina, Browserless, and InfoQuest web fetches resolve relative links and image sources using the requested page URL (or a usable HTML base URL), so returned Markdown includes complete destinations. Link resolution preserves the surrounding HTML source, including malformed-page formatting.
+
+   Self-hosted Browserless, Crawl4AI, Firecrawl, and fastCRW fetch backends require outbound isolation from private, loopback, link-local, and cloud-metadata networks before setting `network_isolation_confirmed: true` on each tool. DeerFlow rejects private or unverifiable backends by default because those services handle redirects, DNS resolution, and subresources themselves. `allow_private_addresses` permits intentional internal target URLs and does not bypass the backend check. See [delegated fetch deployment](backend/docs/CONFIGURATION.md#delegated-fetch-backend-isolation); `make doctor` reports backend configurations that would be refused.
 
    Jina fetches support opt-in bounded retries via `max_retries` (default `0`) and `retry_budget_seconds` (default `30`) in the tool configuration. Valid `Retry-After` hints set a minimum wait for HTTP 429/503; 429 without a valid hint stays terminal. Hints that cannot fit the remaining budget stop retries. Local backoff remains randomized. Retries may increase upstream requests and cost; see [Jina fetch retries](backend/docs/CONFIGURATION.md#jina-fetch-retries).
 
@@ -363,6 +367,7 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
    - `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` accepts a UTF-8 token handoff and reuses it for later model instances in the same process. Undecodable handoffs are skipped so Claude Code can still try its override or default credentials file.
    - CLI credential JSON files accept UTF-8 with or without a BOM, independently of the host locale. `make doctor` accepts the same files when checking CLI authentication. Invalid text encoding is treated as an unreadable source; Claude Code can still try its default file after an invalid override.
    - ACP agent entries are separate from model providers — if you configure `acp_agents.codex`, point it at a Codex ACP adapter such as `npx -y @zed-industries/codex-acp`
+   - A bare ACP agent `command` is resolved before the agent starts, so npm-installed launchers work on Windows too: `npx` or `mcode` is spawned as its `npx.cmd`/`mcode.cmd` shim instead of failing with a command-not-found error. The lookup uses the `PATH` the agent subprocess will actually see (`acp_agents.<name>.env.PATH` when set, otherwise the Gateway's) and hands the spawn an absolute path, so a relative `PATH` entry cannot be re-interpreted inside the agent's own workspace. A `command` containing a path separator is used as configured, and a bare name that cannot be resolved is still reported with the install guidance below.
    - Each ACP agent's `timeout_seconds` (default: 1800) is one shared budget for initialization, session creation, and the prompt, starting after the subprocess launches. On timeout, DeerFlow aborts the invocation and closes the subprocess before returning an error. Workspace/MCP preparation and subprocess cleanup are outside this budget. A `TimeoutError` raised by the SDK before this deadline expires retains its own error message.
    - MiniMax Code speaks ACP directly. Install and authenticate it, then add it as an ACP agent:
 
@@ -801,6 +806,11 @@ Signed-in users' notification toggle, default model, conversation mode, and reas
 
 In a new chat, the submitted question stays above its streamed reasoning and
 tool steps while the server creates the conversation and confirms the message.
+
+Markdown and JSON conversation exports from the chat header or sidebar read all
+persisted history pages, including earlier turns outside the loaded view or
+compacted model context. A failed history read stops the export instead of
+downloading a partial transcript. Public demos export their bundled messages.
 
 Capability Center groups plugins by office collaboration, documents and knowledge, search and research, business and data, and development and operations. The directory includes setup references alongside existing MCP configurations and Lark. Recommended integrations and built-in support do not imply an installed or verified connection; the Installed filter shows configured MCP entries and installed Lark only.
 
@@ -1290,6 +1300,8 @@ Discovery follows operator-managed directory symlinks, but skips links back to a
 
 Skill Markdown and bundled text resources use UTF-8. Skill-creator CLI and review utilities read and write text explicitly as UTF-8 so localized skills behave consistently across operating systems.
 
+Custom skill history preserves Unicode line separators inside saved content and metadata, keeping those revisions readable for history inspection and rollback. Malformed JSON history records are still rejected.
+
 Users can explicitly activate an enabled skill for a single turn by starting the request with `/skill-name`, for example `/data-analysis analyze uploads/foo.csv`. DeerFlow loads that skill's `SKILL.md` as hidden current-turn context while leaving the base prompt limited to skill metadata. Slash activation respects disabled skills, custom-agent skill whitelists, and existing channel commands such as `/new` and `/help`.
 
 After an answer loads skills, its toolbar includes **Skills used**. Hover over or click the icon to see the skills and their sources; hovering a skill name underlines it. Select a skill to inspect its `SKILL.md` in the resizable side panel (a drawer on mobile). The view uses snapshots captured during successful configured read-tool loads or explicit slash activation, so later edits or removal of a skill do not rewrite its history. Repeated loads appear once per run, in first-load order. Range reads and bounded snapshots are labeled as partial; older conversations without captured evidence do not show this menu. Copy returns the captured Markdown, including YAML frontmatter. Package-relative links and images remain readable references rather than navigating away from the conversation. Skill loads performed through other tools, such as shell commands, are not inferred from answer text.
@@ -1498,6 +1510,25 @@ Tavily search and fetch each read `api_key` from their own tool entry in
 reuse the search entry's key, so search can use a different provider. If you
 previously configured a shared Tavily key only under `web_search`, also set it
 under `web_fetch` or use `TAVILY_API_KEY` for both.
+
+For news-focused research, select **Webz.io News Search** in `make setup`, or
+replace the `web_search` tool's `use` with
+`deerflow.community.webz.tools:web_search_tool` and set `WEBZ_API_KEY`.
+An explicit tool `api_key` takes precedence over the environment variable.
+An explicit call's `max_results` overrides the configured default; omission
+uses configuration or 5 (clamped to 1–100). Invalid configured counts, including
+booleans and fractional numbers, fall back to 5. Results include the matching
+passage, title, URL, publication date, and source metadata. The chat search step
+displays source titles and links, including after reloading a conversation, and
+skips malformed source entries without losing valid links. `returned_results`
+counts the returned page, not all matching news articles. Malformed entries are
+skipped with a warning while valid entries are retained; invalid responses or
+pages with no valid entries return an error. Empty result lists remain valid. The tool accepts
+language, country, source-domain, sentiment, category, and publication-date
+filters. Its `time_range` maps to a UTC lower date bound of 1, 7, 30, or 365
+days; an explicit `published_from` overrides that bound. Webz searches recent
+news rather than the general web: date filters cannot extend the provider's
+[documented 30-day coverage](https://docs.webz.io/docs/webz/news-search-api-response-format).
 
 #### Exporting Custom Skills
 
@@ -2164,7 +2195,7 @@ Concurrent reads and writes to the same file share a gate across synchronous and
 The built-in `grep` tool searches either one text file or all matching text files below a directory, so an agent can search an uploaded document directly without first broadening the request to the entire uploads directory.
 E2B's `glob` filter preserves spaces, quotes, and dollar signs in filename patterns, while wildcard matching and root-relative directory scoping remain unchanged.
 E2B `grep` also preserves colons in file and directory names when reporting matching paths and line numbers.
-E2B `glob` and `grep` preserve non-LF separator characters, such as vertical tabs and Unicode line separators, inside returned paths; `grep` also preserves them inside matched text.
+`glob` and `grep` preserve non-LF separator characters, such as vertical tabs and Unicode line separators, inside returned paths on E2B, BoxLite, Tenki, and OpenSandbox; `grep` also preserves them inside matched text.
 
 Remote `ls` excludes ignored descendants before applying its 500-entry listing limit, so dependency and build trees do not crowd out visible files. Explicitly listing an ignored directory still lists its contents; normal depth and output limits remain in effect.
 
@@ -2923,10 +2954,13 @@ persisted injected instruction.
 
 ### Deployment Defaults
 
-The Docker stack publishes its entry port on `127.0.0.1` only, matching the
-local-trusted-environment model described above. To reach it from another
-machine, set `BIND_HOST` in `.env` (e.g. `BIND_HOST=0.0.0.0`) — and only after
-putting the security measures below in place.
+The Docker stack publishes its entry port on `127.0.0.1` only, and local
+`make dev` / `make start` bind nginx, the Gateway, and the frontend to loopback,
+matching the local-trusted-environment model described above. To reach it from
+another machine, set `BIND_HOST` in `.env` (e.g. `BIND_HOST=0.0.0.0`) — and only
+after putting the security measures below in place. Local runs apply `BIND_HOST`
+to nginx on port `2026` only; the Gateway and frontend stay on loopback behind
+it.
 
 **Complete first-run setup before the host becomes reachable.** A fresh
 instance has no accounts yet, so create the admin account through `/setup`

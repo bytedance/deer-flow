@@ -628,6 +628,7 @@ export function buildThreadMessagesPageUrl(
   baseUrl: string,
   threadId: string,
   beforeSeq?: number,
+  limit?: number,
 ) {
   const normalizedBaseUrl = baseUrl.replace(/\/$/, "");
   const path = `/api/threads/${encodeURIComponent(threadId)}/messages/page`;
@@ -638,6 +639,7 @@ export function buildThreadMessagesPageUrl(
   if (beforeSeq !== undefined) {
     url.searchParams.set("before_seq", String(beforeSeq));
   }
+  if (limit !== undefined) url.searchParams.set("limit", String(limit));
   return normalizedBaseUrl ? url.toString() : `${url.pathname}${url.search}`;
 }
 
@@ -649,6 +651,40 @@ export function flattenThreadHistoryPages(
       .slice()
       .reverse()
       .flatMap((page) => page.data),
+  );
+}
+
+/** Read persisted history independently of the loaded UI and compacted state. */
+export async function fetchThreadExportMessages(threadId: string) {
+  const pages: ThreadMessagesPageResponse[] = [];
+  let beforeSeq: number | undefined;
+  do {
+    const response = await fetch(
+      buildThreadMessagesPageUrl(getBackendBaseURL(), threadId, beforeSeq, 200),
+    );
+    if (!response.ok) {
+      throw new Error("Failed to load conversation for export.");
+    }
+    const page = parseThreadMessagesPageResponse(await response.json());
+    const next = getThreadHistoryNextPageParam(page);
+    if (
+      next !== undefined &&
+      (page.data.length === 0 ||
+        next !== page.data[0]?.seq ||
+        (beforeSeq !== undefined && next >= beforeSeq))
+    ) {
+      throw new Error("Thread export history cursor did not advance.");
+    }
+    pages.push(page);
+    beforeSeq = next;
+  } while (beforeSeq !== undefined);
+  return mergeMessages(
+    buildVisibleHistoryMessages(
+      flattenThreadHistoryPages(pages),
+      new Set<string>(),
+    ),
+    [],
+    [],
   );
 }
 
