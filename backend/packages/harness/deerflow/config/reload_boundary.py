@@ -68,11 +68,12 @@ STARTUP_ONLY_FIELDS: dict[str, str] = {
     # config.yaml edits.
     "channels": ("start_channel_service() is invoked once during startup; the live IM channel clients (Feishu, Slack, Telegram, DingTalk) are not rebuilt when channels.* changes."),
     "channel_connections": (
-        "start_channel_service() wires the connection repository and channel workers once at startup, and the channel-connections router caches the merged provider config on app.state; channel_connections.* edits need a restart."
+        "start_channel_service() wires the connection repository and channel workers once at startup, and the channel-connections router caches the merged provider config on app.state; "
+        "the scheduled-task notification delivery worker captures channel_connections.notification_locale when it starts. channel_connections.* edits need a restart."
     ),
     "scheduler": (
         "ScheduledTaskService is constructed and started once during Gateway lifespan startup; enabled, poll_interval_seconds, lease_seconds, "
-        "max_concurrent_runs, queue_timeout_seconds, and multi_instance are captured into the service instance and the background poller task is not rebuilt on config.yaml edits. "
+        "max_concurrent_runs, max_concurrent_runs_per_user, queue_timeout_seconds, and multi_instance are captured into the service instance and the background poller task is not rebuilt on config.yaml edits. "
         "Changing multi-instance recovery prerequisites or lease behavior requires restarting every Gateway Pod together. "
         "scheduler.recursion_limit is not captured there: launch_scheduled_thread_run reads it from get_app_config() on each dispatch, so a YAML edit applies to the next scheduled run without a Gateway restart."
     ),
@@ -93,6 +94,29 @@ STARTUP_ONLY_FIELDS: dict[str, str] = {
     "dedupe_storage": (
         "make_inbound_dedupe_store() resolves the inbound dedupe store once when ChannelService is constructed at startup; the store "
         "(in-process memory or shared Postgres) is captured onto ChannelManager and is not rebuilt on config.yaml edits."
+    ),
+    "auth.local.throttle_storage": (
+        "langgraph_runtime() resolves the login throttle store once at startup from this selector and the persistence engine "
+        "(app.gateway.auth.login_throttle); the store (in-process counter or the shared login_throttle table) is not rebuilt on "
+        "config.yaml edits, so switching it needs a Gateway restart. auth.local.max_login_attempts and lockout_seconds stay live-read."
+    ),
+    "projects.summaries_enabled": (
+        "SummaryGenerator is constructed and its worker pool started once during Gateway lifespan startup; the enable switch, queue shape and model settings are captured into the instance and are not re-read on config.yaml edits."
+    ),
+    "projects.summary_max_bytes": (
+        "SummaryGenerator is constructed and its worker pool started once during Gateway lifespan startup; the enable switch, queue shape and model settings are captured into the instance and are not re-read on config.yaml edits."
+    ),
+    "projects.summary_model_name": (
+        "SummaryGenerator is constructed and its worker pool started once during Gateway lifespan startup; the enable switch, queue shape and model settings are captured into the instance and are not re-read on config.yaml edits."
+    ),
+    "projects.summary_concurrency": (
+        "SummaryGenerator is constructed and its worker pool started once during Gateway lifespan startup; the enable switch, queue shape and model settings are captured into the instance and are not re-read on config.yaml edits."
+    ),
+    "projects.summary_queue_size": (
+        "SummaryGenerator is constructed and its worker pool started once during Gateway lifespan startup; the enable switch, queue shape and model settings are captured into the instance and are not re-read on config.yaml edits."
+    ),
+    "projects.summary_timeout_seconds": (
+        "SummaryGenerator is constructed and its worker pool started once during Gateway lifespan startup; the enable switch, queue shape and model settings are captured into the instance and are not re-read on config.yaml edits."
     ),
 }
 

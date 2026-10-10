@@ -75,6 +75,10 @@ import {
 } from "@/core/messages/utils";
 import { getWorkspaceChangeAnchorGroupIndices } from "@/core/messages/workspace-change-anchor";
 import {
+  placeTaskEvents,
+  type ScheduledTaskEvent,
+} from "@/core/scheduled-tasks/events";
+import {
   buildMessageSidecarContext,
   type SidecarContext,
 } from "@/core/sidecar";
@@ -110,6 +114,7 @@ import {
 import { RunActivity, RunDuration } from "./run-duration";
 import { ScheduledRunPrompt } from "./scheduled-run-prompt";
 import { ScheduledTaskCard } from "./scheduled-task-card";
+import { ScheduledTaskEventLine } from "./scheduled-task-event-line";
 import { MessageListSkeleton } from "./skeleton";
 import { SubtaskCard } from "./subtask-card";
 import {
@@ -324,12 +329,14 @@ export function MessageList({
   onBranchTurn,
   canRegenerate = false,
   canEdit = false,
+  editLockedByGoal = false,
   canBranch = false,
   enableSidecarActions = true,
   enableConversationOutline = false,
   sidecarSurface = false,
   initialScroll = "smooth",
   resizeScroll = "smooth",
+  scheduledTaskEvents,
 }: {
   archiveDownloadsEnabled?: boolean;
   className?: string;
@@ -359,12 +366,16 @@ export function MessageList({
   ) => void | Promise<void>;
   canRegenerate?: boolean;
   canEdit?: boolean;
+  /** Edit would be allowed but for an active goal: show the pencil locked. */
+  editLockedByGoal?: boolean;
   canBranch?: boolean;
   enableSidecarActions?: boolean;
   enableConversationOutline?: boolean;
   sidecarSurface?: boolean;
   initialScroll?: ConversationProps["initial"];
   resizeScroll?: ConversationProps["resize"];
+  /** Lifecycle events of schedules created in this chat, one line each. */
+  scheduledTaskEvents?: readonly ScheduledTaskEvent[];
 }) {
   const { t } = useI18n();
   const sidecar = useMaybeSidecar();
@@ -372,6 +383,16 @@ export function MessageList({
     useState<SelectionToolbarState | null>(null);
   const messages = thread.messages;
   const groupedMessages = useStableMessageGroups(messages, thread.isLoading);
+  // Schedule event lines sit at the end of the turn they followed.
+  const placedTaskEvents = useMemo(
+    () =>
+      scheduledTaskEvents && scheduledTaskEvents.length > 0
+        ? placeTaskEvents(groupedMessages, scheduledTaskEvents, {
+            hasMoreHistory: Boolean(hasMoreHistory),
+          })
+        : null,
+    [groupedMessages, scheduledTaskEvents, hasMoreHistory],
+  );
   // Stable historical groups survive streaming updates. Weak keys also release
   // cached targets when pagination or a thread change removes those groups.
   const reasoningTargetsCache = useRef(
@@ -1148,6 +1169,17 @@ export function MessageList({
       </div>
     );
   };
+  const renderTaskEventLines = (
+    events: readonly ScheduledTaskEvent[] | undefined,
+    className?: string,
+  ) =>
+    events && events.length > 0 ? (
+      <div className={cn("flex w-full flex-col gap-3", className)}>
+        {events.map((event) => (
+          <ScheduledTaskEventLine key={event.id} event={event} />
+        ))}
+      </div>
+    ) : null;
   return (
     <KnowledgeSourcesProvider messages={thread.messages}>
       <Conversation
@@ -1168,6 +1200,15 @@ export function MessageList({
             isLoading={thread.isLoading}
             onActiveGroupChange={
               conversationOutlineEnabled ? handleActiveGroupChange : undefined
+            }
+            renderAfterGroup={
+              placedTaskEvents
+                ? (groupIndex) =>
+                    renderTaskEventLines(
+                      placedTaskEvents.afterGroup.get(groupIndex),
+                      "mt-8",
+                    )
+                : undefined
             }
             renderGroup={(group, groupIndex) => {
               const turnUsageMessages =
@@ -1221,6 +1262,13 @@ export function MessageList({
                     )}
                   >
                     {group.messages.map((msg) => {
+                      const isLatestEditableHumanMessage =
+                        group.type === "human" &&
+                        !group.scheduledOrigin &&
+                        Boolean(msg.id) &&
+                        msg.id === latestEditableHumanMessageId &&
+                        !replayActionBusy &&
+                        Boolean(onEditAndRegenerateMessage);
                       const item = (
                         <MessageListItem
                           message={msg}
@@ -1242,14 +1290,9 @@ export function MessageList({
                           showWorkspaceChanges={workspaceChangeAnchorGroupIndices.has(
                             groupIndex,
                           )}
-                          canEdit={
-                            group.type === "human" &&
-                            !group.scheduledOrigin &&
-                            Boolean(msg.id) &&
-                            msg.id === latestEditableHumanMessageId &&
-                            canEdit &&
-                            !replayActionBusy &&
-                            Boolean(onEditAndRegenerateMessage)
+                          canEdit={isLatestEditableHumanMessage && canEdit}
+                          editLockedByGoal={
+                            isLatestEditableHumanMessage && editLockedByGoal
                           }
                           isEditPending={editingMessageId === msg.id}
                           onEditAndRegenerate={
@@ -1551,6 +1594,7 @@ export function MessageList({
               );
             }}
           />
+          {renderTaskEventLines(placedTaskEvents?.tail)}
           {thread.isLoading && !hasActiveAssistantText && (
             <div className="w-full">
               <RunActivity startTime={turnStartTime} />

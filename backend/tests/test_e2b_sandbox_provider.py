@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import importlib
+import importlib.util
 import json
 import os
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections import OrderedDict
@@ -22,7 +24,8 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from e2b import FileNotFoundException, TimeoutException
+from e2b import CommandExitException, FileNotFoundException, TimeoutException
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic import ValidationError
 
 from deerflow.community.e2b_sandbox.capacity import (
@@ -1751,13 +1754,77 @@ def test_execute_command_returns_stdout_on_success():
     assert sb.is_dead is False
 
 
+def _raise_exit(stdout: str, stderr: str, exit_code: int):
+    """The real SDK raises ``CommandExitException`` on a nonzero exit; it
+    never returns a result with ``exit_code != 0``."""
+
+    def run(_cmd: str) -> Any:
+        raise CommandExitException(stderr=stderr, stdout=stdout, exit_code=exit_code, error=f"exit status {exit_code}")
+
+    return run
+
+
 def test_execute_command_appends_exit_marker_when_failure_has_output():
     """LocalSandbox parity: a nonzero exit must survive in the output text
     even when the command produced output, so evidence consumers (acceptance
     checklist) recover the actual shell status."""
-    client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout="5 passed, 1 error\n", stderr="", exit_code=1)]))
+    client = FakeClient(commands=FakeCommandsAPI([_raise_exit("5 passed, 1 error\n", "", 1)]))
     sb = _make_sandbox(client)
     assert sb.execute_command("make test") == "5 passed, 1 error\n\nExit Code: 1"
+
+
+def test_execute_command_keeps_stdout_and_stderr_on_nonzero_exit():
+    client = FakeClient(commands=FakeCommandsAPI([_raise_exit("12 passed\n", "coverage below 80%\n", 2)]))
+    sb = _make_sandbox(client)
+    assert sb.execute_command("pytest -q") == "12 passed\n\ncoverage below 80%\n\nExit Code: 2"
+    assert sb.is_dead is False
+
+
+def test_execute_command_reports_exit_code_when_failure_has_no_output():
+    client = FakeClient(commands=FakeCommandsAPI([_raise_exit("", "", 1)]))
+    sb = _make_sandbox(client)
+    assert sb.execute_command("false") == "Command exited with code 1"
+
+
+def test_execute_command_nonzero_exit_mentioning_not_found_does_not_mark_dead():
+    """A command's own stderr can contain "sandbox not found"; that is a failed
+    command, not a reaped VM."""
+    client = FakeClient(commands=FakeCommandsAPI([_raise_exit("", "error: sandbox not found\n", 1)]))
+    sb = _make_sandbox(client)
+    assert sb.execute_command("mytool status") == "error: sandbox not found\n\nExit Code: 1"
+    assert sb.is_dead is False
+
+
+def test_execute_command_nonzero_exit_is_harvested_as_error():
+    """End-to-end with the real executor harvest. ``tests/conftest.py`` mocks
+    ``deerflow.subagents.executor``, so it is loaded under a unique name."""
+    path = Path(__file__).parents[1] / "packages/harness/deerflow/subagents/executor.py"
+    spec = importlib.util.spec_from_file_location("_e2b_exit_marker_executor", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    try:
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        from deerflow.subagents import acceptance_checks
+
+        client = FakeClient(commands=FakeCommandsAPI([_raise_exit("12 passed\n", "coverage below 80%\n", 1)]))
+        out = _make_sandbox(client).execute_command("pytest -q")
+
+        cmd = "pytest -q"
+        ai = AIMessage(content="", tool_calls=[{"name": "bash", "args": {"command": cmd}, "id": "tc-1", "type": "tool_call"}])
+        tm = ToolMessage(content=out, tool_call_id="tc-1", name="bash")
+        executions = module._harvest_bash_executions({"messages": [HumanMessage(content="task"), ai, tm]})
+        assert executions, "harvest returned no bash executions"
+        for entry in executions:
+            entry["shell_persistent"] = False
+        assert executions[-1]["status"] == "error"
+        assert executions[-1]["status_marker"] == "Exit Code: 1"
+        assert acceptance_checks._check_tests_passed_leaf(cmd, executions)["holds"] is False
+    finally:
+        sys.modules.pop(spec.name, None)
+        shutdown = getattr(module, "_shutdown_isolated_subagent_loop", None)
+        if shutdown is not None:
+            shutdown()
 
 
 def test_execute_command_does_not_mark_dead_on_unrelated_error():
@@ -2078,6 +2145,30 @@ def test_reclaim_warm_pool_sandbox_handles_reconnect_exception(monkeypatch):
     sid = p._reclaim_warm_pool_sandbox("t1", user_id="u1")
     assert sid is None
     assert "sb-broken" not in p._warm_pool
+
+
+def test_reclaim_warm_pool_sandbox_with_missing_sandbox_frees_slot(monkeypatch):
+    """Reclaiming a confirmed-missing warm sandbox frees the transition slot (#6540).
+
+    ``Sandbox.connect`` raising a trusted not-found error is a confirmed-gone
+    result: it must not leave an eviction tombstone behind that pins the
+    transitioning slot forever.
+    """
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+
+    def missing_sandbox(_sid, **_kw):
+        raise RuntimeError(FakeCommandsAPI.NOT_FOUND_MSG)
+
+    fake_cls.connect_factory = missing_sandbox
+    seed = p._stable_seed("t1", "u1")
+    p._warm_pool["sb-gone"] = (seed, 12345.0)
+
+    assert p._reclaim_warm_pool_sandbox("t1", user_id="u1") is None
+    assert "sb-gone" not in p._warm_pool
+    assert p._eviction_tombstones == set()
+    assert p._remote_ops_in_progress == set()
+    assert p._transitioning_slots == 0
 
 
 def test_acquire_discards_warm_sandbox_when_bootstrap_fails(monkeypatch):
@@ -4591,6 +4682,59 @@ def test_capacity_retries_tombstone_until_warm_vm_is_destroyed(monkeypatch):
     assert p._transitioning_slots == 0
 
 
+def test_eviction_of_missing_sandbox_releases_local_capacity(monkeypatch):
+    """A control-plane confirmed missing warm sandbox frees its local slot (#6540).
+
+    The eviction sees a trusted not-found error from ``Sandbox.connect``, so
+    the transitioning slot is released instead of being retained behind a
+    tombstone that can never clear; the next acquire must succeed.
+    """
+    p = _make_provider(replicas=1, overflow_policy="reject")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+
+    sid = p.acquire("t1", user_id="u1")
+    p.release(sid)
+
+    def missing_sandbox(_sid, **_kw):
+        raise RuntimeError(FakeCommandsAPI.NOT_FOUND_MSG)
+
+    fake_cls.connect_factory = missing_sandbox
+
+    sid2 = p.acquire("t2", user_id="u2")
+
+    assert sid2 != sid
+    assert p._eviction_tombstones == set()
+    assert p._evictions_in_progress == set()
+    assert p._transitioning_slots == 0
+
+
+def test_tombstone_retry_of_missing_sandbox_frees_retained_slot(monkeypatch):
+    """Retrying a retained tombstone against a confirmed-missing VM frees the slot exactly once."""
+    p = _make_provider(replicas=1, overflow_policy="reject")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+
+    sid = p.acquire("t1", user_id="u1")
+    p.release(sid)
+    fake_cls.connect_factory = lambda _sid, **_kw: (_ for _ in ()).throw(RuntimeError("network down"))
+
+    with pytest.raises(SandboxCapacityExceededError) as excinfo:
+        p.acquire("t2", user_id="u2")
+    # A state-unknown failure keeps the slot retained, and the error reports it.
+    assert excinfo.value.transitioning == 1
+    assert p._eviction_tombstones == {sid}
+    assert p._transitioning_slots == 1
+
+    fake_cls.connect_factory = lambda _sid, **_kw: (_ for _ in ()).throw(RuntimeError(FakeCommandsAPI.NOT_FOUND_MSG))
+    assert p._evict_oldest_warm() == sid
+
+    assert p._eviction_tombstones == set()
+    assert p._evictions_in_progress == set()
+    assert p._transitioning_slots == 0
+
+    sid2 = p.acquire("t2", user_id="u2")
+    assert sid2 != sid
+
+
 def test_tombstone_eviction_has_one_retry_owner(monkeypatch):
     """Only one thread can retry a tombstone at a time."""
     p = _make_provider()
@@ -4654,6 +4798,44 @@ def test_shutdown_during_initial_eviction_reconnect_failure_tracks_vm(monkeypatc
     assert p._warm_pool == {}
     assert p._eviction_tombstones == set()
     assert p._evictions_in_progress == set()
+
+
+def test_shutdown_during_gone_sandbox_eviction_releases_slot_once(monkeypatch):
+    """Shutdown racing a confirmed-missing eviction leaves no retained slot.
+
+    The eviction's own cleanup must stay idempotent when shutdown has already
+    cleared the bookkeeping sets: no double slot release, no resurrected
+    tombstone.
+    """
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    p._warm_pool["warm-1"] = ("seed", time.time())
+
+    reconnect_started = threading.Event()
+    allow_failure = threading.Event()
+    calls = 0
+
+    def reconnect(_sid, **_kw):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            reconnect_started.set()
+            assert allow_failure.wait(timeout=2)
+        raise RuntimeError(FakeCommandsAPI.NOT_FOUND_MSG)
+
+    fake_cls.connect_factory = reconnect
+    eviction = threading.Thread(target=p._evict_oldest_warm)
+    eviction.start()
+    assert reconnect_started.wait(timeout=1)
+
+    p.shutdown()
+    allow_failure.set()
+    eviction.join(timeout=5)
+
+    assert p._warm_pool == {}
+    assert p._eviction_tombstones == set()
+    assert p._evictions_in_progress == set()
+    assert p._transitioning_slots == 0
 
 
 def test_capacity_reset_uses_destructive_shutdown_semantics(monkeypatch):
@@ -5586,8 +5768,9 @@ def test_list_dir_raises_when_client_closed():
 
 @pytest.mark.parametrize("marker, error", [("missing", FileNotFoundError), ("1", OSError)])
 def test_list_dir_classifies_empty_failure(marker, error):
-    listing = SimpleNamespace(stdout=f"\n__DF_FIND_STATUS__:{marker}\n", stderr="", exit_code=1)
-    client = FakeClient(commands=FakeCommandsAPI([listing]))
+    # The listing script exits 1 for both; the SDK raises CommandExitException,
+    # whose stdout still carries the status marker the parser classifies by.
+    client = FakeClient(commands=FakeCommandsAPI([_raise_exit(f"\n__DF_FIND_STATUS__:{marker}\n", "", 1)]))
     sb = _make_sandbox(client)
 
     with pytest.raises(error) as exc:
@@ -5595,9 +5778,19 @@ def test_list_dir_classifies_empty_failure(marker, error):
     assert type(exc.value) is error
 
 
+def test_list_dir_returns_entries_when_head_truncation_exits_141():
+    """``head`` closing the pipe on a large listing kills ``find`` with SIGPIPE
+    (141), a successful truncation. The SDK raises for the nonzero exit; the
+    listing must still be returned, not surface as ``OSError``."""
+    stdout = "/home/user\n/home/user/a\n/home/user/b\n\n__DF_FIND_STATUS__:141\n"
+    client = FakeClient(commands=FakeCommandsAPI([_raise_exit(stdout, "", 141)]))
+    sb = _make_sandbox(client)
+
+    assert sb.list_dir("/home/user") == ["/home/user", "/home/user/a", "/home/user/b"]
+
+
 def test_list_dir_raises_oserror_when_find_exit_is_not_missing_path():
-    listing = SimpleNamespace(stdout="", stderr="", exit_code=127)
-    client = FakeClient(commands=FakeCommandsAPI([listing]))
+    client = FakeClient(commands=FakeCommandsAPI([_raise_exit("", "", 127)]))
     sb = _make_sandbox(client)
 
     with pytest.raises(OSError, match="exited with code 127"):

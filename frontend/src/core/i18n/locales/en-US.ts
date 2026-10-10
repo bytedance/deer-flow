@@ -494,6 +494,53 @@ export const enUS: Translations = {
     goalFailed: "Goal command failed.",
     goalTooLong: "Goal is too long. Keep it under {max} characters.",
     goalLengthCounter: "Goal length: {length}/{max} characters",
+    goalBar: {
+      regionLabel: "Goal status",
+      inProgress: "In progress",
+      stopped: "Stopped",
+      waitingForYou: "Waiting for you",
+      waiting: "Waiting",
+      paused: "Paused",
+      autoContinuedOnce: "Auto-continued once",
+      autoContinuedMany: "Auto-continued {count} times",
+      details: "Details",
+      hideDetails: "Hide details",
+      noteLabel: "Goal check note (from the checker)",
+      codeLabel: "Stop code",
+      assumptionTooltip:
+        "The agent filled in something the goal didn't specify and said so in its reply. Check the reply above.",
+      announce: "{status}: {detail}",
+      editLocked:
+        "Editing is off while a goal is set. Run /goal clear to edit.",
+      busy: "A run is still going in this chat. Try again when it finishes.",
+      next: {
+        limit:
+          "Continuation limit reached · {count}/{max}. It won't auto-continue again. Reply to keep going, or set the goal again with /goal <condition> to start a fresh count (this also starts a new run).",
+        autoOff:
+          "Goal check: not met yet. Auto-continue is off for this goal. Reply to keep going.",
+        noProgress:
+          "No progress between turns. Reply with what's missing, or rephrase the goal with /goal.",
+        tokenCapped:
+          "Token budget reached. Send a message to continue; a new run starts with a fresh budget.",
+        missingEvidence:
+          "Goal check: evidence missing. Ask it to show the result or explain what's missing; if the goal no longer applies, run /goal clear.",
+        runFailed:
+          "Goal check: the run did not finish the work. Check the reply for errors, then send a message to retry.",
+        needsInputCard: "Answer the question above to continue.",
+        needsInputReply: "Reply with the missing details to continue.",
+        external:
+          "Goal check: waiting on something external. Send a message when it's ready.",
+        unchecked: "{reason}. It's checked again after your next message.",
+        unknown: "Send a message to keep going.",
+        paused:
+          "Auto-continued {count}/{max}. The run ended before the goal was confirmed. Send a message to check again.",
+      },
+      uncheckedReasons: {
+        evaluatorFailed: "The run itself may be fine",
+        noDurableEndOfTurn: "No final reply was saved",
+        threadChanged: "The chat changed during the check",
+      },
+    },
     compactSuccess:
       "Earlier context compacted. The full chat remains visible; future model calls will use the summary and recent messages.",
     compactSkipped: "The current context does not need compaction yet.",
@@ -1075,6 +1122,7 @@ export const enUS: Translations = {
       continuations: "Kept working {n} more times to reach the goal",
       details: "Details",
       listLabel: "Runs of this task",
+      waitingForSlot: "Waiting for a free slot",
     },
     runTrigger: { scheduled: "Scheduled run", manual: "Trial run" },
     runStatus: {
@@ -1168,6 +1216,24 @@ export const enUS: Translations = {
         "Scheduled tasks aren't available on this server right now.",
       triggerFailed: "The run couldn't be started.",
       permissionDenied: "You don't have permission to do this.",
+    },
+    events: {
+      stoppedWithCondition:
+        "{title} was paused by the agent. Stop condition met: {condition}",
+      stopped: "{title} was paused by the agent: its stop condition was met.",
+      autoPaused:
+        "{title} was paused automatically: 3 runs in a row missed the goal.",
+      finishedRuns: "{title} finished: all {max} runs are done.",
+      finishedOneRun: "{title} finished: its one run is done.",
+      finishedEnd: "{title} finished: its end time has passed.",
+      finished: "{title} finished.",
+      onceDone: "{title} has run.",
+      onceFailed: "{title} didn't finish.",
+      label: "Scheduled task update",
+      suffixLastFailed: "The last run failed.",
+      suffixLastUnmet: "The last run didn't meet the goal.",
+      suffixLastInterrupted: "The last run was interrupted.",
+      untitledTask: "Untitled task",
     },
     card: {
       runs: "Runs",
@@ -1384,6 +1450,31 @@ export const enUS: Translations = {
     pinChatFailed: "Failed to update pinned chat",
   },
 
+  // Thread origin and unread markers
+  threads: {
+    unread: "Unread",
+    unreadLabel: "{title}, unread",
+    unreadLabelWithOrigin: "{origin}, {title}, unread",
+    origin: {
+      schedule: "Scheduled run",
+      fromProvider: (provider: string) => `From ${provider}`,
+      github: "From GitHub",
+      extension: "From an extension",
+      providers: {
+        buzz: "Buzz",
+        dingtalk: "DingTalk",
+        discord: "Discord",
+        feishu: "Feishu",
+        github: "GitHub",
+        qq: "QQ",
+        slack: "Slack",
+        telegram: "Telegram",
+        wechat: "WeChat",
+        wecom: "WeCom",
+      },
+    },
+  },
+
   // Sidecar
   sidecar: {
     title: "Side chat",
@@ -1509,6 +1600,12 @@ export const enUS: Translations = {
       wecom: "WeCom messages through your DeerFlow AI bot.",
     },
     connectedAs: (name: string) => `Connected as ${name}.`,
+    scheduledUpdates: {
+      supported: "Scheduled task updates: sent here",
+      supportedAfterConnect:
+        "Scheduled task updates: available after you connect",
+      unsupported: "Scheduled task updates: not available for this app yet",
+    },
   },
 
   // Page titles (document title)

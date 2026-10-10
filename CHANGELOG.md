@@ -99,6 +99,96 @@ This release closes that milestone with **439 merged pull requests**.
   智能体; no `lead_agent` in labels). Untitled chats and the Scheduled tasks and
   Agents breadcrumbs follow the interface language. ([#6378])
 
+- **scheduler:** Scheduled runs now share execution slots fairly between task
+  owners. A new `scheduler.max_concurrent_runs_per_user` (default `2`, `0` =
+  off, never more than `max_concurrent_runs`) caps how many scheduled runs one
+  owner has launching or running at a time, manual "run now" included; it is
+  checked in the same atomic claim, under the same database lock, as the global
+  cap. The waiting queue is drained owner by owner whatever the cap: owners at
+  their cap drop out before the batch limit, so one owner's backlog no longer
+  pushes another owner's run out of the drain batch. Same-thread FIFO and the
+  order within one owner are unchanged. A run that waits past
+  `scheduler.queue_timeout_seconds` is skipped and shows "Skipped: it waited
+  too long for a free slot" in the run history. ([#6393])
+
+  **Behavior change:** one owner now runs at most 2 scheduled runs at a time by
+  default (before: up to `max_concurrent_runs`, default 3).
+  `scheduler.max_concurrent_runs_per_user: 0` restores the old behavior.
+
+- **scheduler:** When a schedule created in a chat is paused by the agent
+  (its stop condition was met), is paused automatically after three missed
+  goals, or finishes (all `max_runs` done, `end_at` passed, or a one-time task
+  ran), a durable lifecycle event is recorded for that chat in the same
+  database transaction as the state change, and recovery after a crash or a
+  lost lease never records it twice. New `GET
+  /api/threads/{thread_id}/scheduled-task-events` lists them (title snapshot,
+  stop condition, run number and the last run's outcome); the rows stay after
+  the task is deleted and go with the chat. The event names are pinned in
+  `contracts/scheduled_goal_notes_contract.json` (version 3). Migration
+  `0032_activity_and_task_events` adds this table and the run-origin and
+  read-state schema used by later changes; `runs.origin_kind` stays NULL for
+  existing runs. ([#6393])
+
+- **scheduler:** Scheduled-task IM notices are honest, localized and
+  self-contained. Each occurrence sends at most one message, queued by the
+  finalization observer in the same transaction that records the outcome: a
+  pause by the agent (`task_stopped`, new), the automatic pause (now one
+  merged message instead of a goal-missed notice plus a pause notice), the
+  task finishing (`task_finished`, new: all `max_runs` done or `end_at`
+  reached), or the run's own outcome; a pause or finish still says how the
+  last run went. Only apps with proactive push (WeCom today) get notices: the
+  new `app/channels/capabilities.py` declares `proactive_notifications` per
+  provider (and adds the missing `qq` entry), `GET /api/channels/providers`
+  returns it, and other providers get no outbox rows. The text has the task
+  title, what happened, the tasks page's one-line run summary when the agent
+  replied (redacted) and "Open DeerFlow → Scheduled tasks for details.", with
+  no IDs and no links, in the owner's web UI language (new `locale` user
+  preference, `en-US` or `zh-CN`) or else the new
+  `channel_connections.notification_locale` (default `en-US`). No public base
+  URL setting is added: most deployments run on localhost or a LAN, where a
+  link would be dead on the phone that receives it. ([#6393])
+
+  **Behavior change:** runs finalized by crash or lease recovery now notify
+  once (they used to be silent); one message per occurrence replaces separate
+  goal-missed and pause messages; agent stops and finishes now notify; notice
+  text changed and no longer shows the task or run ID. Rows already queued for
+  providers without proactive push end once as `failed` without retries.
+
+- **frontend:** Threads the server creates now show who created them and
+  whether they are new. In the sidebar and on the Chats page, a scheduled run
+  has a clock icon ("Scheduled run"), an IM thread its app's icon ("From
+  Feishu"), a GitHub thread the GitHub mark and an extension thread a puzzle
+  icon. An unread dot follows the title until the thread is opened (never on
+  the open thread; announced as "{title}, unread"). New and changed
+  server-created threads appear within 15 seconds without a reload, opening
+  one clears its dot on every device, and the open chat stays read while a
+  scheduled run in it updates. Nothing polls when the Gateway has no thread
+  activity (memory persistence). ([#6393])
+
+- **frontend:** The chat that created a schedule now shows one line when the
+  schedule pauses or ends ("Release checklist was paused by the agent. Stop
+  condition met: …", "… was paused automatically: 3 runs in a row missed the
+  goal.", "… finished: all 5 runs are done. The last run failed.", "… has
+  run."), at the end of the turn it followed, with the time and "See that run"
+  or "Open task". It appears without a reload when the task's state changes,
+  and stays after the task is deleted. Settings → Channels and the sidebar's
+  channel list say for each app whether scheduled task updates are sent there
+  ("sent here" for WeCom, "not available for this app yet" for the others).
+  ([#6393])
+
+- **scheduler:** The web app keeps the account's `locale` preference equal to
+  its interface language (after sign-in with session auth and on every
+  language switch), so scheduled-task IM notices arrive in the language the
+  user reads DeerFlow in; with auth disabled nothing is written and
+  `notification_locale` applies. A queued run in the run history now reads
+  "Waiting for a free slot". The frontend core for server-created threads
+  lands here too: origin markers from `deerflow_origin` (IM provider names
+  localized, `channel_source` and legacy scheduled threads still recognized),
+  activity polling that refetches the thread lists only when a
+  server-originated thread changed or a thread was read on another device,
+  debounced read marking, and the per-chat lifecycle events with their
+  placement in the conversation. ([#6393])
+
 - **scheduler:** The tasks page shows the per-run goal and end conditions of
   conversation-created tasks. Run history shows whether a goal was met,
   including when it relied on stated assumptions; an unmet run shows a readable
@@ -117,6 +207,39 @@ This release closes that milestone with **439 merged pull requests**.
   entirely on the existing authorized list response — no API change. ([#5355])
 
 #### Agents & runtime
+
+- **goal:** A met chat goal is now recorded on the thread, and the history
+  head keeps goal state. When the evaluator finds a goal met, the checkpoint
+  that clears it also writes a new `goal_outcome` channel: the objective, when
+  the goal was set and met, the continuations used and allowed, the
+  evaluator's reason, `relied_on_assumption` and the id of the reply it was
+  judged on. Any later goal write removes it, and scheduled-task goals do not
+  write it. Clients cannot set it: `POST /state` and non-internal run input
+  that carry `goal_outcome` get 400. The
+  `POST /api/threads/{thread_id}/history` head now carries an active `goal`
+  and an achieved `goal_outcome`, so a stopped goal no longer disappears from
+  the web UI after a run ends or the page reloads; older entries are
+  unchanged. A chat branched from an earlier turn no longer brings back a goal
+  or record that turn did not have. `contracts/thread_goal_contract.json` pins
+  the stand-down and check-failure codes, the record's keys, the history head
+  keys and the host-written reasons. ([#6556])
+
+- **gateway:** Threads the server creates for you can be noticed without a
+  reload. Runs started by a schedule, an IM channel, a GitHub agent, an
+  extension or an MCP notification now carry a server-owned
+  `metadata.deerflow_origin` (`{kind, provider?, namespace?}`, pinned by the new
+  `contracts/thread_origin_contract.json`) and a denormalized
+  `runs.origin_kind`; a thread created for such a run keeps the same marker.
+  Clients cannot set it: thread create/patch and run admission strip client
+  copies. The new `GET /api/thread-activity` feed pages the caller's run
+  changes over the existing run-change clock and returns only threads changed
+  by server-originated runs, plus a per-user `read_version`; an idle poll is one
+  index seek. `POST /api/threads/{thread_id}/read` stores a per-user,
+  never-decreasing read position, and thread search items gain `unread`. Only
+  the caller's own server-originated runs make a thread unread; interactive
+  runs, other users' runs in shared threads and runs from before the upgrade
+  never do. `GET /api/features` reports `thread_activity.available` (SQL
+  persistence only). ([#6393])
 
 - **uploads:** Add stable cursor pagination to the `list_uploaded_files`
   discovery tool. With more than 100 historical uploads matching the same
@@ -695,8 +818,241 @@ This release closes that milestone with **439 merged pull requests**.
   chip is removed, older drafts restore their skill selection as an inline reference,
   and manually typed legacy slash text still submits as a normal message. ([#6154])
 
+- **frontend:** The goal bar above the composer now says what an active
+  `/goal` is doing and why it stopped. It shows "In progress" while a run works
+  on the goal, and after auto-continue stands down "Stopped", "Waiting for
+  you", "Waiting", "Couldn't check the goal" or "Paused" with the reason and
+  the next step on a second line, where it used to keep showing
+  "Continuing 8/8" or look freshly set; "Details" holds the full goal and the
+  checker's own note. A met goal shows "Goal met" (and how many times it
+  auto-continued) until the chat moves on, also after a reload, and the bar no
+  longer stays after a goal met on its first run. While a goal is set, the
+  latest turn's edit pencil is shown disabled with a tooltip instead of hidden,
+  and the message toolbar also appears on keyboard focus. A `/goal` refused
+  because a run is still going keeps the draft and says so. ([#6556])
+
 ### Fixed
 
+- **runtime:** The JSONL event store no longer loses events after a torn final
+  line. A write interrupted mid-record left the file without a trailing newline,
+  so the next append was glued onto the partial record and both became one
+  unparseable line; a truncated multibyte character also made the whole file
+  fail to decode, hiding every intact record and breaking sequence recovery.
+  Appends now insert a separator when the existing file does not end in a
+  newline, reads decode each physical line on its own and skip only the broken
+  one, and a failed batch append still truncates back to the original size.
+  ([#6520])
+- **channels:** `/goal <objective>` and `/goal clear` from an IM channel work
+  again when Gateway auth is enabled (the default). Both sent their write with
+  the internal auth token alone, and the Gateway's CSRF check, which does not
+  exempt internal auth, answered 403, so the channel replied "Failed to set
+  goal." or "Failed to clear goal." They now send the same CSRF cookie and
+  header pair as the channel's SDK client. `/goal` status was unaffected. ([#6537])
+- **auth:** In the Docker stack, five wrong passwords from one client no longer
+  lock every user out of login for five minutes. Failed logins are counted per
+  client IP, and the Gateway honors `X-Real-IP` only from a peer listed in
+  `AUTH_TRUSTED_PROXIES`, which the compose files never set; every browser
+  request reaches the Gateway from the `nginx` container, so all logins shared
+  nginx's address and one lockout. `AUTH_TRUSTED_PROXIES` now also accepts
+  hostnames, resolved off the event loop and cached for 10 seconds (failures
+  included), and both compose files default it to the bundled `nginx` service.
+  nginx overwrites `X-Real-IP` with `$remote_addr` on every Gateway route, so
+  a client cannot choose its own address. An `AUTH_TRUSTED_PROXIES` value in
+  `.env` still takes precedence, including under `make docker-start`, which now
+  exports it for Compose interpolation like the proxy variables. Deployments
+  behind another reverse proxy also need nginx's `real_ip` module for that
+  proxy; see `.env.example`. ([#6519])
+- **scheduler:** "Run once now" on a one-time task before its run time no longer
+  cancels the scheduled run. The trial launched as the task's own run: the task
+  was marked `running`, and the trial's outcome then finished it (`completed`,
+  `failed` or `cancelled`), so the poller, which claims only `enabled` tasks,
+  never ran it at `run_at`, although `next_run_at` still showed that time. A
+  trial launched before the run time now leaves the task's status and
+  `next_run_at` unchanged, like a trial on a recurring task; its outcome is kept
+  on the trial's run row. A trial after the run time has passed still counts as
+  the task's run. A trial whose launch bookkeeping lands after the poller has
+  claimed the now-due task no longer clears that claim's lease, which made the
+  claim's admission fail and left the task `running` with nothing scheduled. ([#6512])
+- **auth:** Login lockouts are now counted once per client IP across every
+  Gateway replica. `POST /api/v1/auth/login/local` kept its failed-login
+  counter in a per-process dict, so with N replicas behind one load balancer an
+  attacker got N × `max_login_attempts` guesses and a lockout on one replica
+  was invisible to the others. The counter now lives behind a
+  `LoginThrottleStore`: the new `auth.local.throttle_storage` selector
+  (default `auto`) keeps it in the shared `login_throttle` table (migration
+  `0035_login_throttle`) whenever `database.backend` is `sqlite` or
+  `postgres`, and falls back to the in-process counter with a warning when
+  there is no database to share (a `memory` database, or a configured database
+  whose engine is not initialised); `memory` forces the historical per-process
+  behavior; `db` forces the table and refuses to start when the configured
+  database's engine is unavailable. The Gateway resolves the store once at
+  startup, right after the persistence engine; a bare app resolves it on the
+  first throttle call. Failures are counted with one atomic upsert that keeps
+  an active lock's start and committed duration (the sentence is "N seconds
+  after the lock started", not "after the last attempt"), the duration
+  committed at lock time is still honored when the policy changes mid-lock, a
+  successful login clears the IP everywhere, served locks and idle counters are
+  swept in bounded batches, and a declared multi-instance deployment that
+  keeps `memory` logs a startup warning. Status codes and messages of the
+  login endpoint are unchanged; `max_login_attempts` and `lockout_seconds`
+  stay live-read. `config_version` is now 57. ([#6501])
+- **memory:** DeerMem's derived SQLite FTS5 retrieval index can now live
+  outside the memory root, and a Gateway instance now notices facts another
+  instance wrote. The index for every user was one SQLite database in WAL mode
+  at `{storage_path}/.retrieval`, so several Gateway Pods sharing one home
+  volume opened the same WAL file over a network filesystem, which SQLite does
+  not support; every Pod start emptied and refilled the shared index under its
+  peers, one Pod's corruption recovery deleted files the others held open, and
+  a Pod kept serving its own copy of a user's facts after a peer wrote new ones.
+  The new `memory.backend_config.retrieval_index_path` places the index
+  directory elsewhere (empty keeps today's location; a relative path is
+  resolved against `storage_path`), the startup rebuild and corruption recovery
+  touch only that local index, and a search now re-syncs a scope whose
+  `memory.json` revision changed since this process last indexed it, so a
+  peer's facts appear on the next search while this instance's own writes do
+  not trigger a rebuild. A declared multi-instance deployment
+  (`deployment.multi_instance: true` / `DEER_FLOW_MULTI_INSTANCE=1`) that keeps
+  the index inside `storage_path` logs a startup warning. The Helm chart mounts
+  a Pod-local `emptyDir` at `/var/lib/deerflow/memory-index`, points the key at
+  it, and drops the legacy `memory.storage_path: memory.json` line that the
+  Gateway discarded with a warning at every start. `config_version` is now 56. ([#6494])
+- **skills:** A `/skill-name` activation now survives a retried model call. The
+  activation was marked as done before the model was called, so when the call
+  failed (rate limit, overload, timeout) or came back empty and was retried, the
+  retry went out without the `SKILL.md` body while the skill's tool restrictions
+  still applied. The retry now carries the same reminder as the first attempt,
+  without re-reading the skill or recording a second activation, and the retried
+  response keeps the skill-usage record. ([#6506])
+- **skills:** Skill changes made through one Gateway replica now reach the
+  skill list in every other replica's system prompt. `SkillStorage` rescans
+  disk on every call, but the prompt layer caches the enabled-skills list and
+  the rendered `<skill_system>` section per process, and installing, editing,
+  deleting, rolling back or toggling a skill (and `POST /api/skills/reload`)
+  only refreshed the process that handled the request, so with several
+  uvicorn workers or several Pods sharing one home volume the other replicas
+  kept offering the old skills until they restarted. Every one of those
+  mutations now also publishes `.extensions_config.json.skills-cache-reset.json`
+  beside the shared `extensions_config.json`, with the same atomic replace and
+  cross-process locks the config uses, and every cache lookup compares that
+  marker's signature at most once per second before serving a cached entry; a
+  marker scoped to one user's custom skills retires only that user's entries.
+  `/api/skills/reload` reports `scope: shared_config` when the marker was
+  written and `scope: process` when no extensions config path resolves, so
+  operators no longer need to call it on every Pod or worker separately. The
+  MCP cache reset's marker now shares the same `deerflow.config.shared_reset_marker`
+  helper. ([#6495])
+- **persistence:** `scripts/migrate_user_isolation.py` now moves each legacy
+  thread to the user who owns it. It looked for thread owners in
+  `{base_dir}/deer-flow.db`, a file DeerFlow never creates (the database is
+  `{sqlite_dir}/deerflow.db`, or PostgreSQL), so the owner list was always empty
+  and every legacy thread was moved to `users/default/`. Owners now come from the
+  `threads_meta` table of the database configured in `config.yaml`. If legacy
+  threads exist but that table cannot be read, the script stops before moving
+  anything; `--allow-missing-thread-owners` assigns every legacy thread to
+  `default` instead, for installs that never recorded thread owners. Installs
+  that already ran the old script can recover their threads with the steps in
+  `docker/provisioner/README.md`. ([#6450])
+- **sandbox:** A failed command in the e2b sandbox now keeps its output and exit
+  code. The e2b SDK raises `CommandExitException` on a nonzero exit instead of
+  returning a result, so `E2BSandbox.execute_command` returned
+  `Error: Command exited with code N and error: ...`: stdout was dropped, the
+  `Exit Code: N` marker was never added, and `_bash_evidence_status` fell back to
+  `deerflow_tool_meta` (`success`), so a failed `pytest` could satisfy a
+  `tests_passed` acceptance criterion. The exception carries the command's
+  stdout, stderr and exit code, and is now formatted like a returned result. A
+  failed command whose stderr mentions "sandbox not found" no longer marks the
+  sandbox as reaped. `list_dir` on e2b handles the same exception, so a missing
+  directory raises `FileNotFoundError` and a listing truncated at 500 entries
+  (SIGPIPE 141) is returned instead of failing with `OSError`. ([#6441])
+- **uploads:** The Gateway's startup sweep of orphaned `.upload-*.part` staging
+  files now skips files younger than 24 hours. The sweep removed every staging
+  file it found, which was right for one Gateway but not for several replicas
+  sharing a home volume: a replica starting during a rolling update deleted the
+  staging file of an upload another replica was still writing, and that upload
+  then failed at its atomic commit. Chunk writes refresh the staging file's
+  mtime, so an upload in flight stays younger than the guard; a crash leftover
+  is collected by the first startup more than 24 hours later, the same guard
+  project-document staging already uses. A staging file that already shares
+  its inode with the published upload (a crash between the atomic link and the
+  staged-name removal) is still reclaimed on the next startup at any age, so
+  that destination does not fail the multi-link safety check on its next
+  replacement. ([#6445])
+- **gateway:** `GET /health/ready` now reports unready while the Redis stream
+  bridge is unreachable. The bridge's Redis client connects lazily and nothing
+  pinged it, so a gateway whose Redis was down started, answered `200 ready` to
+  the Kubernetes readiness probe and the Compose healthcheck, and kept
+  receiving traffic while every run's first publish failed; with the
+  multi-instance gate making the Redis bridge mandatory, such a replica is not
+  serviceable at all. `StreamBridge` gains `ping()`, the response body gains a
+  `stream_bridge` verdict (`not_configured` for the memory bridge) that flips
+  the endpoint to 503 when unreachable, and a report-only `provisioner` verdict
+  from the sandbox provisioner's own `/health` when `sandbox.provisioner_url`
+  is set, which never changes the status code because every replica shares one
+  provisioner. A probe that overruns the endpoint deadline is now the only one
+  marked unreachable, and the public probe gate is one lock per probe kind.
+  ([#6447])
+- **frontend:** Retrying a message after its attachment upload fails now keeps
+  the context that was attached to it. The composer dropped its quotes,
+  conversation references, staged project files and stored draft as soon as a
+  send started, before the attachments uploaded, so after a failed upload the
+  text and files were still there but a retry went out without that context.
+  That one-time state now clears only once the send is dispatched, after the
+  upload. A send that finishes uploading after the user has switched
+  conversations or left the page clears only the stored draft and staged files
+  it carried, keeping a draft saved or a document attached since. ([#6412])
+- **client:** `DeerFlowClient.list_threads(limit)` now limits threads rather
+  than checkpoints. It passed `limit` to a checkpoint scan across every thread,
+  and one turn writes several checkpoints, so a single long conversation filled
+  the limit: the TUI thread picker and `--resume <title>` saw only the latest one
+  or two threads, and an older title failed to resolve. SQLite and Postgres now
+  list threads from their checkpoint index, and only each returned thread's
+  first and latest checkpoints are loaded. Gateway branches are listed, and order
+  follows checkpoint write order, so a goal-only write counts as activity. A new
+  `sort_by="updated_at"` option lets `--continue` keep resuming the most
+  recently active thread; the default order stays newest created first. ([#6426])
+- **client:** Goals now work in the TUI and embedded `DeerFlowClient` on the
+  SQLite and Postgres checkpointers. Their synchronous savers define the async
+  checkpoint methods but raise `NotImplementedError` from them, and the goal
+  helpers used any async method that existed, so `/goal` printed "Could not set
+  goal." and `get_goal`/`set_goal`/`clear_goal` raised. The goal helpers now
+  fall back to the synchronous methods for those savers. The web UI was not
+  affected. ([#6448])
+- **community:** The Browserless `web_fetch` provider now authenticates. It sent
+  the configured token inside the `/content` JSON body, but Browserless reads
+  the token only from the `token` query parameter or the `Authorization`
+  header, and checks it before reading the body. With `BROWSERLESS_TOKEN` set
+  as the configuration guide describes, every `web_fetch` failed with
+  `Browserless HTTP 401` (and with HTTP 400 against an instance started without
+  `TOKEN`, whose body schema rejects the unknown key) while `web_capture`
+  worked with the same token. Both tools now send the token as a query
+  parameter. ([#6484])
+- **mcp:** An MCP server with `task_toolsets` that is unreachable or times out
+  during tool discovery no longer removes every MCP tool. Discovery skipped the
+  failed server with an empty tool list, the task-toolset check then reported
+  its submit, status and cancel tools as missing, and the resulting error
+  discarded the tools of every healthy server. Because the cache was never
+  published, each agent build repeated discovery for all servers, respawning
+  stdio servers and re-requesting OAuth tokens. A server whose discovery fails
+  is now skipped like any other failed server; a server that answers without
+  its configured tools still fails as a configuration error. ([#6481])
+- **frontend:** A failed side-chat send no longer clears the composer. The side
+  chat's submit handler showed the error toast and then resolved, which the
+  composer treats as success, so the typed text and attachments were lost when
+  creating the side chat or uploading an attachment failed. The first message to
+  a new side chat was also cleared as soon as it was queued, before it was sent.
+  The handler now rejects after the toast, and the queued first send settles the
+  submit with its own outcome, so the draft stays for a retry and clears only
+  once the message is sent. ([#6407])
+- **sandbox:** AIO sandboxes no longer trust unverified state for credential
+  placement or container reuse. A failed provisioner capability probe no longer
+  reads as "broker off" (which bind-mounted plaintext lark credential dirs into
+  brokerless Pods for the negative-cache TTL); broker mode is attested per Pod
+  from the provisioner's atomic observation, lark provisioning-config conflicts
+  carry a capability-refresh marker so a deployment change self-heals on the
+  next acquire, and containers whose implicit shell ended ambiguously are fenced
+  by a persistent quarantine (`{DEER_FLOW_HOME}/sandbox-quarantine`) across warm
+  reuse, rediscovery and restarts, recycled under the existing ownership and
+  teardown fences, with records retired only after confirmed absence. ([#6436])
 - **frontend:** A failed reconnect after a page refresh is now retried in the same
   tab. The SDK reconnects once from the tab's `lg:stream` pointer and keeps that
   pointer on error, and active-run recovery skipped any run with a matching
@@ -726,6 +1082,14 @@ This release closes that milestone with **439 merged pull requests**.
   128-token budget before later query terms. Tokens without a letter or digit are
   now dropped, as the no-jieba fallback and the FTS5 query filter already did.
   ([#6388])
+- **gateway:** Run streams now arrive incrementally behind compressing proxies.
+  Every SSE response (`POST /api/threads/{id}/runs/stream`, `GET .../join`,
+  `GET`/`POST .../runs/{run_id}/stream` and `POST /api/runs/stream`) sends
+  `Cache-Control: no-cache, no-transform` from one shared helper instead of
+  `no-cache`, so proxies that compress responses, such as the Next.js rewrite
+  proxy used by `pnpm start` without nginx, no longer buffer the stream and
+  deliver it in bursts. `X-Accel-Buffering: no` and `Content-Location` are
+  unchanged, and nginx deployments behave as before. ([#6393])
 - **config:** Every Gateway process that shares one `extensions_config.json`
   now sees the MCP and skill changes made by another one. The parsed file was
   cached once per process and only the process that handled the write
@@ -869,6 +1233,23 @@ This release closes that milestone with **439 merged pull requests**.
   Upgrading a release that predates `AUTH_JWT_SECRET` generates a new key and
   signs every browser session out once; the chart README shows how to seed
   the previous key into the Secret first to keep sessions. ([#6347])
+- **deploy:** The Helm chart no longer pins the sandbox provisioner to one Pod.
+  `provisioner.replicas` (default 1, unchanged) sets the replica count, the
+  provisioner Deployment gets the gateway's surge-then-drain rollout strategy
+  (`maxSurge: 1`, `maxUnavailable: 0`), and a `PodDisruptionBudget`
+  (`provisioner.podDisruptionBudget`, `minAvailable: 1`) is rendered while
+  `provisioner.replicas > 1`, so a multi-replica gateway deployment no longer
+  loses sandbox creation whenever its single provisioner Pod restarts or its
+  node drains. The provisioner itself needed no change: the labelled sandbox
+  Pods and Services are its only registry, every handler reads them back from
+  the API server, and create already tolerates the `409 AlreadyExists` a
+  concurrent creator produces. The chart README and the provisioner README
+  record what the replica count rests on and that the budget never renders
+  for a single replica. Both budgets render `minAvailable` through one helper
+  that preserves a percentage such as `"50%"` (the previous `int` cast, also
+  in the pre-existing gateway budget, silently turned it into `0`, a budget
+  that protects nothing) and fails the render for `0`, `"0%"` or any other
+  unsupported value with a message naming the values key. ([#6543])
 - **persistence:** A second Gateway instance no longer fails startup with
   `TimeoutError` while another instance runs a PostgreSQL schema migration. The
   bootstrap advisory lock was taken with a blocking `pg_advisory_lock` on the
@@ -3859,6 +4240,16 @@ This release closes that milestone with **439 merged pull requests**.
   messages are rebuilt via `model_copy` so originals are never mutated. The gate
   stays off by default and behavior is unchanged while unset. ([#5577])
 
+- **goal:** Enabling `pii_redaction` now also redacts the `/goal` evaluator's
+  input. The evaluator calls its model directly, outside
+  `PiiRedactionMiddleware`, so it sent raw user lines, tool arguments, tool
+  results and Human Input Card answers. The messages it reads are now
+  redacted whole before the evidence caps can cut an identifier in two, and
+  the assembled input, goal objective included, is redacted again; thread
+  state keeps the raw text. A redaction error fails the check
+  (`evaluator_failed`) instead of sending raw text. With redaction off, the
+  input is byte-identical. ([#6556])
+
 - **authz:** Skill authorization is now enforced at agent assembly and
   activation, so an RBAC policy such as `skills: {allow: ["data-analysis"]}`
   can actually deny a skill — Phase 2A (#4439) covered Gateway routes, but
@@ -3870,6 +4261,16 @@ This release closes that milestone with **439 merged pull requests**.
   fail-closed/fail-open policy. A denied `read_file` of a `SKILL.md` is
   stamped `skill_context_denied`, so durable context, skill allowed-tools,
   and autonomous secret bindings never activate the denied skill. ([#4541])
+
+- **goal:** Enabling `pii_redaction` now also redacts the hidden `/goal`
+  continuation. `PiiRedactionMiddleware` skips this framework message, so
+  each continuation turn sent the goal objective and the evaluator's reason
+  and evidence summary raw to the agent's model, and they stayed in the
+  thread for later model calls. They are now redacted before the message is
+  built; the thread keeps the redacted message, which the UI hides, and the
+  goal state keeps the raw objective. A redaction error fails the check
+  (`evaluator_failed`) before the continuation is counted, instead of
+  sending raw text. With redaction off, the message is byte-identical. ([#6556])
 
 - **lark:** The opt-in Lark broker subcommand denylist
   (`DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS`) can no longer be bypassed by an
@@ -8982,5 +9383,27 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6378]: https://github.com/bytedance/deer-flow/pull/6378
 [#6386]: https://github.com/bytedance/deer-flow/pull/6386
 [#6388]: https://github.com/bytedance/deer-flow/pull/6388
+[#6393]: https://github.com/bytedance/deer-flow/pull/6393
 [#6400]: https://github.com/bytedance/deer-flow/pull/6400
 [#6401]: https://github.com/bytedance/deer-flow/pull/6401
+[#6407]: https://github.com/bytedance/deer-flow/pull/6407
+[#6412]: https://github.com/bytedance/deer-flow/pull/6412
+[#6426]: https://github.com/bytedance/deer-flow/pull/6426
+[#6436]: https://github.com/bytedance/deer-flow/pull/6436
+[#6441]: https://github.com/bytedance/deer-flow/pull/6441
+[#6445]: https://github.com/bytedance/deer-flow/pull/6445
+[#6447]: https://github.com/bytedance/deer-flow/pull/6447
+[#6448]: https://github.com/bytedance/deer-flow/pull/6448
+[#6450]: https://github.com/bytedance/deer-flow/pull/6450
+[#6481]: https://github.com/bytedance/deer-flow/pull/6481
+[#6484]: https://github.com/bytedance/deer-flow/pull/6484
+[#6494]: https://github.com/bytedance/deer-flow/pull/6494
+[#6495]: https://github.com/bytedance/deer-flow/pull/6495
+[#6501]: https://github.com/bytedance/deer-flow/pull/6501
+[#6506]: https://github.com/bytedance/deer-flow/pull/6506
+[#6512]: https://github.com/bytedance/deer-flow/pull/6512
+[#6519]: https://github.com/bytedance/deer-flow/pull/6519
+[#6520]: https://github.com/bytedance/deer-flow/pull/6520
+[#6537]: https://github.com/bytedance/deer-flow/pull/6537
+[#6543]: https://github.com/bytedance/deer-flow/pull/6543
+[#6556]: https://github.com/bytedance/deer-flow/pull/6556

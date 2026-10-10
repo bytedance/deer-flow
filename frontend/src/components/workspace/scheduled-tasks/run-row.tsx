@@ -125,7 +125,13 @@ export function RunRow({
     summary ??
     goalReason(goal, t) ??
     (runError ? st.runErrors[runError.key] : null) ??
-    (isActiveRun(run) ? st.runStatus[run.status] : null);
+    (isActiveRun(run)
+      ? // A queued occurrence is waiting for an execution slot (global or
+        // per-owner cap, or an older run of the same chat).
+        run.status === "queued"
+        ? st.history.waitingForSlot
+        : st.runStatus[run.status]
+      : null);
 
   // Raw text only behind "Details": a stored error the UI cannot word
   // (including an unknown goal code) and the evaluator's free-text reason.

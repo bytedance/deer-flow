@@ -9,6 +9,7 @@ import {
   describeGoalOutcome,
   describeTaskLastError,
   describeTaskOutcome,
+  goalReasonKeyOf,
   parseStopRunId,
   requestedScheduleStop,
 } from "@/core/scheduled-tasks/goal-outcome";
@@ -99,6 +100,16 @@ test("an unknown unmet code stays visible without a label", () => {
   });
 });
 
+test("goalReasonKeyOf reads a code with or without the blocked: prefix", () => {
+  expect(goalReasonKeyOf("blocked:needs_user_input")).toBe("needsUserInput");
+  expect(goalReasonKeyOf("needs_user_input")).toBe("needsUserInput");
+  expect(goalReasonKeyOf("thread_changed_before_continuation")).toBe(
+    "threadChanged",
+  );
+  expect(goalReasonKeyOf("blocked:none")).toBeNull();
+  expect(goalReasonKeyOf("future_reason")).toBeNull();
+});
+
 test.each([
   ["run-2", "run-2", true],
   ["run-2", "run-1", false],
@@ -158,8 +169,9 @@ test.each([
   },
 );
 
-test("contract v2 pins the check-failure codes the UI treats as unchecked", () => {
-  expect(CONTRACT.version).toBe(2);
+test("contract v3 pins the check-failure codes the UI treats as unchecked", () => {
+  // v3 only adds the lifecycle vocabulary; the v2 keys read here are unchanged.
+  expect(CONTRACT.version).toBe(3);
   expect([...CHECK_FAILURE_CODES].sort()).toEqual(
     [...CONTRACT.check_failure_codes].sort(),
   );

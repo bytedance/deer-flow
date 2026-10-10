@@ -12,9 +12,9 @@ from sqlalchemy.orm import aliased
 
 from deerflow.persistence.run import RunRepository
 from deerflow.persistence.run.model import RunRow
-from deerflow.persistence.scheduled_task_runs.finalization import FinalizationObserver, end_condition_reached, finalize_occurrence, is_host_pause_marker
+from deerflow.persistence.scheduled_task_runs.finalization import FinalizationObserver, end_condition_reached, finalize_occurrence, finish_task_at_end_condition, is_host_pause_marker
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
-from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project
+from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project, once_run_still_scheduled
 from deerflow.persistence.scheduled_tasks.model import (
     ACTIVE_RUN_STATUSES,
     TERMINAL_RUN_STATUSES,
@@ -220,7 +220,9 @@ class ScheduledTaskRunRepository:
         task.lease_owner = None
         task.lease_expires_at = None
         task.updated_at = datetime.now(UTC)
-        if task.schedule_type == "once":
+        # A trial ahead of a once task's run time is projected like a
+        # recurring task's run, so the once run stays scheduled.
+        if task.schedule_type == "once" and not once_run_still_scheduled(task, row):
             if candidate.status == "success":
                 task.status = "completed"
                 task.last_error = None
@@ -283,10 +285,9 @@ class ScheduledTaskRunRepository:
                         await session.rollback()
                         raise ScheduledTaskAdmissionRejected(task_id, reason="stale")
                 if trigger == "scheduled" and await end_condition_reached(session, task, now=scheduled_for):
-                    task.status = "completed"
-                    task.next_run_at = None
-                    task.lease_owner = None
-                    task.lease_expires_at = None
+                    # The row being admitted is never persisted, so this is an
+                    # idle finish (no occurrence anchor).
+                    await finish_task_at_end_condition(session, task, occurrence=None, now=scheduled_for, observer=self._finalization_observer)
                     await session.commit()
                     raise ScheduledTaskAdmissionRejected(task_id, reason="ended")
                 active_status = await session.scalar(
@@ -442,40 +443,94 @@ class ScheduledTaskRunRepository:
             result = await session.execute(stmt)
             return int(result.scalar() or 0)
 
-    async def list_queued_runs(self, *, limit: int) -> list[dict[str, Any]]:
+    async def list_queued_runs(self, *, limit: int, per_user_max_concurrent_runs: int = 0) -> list[dict[str, Any]]:
+        """The next bounded drain batch, fair to task owners (see ``_fair_queue_statement``)."""
+        stmt = self._fair_queue_statement(limit=limit, per_user_max_concurrent_runs=per_user_max_concurrent_runs)
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return [self._row_to_dict(row) for row in result.scalars()]
+
+    @staticmethod
+    def _fair_queue_statement(*, limit: int, per_user_max_concurrent_runs: int = 0):
+        """SELECT for the next bounded drain batch, fair to task owners.
+
+        Only same-thread FIFO heads are eligible (an older active row on the
+        same thread hides every newer one). Eligible rows are ranked within
+        their owner by ``attempt_count, created_at, id`` and the batch is
+        ordered by that rank first, so every owner's head comes before any
+        owner's second row: one owner's backlog cannot fill the batch. With a
+        per-owner cap, an owner only contributes as many rows as it has free
+        slots (``cap - executing``), and owners already at the cap drop out
+        before the limit is applied. With a single owner the order equals the
+        plain ``attempt_count, created_at, id`` order.
+
+        Rows whose task is gone (deleted while queued) have no owner. They are
+        never launched (the drain marks them interrupted), so the cap does not
+        hold them back.
+        """
+        candidate = aliased(ScheduledTaskRunRow)
         older = aliased(ScheduledTaskRunRow)
         older_same_thread = exists(
             select(older.id).where(
-                older.thread_id == ScheduledTaskRunRow.thread_id,
+                older.thread_id == candidate.thread_id,
                 older.status.in_(ACTIVE_RUN_STATUSES),
                 or_(
-                    older.created_at < ScheduledTaskRunRow.created_at,
+                    older.created_at < candidate.created_at,
                     and_(
-                        older.created_at == ScheduledTaskRunRow.created_at,
-                        older.id < ScheduledTaskRunRow.id,
+                        older.created_at == candidate.created_at,
+                        older.id < candidate.id,
                     ),
                 ),
             )
         )
-        stmt = (
-            select(ScheduledTaskRunRow)
-            .where(
-                ScheduledTaskRunRow.status == "queued",
-                ~older_same_thread,
-            )
-            # Prefer rows that have had fewer launch attempts. A permanently
-            # busy thread therefore cannot monopolize the bounded drain batch,
-            # while created_at/id preserve FIFO order among equal attempts.
-            .order_by(
-                ScheduledTaskRunRow.attempt_count.asc(),
-                ScheduledTaskRunRow.created_at.asc(),
-                ScheduledTaskRunRow.id.asc(),
-            )
-            .limit(limit)
+        executing_run = aliased(ScheduledTaskRunRow)
+        executing_task = aliased(ScheduledTaskRow)
+        executing = (
+            select(executing_task.user_id.label("owner"), func.count().label("n"))
+            .select_from(executing_run)
+            .join(executing_task, executing_task.id == executing_run.task_id)
+            .where(executing_run.status.in_(EXECUTING_RUN_STATUSES))
+            .group_by(executing_task.user_id)
+            .subquery("executing")
         )
-        async with self._sf() as session:
-            result = await session.execute(stmt)
-            return [self._row_to_dict(row) for row in result.scalars()]
+        owner_task = aliased(ScheduledTaskRow)
+        eligible = (
+            select(
+                candidate.id.label("id"),
+                candidate.attempt_count.label("attempt_count"),
+                candidate.created_at.label("created_at"),
+                owner_task.user_id.label("owner"),
+                func.coalesce(executing.c.n, 0).label("owner_executing"),
+                func.row_number()
+                .over(
+                    partition_by=owner_task.user_id,
+                    order_by=(candidate.attempt_count.asc(), candidate.created_at.asc(), candidate.id.asc()),
+                )
+                .label("owner_rank"),
+            )
+            .select_from(candidate)
+            .outerjoin(owner_task, owner_task.id == candidate.task_id)
+            .outerjoin(executing, executing.c.owner == owner_task.user_id)
+            .where(candidate.status == "queued", ~older_same_thread)
+            .subquery("eligible")
+        )
+        stmt = select(ScheduledTaskRunRow).join(eligible, eligible.c.id == ScheduledTaskRunRow.id)
+        if per_user_max_concurrent_runs > 0:
+            stmt = stmt.where(
+                or_(
+                    eligible.c.owner.is_(None),
+                    eligible.c.owner_rank <= per_user_max_concurrent_runs - eligible.c.owner_executing,
+                )
+            )
+        # Prefer rows that have had fewer launch attempts within an owner. A
+        # permanently busy thread therefore cannot monopolize the bounded drain
+        # batch, while created_at/id preserve FIFO order among equal attempts.
+        return stmt.order_by(
+            eligible.c.owner_rank.asc(),
+            eligible.c.attempt_count.asc(),
+            eligible.c.created_at.asc(),
+            eligible.c.id.asc(),
+        ).limit(limit)
 
     async def get_active_run(self, task_id: str) -> dict[str, Any] | None:
         stmt = (
@@ -499,8 +554,14 @@ class ScheduledTaskRunRepository:
         now: datetime,
         lease_seconds: int,
         global_max_concurrent_runs: int,
+        per_user_max_concurrent_runs: int = 0,
     ) -> dict[str, Any] | None:
-        """Atomically move one waiting row into the lease-fenced launch phase."""
+        """Atomically move one waiting row into the lease-fenced launch phase.
+
+        Both budgets are checked under the same database-wide budget lock, so
+        the per-owner cap is as atomic across workers and instances as the
+        global one. A row rejected by either budget stays ``queued``.
+        """
         async with self._sf() as session:
             dialect = session.get_bind().dialect.name
             if dialect == "postgresql":
@@ -528,16 +589,29 @@ class ScheduledTaskRunRepository:
                 return None
             if task is not None and row.trigger == "scheduled" and await end_condition_reached(session, task, now=now):
                 await finalize_occurrence(session, task, row, status="skipped", error=RUN_ERROR_END_REACHED, finished_at=now, run_id=None, observer=self._finalization_observer)
-                task.status = "completed"
-                task.next_run_at = None
-                task.lease_owner = None
-                task.lease_expires_at = None
+                # finalize_occurrence already finished a live recurring task
+                # (and emitted); this only clears the lease and covers rows
+                # that could not project, without emitting twice.
+                await finish_task_at_end_condition(session, task, occurrence=row, now=now, observer=self._finalization_observer)
                 await session.commit()
                 return None
             executing = await session.scalar(select(func.count()).select_from(ScheduledTaskRunRow).where(ScheduledTaskRunRow.status.in_(EXECUTING_RUN_STATUSES)))
             if int(executing or 0) >= global_max_concurrent_runs:
                 await session.rollback()
                 return None
+            if per_user_max_concurrent_runs > 0 and task is not None:
+                owner_executing = await session.scalar(
+                    select(func.count())
+                    .select_from(ScheduledTaskRunRow)
+                    .join(ScheduledTaskRow, ScheduledTaskRow.id == ScheduledTaskRunRow.task_id)
+                    .where(
+                        ScheduledTaskRunRow.status.in_(EXECUTING_RUN_STATUSES),
+                        ScheduledTaskRow.user_id == task.user_id,
+                    )
+                )
+                if int(owner_executing or 0) >= per_user_max_concurrent_runs:
+                    await session.rollback()
+                    return None
             older = aliased(ScheduledTaskRunRow)
             older_same_thread = exists(
                 select(older.id).where(

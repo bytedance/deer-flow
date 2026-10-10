@@ -6,18 +6,20 @@ from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from deerflow.persistence.base import Base
 from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 from deerflow.persistence.run import RunRepository
 from deerflow.persistence.run.model import RunRow
-from deerflow.persistence.scheduled_task_runs import ScheduledTaskRunRepository
+from deerflow.persistence.scheduled_task_events import ScheduledTaskEventRow
+from deerflow.persistence.scheduled_task_runs import ScheduledTaskAdmissionRejected, ScheduledTaskRunRepository
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks import ScheduledTaskLimitsExhausted, ScheduledTaskRepository
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 from deerflow.persistence.scheduled_tasks.sql import ActiveScheduledTaskMutationConflict
+from deerflow.persistence.thread_meta.model import ThreadMetaRow
 
 NOW = datetime(2026, 10, 3, 8, tzinfo=UTC)
 VERDICT = {"satisfied": False, "blocker": "goal_not_met_yet", "reason": "missing evidence", "evidence_summary": "none", "relied_on_assumption": False, "stand_down_reason": "max_continuations"}
@@ -47,7 +49,7 @@ async def database(tmp_path, *, backend="sqlite"):
         async with engine.begin() as conn:
             if schema:
                 await conn.execute(text(f'CREATE SCHEMA "{schema}"'))
-            await conn.run_sync(lambda sync: Base.metadata.create_all(sync, tables=[ScheduledTaskRow.__table__, ScheduledTaskRunRow.__table__, RunRow.__table__]))
+            await conn.run_sync(lambda sync: Base.metadata.create_all(sync, tables=[ScheduledTaskRow.__table__, ScheduledTaskRunRow.__table__, RunRow.__table__, ThreadMetaRow.__table__, ScheduledTaskEventRow.__table__]))
         sf = async_sessionmaker(engine, expire_on_commit=False)
         yield sf, ScheduledTaskRepository(sf), ScheduledTaskRunRepository(sf)
     finally:
@@ -503,3 +505,276 @@ async def test_terminal_pause_cannot_race_a_create_out_of_its_quota_slot(tmp_pat
         assert results[0] == "finished"
         assert isinstance(results[1], dict)
         assert sum(row["status"] in {"enabled", "running", "paused"} for row in await tasks.list_by_origin_thread("owner", "origin")) == 20
+
+
+# --- Lifecycle events (task_stopped / task_paused / task_finished) ----------------------
+
+
+async def lifecycle_task(sf, tasks, runs, *, once=False, **extra):
+    """The task (``once`` makes it a once task) and its originating chat, with the
+    scheduler's real finalization observer installed; returns each recorded call."""
+    from app.scheduler.service import ScheduledTaskService
+
+    await task(tasks, **extra)
+    if once:
+        await tasks.update("task", user_id="owner", updates={"schedule_type": "once", "schedule_spec": {"run_at": NOW.isoformat()}})
+    async with sf() as session:
+        session.add(ThreadMetaRow(thread_id="origin", user_id="owner"))
+        await session.commit()
+    service = ScheduledTaskService(task_repo=tasks, task_run_repo=runs, launch_run=None, poll_interval_seconds=60, lease_seconds=30, max_concurrent_runs=3)
+    observed = []
+
+    async def observer(session, parent, row, *, events):
+        observed.append((row.id if row is not None else None, events))
+        await service._on_finalization(session, parent, row, events=events)
+
+    for repository in (tasks, runs):
+        repository.set_finalization_observer(observer)
+    return observed
+
+
+def lifecycle_calls(observed):
+    return [(occurrence_id, tuple(event for event in events if event.startswith("task_"))) for occurrence_id, events in observed if any(event.startswith("task_") for event in events)]
+
+
+async def event_rows(sf):
+    async with sf() as session:
+        return list((await session.execute(select(ScheduledTaskEventRow).order_by(ScheduledTaskEventRow.created_at, ScheduledTaskEventRow.id))).scalars())
+
+
+@pytest.mark.asyncio
+async def test_agent_stop_emits_task_stopped_once(tmp_path, database_backend):
+    async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
+        observed = await lifecycle_task(sf, tasks, runs)
+        occurrence_id, run_id = await occurrence(sf, runs, durable_status="running")
+        assert await runs.request_stop(occurrence_id, task_id="task", run_id=run_id, user_id="owner")
+        assert await complete(tasks, occurrence_id, run_id) is True
+        assert observed == [(occurrence_id, ("run_completed", "task_stopped"))]
+        assert await complete(tasks, occurrence_id, run_id) is False
+        assert len(observed) == 1
+        rows = await event_rows(sf)
+        assert [(row.event, row.reason_code, row.anchor, row.occurrence_id, row.thread_id) for row in rows] == [("task_stopped", "agent_stop", occurrence_id, occurrence_id, "origin")]
+
+
+@pytest.mark.asyncio
+async def test_max_runs_completion_emits_task_finished(tmp_path, database_backend):
+    async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
+        observed = await lifecycle_task(sf, tasks, runs, max_runs=2)
+        for suffix in ("1", "2"):
+            occurrence_id, run_id = await occurrence(sf, runs, suffix=suffix)
+            await complete(tasks, occurrence_id, run_id)
+        assert observed == [("occ-1", ("run_completed",)), ("occ-2", ("run_completed", "task_finished"))]
+        assert (await tasks.get("task", user_id="owner"))["status"] == "completed"
+        rows = await event_rows(sf)
+        assert [(row.event, row.reason_code, row.anchor) for row in rows] == [("task_finished", "max_runs", "occ-2")]
+        assert rows[0].payload_json["max_runs"] == 2
+
+
+@pytest.mark.asyncio
+async def test_end_condition_wins_over_agent_stop_events(tmp_path, database_backend):
+    async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
+        observed = await lifecycle_task(sf, tasks, runs, max_runs=1)
+        occurrence_id, run_id = await occurrence(sf, runs, durable_status="running")
+        assert await runs.request_stop(occurrence_id, task_id="task", run_id=run_id, user_id="owner")
+        await complete(tasks, occurrence_id, run_id)
+        assert observed == [(occurrence_id, ("run_completed", "task_finished"))]
+        assert [row.event for row in await event_rows(sf)] == ["task_finished"]
+
+
+@pytest.mark.asyncio
+async def test_idle_end_at_finish_emits_with_end_anchor_once(tmp_path, database_backend):
+    async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
+        observed = await lifecycle_task(sf, tasks, runs, end_at=NOW)
+        assert await tasks.complete_if_ended("task", user_id="owner", now=NOW + timedelta(seconds=1)) is True
+        assert await tasks.complete_if_ended("task", user_id="owner", now=NOW + timedelta(seconds=2)) is True
+        assert observed == [(None, ("task_finished",))]
+        rows = await event_rows(sf)
+        assert [(row.event, row.reason_code, row.anchor, row.occurrence_id) for row in rows] == [("task_finished", "end_at", f"end:{NOW.isoformat()}", None)]
+        assert (await tasks.get("task", user_id="owner"))["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_idle_max_runs_finish_then_end_time_finish_writes_two_events(tmp_path, database_backend):
+    """An idle max_runs finish before the end time must not take the end-time
+    anchor: after a reactivation, the real end-time finish still gets its line."""
+    end = NOW + timedelta(hours=1)
+    async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
+        observed = await lifecycle_task(sf, tasks, runs, end_at=end, max_runs=1)
+        await runs.create(run_record_id="used", task_id="task", thread_id="thread", scheduled_for=NOW, trigger="scheduled", status="queued")
+        async with sf() as session:
+            row = await session.get(ScheduledTaskRunRow, "used")
+            row.status, row.launch_accounted, row.finished_at = "success", True, NOW
+            await session.commit()
+        assert await tasks.complete_if_ended("task", user_id="owner", now=NOW + timedelta(seconds=1)) is True
+        async with sf() as session:
+            parent = await session.get(ScheduledTaskRow, "task")
+            parent.status, parent.max_runs = "enabled", 5
+            await session.commit()
+        assert await tasks.complete_if_ended("task", user_id="owner", now=end + timedelta(seconds=1)) is True
+        assert observed == [(None, ("task_finished",)), (None, ("task_finished",))]
+        rows = await event_rows(sf)
+        assert [(row.event, row.reason_code, row.anchor) for row in rows] == [
+            ("task_finished", "max_runs", "seq:1"),
+            ("task_finished", "end_at", f"end:{end.isoformat()}"),
+        ]
+
+
+@pytest.mark.asyncio
+async def test_claim_time_end_skip_emits_task_finished_once(tmp_path, database_backend):
+    async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
+        observed = await lifecycle_task(sf, tasks, runs, end_at=NOW + timedelta(seconds=1))
+        await runs.create(run_record_id="waiting", task_id="task", thread_id="thread", scheduled_for=NOW, trigger="scheduled", status="queued")
+        assert await runs.claim_queued_run("waiting", lease_owner="worker", now=NOW + timedelta(seconds=2), lease_seconds=30, global_max_concurrent_runs=1) is None
+        assert lifecycle_calls(observed) == [("waiting", ("task_finished",))]
+        assert len(observed) == 1
+        rows = await event_rows(sf)
+        assert [(row.event, row.reason_code, row.anchor) for row in rows] == [("task_finished", "end_at", "waiting")]
+        assert (await tasks.get("task", user_id="owner"))["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_complete_if_ended_with_queued_row_emits_once(tmp_path, database_backend):
+    async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
+        observed = await lifecycle_task(sf, tasks, runs, end_at=NOW + timedelta(seconds=1))
+        await runs.create(run_record_id="waiting", task_id="task", thread_id="thread", scheduled_for=NOW, trigger="scheduled", status="queued")
+        assert await tasks.complete_if_ended("task", user_id="owner", now=NOW + timedelta(seconds=2)) is True
+        assert observed == [("waiting", ("task_finished",))]
+        assert [(row.event, row.anchor) for row in await event_rows(sf)] == [("task_finished", "waiting")]
+        assert (await runs.list_by_task("task"))[0]["status"] == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_complete_if_ended_with_queued_manual_row_emits_idle_finish(tmp_path, database_backend):
+    async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
+        observed = await lifecycle_task(sf, tasks, runs, end_at=NOW + timedelta(seconds=1))
+        await runs.create(run_record_id="trial", task_id="task", thread_id="thread", scheduled_for=NOW, trigger="manual", status="queued")
+        assert await tasks.complete_if_ended("task", user_id="owner", now=NOW + timedelta(seconds=2)) is True
+        assert observed == [(None, ("task_finished",))]
+        rows = await event_rows(sf)
+        assert [(row.event, row.anchor, row.occurrence_id) for row in rows] == [("task_finished", f"end:{(NOW + timedelta(seconds=1)).isoformat()}", None)]
+        # The waiting trial is left alone; only scheduled rows are skipped.
+        assert (await runs.list_by_task("task"))[0]["status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_once_task_end_skip_stays_silent(tmp_path, database_backend):
+    async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
+        observed = await lifecycle_task(sf, tasks, runs, once=True, end_at=NOW + timedelta(seconds=1))
+        await runs.create(run_record_id="waiting", task_id="task", thread_id="thread", scheduled_for=NOW, trigger="scheduled", status="queued")
+        assert await runs.claim_queued_run("waiting", lease_owner="worker", now=NOW + timedelta(seconds=2), lease_seconds=30, global_max_concurrent_runs=1) is None
+        # As in PR1: skipped -> cancelled, then the end condition marks it completed.
+        assert (await tasks.get("task", user_id="owner"))["status"] == "completed"
+        assert lifecycle_calls(observed) == []
+        assert await event_rows(sf) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "error", "reason"),
+    [("success", None, "once_done"), ("failed", "boom", "once_failed"), ("unmet", "goal_not_met_yet", "once_failed"), ("interrupted", "cancelled", None), ("skipped", None, None)],
+)
+async def test_once_task_finish_reasons(tmp_path, database_backend, status, error, reason):
+    async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
+        observed = await lifecycle_task(sf, tasks, runs, once=True)
+        occurrence_id, run_id = await occurrence(sf, runs)
+        assert await complete(tasks, occurrence_id, run_id, status=status, error=error) is True
+        rows = await event_rows(sf)
+        if reason is None:
+            assert lifecycle_calls(observed) == []
+            assert rows == []
+        else:
+            assert lifecycle_calls(observed) == [(occurrence_id, ("task_finished",))]
+            assert [(row.event, row.reason_code, row.anchor) for row in rows] == [("task_finished", reason, occurrence_id)]
+
+
+@pytest.mark.asyncio
+async def test_admission_time_end_emits_task_finished(tmp_path, database_backend):
+    async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
+        observed = await lifecycle_task(sf, tasks, runs, end_at=NOW - timedelta(seconds=1))
+        with pytest.raises(ScheduledTaskAdmissionRejected) as rejected:
+            await runs.create(run_record_id="admitted", task_id="task", thread_id="thread", scheduled_for=NOW, trigger="scheduled", status="queued", coordinate_with_task=True, expected_task_user_id="owner")
+        assert rejected.value.reason == "ended"
+        assert (await tasks.get("task", user_id="owner"))["status"] == "completed"
+        assert observed == [(None, ("task_finished",))]
+        rows = await event_rows(sf)
+        assert [(row.event, row.reason_code, row.occurrence_id) for row in rows] == [("task_finished", "end_at", None)]
+        assert await runs.list_by_task("task") == []
+
+
+@pytest.mark.asyncio
+async def test_manual_trial_that_reaches_end_at_emits_task_finished(tmp_path, database_backend):
+    async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
+        observed = await lifecycle_task(sf, tasks, runs, end_at=NOW)
+        occurrence_id, run_id = await occurrence(sf, runs, suffix="trial", trigger="manual")
+        await complete(tasks, occurrence_id, run_id)
+        # Finalization reports the run event too; the observer drops only that for a trial.
+        assert observed == [(occurrence_id, ("run_completed", "task_finished"))]
+        assert [(row.event, row.reason_code, row.anchor) for row in await event_rows(sf)] == [("task_finished", "end_at", occurrence_id)]
+        assert (await tasks.get("task", user_id="owner"))["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_manual_trial_agent_stop_emits_task_stopped(tmp_path, database_backend):
+    async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
+        observed = await lifecycle_task(sf, tasks, runs)
+        occurrence_id, run_id = await occurrence(sf, runs, suffix="trial", trigger="manual", durable_status="running")
+        assert await runs.request_stop(occurrence_id, task_id="task", run_id=run_id, user_id="owner")
+        await complete(tasks, occurrence_id, run_id)
+        assert observed == [(occurrence_id, ("run_completed", "task_stopped"))]
+        assert [row.event for row in await event_rows(sf)] == ["task_stopped"]
+        assert (await tasks.get("task", user_id="owner"))["status"] == "paused"
+
+
+@pytest.mark.asyncio
+async def test_agent_stop_after_failed_run_pauses_and_says_run_failed(tmp_path, database_backend):
+    async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
+        observed = await lifecycle_task(sf, tasks, runs)
+        occurrence_id, run_id = await occurrence(sf, runs, durable_status="running")
+        assert await runs.request_stop(occurrence_id, task_id="task", run_id=run_id, user_id="owner")
+        await complete(tasks, occurrence_id, run_id, status="failed", error="boom")
+        # The transition is PR1's: a stop request pauses whatever the run outcome.
+        stopped = await tasks.get("task", user_id="owner")
+        assert stopped["status"] == "paused"
+        assert stopped["last_error"] == f"stopped by the agent in run {run_id}"
+        assert observed == [(occurrence_id, ("run_failed", "task_stopped"))]
+        (row,) = await event_rows(sf)
+        assert (row.event, row.payload_json["run_status"]) == ("task_stopped", "failed")
+
+
+def test_no_inline_end_condition_completion():
+    """Only finalize_occurrence and finish_task_at_end_condition finish a task.
+
+    The once-task repair in ``_associate_task_with_run`` mirrors a once run's
+    own outcome (not an end condition) and is the single allowed assignment.
+    """
+    import ast
+    from pathlib import Path
+
+    from deerflow.persistence.scheduled_task_runs import sql as run_sql
+    from deerflow.persistence.scheduled_tasks import sql as task_sql
+
+    class Finder(ast.NodeVisitor):
+        def __init__(self):
+            self.stack = []
+            self.found = []
+
+        def _visit_function(self, node):
+            self.stack.append(node.name)
+            self.generic_visit(node)
+            self.stack.pop()
+
+        visit_FunctionDef = _visit_function
+        visit_AsyncFunctionDef = _visit_function
+
+        def visit_Assign(self, node):
+            targets_status = any(isinstance(target, ast.Attribute) and target.attr == "status" for target in node.targets)
+            if targets_status and isinstance(node.value, ast.Constant) and node.value.value == "completed":
+                self.found.append(self.stack[-1] if self.stack else "<module>")
+            self.generic_visit(node)
+
+    found = []
+    for module in (run_sql, task_sql):
+        finder = Finder()
+        finder.visit(ast.parse(Path(module.__file__).read_text(encoding="utf-8")))
+        found += [(module.__name__.rsplit(".", 2)[-2], name) for name in finder.found]
+    assert found == [("scheduled_task_runs", "_associate_task_with_run")]

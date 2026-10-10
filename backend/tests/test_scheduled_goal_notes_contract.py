@@ -51,15 +51,27 @@ def test_literal_stand_down_reasons_and_no_verdict_are_in_contract():
 
 
 @pytest.mark.parametrize("code", sorted(_CODES))
-def test_im_notice_translates_every_contract_code(code):
-    text = render_notification_text({"event": "run_unmet", "task_id": "task-a", "payload": {"reason_code": code}})
-    assert "Reason: unknown." not in text
+@pytest.mark.parametrize(("locale", "unknown"), [("en-US", "no reason was recorded"), ("zh-CN", "没有记录原因")])
+def test_im_notice_translates_every_contract_code(code, locale, unknown):
+    text = render_notification_text({"event": "run_unmet", "task_id": "task-a", "payload": {"reason_code": code, "locale": locale}})
+    assert unknown not in text
     assert code not in text
 
 
-def test_contract_version_two_keys():
-    assert _CONTRACT["version"] == 2
+def test_contract_version_three_keeps_version_two_keys():
+    assert _CONTRACT["version"] == 3
     assert _CONTRACT["scheduled_origin_key"] == "deerflow_scheduled_origin"
+    assert {"agent_stop_last_error_prefix", "auto_pause_last_error", "unmet_reason_codes", "check_failure_codes", "host_run_errors"} <= set(_CONTRACT)
+
+
+def test_lifecycle_vocabulary_matches_finalization_constants():
+    assert tuple(_CONTRACT["lifecycle_events"]) == finalization.LIFECYCLE_EVENTS
+    assert {event: tuple(reasons) for event, reasons in _CONTRACT["lifecycle_reasons"].items()} == finalization.LIFECYCLE_REASONS
+    assert set(_CONTRACT["lifecycle_reasons"]) == set(_CONTRACT["lifecycle_events"])
+    assert tuple(_CONTRACT["notification_events"]) == finalization.NOTIFICATION_EVENTS
+    # The existing outbox name of the automatic pause is kept, so queued rows stay valid.
+    assert "task_paused" in _CONTRACT["notification_events"]
+    assert set(finalization.RUN_EVENT_BY_STATUS.values()) <= set(_CONTRACT["notification_events"])
 
 
 def test_scheduled_origin_key_matches_the_gateway_constant():

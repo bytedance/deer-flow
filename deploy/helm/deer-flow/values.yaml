@@ -37,6 +37,11 @@ gateway:
   # while channels are enabled), the WeChat QR login, and browser tools.
   # Multi-node clusters also need `persistence.home.accessMode: ReadWriteMany`,
   # and `agent_storage.backend: db` keeps custom agents visible on every Pod.
+  # Memory stays on that shared volume, but DeerMem's SQLite retrieval index is
+  # Pod-local (`memory.backend_config.retrieval_index_path` in `config`, on an
+  # emptyDir at /var/lib/deerflow/memory-index); keep that line when you
+  # override `config`, or the Gateway warns at startup and every Pod shares one
+  # WAL database over the network filesystem.
   # Scheduler multi_instance recovery is safe only when its config
   # prerequisites are met; max_concurrent_runs is shared across Pods then.
   replicas: 1
@@ -60,8 +65,10 @@ gateway:
       maxUnavailable: 0
   # PodDisruptionBudget, rendered only for a multi-instance gateway (replicas
   # > 1 or multiInstance: true; a budget of 1 on a single replica would block
-  # node drains). minAvailable falls back to 1 when unset; disable the budget
-  # rather than setting it to 0.
+  # node drains). minAvailable is an integer or a percentage string such as
+  # "50%" (quoted; a plain `int` cast would turn it into 0) and falls back to
+  # 1 when unset. 0 and "0%" fail the render -- a zero budget protects
+  # nothing -- so disable the budget instead.
   podDisruptionBudget:
     enabled: true
     minAvailable: 1
@@ -141,6 +148,36 @@ provisioner:
   # `existingSecret` when you supply one (external provisioner); otherwise
   # its start command defaults the variable to "", so the default `config`
   # below still loads even when a user-managed Secret lacks the key.
+  # Replica count. 1 is the conservative default, matching the gateway; >1 is
+  # safe as the provisioner stands: it keeps no state of its own between
+  # requests -- the sandbox Pods and Services it labels (`app=deer-flow-sandbox`,
+  # `sandbox-id`) are the only registry, every handler reads them back from
+  # the API server, and create tolerates the 409 AlreadyExists a concurrent
+  # creator on another replica produces (the race several gateway Pods already
+  # run against one provisioner). NodePorts are allocated by the API server,
+  # never by the provisioner. The `provisioner` Service spreads requests over
+  # every replica, so with 1 replica this is the last single point of failure
+  # in a multi-replica gateway deployment: while its Pod restarts or its node
+  # drains no sandbox can be created or discovered. Scaling it changes nothing
+  # else in the chart, so there is no multiInstance switch here.
+  replicas: 1
+  # Rollout strategy. Surge-then-drain keeps one Pod answering sandbox calls
+  # while a peer starts; a replica has nothing to hand over beyond its
+  # in-flight requests, so the default termination grace period is enough.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  # PodDisruptionBudget, rendered only for replicas > 1 (a budget of 1 on a
+  # single replica would block node drains). minAvailable is an integer or a
+  # percentage string such as "50%" and falls back to 1 when unset; 0 and
+  # "0%" fail the render -- a zero budget protects nothing -- so disable the
+  # budget instead. Scaling with `kubectl scale` instead of `replicas` leaves
+  # the budget unrendered.
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
   resources:
     requests:
       cpu: 50m
@@ -324,7 +361,7 @@ ingress:
 # -- DeerFlow config.yaml content. Secrets MUST stay as $VAR references — never
 #    inline literal secret values here. The default enables provisioner sandbox.
 config: |
-  config_version: 53
+  config_version: 58
   log_level: info
   recursion_limit: 100
   max_recursion_limit: 1000
@@ -399,13 +436,23 @@ config: |
 
   # Custom agents and managed subagents default to per-Pod files under the
   # home volume. Switch to the shared database when running more than one
-  # replica (import existing files once with
-  # `python backend/scripts/migrate_agents_to_db.py`):
+  # replica. From the repository root, use the installed backend environment
+  # and the Gateway's runtime/configuration selectors to preview the import:
+  # `uv run --no-sync --project backend python backend/scripts/migrate_agents_to_db.py --dry-run`
+  # Remove --dry-run after reviewing the preview to perform the import:
   # agent_storage:
   #   backend: db
 
+  # Canonical memory (users/{uid}/memory.json plus fact Markdown) lives at the
+  # default root on the home volume. The derived SQLite FTS5 retrieval index is
+  # rebuildable and must not be shared between Pods: SQLite WAL is unsupported
+  # on network filesystems, every Pod start would rebuild the shared index
+  # under its peers, and one Pod's corruption recovery would delete files the
+  # others hold open. gateway-deployment.yaml mounts an emptyDir at this path;
+  # a Pod re-syncs a user's index on its next search after a peer writes.
   memory:
-    storage_path: memory.json
+    backend_config:
+      retrieval_index_path: /var/lib/deerflow/memory-index
 
   verification:
     receipts_enabled: true

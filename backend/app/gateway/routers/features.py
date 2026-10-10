@@ -14,6 +14,7 @@ from app.gateway.browser_capability import browser_capability
 from app.gateway.conversation_access import conversation_references_enabled
 from app.gateway.deps import get_config
 from app.gateway.knowledge_scope_admission import RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER
+from app.gateway.routers.thread_activity import thread_activity_available
 from app.gateway.run_models import MAX_CONVERSATION_REFERENCES
 from deerflow.config.app_config import AppConfig
 from deerflow.scheduler.runtime import scheduler_tools_enabled
@@ -74,6 +75,12 @@ class ScheduledTasksFeature(BaseModel):
     min_interval_seconds: int = Field(..., description="Shortest interval and earliest one-time delay, in seconds")
 
 
+class ThreadActivityFeature(BaseModel):
+    """Availability of the activity feed and per-user read markers."""
+
+    available: bool = Field(..., description="Whether GET /api/thread-activity, POST /api/threads/{thread_id}/read and the thread search `unread` field work (SQL persistence)")
+
+
 class FeaturesResponse(BaseModel):
     """Frontend-facing feature availability flags."""
 
@@ -84,6 +91,7 @@ class FeaturesResponse(BaseModel):
     conversation_references: ConversationReferencesFeature
     knowledge_base: KnowledgeBaseFeature
     scheduled_tasks: ScheduledTasksFeature
+    thread_activity: ThreadActivityFeature
 
 
 @router.get(
@@ -123,6 +131,8 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
             scope_selection_enabled=_knowledge_scope_selection_enabled(config),
         ),
         scheduled_tasks=_scheduled_tasks_feature(request, config),
+        # Startup-scoped: the read repository exists only with SQL persistence.
+        thread_activity=ThreadActivityFeature(available=thread_activity_available(request.app.state)),
     )
 
 

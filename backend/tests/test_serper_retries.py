@@ -174,6 +174,38 @@ def test_preserves_request_and_filters(search):
     assert json.loads(first.content) == expected
 
 
+@pytest.mark.parametrize("endpoint_source", ["tool-config", "environment"])
+def test_retry_keeps_configured_endpoint_and_key_through_reload(search, monkeypatch, endpoint_source):
+    """A retry must not switch providers when config or environment changes."""
+    options = {"max_retries": 1}
+    if endpoint_source == "tool-config":
+        options["base_url"] = " https://first.example/api/// "
+        monkeypatch.setenv("SERPER_BASE_URL", "https://fallback.example")
+    else:
+        monkeypatch.setenv("SERPER_BASE_URL", " https://first.example/api/// ")
+    original_sleep = tools.time.sleep
+
+    def reload_during_backoff(delay):
+        original_sleep(delay)
+        monkeypatch.setenv("SERPER_BASE_URL", "https://second.example/api")
+        monkeypatch.setenv("SERPER_API_KEY", "second-provider-key")
+
+        def reloaded_config():
+            pytest.fail("Retries must use the captured tool configuration")
+
+        monkeypatch.setattr(tools, "get_app_config", reloaded_config)
+
+    monkeypatch.setattr(tools.time, "sleep", reload_during_backoff)
+    result = search([503, 200], options)
+
+    assert "error" not in result
+    assert len(search.requests) == 2
+    route = "search" if search.name == "web_search" else "images"
+    assert {str(request.url) for request in search.requests} == {f"https://first.example/api/{route}"}
+    assert {request.headers["X-API-KEY"] for request in search.requests} == {"dummy-key"}
+    assert search.requests[0].content == search.requests[1].content
+
+
 def test_filtered_error_keeps_original_query(search):
     result = search([503], {"max_retries": 1, "include_domains": ["example.com"]})
     assert result == {"query": "news", "error": "Serper API error: HTTP 503"}

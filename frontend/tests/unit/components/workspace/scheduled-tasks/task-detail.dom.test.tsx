@@ -587,4 +587,29 @@ describe("TaskDetail", () => {
     );
     expect(notice.textContent).not.toContain("later end time");
   });
+
+  test.each([
+    ["en-US", "Waiting for a free slot"],
+    ["zh-CN", "正在等待空闲位置"],
+  ] as const)(
+    "a queued run reads as waiting for a free slot (%s)",
+    async (locale, text) => {
+      renderDetail(task({ active_run_status: "queued" }), {
+        locale,
+        runs: [
+          run({
+            status: "queued",
+            run_id: null,
+            finished_at: null,
+            run_number: null,
+            total_tokens: null,
+            summary: null,
+          }),
+        ],
+      });
+      const row = await screen.findByTestId("scheduled-run-row");
+      expect(row.textContent).toContain(text);
+      expectNoRawIdentifiers(row);
+    },
+  );
 });

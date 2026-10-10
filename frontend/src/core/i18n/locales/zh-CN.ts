@@ -460,6 +460,50 @@ export const zhCN: Translations = {
     goalFailed: "目标命令执行失败。",
     goalTooLong: "目标过长，请控制在 {max} 个字符以内。",
     goalLengthCounter: "目标长度：{length}/{max} 字符",
+    goalBar: {
+      regionLabel: "目标状态",
+      inProgress: "进行中",
+      stopped: "已停止",
+      waitingForYou: "等你回复",
+      waiting: "等待中",
+      paused: "已暂停",
+      autoContinuedOnce: "自动续跑了 1 次",
+      autoContinuedMany: "自动续跑了 {count} 次",
+      details: "详情",
+      hideDetails: "收起详情",
+      noteLabel: "目标检查说明（评估器原文）",
+      codeLabel: "停止代码",
+      assumptionTooltip:
+        "智能体补全了目标里没写明的内容，并在回复里做了说明，请核对上面的回复。",
+      announce: "{status}：{detail}",
+      editLocked: "设置了目标时不能编辑，先运行 /goal clear 清除目标。",
+      busy: "这个对话还有运行未结束，结束后再试。",
+      next: {
+        limit:
+          "已达到自动续跑上限 {count}/{max}，不会再自动续跑。回复即可继续；或用 /goal <完成条件> 重新设置目标，次数从零开始（同时会开始一次新的运行）。",
+        autoOff: "目标检查：尚未达成。这个目标没有开启自动续跑，回复即可继续。",
+        noProgress:
+          "连续几轮没有进展。回复说明还缺什么，或用 /goal 换个说法重新设置目标。",
+        tokenCapped:
+          "已达到 token 预算。发送消息即可继续，新的运行会重新计算预算。",
+        missingEvidence:
+          "目标检查：缺少依据。可以让它展示结果或说明卡在哪里；如果目标已不适用，用 /goal clear 清除目标。",
+        runFailed:
+          "目标检查：这次运行没有完成任务。先看看回复里的错误，再发送消息重试。",
+        needsInputCard: "回答上面的问题即可继续。",
+        needsInputReply: "回复补充缺少的信息即可继续。",
+        external: "目标检查：正在等待外部条件，就绪后发送消息即可继续。",
+        unchecked: "{reason}。下次发消息后会重新检查。",
+        unknown: "发送消息即可继续。",
+        paused:
+          "已自动续跑 {count}/{max} 次，运行在确认达成前结束了。发送消息即可重新检查。",
+      },
+      uncheckedReasons: {
+        evaluatorFailed: "这次运行本身可能没问题",
+        noDurableEndOfTurn: "没有保存最终回复",
+        threadChanged: "检查期间对话发生了变化",
+      },
+    },
     compactSuccess:
       "已压缩早期上下文。完整聊天记录仍保留，后续模型将基于摘要和最近消息继续。",
     compactSkipped: "当前上下文还不需要压缩。",
@@ -1011,6 +1055,7 @@ export const zhCN: Translations = {
       continuations: "为达成目标额外继续了 {n} 轮",
       details: "详细信息",
       listLabel: "此任务的运行记录",
+      waitingForSlot: "正在等待空闲位置",
     },
     runTrigger: { scheduled: "定时运行", manual: "试运行" },
     runStatus: {
@@ -1096,6 +1141,25 @@ export const zhCN: Translations = {
       schedulerUnavailable: "此服务器上的定时任务暂时不可用。",
       triggerFailed: "无法启动这次运行。",
       permissionDenied: "你没有执行此操作的权限。",
+    },
+    // No space after {title}: "检查发布清单已结束". A title ending in a Latin
+    // letter or digit gets one at render time ("Daily report 已结束").
+    events: {
+      stoppedWithCondition:
+        "{title}已由智能体暂停。停止条件已满足：{condition}",
+      stopped: "{title}已由智能体暂停：停止条件已满足。",
+      autoPaused: "{title}已自动暂停：连续 3 次未达成目标。",
+      finishedRuns: "{title}已结束：{max} 次运行已全部完成。",
+      finishedOneRun: "{title}已结束：唯一一次运行已完成。",
+      finishedEnd: "{title}已结束：已过结束时间。",
+      finished: "{title}已结束。",
+      onceDone: "{title}已运行。",
+      onceFailed: "{title}没有成功完成。",
+      label: "定时任务通知",
+      suffixLastFailed: "最后一次运行出错了。",
+      suffixLastUnmet: "最后一次运行未达成目标。",
+      suffixLastInterrupted: "最后一次运行被中断了。",
+      untitledTask: "未命名任务",
     },
     card: {
       runs: "运行时间",
@@ -1298,6 +1362,33 @@ export const zhCN: Translations = {
     pinChatFailed: "更新对话置顶状态失败",
   },
 
+  // Thread origin and unread markers
+  threads: {
+    unread: "未读",
+    unreadLabel: "{title}，未读",
+    unreadLabelWithOrigin: "{origin}，{title}，未读",
+    origin: {
+      schedule: "定时运行",
+      // A Latin name keeps the usual space ("来自 GitHub"); a Chinese one does not ("来自飞书").
+      fromProvider: (provider: string) =>
+        /^[A-Za-z0-9]/.test(provider) ? `来自 ${provider}` : `来自${provider}`,
+      github: "来自 GitHub",
+      extension: "来自扩展",
+      providers: {
+        buzz: "Buzz",
+        dingtalk: "钉钉",
+        discord: "Discord",
+        feishu: "飞书",
+        github: "GitHub",
+        qq: "QQ",
+        slack: "Slack",
+        telegram: "Telegram",
+        wechat: "微信",
+        wecom: "企业微信",
+      },
+    },
+  },
+
   // Sidecar
   sidecar: {
     title: "侧边对话",
@@ -1413,6 +1504,11 @@ export const zhCN: Translations = {
       wecom: "通过 DeerFlow AI Bot 接收企业微信消息。",
     },
     connectedAs: (name: string) => `已连接为 ${name}。`,
+    scheduledUpdates: {
+      supported: "定时任务通知：会发送到这里",
+      supportedAfterConnect: "定时任务通知：连接后可发送到这里",
+      unsupported: "定时任务通知：此应用暂不支持",
+    },
   },
 
   // Page titles (document title)

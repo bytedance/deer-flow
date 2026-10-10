@@ -34,6 +34,7 @@ from deerflow.persistence.thread_meta.memory import THREADS_NS, MemoryThreadMeta
 from deerflow.runtime import ConflictError, ThreadOperationKind
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY
+from deerflow.runtime.goal import build_goal_outcome, build_goal_state, write_thread_goal
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.uploads.companions import companion_names, register_companion, resolve_companion
 from deerflow.utils.file_outline import extract_outline_for_file
@@ -3739,6 +3740,162 @@ def test_update_thread_state_overwrite_into_never_written_channel(monkeypatch, m
         assert read_response.json()["values"]["goal"] == {"objective": "finish"}
 
 
+def _met_goal_record(reply_message_id: str | None = "a2") -> dict:
+    return build_goal_outcome(build_goal_state("ship the fix"), {"satisfied": True, "blocker": "none", "reason": "Shipped."}, reply_message_id=reply_message_id)
+
+
+def _record_met_goal(checkpointer, thread_id: str, record: dict) -> None:
+    asyncio.run(write_thread_goal(checkpointer, thread_id, None, as_node="goal_evaluator", outcome=record))
+
+
+def _create_extension_thread(client, checkpointer, custom_factory, mode, thread_id) -> None:
+    created = client.post("/api/threads", json={"thread_id": thread_id, "metadata": {}, "assistant_id": "extension-agent"})
+    assert created.status_code == 200, created.text
+    asyncio.run(_seed_extension_source(checkpointer, custom_factory, mode, thread_id))
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_history_head_carries_goal_state_without_messages(monkeypatch, mode) -> None:
+    """useStream rebuilds thread values from the head, so a goal set on /chats/new
+    and a met-goal record must be there even before any message exists."""
+    app, _store, checkpointer = _build_thread_app()
+    _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    thread_id = f"goal-head-{mode}"
+    record = _met_goal_record(None)
+
+    with TestClient(app) as client:
+        goal_response = client.put(f"/api/threads/{thread_id}/goal", json={"objective": "ship the fix"})
+        assert goal_response.status_code == 200, goal_response.text
+        set_head = client.post(f"/api/threads/{thread_id}/history", json={"limit": 1}).json()[0]["values"]
+        _record_met_goal(checkpointer, thread_id, record)
+        met_history = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10}).json()
+
+    assert set_head == {"goal": goal_response.json()["goal"]}
+    assert met_history[0]["values"] == {"goal_outcome": record}
+    # Older entries stay title/thread_data only.
+    assert len(met_history) > 1
+    assert all(not {"goal", "goal_outcome"} & set(entry["values"]) for entry in met_history[1:])
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_history_head_skips_goal_state_that_is_not_active_or_achieved(monkeypatch, mode) -> None:
+    """POST /state stores an unbuilt goal; the head must not show it as a goal the backend ignores."""
+    app, _store, checkpointer = _build_thread_app()
+    custom_factory = _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    thread_id = f"malformed-goal-head-{mode}"
+
+    with TestClient(app) as client:
+        _create_extension_thread(client, checkpointer, custom_factory, mode, thread_id)
+        update_response = client.post(f"/api/threads/{thread_id}/state", json={"values": {"goal": {"objective": "finish"}}})
+        assert update_response.status_code == 200, update_response.text
+        malformed_goal_head = client.post(f"/api/threads/{thread_id}/history", json={"limit": 1}).json()[0]["values"]
+        _record_met_goal(checkpointer, thread_id, {**_met_goal_record(), "status": "cleared"})
+        unknown_outcome_head = client.post(f"/api/threads/{thread_id}/history", json={"limit": 1}).json()[0]["values"]
+
+    assert "goal" not in malformed_goal_head
+    assert [message["id"] for message in malformed_goal_head["messages"]] == ["h1", "a1", "h2", "a2"]
+    assert "goal_outcome" not in unknown_outcome_head
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_goal_writes_drop_the_met_goal_record(monkeypatch, mode) -> None:
+    """PUT/DELETE /goal and a POST /state goal write must not leave an older 'goal met' behind."""
+    app, _store, checkpointer = _build_thread_app()
+    custom_factory = _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    thread_id = f"goal-outcome-writers-{mode}"
+    record = _met_goal_record()
+    writers = {
+        "put": lambda client: client.put(f"/api/threads/{thread_id}/goal", json={"objective": "next goal"}),
+        "delete": lambda client: client.delete(f"/api/threads/{thread_id}/goal"),
+        "state": lambda client: client.post(f"/api/threads/{thread_id}/state", json={"values": {"goal": None}}),
+    }
+    after = {}
+
+    with TestClient(app) as client:
+        _create_extension_thread(client, checkpointer, custom_factory, mode, thread_id)
+        for name, write in writers.items():
+            _record_met_goal(checkpointer, thread_id, record)
+            assert client.get(f"/api/threads/{thread_id}/state").json()["values"]["goal_outcome"] == record
+            response = write(client)
+            assert response.status_code == 200, response.text
+            after[name] = client.get(f"/api/threads/{thread_id}/state").json()["values"]
+        head = client.post(f"/api/threads/{thread_id}/history", json={"limit": 1}).json()[0]["values"]
+
+    assert after["put"]["goal"]["objective"] == "next goal"
+    assert all(values.get("goal_outcome") is None for values in after.values())
+    assert "goal_outcome" not in head
+
+
+def _seed_turn(checkpointer, custom_factory, mode, thread_id, human_id: str, ai_id: str, **values) -> None:
+    accessor = CheckpointStateAccessor.bind(custom_factory(), checkpointer, mode=mode)
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+
+    async def seed() -> None:
+        await accessor.aupdate(config, {"messages": [HumanMessage(id=human_id, content=f"question {human_id}")], **values}, as_node="model")
+        await accessor.aupdate(config, {"messages": [AIMessage(id=ai_id, content=f"answer {ai_id}")]}, as_node="model")
+
+    asyncio.run(seed())
+
+
+def _branch_head(client, thread_id: str, message_id: str) -> tuple[str, dict]:
+    branch_response = client.post(f"/api/threads/{thread_id}/branches", json={"message_id": message_id, "message_ids": [message_id]})
+    assert branch_response.status_code == 200, branch_response.text
+    branch_thread_id = branch_response.json()["thread_id"]
+    return branch_thread_id, client.post(f"/api/threads/{branch_thread_id}/history", json={"limit": 1}).json()[0]["values"]
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_branch_from_the_met_turn_keeps_the_record_without_the_met_goal(monkeypatch, mode) -> None:
+    """The branch head is written onto the replay base from before the turn, where the
+    goal was still active; the branch keeps the record and its message ids, not the goal."""
+    app, _store, checkpointer = _build_thread_app()
+    custom_factory = _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    thread_id = f"met-goal-branch-{mode}"
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": thread_id, "metadata": {}, "assistant_id": "extension-agent"})
+        assert created.status_code == 200, created.text
+        _seed_turn(checkpointer, custom_factory, mode, thread_id, "h1", "a1")
+        goal_response = client.put(f"/api/threads/{thread_id}/goal", json={"objective": "ship the fix"})
+        assert goal_response.status_code == 200, goal_response.text
+        _seed_turn(checkpointer, custom_factory, mode, thread_id, "h2", "a2")
+        record = build_goal_outcome(goal_response.json()["goal"], {"satisfied": True, "blocker": "none", "reason": "Shipped."}, reply_message_id="a2")
+        _record_met_goal(checkpointer, thread_id, record)
+        branch_thread_id, branch_head = _branch_head(client, thread_id, "a2")
+        branch_goal = client.get(f"/api/threads/{branch_thread_id}/goal").json()["goal"]
+
+    assert branch_head["goal_outcome"] == record
+    assert "goal" not in branch_head
+    assert branch_goal is None
+    assert [message["id"] for message in branch_head["messages"]] == ["h1", "a1", "h2", "a2"]
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_branch_does_not_take_an_older_met_goal_record_from_the_replay_base(monkeypatch, mode) -> None:
+    """A run-input goal clears the older record and a stand-down then drops the cleared
+    key, so only the replay base still holds that record; the branch must not revive it."""
+    app, _store, checkpointer = _build_thread_app()
+    custom_factory = _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    thread_id = f"older-record-branch-{mode}"
+    next_goal = build_goal_state("next goal")
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": thread_id, "metadata": {}, "assistant_id": "extension-agent"})
+        assert created.status_code == 200, created.text
+        _seed_turn(checkpointer, custom_factory, mode, thread_id, "h1", "a1")
+        _record_met_goal(checkpointer, thread_id, _met_goal_record("a1"))
+        # normalize_input's shape for an external run-input goal.
+        _seed_turn(checkpointer, custom_factory, mode, thread_id, "h2", "a2", goal=next_goal, goal_outcome=None)
+        asyncio.run(write_thread_goal(checkpointer, thread_id, next_goal, as_node="goal_evaluator"))
+        source_head = client.post(f"/api/threads/{thread_id}/history", json={"limit": 1}).json()[0]["values"]
+        _branch_thread_id, branch_head = _branch_head(client, thread_id, "a2")
+
+    assert source_head["goal"] == next_goal
+    assert "goal_outcome" not in source_head
+    assert branch_head["goal"] == next_goal
+    assert "goal_outcome" not in branch_head
+
+
 @pytest.mark.parametrize("mode", ["full", "delta"])
 def test_update_thread_state_preserves_agent_binding_for_manual_compaction(monkeypatch, mode) -> None:
     """A manual state rewrite must retain the state-producing agent policy."""
@@ -4830,3 +4987,152 @@ def test_task_notes_state_write_normalizes_and_replaces(monkeypatch, mode, fallb
         read = client.get("/api/threads/note-replacement/state")
         assert read.status_code == 200, read.text
         assert read.json()["values"]["task_notes"] == {"new": {"content": "keep backups", "source_ids": [], "authority": "model_report"}}
+
+
+# ---------------------------------------------------------------------------
+# Server-owned origin marker and per-user unread state (deerflow_origin)
+# ---------------------------------------------------------------------------
+
+
+def test_strip_reserved_metadata_drops_client_origin():
+    from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY
+
+    assert DEERFLOW_ORIGIN_KEY in threads._SERVER_RESERVED_METADATA_KEYS
+    assert threads._strip_reserved_metadata({DEERFLOW_ORIGIN_KEY: {"kind": "schedule"}, "keep": 1}) == {"keep": 1}
+
+
+def test_create_and_patch_strip_a_client_supplied_origin() -> None:
+    from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY
+
+    app, _store, checkpointer = _build_thread_app()
+    forged = {DEERFLOW_ORIGIN_KEY: {"kind": "schedule"}, "title": "mine"}
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": "origin-forge", "metadata": forged})
+        assert created.status_code == 200, created.text
+        assert created.json()["metadata"] == {"title": "mine"}
+        patched = client.patch("/api/threads/origin-forge", json={"metadata": {DEERFLOW_ORIGIN_KEY: {"kind": "im_channel"}}})
+        assert patched.status_code == 200, patched.text
+        assert DEERFLOW_ORIGIN_KEY not in patched.json()["metadata"]
+        fetched = client.post("/api/threads/search", json={"limit": 10})
+        assert all(DEERFLOW_ORIGIN_KEY not in item["metadata"] for item in fetched.json())
+
+    checkpoint = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": "origin-forge", "checkpoint_ns": ""}}))
+    assert DEERFLOW_ORIGIN_KEY not in checkpoint.metadata
+
+
+def test_create_thread_marks_a_host_origin_from_request_state() -> None:
+    """Only server code can set request.state.run_origin (an extension handle)."""
+    from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY
+
+    app, _store, _checkpointer = _build_thread_app()
+
+    @app.middleware("http")
+    async def host_origin(request, call_next):
+        request.state.run_origin = {"kind": "extension", "namespace": "community.teams"}
+        return await call_next(request)
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads", json={"thread_id": "ext-thread", "metadata": {"title": "t"}})
+    assert response.status_code == 200, response.text
+    assert response.json()["metadata"] == {"title": "t", DEERFLOW_ORIGIN_KEY: {"kind": "extension", "namespace": "community.teams"}}
+
+
+def _unread_app(tmp_path, *, owner_check_passes: bool = True):
+    from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from deerflow.persistence.base import Base
+    from deerflow.persistence.run import RunRepository
+    from deerflow.persistence.run.model import RunChangeClockRow, RunRow
+    from deerflow.persistence.thread_reads import ThreadReadMarkerRow, ThreadReadRepository, ThreadReadVersionRow
+
+    user = User(id=UUID("31f5a8c2-1d4e-4b6f-8a9c-0d1e2f3a4b5c"), email="unread@example.com", password_hash="x", system_role="user")
+    app = make_authed_test_app(user_factory=lambda: user, owner_check_passes=owner_check_passes, bind_current_user=True)
+    store = InMemoryStore()
+    app.state.store = store
+    app.state.checkpointer = InMemorySaver()
+    app.state.run_manager = _ThreadTestRunManager()
+    app.state.thread_store = _PermissiveThreadMetaStore(store)
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'unread.db'}")
+
+    async def _init():
+        async with engine.begin() as conn:
+            await conn.run_sync(lambda sync: Base.metadata.create_all(sync, tables=[m.__table__ for m in (RunRow, RunChangeClockRow, ThreadReadMarkerRow, ThreadReadVersionRow)]))
+
+    asyncio.run(_init())
+    sf = async_sessionmaker(engine, expire_on_commit=False)
+    app.state.thread_read_repo = ThreadReadRepository(sf)
+    app.include_router(threads.router)
+    return app, store, RunRepository(sf), str(user.id), engine
+
+
+def test_search_items_carry_unread_until_the_thread_is_read(tmp_path) -> None:
+    from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY
+
+    app, store, runs, user_id, engine = _unread_app(tmp_path)
+
+    async def _seed():
+        for thread_id, metadata in (("sched-thread", {DEERFLOW_ORIGIN_KEY: {"kind": "schedule"}}), ("chat-thread", {})):
+            await store.aput(THREADS_NS, thread_id, {"thread_id": thread_id, "status": "idle", "created_at": "2026-10-06T00:00:00+00:00", "updated_at": "2026-10-06T00:00:00+00:00", "metadata": metadata})
+        await runs.put("run-sched", thread_id="sched-thread", user_id=user_id, status="success", metadata={DEERFLOW_ORIGIN_KEY: {"kind": "schedule"}})
+        await runs.put("run-chat", thread_id="chat-thread", user_id=user_id, status="success", metadata={})
+
+    asyncio.run(_seed())
+    try:
+        with TestClient(app) as client:
+            items = {item["thread_id"]: item for item in client.post("/api/threads/search", json={"limit": 10}).json()}
+            assert items["sched-thread"]["unread"] is True
+            assert items["chat-thread"]["unread"] is False
+
+            read = client.post("/api/threads/sched-thread/read")
+            assert read.status_code == 200, read.text
+            assert read.json() == {"unread": False, "read_version": 1}
+            items = {item["thread_id"]: item for item in client.post("/api/threads/search", json={"limit": 10}).json()}
+            assert items["sched-thread"]["unread"] is False
+    finally:
+        asyncio.run(engine.dispose())
+
+
+def test_search_unread_is_null_without_sql_read_state() -> None:
+    app, store, _checkpointer = _build_thread_app()
+    asyncio.run(store.aput(THREADS_NS, "t", {"thread_id": "t", "status": "idle", "created_at": "2026-10-06T00:00:00+00:00", "updated_at": "2026-10-06T00:00:00+00:00", "metadata": {}}))
+    with TestClient(app) as client:
+        assert [item["unread"] for item in client.post("/api/threads/search", json={"limit": 10}).json()] == [None]
+
+
+def test_mark_read_on_another_users_thread_is_404(tmp_path) -> None:
+    app, _store, _runs, user_id, engine = _unread_app(tmp_path, owner_check_passes=False)
+    try:
+        with TestClient(app) as client:
+            response = client.post("/api/threads/someone-elses/read")
+        assert response.status_code == 404
+        assert asyncio.run(app.state.thread_read_repo.read_version(user_id=user_id)) == 0
+    finally:
+        asyncio.run(engine.dispose())
+
+
+def test_delete_thread_route_removes_read_markers(tmp_path) -> None:
+    app, store, runs, user_id, engine = _unread_app(tmp_path)
+
+    async def _seed():
+        await store.aput(THREADS_NS, "gone", {"thread_id": "gone", "status": "idle", "created_at": "2026-10-06T00:00:00+00:00", "updated_at": "2026-10-06T00:00:00+00:00", "metadata": {}})
+        await runs.put("run-gone", thread_id="gone", user_id=user_id, status="success", metadata={"deerflow_origin": {"kind": "schedule"}})
+        await app.state.thread_read_repo.mark_read(user_id=user_id, thread_id="gone")
+
+    asyncio.run(_seed())
+    app.state.run_event_store = MagicMock(delete_by_thread=AsyncMock())
+    app.state.run_store = runs
+    try:
+        with patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)), TestClient(app) as client:
+            assert client.delete("/api/threads/gone").status_code == 200
+        from deerflow.persistence.thread_reads import ThreadReadMarkerRow
+
+        async def _count():
+            async with app.state.thread_read_repo._sf() as session:
+                return await session.get(ThreadReadMarkerRow, (user_id, "gone"))
+
+        assert asyncio.run(_count()) is None
+    finally:
+        asyncio.run(engine.dispose())

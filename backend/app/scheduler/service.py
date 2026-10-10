@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import socket
 import uuid
@@ -11,8 +12,17 @@ from zoneinfo import ZoneInfo
 from fastapi import HTTPException
 from sqlalchemy import select
 
+from app.channels.capabilities import supports_proactive_notifications
+from app.scheduler.notification_text import NOTIFICATION_LOCALES
 from deerflow.persistence.channel_connections.model import ChannelConnectionRow
+from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.scheduled_task_events import ScheduledTaskEventRepository
 from deerflow.persistence.scheduled_task_runs import ActiveScheduledRunConflict, ScheduledTaskAdmissionRejected
+from deerflow.persistence.scheduled_task_runs.finalization import LIFECYCLE_EVENTS, RUN_EVENT_BY_STATUS, lifecycle_anchor, lifecycle_reason
+from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
+from deerflow.persistence.scheduled_task_runs.sql import run_number_expression
+from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.persistence.user.model import UserPreferenceRow
 from deerflow.runtime import ConflictError, RunRecord
 from deerflow.scheduler.host_notes import RUN_ERROR_DELETED_WHILE_QUEUED, RUN_ERROR_INTERRUPTED, RUN_ERROR_LEASE_LOST, RUN_ERROR_PAUSED_WHILE_QUEUED, RUN_ERROR_QUEUE_TIMEOUT, RUN_ERROR_RESTARTED
 from deerflow.scheduler.schedules import next_run_at
@@ -53,6 +63,132 @@ def _as_utc(value: datetime | str | None) -> datetime | None:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
+def _as_utc_or_none(value: object) -> datetime | None:
+    """A datetime as aware UTC; anything else (or an unusable value) is None."""
+    if not isinstance(value, datetime):
+        return None
+    try:
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+    except (ValueError, OverflowError):
+        return None
+
+
+def _int_or_none(value: object) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _chat_event_payload(task, occurrence, event: str, *, run_number: int | None) -> dict[str, Any]:
+    """Display snapshot of a lifecycle event (survives task deletion and edits).
+
+    ``run_thread_id`` is set only when the occurrence launched a run (a skipped
+    occurrence's thread was never created). ``latest_reason_code`` is the
+    unmet reason of that run. Never raises for bad stored values.
+    """
+    title = task.title.strip() if isinstance(task.title, str) else ""
+    stop_condition = getattr(task, "stop_condition", None)
+    end_at = _as_utc_or_none(getattr(task, "end_at", None))
+    run_status = getattr(occurrence, "status", None) if occurrence is not None else None
+    launched = occurrence is not None and occurrence.run_id is not None
+    # The agent that ran it (edits are refused while a run is active), so the
+    # run link opens on that agent's route, not the originating chat's.
+    agent = getattr(task, "assistant_id", None)
+    return {
+        "task_title": title or None,
+        "stop_condition": stop_condition if event == "task_stopped" and isinstance(stop_condition, str) and stop_condition.strip() else None,
+        "run_thread_id": occurrence.thread_id if launched else None,
+        "run_agent_name": agent.strip() if launched and isinstance(agent, str) and agent.strip() else None,
+        "run_number": run_number,
+        "run_status": run_status,
+        "latest_reason_code": occurrence.error if run_status == "unmet" and isinstance(occurrence.error, str) else None,
+        "max_runs": _int_or_none(getattr(task, "max_runs", None)),
+        "end_at": end_at.isoformat() if end_at is not None else None,
+        "schedule_type": task.schedule_type if isinstance(task.schedule_type, str) else None,
+    }
+
+
+def _origin_thread_share_lock(thread_id: str):
+    """``SELECT ... FOR SHARE`` on the originating chat's ``threads_meta`` row.
+
+    The share lock makes a concurrent thread delete wait until this
+    finalization commits (Postgres; SQLite already serializes writers), so the
+    delete's later ``delete_by_thread`` step removes the line written here. A
+    delete that committed first leaves no row to lock, and no line is written.
+    """
+    return select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id == thread_id).with_for_update(read=True)
+
+
+def _event_time(task, occurrence) -> datetime:
+    """When the reported transition happened (for the ``end_at`` / ``max_runs`` reason)."""
+    return _as_utc_or_none(getattr(occurrence, "finished_at", None)) or _as_utc_or_none(getattr(task, "updated_at", None)) or datetime.now(UTC)
+
+
+# One IM message per occurrence (or idle finish): the first event of this
+# order that the transition produced. A once task's ``task_finished`` is never
+# the message (its run event says the same thing), see ``_notice_event``.
+_NOTICE_PRIORITY: tuple[str, ...] = ("task_stopped", "task_paused", "task_finished", "run_failed", "run_unmet", "run_completed")
+NOTIFICATION_PAYLOAD_VERSION = 2
+
+
+def _notice_event(task, occurrence, events: tuple[str, ...], *, now: datetime) -> tuple[str, str | None] | None:
+    """The single event an IM notice reports, with its lifecycle reason (None for run events)."""
+    for event in _NOTICE_PRIORITY:
+        if event not in events:
+            continue
+        if event == "task_finished":
+            reason = lifecycle_reason(task, event, now=now, occurrence=occurrence)
+            if reason.startswith("once_"):
+                continue
+            return event, reason
+        if event in LIFECYCLE_EVENTS:
+            return event, lifecycle_reason(task, event, now=now, occurrence=occurrence)
+        return event, None
+    return None
+
+
+def _idle_notice_key(task_id: str, anchor: str) -> str:
+    """Outbox ``task_run_id`` of a finish without an occurrence (fits the 64-char column).
+
+    Derived from the lifecycle anchor, so re-running ``complete_if_ended`` for
+    the same end dedupes, and page-created tasks (no event row) get one too.
+    """
+    digest = hashlib.sha256(f"{task_id}\x00{anchor}".encode()).hexdigest()
+    return f"idle:{digest[:48]}"
+
+
+def _notice_payload(task, occurrence, event: str, reason: str | None, *, locale: str | None) -> dict[str, Any]:
+    """Payload v2 of an IM notice (rendered by ``app.scheduler.notification_text``).
+
+    No thread or run ids: notices carry no links. ``task_id`` stays for
+    diagnostics only. Never raises for bad stored values.
+    """
+    title = task.title.strip() if isinstance(task.title, str) else ""
+    run_status = getattr(occurrence, "status", None) if occurrence is not None else None
+    occurrence_error = getattr(occurrence, "error", None) if occurrence is not None else None
+    unmet_reason = occurrence_error if run_status == "unmet" and isinstance(occurrence_error, str) else None
+    payload: dict[str, Any] = {
+        "payload_version": NOTIFICATION_PAYLOAD_VERSION,
+        "task_id": task.id,
+        "task_title": title or None,
+        "locale": locale,
+        "reason_code": unmet_reason if event == "run_unmet" else reason,
+        "latest_reason_code": unmet_reason,
+        "run_status": run_status if isinstance(run_status, str) else None,
+    }
+    verdict = getattr(occurrence, "goal_verdict", None) if occurrence is not None else None
+    if run_status == "success" and getattr(occurrence, "goal_objective", None) is not None and isinstance(verdict, dict) and verdict.get("satisfied") is True:
+        # Present only when a goal was met; True when it relied on an assumption.
+        payload["relied_on_assumption"] = verdict.get("relied_on_assumption") is True
+    stop_condition = getattr(task, "stop_condition", None)
+    if event == "task_stopped" and isinstance(stop_condition, str) and stop_condition.strip():
+        payload["stop_condition"] = stop_condition
+    if event == "task_finished":
+        payload["max_runs"] = _int_or_none(getattr(task, "max_runs", None))
+    return payload
+
+
 # Shared so the active-row fast path and the atomic-admission conflict path
 # return byte-identical outcomes for the same active-occurrence condition.
 _ACTIVE_RUN_CONFLICT_ERROR = "task already has an active run"
@@ -74,6 +210,7 @@ class ScheduledTaskService:
         poll_interval_seconds: int,
         lease_seconds: int,
         max_concurrent_runs: int,
+        max_concurrent_runs_per_user: int = 0,
         queue_timeout_seconds: int = 3600,
         multi_instance: bool = False,
         run_lease_grace_seconds: int = 10,
@@ -87,12 +224,17 @@ class ScheduledTaskService:
         self._poll_interval_seconds = poll_interval_seconds
         self._lease_seconds = lease_seconds
         self._max_concurrent_runs = max_concurrent_runs
+        # Per-owner cap on launching/running rows (0 = off). It never exceeds
+        # the global cap, so with the defaults (3 global, 2 per owner) one
+        # owner always leaves a slot for everyone else.
+        self._max_concurrent_runs_per_user = min(max_concurrent_runs_per_user, max_concurrent_runs) if max_concurrent_runs_per_user > 0 else 0
         self._queue_timeout_seconds = queue_timeout_seconds
         self._multi_instance = multi_instance
         self._run_lease_grace_seconds = run_lease_grace_seconds
         # Notification outbox wiring (issue #4254): both repos must be present
-        # for the feature to be active; the completion hook only enqueues, the
-        # delivery worker sends. Either being None keeps legacy behavior.
+        # for IM notices. The finalization observer stages them in the outcome's
+        # transaction (it reads bindings in that session); the delivery worker
+        # sends. Either being None sends no IM notices.
         self._connection_repo = connection_repo
         self._notification_repo = notification_repo
         # Whether scheduled runs get stop_scheduled_task (scheduler.tool_enabled).
@@ -130,38 +272,122 @@ class ScheduledTaskService:
         return self._task is not None and not self._task.done()
 
     def _install_finalization_observers(self) -> None:
-        observer = self._enqueue_finalization_notices if self._connection_repo is not None and self._notification_repo is not None else None
+        # Always installed: chat events need no outbox. The IM step checks the
+        # outbox wiring at call time, so a detached outbox keeps chat events.
         for repository in (self._task_repo, self._task_run_repo):
             register = getattr(repository, "set_finalization_observer", None)
             if callable(register):
-                register(observer)
+                register(self._on_finalization)
 
-    async def _enqueue_finalization_notices(self, session, task, occurrence, *, events: tuple[str, ...]) -> None:
-        """Commit new lifecycle notices with their first terminal transition.
+    async def _on_finalization(self, session, task, occurrence, *, events: tuple[str, ...]) -> None:
+        """Stage lifecycle obligations in the transaction that finalizes them.
 
-        Ordinary success/failure notification behavior remains in the existing
-        completion hook. Only goal-unmet and automatic-pause obligations use
-        this transaction-aware callback, including during crash recovery.
+        Called by ``finalize_occurrence`` and ``finish_task_at_end_condition``
+        under the parent lock, before their commit, so every row written here
+        commits or rolls back with the state change it reports (also during
+        crash and lease recovery). ``occurrence`` is None for an idle finish.
+
+        1. A manual trial drops only its ``run_*`` events (the user is watching
+           it); lifecycle events are one-time transitions and are kept.
+        2. Lifecycle events become rows for the originating chat.
+        3. One IM notice per occurrence (only while the outbox is wired).
+
+        Lookups never raise for bad data (see ``_record_chat_events``); only
+        database errors propagate, because swallowing them would break the
+        same-transaction guarantee.
         """
-        selected = tuple(event for event in events if event in {"run_unmet", "task_paused"})
-        if not selected or occurrence.trigger == "manual" or self._notification_repo is None or self._connection_repo is None:
+        if occurrence is not None and occurrence.trigger == "manual":
+            events = tuple(event for event in events if event not in RUN_EVENT_BY_STATUS.values())
+        lifecycle = tuple(event for event in events if event in LIFECYCLE_EVENTS)
+        if lifecycle:
+            await self._record_chat_events(session, task, occurrence, lifecycle)
+        if self._notification_repo is not None and self._connection_repo is not None:
+            await self._enqueue_notice(session, task, occurrence, events)
+
+    async def _record_chat_events(self, session, task, occurrence, events: tuple[str, ...]) -> None:
+        """Write one display-only event row per lifecycle event for the originating chat.
+
+        Page-created tasks have no originating chat, and a deleted chat gets no
+        new rows. Bad stored data falls back (blank title -> None, unreadable
+        end time -> ``max_runs`` / ``seq:`` anchor, missing run -> None).
+        """
+        origin_thread_id = getattr(task, "origin_thread_id", None)
+        if not isinstance(origin_thread_id, str) or not origin_thread_id:
             return
-        bindings = await session.scalars(select(ChannelConnectionRow).where(ChannelConnectionRow.owner_user_id == task.user_id, ChannelConnectionRow.status == "connected"))
+        if await session.scalar(_origin_thread_share_lock(origin_thread_id)) is None:
+            return
+        now = _event_time(task, occurrence)
+        anchor = lifecycle_anchor(task, occurrence, now=now)
+        after_run_id = await session.scalar(select(RunRow.run_id).where(RunRow.thread_id == origin_thread_id, RunRow.operation_kind == "run").order_by(RunRow.created_at.desc(), RunRow.run_id.desc()).limit(1))
+        run_number = None
+        if occurrence is not None:
+            value = await session.scalar(select(run_number_expression(ScheduledTaskRunRow)).where(ScheduledTaskRunRow.id == occurrence.id))
+            run_number = _int_or_none(value)
+        for event in events:
+            reason = lifecycle_reason(task, event, now=now, occurrence=occurrence)
+            await ScheduledTaskEventRepository.record_in_session(
+                session,
+                user_id=task.user_id,
+                task_id=task.id,
+                thread_id=origin_thread_id,
+                occurrence_id=occurrence.id if occurrence is not None else None,
+                anchor=anchor,
+                event=event,
+                reason_code=reason,
+                after_run_id=after_run_id,
+                payload=_chat_event_payload(task, occurrence, event, run_number=run_number),
+            )
+
+    async def _enqueue_notice(self, session, task, occurrence, events: tuple[str, ...]) -> None:
+        """Stage the occurrence's one IM notice for each push-capable binding of the owner.
+
+        Rows are deduplicated on ``(task_run_id, event, provider, target)``,
+        so recovery re-finalizing nothing (``finalize_occurrence`` returns
+        False) and a replayed idle finish (same anchor) add nothing. Providers
+        without proactive push get no row. Plain manual trials reach here
+        without run events and send nothing; interrupted runs have no event.
+        """
+        now = _event_time(task, occurrence)
+        selected = _notice_event(task, occurrence, events, now=now)
+        if selected is None:
+            return
+        event, reason = selected
+        bindings = [
+            binding
+            for binding in await session.scalars(select(ChannelConnectionRow).where(ChannelConnectionRow.owner_user_id == task.user_id, ChannelConnectionRow.status == "connected"))
+            if binding.provider and binding.external_account_id and supports_proactive_notifications(binding.provider)
+        ]
+        if not bindings:
+            return
+        payload = _notice_payload(task, occurrence, event, reason, locale=await self._owner_locale(session, task.user_id))
+        task_run_id = occurrence.id if occurrence is not None else _idle_notice_key(task.id, lifecycle_anchor(task, occurrence, now=now))
         for binding in bindings:
-            if not binding.provider or not binding.external_account_id:
-                continue
-            for event in selected:
-                await self._notification_repo.enqueue_in_session(
-                    session,
-                    task_id=task.id,
-                    task_run_id=occurrence.id,
-                    run_id=occurrence.run_id,
-                    event=event,
-                    provider=binding.provider,
-                    target=binding.external_account_id,
-                    owner_user_id=task.user_id,
-                    payload={"task_id": task.id, "task_title": task.title, "reason_code": "consecutive_unmet" if event == "task_paused" else occurrence.error},
-                )
+            await self._notification_repo.enqueue_in_session(
+                session,
+                task_id=task.id,
+                task_run_id=task_run_id,
+                run_id=occurrence.run_id if occurrence is not None else None,
+                event=event,
+                provider=binding.provider,
+                target=binding.external_account_id,
+                owner_user_id=task.user_id,
+                payload=payload,
+            )
+
+    @staticmethod
+    async def _owner_locale(session, user_id: str) -> str | None:
+        """The owner's UI language preference, or None (= ``channel_connections.notification_locale``).
+
+        A missing, invalid or unreadable stored value falls back instead of
+        raising (liveness rule: the observer must not wedge recovery). Database
+        errors still propagate.
+        """
+        try:
+            value = await session.scalar(select(UserPreferenceRow.value).where(UserPreferenceRow.user_id == user_id, UserPreferenceRow.key == "locale"))
+        except (ValueError, TypeError, KeyError):
+            # Undecodable stored JSON (json.JSONDecodeError is a ValueError).
+            return None
+        return value if isinstance(value, str) and value in NOTIFICATION_LOCALES else None
 
     def detach_notification_outbox(self) -> None:
         """Stop enqueueing run notifications (issue #4254).
@@ -216,13 +442,18 @@ class ScheduledTaskService:
         return "enabled"
 
     @staticmethod
-    def _task_status_for_launch(task: dict[str, Any], *, trigger: str) -> str:
+    def _task_status_for_launch(task: dict[str, Any], *, trigger: str, next_at: datetime | None) -> str:
         # The task-level status to write once _launch_run has produced a live
         # run. A `once` task stays "running" until handle_run_completion
         # observes the real terminal outcome; declaring "completed" at launch
         # would stick if the run fails or the process dies (startup
-        # reconciliation is cancel_stuck_once_tasks).
-        if task["schedule_type"] == "once":
+        # reconciliation is cancel_stuck_once_tasks). A manual trial before
+        # the run time (``next_at`` still set) is not that run: like a failed
+        # trial, it must not consume the task's scheduled future. Keep this in
+        # step with projection.once_run_still_scheduled, which applies the same
+        # rule when the trial finalizes; if they disagree, a trial parks the
+        # task in "running" and the stuck-once recovery ends up owning it.
+        if task["schedule_type"] == "once" and (trigger != "manual" or next_at is None):
             return "running"
         if trigger == "manual" and task.get("status") == "paused":
             return "paused"
@@ -377,6 +608,7 @@ class ScheduledTaskService:
             now=now,
             lease_seconds=self._lease_seconds,
             global_max_concurrent_runs=self._max_concurrent_runs,
+            per_user_max_concurrent_runs=self._max_concurrent_runs_per_user,
         )
         if claimed is None:
             return self._queued_result(task_run_id, execution_thread_id)
@@ -424,7 +656,7 @@ class ScheduledTaskService:
                 task["timezone"],
                 now=now,
             )
-            task_status = self._task_status_for_launch(task, trigger=trigger)
+            task_status = self._task_status_for_launch(task, trigger=trigger, next_at=next_at)
             await self._record_launched_run(
                 task_run_id=task_run_id,
                 task_id=task["id"],
@@ -478,7 +710,7 @@ class ScheduledTaskService:
                 # if the DB is still down the row stays "queued" -- still
                 # active, still holding the slot -- so we log and still report
                 # the run as launched so callers know a run is in flight.
-                task_status = self._task_status_for_launch(task, trigger=trigger)
+                task_status = self._task_status_for_launch(task, trigger=trigger, next_at=next_at)
                 try:
                     await self._record_launched_run(
                         task_run_id=task_run_id,
@@ -666,7 +898,10 @@ class ScheduledTaskService:
         }
 
     async def _drain_queue(self, *, now: datetime) -> None:
-        queued_rows = await self._task_run_repo.list_queued_runs(limit=max(16, self._max_concurrent_runs * 4))
+        queued_rows = await self._task_run_repo.list_queued_runs(
+            limit=max(16, self._max_concurrent_runs * 4),
+            per_user_max_concurrent_runs=self._max_concurrent_runs_per_user,
+        )
         for queued in queued_rows:
             await self._task_repo.release_queued_admission_lease(queued["task_id"])
             task = await self._task_repo.get_internal(queued["task_id"])
@@ -732,7 +967,11 @@ class ScheduledTaskService:
         completion_kwargs = {}
         if metadata.get("scheduled_goal_objective") is not None:
             completion_kwargs["goal_verdict"] = getattr(record, "goal_verdict", None)
-        completed = await self._task_repo.complete_run(
+        # The outcome and its notices (chat event, IM outbox row) commit in one
+        # transaction: the finalization observer stages them. A completion
+        # that recorded nothing (another run's occurrence, already finalized
+        # by recovery) announces nothing.
+        await self._task_repo.complete_run(
             task_id,
             user_id=user_id,
             task_run_id=task_run_id,
@@ -742,110 +981,6 @@ class ScheduledTaskService:
             finished_at=datetime.now(UTC),
             **completion_kwargs,
         )
-        if not completed:
-            # The occurrence was not this run's to complete (missing row, another
-            # run, another owner): nothing was recorded, so nothing is announced.
-            return
-
-        if terminal_status == "unmet":
-            # Its distinct notice was staged in the same transaction above.
-            return
-
-        if metadata.get("scheduled_trigger") == "manual":
-            # A manual "run now" happens with the user watching the UI; the
-            # IM push would only echo what they already see. Missing
-            # metadata fails safe towards notifying.
-            return
-
-        if self._notification_repo is None or self._connection_repo is None:
-            return
-        # complete_run commits the outcome atomically without returning the task,
-        # so the title is read afterwards. A task deleted meanwhile stays silent.
-        # A failed read must not shadow the committed outcome or drop the push:
-        # the title is optional and the message falls back to the task id.
-        task_title = None
-        try:
-            task = await self._task_repo.get(task_id, user_id=user_id)
-        except Exception:
-            logger.exception("[Scheduler] failed to load task %s for notifications", task_id)
-        else:
-            if task is None:
-                return
-            task_title = task.get("title")
-
-        await self._enqueue_run_notifications(
-            task_id=task_id,
-            task_run_id=task_run_id,
-            run_id=record.run_id,
-            user_id=user_id,
-            terminal_status=terminal_status,
-            error=error,
-            task_title=task_title,
-            relied_on_assumption=(isinstance(getattr(record, "goal_verdict", None), dict) and record.goal_verdict.get("satisfied") is True and record.goal_verdict.get("relied_on_assumption") is True),
-        )
-
-    async def _enqueue_run_notifications(
-        self,
-        *,
-        task_id: str,
-        task_run_id: str,
-        run_id: str | None,
-        user_id: str,
-        terminal_status: str,
-        error: str | None,
-        task_title: str | None = None,
-        relied_on_assumption: bool = False,
-    ) -> None:
-        """Write durable outbox rows for the run outcome (issue #4254).
-
-        Best-effort by design: a notification failure is logged and swallowed
-        so delivery problems can never shadow the execution status written
-        above. Interrupted runs are user-initiated cancels and intentionally
-        produce no notification.
-        """
-        if self._notification_repo is None or self._connection_repo is None:
-            return
-        event = {"success": "run_completed", "failed": "run_failed"}.get(terminal_status)
-        if event is None:
-            return
-        try:
-            connections = await self._connection_repo.list_connections(user_id)
-        except Exception:
-            logger.exception("[Scheduler] failed to list channel connections for notifications")
-            return
-        payload = {
-            "run_status": terminal_status,
-            "error": error,
-            "task_id": task_id,
-            "task_title": task_title,
-        }
-        if relied_on_assumption:
-            payload["relied_on_assumption"] = True
-        for connection in connections:
-            if connection.get("status") != "connected":
-                continue
-            provider = connection.get("provider")
-            target = connection.get("external_account_id")
-            if not provider or not target:
-                continue
-            try:
-                await self._notification_repo.enqueue(
-                    task_id=task_id,
-                    task_run_id=task_run_id,
-                    run_id=run_id,
-                    event=event,
-                    provider=provider,
-                    target=target,
-                    owner_user_id=user_id,
-                    payload=payload,
-                )
-            except Exception:
-                logger.exception(
-                    "[Scheduler] failed to enqueue notification task_run=%s provider=%s target=%s",
-                    task_run_id,
-                    provider,
-                    target,
-                )
 
     async def start(self) -> None:
         if self._task is not None:

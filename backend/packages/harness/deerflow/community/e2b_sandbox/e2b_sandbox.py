@@ -7,10 +7,11 @@ import shlex
 import threading
 from typing import TYPE_CHECKING
 
-from e2b import FileNotFoundException
+from e2b import CommandExitException, FileNotFoundException
 from e2b_code_interpreter import Sandbox as E2BClientSandbox
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.read_file_contract import split_file_lines
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
@@ -165,7 +166,13 @@ class E2BSandbox(Sandbox):
                     kwargs["envs"] = env
                 if timeout is not None:
                     kwargs["timeout"] = timeout
-                result = client.commands.run(command, **kwargs)
+                try:
+                    result = client.commands.run(command, **kwargs)
+                except CommandExitException as exc:
+                    # The SDK raises on a nonzero exit instead of returning a
+                    # result. The exception is itself a ``CommandResult``, so
+                    # format it like one to keep stdout and the exit marker.
+                    result = exc
                 stdout = getattr(result, "stdout", "") or ""
                 stderr = getattr(result, "stderr", "") or ""
                 exit_code = getattr(result, "exit_code", 0)
@@ -233,7 +240,7 @@ class E2BSandbox(Sandbox):
             if start_line is None and end_line is None:
                 return content.decode("utf-8", errors="replace") if isinstance(content, bytes) else content or ""
             text = content.decode("utf-8", errors="replace") if isinstance(content, bytes) else content or ""
-            lines = text.splitlines()
+            lines = split_file_lines(text)
             # Clamp like LocalSandbox.read_file: a negative start would otherwise
             # wrap around through Python's negative-index slicing.
             start = max(start_line or 1, 1)
@@ -347,6 +354,12 @@ class E2BSandbox(Sandbox):
                 raise RuntimeError("sandbox client has been closed")
             try:
                 result = client.commands.run(remote_list_dir_command(resolved, max_depth))
+            except CommandExitException as exc:
+                # The listing script exits nonzero on reachable outcomes (missing
+                # root: 1; head truncating a large listing: SIGPIPE 141). The SDK
+                # raises for those, but the exception carries stdout, whose
+                # status marker the parser trusts over the exit code.
+                result = exc
             except Exception as e:
                 logger.error("Failed to list_dir %s in e2b sandbox: %s", resolved, e)
                 raise OSError(f"Failed to list_dir {resolved} in e2b sandbox: {e}") from e
@@ -481,7 +494,7 @@ class E2BSandbox(Sandbox):
             # pattern) and enforce the real directory scope below via
             # ``path_matches``, the same helper ``glob()`` uses.
             include_pattern = glob.split("/")[-1] or glob
-            flags.append(f"--include={include_pattern}")
+            flags.append(shlex.quote(f"--include={include_pattern}"))
 
         per_file_cap = max(max_results + 1, 50)
         total_cap = max(max_results * 4, max_results + 50)

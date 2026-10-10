@@ -124,11 +124,12 @@ services:
     # QR login and browser tools stay worker-local, so keep one worker while
     # they are enabled. --timeout-graceful-shutdown bounds how long open SSE
     # connections may delay lifespan shutdown after SIGTERM; stop_grace_period
-    # below must cover that bound plus the lifespan's worst case: five hooks
+    # below must cover that bound plus the lifespan's worst case: seven hooks
     # bounded at 5s each (trash sweep, notification worker, channel service,
-    # browser sessions, MCP session pool), the 1s retrieval-warm wait, the 5s
+    # scheduled task service, subagent batch service, browser sessions,
+    # MCP session pool), the 1s retrieval-warm wait, the 5s
     # run drain and the 30s memory flush (memory.shutdown_flush_timeout_seconds)
-    # -- about 61s -- plus slack. backend/tests/_gateway_shutdown_budget.py
+    # -- about 71s -- plus slack. backend/tests/_gateway_shutdown_budget.py
     # pins the arithmetic.
     command: sh -c "cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${GATEWAY_WORKERS:-1} --timeout-graceful-shutdown 10"
     # Docker's 10s default SIGKILLed the 30s memory queue flush
@@ -167,6 +168,14 @@ services:
       # DooD path/network translation
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
+      # The login lockout counts failures per client IP, but every browser
+      # request reaches the Gateway from nginx. Trust nginx's X-Real-IP (it
+      # overwrites the header on every Gateway route) so one client's wrong
+      # passwords cannot lock everyone out. Hostname, re-resolved every 10s.
+      # `:-` on purpose: an empty value also means nginx, because every browser
+      # request arrives through it, so direct mode would only bring back the
+      # shared lockout. Set another list in .env to change whom to trust.
+      - AUTH_TRUSTED_PROXIES=${AUTH_TRUSTED_PROXIES:-nginx}
       # Proxy values (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY) are inherited from ../.env via env_file.
       # Only NO_PROXY is declared here so internal service hostnames are always exempt from the proxy.
       - NO_PROXY=${NO_PROXY:-}${NO_PROXY:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,openviking,host.docker.internal
@@ -180,8 +189,10 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      # /health/ready runs both probes concurrently within a 3s endpoint
-      # deadline; the client timeout must stay above that bound.
+      # /health/ready runs its probes (database, checkpointer, Redis stream
+      # bridge, provisioner) concurrently within a 3s endpoint deadline; the
+      # client timeout must stay above that bound. The gateway is unhealthy
+      # while Redis is unreachable; the provisioner verdict is report-only.
       test: ["CMD", "python", "-c", "import urllib.request; response = urllib.request.urlopen('http://127.0.0.1:8001/health/ready', timeout=5); raise SystemExit(0 if response.status == 200 else 1)"]
       interval: 5s
       timeout: 5s

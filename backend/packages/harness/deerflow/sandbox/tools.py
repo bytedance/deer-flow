@@ -26,6 +26,7 @@ from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.runtime.secret_context import read_active_secrets
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.sandbox.env_policy import is_blocked_env_name
 from deerflow.sandbox.exceptions import (
     SandboxError,
     SandboxNotFoundError,
@@ -2351,7 +2352,7 @@ def _github_env_from_runtime(runtime: Runtime) -> dict[str, str] | None:
 _LARK_CLI_COMMAND_RE = re.compile(r"(?<![A-Za-z0-9_.-])lark-cli(?![A-Za-z0-9_.-])")
 
 
-def _lark_cli_env_from_runtime(runtime: Runtime, command: str, *, sandbox_paths: bool) -> dict[str, str] | None:
+def _lark_cli_env_from_runtime(runtime: Runtime, command: str, *, sandbox_paths: bool, sandbox: Sandbox | None = None) -> dict[str, str] | None:
     """Expose Settings-page Lark auth to sandbox ``lark-cli`` commands.
 
     Settings authorizes ``lark-cli`` under DeerFlow's per-user integration
@@ -2367,14 +2368,12 @@ def _lark_cli_env_from_runtime(runtime: Runtime, command: str, *, sandbox_paths:
     """
     if not _LARK_CLI_COMMAND_RE.search(command):
         return None
-    try:
-        from deerflow.integrations.lark_cli import lark_cli_env_overlay, sandbox_lark_broker_active
+    from deerflow.integrations.lark_cli import lark_cli_env_overlay
 
-        broker = sandbox_paths and sandbox_lark_broker_active()
-        return lark_cli_env_overlay(resolve_runtime_user_id(runtime), sandbox_paths=sandbox_paths, broker=broker)
-    except Exception:
-        logger.warning("Could not build Lark CLI env overlay; running command without managed auth", exc_info=True)
-        return None
+    broker = getattr(sandbox, "lark_cli_broker", None) if sandbox_paths else False
+    if broker is None:
+        raise RuntimeError("Sandbox Lark broker mode is unverified; refusing to execute lark-cli")
+    return lark_cli_env_overlay(resolve_runtime_user_id(runtime), sandbox_paths=sandbox_paths, broker=broker)
 
 
 @tool("bash", parse_docstring=True)
@@ -2400,6 +2399,7 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
         command: The bash command to execute. Always use absolute paths for files and directories.
         description: Optional short explanation of this command shown in the UI.
     """
+    redaction_env = None
     try:
         sandbox = ensure_sandbox_initialized(runtime)
         # Request-scoped secrets resolved for the active skill (#3861), plus a
@@ -2410,12 +2410,18 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
         identity_prefix = _channel_identity_prefix(runtime)
         user_prefix = _user_identity_prefix(runtime)
         github_env = _github_env_from_runtime(runtime)
-        lark_cli_env = _lark_cli_env_from_runtime(runtime, command, sandbox_paths=not is_local_sandbox(runtime))
+        lark_cli_env = _lark_cli_env_from_runtime(runtime, command, sandbox_paths=not is_local_sandbox(runtime), sandbox=sandbox)
         if github_env:
             injected_env = {**(injected_env or {}), **github_env}
         if lark_cli_env:
             injected_env = {**(injected_env or {}), **lark_cli_env}
+        redaction_env = injected_env
         if is_local_sandbox(runtime):
+            # Match the credential-name policy used for inherited host env.
+            # Keep benign operator settings readable and redact effective
+            # credentials before execution, including any exception output.
+            redaction_env = {name: value for name, value in (getattr(sandbox, "environment", None) or {}).items() if is_blocked_env_name(name)}
+            redaction_env.update(injected_env or {})
             if not is_host_bash_allowed():
                 return f"Error: {LOCAL_HOST_BASH_DISABLED_MESSAGE}"
             ensure_thread_directories_exist(runtime)
@@ -2455,7 +2461,7 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
                 timeout=command_timeout,
             )
             return _truncate_bash_output(
-                mask_secret_values(mask_local_paths_in_output(output, thread_data), injected_env),
+                mask_secret_values(mask_local_paths_in_output(output, thread_data), redaction_env),
                 max_chars,
             )
         ensure_thread_directories_exist(runtime)
@@ -2481,11 +2487,11 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
             max_chars,
         )
     except SandboxError as e:
-        return f"Error: {e}"
+        return mask_secret_values(f"Error: {e}", redaction_env)
     except PermissionError as e:
-        return f"Error: {e}"
+        return mask_secret_values(f"Error: {e}", redaction_env)
     except Exception as e:
-        return f"Error: Unexpected error executing command: {_sanitize_error(e, runtime)}"
+        return mask_secret_values(f"Error: Unexpected error executing command: {_sanitize_error(e, runtime)}", redaction_env)
 
 
 async def _bash_tool_async(runtime: Runtime, command: str, description: str = "") -> str:

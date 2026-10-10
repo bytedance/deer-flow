@@ -35,7 +35,11 @@ from app.gateway.checkpoint_lineage import (
     checkpoint_messages,
     find_checkpoint_before_message,
     find_checkpoint_before_message_chronologically,
+    history_parent_index,
     is_duration_only_checkpoint,
+    parent_from_history_index,
+    resolve_history_versions,
+    resolve_stamp_candidate_versions,
 )
 from app.gateway.context_usage import build_context_usage
 from app.gateway.conversation_reader import (
@@ -59,15 +63,18 @@ from app.gateway.services import (
     start_run,
     wait_for_run_completion,
 )
+from app.gateway.sse_headers import sse_response_headers
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.middlewares.dynamic_context_middleware import strip_injected_user_message_id_suffix
 from deerflow.authz.sandbox_authz import safe_app_config_async
 from deerflow.config.paths import get_paths, make_safe_user_id
 from deerflow.runtime import CancelOutcome, ConflictError, RunRecord, RunStatus, ThreadOperationKind, serialize_channel_values_for_api
+from deerflow.runtime.goal import is_active_goal
 from deerflow.runtime.runs.store.base import format_run_cursor_created_at, normalize_run_created_at_iso
 from deerflow.runtime.secret_context import redact_config_secrets, redact_metadata_secrets
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.utils.llm_text import strip_leading_think_blocks
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
 from deerflow.utils.thread_id import ThreadId
 from deerflow.workspace_changes import get_workspace_changes_response
@@ -83,6 +90,7 @@ _artifact_archive_slots = asyncio.Semaphore(4)
 _MISSING_REGENERATE_BASE_DETAIL = "Could not find an addressable checkpoint before the target user message"
 _UNSAFE_REGENERATE_LINEAGE_DETAIL = "Could not safely resolve the checkpoint before the target user message"
 THREAD_MESSAGE_LEGACY_SCAN_BATCH = 201
+_LEGACY_IDEMPOTENCY_REQUEST_KEY = "idempotency_request"
 
 
 IdempotencyKeyHeader = Annotated[
@@ -139,8 +147,8 @@ async def _refresh_store_backed_run(run_mgr: Any, record: Any) -> Any:
     return record
 
 
-def _is_duration_only_checkpoint(checkpoint_tuple: Any) -> bool:
-    return is_duration_only_checkpoint(checkpoint_tuple)
+def _is_duration_only_checkpoint(checkpoint_tuple: Any, history_index: dict[tuple[str, str], Any], versions=None, parent_versions=None) -> bool:
+    return is_duration_only_checkpoint(checkpoint_tuple, parent=parent_from_history_index(checkpoint_tuple, history_index), versions=versions, parent_versions=parent_versions)
 
 
 def compute_run_durations(runs) -> dict[str, int]:
@@ -366,6 +374,12 @@ async def _raise_lease_valid_elsewhere(
 
 def _record_to_response(record: RunRecord) -> RunResponse:
     kwargs = dict(record.kwargs or {})
+    legacy_idempotency_request = kwargs.pop(_LEGACY_IDEMPOTENCY_REQUEST_KEY, None)
+    if isinstance(legacy_idempotency_request, dict) and legacy_idempotency_request.get("kind") == "resume":
+        # Readers may outlive rows written by the pre-0034 rolling-upgrade
+        # fence. Keep its private digest and synthetic input out of every
+        # public run response; new writers use the dedicated ORM column.
+        kwargs["input"] = None
     if "config" in kwargs:
         kwargs["config"] = redact_config_secrets(kwargs["config"])
 
@@ -554,8 +568,7 @@ def _has_title(values: dict[str, Any]) -> bool:
 
 
 def _has_active_goal(snapshot: Any) -> bool:
-    goal = _checkpoint_values(snapshot).get("goal")
-    return isinstance(goal, dict) and goal.get("status") == "active"
+    return is_active_goal(_checkpoint_values(snapshot).get("goal"))
 
 
 def _latest_editable_turn(messages: list[Any], human_message_id: str) -> tuple[int, Any, int, Any, list[str]]:
@@ -591,10 +604,11 @@ def _run_last_ai_matches_message(record: RunRecord, message: Any) -> bool:
     last_ai_message = (record.last_ai_message or "").strip()
     if not last_ai_message:
         return False
-    target_text = _message_text(message).strip()
+    target_text = _message_text(message)
     if not target_text:
         return False
-    return last_ai_message == target_text[: len(last_ai_message)]
+    # Match both historical raw summaries and newer visible-answer summaries.
+    return any(last_ai_message == text[: len(last_ai_message)] for text in (target_text.strip(), strip_leading_think_blocks(target_text)))
 
 
 async def _find_target_run_id(
@@ -670,12 +684,19 @@ async def _find_base_checkpoint_before_human(
             raise HTTPException(status_code=409, detail=_UNSAFE_REGENERATE_LINEAGE_DETAIL) from exc
     try:
         raw_checkpoints = await accessor.ahistory(base_config, limit=REGENERATE_HISTORY_RAW_SCAN_LIMIT)
-        checkpoints = [item for item in raw_checkpoints if not _is_duration_only_checkpoint(item)]
+        history_index = history_parent_index(raw_checkpoints)
+        version_cache: dict[tuple[str, str, str], Any] = {}
+        checkpoints = []
+        for item in raw_checkpoints:
+            parent = parent_from_history_index(item, history_index)
+            versions, parent_versions = await resolve_stamp_candidate_versions(accessor, item, parent, version_cache)
+            if not _is_duration_only_checkpoint(item, history_index, versions=versions, parent_versions=parent_versions):
+                checkpoints.append(item)
     except Exception as exc:
         logger.exception("Failed to list checkpoints for regenerate thread %s", thread_id)
         raise HTTPException(status_code=500, detail="Failed to inspect checkpoint history") from exc
 
-    previous_checkpoint, target_found = find_checkpoint_before_message_chronologically(raw_checkpoints, human_message_id)
+    previous_checkpoint, target_found = find_checkpoint_before_message_chronologically(raw_checkpoints, human_message_id, history_versions=await resolve_history_versions(accessor, raw_checkpoints, cache=version_cache))
     if target_found:
         if previous_checkpoint is None:
             raise HTTPException(
@@ -1010,15 +1031,10 @@ async def stream_run(
             emit_gap_on_missing_stream=record.idempotency_reused,
         ),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-            # LangGraph Platform includes run metadata in this header.
-            # The SDK uses a greedy regex to extract the run id from this path,
-            # so it must point at the canonical run resource without extra suffixes.
-            "Content-Location": f"/api/threads/{thread_id}/runs/{record.run_id}",
-        },
+        # LangGraph Platform includes run metadata in Content-Location.
+        # The SDK uses a greedy regex to extract the run id from this path,
+        # so it must point at the canonical run resource without extra suffixes.
+        headers=sse_response_headers(content_location=f"/api/threads/{thread_id}/runs/{record.run_id}"),
     )
 
 
@@ -1327,11 +1343,7 @@ async def join_run(thread_id: ThreadId, run_id: str, request: Request) -> Stream
         # policy must not fire because an observer closed their connection.
         sse_consumer(bridge, record, request, run_mgr, apply_on_disconnect=False),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers=sse_response_headers(),
     )
 
 
@@ -1416,11 +1428,7 @@ async def _stream_existing_run(
         # must not fire because a joiner closed their connection.
         sse_consumer(bridge, record, request, run_mgr, apply_on_disconnect=False),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers=sse_response_headers(),
     )
 
 

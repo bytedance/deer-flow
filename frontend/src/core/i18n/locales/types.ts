@@ -404,6 +404,44 @@ export interface Translations {
     goalFailed: string;
     goalTooLong: string;
     goalLengthCounter: string;
+    goalBar: {
+      regionLabel: string;
+      inProgress: string;
+      stopped: string;
+      waitingForYou: string;
+      waiting: string;
+      paused: string;
+      autoContinuedOnce: string;
+      autoContinuedMany: string;
+      details: string;
+      hideDetails: string;
+      noteLabel: string;
+      codeLabel: string;
+      assumptionTooltip: string;
+      announce: string;
+      editLocked: string;
+      busy: string;
+      next: {
+        limit: string;
+        autoOff: string;
+        noProgress: string;
+        tokenCapped: string;
+        missingEvidence: string;
+        runFailed: string;
+        needsInputCard: string;
+        needsInputReply: string;
+        external: string;
+        unchecked: string;
+        unknown: string;
+        paused: string;
+      };
+      /** Why a check failed, without the "Couldn't check the goal" of its chip. */
+      uncheckedReasons: {
+        evaluatorFailed: string;
+        noDurableEndOfTurn: string;
+        threadChanged: string;
+      };
+    };
     compactSuccess: string;
     compactSkipped: string;
     compactFailed: string;
@@ -892,6 +930,8 @@ export interface Translations {
       continuations: string;
       details: string;
       listLabel: string;
+      /** A queued run waiting for an execution slot. */
+      waitingForSlot: string;
     };
     runTrigger: { scheduled: string; manual: string };
     runStatus: {
@@ -972,6 +1012,26 @@ export interface Translations {
       schedulerUnavailable: string;
       triggerFailed: string;
       permissionDenied: string;
+    };
+    /** One line in the originating chat per lifecycle event ("{title}" is rendered bold). */
+    events: {
+      stoppedWithCondition: string;
+      stopped: string;
+      autoPaused: string;
+      finishedRuns: string;
+      finishedOneRun: string;
+      finishedEnd: string;
+      /** A finish whose reason this client does not know. */
+      finished: string;
+      onceDone: string;
+      onceFailed: string;
+      /** `aria-label` of the line. */
+      label: string;
+      suffixLastFailed: string;
+      suffixLastUnmet: string;
+      suffixLastInterrupted: string;
+      /** Shown in place of a missing task title. */
+      untitledTask: string;
     };
     card: {
       runs: string;
@@ -1142,6 +1202,39 @@ export interface Translations {
     pinChatFailed: string;
   };
 
+  // Thread origin and unread markers (sidebar and chats list)
+  threads: {
+    /** sr-only text and tooltip of the unread dot. */
+    unread: string;
+    /** Row `aria-label` of an unread thread: "{title}, unread". */
+    unreadLabel: string;
+    /**
+     * The same with the origin marker's label first, so the row name keeps
+     * it: "{origin}, {title}, unread".
+     */
+    unreadLabelWithOrigin: string;
+    origin: {
+      schedule: string;
+      /** "From {provider}" for an IM channel thread; `provider` is already localized. */
+      fromProvider: (provider: string) => string;
+      github: string;
+      extension: string;
+      /** Localized IM provider names, keyed by provider id. */
+      providers: {
+        buzz: string;
+        dingtalk: string;
+        discord: string;
+        feishu: string;
+        github: string;
+        qq: string;
+        slack: string;
+        telegram: string;
+        wechat: string;
+        wecom: string;
+      };
+    };
+  };
+
   // Sidecar
   sidecar: {
     title: string;
@@ -1242,6 +1335,12 @@ export interface Translations {
     saveChanges: string;
     descriptions: Record<string, string>;
     connectedAs: (name: string) => string;
+    /** Whether scheduled-task updates reach this app (one muted line on the provider card). */
+    scheduledUpdates: {
+      supported: string;
+      supportedAfterConnect: string;
+      unsupported: string;
+    };
   };
 
   // Page titles (document title)

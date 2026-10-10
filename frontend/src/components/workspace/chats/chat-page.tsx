@@ -61,6 +61,7 @@ import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { useProject } from "@/core/projects";
+import { useThreadScheduledTaskEvents } from "@/core/scheduled-tasks/events";
 import { useScheduleToolResultRefresh } from "@/core/scheduled-tasks/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
 import { resolveThreadContext } from "@/core/settings/store";
@@ -82,6 +83,7 @@ import { cn } from "@/lib/utils";
 
 import { ChatBox } from "./chat-box";
 import { useSpecificChatMode } from "./use-chat-mode";
+import { useMarkOpenThreadRead } from "./use-mark-open-thread-read";
 import { useThreadChat } from "./use-thread-chat";
 
 export default function ChatPage() {
@@ -120,6 +122,17 @@ export default function ChatPage() {
   const threadMetadata = useThreadMetadata(threadId, {
     enabled: !isNewThread && !isMock,
     isMock,
+  });
+  // A saved thread that exists on the server is being read while open:
+  // clears its unread dot (sidebar and chats list) on every device.
+  const markThreadRead = useMarkOpenThreadRead(threadId, {
+    enabled: !isNewThread && !isMock && threadMetadata.data != null,
+  });
+  // Lifecycle lines of schedules created in this chat ("Paused by agent",
+  // "Finished"); they stay after the task is deleted.
+  const scheduledTaskEvents = useThreadScheduledTaskEvents(threadId, {
+    isNewThread,
+    enabled: !isMock,
   });
   const branchThread = useBranchThread();
   const backendTokenUsage = threadTokenUsageToTokenUsage(threadTokenUsage.data);
@@ -204,6 +217,9 @@ export default function ChatPage() {
       setIsNewThread(false);
     },
     onFinish: (state) => {
+      // A run in this thread ended (a send, or a joined scheduled run) while
+      // it is open: it has been read.
+      markThreadRead();
       if (document.hidden || !document.hasFocus()) {
         let body = "Conversation finished";
         const lastMessage = state.messages.at(-1);
@@ -414,9 +430,11 @@ export default function ChatPage() {
     : "off";
   const hasTodos = (thread.values.todos?.length ?? 0) > 0;
   const browserEnabled = !isNewThread && !isMock && browserControlEnabled;
-  const { activeGoal, hasGoal, setLocalGoal } = useActiveGoal(
+  const { activeGoal, hasGoal, goalOutcome, setLocalGoal } = useActiveGoal(
     threadId,
     thread.values.goal,
+    thread.values.goal_outcome,
+    thread.messages,
   );
   const hasOpenHumanInputCard = useMemo(
     () =>
@@ -434,6 +452,15 @@ export default function ChatPage() {
     !isNewThread && !isMock && threadMetadata.data
       ? projectIdOfThread(threadMetadata.data)
       : null;
+  // A goal blocks edit-and-rerun server-side; show the pencil locked.
+  const editBase =
+    !isNewThread &&
+    !isMock &&
+    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
+    !isUploading &&
+    !thread.isLoading &&
+    !branchThread.isPending &&
+    !hasOpenHumanInputCard;
 
   return (
     <ThreadContext.Provider value={{ thread, isMock }}>
@@ -518,6 +545,7 @@ export default function ChatPage() {
                   testId="main-message-list"
                   threadId={threadId}
                   thread={thread}
+                  scheduledTaskEvents={scheduledTaskEvents.data}
                   enableConversationOutline
                   paddingBottom={MESSAGE_LIST_DEFAULT_PADDING_BOTTOM}
                   hasMoreHistory={hasMoreHistory}
@@ -532,16 +560,8 @@ export default function ChatPage() {
                     !thread.isLoading
                   }
                   onRegenerateMessage={handleRegenerate}
-                  canEdit={
-                    !isNewThread &&
-                    !isMock &&
-                    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
-                    !isUploading &&
-                    !thread.isLoading &&
-                    !branchThread.isPending &&
-                    !hasGoal &&
-                    !hasOpenHumanInputCard
-                  }
+                  canEdit={editBase && !hasGoal}
+                  editLockedByGoal={editBase && hasGoal}
                   onEditAndRegenerateMessage={handleEditAndRegenerate}
                   onSubmitHumanInput={
                     isMock || env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
@@ -575,7 +595,7 @@ export default function ChatPage() {
                       : "max-w-(--container-width-md)",
                   )}
                 >
-                  {(hasGoal || hasTodos) && (
+                  {(hasGoal || goalOutcome !== null || hasTodos) && (
                     <div
                       className={cn(
                         "right-0 left-0 z-0",
@@ -588,7 +608,12 @@ export default function ChatPage() {
                           isWelcomeMode ? "absolute" : "relative",
                         )}
                       >
-                        {activeGoal && <GoalStatus goal={activeGoal} />}
+                        <GoalStatus
+                          goal={activeGoal}
+                          outcome={goalOutcome}
+                          isRunning={thread.isLoading}
+                          hasOpenHumanInputCard={hasOpenHumanInputCard}
+                        />
                         {hasTodos && (
                           <TodoList
                             className="bg-background/5"
