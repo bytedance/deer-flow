@@ -20,6 +20,22 @@ def test_install_shim_publishes_executable_files(tmp_path):
     assert [p.name for p in (tmp_path / "bin").glob("*.tmp")] == []
 
 
+def test_install_shim_publishes_correct_permissions(tmp_path):
+    """Launcher and shim must be executable (0o755), marker readable (0o644)."""
+    launcher = install_shim(str(tmp_path), version="1.2.3")
+
+    launcher_stat = os.stat(launcher)
+    assert launcher_stat.st_mode & 0o777 == 0o755
+
+    shim_body = tmp_path / "bin" / "lark-cli-shim.py"
+    shim_stat = os.stat(shim_body)
+    assert shim_stat.st_mode & 0o777 == 0o755
+
+    marker = tmp_path / ".deerflow-lark-cli-runtime.json"
+    marker_stat = os.stat(marker)
+    assert marker_stat.st_mode & 0o777 == 0o644
+
+
 def test_a_failed_publish_leaves_the_previous_runtime_intact(tmp_path, monkeypatch):
     install_shim(str(tmp_path), version="1.0.0")
     marker = tmp_path / ".deerflow-lark-cli-runtime.json"
@@ -50,7 +66,7 @@ def test_atomic_helper_keeps_the_previous_file_when_publish_fails(tmp_path, monk
     monkeypatch.setattr(os, "replace", _boom)
 
     with pytest.raises(OSError):
-        _write_text_atomically(str(target), '{"version": "2.0.0"}')
+        _write_text_atomically(str(target), '{"version": "2.0.0"}', mode=0o644)
 
     assert target.read_text(encoding="utf-8") == '{"version": "1.0.0"}'
     assert list(tmp_path.glob("*.tmp")) == []
