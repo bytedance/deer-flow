@@ -47,9 +47,7 @@ async def test_corrupt_entry_is_miss_while_valid_entry_is_preserved(
 ) -> None:
     client = _RedisClient({"good": b"json\x00ok", "bad": corrupt, "absent": None})
     monkeypatch.setattr(redis_cache, "_create_client", lambda *args, **kwargs: client)
-    cache = redis_cache.RedisCheckpointHistoryCache(
-        "redis://unused", serde=_Serde(), ttl_seconds=60
-    )
+    cache = redis_cache.RedisCheckpointHistoryCache("redis://unused", serde=_Serde(), ttl_seconds=60)
 
     found = await cache.aget_many(["good", "bad", "absent"])
 
