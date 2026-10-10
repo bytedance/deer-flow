@@ -156,8 +156,9 @@ _DESTRUCTIVE_RM_RE = (
 # (`bomb(){ bomb|bomb& };bomb`) passed the blocking gate. Going beyond the
 # middleware shape, the variant matcher requires the function name as a
 # standalone shell word on both sides of a pipe whose command is backgrounded
-# (`&` before the next `;`), so lookalikes like `f | ff` or `build.log`
-# do not hard-block. The matcher runs for
+# (the first `;`/`&` after the pipe, where `|&` does not background), and
+# quotes or backslashes delimit words, so lookalikes like `f | ff` or
+# `build.log` do not hard-block while `f | "f" &` still does. The matcher runs for
 # shell files only (`_is_shell_path`): `<name>() {` is shell definition
 # syntax, and scanning every text file for the shape would hard-block C/JS
 # bitwise lookalikes (`mask | mask & 255`) as CRITICAL. Work per header stays
@@ -167,7 +168,7 @@ _DESTRUCTIVE_RM_RE = (
 # the file.
 _FORK_BOMB_NAME_MAX = 64
 _FORK_BOMB_BODY_WINDOW = 512
-_FORK_BOMB_NAME_EXCLUDED = frozenset(" \t\n\r\f\v(){}|;&")
+_FORK_BOMB_NAME_EXCLUDED = frozenset(" \t\n\r\f\v(){}|;&\"'\\")
 _FORK_BOMB_HEADER_RE = re.compile(r"\(\)[ \t\n\r\f\v]*\{")
 # `env`, `printenv` and `export -p` count only at a real command position. The
 # text is first reduced to shell code by `_shell_code_only`, excluding comments
@@ -1156,14 +1157,22 @@ def _fork_bomb_has_word(text: str, start: int, end: int, name: str) -> bool:
 
 
 def _fork_bomb_terminator(text: str, start: int, end: int) -> int:
-    """Return the offset of the first `;` or `&` in ``text[start:end]``, else ``end``."""
-    semicolon = text.find(";", start, end)
-    ampersand = text.find("&", start, end)
-    if semicolon == -1:
-        semicolon = end
-    if ampersand == -1:
-        ampersand = end
-    return min(semicolon, ampersand)
+    """Return the offset of the first `;` or backgrounding `&` in ``text[start:end]``, else ``end``.
+
+    The `&` of a `|&` pipe operator keeps the command in the foreground, so it
+    is skipped along with the pipe it belongs to.
+    """
+    cursor = start
+    while cursor < end:
+        semicolon = text.find(";", cursor, end)
+        ampersand = text.find("&", cursor, end)
+        if ampersand != -1 and (semicolon == -1 or ampersand < semicolon):
+            if ampersand > 0 and text[ampersand - 1] == "|":
+                cursor = ampersand + 1
+                continue
+            return ampersand
+        return semicolon if semicolon != -1 else end
+    return end
 
 
 def _fork_bomb_span(text: str) -> tuple[int, int] | None:
@@ -1171,8 +1180,10 @@ def _fork_bomb_span(text: str) -> tuple[int, int] | None:
 
     Finds `<name>() {` headers and requires the same name as a standalone
     shell word on both sides of a pipe whose command is backgrounded: the
-    `&` must end that pipe's command (no `;` in between), and the left word
-    must belong to the same pipeline (no `;`/`&` between it and the pipe).
+    first `;`/`&` after the pipe (with `|&` skipped, it does not background)
+    must be `&`, and the left word must belong to the same pipeline (no
+    `;`/`&` between it and the pipe). Quotes and backslashes delimit words,
+    so `f | "f" &` and `f | \\f &` count like the unquoted spelling.
     Work per header is bounded by the name cap and body window; the closing
     brace ends the window when it comes first. A trailing `};name` invocation
     is not required -- the definition alone is the shape the middleware-level
@@ -1201,11 +1212,15 @@ def _fork_bomb_span(text: str) -> tuple[int, int] | None:
         # Two word occurrences can only straddle a pipe together, so the
         # candidate pipes are the ones between consecutive occurrences; the
         # pipe list itself may be arbitrarily dense and is never walked.
+        # Pipes advance, and the terminator only moves forward with them, so
+        # it is scanned once per header instead of once per candidate.
+        terminator = -1
         for left, right in zip(words, words[1:]):
             pipe = text.find("|", left, right)
             if pipe == -1:
                 continue
-            terminator = _fork_bomb_terminator(text, pipe + 1, body_end)
+            if terminator <= pipe:
+                terminator = _fork_bomb_terminator(text, pipe + 1, body_end)
             if terminator < body_end and text[terminator] == "&" and right < terminator:
                 left_start = 1 + max(text.rfind(";", body_start, pipe), text.rfind("&", body_start, pipe))
                 if left_start < body_start:

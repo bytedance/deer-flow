@@ -2169,6 +2169,12 @@ def test_cleartext_http_uses_host_after_userinfo_without_exposing_credentials(tm
         ".(){ .|.& };.",
         "forkbomb() {\n  forkbomb | forkbomb &\n}\nforkbomb\n",
         "forkbomb(){ forkbomb | forkbomb & }",
+        # Quotes and backslashes still name the command; `|&` pipes without
+        # backgrounding the pipe itself (the trailing `&` does).
+        'f(){ f | "f" & };f',
+        "f(){ f | 'f' & };f",
+        "f(){ f | \\f & };f",
+        "f(){ f |& f & };f",
     ],
 )
 def test_fork_bomb_variants_block(tmp_path: Path, snippet: str) -> None:
