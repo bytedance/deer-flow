@@ -359,6 +359,59 @@ def test_authorize_sandbox_calls_provider_with_correct_request(monkeypatch):
 # artifact edit) still succeeds with the sandbox sync skipped.
 
 
+def test_gateway_missing_client_keeps_infrastructure_error_lease():
+    from app.gateway.authz import try_acquire_sandbox_for_request
+    from deerflow.sandbox.lease import discard_sandbox_lease_manager
+
+    provider = MagicMock()
+    provider.acquire_async = AsyncMock(return_value="lost-after-acquire")
+    provider.get.return_value = None
+
+    async def go():
+        lease = await try_acquire_sandbox_for_request(None, provider, "thread-1", user_id="user-1", app_config=None)
+        assert lease.sandbox is None
+        assert lease.sandbox_id == "lost-after-acquire"
+        assert lease.denied is False
+        assert lease.owner_id is None
+        assert lease.provider is provider
+        await lease.release()
+        await lease.release()
+
+    try:
+        asyncio.run(go())
+        provider.release.assert_called_once_with("lost-after-acquire")
+    finally:
+        discard_sandbox_lease_manager(provider)
+
+
+@pytest.mark.parametrize("failure", ["acquire", "lookup", "rollback"])
+def test_gateway_client_lease_preserves_provider_errors(failure):
+    from app.gateway.authz import try_acquire_sandbox_for_request
+    from deerflow.sandbox.lease import discard_sandbox_lease_manager
+
+    error = RuntimeError(f"{failure} failed")
+    provider = MagicMock()
+    provider.acquire_async = AsyncMock(return_value="lost-after-acquire")
+    provider.get.return_value = None
+    if failure == "acquire":
+        provider.acquire_async.side_effect = error
+    elif failure == "lookup":
+        provider.get.side_effect = error
+    else:
+        provider.release.side_effect = error
+
+    try:
+        with pytest.raises(RuntimeError) as exc_info:
+            asyncio.run(try_acquire_sandbox_for_request(None, provider, "thread-1", user_id="user-1", app_config=None))
+        assert exc_info.value is error
+        if failure == "acquire":
+            provider.release.assert_not_called()
+        else:
+            provider.release.assert_called_once_with("lost-after-acquire")
+    finally:
+        discard_sandbox_lease_manager(provider)
+
+
 def _make_upload_app(monkeypatch, provider, *, fail_closed: bool = True):
     """Build a FastAPI app with the uploads router and authz enabled."""
     from _router_auth_helpers import make_authed_test_app

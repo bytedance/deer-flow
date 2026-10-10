@@ -5,6 +5,10 @@ from collections.abc import Sequence
 
 from langgraph.channels import BinaryOperatorAggregate
 
+# Call-local resolved arguments shared by artifact resolution and note admission.
+# This key belongs only to ToolRuntime.state, never checkpointed ThreadState.
+RESOLVED_TOOL_CALL_ARGS_KEY = "__resolved_tool_call_args"
+
 MAX_NOTES = 8
 MAX_NOTE_CHARS = 750
 MAX_NOTE_SOURCES = 4

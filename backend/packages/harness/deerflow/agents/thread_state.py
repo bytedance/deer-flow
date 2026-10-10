@@ -16,7 +16,7 @@ from langgraph.channels import DeltaChannel
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 import deerflow.checkpoint_patches as _checkpoint_patches  # noqa: F401 - import-time saver fixes
-from deerflow.agents.goal_state import GoalState
+from deerflow.agents.goal_state import GoalOutcomeState, GoalState
 from deerflow.agents.task_continuity.state import TaskNotesChannel, merge_task_notes
 from deerflow.config.database_config import DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY, CheckpointChannelMode
 from deerflow.subagents.status_contract import SUBAGENT_STATUS_VALUES
@@ -50,6 +50,15 @@ class BackgroundTaskState(TypedDict):
     updated_at: str
 
 
+class BlobRefData(TypedDict):
+    """JSON-safe checkpoint representation of ``deerflow.storage.BlobRef``."""
+
+    sha256: str
+    size: int
+    kind: str
+    content_type: NotRequired[str | None]
+
+
 class ViewedImageData(TypedDict):
     """Metadata for a viewed image file.
 
@@ -64,6 +73,7 @@ class ViewedImageData(TypedDict):
     actual_path: str
     sha256: str
     source_sandbox_id: NotRequired[str]
+    blob_ref: NotRequired[BlobRefData]
 
 
 def merge_sandbox(existing: SandboxState | None, new: SandboxState | None) -> SandboxState | None:
@@ -356,6 +366,7 @@ class ThreadState(AgentState):
     artifacts: Annotated[list[str], merge_artifacts]
     todos: Annotated[list | None, merge_todos]
     goal: Annotated[GoalState | None, merge_goal]
+    goal_outcome: NotRequired[GoalOutcomeState | None]
     uploaded_files: NotRequired[list[dict] | None]
     viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> metadata (no base64)
     promoted: Annotated[PromotedTools | None, merge_promoted]

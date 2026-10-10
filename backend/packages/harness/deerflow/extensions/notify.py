@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import time
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
@@ -20,6 +21,7 @@ from deerflow_extension_api import (
 )
 
 from deerflow.extensions.registry import LoadedExtensions
+from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 
@@ -115,15 +117,26 @@ async def _notify_each(
     """Invoke contributors in order, fail-open, within one shared budget."""
     loop = asyncio.get_running_loop()
     deadline = None if timeout is None else loop.time() + timeout
+    # ``budget_spent`` latches once the shared budget runs out, so the skip
+    # decision never depends on a second clock read. The loop runs a scheduled
+    # timeout up to one ``clock_resolution`` *early* (``BaseEventLoop._run_once``
+    # compares each handle's ``_when`` against ``now + clock_resolution``), so on
+    # a coarse clock — Windows' ~15.6 ms against budgets as small as 20 ms —
+    # ``loop.time()`` can still sit strictly before ``deadline`` at the moment
+    # the budget has in fact expired. That raced both the log classification and
+    # the skip of later contributors (#6453).
+    budget_spent = False
     for source, contributor in contributors:
+        timeout_scope: asyncio.Timeout | None = None
         try:
             call = invoke(contributor)
             if deadline is None:
                 await call
                 continue
 
-            remaining = deadline - loop.time()
+            remaining = 0.0 if budget_spent else deadline - loop.time()
             if remaining <= 0:
+                budget_spent = True
                 close = getattr(call, "close", None)
                 if callable(close):
                     close()
@@ -135,9 +148,15 @@ async def _notify_each(
                     timeout,
                 )
                 continue
-            await asyncio.wait_for(call, remaining)
+            # ``asyncio.timeout`` records whether *it* expired, so the handler
+            # below never re-reads the clock to tell a spent budget from a
+            # ``TimeoutError`` the contributor raised on its own.
+            timeout_scope = asyncio.timeout(remaining)
+            async with timeout_scope:
+                await call
         except TimeoutError:
-            if deadline is not None and loop.time() >= deadline:
+            if timeout_scope is not None and timeout_scope.expired():
+                budget_spent = True
                 # Budget exhaustion mid-hook is the same expected operational
                 # condition as the skip above, so it stays a warning rather
                 # than a hook failure with an asyncio-internal traceback.
@@ -182,7 +201,7 @@ async def _notify_each(
 # loops, but extension resources must always be touched on the loop where they
 # were started.
 _notify_loop: asyncio.AbstractEventLoop | None = None
-_pending_dispatches: set[asyncio.Future[Any]] = set()
+_pending_dispatches: set[concurrent.futures.Future[None]] = set()
 _warned_no_loop = False
 _system_observations_enabled = True
 
@@ -193,6 +212,35 @@ def set_extension_notify_loop(loop: asyncio.AbstractEventLoop | None) -> None:
     _notify_loop = loop
     _system_observations_enabled = True
     _warned_no_loop = False
+
+
+async def drain_extension_notify_dispatches(*, timeout: float = 5.0) -> None:
+    """Boundedly drain already-submitted fire-and-forget observations.
+
+    New detached observations are suspended before the snapshot so shutdown
+    cannot open a submit-after-snapshot window. The bounded wait keeps a wedged
+    extension observer from holding Gateway teardown forever.
+    """
+    suspend_extension_system_observations()
+    pending = tuple(_pending_dispatches)
+    if not pending:
+        return
+
+    async def _wait() -> None:
+        try:
+            async with asyncio.timeout(timeout):
+                await asyncio.gather(
+                    *(asyncio.wrap_future(future) for future in pending),
+                    return_exceptions=True,
+                )
+        except TimeoutError:
+            logger.warning(
+                "Timed out after %.1fs draining %d pending extension observation(s)",
+                timeout,
+                len(pending),
+            )
+
+    await await_drained(_wait())
 
 
 def reset_extension_notify_loop() -> None:

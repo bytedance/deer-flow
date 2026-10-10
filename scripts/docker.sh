@@ -28,7 +28,7 @@ _refresh_compose_cmd() {
 }
 _refresh_compose_cmd
 
-# docker-compose-dev.yaml marks its env_file entries optional with the long-form
+# Both compose files mark their env_file entries optional with the long-form
 # `- path: ... / required: false` syntax, understood by Compose v2.24.0 and up.
 # Older clients abort while parsing the file, before any preflight below can run.
 COMPOSE_MIN_VERSION="2.24.0"
@@ -147,6 +147,12 @@ ensure_env_files() {
     ensure_from_example "$PROJECT_ROOT/frontend/.env" "$PROJECT_ROOT/frontend/.env.example" "frontend/.env"
 }
 
+# start runs Compose from docker/ without --env-file, so ${VAR} interpolation in
+# docker-compose-dev.yaml sees the shell only, never the checkout .env. Export
+# the .env values that interpolation consumes; a value already set in the shell
+# (even empty) wins, as it does for Compose. AUTH_TRUSTED_PROXIES belongs here
+# because the Gateway's `environment:` entry, which defaults to nginx, outranks
+# the same key loaded through env_file and would replace the operator's list.
 load_proxy_env_from_dotenv() {
     local env_file="$PROJECT_ROOT/.env"
     local var
@@ -157,16 +163,16 @@ load_proxy_env_from_dotenv() {
         return
     fi
 
-    for var in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy; do
+    for var in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy AUTH_TRUSTED_PROXIES; do
         if [ -z "${!var+x}" ]; then
             line="$(grep -E "^[[:space:]]*${var}=" "$env_file" | tail -n 1 || true)"
             if [ -n "$line" ]; then
                 value="${line#*=}"
+                value="${value%$'\r'}"
                 value="${value%\"}"
                 value="${value#\"}"
                 value="${value%\'}"
                 value="${value#\'}"
-                value="${value%$'\r'}"
                 export "${var}=${value}"
             fi
         fi

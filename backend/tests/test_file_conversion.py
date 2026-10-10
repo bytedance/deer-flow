@@ -7,8 +7,6 @@ import sys
 from types import ModuleType
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from deerflow.utils.file_conversion import (
     _ASYNC_THRESHOLD_BYTES,
     _MIN_CHARS_PER_PAGE,
@@ -319,60 +317,6 @@ class TestConvertFileToMarkdown:
         assert md_path is not None
         assert md_path.read_text(encoding="utf-8") == chinese_content
 
-    def test_does_not_follow_symlink_at_output_path(self, tmp_path):
-        pdf = tmp_path / "report.pdf"
-        pdf.write_bytes(b"%PDF-1.4 fake")
-        outside = tmp_path / "secret.txt"
-        outside.write_text("untouched", encoding="utf-8")
-        dest = tmp_path / "report.md"
-        try:
-            dest.symlink_to(outside)
-        except OSError as exc:
-            if getattr(exc, "winerror", None) == 1314:
-                pytest.skip("symlink creation requires Developer Mode or elevated privileges on Windows")
-            raise
-
-        with (
-            patch("deerflow.utils.file_conversion._get_pdf_converter", return_value="auto"),
-            patch("deerflow.utils.file_conversion._do_convert", return_value="# converted"),
-        ):
-            md_path = _run(convert_file_to_markdown(pdf, output_path=dest))
-
-        assert md_path == dest
-        assert dest.is_file()
-        assert not dest.is_symlink()
-        assert dest.read_text(encoding="utf-8") == "# converted"
-        assert outside.read_text(encoding="utf-8") == "untouched"
-
-    def test_reserved_then_replaced_with_symlink_does_not_write_through(self, tmp_path):
-        from deerflow.uploads.manager import reserve_unique_filename
-
-        pdf = tmp_path / "notes.pdf"
-        pdf.write_bytes(b"%PDF-1.4 fake")
-        outside = tmp_path / "host-secret.txt"
-        outside.write_text("secret", encoding="utf-8")
-        reserved = reserve_unique_filename(tmp_path, "notes.md", set())
-        dest = tmp_path / reserved
-        dest.unlink()
-        try:
-            dest.symlink_to(outside)
-        except OSError as exc:
-            if getattr(exc, "winerror", None) == 1314:
-                pytest.skip("symlink creation requires Developer Mode or elevated privileges on Windows")
-            raise
-
-        with (
-            patch("deerflow.utils.file_conversion._get_pdf_converter", return_value="auto"),
-            patch("deerflow.utils.file_conversion._do_convert", return_value="# notes"),
-        ):
-            md_path = _run(convert_file_to_markdown(pdf, output_path=dest))
-
-        assert md_path == dest
-        assert dest.is_file()
-        assert not dest.is_symlink()
-        assert dest.read_text(encoding="utf-8") == "# notes"
-        assert outside.read_text(encoding="utf-8") == "secret"
-
 
 # ---------------------------------------------------------------------------
 # extract_outline
@@ -543,60 +487,6 @@ class TestExtractOutline:
         assert outline[0]["title"] == "UNITED STATES SECURITIES AND EXCHANGE COMMISSION"
 
 
-class TestResolveConvertedMarkdownPath:
-    def test_explicit_companion_wins_over_sibling(self, tmp_path):
-        from deerflow.utils.file_outline import resolve_converted_markdown_path
-
-        pdf = tmp_path / "a.pdf"
-        pdf.write_bytes(b"%PDF")
-        (tmp_path / "a.md").write_text("# DOCX\n", encoding="utf-8")
-        renamed = tmp_path / "a_1.md"
-        renamed.write_text("# PDF\n", encoding="utf-8")
-
-        assert resolve_converted_markdown_path(pdf, companion_name="a_1.md") == renamed
-
-    def test_rejects_path_traversal_and_falls_back_to_sibling(self, tmp_path):
-        from deerflow.utils.file_outline import resolve_converted_markdown_path
-
-        pdf = tmp_path / "report.pdf"
-        pdf.write_bytes(b"%PDF")
-        sibling = tmp_path / "report.md"
-        sibling.write_text("# Safe\n", encoding="utf-8")
-
-        assert resolve_converted_markdown_path(pdf, companion_name="../escape.md") == sibling
-
-    def test_ignores_symlink_companion(self, tmp_path):
-        from deerflow.utils.file_outline import resolve_converted_markdown_path
-
-        pdf = tmp_path / "report.pdf"
-        pdf.write_bytes(b"%PDF")
-        target = tmp_path / "outside.md"
-        target.write_text("# LEAK\n", encoding="utf-8")
-        (tmp_path / "report.md").symlink_to(target)
-
-        assert resolve_converted_markdown_path(pdf) is None
-
-
-class TestExtractOutlineForFileReuse:
-    def test_pre_resolved_md_path_skips_sidecar_load(self, tmp_path, monkeypatch):
-        from deerflow.utils.file_outline import extract_outline_for_file
-
-        pdf = tmp_path / "a.pdf"
-        pdf.write_bytes(b"%PDF")
-        (tmp_path / "a.md").write_text("# WRONG\n", encoding="utf-8")
-        right = tmp_path / "a_1.md"
-        right.write_text("# RIGHT\n", encoding="utf-8")
-
-        def boom(*_args, **_kwargs):
-            raise AssertionError("pre-resolved md_path must not load the sidecar")
-
-        monkeypatch.setattr("deerflow.uploads.companion_map.coerce_companion_state", boom)
-
-        outline, preview = extract_outline_for_file(pdf, md_path=right)
-        assert preview == []
-        assert outline[0]["title"] == "RIGHT"
-
-
 # ---------------------------------------------------------------------------
 # Off-loop stat/write-back: cancellation drain and executor re-entrancy
 # (review follow-ups on the uploads conversion PR)
@@ -604,36 +494,37 @@ class TestExtractOutlineForFileReuse:
 
 
 def test_cancelled_conversion_drains_write_and_removes_partial(tmp_path, monkeypatch):
-    """Cancel must not abandon the in-flight write, and must clean the output.
+    """Cancel must not abandon the in-flight write, and must clean the partial file.
 
-    The companion write is atomic (a same-directory temp file plus replace, so
-    a planted symlink is not followed) and drained: ``run_file_io`` awaits
-    ``run_in_executor``, so a plain await would unwind while the worker is
-    still writing. The drained write delivers the cancellation only after the
-    worker settled, and the handler then removes the settled output.
+    ``run_file_io`` awaits ``run_in_executor``, so a plain await would unwind
+    while the worker is still writing; the drained write delivers the
+    cancellation only after the worker settled, and the handler then removes
+    the partial output so repeated cancelled conversions cannot leave large
+    hidden staging files behind.
     """
     import threading
-
-    from deerflow.utils import file_conversion
+    from pathlib import Path
 
     started = threading.Event()
     cancel_issued = threading.Event()
     release = threading.Event()
     done = threading.Event()
-    real_write = file_conversion._write_text_atomic
+    real_write_text = Path.write_text
 
-    def _blocking_write(path, text):
+    def _blocking_write_text(self, data, encoding=None):
         started.set()
         release.wait(timeout=10)
-        result = real_write(path, text)
+        result = real_write_text(self, data, encoding=encoding)
         done.set()
         return result
 
+    # Seed the source BEFORE installing the patch, so the setup write is not
+    # captured by _blocking_write_text (which would pre-set started/done).
     src = tmp_path / "doc.txt"
     out = tmp_path / "doc.md"
     src.write_text("hello")
 
-    monkeypatch.setattr(file_conversion, "_write_text_atomic", _blocking_write)
+    monkeypatch.setattr(Path, "write_text", _blocking_write_text)
 
     async def _scenario():
         task = asyncio.create_task(convert_file_to_markdown(src, output_path=out))

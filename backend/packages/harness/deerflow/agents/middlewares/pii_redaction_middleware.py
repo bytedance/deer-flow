@@ -34,11 +34,16 @@ Scope model (mirrors the structural guardrails):
 * The memory-enqueue path is covered by the follow-up slice (#5577):
   ``redact_queued_messages`` (memory middleware) applies the same configured
   policy to the extraction payloads queued for the memory backend.
+* The hidden ``/goal`` continuation is a framework message this middleware
+  skips, so ``make_goal_continuation_message`` (``runtime/goal.py``) redacts
+  its objective, reason and evidence summary before the message is stored.
 * The compaction and durable-context seams run outside ``wrap_model_call``;
   :func:`redact_text` is the shared entry point they call, wired from
   SummarizationMiddleware (compaction input) and DurableContextMiddleware
   (reinjected ``summary_text``); TitleMiddleware redacts its complete user and
-  assistant fields before truncation and direct model invocation.
+  assistant fields before truncation and direct model invocation. The goal
+  evaluator (``runtime/goal.py``) likewise redacts whole messages before its
+  evidence caps, and its assembled input.
 
 Detector order is fixed and pinned by a regression test; email → api_key →
 national_id → credit_card → phone. Checksum-gated national IDs run *before*
@@ -321,11 +326,12 @@ def _redact_content(content: object, redactor: _Redactor) -> tuple[object, bool]
     """Redact *content*, preserving its shape. Returns ``(content, changed)``.
 
     Handles the two shapes message content takes — plain ``str`` and a list of
-    content blocks. Blocks pass through untouched except for any string-valued
-    ``text`` field they carry: lenient downstream consumers (e.g. DeerMem's
-    ``format_conversation_for_update``) read ``p.get("text")`` regardless of
-    the block type, so a non-text block must not smuggle raw PII past the
-    helper. The input is never mutated.
+    content blocks. Blocks pass through untouched except for string-valued
+    ``text`` fields and structured ``json`` payloads. The latter is important
+    for MCP results: serializing a ``{"type": "json", "json": {...}}`` block
+    later must not bypass the PII boundary. Binary media fields are left alone
+    so redaction cannot corrupt an image or file payload. The input is never
+    mutated.
     """
     if isinstance(content, str):
         redacted = redactor.redact(content)
@@ -339,16 +345,52 @@ def _redact_content(content: object, redactor: _Redactor) -> tuple[object, bool]
             redacted = redactor.redact(block)
             changed = changed or redacted != block
             new_content.append(redacted)
-        elif isinstance(block, dict) and isinstance(block.get("text"), str):
-            redacted = redactor.redact(block["text"])
-            if redacted != block["text"]:
-                new_content.append({**block, "text": redacted})
-                changed = True
-            else:
-                new_content.append(block)
+        elif isinstance(block, dict):
+            updated_block = block
+            block_changed = False
+
+            if isinstance(block.get("text"), str):
+                redacted = redactor.redact(block["text"])
+                if redacted != block["text"]:
+                    updated_block = {**updated_block, "text": redacted}
+                    block_changed = True
+
+            if "json" in block:
+                redacted_json, json_changed = _redact_json_value(block["json"], redactor)
+                if json_changed:
+                    updated_block = {**updated_block, "json": redacted_json}
+                    block_changed = True
+
+            changed = changed or block_changed
+            new_content.append(updated_block)
         else:
             new_content.append(block)
     return new_content, changed
+
+
+def _redact_json_value(value: object, redactor: _Redactor) -> tuple[object, bool]:
+    """Redact string leaves in a structured JSON value without mutating it."""
+    if isinstance(value, str):
+        redacted = redactor.redact(value)
+        return redacted, redacted != value
+    if isinstance(value, list):
+        items: list[object] = []
+        changed = False
+        for item in value:
+            redacted_item, item_changed = _redact_json_value(item, redactor)
+            items.append(redacted_item)
+            changed = changed or item_changed
+        return items, changed
+    if isinstance(value, dict):
+        result: dict[object, object] = {}
+        changed = False
+        for key, item in value.items():
+            redacted_key = redactor.redact(key) if isinstance(key, str) else key
+            redacted_item, item_changed = _redact_json_value(item, redactor)
+            result[redacted_key] = redacted_item
+            changed = changed or item_changed or redacted_key != key
+        return result, changed
+    return value, False
 
 
 class PiiRedactionMiddleware(AgentMiddleware[AgentState]):

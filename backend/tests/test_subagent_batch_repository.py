@@ -270,6 +270,85 @@ async def test_pause_resume_cancel_and_owner_scope(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_retry_item_keeps_paused_batch_paused_until_resume(tmp_path) -> None:
+    repo = await _repo(tmp_path)
+    await _create(repo, count=3, max_live=3, max_running=3, max_attempts=1)
+    now = datetime.now(UTC)
+    failed = (await repo.claim_items(now=now, lease_owner="worker-1", lease_seconds=60, limit=1))[0]
+    await repo.finalize_item(
+        failed["id"],
+        lease_owner="worker-1",
+        succeeded=False,
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        error="permanent",
+        stop_reason=None,
+        token_usage=None,
+        model_name="model-a",
+        completed_at=now,
+    )
+    paused = await repo.pause_batch("batch-1", user_id="user-1")
+    assert paused is not None and paused["status"] == "paused"
+    assert await repo.claim_items(now=now + timedelta(seconds=1), lease_owner="worker-2", lease_seconds=60, limit=10) == []
+
+    retried = await repo.retry_item("batch-1", failed["id"], user_id="user-1")
+
+    assert retried is not None
+    assert retried["status"] == "pending"
+    assert retried["attempt"] == 0
+    assert retried["error"] is None
+    batch = await repo.get_batch("batch-1", user_id="user-1")
+    assert batch is not None and batch["status"] == "paused"
+    assert batch["counts"]["pending"] == 1
+    assert batch["counts"]["queued"] == 2
+    assert await repo.claim_items(now=now + timedelta(seconds=2), lease_owner="worker-2", lease_seconds=60, limit=10) == []
+
+    await close_engine()
+    repo = await _repo(tmp_path)
+    batch = await repo.get_batch("batch-1", user_id="user-1")
+    assert batch is not None and batch["status"] == "paused"
+
+    resumed = await repo.resume_batch("batch-1", user_id="user-1")
+    assert resumed is not None and resumed["status"] == "queued"
+    claimed = await repo.claim_items(now=now + timedelta(seconds=3), lease_owner="worker-3", lease_seconds=60, limit=10)
+    assert len(claimed) == 3
+    assert failed["id"] in {item["id"] for item in claimed}
+
+
+@pytest.mark.asyncio
+async def test_retry_item_in_running_batch_keeps_batch_schedulable(tmp_path) -> None:
+    repo = await _repo(tmp_path)
+    await _create(repo, count=3, max_live=3, max_running=3, max_attempts=1)
+    now = datetime.now(UTC)
+    failed = (await repo.claim_items(now=now, lease_owner="worker-1", lease_seconds=60, limit=1))[0]
+    await repo.finalize_item(
+        failed["id"],
+        lease_owner="worker-1",
+        succeeded=False,
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        error="permanent",
+        stop_reason=None,
+        token_usage=None,
+        model_name="model-a",
+        completed_at=now,
+    )
+    batch = await repo.get_batch("batch-1", user_id="user-1")
+    assert batch is not None and batch["status"] == "running"
+
+    retried = await repo.retry_item("batch-1", failed["id"], user_id="user-1")
+
+    assert retried is not None and retried["status"] == "pending"
+    batch = await repo.get_batch("batch-1", user_id="user-1")
+    assert batch is not None and batch["status"] == "queued"
+    claimed = await repo.claim_items(now=now + timedelta(seconds=1), lease_owner="worker-2", lease_seconds=60, limit=10)
+    assert len(claimed) == 3
+    assert failed["id"] in {item["id"] for item in claimed}
+
+
+@pytest.mark.asyncio
 async def test_cancel_terminalizes_in_flight_items_and_fences_stale_completion(tmp_path) -> None:
     repo = await _repo(tmp_path)
     await _create(repo, count=1, max_live=1, max_running=1)

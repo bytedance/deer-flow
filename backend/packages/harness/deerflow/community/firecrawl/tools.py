@@ -1,9 +1,38 @@
+import inspect
 import json
+import logging
 
 from firecrawl import AsyncFirecrawlApp
 from langchain.tools import tool
 
+from deerflow.community.search_max_results import DEFAULT_MAX_RESULTS, coerce_max_results
 from deerflow.config import get_app_config
+
+logger = logging.getLogger(__name__)
+
+
+async def _aclose_firecrawl_client(client: AsyncFirecrawlApp) -> None:
+    """Best-effort close of the pooled async HTTP client a per-call app constructed.
+
+    ``AsyncFirecrawlApp`` eagerly builds an ``httpx.AsyncClient``-backed pool in
+    its constructor and exposes no public teardown, so reach it through the
+    delegating v2 client. The declared dependency range (``firecrawl-py>=1.15.0``)
+    includes versions without that attribute, and teardown runs from a
+    ``finally`` — absence or failure here must never mask the tool's own result.
+    """
+    pooled = getattr(getattr(client, "_v2_client", None), "async_http_client", None)
+    if pooled is None:
+        return
+    try:
+        close = getattr(pooled, "close", None)
+        if not callable(close):
+            logger.warning("Firecrawl async HTTP pool has no close method")
+            return
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+    except Exception:
+        logger.warning("Failed to close the Firecrawl async HTTP pool", exc_info=True)
 
 
 def _get_firecrawl_client(tool_name: str = "web_search") -> AsyncFirecrawlApp:
@@ -28,11 +57,12 @@ async def web_search_tool(query: str) -> str:
     Args:
         query: The query to search for.
     """
+    client: AsyncFirecrawlApp | None = None
     try:
         config = get_app_config().get_tool_config("web_search")
-        max_results = 5
+        max_results = DEFAULT_MAX_RESULTS
         if config is not None:
-            max_results = config.model_extra.get("max_results", max_results)
+            max_results = coerce_max_results(config.model_extra.get("max_results", max_results), provider="Firecrawl", logger=logger)
 
         client = _get_firecrawl_client("web_search")
         result = await client.search(query, limit=max_results)
@@ -51,6 +81,9 @@ async def web_search_tool(query: str) -> str:
         return json_results
     except Exception as e:
         return f"Error: {str(e)}"
+    finally:
+        if client is not None:
+            await _aclose_firecrawl_client(client)
 
 
 @tool("web_fetch", parse_docstring=True)
@@ -64,6 +97,7 @@ async def web_fetch_tool(url: str) -> str:
     Args:
         url: The URL to fetch the contents of.
     """
+    client: AsyncFirecrawlApp | None = None
     try:
         client = _get_firecrawl_client("web_fetch")
         result = await client.scrape(url, formats=["markdown"])
@@ -76,5 +110,8 @@ async def web_fetch_tool(url: str) -> str:
             return "Error: No content found"
     except Exception as e:
         return f"Error: {str(e)}"
+    finally:
+        if client is not None:
+            await _aclose_firecrawl_client(client)
 
     return f"# {title}\n\n{markdown_content[:4096]}"

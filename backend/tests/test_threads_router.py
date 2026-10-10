@@ -1,5 +1,6 @@
 import asyncio
 import re
+import threading
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -16,6 +17,7 @@ from langgraph.store.memory import InMemoryStore
 from langgraph.types import Overwrite
 
 from app.gateway import services as gateway_services
+from app.gateway.auth.models import User
 from app.gateway.routers import thread_runs, threads
 from deerflow.config.paths import Paths
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
@@ -32,7 +34,10 @@ from deerflow.persistence.thread_meta.memory import THREADS_NS, MemoryThreadMeta
 from deerflow.runtime import ConflictError, ThreadOperationKind
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY
+from deerflow.runtime.goal import build_goal_outcome, build_goal_state, write_thread_goal
 from deerflow.runtime.user_context import reset_current_user, set_current_user
+from deerflow.uploads.companions import companion_names, register_companion, resolve_companion
+from deerflow.utils.file_outline import extract_outline_for_file
 
 _ISO_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
 
@@ -413,15 +418,14 @@ def test_delete_thread_data_rejects_invalid_thread_id(tmp_path):
 
 
 def test_delete_thread_route_cleans_thread_directory(tmp_path):
-    from deerflow.runtime.user_context import get_effective_user_id
-
     paths = Paths(tmp_path)
-    user_id = get_effective_user_id()
+    owner = User(email="thread-owner@example.com", password_hash="x")
+    user_id = str(owner.id)
     thread_dir = paths.thread_dir("thread-route", user_id=user_id)
     paths.sandbox_work_dir("thread-route", user_id=user_id).mkdir(parents=True, exist_ok=True)
     (paths.sandbox_work_dir("thread-route", user_id=user_id) / "notes.txt").write_text("hello", encoding="utf-8")
 
-    app = make_authed_test_app()
+    app = make_authed_test_app(user_factory=lambda: owner, bind_current_user=True)
     app.state.run_manager = _ThreadTestRunManager()
     app.include_router(threads.router)
 
@@ -456,6 +460,59 @@ def test_delete_thread_route_closes_browser_session(tmp_path):
 
     assert response.status_code == 200
     manager.close_session.assert_awaited_once_with("thread-browser")
+
+
+def test_delete_thread_route_closes_mcp_sessions(tmp_path):
+    """Deleting a thread tears down its persistent MCP sessions so a later
+    caller who reuses the id gets fresh MCP server state instead of a retained
+    session (and its leaked owner task plus subprocess) — the same invariant the
+    browser-session cleanup above guards (#5188)."""
+    paths = Paths(tmp_path)
+    owner = User(email="mcp-owner@example.com", password_hash="x")
+
+    app = make_authed_test_app(user_factory=lambda: owner, bind_current_user=True)
+    app.state.run_manager = _ThreadTestRunManager()
+    app.include_router(threads.router)
+
+    pool = SimpleNamespace(close_thread_scope=AsyncMock(return_value=None))
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=paths),
+        patch("deerflow.mcp.session_pool.get_session_pool", return_value=pool),
+    ):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-mcp")
+
+    assert response.status_code == 200
+    pool.close_thread_scope.assert_awaited_once_with(
+        user_id=str(owner.id),
+        thread_id="thread-mcp",
+    )
+
+
+def test_delete_thread_route_isolates_failing_mcp_cleanup(tmp_path):
+    """A failing MCP teardown must stay best-effort like every other cleanup step.
+
+    The delete has already removed the thread's filesystem data, checkpoints and
+    metadata by the time MCP sessions are closed, so an exception here must not
+    turn a successful deletion into a 500.
+    """
+    paths = Paths(tmp_path)
+
+    app = make_authed_test_app()
+    app.state.run_manager = _ThreadTestRunManager()
+    app.include_router(threads.router)
+
+    pool = SimpleNamespace(close_thread_scope=AsyncMock(side_effect=RuntimeError("simulated MCP teardown failure")))
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=paths),
+        patch("deerflow.mcp.session_pool.get_session_pool", return_value=pool),
+    ):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-mcp-fail")
+
+    assert response.status_code == 200
+    assert response.json() == {"success": True, "message": "Deleted local thread data for thread-mcp-fail"}
+    pool.close_thread_scope.assert_awaited_once()
 
 
 def _persistence_cleanup_app(tmp_path, *, run_store, event_store, feedback_repo):
@@ -690,6 +747,55 @@ def test_delete_thread_route_rejects_active_thread_operation_without_deleting_me
 
     assert response.status_code == 409
     assert asyncio.run(store.aget(THREADS_NS, "thread-active-delete")) is not None
+
+
+def test_delete_thread_route_holds_reservation_until_cancelled_removal_finishes(tmp_path):
+    """A cancelled delete must not release its reservation mid-rmtree.
+
+    The removal runs on a file-IO worker. Cancelling the request abandons the
+    await, not the worker, so a bare await would let ``reserve_thread_operation``
+    exit -- and admit a new run on the thread -- while its files are still
+    being deleted. The stalled removal below makes that window observable.
+    """
+    events: list[str] = []
+    removal_started = threading.Event()
+    release_removal = threading.Event()
+
+    class RecordingRunManager(_ThreadTestRunManager):
+        @asynccontextmanager
+        async def reserve_thread_operation(self, _thread_id: str, **_kwargs):
+            try:
+                yield
+            finally:
+                events.append("reservation released")
+
+    def stalled_delete_thread_dir(_thread_id, *, user_id=None):
+        removal_started.set()
+        release_removal.wait(timeout=5)
+        events.append("removal finished")
+
+    paths = Paths(tmp_path)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(run_manager=RecordingRunManager(), checkpointer=None)))
+
+    async def scenario() -> None:
+        task = asyncio.create_task(threads.delete_thread_data.__wrapped__("thread-cancelled-delete", request))
+        assert await asyncio.to_thread(removal_started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        # Cancellation is deferred while the removal is still running.
+        assert not task.done()
+        assert events == []
+        release_removal.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=paths),
+        patch.object(paths, "delete_thread_dir", side_effect=stalled_delete_thread_dir),
+    ):
+        asyncio.run(scenario())
+
+    assert events == ["removal finished", "reservation released"]
 
 
 def test_branch_thread_route_rejects_concurrent_source_operation_without_creating_child():
@@ -3634,6 +3740,162 @@ def test_update_thread_state_overwrite_into_never_written_channel(monkeypatch, m
         assert read_response.json()["values"]["goal"] == {"objective": "finish"}
 
 
+def _met_goal_record(reply_message_id: str | None = "a2") -> dict:
+    return build_goal_outcome(build_goal_state("ship the fix"), {"satisfied": True, "blocker": "none", "reason": "Shipped."}, reply_message_id=reply_message_id)
+
+
+def _record_met_goal(checkpointer, thread_id: str, record: dict) -> None:
+    asyncio.run(write_thread_goal(checkpointer, thread_id, None, as_node="goal_evaluator", outcome=record))
+
+
+def _create_extension_thread(client, checkpointer, custom_factory, mode, thread_id) -> None:
+    created = client.post("/api/threads", json={"thread_id": thread_id, "metadata": {}, "assistant_id": "extension-agent"})
+    assert created.status_code == 200, created.text
+    asyncio.run(_seed_extension_source(checkpointer, custom_factory, mode, thread_id))
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_history_head_carries_goal_state_without_messages(monkeypatch, mode) -> None:
+    """useStream rebuilds thread values from the head, so a goal set on /chats/new
+    and a met-goal record must be there even before any message exists."""
+    app, _store, checkpointer = _build_thread_app()
+    _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    thread_id = f"goal-head-{mode}"
+    record = _met_goal_record(None)
+
+    with TestClient(app) as client:
+        goal_response = client.put(f"/api/threads/{thread_id}/goal", json={"objective": "ship the fix"})
+        assert goal_response.status_code == 200, goal_response.text
+        set_head = client.post(f"/api/threads/{thread_id}/history", json={"limit": 1}).json()[0]["values"]
+        _record_met_goal(checkpointer, thread_id, record)
+        met_history = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10}).json()
+
+    assert set_head == {"goal": goal_response.json()["goal"]}
+    assert met_history[0]["values"] == {"goal_outcome": record}
+    # Older entries stay title/thread_data only.
+    assert len(met_history) > 1
+    assert all(not {"goal", "goal_outcome"} & set(entry["values"]) for entry in met_history[1:])
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_history_head_skips_goal_state_that_is_not_active_or_achieved(monkeypatch, mode) -> None:
+    """POST /state stores an unbuilt goal; the head must not show it as a goal the backend ignores."""
+    app, _store, checkpointer = _build_thread_app()
+    custom_factory = _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    thread_id = f"malformed-goal-head-{mode}"
+
+    with TestClient(app) as client:
+        _create_extension_thread(client, checkpointer, custom_factory, mode, thread_id)
+        update_response = client.post(f"/api/threads/{thread_id}/state", json={"values": {"goal": {"objective": "finish"}}})
+        assert update_response.status_code == 200, update_response.text
+        malformed_goal_head = client.post(f"/api/threads/{thread_id}/history", json={"limit": 1}).json()[0]["values"]
+        _record_met_goal(checkpointer, thread_id, {**_met_goal_record(), "status": "cleared"})
+        unknown_outcome_head = client.post(f"/api/threads/{thread_id}/history", json={"limit": 1}).json()[0]["values"]
+
+    assert "goal" not in malformed_goal_head
+    assert [message["id"] for message in malformed_goal_head["messages"]] == ["h1", "a1", "h2", "a2"]
+    assert "goal_outcome" not in unknown_outcome_head
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_goal_writes_drop_the_met_goal_record(monkeypatch, mode) -> None:
+    """PUT/DELETE /goal and a POST /state goal write must not leave an older 'goal met' behind."""
+    app, _store, checkpointer = _build_thread_app()
+    custom_factory = _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    thread_id = f"goal-outcome-writers-{mode}"
+    record = _met_goal_record()
+    writers = {
+        "put": lambda client: client.put(f"/api/threads/{thread_id}/goal", json={"objective": "next goal"}),
+        "delete": lambda client: client.delete(f"/api/threads/{thread_id}/goal"),
+        "state": lambda client: client.post(f"/api/threads/{thread_id}/state", json={"values": {"goal": None}}),
+    }
+    after = {}
+
+    with TestClient(app) as client:
+        _create_extension_thread(client, checkpointer, custom_factory, mode, thread_id)
+        for name, write in writers.items():
+            _record_met_goal(checkpointer, thread_id, record)
+            assert client.get(f"/api/threads/{thread_id}/state").json()["values"]["goal_outcome"] == record
+            response = write(client)
+            assert response.status_code == 200, response.text
+            after[name] = client.get(f"/api/threads/{thread_id}/state").json()["values"]
+        head = client.post(f"/api/threads/{thread_id}/history", json={"limit": 1}).json()[0]["values"]
+
+    assert after["put"]["goal"]["objective"] == "next goal"
+    assert all(values.get("goal_outcome") is None for values in after.values())
+    assert "goal_outcome" not in head
+
+
+def _seed_turn(checkpointer, custom_factory, mode, thread_id, human_id: str, ai_id: str, **values) -> None:
+    accessor = CheckpointStateAccessor.bind(custom_factory(), checkpointer, mode=mode)
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+
+    async def seed() -> None:
+        await accessor.aupdate(config, {"messages": [HumanMessage(id=human_id, content=f"question {human_id}")], **values}, as_node="model")
+        await accessor.aupdate(config, {"messages": [AIMessage(id=ai_id, content=f"answer {ai_id}")]}, as_node="model")
+
+    asyncio.run(seed())
+
+
+def _branch_head(client, thread_id: str, message_id: str) -> tuple[str, dict]:
+    branch_response = client.post(f"/api/threads/{thread_id}/branches", json={"message_id": message_id, "message_ids": [message_id]})
+    assert branch_response.status_code == 200, branch_response.text
+    branch_thread_id = branch_response.json()["thread_id"]
+    return branch_thread_id, client.post(f"/api/threads/{branch_thread_id}/history", json={"limit": 1}).json()[0]["values"]
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_branch_from_the_met_turn_keeps_the_record_without_the_met_goal(monkeypatch, mode) -> None:
+    """The branch head is written onto the replay base from before the turn, where the
+    goal was still active; the branch keeps the record and its message ids, not the goal."""
+    app, _store, checkpointer = _build_thread_app()
+    custom_factory = _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    thread_id = f"met-goal-branch-{mode}"
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": thread_id, "metadata": {}, "assistant_id": "extension-agent"})
+        assert created.status_code == 200, created.text
+        _seed_turn(checkpointer, custom_factory, mode, thread_id, "h1", "a1")
+        goal_response = client.put(f"/api/threads/{thread_id}/goal", json={"objective": "ship the fix"})
+        assert goal_response.status_code == 200, goal_response.text
+        _seed_turn(checkpointer, custom_factory, mode, thread_id, "h2", "a2")
+        record = build_goal_outcome(goal_response.json()["goal"], {"satisfied": True, "blocker": "none", "reason": "Shipped."}, reply_message_id="a2")
+        _record_met_goal(checkpointer, thread_id, record)
+        branch_thread_id, branch_head = _branch_head(client, thread_id, "a2")
+        branch_goal = client.get(f"/api/threads/{branch_thread_id}/goal").json()["goal"]
+
+    assert branch_head["goal_outcome"] == record
+    assert "goal" not in branch_head
+    assert branch_goal is None
+    assert [message["id"] for message in branch_head["messages"]] == ["h1", "a1", "h2", "a2"]
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_branch_does_not_take_an_older_met_goal_record_from_the_replay_base(monkeypatch, mode) -> None:
+    """A run-input goal clears the older record and a stand-down then drops the cleared
+    key, so only the replay base still holds that record; the branch must not revive it."""
+    app, _store, checkpointer = _build_thread_app()
+    custom_factory = _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    thread_id = f"older-record-branch-{mode}"
+    next_goal = build_goal_state("next goal")
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": thread_id, "metadata": {}, "assistant_id": "extension-agent"})
+        assert created.status_code == 200, created.text
+        _seed_turn(checkpointer, custom_factory, mode, thread_id, "h1", "a1")
+        _record_met_goal(checkpointer, thread_id, _met_goal_record("a1"))
+        # normalize_input's shape for an external run-input goal.
+        _seed_turn(checkpointer, custom_factory, mode, thread_id, "h2", "a2", goal=next_goal, goal_outcome=None)
+        asyncio.run(write_thread_goal(checkpointer, thread_id, next_goal, as_node="goal_evaluator"))
+        source_head = client.post(f"/api/threads/{thread_id}/history", json={"limit": 1}).json()[0]["values"]
+        _branch_thread_id, branch_head = _branch_head(client, thread_id, "a2")
+
+    assert source_head["goal"] == next_goal
+    assert "goal_outcome" not in source_head
+    assert branch_head["goal"] == next_goal
+    assert "goal_outcome" not in branch_head
+
+
 @pytest.mark.parametrize("mode", ["full", "delta"])
 def test_update_thread_state_preserves_agent_binding_for_manual_compaction(monkeypatch, mode) -> None:
     """A manual state rewrite must retain the state-producing agent policy."""
@@ -3843,6 +4105,13 @@ def test_branch_thread_best_effort_copies_current_workspace(tmp_path) -> None:
     source_uploads.mkdir(parents=True, exist_ok=True)
     (source_outputs / "result.txt").write_text("answer", encoding="utf-8")
     (source_uploads / ".upload-stale.part").write_text("partial", encoding="utf-8")
+    original = source_uploads / "report.pdf"
+    markdown = source_uploads / "report.md"
+    original.write_bytes(b"%PDF")
+    markdown.write_text("# Converted report\n", encoding="utf-8")
+    register_companion(original, markdown)
+    (source_uploads / "unrelated.pdf").write_bytes(b"%PDF")
+    (source_uploads / "unrelated.md").write_text("# User notes\n", encoding="utf-8")
 
     human = HumanMessage(id="human-file", content="Make a file")
     ai = AIMessage(id="ai-file", content="Done")
@@ -3875,313 +4144,12 @@ def test_branch_thread_best_effort_copies_current_workspace(tmp_path) -> None:
     assert target_user_data.exists()
     assert (target_user_data / "outputs" / "result.txt").read_text(encoding="utf-8") == "answer"
     assert not (target_user_data / "uploads" / ".upload-stale.part").exists()
+    branch_original = target_user_data / "uploads" / "report.pdf"
+    assert resolve_companion(branch_original) == target_user_data / "uploads" / "report.md"
+    assert extract_outline_for_file(branch_original)[0] == [{"title": "Converted report", "line": 1}]
+    assert companion_names(target_user_data / "uploads") == {"report.md"}
+    assert resolve_companion(target_user_data / "uploads" / "unrelated.pdf") is None
     assert source_user_data.exists()
-
-
-def test_branch_thread_rebinds_converted_markdown_identities(tmp_path) -> None:
-    """Latest-turn branch copy must rebuild companion pins against copied files.
-
-    Pins live beside ``user-data``, so copying only that tree leaves the sidecar
-    ``id`` pointing at a missing pin. ``list_uploaded_files`` then drops
-    converted-text paths and lists collision-renamed companions as standalone
-    rows even though the Markdown copies succeeded.
-    """
-    from deerflow.tools.builtins.list_uploaded_files_tool import _list_uploaded_files_impl
-    from deerflow.uploads.companion_map import (
-        companion_entry_matches,
-        companion_identity_path,
-        load_companion_entries,
-        record_companion_mapping,
-    )
-
-    paths = Paths(tmp_path)
-    app, _store, checkpointer = _build_thread_app()
-    source_thread_id = "source-with-companions"
-    user_id = "branch-user"
-
-    source_uploads = paths.sandbox_uploads_dir(source_thread_id, user_id=user_id)
-    source_uploads.mkdir(parents=True, exist_ok=True)
-    (source_uploads / "report.pdf").write_bytes(b"%PDF")
-    (source_uploads / "report.md").write_text("# Intro\n\nBody.\n", encoding="utf-8")
-    record_companion_mapping(source_uploads, "report.pdf", "report.md")
-    (source_uploads / "a.docx").write_bytes(b"docx")
-    (source_uploads / "a.pdf").write_bytes(b"%PDF")
-    (source_uploads / "a.md").write_text("# From DOCX\n", encoding="utf-8")
-    (source_uploads / "a_1.md").write_text("# From PDF\n", encoding="utf-8")
-    record_companion_mapping(source_uploads, "a.docx", "a.md")
-    record_companion_mapping(source_uploads, "a.pdf", "a_1.md")
-    source_report = load_companion_entries(source_uploads)["report.pdf"]
-
-    human = HumanMessage(id="human-file", content="Make a file")
-    ai = AIMessage(id="ai-file", content="Done")
-
-    async def _seed(parent_config: dict) -> None:
-        after_human = await _write_checkpoint(checkpointer, source_thread_id, str(uuid6()), [human], step=1, parent_config=parent_config)
-        await _write_checkpoint(checkpointer, source_thread_id, str(uuid6()), [human, ai], step=2, parent_config=after_human)
-
-    with (
-        patch("app.gateway.routers.threads.get_paths", return_value=paths),
-        patch("app.gateway.routers.threads.get_effective_user_id", return_value=user_id),
-        TestClient(app) as client,
-    ):
-        created = client.post("/api/threads", json={"thread_id": source_thread_id, "metadata": {}})
-        assert created.status_code == 200, created.text
-        initial = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": source_thread_id, "checkpoint_ns": ""}}))
-        assert initial is not None
-        asyncio.run(_seed(initial.config))
-
-        response = client.post(
-            f"/api/threads/{source_thread_id}/branches",
-            json={"message_id": "ai-file", "message_ids": ["ai-file"]},
-        )
-
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["workspace_clone_mode"] == "current_thread_best_effort"
-
-    dest_uploads = paths.sandbox_uploads_dir(body["thread_id"], user_id=user_id)
-    runtime = SimpleNamespace(
-        context={"thread_id": body["thread_id"], "user_id": user_id},
-        state={"uploaded_files": []},
-        config=None,
-        server_info=None,
-    )
-    listed = _list_uploaded_files_impl(include_outline=True, runtime=runtime, _paths=paths)
-    by_name = {row["filename"]: row for row in listed["files"]}
-    assert set(by_name) == {"report.pdf", "a.docx", "a.pdf"}
-    assert by_name["report.pdf"]["markdown_file"] == "report.md"
-    assert by_name["report.pdf"]["markdown_path"] == "/mnt/user-data/uploads/report.md"
-    assert by_name["report.pdf"]["outline"][0]["title"] == "Intro"
-    assert by_name["a.pdf"]["markdown_file"] == "a_1.md"
-    assert "a_1.md" not in by_name
-
-    dest_report = load_companion_entries(dest_uploads)["report.pdf"]
-    assert dest_report.id
-    assert dest_report.id != source_report.id
-    assert companion_entry_matches(dest_uploads, dest_report)
-    dest_pin = companion_identity_path(dest_uploads, dest_report.id)
-    assert dest_pin.stat().st_ino == (dest_uploads / "report.md").stat().st_ino
-    assert dest_pin.stat().st_ino != (source_uploads / "report.md").stat().st_ino
-
-
-def test_branch_thread_reports_companion_rebind_failure(tmp_path) -> None:
-    """A pin rebuild error must not 500 after files are copied.
-
-    The branch stays usable; ``workspace_clone_mode`` distinguishes this from a
-    full workspace copy failure, and the dest sidecar is left unrebound.
-    """
-    from deerflow.tools.builtins.list_uploaded_files_tool import _list_uploaded_files_impl
-    from deerflow.uploads.companion_map import companion_entry_matches, load_companion_entries, record_companion_mapping
-
-    paths = Paths(tmp_path)
-    app, _store, checkpointer = _build_thread_app()
-    source_thread_id = "source-rebind-fail"
-    user_id = "branch-user"
-
-    source_uploads = paths.sandbox_uploads_dir(source_thread_id, user_id=user_id)
-    source_uploads.mkdir(parents=True, exist_ok=True)
-    (source_uploads / "report.pdf").write_bytes(b"%PDF")
-    (source_uploads / "report.md").write_text("# Intro\n", encoding="utf-8")
-    (source_uploads / "a.pdf").write_bytes(b"%PDF")
-    (source_uploads / "a_1.md").write_text("# From PDF\n", encoding="utf-8")
-    record_companion_mapping(source_uploads, "report.pdf", "report.md")
-    record_companion_mapping(source_uploads, "a.pdf", "a_1.md")
-    source_report = load_companion_entries(source_uploads)["report.pdf"]
-
-    human = HumanMessage(id="human-file", content="Make a file")
-    ai = AIMessage(id="ai-file", content="Done")
-
-    async def _seed(parent_config: dict) -> None:
-        after_human = await _write_checkpoint(checkpointer, source_thread_id, str(uuid6()), [human], step=1, parent_config=parent_config)
-        await _write_checkpoint(checkpointer, source_thread_id, str(uuid6()), [human, ai], step=2, parent_config=after_human)
-
-    with (
-        patch("app.gateway.routers.threads.get_paths", return_value=paths),
-        patch("app.gateway.routers.threads.get_effective_user_id", return_value=user_id),
-        patch("app.gateway.routers.threads.rebind_cloned_companion_identities", side_effect=OSError("pin failed")),
-        TestClient(app) as client,
-    ):
-        created = client.post("/api/threads", json={"thread_id": source_thread_id, "metadata": {}})
-        assert created.status_code == 200, created.text
-        initial = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": source_thread_id, "checkpoint_ns": ""}}))
-        assert initial is not None
-        asyncio.run(_seed(initial.config))
-
-        response = client.post(
-            f"/api/threads/{source_thread_id}/branches",
-            json={"message_id": "ai-file", "message_ids": ["ai-file"]},
-        )
-
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["workspace_clone_mode"] == "current_thread_best_effort_companion_rebind_failed"
-
-    dest_uploads = paths.sandbox_uploads_dir(body["thread_id"], user_id=user_id)
-    assert (dest_uploads / "report.pdf").is_file()
-    assert (dest_uploads / "report.md").is_file()
-    dest_report = load_companion_entries(dest_uploads)["report.pdf"]
-    assert dest_report.id == source_report.id
-    assert not companion_entry_matches(dest_uploads, dest_report)
-
-    runtime = SimpleNamespace(
-        context={"thread_id": body["thread_id"], "user_id": user_id},
-        state={"uploaded_files": []},
-        config=None,
-        server_info=None,
-    )
-    listed = _list_uploaded_files_impl(include_outline=True, runtime=runtime, _paths=paths)
-    by_name = {row["filename"]: row for row in listed["files"]}
-    assert "markdown_file" not in by_name["report.pdf"]
-    assert "a_1.md" in by_name
-
-
-def test_copy_branch_tombstones_when_source_rerecords_during_copytree(tmp_path) -> None:
-    """A same-name re-upload on the source after copy must not pin dest notes.
-
-    Upload/delete do not take the source branch reservation, so this window is
-    real. Pause after copy, re-record on the source, then resume rebind.
-    """
-    import threading
-
-    from app.gateway.routers.threads import _copy_branch_user_data_sync
-    from deerflow.uploads.companion_map import (
-        copy_user_data_tree,
-        load_companion_entries,
-        load_companion_state,
-        lookup_companion_mapping,
-        record_companion_mapping,
-    )
-    from deerflow.uploads.manager import delete_file_safe
-
-    paths = Paths(tmp_path)
-    source_thread_id = "source-rerecord-race"
-    dest_thread_id = "dest-rerecord-race"
-    user_id = "branch-user"
-    source_uploads = paths.sandbox_uploads_dir(source_thread_id, user_id=user_id)
-    source_uploads.mkdir(parents=True, exist_ok=True)
-    (source_uploads / "report.pdf").write_bytes(b"%PDF")
-    (source_uploads / "report.md").write_text("# convert\n", encoding="utf-8")
-    record_companion_mapping(source_uploads, "report.pdf", "report.md")
-    copied_id = load_companion_entries(source_uploads)["report.pdf"].id
-    (source_uploads / "report.md").unlink()
-    (source_uploads / "report.md").write_text("# independent notes\n", encoding="utf-8")
-
-    copied = threading.Event()
-    resume = threading.Event()
-    modes: list[str] = []
-
-    def _copy_then_pause(src, dst, ignore=None):
-        result = copy_user_data_tree(src, dst, ignore=ignore)
-        copied.set()
-        assert resume.wait(timeout=5), "timed out waiting to resume after source re-record"
-        return result
-
-    with patch("app.gateway.routers.threads.copy_user_data_tree", _copy_then_pause):
-        worker = threading.Thread(
-            target=lambda: modes.append(_copy_branch_user_data_sync(paths, source_thread_id, dest_thread_id, user_id=user_id)),
-            daemon=True,
-        )
-        worker.start()
-        assert copied.wait(timeout=5), "copy did not run"
-        (source_uploads / "report.md").unlink()
-        (source_uploads / "report.md").write_text("# new convert\n", encoding="utf-8")
-        record_companion_mapping(source_uploads, "report.pdf", "report.md")
-        new_id = load_companion_entries(source_uploads)["report.pdf"].id
-        resume.set()
-        worker.join(timeout=5)
-        assert not worker.is_alive()
-
-    if copied_id is None and new_id is None:
-        pytest.skip("identity pins unavailable; generation tokens cannot differ")
-    assert new_id != copied_id
-    assert modes == ["current_thread_best_effort"]
-
-    dest_uploads = paths.sandbox_uploads_dir(dest_thread_id, user_id=user_id)
-    assert lookup_companion_mapping(dest_uploads, "report.pdf") is None
-    assert "report.pdf" in load_companion_state(dest_uploads).evicted
-    assert (dest_uploads / "report.md").read_text(encoding="utf-8") == "# independent notes\n"
-    delete_file_safe(dest_uploads, "report.pdf", convertible_extensions={".pdf"})
-    assert (dest_uploads / "report.md").read_text(encoding="utf-8") == "# independent notes\n"
-
-
-def test_copy_branch_tombstones_when_sidecar_copied_after_source_rerecord(tmp_path) -> None:
-    """Copy can copy notes first and the sidecar after a source re-record.
-
-    Sidecar identity and even matching bytes then look valid, but dest markdown
-    is still the independent restore. Pause after copying everything except the
-    sidecar, re-record the same text on the source, then copy the new sidecar.
-    """
-    import threading
-    from pathlib import Path
-
-    from app.gateway.routers.threads import _copy_branch_user_data_sync
-    from deerflow.uploads.companion_map import (
-        COMPANION_MAP_FILENAME,
-        _copy_regular_file_nofollow,
-        copy_user_data_tree,
-        load_companion_state,
-        lookup_companion_mapping,
-        record_companion_mapping,
-    )
-    from deerflow.uploads.manager import delete_file_safe
-
-    same_text = "# same bytes\n"
-    paths = Paths(tmp_path)
-    source_thread_id = "source-sidecar-late"
-    dest_thread_id = "dest-sidecar-late"
-    user_id = "branch-user"
-    source_uploads = paths.sandbox_uploads_dir(source_thread_id, user_id=user_id)
-    source_uploads.mkdir(parents=True, exist_ok=True)
-    (source_uploads / "report.pdf").write_bytes(b"%PDF")
-    (source_uploads / "report.md").write_text("# convert\n", encoding="utf-8")
-    record_companion_mapping(source_uploads, "report.pdf", "report.md")
-    (source_uploads / "report.md").unlink()
-    (source_uploads / "report.md").write_text(same_text, encoding="utf-8")
-
-    copied = threading.Event()
-    resume = threading.Event()
-    modes: list[str] = []
-
-    def _copy_markdown_before_sidecar(src, dst, ignore=None):
-        orig_ignore = ignore
-
-        def ignore_sidecar(directory, names):
-            ignored = set(orig_ignore(directory, names)) if orig_ignore else set()
-            if COMPANION_MAP_FILENAME in names:
-                ignored.add(COMPANION_MAP_FILENAME)
-            return ignored
-
-        result = copy_user_data_tree(src, dst, ignore=ignore_sidecar)
-        copied.set()
-        assert resume.wait(timeout=5), "timed out waiting to resume after source re-record"
-        src_sidecar = Path(src) / "uploads" / COMPANION_MAP_FILENAME
-        dst_sidecar = Path(dst) / "uploads" / COMPANION_MAP_FILENAME
-        if src_sidecar.is_file() and dst_sidecar.parent.is_dir():
-            _copy_regular_file_nofollow(src_sidecar, dst_sidecar)
-        return result
-
-    with patch("app.gateway.routers.threads.copy_user_data_tree", _copy_markdown_before_sidecar):
-        worker = threading.Thread(
-            target=lambda: modes.append(_copy_branch_user_data_sync(paths, source_thread_id, dest_thread_id, user_id=user_id)),
-            daemon=True,
-        )
-        worker.start()
-        assert copied.wait(timeout=5), "copy did not run"
-        (source_uploads / "report.md").unlink()
-        (source_uploads / "report.md").write_text(same_text, encoding="utf-8")
-        record_companion_mapping(source_uploads, "report.pdf", "report.md")
-        resume.set()
-        worker.join(timeout=5)
-        assert not worker.is_alive()
-
-    assert modes == ["current_thread_best_effort"]
-
-    dest_uploads = paths.sandbox_uploads_dir(dest_thread_id, user_id=user_id)
-    assert lookup_companion_mapping(dest_uploads, "report.pdf") is None
-    assert "report.pdf" in load_companion_state(dest_uploads).evicted
-    assert (dest_uploads / "report.md").read_text(encoding="utf-8") == same_text
-    delete_file_safe(dest_uploads, "report.pdf", convertible_extensions={".pdf"})
-    assert (dest_uploads / "report.md").read_text(encoding="utf-8") == same_text
 
 
 def test_branch_thread_from_historical_turn_skips_workspace_clone(tmp_path) -> None:
@@ -5019,3 +4987,152 @@ def test_task_notes_state_write_normalizes_and_replaces(monkeypatch, mode, fallb
         read = client.get("/api/threads/note-replacement/state")
         assert read.status_code == 200, read.text
         assert read.json()["values"]["task_notes"] == {"new": {"content": "keep backups", "source_ids": [], "authority": "model_report"}}
+
+
+# ---------------------------------------------------------------------------
+# Server-owned origin marker and per-user unread state (deerflow_origin)
+# ---------------------------------------------------------------------------
+
+
+def test_strip_reserved_metadata_drops_client_origin():
+    from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY
+
+    assert DEERFLOW_ORIGIN_KEY in threads._SERVER_RESERVED_METADATA_KEYS
+    assert threads._strip_reserved_metadata({DEERFLOW_ORIGIN_KEY: {"kind": "schedule"}, "keep": 1}) == {"keep": 1}
+
+
+def test_create_and_patch_strip_a_client_supplied_origin() -> None:
+    from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY
+
+    app, _store, checkpointer = _build_thread_app()
+    forged = {DEERFLOW_ORIGIN_KEY: {"kind": "schedule"}, "title": "mine"}
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": "origin-forge", "metadata": forged})
+        assert created.status_code == 200, created.text
+        assert created.json()["metadata"] == {"title": "mine"}
+        patched = client.patch("/api/threads/origin-forge", json={"metadata": {DEERFLOW_ORIGIN_KEY: {"kind": "im_channel"}}})
+        assert patched.status_code == 200, patched.text
+        assert DEERFLOW_ORIGIN_KEY not in patched.json()["metadata"]
+        fetched = client.post("/api/threads/search", json={"limit": 10})
+        assert all(DEERFLOW_ORIGIN_KEY not in item["metadata"] for item in fetched.json())
+
+    checkpoint = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": "origin-forge", "checkpoint_ns": ""}}))
+    assert DEERFLOW_ORIGIN_KEY not in checkpoint.metadata
+
+
+def test_create_thread_marks_a_host_origin_from_request_state() -> None:
+    """Only server code can set request.state.run_origin (an extension handle)."""
+    from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY
+
+    app, _store, _checkpointer = _build_thread_app()
+
+    @app.middleware("http")
+    async def host_origin(request, call_next):
+        request.state.run_origin = {"kind": "extension", "namespace": "community.teams"}
+        return await call_next(request)
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads", json={"thread_id": "ext-thread", "metadata": {"title": "t"}})
+    assert response.status_code == 200, response.text
+    assert response.json()["metadata"] == {"title": "t", DEERFLOW_ORIGIN_KEY: {"kind": "extension", "namespace": "community.teams"}}
+
+
+def _unread_app(tmp_path, *, owner_check_passes: bool = True):
+    from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from deerflow.persistence.base import Base
+    from deerflow.persistence.run import RunRepository
+    from deerflow.persistence.run.model import RunChangeClockRow, RunRow
+    from deerflow.persistence.thread_reads import ThreadReadMarkerRow, ThreadReadRepository, ThreadReadVersionRow
+
+    user = User(id=UUID("31f5a8c2-1d4e-4b6f-8a9c-0d1e2f3a4b5c"), email="unread@example.com", password_hash="x", system_role="user")
+    app = make_authed_test_app(user_factory=lambda: user, owner_check_passes=owner_check_passes, bind_current_user=True)
+    store = InMemoryStore()
+    app.state.store = store
+    app.state.checkpointer = InMemorySaver()
+    app.state.run_manager = _ThreadTestRunManager()
+    app.state.thread_store = _PermissiveThreadMetaStore(store)
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'unread.db'}")
+
+    async def _init():
+        async with engine.begin() as conn:
+            await conn.run_sync(lambda sync: Base.metadata.create_all(sync, tables=[m.__table__ for m in (RunRow, RunChangeClockRow, ThreadReadMarkerRow, ThreadReadVersionRow)]))
+
+    asyncio.run(_init())
+    sf = async_sessionmaker(engine, expire_on_commit=False)
+    app.state.thread_read_repo = ThreadReadRepository(sf)
+    app.include_router(threads.router)
+    return app, store, RunRepository(sf), str(user.id), engine
+
+
+def test_search_items_carry_unread_until_the_thread_is_read(tmp_path) -> None:
+    from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY
+
+    app, store, runs, user_id, engine = _unread_app(tmp_path)
+
+    async def _seed():
+        for thread_id, metadata in (("sched-thread", {DEERFLOW_ORIGIN_KEY: {"kind": "schedule"}}), ("chat-thread", {})):
+            await store.aput(THREADS_NS, thread_id, {"thread_id": thread_id, "status": "idle", "created_at": "2026-10-06T00:00:00+00:00", "updated_at": "2026-10-06T00:00:00+00:00", "metadata": metadata})
+        await runs.put("run-sched", thread_id="sched-thread", user_id=user_id, status="success", metadata={DEERFLOW_ORIGIN_KEY: {"kind": "schedule"}})
+        await runs.put("run-chat", thread_id="chat-thread", user_id=user_id, status="success", metadata={})
+
+    asyncio.run(_seed())
+    try:
+        with TestClient(app) as client:
+            items = {item["thread_id"]: item for item in client.post("/api/threads/search", json={"limit": 10}).json()}
+            assert items["sched-thread"]["unread"] is True
+            assert items["chat-thread"]["unread"] is False
+
+            read = client.post("/api/threads/sched-thread/read")
+            assert read.status_code == 200, read.text
+            assert read.json() == {"unread": False, "read_version": 1}
+            items = {item["thread_id"]: item for item in client.post("/api/threads/search", json={"limit": 10}).json()}
+            assert items["sched-thread"]["unread"] is False
+    finally:
+        asyncio.run(engine.dispose())
+
+
+def test_search_unread_is_null_without_sql_read_state() -> None:
+    app, store, _checkpointer = _build_thread_app()
+    asyncio.run(store.aput(THREADS_NS, "t", {"thread_id": "t", "status": "idle", "created_at": "2026-10-06T00:00:00+00:00", "updated_at": "2026-10-06T00:00:00+00:00", "metadata": {}}))
+    with TestClient(app) as client:
+        assert [item["unread"] for item in client.post("/api/threads/search", json={"limit": 10}).json()] == [None]
+
+
+def test_mark_read_on_another_users_thread_is_404(tmp_path) -> None:
+    app, _store, _runs, user_id, engine = _unread_app(tmp_path, owner_check_passes=False)
+    try:
+        with TestClient(app) as client:
+            response = client.post("/api/threads/someone-elses/read")
+        assert response.status_code == 404
+        assert asyncio.run(app.state.thread_read_repo.read_version(user_id=user_id)) == 0
+    finally:
+        asyncio.run(engine.dispose())
+
+
+def test_delete_thread_route_removes_read_markers(tmp_path) -> None:
+    app, store, runs, user_id, engine = _unread_app(tmp_path)
+
+    async def _seed():
+        await store.aput(THREADS_NS, "gone", {"thread_id": "gone", "status": "idle", "created_at": "2026-10-06T00:00:00+00:00", "updated_at": "2026-10-06T00:00:00+00:00", "metadata": {}})
+        await runs.put("run-gone", thread_id="gone", user_id=user_id, status="success", metadata={"deerflow_origin": {"kind": "schedule"}})
+        await app.state.thread_read_repo.mark_read(user_id=user_id, thread_id="gone")
+
+    asyncio.run(_seed())
+    app.state.run_event_store = MagicMock(delete_by_thread=AsyncMock())
+    app.state.run_store = runs
+    try:
+        with patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)), TestClient(app) as client:
+            assert client.delete("/api/threads/gone").status_code == 200
+        from deerflow.persistence.thread_reads import ThreadReadMarkerRow
+
+        async def _count():
+            async with app.state.thread_read_repo._sf() as session:
+                return await session.get(ThreadReadMarkerRow, (user_id, "gone"))
+
+        assert asyncio.run(_count()) is None
+    finally:
+        asyncio.run(engine.dispose())

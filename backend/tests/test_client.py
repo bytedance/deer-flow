@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 
 import pytest
+from _thread_checkpoint_helpers import INDEXED_SAVER_KINDS, SAVER_KINDS, make_saver, put_goal_write, put_thread
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage  # noqa: F401
 from langchain_core.tools import StructuredTool
 
@@ -25,7 +26,7 @@ from app.gateway.routers.threads import ThreadGoalResponse
 from app.gateway.routers.uploads import UploadResponse
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import DeltaThreadState, ThreadState
-from deerflow.client import DeerFlowClient
+from deerflow.client import DeerFlowClient, StreamEvent
 from deerflow.config.agents_config import AgentConfig
 from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
@@ -120,6 +121,13 @@ class TestClientInit:
                 DeerFlowClient(agent_name="invalid name with spaces!")
             with pytest.raises(ValueError, match="Invalid agent name"):
                 DeerFlowClient(agent_name="../path/traversal")
+
+    def test_agent_name_with_trailing_newline_rejected(self, mock_app_config):
+        with patch("deerflow.client.get_app_config", return_value=mock_app_config):
+            # The client's own guard must reject this at construction; the
+            # memory store's later fullmatch check uses different phrasing.
+            with pytest.raises(ValueError, match="Must match pattern"):
+                DeerFlowClient(agent_name="reviewer\n")
 
     def test_custom_config_path(self, mock_app_config):
         with (
@@ -753,6 +761,32 @@ class TestStream:
         assert any(event.data.get("additional_kwargs", {}).get("token_usage_attribution", {}).get("kind") == "final_answer" for event in ai_events)
 
     @pytest.mark.parametrize("streamed", [True, False])
+    def test_stream_carries_llm_error_fallback_flag_to_headless_cli(self, client, streamed):
+        """``deerflow --print`` / ``--json`` read the fallback flag from stream events to exit non-zero."""
+        from deerflow.tui.cli import _RunOutcome
+
+        fallback = AIMessage(
+            content="The configured LLM provider rejected the request because authentication or access is invalid.",
+            id="ai-1",
+            additional_kwargs={"deerflow_error_fallback": True, "error_type": "AuthenticationError", "error_reason": "auth"},
+        )
+        chunks = [("values", {"messages": [HumanMessage(content="hi", id="h-1"), fallback]})]
+        if streamed:
+            chunks.insert(0, ("messages", (AIMessageChunk(content=fallback.content, id="ai-1"), {})))
+        agent = _make_agent_mock(chunks)
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            outcome = _RunOutcome()
+            for event in client.stream("hi", thread_id="t-stream-fallback"):
+                outcome.observe(event)
+
+        assert outcome.answer() == fallback.content
+        assert outcome.error_text() == "LLM request failed (error_type=AuthenticationError, error_reason=auth)"
+
+    @pytest.mark.parametrize("streamed", [True, False])
     def test_stream_emits_text_a_later_node_appends_to_a_sent_ai_message(self, client, streamed):
         """A guard's ``after_model`` replaces the message under the same id after it was sent."""
         call = {"name": "bash", "args": {"command": "ls"}, "id": "call-1"}
@@ -1224,6 +1258,54 @@ class TestStream:
 
 
 class TestChat:
+    @pytest.mark.parametrize(
+        ("events", "expected"),
+        [
+            pytest.param(
+                [
+                    StreamEvent(type="messages-tuple", data={"type": "ai", "id": "draft", "content": "draft"}),
+                    StreamEvent(type="messages-tuple", data={"type": "ai", "id": "answer", "content": "fi"}),
+                    StreamEvent(type="messages-tuple", data={"type": "ai", "id": "draft", "content": " revised"}),
+                    StreamEvent(type="messages-tuple", data={"type": "ai", "id": "answer", "content": "nal"}),
+                    StreamEvent(type="messages-tuple", data={"type": "tool", "id": "tool", "content": "ignored"}),
+                    StreamEvent(type="values", data={"messages": [{"type": "ai", "content": "ignored"}]}),
+                ],
+                "final",
+                id="interleaved-message-ids",
+            ),
+            pytest.param(
+                [
+                    StreamEvent(type="messages-tuple", data={"type": "ai", "id": "answer", "content": "answer"}),
+                    StreamEvent(type="messages-tuple", data={"type": "ai", "id": "empty", "content": "", "additional_kwargs": {"reasoning_content": "thinking"}}),
+                    StreamEvent(type="end"),
+                ],
+                "answer",
+                id="metadata-only-message",
+            ),
+            pytest.param(
+                [
+                    StreamEvent(type="messages-tuple", data={"type": "ai", "content": "no"}),
+                    StreamEvent(type="messages-tuple", data={"type": "ai", "id": None, "content": " id"}),
+                    StreamEvent(type="messages-tuple", data={"type": "ai", "id": "", "content": " answer"}),
+                ],
+                "no id answer",
+                id="missing-message-id",
+            ),
+            pytest.param([StreamEvent(type="messages-tuple", data={"type": "ai", "id": "empty", "content": ""})], "", id="no-ai-text"),
+        ],
+    )
+    def test_headless_and_chat_share_final_answer_selection(self, client, events, expected):
+        """The CLI and chat must agree on interleaved deltas and metadata-only events."""
+        from deerflow.tui.cli import _RunOutcome
+
+        with patch.object(client, "stream", return_value=iter(events)):
+            assert client.chat("q", thread_id="t-shared-answer") == expected
+
+        outcome = _RunOutcome()
+        for event in events:
+            outcome.observe(event)
+        assert outcome.answer() == expected
+
     def test_returns_last_message(self, client):
         """chat() returns the last AI message text."""
         ai1 = AIMessage(content="thinking...", id="ai-1")
@@ -1453,6 +1535,24 @@ class TestEnsureAgent:
         assert mock_build_middlewares.call_args.kwargs["memory_enabled"] is expected_memory_enabled
         assert mock_apply_prompt.call_args.kwargs["memory_enabled"] is expected_memory_enabled
 
+    @pytest.mark.parametrize(("tool_names", "expected"), [(["read_file", "write_file", "bash"], True), (["read_file", "write_file"], False)])
+    def test_tells_the_prompt_whether_bash_is_bound(self, client, tool_names, expected):
+        config = client._get_runnable_config("t1")
+        tools = [StructuredTool.from_function(lambda: "", name=name, description=name) for name in tool_names]
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=MagicMock()),
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt") as mock_apply_prompt,
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=tools),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(config, context={"user_id": "owner-1"})
+
+        assert mock_apply_prompt.call_args.kwargs["bash_available"] is expected
+
     def test_reuses_named_agent_config_on_cached_agent_fast_path(self, client):
         client._agent_name = "stateful-agent"
         config = client._get_runnable_config("t1")
@@ -1579,6 +1679,7 @@ class TestEnsureAgent:
             patch.object(client, "_get_tools", return_value=[safe_tool, denied_tool]),
             patch("deerflow.authz.tool_filter.resolve_authorization_provider", return_value=provider),
             patch("deerflow.agents.lead_agent.agent.resolve_authorization_provider", return_value=provider),
+            patch("deerflow.authz.skill_filter.resolve_authorization_provider", return_value=provider),
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
         ):
             client._ensure_agent(client._get_runnable_config("t1"), context={"user_role": "user"})
@@ -1875,6 +1976,25 @@ class TestEnsureAgent:
 
         assert mock_create_agent.call_count == 2
 
+    def test_null_subagent_total_limit_falls_back_to_app_config(self, client, mock_app_config):
+        """An explicit ``null`` cap means "unset", not a value to hand to the clamp."""
+        mock_app_config.subagents.max_total_per_run = 4
+        config = client._get_runnable_config("t1")
+        config["configurable"].update({"subagent_enabled": True, "max_total_subagents": None})
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=MagicMock()),
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt") as mock_apply_prompt,
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(config)
+
+        assert mock_apply_prompt.call_args.kwargs["max_total_subagents"] == 4
+
     def test_deferred_skill_discovery_wired_when_enabled(self, client, mock_app_config):
         """When skills.deferred_discovery=True, skill_names reaches apply_prompt_template
         (parity with agent.py — config flag must not be a silent no-op on the embedded path)."""
@@ -2099,44 +2219,133 @@ class TestThreadQueries:
         snapshot.created_at = checkpoint_tuple.checkpoint["ts"]
         return snapshot
 
-    def test_list_threads_empty(self, client):
-        mock_checkpointer = MagicMock()
-        mock_checkpointer.list.return_value = []
-        client._checkpointer = mock_checkpointer
+    @pytest.fixture(params=SAVER_KINDS)
+    def saver(self, request):
+        with make_saver(request.param) as saver:
+            saver.kind = request.param
+            yield saver
 
-        result = client.list_threads()
-        assert result == {"thread_list": []}
-        mock_checkpointer.list.assert_called_once_with(config=None, limit=10)
+    def test_list_threads_empty(self, client, saver):
+        client._checkpointer = saver
 
-    def test_list_threads_basic(self, client):
-        mock_checkpointer = MagicMock()
-        client._checkpointer = mock_checkpointer
+        assert client.list_threads() == {"thread_list": []}
 
-        cp1 = self._make_mock_checkpoint_tuple("t1", "c1", "2023-01-01T10:00:00Z", title="Thread 1")
-        cp2 = self._make_mock_checkpoint_tuple("t1", "c2", "2023-01-01T10:05:00Z", title="Thread 1 Updated")
-        cp3 = self._make_mock_checkpoint_tuple("t2", "c3", "2023-01-02T10:00:00Z", title="Thread 2")
-        cp_empty = self._make_mock_checkpoint_tuple("", "c4", "2023-01-03T10:00:00Z", title="Thread Empty")
+    def test_list_threads_limit_counts_threads_not_checkpoints(self, client, saver):
+        client._checkpointer = saver
+        put_thread(saver, "t-old", ["2023-01-01T10:00:00Z", "2023-01-01T10:01:00Z"])
+        # A long conversation writes far more checkpoints than the limit.
+        put_thread(saver, "t-busy", [f"2023-01-02T10:{minute:02d}:00Z" for minute in range(30)])
 
-        # Mock list returns out of order to test the timestamp sorting/comparison
-        # Also includes a checkpoint with an empty thread_id which should be skipped
-        mock_checkpointer.list.return_value = [cp2, cp1, cp_empty, cp3]
+        threads = client.list_threads(limit=2)["thread_list"]
 
-        result = client.list_threads(limit=5)
-        mock_checkpointer.list.assert_called_once_with(config=None, limit=5)
+        assert [t["thread_id"] for t in threads] == ["t-busy", "t-old"]
 
-        threads = result["thread_list"]
-        assert len(threads) == 2
+    def test_list_threads_reports_first_and_latest_checkpoint(self, client, saver):
+        client._checkpointer = saver
+        checkpoint_ids = put_thread(saver, "t1", ["2023-01-01T10:00:00Z", "2023-01-01T10:05:00Z", "2023-01-01T10:09:00Z"], title="Thread 1")
 
-        # t2 should be first because its created_at (2023-01-02) is newer than t1 (2023-01-01)
-        assert threads[0]["thread_id"] == "t2"
-        assert threads[0]["created_at"] == "2023-01-02T10:00:00Z"
-        assert threads[0]["title"] == "Thread 2"
+        (thread,) = client.list_threads()["thread_list"]
 
-        assert threads[1]["thread_id"] == "t1"
-        assert threads[1]["created_at"] == "2023-01-01T10:00:00Z"
-        assert threads[1]["updated_at"] == "2023-01-01T10:05:00Z"
-        assert threads[1]["latest_checkpoint_id"] == "c2"
-        assert threads[1]["title"] == "Thread 1 Updated"
+        assert thread == {
+            "thread_id": "t1",
+            "created_at": "2023-01-01T10:00:00Z",
+            "updated_at": "2023-01-01T10:09:00Z",
+            "latest_checkpoint_id": checkpoint_ids[-1],
+            "title": "Thread 1 #2",
+        }
+
+    def test_list_threads_sorts_by_creation_then_slices(self, client, saver):
+        client._checkpointer = saver
+        put_thread(saver, "t-first", ["2023-01-01T10:00:00Z"])
+        put_thread(saver, "t-second", ["2023-01-02T10:00:00Z"])
+        put_thread(saver, "t-third", ["2023-01-03T10:00:00Z"])
+        put_thread(saver, "t-first", ["2023-01-05T10:00:00Z"])  # later activity does not change creation order
+
+        threads = client.list_threads(limit=2)["thread_list"]
+
+        assert [t["thread_id"] for t in threads] == ["t-third", "t-second"]
+
+    def test_list_threads_sort_by_updated_at_returns_most_recently_written(self, client, saver):
+        client._checkpointer = saver
+        put_thread(saver, "t-first", ["2023-01-01T10:00:00Z"])
+        put_thread(saver, "t-second", ["2023-01-02T10:00:00Z"])
+        put_thread(saver, "t-third", ["2023-01-03T10:00:00Z"])
+        put_thread(saver, "t-first", ["2023-01-05T10:00:00Z"])
+
+        threads = client.list_threads(limit=2, sort_by="updated_at")["thread_list"]
+
+        assert [t["thread_id"] for t in threads] == ["t-first", "t-third"]
+
+    def test_list_threads_includes_threads_seeded_without_an_input_checkpoint(self, client, saver):
+        client._checkpointer = saver
+        put_thread(saver, "t-run", ["2023-01-01T10:00:00Z", "2023-01-01T10:01:00Z"])
+        # The Gateway seeds a branch through update_state, so its first checkpoint is step 0.
+        put_thread(saver, "t-branch", ["2023-01-02T10:00:00Z", "2023-01-02T10:00:01Z"], title="My branch", first_step=0, first_source="branch")
+
+        threads = client.list_threads()["thread_list"]
+
+        assert [(t["thread_id"], t["created_at"]) for t in threads] == [("t-branch", "2023-01-02T10:00:00Z"), ("t-run", "2023-01-01T10:00:00Z")]
+
+    def test_list_threads_orders_goal_writes_by_checkpoint_not_ts(self, client, saver):
+        client._checkpointer = saver
+        put_thread(saver, "t-a", ["2023-01-01T10:00:00Z"])
+        put_thread(saver, "t-b", ["2023-01-02T10:00:00Z"])
+        # A goal write keeps the copied checkpoint's ts but is the newest write.
+        goal_checkpoint_id = put_goal_write(saver, "t-a")
+
+        (thread,) = client.list_threads(limit=1, sort_by="updated_at")["thread_list"]
+
+        assert thread["thread_id"] == "t-a"
+        assert thread["latest_checkpoint_id"] == goal_checkpoint_id
+        assert thread["updated_at"] == "2023-01-01T10:00:00Z"
+
+    def test_list_threads_ignores_subgraph_namespaces(self, client, saver):
+        client._checkpointer = saver
+        # Subgraph checkpoints are written both before and after the thread's own.
+        put_thread(saver, "t1", ["2023-01-01T09:00:00Z"], checkpoint_ns="subgraph-a")
+        checkpoint_ids = put_thread(saver, "t1", ["2023-01-01T10:00:00Z", "2023-01-01T10:05:00Z"])
+        put_thread(saver, "t1", ["2023-01-01T10:09:00Z"], checkpoint_ns="subgraph-b")
+
+        (thread,) = client.list_threads()["thread_list"]
+
+        assert thread["created_at"] == "2023-01-01T10:00:00Z"
+        assert thread["updated_at"] == "2023-01-01T10:05:00Z"
+        assert thread["latest_checkpoint_id"] == checkpoint_ids[-1]
+
+    def test_list_threads_reads_sql_savers_from_the_index(self, client, saver):
+        if saver.kind not in INDEXED_SAVER_KINDS:
+            pytest.skip("only SQL savers have a thread index")
+        client._checkpointer = saver
+        put_thread(saver, "t1", ["2023-01-01T10:00:00Z", "2023-01-01T10:01:00Z"])
+
+        with patch.object(type(saver), "list", side_effect=AssertionError("walked every checkpoint")):
+            threads = client.list_threads()["thread_list"]
+
+        assert [t["thread_id"] for t in threads] == ["t1"]
+
+    def test_list_threads_rejects_unknown_sort_key(self, client, saver):
+        client._checkpointer = saver
+
+        with pytest.raises(ValueError, match="sort_by"):
+            client.list_threads(sort_by="title")
+
+    def test_tui_session_resolves_past_a_busy_thread(self, client, saver):
+        from deerflow.tui.cli import LaunchPlan
+        from deerflow.tui.session import Session
+
+        client._checkpointer = saver
+        put_thread(saver, "t-old", ["2023-01-01T10:00:00Z"], title="Old chat")
+        put_thread(saver, "t-branch", ["2023-01-01T11:00:00Z"], title="My branch", first_step=0, first_source="branch")
+        put_thread(saver, "t-busy", [f"2023-01-02T10:{minute:02d}:00Z" for minute in range(120)], title="Busy chat")
+        put_goal_write(saver, "t-old")
+        session = Session(client=client)
+
+        # --resume <title> finds threads whose checkpoints fall outside the newest 100,
+        # including a branch that never had an input checkpoint.
+        assert session.resolve_ref("Old chat #0") == "t-old"
+        assert session.resolve_ref("My branch #0") == "t-branch"
+        # --continue resumes the thread written most recently, even by a goal write.
+        assert session.resolve_thread(LaunchPlan(mode="tui", continue_recent=True)) == "t-old"
 
     def test_list_threads_fallback_checkpointer(self, client):
         mock_checkpointer = MagicMock()
@@ -2267,15 +2476,17 @@ class TestThreadQueries:
 
 
 class TestGoalManagement:
-    def test_goal_round_trip_uses_checkpoint(self, client):
-        from langgraph.checkpoint.memory import InMemorySaver
+    # ``sqlite`` and ``cached-sqlite`` are the TUI/embedded defaults: sync-only
+    # savers whose async methods exist but raise NotImplementedError.
+    @pytest.mark.parametrize("saver_kind", SAVER_KINDS)
+    def test_goal_round_trip_uses_checkpoint(self, client, saver_kind):
+        with make_saver(saver_kind) as saver:
+            client._checkpointer = saver
 
-        client._checkpointer = InMemorySaver()
-
-        set_result = client.set_goal("goal-thread", "finish all tests", max_continuations=3)
-        get_result = client.get_goal("goal-thread")
-        clear_result = client.clear_goal("goal-thread")
-        after_clear = client.get_goal("goal-thread")
+            set_result = client.set_goal("goal-thread", "finish all tests", max_continuations=3)
+            get_result = client.get_goal("goal-thread")
+            clear_result = client.clear_goal("goal-thread")
+            after_clear = client.get_goal("goal-thread")
 
         assert set_result["goal"]["objective"] == "finish all tests"
         assert set_result["goal"]["max_continuations"] == 3
@@ -2730,6 +2941,23 @@ class TestUploads:
         with pytest.raises(FileNotFoundError):
             client.upload_files("thread-1", ["/nonexistent/file.txt"])
 
+    @pytest.mark.parametrize("filename", [".upload-notes.part", ".UPLOAD-NOTES.PART", ".Upload-NoTeS.Part"])
+    def test_upload_files_rejects_reserved_name_before_copying_batch(self, client, tmp_path, filename):
+        normal = tmp_path / "normal.txt"
+        normal.write_bytes(b"normal document")
+        reserved = tmp_path / filename
+        reserved.write_bytes(b"reserved document")
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+
+        with patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir):
+            with pytest.raises(ValueError, match="reserved upload staging"):
+                client.upload_files("thread-1", [normal, reserved])
+
+        assert list(uploads_dir.iterdir()) == []
+        assert normal.read_bytes() == b"normal document"
+        assert reserved.read_bytes() == b"reserved document"
+
     def test_upload_files_rejects_directory_path(self, client):
         with tempfile.TemporaryDirectory() as tmp:
             with pytest.raises(ValueError, match="Path is not a file"):
@@ -2818,110 +3046,25 @@ class TestUploads:
             assert result["files"][1]["markdown_file"] == "a_1.md"
             assert (uploads_dir / "a.md").read_text(encoding="utf-8") == "FROM:a.docx"
             assert (uploads_dir / "a_1.md").read_text(encoding="utf-8") == "FROM:a.pdf"
-            from deerflow.uploads.companion_map import load_companion_map
+            from deerflow.uploads.companions import resolve_companion
 
-            assert load_companion_map(uploads_dir) == {"a.docx": "a.md", "a.pdf": "a_1.md"}
+            assert resolve_companion(uploads_dir / "a.docx") == uploads_dir / "a.md"
+            assert resolve_companion(uploads_dir / "a.pdf") == uploads_dir / "a_1.md"
 
-    def test_upload_files_companion_does_not_overwrite_prior_request_user_markdown(self, client):
-        """A later notes.docx must not clobber notes.md left by an earlier call."""
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            uploads_dir = tmp_path / "uploads"
-            uploads_dir.mkdir()
-            (uploads_dir / "notes.md").write_bytes(b"USER_MARKDOWN")
-
-            docx = tmp_path / "notes.docx"
-            docx.write_bytes(b"DOCX")
-
-            async def fake_convert(path: Path, output_path: Path | None = None) -> Path:
-                md_path = output_path if output_path is not None else path.with_suffix(".md")
-                md_path.write_text("FROM_DOCX", encoding="utf-8")
-                return md_path
-
+            authored = tmp_path / "replacement" / "a_1.md"
+            authored.parent.mkdir()
+            authored.write_text("# My notes", encoding="utf-8")  # same byte length as FROM:a.pdf
             with (
                 patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
                 patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
-                patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".docx"}),
-                patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=fake_convert),
             ):
-                result = client.upload_files("thread-1", [docx])
+                client.upload_files("thread-1", [authored])
 
-            assert result["success"] is True
-            assert result["files"][0]["markdown_file"] == "notes_1.md"
-            assert (uploads_dir / "notes.md").read_bytes() == b"USER_MARKDOWN"
-            assert (uploads_dir / "notes_1.md").read_text(encoding="utf-8") == "FROM_DOCX"
-            from deerflow.uploads.companion_map import load_companion_map
+            from deerflow.utils.file_outline import extract_outline_for_file
 
-            assert load_companion_map(uploads_dir) == {"notes.docx": "notes_1.md"}
-
-    def test_upload_files_companion_does_not_reuse_prior_request_same_stem_markdown(self, client):
-        """A later a.pdf must not overwrite a.md or collapse the earlier mapping."""
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            uploads_dir = tmp_path / "uploads"
-            uploads_dir.mkdir()
-            (uploads_dir / "a.docx").write_bytes(b"DOCX")
-            (uploads_dir / "a.md").write_text("FROM_DOCX", encoding="utf-8")
-            from deerflow.uploads.companion_map import record_companion_mapping
-
-            record_companion_mapping(uploads_dir, "a.docx", "a.md")
-
-            pdf = tmp_path / "a.pdf"
-            pdf.write_bytes(b"PDF")
-
-            async def fake_convert(path: Path, output_path: Path | None = None) -> Path:
-                md_path = output_path if output_path is not None else path.with_suffix(".md")
-                md_path.write_text("FROM_PDF", encoding="utf-8")
-                return md_path
-
-            with (
-                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
-                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
-                patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
-                patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=fake_convert),
-            ):
-                result = client.upload_files("thread-1", [pdf])
-
-            assert result["success"] is True
-            assert result["files"][0]["markdown_file"] == "a_1.md"
-            assert (uploads_dir / "a.md").read_text(encoding="utf-8") == "FROM_DOCX"
-            assert (uploads_dir / "a_1.md").read_text(encoding="utf-8") == "FROM_PDF"
-            from deerflow.uploads.companion_map import load_companion_map
-
-            assert load_companion_map(uploads_dir) == {"a.docx": "a.md", "a.pdf": "a_1.md"}
-
-    def test_upload_files_succeeds_when_companion_sidecar_write_fails(self, client):
-        """Sidecar write is advisory; a mapping IO error must not fail the upload."""
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            uploads_dir = tmp_path / "uploads"
-            uploads_dir.mkdir()
-
-            pdf = tmp_path / "report.pdf"
-            pdf.write_bytes(b"%PDF-1.4")
-
-            async def fake_convert(path: Path, output_path: Path | None = None) -> Path:
-                md_path = output_path if output_path is not None else path.with_suffix(".md")
-                md_path.write_text("FROM_PDF", encoding="utf-8")
-                return md_path
-
-            with (
-                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
-                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
-                patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
-                patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=fake_convert),
-                patch("deerflow.client.record_companion_mapping", side_effect=OSError("disk full")),
-            ):
-                result = client.upload_files("thread-1", [pdf])
-
-            assert result["success"] is True
-            assert result["files"][0]["filename"] == "report.pdf"
-            assert result["files"][0]["markdown_file"] == "report.md"
-            assert (uploads_dir / "report.pdf").is_file()
-            assert (uploads_dir / "report.md").read_text(encoding="utf-8") == "FROM_PDF"
-            from deerflow.uploads.companion_map import load_companion_map
-
-            assert load_companion_map(uploads_dir) == {}
+            assert resolve_companion(uploads_dir / "a.pdf") is None
+            assert extract_outline_for_file(uploads_dir / "a.pdf") == ([], [])
+            assert extract_outline_for_file(uploads_dir / "a_1.md")[0] == [{"title": "My notes", "line": 1}]
 
     def test_upload_files_failed_conversion_releases_the_claimed_markdown_name(self, client):
         """A conversion that writes nothing must not reserve stem.md against a later companion.
@@ -2959,47 +3102,6 @@ class TestUploads:
             assert result["files"][0].get("markdown_file") is None
             assert result["files"][1]["markdown_file"] == "a.md"
             assert (uploads_dir / "a.md").read_text(encoding="utf-8") == "FROM:a.pdf"
-            assert not (uploads_dir / "a_1.md").exists()
-
-    def test_upload_files_convert_cancellation_releases_reserved_companion_name(self, client):
-        """Cancelled convert must drop the empty reservation so a later same-stem convert can use it."""
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            uploads_dir = tmp_path / "uploads"
-            uploads_dir.mkdir()
-
-            docx = tmp_path / "a.docx"
-            pdf = tmp_path / "a.pdf"
-            docx.write_bytes(b"DOCX")
-            pdf.write_bytes(b"PDF")
-
-            async def fake_convert(path: Path, output_path: Path | None = None) -> Path:
-                md_path = output_path if output_path is not None else path.with_suffix(".md")
-                md_path.write_text("FROM_PDF", encoding="utf-8")
-                return md_path
-
-            with (
-                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
-                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
-                patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".docx"}),
-                patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=asyncio.CancelledError),
-            ):
-                with pytest.raises(asyncio.CancelledError):
-                    client.upload_files("thread-1", [docx])
-
-            assert not (uploads_dir / "a.md").exists()
-
-            with (
-                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
-                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
-                patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
-                patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=fake_convert),
-            ):
-                result = client.upload_files("thread-1", [pdf])
-
-            assert result["success"] is True
-            assert result["files"][0]["markdown_file"] == "a.md"
-            assert (uploads_dir / "a.md").read_text(encoding="utf-8") == "FROM_PDF"
             assert not (uploads_dir / "a_1.md").exists()
 
     def test_upload_files_converts_the_source_not_the_landed_copy(self, client):
@@ -3960,7 +4062,6 @@ class TestScenarioEdgeCases:
             assert result["files"][0]["filename"] == "doc.pdf"
             assert "markdown_file" not in result["files"][0]  # Conversion failed gracefully
             assert (uploads_dir / "doc.pdf").exists()  # File still uploaded
-            assert not (uploads_dir / "doc.md").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -4865,10 +4966,7 @@ class TestUploadDeleteSymlink:
 
             assert result["success"] is True
             assert [f["filename"] for f in result["files"]] == ["report.pdf"]
-            # Occupied companion names — leftover files or planted symlinks —
-            # take the next suffix instead of writing through the name.
-            assert result["files"][0]["markdown_file"] == "report_1.md"
-            assert (uploads_dir / "report_1.md").read_text(encoding="utf-8") == "FROM:report.pdf"
+            assert "markdown_file" not in result["files"][0]
             assert outside.read_text() == "original"
             assert link.is_symlink()
             assert (uploads_dir / "report.pdf").read_bytes() == b"PDF"

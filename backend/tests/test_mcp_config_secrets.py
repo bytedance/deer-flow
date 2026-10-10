@@ -731,22 +731,35 @@ async def test_mcp_config_requires_admin_user():
 async def test_reset_mcp_tools_cache_endpoint_requires_admin_user(monkeypatch):
     called = False
 
-    def fake_reset_mcp_tools_cache():
+    def fake_publish_mcp_tools_cache_reset():
         nonlocal called
         called = True
+        return "shared-generation"
 
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", fake_reset_mcp_tools_cache)
+    monkeypatch.setattr(mcp_router, "publish_mcp_tools_cache_reset", fake_publish_mcp_tools_cache_reset)
 
     response = await reset_mcp_tools_cache_endpoint(_request_with_role("admin"))
 
     assert called is True
     assert response.success is True
+    assert response.scope == "shared_config"
     assert "next use" in response.message
 
     with pytest.raises(HTTPException) as exc_info:
         await reset_mcp_tools_cache_endpoint(_request_with_role("user"))
 
     assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_reset_mcp_tools_cache_endpoint_reports_process_scope_without_shared_config(monkeypatch):
+    monkeypatch.setattr(mcp_router, "publish_mcp_tools_cache_reset", lambda: None)
+
+    response = await reset_mcp_tools_cache_endpoint(_request_with_role("admin"))
+
+    assert response.success is True
+    assert response.scope == "process"
+    assert "current Gateway process" in response.message
 
 
 @pytest.mark.asyncio

@@ -9,18 +9,14 @@ import logging
 import os
 import shutil
 import stat
+import time
+from datetime import timedelta
 from pathlib import Path
 from urllib.parse import quote
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
-from deerflow.uploads.companion_map import (
-    companion_entry_matches,
-    forget_companion_mapping,
-    is_companion_map_file,
-    load_companion_state,
-    unlink_verified_companion,
-)
+from deerflow.utils.host_paths import windows_incompatible_segment
 from deerflow.utils.thread_id import validate_thread_id
 
 
@@ -36,6 +32,9 @@ logger = logging.getLogger(__name__)
 
 UPLOAD_STAGING_PREFIX = ".upload-"
 UPLOAD_STAGING_SUFFIX = ".part"
+# Staging files younger than this are treated as in flight by the startup sweep.
+# Mirrors the project-document ``.staging`` orphan guard (``projects/trash.py``).
+UPLOAD_STAGING_MIN_AGE = timedelta(hours=24)
 
 _MAX_FILENAME_BYTES = 255
 
@@ -65,7 +64,7 @@ def normalize_filename(filename: str) -> str:
         Safe filename (basename only).
 
     Raises:
-        ValueError: If filename is empty or resolves to a traversal pattern.
+        ValueError: If filename is empty, unsafe, too long, or uses the reserved staging pattern.
     """
     if not filename:
         raise ValueError("Filename is empty")
@@ -80,8 +79,11 @@ def normalize_filename(filename: str) -> str:
         raise ValueError(f"Filename contains backslash: {filename!r}")
     if len(safe.encode("utf-8")) > _MAX_FILENAME_BYTES:
         raise ValueError(f"Filename too long: {len(safe)} chars")
-    if is_companion_map_file(safe):
-        raise ValueError(f"Filename is reserved: {filename!r}")
+    if is_reserved_upload_filename(safe):
+        raise ValueError(f"Filename uses reserved upload staging pattern: {filename!r}")
+    reason = windows_incompatible_segment(safe)
+    if reason:
+        raise ValueError(f"Filename is not portable to Windows: {filename!r} ({reason})")
     return safe
 
 
@@ -94,7 +96,7 @@ def _fit_utf8_bytes(text: str, budget: int) -> str:
 
 
 def claim_unique_filename(name: str, seen: set[str]) -> str:
-    """Generate a unique filename by appending ``_N`` suffix on collision.
+    """Generate a case-insensitively unique filename by appending ``_N`` on collision.
 
     Automatically adds the returned name to *seen* so callers don't need to.
 
@@ -110,9 +112,10 @@ def claim_unique_filename(name: str, seen: set[str]) -> str:
         seen: Set of filenames already claimed (mutated in place).
 
     Returns:
-        A filename not present in *seen* (already added to *seen*).
+        A filename not present in *seen* even ignoring case (already added to *seen*).
     """
-    if name not in seen:
+    claimed = {existing.casefold() for existing in seen}
+    if name.casefold() not in claimed:
         seen.add(name)
         return name
     stem, suffix = Path(name).stem, Path(name).suffix
@@ -126,55 +129,11 @@ def claim_unique_filename(name: str, seen: set[str]) -> str:
             candidate = _fit_utf8_bytes(stem + suffix, _MAX_FILENAME_BYTES - len(tag.encode("utf-8"))) + tag
         else:
             candidate = f"{_fit_utf8_bytes(stem, budget)}{tag}{suffix}"
-        if candidate not in seen:
+        if candidate.casefold() not in claimed:
             break
         counter += 1
     seen.add(candidate)
     return candidate
-
-
-def reserve_unique_filename(directory: Path, name: str, seen: set[str]) -> str:
-    """Create *name* (or a ``_N`` variant) exclusively in *directory*.
-
-    Unlike :func:`claim_unique_filename`, this observes existing directory
-    entries: ``os.open(..., O_CREAT | O_EXCL)`` fails when the path already
-    exists, including leftovers from an earlier request. The reserved path
-    is an empty regular file; the caller must write it or
-    :func:`release_reserved_filename`.
-    """
-    if not name or Path(name).name != name:
-        raise ValueError(f"Filename is not a basename: {name!r}")
-    directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
-    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    if hasattr(os, "O_CLOEXEC"):
-        flags |= os.O_CLOEXEC
-    if hasattr(os, "O_BINARY"):
-        flags |= os.O_BINARY
-    while True:
-        candidate = claim_unique_filename(name, seen)
-        dest = directory / candidate
-        try:
-            fd = os.open(dest, flags, 0o600)
-        except OSError as exc:
-            # Occupied by a regular file, leftover symlink, or directory.
-            if exc.errno in {errno.EEXIST, getattr(errno, "ELOOP", errno.EEXIST), errno.EISDIR}:
-                continue
-            seen.discard(candidate)
-            raise
-        os.close(fd)
-        return candidate
-
-
-def release_reserved_filename(directory: Path, name: str, seen: set[str]) -> None:
-    """Drop an unused exclusive reservation from *seen* and the directory."""
-    seen.discard(name)
-    try:
-        os.unlink(Path(directory) / name)
-    except FileNotFoundError:
-        pass
 
 
 def is_upload_staging_file(filename: str) -> bool:
@@ -182,14 +141,14 @@ def is_upload_staging_file(filename: str) -> bool:
     return filename.startswith(UPLOAD_STAGING_PREFIX) and filename.endswith(UPLOAD_STAGING_SUFFIX)
 
 
-def is_upload_hidden_file(filename: str) -> bool:
-    """Return whether *filename* should be omitted from upload listings.
+def is_reserved_upload_filename(filename: str) -> bool:
+    """Check a new basename against the staging namespace, including Win32 aliases.
 
-    Covers Gateway staging files and the converted-markdown companion sidecar
-    (plus its lock/tmp siblings). Staging files are still the only names
-    swept on Gateway startup.
+    Win32 trims trailing dots and spaces and normally ignores case when opening
+    a path. Reject those aliases on every host, without changing the name or
+    the on-disk staging predicate used by listings and cleanup of existing files.
     """
-    return is_upload_staging_file(filename) or is_companion_map_file(filename)
+    return is_upload_staging_file(filename.rstrip(" .").lower())
 
 
 def validate_path_traversal(path: Path, base: Path) -> None:
@@ -204,8 +163,8 @@ def validate_path_traversal(path: Path, base: Path) -> None:
         raise PathTraversalError("Path traversal detected") from None
 
 
-def validate_upload_destination(base_dir: Path, filename: str) -> Path:
-    """Validate an upload destination without mutating an existing file."""
+def validate_upload_destination(base_dir: Path, filename: str, *, exclusive: bool = False) -> Path:
+    """Validate a destination; exclusive creation treats regular hardlinks as collisions."""
     safe_name = normalize_filename(filename)
     dest = base_dir / safe_name
 
@@ -216,7 +175,7 @@ def validate_upload_destination(base_dir: Path, filename: str) -> Path:
 
     if st is not None and not stat.S_ISREG(st.st_mode):
         raise UnsafeUploadPathError(f"Upload destination is not a regular file: {safe_name}")
-    if st is not None and st.st_nlink > 1:
+    if not exclusive and st is not None and st.st_nlink > 1:
         raise UnsafeUploadPathError(f"Upload destination has multiple links: {safe_name}")
 
     validate_path_traversal(dest, base_dir)
@@ -228,9 +187,35 @@ def _iter_upload_dirs(base_dir: Path):
     yield from base_dir.glob("users/*/threads/*/user-data/uploads")
 
 
-def cleanup_stale_upload_staging_files(base_dir: Path | str | None = None) -> int:
-    """Remove orphaned Gateway upload staging files left by a hard crash."""
+def _staging_entry_stat(entry: os.DirEntry[str]) -> os.stat_result:
+    # ``os.lstat`` rather than ``entry.stat``: on Windows a ``DirEntry`` stat leaves
+    # ``st_nlink`` at zero, and the published-alias rule in the sweep depends on it.
+    return os.lstat(entry.path)
+
+
+def cleanup_stale_upload_staging_files(base_dir: Path | str | None = None, *, min_age: timedelta = UPLOAD_STAGING_MIN_AGE) -> int:
+    """Remove orphaned Gateway upload staging files left by a hard crash.
+
+    A lone ``.upload-*.part`` (``st_nlink == 1``) is removed only once its mtime
+    is older than *min_age*. The uploads directories may live on a volume
+    shared by several Gateway replicas, so at startup such a file can belong to
+    an upload another replica is still writing; each chunk write refreshes its
+    mtime, which keeps it younger than the guard until it is committed or
+    abandoned.
+
+    A staging name with ``st_nlink > 1`` is removed at any age: the commit's
+    ``os.link`` already published those bytes under their final name, so the
+    staged name is only an alias left behind by a crash (or a deferred removal
+    that never ran). Keeping it would make that destination fail the
+    multi-link safety check on the next replacement upload (embedded
+    ``DeerFlowClient.upload_files`` goes through ``copy_upload_file_no_symlink``).
+    Removing the alias cannot affect an upload in flight: a staged part gains
+    its second link only through its own commit.
+
+    A file that cannot be stat'ed is kept, never removed on a guess.
+    """
     root = Path(base_dir) if base_dir is not None else get_paths().base_dir
+    cutoff = time.time() - min_age.total_seconds()
     removed = 0
     for uploads_dir in _iter_upload_dirs(root):
         if not uploads_dir.is_dir():
@@ -240,6 +225,15 @@ def cleanup_stale_upload_staging_files(base_dir: Path | str | None = None) -> in
                 for entry in entries:
                     if not is_upload_staging_file(entry.name) or not entry.is_file(follow_symlinks=False):
                         continue
+                    try:
+                        st = _staging_entry_stat(entry)
+                    except FileNotFoundError:
+                        continue
+                    except OSError:
+                        logger.warning("Could not stat upload staging file %s; keeping it", entry.path, exc_info=True)
+                        continue
+                    if st.st_nlink <= 1 and st.st_mtime >= cutoff:
+                        continue  # a lone, young part may still be in flight on another replica
                     try:
                         os.unlink(entry.path)
                         removed += 1
@@ -254,7 +248,7 @@ def cleanup_stale_upload_staging_files(base_dir: Path | str | None = None) -> in
     return removed
 
 
-def open_upload_file_no_symlink(base_dir: Path, filename: str) -> tuple[Path, object]:
+def open_upload_file_no_symlink(base_dir: Path, filename: str, *, exclusive: bool = False) -> tuple[Path, object]:
     """Open an upload destination for safe streaming writes.
 
     Upload directories may be mounted into local sandboxes. A sandbox process can
@@ -265,9 +259,13 @@ def open_upload_file_no_symlink(base_dir: Path, filename: str) -> tuple[Path, ob
     and ``fstat`` validation after ``open()`` to reduce the TOCTOU window; this does
     not eliminate all races but makes exploitation significantly harder. Path-traversal
     validation prevents escapes from *base_dir* in both cases.
+
+    ``exclusive=True`` atomically claims a new filename. An existing regular
+    file raises ``FileExistsError`` without truncation so the caller can retry
+    under another name. The default retains replacement semantics.
     """
     safe_name = normalize_filename(filename)
-    dest = validate_upload_destination(base_dir, safe_name)
+    dest = validate_upload_destination(base_dir, safe_name, exclusive=exclusive)
     try:
         st = os.lstat(dest)
     except FileNotFoundError:
@@ -278,6 +276,8 @@ def open_upload_file_no_symlink(base_dir: Path, filename: str) -> tuple[Path, ob
     if has_nofollow:
         # POSIX: O_NOFOLLOW makes open() fail with ELOOP if dest is a symlink.
         flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW
+        if exclusive:
+            flags |= os.O_EXCL
         if hasattr(os, "O_NONBLOCK"):
             flags |= os.O_NONBLOCK
 
@@ -305,10 +305,12 @@ def open_upload_file_no_symlink(base_dir: Path, filename: str) -> tuple[Path, ob
     # Note: a narrow race window remains between the pre-open lstat and open(); the
     # path-traversal check mitigates escapes from base_dir but cannot prevent an
     # attacker who can atomically replace dest with a symlink after the check.
-    if st is not None and st.st_nlink > 1:
+    if not exclusive and st is not None and st.st_nlink > 1:
         raise UnsafeUploadPathError(f"Upload destination has multiple links: {safe_name}")
 
     flags = os.O_WRONLY | os.O_CREAT
+    if exclusive:
+        flags |= os.O_EXCL
     if hasattr(os, "O_BINARY"):
         flags |= os.O_BINARY
 
@@ -319,7 +321,7 @@ def open_upload_file_no_symlink(base_dir: Path, filename: str) -> tuple[Path, ob
 
     if pre_open_st is not None and not stat.S_ISREG(pre_open_st.st_mode):
         raise UnsafeUploadPathError(f"Upload destination is not a regular file: {safe_name}")
-    if pre_open_st is not None and pre_open_st.st_nlink > 1:
+    if not exclusive and pre_open_st is not None and pre_open_st.st_nlink > 1:
         raise UnsafeUploadPathError(f"Upload destination has multiple links: {safe_name}")
 
     try:
@@ -342,9 +344,9 @@ def open_upload_file_no_symlink(base_dir: Path, filename: str) -> tuple[Path, ob
     return dest, fh
 
 
-def write_upload_file_no_symlink(base_dir: Path, filename: str, data: bytes) -> Path:
+def write_upload_file_no_symlink(base_dir: Path, filename: str, data: bytes, *, exclusive: bool = False) -> Path:
     """Write upload bytes without following a pre-existing destination symlink."""
-    dest, fh = open_upload_file_no_symlink(base_dir, filename)
+    dest, fh = open_upload_file_no_symlink(base_dir, filename, exclusive=exclusive)
     with fh:
         fh.write(data)
     return dest
@@ -468,6 +470,10 @@ def apply_upload_sandbox_permits(file_path: os.PathLike[str] | str, extra_mode_b
 def list_files_in_dir(directory: Path) -> dict:
     """List files (not directories) in *directory*.
 
+    Listing is best-effort under concurrent deletion: vanished entries are
+    omitted, and a directory that disappears or becomes a non-directory
+    returns the entries collected so far. Operational errors still propagate.
+
     Args:
         directory: Directory to scan.
 
@@ -480,39 +486,50 @@ def list_files_in_dir(directory: Path) -> dict:
         return {"files": [], "count": 0}
 
     files = []
-    with os.scandir(directory) as entries:
-        for entry in sorted(entries, key=lambda e: e.name):
-            if is_upload_hidden_file(entry.name):
-                continue
-            if not entry.is_file(follow_symlinks=False):
-                continue
-            st = entry.stat(follow_symlinks=False)
-            files.append(
-                {
-                    "filename": entry.name,
-                    "size": st.st_size,
-                    "path": entry.path,
-                    "extension": Path(entry.name).suffix,
-                    "modified": st.st_mtime,
-                }
-            )
+    try:
+        with os.scandir(directory) as entries:
+            for entry in sorted(entries, key=lambda e: e.name):
+                if is_upload_staging_file(entry.name):
+                    continue
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                try:
+                    st = entry.stat(follow_symlinks=False)
+                except OSError as exc:
+                    # The entry can vanish between the scandir sweep and this stat
+                    # (the DELETE endpoint via delete_file_safe, possibly from
+                    # another replica, or a sandbox process removing its own file).
+                    # Same policy as the chmod path above: skip expected races,
+                    # surface operational errors like EACCES.
+                    if exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.ELOOP}:
+                        logger.debug("Skipped upload entry that vanished mid-scan: %s", entry.path)
+                        continue
+                    raise
+                files.append(
+                    {
+                        "filename": entry.name,
+                        "size": st.st_size,
+                        "path": entry.path,
+                        "extension": Path(entry.name).suffix,
+                        "modified": st.st_mtime,
+                    }
+                )
+    except (FileNotFoundError, NotADirectoryError):
+        # Thread deletion or a sandbox process may remove or replace the
+        # directory after the is_dir() check. Keep the collected snapshot.
+        logger.debug("Uploads directory vanished mid-scan, keeping partial snapshot of %d entries: %s", len(files), directory)
     return {"files": files, "count": len(files)}
 
 
-def delete_file_safe(base_dir: Path, filename: str, *, convertible_extensions: set[str] | None = None) -> dict:
+def delete_file_safe(base_dir: Path, filename: str) -> dict:
     """Delete a file inside *base_dir* after path-traversal validation.
 
-    If *convertible_extensions* is provided and the file's extension matches,
-    a converted-markdown companion is removed only when the sidecar still
-    proves this original wrote it. Removal quarantines that directory entry
-    and re-checks the moved inode against the identity pin so a sandbox
-    replacement of the basename is preserved. A stale sidecar entry
-    (companion deleted or replaced outside this API) disables companion
-    cleanup. Without sidecar evidence the companion is left in place: the
-    ``<stem>.md`` beside a document may belong to another document sharing
-    that stem, or to the user, and guessing destroyed the wrong file
-    (issue #5672). Unverified companions stay listed and can be deleted on
-    their own.
+    Only the requested file is removed. A converted document's Markdown
+    companion is left in place: conversion names it after the document's stem
+    and falls back to a ``_N`` suffix when that name is taken, so the ``.md``
+    beside a document may belong to another document sharing that stem, or to
+    the user. Removing it on that guess destroyed the wrong file. It stays
+    listed and can be deleted on its own (issue #5672).
 
     Only regular files are deleted. Upload directories may be mounted into
     local sandboxes, so a sandbox process can plant a symlink under an upload
@@ -522,8 +539,6 @@ def delete_file_safe(base_dir: Path, filename: str, *, convertible_extensions: s
     Args:
         base_dir: Directory containing the file.
         filename: Name of file to delete.
-        convertible_extensions: Lowercase extensions (e.g. ``{".pdf", ".docx"}``)
-            whose sidecar-verified companion markdown should be cleaned up.
 
     Returns:
         Dict with success and message.
@@ -532,36 +547,13 @@ def delete_file_safe(base_dir: Path, filename: str, *, convertible_extensions: s
         FileNotFoundError: If the file does not exist.
         PathTraversalError: If path traversal is detected.
     """
-    safe_name = Path(filename).name
     file_path = base_dir / filename
     validate_path_traversal(file_path, base_dir)
-    if is_upload_hidden_file(safe_name):
-        raise FileNotFoundError(f"File not found: {filename}")
 
     if file_path.is_symlink() or not file_path.is_file():
         raise FileNotFoundError(f"File not found: {filename}")
 
-    state = load_companion_state(base_dir)
-    entry = state.companions.get(safe_name)
-    matched = entry is not None and companion_entry_matches(base_dir, entry)
     file_path.unlink()
-
-    try:
-        # Clean up companion markdown generated during upload conversion.
-        if convertible_extensions and file_path.suffix.lower() in convertible_extensions:
-            if entry is not None and matched:
-                unlink_verified_companion(base_dir, entry)
-                forget_companion_mapping(base_dir, companion=entry.name)
-
-        forget_companion_mapping(base_dir, original=safe_name)
-        if file_path.suffix.lower() == ".md":
-            forget_companion_mapping(base_dir, companion=safe_name)
-    except (OSError, ValueError):
-        logger.warning(
-            "Companion sidecar cleanup failed after deleting %s",
-            filename,
-            exc_info=True,
-        )
 
     return {"success": True, "message": f"Deleted {filename}"}
 

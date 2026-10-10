@@ -39,9 +39,6 @@ _SAMPLES = [
     "d.cache",
     "core~",
     "shortcut.lnk",
-    ".upload-active.part",
-    ".deer-flow-companions.json",
-    ".deer-flow-companions.lock",
     # kept (must NOT be ignored)
     "foo.py",
     "README.md",
@@ -60,7 +57,7 @@ def test_matches_reference_for_all_samples():
 
 
 def test_known_ignored_names():
-    for name in [".git", "node_modules", "__pycache__", "x.swp", "z.log", "core~", "thing.egg-info", ".deer-flow-companions.json"]:
+    for name in [".git", "node_modules", "__pycache__", "x.swp", "z.log", "core~", "thing.egg-info"]:
         assert should_ignore_name(name) is True
 
 

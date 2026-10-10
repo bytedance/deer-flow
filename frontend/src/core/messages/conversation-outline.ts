@@ -40,13 +40,17 @@ export function buildConversationChapters(
     }
 
     const message = group.messages[0];
+    // A scheduled launch's text carries host-written instructions; its task
+    // title is what the run block shows.
+    const text = group.scheduledOrigin
+      ? group.scheduledOrigin.task_title
+      : message
+        ? extractTextFromMessage(message)
+        : "";
     chapters.push({
       id: group.id ?? message?.id ?? `human-turn:${groupIndex}`,
       groupIndex,
-      title: normalizeChapterTitle(
-        message ? extractTextFromMessage(message) : "",
-        fallbackTitle,
-      ),
+      title: normalizeChapterTitle(text, fallbackTitle),
     });
   });
 

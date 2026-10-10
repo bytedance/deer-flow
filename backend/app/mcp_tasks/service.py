@@ -702,6 +702,7 @@ class McpTaskService:
         thread_incarnation: str | None,
         limit: int = 50,
         active_only: bool = False,
+        status: TaskStatus | None = None,
     ) -> list[dict[str, Any]]:
         return await self._repository.list_by_thread(
             thread_id,
@@ -709,6 +710,7 @@ class McpTaskService:
             thread_incarnation=thread_incarnation,
             limit=limit,
             active_only=active_only,
+            **({"status": TaskStatus(status)} if status is not None else {}),
         )
 
     async def cancel_task(
@@ -936,6 +938,47 @@ class McpTaskService:
             return
 
         source_run = await self._get_run(record.get("run_id"), user_id=record["user_id"]) if record.get("run_id") else None
+        launch_started_at = _notification_completion_time(not_before=now)
+        recovering_launch = record.get("notification_status") == "launching"
+        # Reservation commit outcome is ambiguous under cancellation. Prefer a
+        # phase-preserving lease release until the await returns definitively.
+        record["notification_status"] = "launching"
+        launch_reserved = await self._repository.begin_notification_launch(
+            task_id,
+            lease_owner=self._lease_owner,
+            notification_lease_token=record["notification_lease_token"],
+            dispatch_version=dispatch_version,
+            lease_seconds=self._lease_seconds,
+            now=launch_started_at,
+        )
+        if not launch_reserved:
+            if recovering_launch:
+                await self._release_ordinary_batch_record(
+                    record,
+                    release=lambda: self._repository.release_notification_lease(
+                        task_id,
+                        lease_owner=self._lease_owner,
+                        notification_lease_token=record["notification_lease_token"],
+                        next_notification_at=launch_started_at,
+                        error=record.get("notification_error"),
+                        count_failure=False,
+                    ),
+                    action="release expired notification launch",
+                )
+                return
+            await self._release_ordinary_batch_record(
+                record,
+                release=lambda: self._repository.release_notification_claim(
+                    task_id,
+                    lease_owner=self._lease_owner,
+                    notification_lease_token=record["notification_lease_token"],
+                    next_notification_at=launch_started_at,
+                    error=record.get("notification_error"),
+                    replace_with_latest=True,
+                ),
+                action="release stale notification launch",
+            )
+            return
         try:
             result = await self._launch_notification(
                 thread_id=record["thread_id"],
