@@ -169,22 +169,9 @@ Only "no config anywhere" creates `<checkout>/config.yaml` from the example.
 
 ## Multi-Instance Dev Harness
 
-`dev_multi_instance.sh` owns containers and processes; `dev_multi_instance.py`
-owns config rendering, shared secrets, the nginx config and `check`, tested in
-`backend/tests/test_dev_multi_instance_script.py`. The rendered config must pass
-the real `_enforce_postgres_for_multi_worker` gate for any base config: when the
-gate gains a clause, extend `build_multi_instance_config` and its tests. Both
-Gateways share one `config.yaml`; the per-process retrieval index and the
-database/Redis URLs are `$VAR` references each Gateway exports, so the file holds
-no harness secret. Gateways run from the resolved backend interpreter, not `uv run`,
-so the pid file names the serving process and `stop --kill` cannot orphan it. B
-starts after A answers `/health`: LangGraph's checkpointer/store `setup()` is not
-advisory-locked. Deletion is limited to a state dir holding the marker file.
-The overlay also redirects every endpoint and data root the base config names
-(checkpointer, sandbox ownership, checkpoint cache, DeerMem/blob roots, local AIO
-container prefix) into the harness. Containers carry a state-dir label; only the
-owning state dir removes them, always with `-v` (both images declare volumes).
-`up` installs an EXIT trap so any failure after the containers start tears down.
+`dev_multi_instance.{sh,py}` must keep the rendered config passing the real
+multi-instance gate and every endpoint/data root inside its state dir
+(`backend/tests/test_dev_multi_instance_script.py`).
 
 ## Shell Script Invocation Contract
 
