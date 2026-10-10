@@ -1888,6 +1888,24 @@ sandbox:
 #   # environment:
 #   #   PYTHONUNBUFFERED: "1"
 #
+# Option 3b: Smol Machines microVM Sandbox (local or Smol Cloud)
+# Runs each thread in an isolated VM. Use local to keep agent workloads and
+# project files on your own KVM/macOS host, or cloud with the same tool API.
+# Released VMs stay warm for the same user/thread; local needs no Docker daemon.
+# Install the optional SDK: pip install "deerflow-harness[smol]".
+# sandbox:
+#   use: deerflow.community.smol:SmolSandboxProvider
+#   target: local                    # or cloud (set SMOL_CLOUD_TOKEN)
+#   image: python:3.12-slim
+#   # cpus: 2
+#   # memory_mb: 2048
+#   # replicas: 3                    # process-local active + warm soft cap
+#   # idle_timeout: 600              # warm VM lifetime in seconds
+#   # ttl_seconds: 86400             # cloud only: cleanup after worker failure
+#   # environment:
+#   #   PYTHONUNBUFFERED: "1"
+#   # sandbox.network.mode must remain open; dynamic egress approval is AIO-only.
+
 # Option 4: Provisioner-managed AIO Sandbox (docker-compose-dev)
 # Each sandbox_id gets a dedicated Pod in k3s, managed by the provisioner.
 # Recommended for production or advanced users who want better isolation and scalability.:

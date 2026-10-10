@@ -174,7 +174,7 @@ class SandboxConfig(BaseModel):
         allow_host_bash: Enable host-side bash execution for LocalSandboxProvider.
             Dangerous and intended only for fully trusted local workflows.
 
-    AioSandboxProvider, BoxliteProvider, E2BSandboxProvider, OpenSandboxProvider, and
+    AioSandboxProvider, BoxliteProvider, E2BSandboxProvider, OpenSandboxProvider, SmolSandboxProvider, and
     LocalSandboxProvider shared options:
         image: Sandbox image to use (Docker/AIO, BoxLite OCI, or OpenSandbox image)
         replicas: Positive provider capacity. E2B shares it across Gateway
@@ -199,6 +199,11 @@ class SandboxConfig(BaseModel):
     AioSandboxProvider and E2BSandboxProvider shared options:
         ownership: Cross-instance sandbox ownership store (memory | redis). Multi-instance
             deployments sharing a sandbox backend need redis; see SandboxOwnershipConfig.
+
+    SmolSandboxProvider specific options:
+        target: local (default) or cloud; cloud uses SMOL_CLOUD_TOKEN / smol CLI login.
+        cpus, memory_mb: VM resources; ttl_seconds: positive cloud lifetime (default 86400).
+        The network mode must be open; dynamic allowlists need AIO.
 
     OpenSandboxProvider specific options:
         api_key, domain, protocol, request_timeout, use_server_proxy: OpenSandbox
@@ -327,7 +332,7 @@ class SandboxConfig(BaseModel):
             "`hard_timeout`; the frozen legacy `all-in-one-sandbox:latest` image "
             "only gets the bounded host-side request. `bash_command_timeout` is "
             "used by providers that explicitly wire this setting (currently "
-            "LocalSandbox, AioSandbox, and OpenSandbox). Other providers retain "
+            "LocalSandbox, AioSandbox, OpenSandbox, and SmolSandbox). Other providers retain "
             "their provider-specific command defaults unless a caller supplies an "
             "explicit timeout."
         ),

@@ -853,6 +853,9 @@ postgres = [
 redis = [
     { name = "deerflow-harness", extra = ["redis"] },
 ]
+smol = [
+    { name = "deerflow-harness", extra = ["smol"] },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -882,6 +885,7 @@ requires-dist = [
     { name = "deerflow-harness", extras = ["ollama"], marker = "extra == 'ollama'", editable = "packages/harness" },
     { name = "deerflow-harness", extras = ["postgres"], marker = "extra == 'postgres'", editable = "packages/harness" },
     { name = "deerflow-harness", extras = ["redis"], marker = "extra == 'redis'", editable = "packages/harness" },
+    { name = "deerflow-harness", extras = ["smol"], marker = "extra == 'smol'", editable = "packages/harness" },
     { name = "dingtalk-stream", specifier = ">=0.24.3" },
     { name = "discord-py", marker = "extra == 'discord'", specifier = ">=2.7.0" },
     { name = "e2b-code-interpreter", specifier = ">=2.8.1" },
@@ -901,7 +905,7 @@ requires-dist = [
     { name = "websockets", specifier = ">=16.0,<17" },
     { name = "wecom-aibot-python-sdk", specifier = ">=0.1.6" },
 ]
-provides-extras = ["postgres", "redis", "discord", "buzz", "monocle", "ollama", "browser", "memory-zh"]
+provides-extras = ["postgres", "redis", "discord", "buzz", "monocle", "ollama", "browser", "smol", "memory-zh"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1006,6 +1010,9 @@ pymupdf = [
 redis = [
     { name = "redis" },
 ]
+smol = [
+    { name = "smolmachines" },
+]
 tenki = [
     { name = "tenki" },
 ]
@@ -1066,6 +1073,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "readabilipy", specifier = ">=0.3.0" },
     { name = "redis", marker = "extra == 'redis'", specifier = ">=5.0.0" },
+    { name = "smolmachines", marker = "extra == 'smol'", specifier = ">=1.26.1" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0,<3.0" },
     { name = "tavily-python", specifier = ">=0.7.17" },
     { name = "tenki", marker = "extra == 'tenki'", specifier = ">=1.4.0" },
@@ -1073,7 +1081,7 @@ requires-dist = [
     { name = "tiktoken", specifier = ">=0.8.0" },
     { name = "tzdata", specifier = ">=2025.1" },
 ]
-provides-extras = ["tui", "groundroute", "ollama", "postgres", "redis", "pymupdf", "boxlite", "tenki", "opensandbox", "monocle", "browser", "memory-zh"]
+provides-extras = ["tui", "groundroute", "ollama", "postgres", "redis", "pymupdf", "boxlite", "smol", "tenki", "opensandbox", "monocle", "browser", "memory-zh"]
 
 [[package]]
 name = "defusedxml"
@@ -4439,6 +4447,16 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/22/35/fc009118a13187dd9731657c60138e5a7c2dea88681a7f04dc406af5da7d/slack_sdk-3.41.0.tar.gz", hash = "sha256:eb61eb12a65bebeca9cb5d36b3f799e836ed2be21b456d15df2627cfe34076ca", size = 250568, upload-time = "2026-03-12T16:10:11.381Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a1/df/2e4be347ff98281b505cc0ccf141408cdd25eb5ca9f3830deb361b2472d3/slack_sdk-3.41.0-py2.py3-none-any.whl", hash = "sha256:bb18dcdfff1413ec448e759cf807ec3324090993d8ab9111c74081623b692a89", size = 313885, upload-time = "2026-03-12T16:10:09.811Z" },
+]
+
+[[package]]
+name = "smolmachines"
+version = "1.26.1"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/db/24/73597ccc553ad413d670eb8ad808e3d041f791449d8c3f6581269b8e9705/smolmachines-1.26.1-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:143e7ac3e853f9d5fa46f92bb6be9343900e2350fe53feaf3efda657c500e5f5", size = 52118858, upload-time = "2026-10-10T13:18:03.359Z" },
+    { url = "https://files.pythonhosted.org/packages/e7/1a/7faeaf2ff37048899a8176477361b8aef38cdc6f88477d9e617fbb8c7fca/smolmachines-1.26.1-cp39-abi3-manylinux_2_34_aarch64.whl", hash = "sha256:f36e73caa5c32810159e6810a32f008de4f36b6217940809941b938e9610e5ff", size = 63427928, upload-time = "2026-10-10T13:18:08.037Z" },
+    { url = "https://files.pythonhosted.org/packages/00/31/f8f35a27f78e8540bd0560f04271fb42ffdbfb5cd3b15190e701fc7e2f0c/smolmachines-1.26.1-cp39-abi3-manylinux_2_34_x86_64.whl", hash = "sha256:b40e3aa6bd105b14770b6580ca83f7cf4dc4d619cc81809b861dedf6263b7bf6", size = 65220669, upload-time = "2026-10-10T13:18:13.002Z" },
 ]
 
 [[package]]
