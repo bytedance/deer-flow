@@ -3,13 +3,13 @@
 The MCP tool-result conversion layer once persisted URL-sourced ``file``
 content blocks (MCP ``ResourceLink`` results: ``ui://`` MCP App cards, local
 files at ``/mnt/user-data/...`` virtual paths, remote non-image links) into
-checkpointed ``ToolMessage`` content. From the next turn on, every model call
-in such a thread fails during client-side message serialization:
+checkpointed ``ToolMessage`` content. When the selected model uses OpenAI Chat
+Completions, every subsequent call fails during client-side message serialization:
 langchain-core's OpenAI translator raises ``ValueError: OpenAI Chat Completions
 does not support file URLs.`` for ANY ``file`` block carrying a ``url`` — the
-Chat Completions API accepts file blocks only as base64 or file-id, and DeerFlow
-does not enable the Responses API. The agent loop classifies that as a generic,
-non-retriable failure, so every subsequent turn answers with a fallback error:
+Chat Completions API accepts file blocks only as base64 or file-id. The agent
+loop classifies that as a generic, non-retriable failure, so every subsequent
+turn answers with a fallback error:
 the thread is permanently bricked.
 
 The conversion layer no longer emits those blocks for new results. This
@@ -47,16 +47,17 @@ The rewrite hooks ``wrap_model_call``/``awrap_model_call`` and hands the
 handler an overridden request, exactly like ``ViewImageMiddleware``: nothing is
 written to state, so checkpoints keep the original blocks (artifact capture and
 other state readers are unaffected) and a poisoned thread heals itself on its
-next turn with no migration. Note the placeholder visibility contract differs
-from the conversion layer's: there the placeholder text is checkpointed, so the
-location stays available to the artifact free-text scan and the link survives
-as a structured ``resource_links`` entry. Here the placeholder exists only in
-the request view — a referenceable original block (an http(s) URL, or an
-absolute host path) is still captured as an artifact entry, but from the
-capture-time scan of the *state* block, not from this placeholder; a
-non-referenceable one (raw ``file://``, ``data:``, ``blob:``) yields no entry
-either, and its only remaining copy is the original block in the checkpoint
-this rewrite deliberately never touches.
+next turn with no migration. Artifact capture scans the original state messages,
+so it never sees these request-only placeholders. The healer creates neither
+``resource_links`` entries nor artifact handles; any captured references come
+from the original tool result under the registry's own referenceability rules.
+URLs withheld from the placeholder remain in the original checkpoint blocks;
+the healer does not expose them through a new artifact entry.
+
+The MCP conversion layer separately preserves downgraded ``ResourceLink``
+results in ``ToolMessage.artifact["resource_links"]``, including unresolved host
+locations, except ``data:``/``blob:`` links, which it drops. This structured
+preservation happens during conversion of new results.
 
 Scope is deliberately role-agnostic: every request message with list-form
 content is rewritten, not just ``ToolMessage`` history. User uploads are
