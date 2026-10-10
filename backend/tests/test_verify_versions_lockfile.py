@@ -46,7 +46,8 @@ pytestmark = pytest.mark.skipif(
 # Fake `uv lock --check`: the lock is current when its root entry records the
 # pyproject version in uv's PEP 440 form (for these inputs, without the `-`).
 # The invocation and its working directory are logged so a test can tell
-# whether the gate asked uv at all, and from backend/.
+# whether the gate asked uv at all, and from backend/. FAKE_UV_ERROR makes it
+# fail for a reason other than a stale lock (a network error, a crash).
 FAKE_UV = """#!/usr/bin/env python3
 import os
 import re
@@ -59,17 +60,19 @@ with log.open("a", encoding="utf-8") as handle:
 
 if sys.argv[1:] != ["lock", "--check"]:
     sys.exit(f"fake uv: unsupported invocation {sys.argv[1:]}")
+if os.environ.get("FAKE_UV_ERROR"):
+    sys.exit(os.environ["FAKE_UV_ERROR"])
 
 root = Path.cwd()
 declared = re.search(r'(?m)^version\\s*=\\s*"([^"]+)"', (root / "pyproject.toml").read_text(encoding="utf-8")).group(1)
-recorded = re.search(r'(?m)^name = "deer-flow"\\nversion = "([^"]+)"', (root / "uv.lock").read_text(encoding="utf-8")).group(1)
-if recorded != declared.replace("-", ""):
+recorded = re.search(r'(?m)^name = "deer-flow"\\nversion = "([^"]+)"', (root / "uv.lock").read_text(encoding="utf-8"))
+if recorded is None or recorded.group(1) != declared.replace("-", ""):
     sys.exit("The lockfile at `uv.lock` needs to be updated, but `--check` was provided. To update the lockfile, run `uv lock`.")
 print("Resolved 1 package")
 """
 
 
-def _write_sandbox(root: Path, *, sources: str, lock: str) -> Path:
+def _write_sandbox(root: Path, *, sources: str, lock: str, lock_name: str = "deer-flow") -> Path:
     """A repo-shaped tree with every version source at ``sources`` and the lock at ``lock``."""
     (root / "scripts").mkdir(parents=True)
     (root / "backend").mkdir()
@@ -79,7 +82,7 @@ def _write_sandbox(root: Path, *, sources: str, lock: str) -> Path:
 
     (root / "backend" / "pyproject.toml").write_text(f'[project]\nname = "deer-flow"\nversion = "{sources}"\n', encoding="utf-8")
     (root / "backend" / "uv.lock").write_text(
-        f'version = 1\n\n[[package]]\nname = "deer-flow"\nversion = "{lock}"\nsource = {{ virtual = "." }}\n',
+        f'version = 1\n\n[[package]]\nname = "{lock_name}"\nversion = "{lock}"\nsource = {{ virtual = "." }}\n',
         encoding="utf-8",
     )
     (root / "frontend" / "package.json").write_text(f'{{\n  "name": "deer-flow-frontend",\n  "version": "{sources}"\n}}\n', encoding="utf-8")
@@ -100,11 +103,11 @@ def _install_fake_uv(root: Path) -> Path:
     return bin_dir
 
 
-def _run_verify(root: Path, *args: str, path: str) -> subprocess.CompletedProcess[str]:
+def _run_verify(root: Path, *args: str, path: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [SCRIPT_BASH, str(root / "scripts" / "verify_versions.sh"), *args],
         cwd=root,
-        env={**os.environ, "PATH": path},
+        env={**os.environ, **(env or {}), "PATH": path},
         capture_output=True,
         text=True,
         check=False,
@@ -140,10 +143,35 @@ def test_gate_rejects_a_lock_left_on_the_previous_version(tmp_path: Path, args: 
     result = _run_verify(root, *args, path=_with_fake_uv(bin_dir))
 
     assert result.returncode == 1
-    assert "::error::backend/uv.lock is out of date" in result.stderr
+    assert "::error::'uv lock --check' failed on backend/uv.lock (output above); if the lock is stale, run scripts/bump_version.sh" in result.stderr
     assert "needs to be updated" in result.stderr, "uv's own explanation should reach the job log"
     assert "Tip: run scripts/bump_version.sh" in result.stderr
     assert "OK —" not in result.stdout
+
+
+def test_gate_does_not_blame_the_lock_for_an_unrelated_uv_failure(tmp_path: Path):
+    """A uv failure that is not a stale lock is still fatal, but the annotation must not claim staleness."""
+    root = _write_sandbox(tmp_path / "repo", sources="2.2.0", lock="2.2.0")
+    bin_dir = _install_fake_uv(root)
+
+    result = _run_verify(root, "2.2.0", path=_with_fake_uv(bin_dir), env={"FAKE_UV_ERROR": "error: Failed to fetch: `https://pypi.org/simple/langgraph/`"})
+
+    assert result.returncode == 1
+    assert "Failed to fetch" in result.stderr, "uv's own explanation should reach the job log"
+    assert "::error::'uv lock --check' failed on backend/uv.lock (output above); if the lock is stale, run scripts/bump_version.sh" in result.stderr
+    assert "out of date" not in result.stderr
+
+
+def test_gate_explains_a_lock_without_the_root_entry(tmp_path: Path):
+    """The printed lock version is for the job log; an unparsable lock must say so instead of printing nothing."""
+    root = _write_sandbox(tmp_path / "repo", sources="2.2.0", lock="2.2.0", lock_name="deer-flow-renamed")
+    bin_dir = _install_fake_uv(root)
+
+    result = _run_verify(root, "2.2.0", path=_with_fake_uv(bin_dir))
+
+    assert result.returncode == 1
+    assert "backend/uv.lock:        (root entry not found; 'uv lock --check' is authoritative)" in result.stdout
+    assert "::error::'uv lock --check' failed on backend/uv.lock (output above); if the lock is stale, run scripts/bump_version.sh" in result.stderr
 
 
 def test_gate_refuses_to_pass_without_uv(tmp_path: Path):

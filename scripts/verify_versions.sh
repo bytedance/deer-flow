@@ -42,6 +42,8 @@ LOCK_VERSION=$(awk -v name="$PY_NAME" '
   $0 == "name = \"" name "\"" { root = 1 }
   root && /^version = / { gsub(/"/, "", $3); print $3; exit }
 ' "$UV_LOCK")
+# Display only: `uv lock --check` below is what passes or fails the lock.
+[ -n "$LOCK_VERSION" ] || LOCK_VERSION="(root entry not found; 'uv lock --check' is authoritative)"
 
 printf 'Chart.yaml version:     %s\n' "$CHART_VERSION"
 printf 'Chart.yaml appVersion:  %s\n' "$APP_VERSION"
@@ -85,7 +87,7 @@ if ! command -v uv >/dev/null 2>&1; then
   status=1
 elif ! lock_output=$(cd "$ROOT/backend" && uv lock --check 2>&1); then
   printf '%s\n' "$lock_output" >&2
-  echo "::error::backend/uv.lock is out of date: 'uv lock --check' failed (output above)." >&2
+  echo "::error::'uv lock --check' failed on backend/uv.lock (output above); if the lock is stale, run scripts/bump_version.sh." >&2
   status=1
 fi
 
