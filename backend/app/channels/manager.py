@@ -543,33 +543,52 @@ def _merge_dicts(*layers: Any) -> dict[str, Any]:
     return merged
 
 
-def _select_carried_model_name(run_config: Mapping, run_context: Mapping) -> str | None:
-    """Pick the session-configured model out of merged run carriers.
+def _select_carried_value(run_config: Mapping, run_context: Mapping, key: str) -> str | None:
+    """Pick a session-carried scalar out of merged run carriers.
 
-    Single source of truth for the carrier precedence shared by the run
-    path and the ``/model`` status reply, mirroring the Gateway merge a run
-    crosses: when the merged request config carries a ``context`` section,
-    ``build_run_config`` keeps it and *drops* ``configurable``, so
-    ``config.context`` beats the top-level ``context``; otherwise
-    ``merge_run_context_overrides`` / ``_get_runtime_config`` let the
-    top-level ``context`` carrier win over ``configurable``. Reordering or
-    extending session layers must update this rule and the layer merge in
-    ``_resolve_run_params`` together.
+    Carrier precedence mirrors the Gateway merge a run crosses: when the
+    merged request config carries a ``context`` section, ``build_run_config``
+    keeps it and *drops* ``configurable``, so ``config.context`` beats the
+    top-level ``context``; otherwise ``merge_run_context_overrides`` /
+    ``_get_runtime_config`` let the top-level ``context`` carrier win over
+    ``configurable``.
     """
     if "context" in run_config:
         candidates = (
-            _as_dict(run_config.get("context")).get("model_name"),
-            run_context.get("model_name"),
+            _as_dict(run_config.get("context")).get(key),
+            run_context.get(key),
         )
     else:
         candidates = (
-            run_context.get("model_name"),
-            _as_dict(run_config.get("configurable")).get("model_name"),
+            run_context.get(key),
+            _as_dict(run_config.get("configurable")).get(key),
         )
     for candidate in candidates:
         if isinstance(candidate, str) and candidate.strip():
             return candidate.strip()
     return None
+
+
+def _select_carried_model_name(run_config: Mapping, run_context: Mapping) -> str | None:
+    """Pick the session-configured model out of merged run carriers.
+
+    Single source of truth for the carrier precedence shared by the run
+    path and the ``/model`` status reply (see ``_select_carried_value`` for
+    the merge rule). Reordering or extending session layers must update this
+    rule and the layer merge in ``_resolve_run_params`` together.
+    """
+    return _select_carried_value(run_config, run_context, "model_name")
+
+
+def _select_carried_agent_name(run_config: Mapping, run_context: Mapping) -> str | None:
+    """Pick the session-carried agent out of merged run carriers.
+
+    The effective agent rides the same three carriers across the Gateway
+    merge as ``model_name``, so the same precedence applies (the run path
+    only *defaults* an assistant-derived ``agent_name`` into the top-level
+    context with ``setdefault``, so a context-carried agent always beats it).
+    """
+    return _select_carried_value(run_config, run_context, "agent_name")
 
 
 def _normalize_custom_agent_name(raw_value: str) -> str:
@@ -1369,6 +1388,11 @@ class ChannelManager:
         # the same Gateway process in practice; revisit if pins ever need to
         # be read across a shared store.
         self._thread_model_names: dict[str, str | None] = {}
+        # Bumped on every model-cache mutation (publish or clear-on-pressure
+        # eviction). A cold load captures it before its in-flight threads.get
+        # and refetches when it moved — an eviction must not let an older
+        # snapshot overwrite a successfully committed pin (see _load_thread_model).
+        self._model_cache_generation = 0
         # Serializes cold pin loads against persist+cache publication: without
         # it, a slow threads.get that captured pre-pin metadata can land after
         # a concurrent /model write and overwrite the fresh cache entry with
@@ -2451,6 +2475,7 @@ class ChannelManager:
         return agent_name
 
     def _remember_thread_model(self, thread_id: str, model_name: str | None) -> None:
+        self._model_cache_generation += 1
         if len(self._thread_model_names) > IN_PROCESS_CACHE_MAX_ENTRIES:
             self._thread_model_names.clear()
         self._thread_model_names[thread_id] = model_name
@@ -2480,19 +2505,28 @@ class ChannelManager:
         get_kwargs: dict[str, Any] = {}
         if owner_headers := _owner_headers(msg):
             get_kwargs["headers"] = owner_headers
-        thread = await client.threads.get(thread_id, **get_kwargs)
-        metadata = thread.get("metadata") if isinstance(thread, Mapping) else None
-        raw_model_name = metadata.get(CHANNEL_MODEL_METADATA_KEY) if isinstance(metadata, Mapping) else None
-        model_name = raw_model_name.strip() if isinstance(raw_model_name, str) and raw_model_name.strip() else None
+        for attempt in (0, 1):
+            generation = self._model_cache_generation
+            thread = await client.threads.get(thread_id, **get_kwargs)
+            metadata = thread.get("metadata") if isinstance(thread, Mapping) else None
+            raw_model_name = metadata.get(CHANNEL_MODEL_METADATA_KEY) if isinstance(metadata, Mapping) else None
+            model_name = raw_model_name.strip() if isinstance(raw_model_name, str) and raw_model_name.strip() else None
 
-        async with self._model_pin_lock:
-            # A /model write that committed while the GET was in flight
-            # already published under the lock; its value wins over this
-            # older snapshot.
-            if thread_id in self._thread_model_names:
-                return self._thread_model_names[thread_id]
-            self._remember_thread_model(thread_id, model_name)
-            return model_name
+            async with self._model_pin_lock:
+                # A /model write that committed while the GET was in flight
+                # already published under the lock; its value wins over this
+                # older snapshot.
+                if thread_id in self._thread_model_names:
+                    return self._thread_model_names[thread_id]
+                if attempt == 0 and generation != self._model_cache_generation:
+                    # A write or a clear-on-pressure eviction landed while the
+                    # GET was in flight — the cache entry may have been
+                    # evicted after the write, so the in-cache re-check above
+                    # cannot see it. The snapshot may be stale; refetch once
+                    # instead of publishing it over the committed selection.
+                    continue
+                self._remember_thread_model(thread_id, model_name)
+                return model_name
 
     async def _persist_model_pin(
         self,
@@ -2540,9 +2574,10 @@ class ChannelManager:
         definition of which carrier wins — no third replication of the
         Gateway precedence. When no layer carries a model, the fallback
         mirrors the agent factory's ``_resolve_model_name(requested or
-        agent_model_name)``: the resolved assistant (thread pin or session
-        config) is loaded, and its configured ``model`` is the next run's
-        model.
+        agent_model_name)``: the effective agent is resolved from the same
+        merged carriers the run would use (explicit message/thread choice,
+        then carrier ``agent_name``, then session ``assistant_id``), and its
+        configured ``model`` is the next run's model.
         """
         channel_layer, user_layer = self._resolve_session_layer(msg)
         merged_config = _merge_dicts(
@@ -2571,23 +2606,40 @@ class ChannelManager:
                     thread_id,
                     exc_info=True,
                 )
-        assistant_id = self._resolve_assistant_id(
-            message_assistant_id=self._resolve_message_assistant_id(msg),
-            thread_assistant_id=thread_assistant_id,
-            user_layer=user_layer,
-            channel_layer=channel_layer,
-        )
-        if assistant_id != DEFAULT_ASSISTANT_ID:
+        # Resolve the effective agent the way the run path and the runtime
+        # would: an explicit per-message or thread-pinned choice overwrites
+        # every carrier (``_apply_explicit_agent_choice``); otherwise the
+        # merged carriers' ``agent_name`` wins, because the run path only
+        # *defaults* the assistant-derived name into the top-level context
+        # with ``setdefault``; otherwise the session-layer ``assistant_id``
+        # applies.
+        agent_name: str | None = None
+        explicit_assistant = self._resolve_message_assistant_id(msg) or thread_assistant_id
+        if explicit_assistant is not None:
+            if explicit_assistant != DEFAULT_ASSISTANT_ID:
+                agent_name = explicit_assistant
+        else:
+            agent_name = _select_carried_agent_name(merged_config, merged_context)
+            if agent_name is None:
+                assistant_id = self._resolve_assistant_id(
+                    message_assistant_id=None,
+                    thread_assistant_id=None,
+                    user_layer=user_layer,
+                    channel_layer=channel_layer,
+                )
+                if assistant_id != DEFAULT_ASSISTANT_ID:
+                    agent_name = assistant_id
+        if agent_name:
             try:
                 agent_config = await asyncio.to_thread(
                     load_agent_config,
-                    _normalize_custom_agent_name(assistant_id),
+                    _normalize_custom_agent_name(agent_name),
                     user_id=_channel_storage_user_id(msg),
                 )
             except Exception:
                 logger.warning(
                     "[Manager] failed to load agent config %r for /model status",
-                    assistant_id,
+                    agent_name,
                     exc_info=True,
                 )
             else:
