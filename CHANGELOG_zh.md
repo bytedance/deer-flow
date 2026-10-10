@@ -3594,6 +3594,13 @@
   `make test-shard` 与 CI 的分片方式不变，live 与阻塞 I/O 测试仍被排除。
   新增测试用离线 worker 替身固定了分片并行启动与“等待全部分片再报失败”
   的行为。([#6324])
+- **集成：** Lark/Feishu CLI 的输出改为按 UTF-8 解码，不再使用宿主 locale。
+  `lark-cli`（通过 `@larksuite/cli` npm 包分发的原生二进制）与 npm 都会向管道
+  写入 UTF-8，但 `lark_cli.py` 中的每一处捕获都只传了 `text=True` 而未指定
+  `encoding`，因此在 ANSI 代码页非 UTF-8 的宿主上（cp936、cp1252）非 ASCII
+  字段会被静默破坏——`auth status --json` 返回的 `userName` 变成乱码，而无法
+  解码的字节还可能让读取线程异常退出、使 `stdout` 变成 `None`，从而把一个正常
+  的 CLI 报告为不可用。([#6590])
 
 ## [2.1.0] — 2026-09-24
 
@@ -7630,4 +7637,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6580]: https://github.com/bytedance/deer-flow/pull/6580
 [#6582]: https://github.com/bytedance/deer-flow/pull/6582
 [#6588]: https://github.com/bytedance/deer-flow/pull/6588
+[#6590]: https://github.com/bytedance/deer-flow/pull/6590
 [#6595]: https://github.com/bytedance/deer-flow/pull/6595

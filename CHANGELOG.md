@@ -4611,6 +4611,14 @@ This release closes that milestone with **439 merged pull requests**.
   coverage stays excluded. A new test pins the concurrent startup and the
   wait-for-every-shard failure reporting with offline worker doubles.
   ([#6324])
+- **integrations:** Lark/Feishu CLI output is decoded as UTF-8 instead of with
+  the host locale. `lark-cli` (a native binary shipped through the
+  `@larksuite/cli` npm package) and npm both write UTF-8 to a pipe, but every
+  capture in `lark_cli.py` passed `text=True` without an `encoding`, so a host
+  whose ANSI code page is not UTF-8 (cp936, cp1252) silently mangled non-ASCII
+  fields — `auth status --json` returned a garbled `userName`, and an
+  undecodable byte could kill the reader thread and leave `stdout` as `None`,
+  reporting a healthy CLI as unavailable. ([#6590])
 
 ## [2.1.0] — 2026-09-24
 
@@ -9473,4 +9481,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6580]: https://github.com/bytedance/deer-flow/pull/6580
 [#6582]: https://github.com/bytedance/deer-flow/pull/6582
 [#6588]: https://github.com/bytedance/deer-flow/pull/6588
+[#6590]: https://github.com/bytedance/deer-flow/pull/6590
 [#6595]: https://github.com/bytedance/deer-flow/pull/6595
