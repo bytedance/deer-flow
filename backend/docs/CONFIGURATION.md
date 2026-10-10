@@ -83,8 +83,11 @@ disabling or regrouping active policies; conflicting settings fail model
 construction instead of resetting a live budget.
 
 When enabled, exposed SDK `max_retries` settings are set to zero: SDK retries
-would bypass the admission hook. Agent middleware retries still work and each
-new attempt is paced. Calls outside that middleware no longer get SDK retries.
+would bypass the admission hook. Claude and Codex also set their provider-internal
+`retry_max_attempts` to one, regardless of config or caller overrides, and log a
+warning when reducing a larger value. Agent middleware retries still work,
+including HTTP 529 overloads, and each new attempt is paced. Calls outside that
+middleware no longer get SDK or Claude/Codex wrapper retries.
 Custom providers that bypass BaseChatModel admission hooks or perform hidden
 retries need their own integration. A caller-supplied `rate_limiter` cannot be
 combined with `request_admission`.
@@ -278,6 +281,29 @@ models:
         thinking:
           type: enabled
 ```
+
+#### MindIE XML tool arguments
+
+The MindIE adapter (`deerflow.models.mindie_provider:MindIEChatModel`) parses XML
+tool calls before decoding escaped newlines in the remaining reply text. JSON
+objects and arrays keep their original escapes during parsing, so `\n` inside a
+JSON string becomes a newline through JSON decoding and `\\n` retains a literal
+backslash. The existing Python-literal fallback also parses the original value.
+
+Non-JSON raw-string parameters retain the gateway's multiline compatibility:
+literal `\n` outside fenced code becomes a real newline, and surrounding
+whitespace is trimmed. Escapes inside fenced code remain unchanged. This keeps
+multi-line file content and commands working. Raw strings cannot distinguish an
+intended literal `\n` from a gateway-escaped newline; structured JSON parameters
+avoid that ambiguity. Numeric conversion failures and unsafe Python-literal
+containers retain the entire original argument rather than rewriting it.
+
+The same behavior applies to synchronous generation, asynchronous generation,
+and both synchronous and asynchronous streaming. Tool-enabled streams use
+non-streaming generation followed by simulated chunks, even with a
+`streaming: true` model default; native no-tool streams carry the fence state
+across chunks. Native tool-call arguments remain unchanged.
+No additional configuration is required.
 
 #### Gemini via Google's OpenAI-compatible endpoint
 
@@ -560,8 +586,68 @@ Notes:
 - `GATEWAY_WORKERS` / `WEB_CONCURRENCY` only count the uvicorn workers of one process tree. A Kubernetes Deployment with `replicas > 1` runs one worker per Pod, so every Pod reports a single worker and the multi-worker startup gate stays inert — while each Pod's startup orphan reconciliation still writes the other Pods' lease-less runs off as crashed on every rolling update.
 - Set `multi_instance: true` (or export `DEER_FLOW_MULTI_INSTANCE=1`, which lets deploy tooling such as a Helm chart set it from its replica count) on every instance that shares one database. Startup then enforces the same prerequisites as `GATEWAY_WORKERS > 1`: `database.backend: postgres`, `run_events.backend: db`, `run_ownership.heartbeat_enabled: true`, and a Redis stream bridge (`stream_bridge.type: redis` or `DEER_FLOW_STREAM_BRIDGE_REDIS_URL`). It refuses an explicit `sandbox.ownership.type: memory`, process-local browser tools, and `scheduler.enabled: true` without `scheduler.multi_instance: true`.
 - `DEER_FLOW_MULTI_INSTANCE` treats blank, `0`, `false`, `no` and `off` as "not declared"; any other value declares a multi-instance deployment, so a typo fails closed.
+- `GET /health/ready` pings the Redis stream bridge on every probe and answers 503 (`stream_bridge: unreachable`) while Redis is down, so the orchestrator drains that instance instead of routing it runs it cannot publish or stream; the memory bridge reports `not_configured`. When `sandbox.provisioner_url` is set, the body also carries the provisioner's `/health` verdict (`provisioner: ok|unreachable`), which never changes the status code because every instance shares one provisioner. That probe follows the sandbox clients' proxy policy: loopback, private, link-local and cluster-local provisioner addresses bypass `HTTP_PROXY`, external hosts keep the environment's proxy settings.
+- The declaration also drives the `agent_storage.backend: file` divergence warning, the inbound webhook dedupe warning, the `auth.local.throttle_storage: memory` warning, and the WeChat QR-login guard, which otherwise only look at the worker count.
+- Login lockouts are shared through the database: `auth.local.throttle_storage` (startup-only) defaults to `auto`, which keeps the per-IP failed-login counters for `POST /api/v1/auth/login/local` in the `login_throttle` table whenever `database.backend` is `sqlite` or `postgres`, so every instance enforces one `max_login_attempts` limit per client IP and a lockout on one instance holds on all of them. `memory` keeps the historical per-process counter (N instances give an attacker N × `max_login_attempts` guesses; a declared multi-instance deployment logs a warning), and `db` forces the table (it falls back to memory with a warning when the database backend is `memory`, and refuses to start when the configured database's engine is unavailable; `auto` falls back with a warning in that case). `max_login_attempts` and `lockout_seconds` stay live-read.
+- IM chat-to-thread bindings are shared through the database too: with `database.backend: sqlite` or `postgres` the `ChannelManager` keeps the `channel_name:chat_id[:topic_id]` → thread mapping of unbound IM conversations in the `channel_thread_bindings` table (migration `0038_channel_thread_bindings`), so a conversation created on one instance continues on the same thread when its next message lands on another. On the first start after upgrading, an existing `{base_dir}/channels/store.json` is imported once — only into an empty table, with `INSERT … ON CONFLICT DO NOTHING` so concurrently starting instances cannot duplicate a binding — and renamed `store.json.migrated`; a populated table leaves the file untouched. `memory` keeps the per-process JSON file.
 - The declaration also drives the `agent_storage.backend: file` divergence warning, the inbound webhook dedupe warning, and the WeChat QR-login guard, which otherwise only look at the worker count.
+- With the default DeerMem backend, the declaration also warns when the derived SQLite retrieval index sits inside the shared `storage_path` (the default `{storage_path}/.retrieval`). Set `memory.backend_config.retrieval_index_path` to an instance-local directory (relative values resolve against `storage_path`): SQLite WAL is unsupported on network filesystems, and the index is rebuilt from the Markdown facts at startup and re-synced per user scope after a peer writes.
+- A declared multi-instance deployment that enables a feature storing credentials (today `channel_connections.enabled: true`) also needs one shared `DEER_FLOW_CREDENTIALS_KEY`; see [Credentials encryption key](#credentials-encryption-key-deer_flow_credentials_key).
 - Restart-required: the gate runs once at startup. Restart all Gateway instances together after changing it.
+
+#### Local two-Gateway harness
+
+`scripts/dev_multi_instance.sh` (also `make dev-multi`, `make dev-multi-check`, `make dev-multi-down`) runs this topology on one machine, so cross-instance behavior can be checked without a cluster:
+
+- Throwaway `postgres:17-alpine` and `redis:7-alpine` containers (`deerflow-mi-postgres`, `deerflow-mi-redis`) on `127.0.0.1:55432` and `127.0.0.1:56379`, Gateway A on `127.0.0.1:8001` and Gateway B on `127.0.0.1:8011` (8002 stays free for the provisioner). When nginx is installed, `http://localhost:2027` round-robins `/api` over both Gateways, names the Gateway that answered in an `X-DeerFlow-Upstream` response header, and forwards `/` to a frontend on port 3000 if you start one. Ports, container names and images are overridable; see `--help`.
+- The generated `config.yaml` is your own `config.yaml` (otherwise `config.example.yaml`; `DEERFLOW_MI_BASE_CONFIG` picks another file) plus `deployment.multi_instance: true`, `database.backend: postgres`, `run_events.backend: db`, `run_ownership.heartbeat_enabled: true` and `stream_bridge.type: redis`. Settings the startup gate refuses are changed and reported: process-local browser tools are removed and an enabled scheduler gets `scheduler.multi_instance: true`. Enabled IM channels are disabled because both Gateways would connect the same bot; `DEERFLOW_MI_KEEP_CHANNELS=1` keeps them.
+- Everything the pair writes stays in the harness, never in your own deployment: any `checkpointer` section is removed (it would win over `database` for checkpoints and the Store), an explicit `sandbox.ownership` and a Redis `database.checkpoint_cache` point at the harness Redis (ownership timing settings are kept), a DeerMem `storage_path` (either spelling) and `blob_storage.backend_config.root` are dropped so their data lands in the harness home, and a local AIO sandbox gets a `container_prefix` derived from the state dir, so the harness never adopts or reaps sandbox containers it did not start. A non-DeerMem memory backend is used as configured, and the harness says so.
+- Both processes share one `DEER_FLOW_HOME`, one copy of `extensions_config.json` (MCP and skill edits never reach your own file), and generated `AUTH_JWT_SECRET`, `DEER_FLOW_INTERNAL_AUTH_TOKEN` and `DEER_FLOW_CREDENTIALS_KEY` values. Each process keeps its own DeerMem `retrieval_index_path`, which the shared config reads from `$DEERFLOW_MI_RETRIEVAL_INDEX_PATH`.
+- Gateway B starts only after A answers `/health`. Alembic migrations are serialized by an advisory lock, but the LangGraph checkpointer and store `setup()` that runs next is not, so two cold starts against an empty database could race.
+- State lives in `.deer-flow/multi-instance/` (gitignored). `down` stops the Gateways and nginx, removes the containers together with their anonymous data volumes and deletes everything there except `logs/`. Each container is labelled with the state dir that created it, and only that state dir removes it: a harness started from another checkout or `DEERFLOW_MI_STATE_DIR` refuses to start rather than remove them (give it its own `DEERFLOW_MI_*_CONTAINER` names and ports). If `up` fails partway, everything it already started is torn down. Do not run `make dev` or `make stop` alongside the harness: both reclaim port 8001 and this checkout's Gateway processes.
+
+```bash
+scripts/dev_multi_instance.sh up             # containers, config, Gateway A, then B, then nginx
+scripts/dev_multi_instance.sh check          # automated cross-instance checks (below)
+scripts/dev_multi_instance.sh stop b --kill  # SIGKILL B to simulate a crash; `start b` brings it back
+scripts/dev_multi_instance.sh logs a -f
+scripts/dev_multi_instance.sh down
+```
+
+`check` signs in as a throwaway account it creates on first use (on a fresh database it becomes the first admin, which the skill toggle needs; the credentials are in `.deer-flow/multi-instance/check-user.json`) and verifies that:
+
+- `GET /health/ready` reports `ready` and `stream_bridge: ok` on both Gateways;
+- B accepts a session issued by A, and both accept the shared internal token while refusing a wrong one;
+- a thread created on A is readable on B, and a file uploaded on A is listed on B, which serves identical bytes from `GET /api/threads/{id}/artifacts/{path}`;
+- a public skill toggled with `PUT /api/skills/{name}` on A shows the new state on B within 30 s (the toggle is reverted afterwards);
+- nginx reaches both Gateways;
+- a run created on A can be joined on B and resumed on A from a `Last-Event-ID`. With no model configured the run fails before any LLM call; when models are configured, or the model list could not be read, this check is skipped unless you pass `check --with-llm`. Each stream read has a time budget that heartbeats do not extend.
+
+These still need a manual pass:
+
+- stop B with `stop b --kill` while A has an active run: A's run must not turn `error`;
+- cancel a run on B from A: it takes effect within about one heartbeat (~10 s; a lower `run_ownership.lease_seconds` makes the boundary easier to observe);
+- change an MCP filesystem server's args on A: B's local-bash allowlist follows;
+- edit a skill on A: B's system-prompt skills section changes within 30 s;
+- the IM channel gates (one leader per platform, failover after killing the leader, runtime-config changes), once channel leader election lands; run them with `DEERFLOW_MI_KEEP_CHANNELS=1`.
+
+### Credentials encryption key (`DEER_FLOW_CREDENTIALS_KEY`)
+
+DeerFlow encrypts credentials it stores at rest (today: per-connection IM channel credentials in the `channel_credentials` table) with a deployment key read **only** from the environment — there is no `config.yaml` key, and it is never derived from `AUTH_JWT_SECRET`.
+
+```bash
+# Generate a key (urlsafe base64 of 32 random bytes, a Fernet key):
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+export DEER_FLOW_CREDENTIALS_KEY=<key>
+```
+
+- **Rotation:** the value may be a comma-separated list. The first key encrypts new values; every listed key decrypts. Prepend the new key (`new,old`), restart, and keep the old key listed until the values it encrypted have been rewritten. Stored values carry a `fernet:v2:` prefix; `fernet:v1:` values written by earlier builds stay readable under the same key.
+- **Single instance:** when the variable is unset or blank, the Gateway generates `{DEER_FLOW_HOME}/.credentials_key` (mode `0600`) on first use and reuses it. The file is created exclusively, so uvicorn workers sharing the runtime home converge on one key. It is only created when a feature that stores credentials is enabled.
+- **Multi-instance:** instances that do not share a runtime home would each generate their own file and could not decrypt what their peers stored. Startup therefore refuses a declared multi-instance deployment (`deployment.multi_instance: true` / `DEER_FLOW_MULTI_INSTANCE=1`) that enables `channel_connections` without the variable. Multiple workers of one process tree (`GATEWAY_WORKERS > 1` without the declaration) share the file and are not refused. Deployments that store no credentials keep booting without a key.
+- **Malformed keys** (wrong length, standard rather than urlsafe base64, any bad entry in the list) stop startup with an error that never repeats the key material.
+- **Backup:** losing the key makes every stored credential unreadable. Unreadable values are treated as missing (logged as a warning), never as a crash — Slack, for example, falls back to the deployment bot token.
+- **Deployment tooling:** the Helm chart generates the key into its app Secret and preserves it across upgrades; `make up` (`scripts/deploy.sh`) honors a shell or `.env` value and otherwise generates and persists `$DEER_FLOW_HOME/.credentials_key` — the same file the Gateway would generate, so whichever side created it first wins.
+- The persisted `.jwt_secret` (used when `AUTH_JWT_SECRET` is unset) is created the same exclusive way, so replicas cold-starting on a shared volume no longer keep different session-signing secrets.
 
 ### Agent Storage
 
@@ -581,9 +667,19 @@ agent_storage:
 
 Migrating an existing install from `file` to `db`:
 
+Run from the repository root using the backend's `uv` environment. The importer
+depends on the installed workspace packages; using a system `python` without
+an activated backend environment can fail with `ModuleNotFoundError: deerflow`.
+Complete the [backend installation](../../CONTRIBUTING.md#option-2-local-development)
+first, including the `postgres` extra when applicable. Use the same exported
+configuration and runtime selectors as the running Gateway, such as
+`DEER_FLOW_CONFIG_PATH` and `DEER_FLOW_HOME`. `--project backend` selects the
+environment without changing the working directory, so relative paths keep
+their meaning; `--no-sync` preserves installed extras.
+
 ```bash
-python backend/scripts/migrate_agents_to_db.py            # copy on-disk agents into the db
-python backend/scripts/migrate_agents_to_db.py --dry-run  # preview without writing
+uv run --no-sync --project backend python backend/scripts/migrate_agents_to_db.py --dry-run  # preview without writing
+uv run --no-sync --project backend python backend/scripts/migrate_agents_to_db.py            # copy on-disk agents into the db
 ```
 
 The importer is idempotent (already-present agents are skipped) and leaves the source files untouched, so reverting `agent_storage.backend` to `file` is a clean rollback. Agent *memory* (`memory.json`) is unaffected by this switch.
@@ -694,6 +790,92 @@ Serper `web_search` also accepts the optional model argument
 to Serper. Omitting `time_range` or passing `null` omits the recency constraint from the
 search request. This option does not change Serper `image_search`.
 
+#### Serper retries
+
+Both Serper `web_search` and `image_search` accept these operator-only settings
+in their respective `tools` entries (the model-facing arguments are unchanged):
+
+```yaml
+max_retries: 0             # Default off; integer 0–3 extra requests
+retry_budget_seconds: 30   # Default 30; finite number >0 and <=300
+```
+
+Set `max_retries: 1` to enable recovery. Booleans, strings, nulls, out-of-range
+values, and non-finite budgets return a structured configuration error before
+HTTP. The three-retry cap limits additional quota/cost; the 300-second budget
+cap limits scheduling waits. No billing or idempotency guarantee is claimed.
+
+Only connection establishment failures (`ConnectError`/`ConnectTimeout`) and
+HTTP 502/503/504 are retried. HTTP 429 requires a valid `Retry-After` hint.
+Authentication errors, other statuses, read/write timeouts, malformed successful
+JSON and tool/result-processing failures are never retried.
+
+Backoff uses equal jitter: 0.25–0.5, 0.5–1, then 1–2 seconds. Valid nonnegative
+integer seconds or HTTP-date `Retry-After` hints on 429/503 set a minimum wait
+(past dates mean zero). HTTP dates include asctime and RFC 850 forms; RFC 850
+two-digit years resolve to the most recent matching year no more than 50 years
+in the future. Invalid hints leave 503 on local backoff;
+429 stays terminal. A hint or backoff that reaches/exceeds the remaining budget
+returns the last error without another request or a shortened wait.
+Both budget checks log `Serper retry time budget exhausted` at warning level,
+distinguishing budget stops from exhausting all configured attempts without
+changing the returned error.
+
+One monotonic scheduling deadline starts before client creation, counting elapsed
+requests and waits; it is checked before waiting and again before a retry.
+It does **not** interrupt active synchronous HTTP requests, response streaming,
+or worker threads. HTTPX's unchanged 30-second timeout applies per network phase,
+so this is **not** a hard end-to-end wall-clock deadline. The initial request is
+always allowed. Payload, API key, domain restrictions and time range stay identical
+across attempts; errors still report the cleaned original query. No refill,
+cache, global limiter or model-level retry is added.
+
+#### Serper endpoints
+
+To use a Serper-compatible provider for web and image search, set
+`SERPER_BASE_URL` to its base URL without `/search` or `/images`, and set
+`SERPER_API_KEY` to that provider's key. The default base URL is
+`https://google.serper.dev`.
+
+Each Serper tool can override the environment independently in `config.yaml`:
+
+```yaml
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.serper.tools:web_search_tool
+    base_url: https://proxy.example/api
+    api_key: $SEARCH_PROVIDER_API_KEY
+  - name: image_search
+    group: web
+    use: deerflow.community.serper.tools:image_search_tool
+    base_url: https://images.example/api
+    api_key: $IMAGE_PROVIDER_API_KEY
+```
+
+A non-empty string `base_url` in the requested tool's entry takes precedence
+over `SERPER_BASE_URL`. Missing, non-string or whitespace-only tool values fall
+back to the environment. An unset, empty or whitespace-only environment value
+keeps the default endpoint. Leading/trailing whitespace and trailing slashes
+are removed before appending `/search` or `/images`. A tool's `api_key` similarly
+overrides `SERPER_API_KEY`; neither tool inherits the other's endpoint or key.
+Both settings are read from the same captured tool configuration, so a hot
+reload cannot pair the old provider's endpoint with the new provider's key.
+
+Overrides must be absolute `http://` or `https://` URLs with a host and valid
+port. Query strings and fragments (including empty `?`/`#` markers) are rejected
+before HTTP. Invalid overrides return a configuration error naming
+`base_url`/`SERPER_BASE_URL` without exposing the configured value; they do not
+fall back to another host.
+
+These are operator-controlled settings, not model-supplied arguments. Choose a
+trusted provider: the key is sent to the configured host in the `X-API-KEY`
+header, never in a query parameter. Endpoint configuration does not change the
+existing validation of returned image URLs or web source filters. The endpoint
+is resolved once before transport so it can remain constant across retry attempts.
+Override debug diagnostics show the effective endpoint without URL credentials,
+query or fragment; result-URL guards do not restrict the operator's API host.
+
 #### Serper source filters
 
 ```yaml
@@ -735,7 +917,7 @@ including on provider errors.
 
 `time_range` still maps to `tbs`, and `max_results` caps the filtered results.
 `total_results` reports the actual remaining count (zero with `results: []`
-when none survive). One request is made: no refill or relaxed-filter retries.
+when none survive). No refill or relaxed-filter requests are made.
 These settings do not affect `image_search` or the model-facing tool schema.
 Source selection is neither a factuality guarantee nor a global URL-access
 policy for fetch tools, browsers, or redirects.
@@ -758,7 +940,41 @@ retrieval behavior. No paid API calls are needed for the regression suite.
 - `str_replace` - String replacement in files
 - `bash` - Execute bash commands
 
-Browserless can be configured as an opt-in visual capture tool:
+#### Delegated Fetch Backend Isolation
+
+Browserless, Crawl4AI, Firecrawl, and fastCRW perform navigation, redirects,
+DNS resolution, and subresource loading in the backend's own network namespace.
+Checking the submitted URL in the Gateway cannot constrain these later requests.
+For `web_fetch`, and Browserless `web_capture`, DeerFlow therefore refuses to
+delegate to a private, loopback, or otherwise unverifiable backend by default.
+HTTP(S) backend endpoints resolving only to public addresses do not require an
+isolation acknowledgement.
+
+The backend endpoint is the tool's `base_url`. Browserless defaults to
+`http://localhost:3032`, Crawl4AI to `http://localhost:11235`, and Firecrawl to
+its SDK's public cloud endpoint when `base_url` is unset. fastCRW uses
+`base_url`, then `CRW_API_URL`, then `https://fastcrw.com/api`. The guard checks
+the effective endpoint, including environment references in the config.
+
+Before enabling a self-hosted backend, enforce an outbound policy on that
+service that blocks private, loopback, link-local, shared (`100.64.0.0/10`),
+other non-global, and cloud-metadata destinations, including redirects and
+subresources. Then set `network_isolation_confirmed: true` on each tool using
+that backend. Browserless fetch and capture are separate tool entries and each
+needs the setting. Run `make doctor` to check for configurations that would be
+refused. Existing localhost deployments need this migration before fetching or
+capturing pages after an upgrade.
+
+`network_isolation_confirmed` is an operator acknowledgement; it does not
+install or verify an egress policy. `allow_private_addresses: true` controls
+the submitted target URL only and never bypasses backend screening. Reserve it
+for intentional internal targets and explicitly account for those destinations
+in the backend's outbound policy. Neither setting relaxes the HTTP(S) requirement.
+Backend DNS screening happens at validation time and does not pin the subsequent
+client connection, so it cannot by itself close a DNS-rebinding window.
+
+Browserless can be configured as an opt-in visual capture tool after its egress
+policy is in place:
 
 ```yaml
 tools:
@@ -767,6 +983,7 @@ tools:
     use: deerflow.community.browserless.tools:web_capture_tool
     base_url: http://localhost:3032
     # token: $BROWSERLESS_TOKEN
+    network_isolation_confirmed: true  # Only after isolating Browserless egress
     output_format: png
     full_page: true
     viewport_width: 1280
@@ -790,8 +1007,12 @@ Browserless instance. You can point `base_url` at [Browserless Cloud](https://ww
 # match the default base_url (http://localhost:3032). Recent Browserless
 # images always require a token — if you don't pass one, a random token is
 # generated and requests without it are rejected — so set it explicitly.
-docker run -d --name browserless -p 3032:3000 -e "TOKEN=local-dev-token" ghcr.io/browserless/chromium
+docker run -d --name browserless -p 127.0.0.1:3032:3000 -e "TOKEN=local-dev-token" ghcr.io/browserless/chromium
 ```
+
+Publishing a port does not isolate outbound traffic. Apply the egress policy
+appropriate to your container platform before setting
+`network_isolation_confirmed: true`; the command above only starts the service.
 
 Then set the same token so the tool sends it (uncomment `token: $BROWSERLESS_TOKEN`
 in the config above):
@@ -1375,18 +1596,21 @@ models:
 - `DEEPSEEK_API_KEY` - DeepSeek API key
 - `MIMO_API_KEY` - Xiaomi MiMo API key
 - `NOVITA_API_KEY` - Novita API key (OpenAI-compatible endpoint)
+- `OPPER_API_KEY` - Opper API key (OpenAI-compatible endpoint)
 - `TAVILY_API_KEY` - Tavily search API key
 - `BRAVE_SEARCH_API_KEY` - Brave Search API key for `web_search` and `image_search`
 - `SERPER_API_KEY` - Serper (Google Search/Images API) key for `web_search` and `image_search`
+- `SERPER_BASE_URL` - Optional operator-controlled Serper-compatible base URL for both tools; each tool's `base_url` takes precedence. The provider key is sent to the configured host in `X-API-KEY`, never a query parameter. See [Serper endpoints](#serper-endpoints).
 - `SERPLY_API_KEY` - [Serply](https://serply.io) key for `web_search` (Google Search, plus Google News and Google Scholar via `vertical`)
 - `GROUNDROUTE_API_KEY` - GroundRoute meta-search API key for `web_search` and `web_fetch` (routes across Serper, Brave, Exa, Tavily, Firecrawl, Perplexity with gain-share pricing)
 - `SOFYA_API_KEY` - [Sofya](https://sofya.co) key for `web_search` and `web_fetch`
 - `UNBROWSE_API_KEY` - [Unbrowse](https://unbrowse.ai) key for `web_fetch`
-- `BROWSERLESS_TOKEN` - Browserless Cloud token for `web_capture` (optional for self-hosted Browserless)
+- `BROWSERLESS_TOKEN` - Browserless token for `web_fetch` (Browserless provider) and `web_capture`, sent as the `token` query parameter (required by Browserless Cloud and by a self-hosted instance started with `TOKEN`)
 - `DEER_FLOW_PROJECT_ROOT` - Project root for relative runtime paths
 - `DEER_FLOW_CONFIG_PATH` - Custom config file path
 - `DEER_FLOW_EXTENSIONS_CONFIG_PATH` - Custom extensions config file path
 - `DEER_FLOW_HOME` - Runtime state directory (defaults to `.deer-flow` under the project root)
+- `DEER_FLOW_CREDENTIALS_KEY` - At-rest encryption key(s) for stored credentials; comma-separate to rotate. See [Credentials encryption key](#credentials-encryption-key-deer_flow_credentials_key)
 - `DEER_FLOW_SKILLS_PATH` - Skills directory when `skills.path` is omitted
 - `GATEWAY_ENABLE_DOCS` - Set to `false` to disable Swagger UI (`/docs`), ReDoc (`/redoc`), and OpenAPI schema (`/openapi.json`) endpoints (default: `true`)
 

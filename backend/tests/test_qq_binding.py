@@ -9,7 +9,7 @@ import pytest_asyncio
 from app.channels.manager import ChannelManager
 from app.channels.message_bus import MessageBus
 from app.channels.qq import QQChannel
-from app.channels.store import ChannelStore
+from app.channels.store import JsonChannelStore
 from deerflow.persistence.channel_connections import ChannelConnectionRepository
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
 
@@ -59,7 +59,7 @@ async def test_binding_transfer_rejects_queued_old_owner(repo, tmp_path, monkeyp
     channel.send = AsyncMock()
     manager = ChannelManager(
         bus,
-        ChannelStore(tmp_path / "threads.json"),
+        JsonChannelStore(tmp_path / "threads.json"),
         connection_repo=repo,
         require_bound_identity=True,
     )

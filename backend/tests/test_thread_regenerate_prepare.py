@@ -12,7 +12,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langgraph.checkpoint.base import empty_checkpoint, uuid6
 from langgraph.checkpoint.memory import InMemorySaver
 
-from deerflow.runtime import RunStatus
+from deerflow.runtime import DisconnectMode, RunRecord, RunStatus
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 
@@ -1307,6 +1307,37 @@ def test_prepare_edit_regenerate_payload_rejects_active_goal():
     assert exc.value.detail == "Cannot edit while a goal is active"
 
 
+@pytest.mark.parametrize(
+    "latest_values",
+    [
+        # Clearing a met goal leaves only its record.
+        {"goal_outcome": {"status": "achieved", "objective": "finish", "reply_message_id": "ai-1"}},
+        # POST /state stores an unbuilt goal the history head does not show as active.
+        {"goal": {"objective": "finish"}},
+    ],
+    ids=["met-goal-record", "goal-without-status"],
+)
+def test_prepare_edit_regenerate_payload_allows_editing_without_an_active_goal(latest_values):
+    from app.gateway.routers.thread_runs import _prepare_edit_regenerate_payload
+
+    human = HumanMessage(id="human-1", content="question")
+    ai = AIMessage(id="ai-1", content="answer v1")
+    latest = _checkpoint("ckpt-ai", [human, ai])
+    latest.checkpoint["channel_values"].update(latest_values)
+    event_store, run_manager = _answer_run_fixtures()
+
+    response = asyncio.run(
+        _prepare_edit_regenerate_payload(
+            "thread-1",
+            "human-1",
+            "updated question",
+            _request(FakeCheckpointer([latest, _checkpoint("ckpt-human", [human]), _checkpoint("ckpt-base", [])]), event_store, run_manager=run_manager),
+        )
+    )
+
+    assert response.checkpoint["checkpoint_id"] == "ckpt-base"
+
+
 def test_prepare_edit_regenerate_payload_requires_successful_source_run():
     from app.gateway.routers.thread_runs import _prepare_edit_regenerate_payload
 
@@ -1541,18 +1572,28 @@ def test_prepare_regenerate_payload_rejects_non_latest_assistant():
     assert exc.value.detail == "Only the latest assistant message can be regenerated"
 
 
-def test_prepare_regenerate_payload_falls_back_to_matching_run_when_events_are_missing():
+@pytest.mark.parametrize(
+    ("content", "summary"),
+    [
+        ("answer", "answer"),
+        ("<think>Reasoning.</think>answer", "<think>Reasoning.</think>answer"),
+        ("<think>Reasoning.</think>answer", "answer"),
+        ("<think>" + "r" * 2400 + "</think>" + "a" * 2500, "a" * 2000),
+    ],
+    ids=["plain", "legacy-summary", "visible-summary", "long-reasoning"],
+)
+def test_prepare_regenerate_payload_falls_back_to_matching_run_when_events_are_missing(content, summary):
     from app.gateway.routers.thread_runs import _prepare_regenerate_payload
 
     human = HumanMessage(id="human-1", content="question")
-    ai = AIMessage(id="ai-1", content="answer")
+    ai = AIMessage(id="ai-1", content=content)
     base = _checkpoint("ckpt-base", [])
     after_human = _checkpoint("ckpt-human", [human])
     latest = _checkpoint("ckpt-ai", [human, ai])
     checkpointer = FakeCheckpointer([latest, after_human, base])
     run_manager = FakeRunManager(
         [
-            SimpleNamespace(run_id="run-latest", status=RunStatus.success, last_ai_message="answer"),
+            RunRecord(run_id="run-latest", thread_id="thread-1", assistant_id="lead_agent", status=RunStatus.success, on_disconnect=DisconnectMode.continue_, last_ai_message=summary),
             SimpleNamespace(run_id="run-older", status=RunStatus.error, last_ai_message="answer"),
         ]
     )

@@ -1,3 +1,36 @@
+## Support Bundle Runtime Home
+
+Thread manifests use a nonempty `DEER_FLOW_HOME` exclusively, resolving relative
+values from the checkout like the local launcher. Read root `.env` path settings
+without exporting secrets; dotenv overrides shell exports, including empty values.
+Expand unquoted leading tildes, preserving quoted literals. If python-dotenv is
+unavailable or `.env` cannot be read/decoded as UTF-8, retain shell/legacy lookup
+so troubleshooting remains usable. Read the complete file before applying any
+assignments so a decoding failure cannot partially override shell values.
+Resolve `$NAME`, `${NAME}` and `${NAME:-literal}` in unquoted/double-quoted
+values using a private environment with checkout `PWD` and earlier dotenv
+assignments. Single-quoted values and escaped dollars stay literal. Parse the
+file without sourcing it or executing command substitutions.
+When home is unset and `DEER_FLOW_PROJECT_ROOT` is configured, search the launcher's
+`backend/.deer-flow` first, then the standalone harness project root. Scan both
+legacy threads and user-scoped threads in that root. With no override, retain
+the two checkout layouts. Display an external home as `{DEER_FLOW_HOME}` rather
+than its absolute host path, and never include file contents in the manifest.
+Coverage lives in `backend/tests/test_support_bundle.py`.
+This lookup follows the local launcher's root `.env`; it does not discover
+`backend/.env` or `DEER_FLOW_ENV_FILE` used by standalone Gateway launches.
+For those launches, export the effective `DEER_FLOW_HOME` when collecting a bundle
+and ensure the checkout `.env` does not override it. Tests clear all three runtime
+path variables and compare storage defaults with the launcher's actual shell blocks.
+
+## Dependency Check Diagnostics
+
+`check.py` captures tool output as UTF-8 with replacement for malformed bytes,
+independently of the host locale. Its Python pnpm runner inherits the environment
+with `PYTHONIOENCODING=utf-8:backslashreplace`, matching the capture encoding.
+Keep Unicode failure diagnostics and exit status available to `make check`.
+Real subprocess regressions live in `backend/tests/test_check_script.py`.
+
 ## Manual Claude OAuth Export
 
 `export_claude_code_oauth.py` validates Keychain JSON as an object containing an
@@ -9,6 +42,18 @@ trimming its contents. Offline CLI coverage:
 `backend/tests/test_claude_keychain_export.py`.
 
 ## Service Startup Contracts
+
+The setup wizard offers Webz.io as a news-only `web_search` provider using
+`deerflow.community.webz.tools:web_search_tool` and `WEBZ_API_KEY`. Keep its
+entry aligned with the credential check in `doctor.py` and the example config.
+The adapter uses async HTTPS requests, offloads lazy config loading, and maps
+`source` to provider `domain`; explicit `published_from` overrides recency.
+Explicit `max_results` overrides the wizard's configured default; omission or
+null uses configuration or 5. Reject boolean/fractional configured counts before
+clamping to 1–100. `returned_results` is the normalized page size, not a match total.
+Skip malformed page entries with index-only warnings; retain valid neighbors.
+Reject malformed envelopes and nonempty pages with no valid entries, logging
+no provider payloads or credentials. Contract tests live in `backend/tests/test_webz_tools.py`.
 
 Optional browser dependency detection reads the top-level `tools:` sequence
 without requiring `name` to be its first mapping key. Both indented and
@@ -24,7 +69,12 @@ including after an Apple Container failure, and retain the final image-config
 note rather than exiting early on Apple Container success.
 
 The root `PORT` value configures Docker's published nginx ingress only; local
-orchestration pins Next.js to `3000`. Runtime commands launch from the already
+orchestration pins Next.js to `3000`. Local runs bind the Gateway and Next.js to
+`127.0.0.1`; `nginx-local-conf.sh` keeps nginx on loopback or, for a set
+`BIND_HOST`, renders `temp/nginx.local.conf` listening there. `serve.sh`
+resolves it before stopping anything, so a bad value cannot tear down a running
+stack. Keep `dev.mjs`'s all-interfaces default: the Docker dev frontend needs
+it. Runtime commands launch from the already
 synchronized environment with `uv run --no-sync`. Production Compose probes
 Gateway `/health`, and `deploy.sh` waits for all services before reporting
 success; failures print Compose status and recent Gateway logs.
@@ -38,11 +88,19 @@ keys the production Gateway would receive, and `make config` skips files that
 exist. Pinned by `backend/tests/test_compose_default_bind_host.py` and
 `backend/tests/test_gateway_startup.py`.
 
+`docker.sh start` runs Compose from `docker/` without `--env-file`, so
+dev-compose interpolation sees only the shell. `load_proxy_env_from_dotenv`
+exports the `.env` keys interpolation needs (proxy variables and
+`AUTH_TRUSTED_PROXIES`, whose `environment:` default would otherwise replace
+the `env_file` value); shell exports still win. Pinned by
+`backend/tests/test_compose_auth_trusted_proxies.py`.
+
 `deploy.sh` never sources the repo-root `.env`; Compose reads it via
 `--env-file`, and shell exports outrank that file during interpolation (an
-exported-but-empty variable still wins). So `BETTER_AUTH_SECRET` and
-`DEER_FLOW_INTERNAL_AUTH_TOKEN` resolve shell → `.env` → persisted file under
-`DEER_FLOW_HOME` → freshly generated, and a `.env`-provided value is left
+exported-but-empty variable still wins). So `BETTER_AUTH_SECRET`,
+`DEER_FLOW_INTERNAL_AUTH_TOKEN` and `DEER_FLOW_CREDENTIALS_KEY` resolve shell →
+`.env` → persisted file under `DEER_FLOW_HOME` → freshly generated, and a
+`.env`-provided value is left
 unexported so Compose parses it itself. Whether `.env` provides one is
 Compose's answer, not a `KEY=VALUE` grep: Compose also accepts `KEY: VALUE`
 lines and interpolates `${VAR}` inside values, so the script renders a stub
@@ -55,9 +113,20 @@ failing probe stops the script rather than guessing. `read_dotenv_value`
 stays for the end-of-run summary only. Do not export a value the script read
 from `.env`: that shadows Compose's own dotenv parsing and re-creates the bug
 where `make up` replaced the operator's secret with a generated one.
+The credentials key (a Fernet key) persists as `.credentials_key`, the file the
+Gateway itself generates in that runtime home, via a noclobber (`O_EXCL`)
+create that reads a concurrent winner back.
 `backend/tests/test_deploy_dotenv_secrets.py` pins the order and the probe;
 its real-Compose cases run against the installed `docker` CLI and against any
 standalone binaries listed in `DEER_FLOW_TEST_COMPOSE_BINARIES`.
+
+Deployment commands check `DEER_FLOW_HOME` writability before setup and check
+persisted secret readability only when shell/Compose dotenv overrides are absent.
+Both failures identify the affected path and print the recursive ownership
+recovery hint for the runtime home. Existing secrets are only read, so a
+readable, read-only file is valid. `down` skips these checks and all secret
+resolution/generation so permission damage cannot prevent teardown. Coverage:
+`backend/tests/test_deploy_home_writability.py`.
 
 `doctor.py` checks the config file the Gateway would load, not a fixed
 `<checkout>/config.yaml`. It mirrors how `serve.sh` hands the two
@@ -72,6 +141,14 @@ override the Gateway would reject (`DEER_FLOW_CONFIG_PATH` missing,
 Gateway's error, and the config-dependent checks skip. Any failure to import
 the harness is reported, never raised: doctor diagnoses broken environments.
 Pinned by `backend/tests/test_doctor.py::TestMainConfigResolution`.
+
+Doctor screens Browserless fetch/capture and Crawl4AI, Firecrawl, and fastCRW
+fetch backends with the runtime's `validate_delegated_backend_url`, before
+provider success shortcuts. Keep endpoint defaults, `CRW_API_URL` precedence,
+config environment resolution, and isolation acknowledgement coercion aligned
+with those tools. `allow_private_addresses` affects targets only. Doctor reports
+refused delegation with the deployment guide; it does not verify egress policies.
+Offline coverage lives in `backend/tests/test_doctor.py`.
 
 CLI credential JSON checks accept UTF-8 with or without a leading BOM, matching
 the runtime credential loader. Keep `_load_json_object` on `utf-8-sig`; malformed
@@ -89,6 +166,12 @@ defaults `DEER_FLOW_PROJECT_ROOT` to the checkout, as `serve.sh` does, so
 `DEER_FLOW_CONFIG_PATH` or invalid project root is an error, never a fallback.
 Only "no config anywhere" creates `<checkout>/config.yaml` from the example.
 `backend/tests/test_config_version.py::test_config_upgrade_*` pins this.
+
+## Multi-Instance Dev Harness
+
+`dev_multi_instance.{sh,py}` must keep the rendered config passing the real
+multi-instance gate and every endpoint/data root inside its state dir
+(`backend/tests/test_dev_multi_instance_script.py`).
 
 ## Shell Script Invocation Contract
 

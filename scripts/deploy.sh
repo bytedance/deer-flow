@@ -120,6 +120,25 @@ fi
 echo -e "${BLUE}DEER_FLOW_HOME=$DEER_FLOW_HOME${NC}"
 mkdir -p "$DEER_FLOW_HOME"
 
+# ── DEER_FLOW_HOME writability preflight ─────────────────────────────────────
+
+# `make docker-start` bind-mounts the host `backend/` directory into the gateway
+# container, whose process runs as root, so state it creates under
+# backend/.deer-flow ends up owned by root on the host. A later `make up` runs
+# this script as the invoking user and only fails deep into the run with a bare
+# "Permission denied" while persisting generated secrets. Detect it up front and
+# print the exact recovery command instead.
+fail_home_permission() {
+    echo -e "${RED}✗ $1 is not $2 by '$(id -un)'.${NC}" >&2
+    echo -e "${RED}  This usually happens when the dev stack (make docker-start) created it as root.${NC}" >&2
+    echo -e "${YELLOW}  Recover with: sudo chown -R $(id -u):$(id -g) '$DEER_FLOW_HOME'${NC}" >&2
+    exit 1
+}
+
+if [ "$CMD" != "down" ] && [ ! -w "$DEER_FLOW_HOME" ]; then
+    fail_home_permission "$DEER_FLOW_HOME" writable
+fi
+
 # ── DEER_FLOW_REPO_ROOT (for skills host path in DooD) ───────────────────────
 
 export DEER_FLOW_REPO_ROOT="$REPO_ROOT"
@@ -208,10 +227,15 @@ dotenv_provides_secret() {
 # sessions survive container restarts.
 
 _secret_file="$DEER_FLOW_HOME/.better-auth-secret"
-if [ -z "$BETTER_AUTH_SECRET" ] && dotenv_provides_secret BETTER_AUTH_SECRET; then
+if [ "$CMD" != "down" ] && [ -z "$BETTER_AUTH_SECRET" ] && dotenv_provides_secret BETTER_AUTH_SECRET; then
     echo -e "${GREEN}✓ BETTER_AUTH_SECRET loaded from $ENV_FILE${NC}"
-elif [ -z "$BETTER_AUTH_SECRET" ]; then
+elif [ "$CMD" != "down" ] && [ -z "$BETTER_AUTH_SECRET" ]; then
     if [ -f "$_secret_file" ]; then
+        # A writable directory can still contain a root-owned, unreadable file.
+        # Persisted secrets are only read; read-only files and overrides are valid.
+        if [ ! -r "$_secret_file" ]; then
+            fail_home_permission "$_secret_file" readable
+        fi
         export BETTER_AUTH_SECRET
         BETTER_AUTH_SECRET="$(cat "$_secret_file")"
         echo -e "${GREEN}✓ BETTER_AUTH_SECRET loaded from $_secret_file${NC}"
@@ -246,6 +270,9 @@ if [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_INTERNAL_AUTH_TOKEN" ] && dotenv_pro
     echo -e "${GREEN}✓ DEER_FLOW_INTERNAL_AUTH_TOKEN loaded from $ENV_FILE${NC}"
 elif [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_INTERNAL_AUTH_TOKEN" ]; then
     if [ -f "$_internal_auth_token_file" ]; then
+        if [ ! -r "$_internal_auth_token_file" ]; then
+            fail_home_permission "$_internal_auth_token_file" readable
+        fi
         export DEER_FLOW_INTERNAL_AUTH_TOKEN
         DEER_FLOW_INTERNAL_AUTH_TOKEN="$(cat "$_internal_auth_token_file")"
         echo -e "${GREEN}✓ DEER_FLOW_INTERNAL_AUTH_TOKEN loaded from $_internal_auth_token_file${NC}"
@@ -269,6 +296,53 @@ elif [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_INTERNAL_AUTH_TOKEN" ]; then
         chmod 600 "$_internal_auth_token_file"
         echo -e "${GREEN}✓ DEER_FLOW_INTERNAL_AUTH_TOKEN generated → $_internal_auth_token_file${NC}"
     fi
+fi
+
+# ── DEER_FLOW_CREDENTIALS_KEY ────────────────────────────────────────────────
+# At-rest Fernet key the Gateway encrypts stored credentials with. Losing it
+# makes those credentials unreadable, so back the file up. It is persisted
+# under the name the Gateway itself generates in its runtime home (the
+# $DEER_FLOW_HOME bind mount), so a key either side created first is the one
+# both keep. noclobber turns the redirection into an exclusive (O_EXCL)
+# create: when a concurrent run wins, its key is read back instead of ours.
+
+_credentials_key_file="$DEER_FLOW_HOME/.credentials_key"
+if [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_CREDENTIALS_KEY" ] && dotenv_provides_secret DEER_FLOW_CREDENTIALS_KEY; then
+    echo -e "${GREEN}✓ DEER_FLOW_CREDENTIALS_KEY loaded from $ENV_FILE${NC}"
+elif [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_CREDENTIALS_KEY" ]; then
+    _generated_credentials_key=""
+    if [ ! -f "$_credentials_key_file" ]; then
+        # urlsafe base64 of 32 random bytes, the Fernet key format.
+        if command -v python3 > /dev/null 2>&1 && \
+            _generated_credentials_key="$(python3 -c 'import sys; sys.version_info >= (3, 6) or sys.exit(1); import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())' 2>/dev/null)"; then
+            true
+        elif command -v python > /dev/null 2>&1 && \
+            _generated_credentials_key="$(python -c 'import sys; sys.version_info >= (3, 6) or sys.exit(1); import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())' 2>/dev/null)"; then
+            true
+        elif command -v openssl > /dev/null 2>&1 && \
+            _generated_credentials_key="$(openssl rand -base64 32 | tr '+/' '-_')"; then
+            true
+        else
+            echo -e "${RED}✗ Cannot generate DEER_FLOW_CREDENTIALS_KEY: python3, python, and openssl are all unavailable.${NC}" >&2
+            echo -e "${RED}  Set DEER_FLOW_CREDENTIALS_KEY manually before running make up.${NC}" >&2
+            exit 1
+        fi
+        if ! ( umask 077; set -o noclobber; printf '%s\n' "$_generated_credentials_key" > "$_credentials_key_file" ) 2>/dev/null; then
+            _generated_credentials_key=""
+        fi
+    fi
+    if [ -n "$_generated_credentials_key" ]; then
+        export DEER_FLOW_CREDENTIALS_KEY="$_generated_credentials_key"
+        echo -e "${GREEN}✓ DEER_FLOW_CREDENTIALS_KEY generated → $_credentials_key_file (back it up)${NC}"
+    else
+        if [ ! -r "$_credentials_key_file" ]; then
+            fail_home_permission "$_credentials_key_file" readable
+        fi
+        export DEER_FLOW_CREDENTIALS_KEY
+        DEER_FLOW_CREDENTIALS_KEY="$(cat "$_credentials_key_file")"
+        echo -e "${GREEN}✓ DEER_FLOW_CREDENTIALS_KEY loaded from $_credentials_key_file${NC}"
+    fi
+    unset _generated_credentials_key
 fi
 
 # ── UV_EXTRAS auto-detection ─────────────────────────────────────────────────

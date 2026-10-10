@@ -5,8 +5,17 @@ import { z } from "zod";
 export const userSchema = z.object({
   id: z.string(),
   email: z.string().email(),
-  system_role: z.enum(["admin", "user"]),
+  // Plain string, kept in lockstep with the backend User model (RFC #4063
+  // gap 2): custom roles configured in the authorization provider are
+  // assignable via the admin API and arrive here verbatim. Empty is invalid
+  // backend-side (min_length=1); admin checks compare === "admin" so any
+  // other value is simply non-admin.
+  system_role: z.string().min(1),
   needs_setup: z.boolean().optional().default(false),
+  // Account lifecycle (RFC #4063 gap 3): true when the account is
+  // operator-suspended. Optional so pre-gap-3 backends (and test literals)
+  // parse unchanged — absent means not disabled.
+  disabled: z.boolean().optional(),
   oauth_provider: z.string().nullable().optional().default(null),
   // Effective route permissions (RFC #4063 Phase 4). Optional + nullable:
   // absent = pre-Phase-4 backend, null = credential-creation response that

@@ -24,8 +24,11 @@ from deerflow.mcp.interceptors import build_mcp_tool_interceptors, compose_tool_
 from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor, get_initial_oauth_headers
 from deerflow.mcp.session_pool import (
     MCPPoolDomain,
+    MCPSessionPool,
+    ServerBinding,
     call_pooled_session_tool,
     get_session_pool,
+    normalized_connection_fingerprint,
 )
 from deerflow.mcp.tasks import ORDINARY_MCP_TASK_DRIVER, TaskSubmitRequest
 from deerflow.mcp.tasks.runtime import (
@@ -38,6 +41,7 @@ from deerflow.mcp_scope import mcp_session_scope_key, runtime_thread_incarnation
 from deerflow.reflection import resolve_variable
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.mcp_metadata import tag_mcp_routing, tag_mcp_tool
+from deerflow.tools.resource_placeholder import model_visible_location, resource_placeholder_text
 from deerflow.tools.sync import make_sync_tool_wrapper
 from deerflow.tools.types import Runtime
 
@@ -437,6 +441,18 @@ def _convert_call_tool_result(
     with their cwd/temp pinned inside the mounted tree, so they already live in
     a servable location. Remote URIs and files outside the thread's user-data
     tree are left untouched.
+
+    ``ResourceLink`` items never become URL-sourced ``file`` blocks: Chat
+    Completions message serialization rejects those, and once the result is
+    checkpointed every later turn of the thread fails. An ``http(s)`` image
+    link stays an image block; every other link (``ui://`` cards, local files
+    at virtual paths, remote non-image links, unknown schemes) becomes a short
+    text placeholder, and the link is preserved as structured data in the
+    artifact under ``resource_links``. Placeholders never embed host
+    filesystem paths: a link that stays unresolved (outside the thread's
+    user-data tree, or no thread context) omits the location segment rather
+    than leaking a raw ``file://`` URI or bare path, and non-referenceable
+    ``data:``/``blob:`` URIs are dropped from the artifact channel too.
     """
     from langchain_core.messages import ToolMessage
     from langchain_core.messages.content import create_file_block, create_image_block, create_text_block
@@ -479,6 +495,7 @@ def _convert_call_tool_result(
 
     # Convert MCP content blocks to LangChain content blocks.
     lc_content = []
+    resource_links: list[dict[str, Any]] = []
     for item in call_tool_result.content:
         if isinstance(item, TextContent):
             lc_content.append(create_text_block(text=_resolve_text(item.text)))
@@ -487,10 +504,40 @@ def _convert_call_tool_result(
         elif isinstance(item, ResourceLink):
             mime = item.mimeType or None
             url = _resolve_link_url(str(item.uri))
-            if mime and mime.startswith("image/"):
+            if mime and mime.startswith("image/") and url.lower().startswith(("http://", "https://")):
                 lc_content.append(create_image_block(url=url, mime_type=mime))
+            elif url.lower().startswith(("data:", "blob:")):
+                # ``data:``/``blob:`` URIs never enter state: a ``data:`` URI
+                # embeds the whole payload, so inlining it would put megabytes
+                # of base64 into model-visible text and into checkpointed
+                # ``resource_links``; a ``blob:`` URI names a browser-local
+                # object nothing else can dereference. ``image/*`` links are
+                # downgraded here too, by design: the conversion layer keeps
+                # NEW inline payloads out of state, while the read-time
+                # middleware passes persisted ``data:`` image blocks through
+                # (it only heals blocks already in checkpoints). Neither is
+                # referenceable, so the raw URI is dropped from the artifact
+                # channel and the placeholder omits the location segment.
+                lc_content.append(create_text_block(text=resource_placeholder_text(name=item.name or "unnamed", mime_type=mime)))
             else:
-                lc_content.append(create_file_block(url=url, mime_type=mime))
+                # URL-sourced file blocks are rejected by Chat Completions
+                # serialization (langchain-core), which bricks the thread once
+                # the result is checkpointed. Downgrade every other link to a
+                # text placeholder and keep the structured link in the artifact
+                # channel. The placeholder shows the location only when the
+                # resolved URL carries no host-path risk — a raw ``file://``
+                # URI or bare host path is withheld from model-visible text
+                # but still recorded in the artifact channel.
+                lc_content.append(
+                    create_text_block(
+                        text=resource_placeholder_text(
+                            name=item.name or "unnamed",
+                            mime_type=mime,
+                            url=model_visible_location(url),
+                        )
+                    )
+                )
+                resource_links.append({"name": item.name, "uri": url, "mime_type": mime})
         elif isinstance(item, EmbeddedResource):
             from mcp.types import BlobResourceContents
 
@@ -515,6 +562,10 @@ def _convert_call_tool_result(
     artifact = None
     if call_tool_result.structuredContent is not None:
         artifact = {"structured_content": call_tool_result.structuredContent}
+    if resource_links:
+        if artifact is None:
+            artifact = {}
+        artifact["resource_links"] = resource_links
 
     return lc_content, artifact
 
@@ -545,6 +596,9 @@ def _make_session_pool_tool(
     session_init_timeout: float | None = None,
     tool_name_prefix: bool = True,
     ownership_domain: MCPPoolDomain = "deployment",
+    *,
+    pool: MCPSessionPool | None = None,
+    binding: ServerBinding | None = None,
 ) -> BaseTool:
     """Wrap an MCP tool so it reuses a persistent session from the pool.
 
@@ -563,7 +617,15 @@ def _make_session_pool_tool(
     if tool_name_prefix and original_name.startswith(prefix):
         original_name = original_name[len(prefix) :]
 
-    pool = get_session_pool()
+    if pool is None:
+        pool = get_session_pool()
+    if binding is None and isinstance(pool, MCPSessionPool):
+        binding = pool.ensure_binding(
+            server_name,
+            normalized_connection_fingerprint(connection),
+            domain=ownership_domain,
+        )
+    effective_domain = binding.domain if binding is not None else ownership_domain
 
     async def call_with_persistent_session(
         runtime: Runtime | None = None,
@@ -613,16 +675,25 @@ def _make_session_pool_tool(
             session_env.setdefault("TMP", str(tmp_dir))
             session_env.setdefault("TEMP", str(tmp_dir))
             session_connection["env"] = session_env
-        session_request = (
-            pool.get_session(server_name, scope_key, session_connection)
-            if ownership_domain == "deployment"
-            else pool.get_session(
+        if binding is not None:
+            session_request = pool.get_session(
                 server_name,
                 scope_key,
                 session_connection,
-                domain=ownership_domain,
+                binding=binding,
             )
-        )
+        elif effective_domain == "deployment":
+            # Compatibility for direct unit-test fakes that construct this
+            # wrapper without going through get_mcp_tools(). Production
+            # discovery always supplies the explicit binding above.
+            session_request = pool.get_session(server_name, scope_key, session_connection)
+        else:
+            session_request = pool.get_session(
+                server_name,
+                scope_key,
+                session_connection,
+                domain=effective_domain,
+            )
         if session_init_timeout is not None:
             # Cancellation here is safe: MCPSessionPool.get_session owns the
             # teardown of a session stuck mid-creation (it signals close and
@@ -647,7 +718,7 @@ def _make_session_pool_tool(
         else:
             session = await session_request
 
-        domain_kwargs = {"domain": ownership_domain} if ownership_domain != "deployment" else {}
+        domain_kwargs = {"domain": effective_domain} if effective_domain != "deployment" else {}
 
         # Build common call_tool kwargs once — only add keys when needed so
         # existing call-sites that assert on exact arguments are not affected.
@@ -858,7 +929,12 @@ def _configure_task_tools_for_server(
     return configured
 
 
-async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, personal_user_id: str | None = None) -> list[BaseTool]:
+async def get_mcp_tools(
+    extensions_config: ExtensionsConfig | None = None,
+    *,
+    personal_user_id: str | None = None,
+    session_pool: MCPSessionPool | None = None,
+) -> list[BaseTool]:
     """Get all tools from enabled MCP servers.
 
     Tools using stdio transport are wrapped with persistent-session logic so
@@ -870,6 +946,10 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
         extensions_config: Optional pre-loaded extensions config. Callers that
             must prove which config revision produced these tools pass the exact
             instance they snapshotted; ``None`` loads the latest config from disk.
+        session_pool: Optional session pool captured by the caller. Cache
+            initializers pass the exact pool their generation owns so a
+            superseded claim cannot install bindings into a replacement pool;
+            ``None`` resolves the current singleton.
 
     Returns:
         List of LangChain tools from all enabled MCP servers.
@@ -907,6 +987,22 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
         logger.info("No enabled MCP servers configured")
         return []
 
+    # Capture the exact pool and stdio binding before the first discovery await.
+    # A later reset/reconcile can supersede this capability, but a stale wrapper
+    # can never silently pair its old connection with a replacement pool/epoch.
+    pool = session_pool
+    if pool is None:
+        pool = get_session_pool()
+    ownership_domain: MCPPoolDomain = "personal" if personal_user_id is not None else "deployment"
+    server_bindings: dict[str, ServerBinding] = {}
+    for server_name, server_connection in servers_config.items():
+        if server_connection.get("transport", "stdio") == "stdio":
+            server_bindings[server_name] = pool.ensure_binding(
+                server_name,
+                normalized_connection_fingerprint(server_connection),
+                domain=ownership_domain,
+            )
+
     try:
         # Create the multi-server MCP client
         logger.info(f"Initializing MCP client with {len(servers_config)} server(s)")
@@ -938,7 +1034,10 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
             tool_name_prefix=True,
         )
 
-        async def load_server_tools(server_name: str) -> list[BaseTool]:
+        async def load_server_tools(server_name: str) -> list[BaseTool] | None:
+            # ``None`` marks a server whose discovery failed, which is distinct
+            # from a server that answered with zero tools: only the latter is
+            # evidence that configured task_toolsets name missing tools.
             try:
                 server_cfg = extensions_config.mcp_servers.get(server_name)
                 tool_name_prefix = server_cfg.tool_name_prefix if server_cfg is not None else True
@@ -984,19 +1083,19 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
                             server_name,
                             session_init_timeout,
                         )
-                        return []
+                        return None
                 return await discovery
             except Exception as e:
                 logger.warning(
                     f"Skipping MCP server '{server_name}' after tool discovery failed: {e}",
                     exc_info=True,
                 )
-                return []
+                return None
 
         # Get tools from each server independently so one broken MCP server does
         # not prevent healthy servers from contributing their tools.
         tools_by_server = await asyncio.gather(*(load_server_tools(name) for name in servers_config))
-        tools = [tool for server_tools in tools_by_server for tool in server_tools]
+        tools = [tool for server_tools in tools_by_server if server_tools is not None for tool in server_tools]
         logger.info(f"Successfully loaded {len(tools)} tool(s) from MCP servers")
 
         # Wrap each tool with persistent-session logic.
@@ -1011,6 +1110,11 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
         # "web_") matches "web" first), which pools the tool under the wrong server. Using the
         # source grouping makes routing exact even when a server opts out of name prefixing.
         for source_name, server_tools in zip(servers_config.keys(), tools_by_server, strict=True):
+            if server_tools is None:
+                # Discovery already logged the skip. Validating task_toolsets
+                # against a server that never answered would report every
+                # raw tool as missing and discard the healthy servers' tools.
+                continue
             transport = servers_config[source_name].get("transport", "stdio")
             server_cfg = extensions_config.mcp_servers.get(source_name)
             tool_name_prefix = server_cfg.tool_name_prefix if server_cfg is not None else True
@@ -1042,7 +1146,9 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
                             tool_call_timeout=_timeout,
                             session_init_timeout=_init_timeout,
                             tool_name_prefix=tool_name_prefix,
-                            ownership_domain=("personal" if personal_user_id is not None else "deployment"),
+                            ownership_domain=ownership_domain,
+                            pool=pool,
+                            binding=server_bindings[source_name],
                         )
                     )
                 else:

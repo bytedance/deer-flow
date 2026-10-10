@@ -38,6 +38,14 @@ class _FakeRedis:
         self.deleted = []
         self.expirations = []
         self.closed = False
+        self.ping_calls = 0
+        self.ping_error: Exception | None = None
+
+    async def ping(self):
+        self.ping_calls += 1
+        if self.ping_error is not None:
+            raise self.ping_error
+        return True
 
     async def xadd(self, name, fields, maxlen=None, approximate=True):
         self.counters[name] += 1
@@ -533,6 +541,42 @@ async def test_concurrent_slow_consumers_receive_gap():
 @pytest.fixture
 def redis_bridge() -> RedisStreamBridge:
     return RedisStreamBridge(redis_url="redis://fake", queue_maxsize=2, client=_FakeRedis())
+
+
+# ---------------------------------------------------------------------------
+# Readiness ping
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_memory_bridge_ping_has_no_external_backend():
+    """The in-process bridge has nothing external to probe and never reports unreachable."""
+    bridge = MemoryStreamBridge()
+
+    assert bridge.supports_cross_process is False
+    assert await bridge.ping() is True
+
+
+@pytest.mark.anyio
+async def test_redis_bridge_ping_reports_reachable_backend():
+    fake = _FakeRedis()
+    bridge = RedisStreamBridge(redis_url="redis://fake", queue_maxsize=2, client=fake)
+
+    assert bridge.supports_cross_process is True
+    assert await bridge.ping() is True
+    assert fake.ping_calls == 1
+
+
+@pytest.mark.anyio
+async def test_redis_bridge_ping_reports_unreachable_backend_on_redis_error():
+    """A Redis-side failure is a readiness answer (False), not an exception for the probe to unpack."""
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    fake = _FakeRedis()
+    fake.ping_error = RedisConnectionError("connection refused")
+    bridge = RedisStreamBridge(redis_url="redis://fake", queue_maxsize=2, client=fake)
+
+    assert await bridge.ping() is False
 
 
 @pytest.mark.anyio

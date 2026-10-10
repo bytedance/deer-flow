@@ -150,6 +150,18 @@ spec:
                   name: {{ include "deer-flow.appSecret" . }}
                   key: AUTH_JWT_SECRET
                   optional: {{ ne (include "deer-flow.gatewayMultiInstance" .) "true" }}
+            # At-rest key for stored credentials, shared by every Pod so one
+            # Pod can decrypt what another stored. Optional so a user-managed
+            # existingAppSecret without it still boots: a single Pod then falls
+            # back to .credentials_key on the home volume, and the Gateway's own
+            # startup gate refuses a multi-instance deployment that stores
+            # credentials (channel_connections) without the key.
+            - name: DEER_FLOW_CREDENTIALS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "deer-flow.appSecret" . }}
+                  key: DEER_FLOW_CREDENTIALS_KEY
+                  optional: true
             {{- if .Values.provisioner.enabled }}
             # Shared gateway -> bundled-provisioner key. config.yaml references
             # it as sandbox.provisioner_api_key: $PROVISIONER_API_KEY, and the
@@ -216,9 +228,12 @@ spec:
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
-            # /health/ready bounds both probes to a 3s endpoint deadline;
+            # /health/ready bounds all its probes (database, checkpointer,
+            # Redis stream bridge, provisioner) to a 3s endpoint deadline;
             # timeoutSeconds must stay above that bound or Kubernetes aborts
-            # slow-but-healthy responses at its 1s default.
+            # slow-but-healthy responses at its 1s default. An unreachable
+            # Redis makes the pod unready; the provisioner verdict is
+            # report-only.
             timeoutSeconds: 5
           livenessProbe:
             httpGet:
@@ -251,6 +266,13 @@ spec:
             - name: home
               mountPath: /app/backend/.deer-flow
               subPath: deer-flow
+            # Pod-local home for DeerMem's rebuildable SQLite retrieval index
+            # (config memory.backend_config.retrieval_index_path). SQLite WAL is
+            # unsupported on network filesystems and peers must not rebuild or
+            # delete each other's index, so it never lives on the shared home
+            # volume; fsGroup 1000 above makes the emptyDir writable by uid 1000.
+            - name: memory-index
+              mountPath: /var/lib/deerflow/memory-index
       volumes:
         - name: config
           configMap:
@@ -275,3 +297,5 @@ spec:
           {{- else }}
           emptyDir: {}
         {{- end }}
+        - name: memory-index
+          emptyDir: {}

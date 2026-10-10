@@ -18,8 +18,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import FastAPI
 
-from app.gateway.deps import _enforce_postgres_for_multi_worker, _validate_agent_storage, langgraph_runtime
+from app.gateway.deps import (
+    _enforce_credentials_key,
+    _enforce_postgres_for_multi_worker,
+    _validate_agent_storage,
+    _validate_login_throttle_storage,
+    _validate_memory_retrieval_index,
+    credentials_key_consumers,
+    langgraph_runtime,
+)
 from app.gateway.routers.browser import _browser_tools_enabled
+from deerflow.config.credentials_key import CREDENTIALS_KEY_ENV_VAR, GENERATE_KEY_COMMAND
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.deployment_config import MULTI_INSTANCE_ENV_VAR, DeploymentConfig, multi_instance_declaration
 from deerflow.config.run_ownership_config import RunOwnershipConfig
@@ -75,6 +84,7 @@ def isolated_worker_env(monkeypatch):
     monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
     monkeypatch.delenv(MULTI_INSTANCE_ENV_VAR, raising=False)
     monkeypatch.delenv("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", raising=False)
+    monkeypatch.delenv(CREDENTIALS_KEY_ENV_VAR, raising=False)
 
 
 # ---------------------------------------------------------------------------
@@ -707,3 +717,239 @@ def test_deployment_declaration_helpers(monkeypatch):
     by_env = multi_instance_declaration(SimpleNamespace(deployment=DeploymentConfig(multi_instance=True)))
     assert by_env is not None
     assert (by_env.source, by_env.knob, by_env.rollback) == ("env", f"{MULTI_INSTANCE_ENV_VAR}=replicas", f"unset {MULTI_INSTANCE_ENV_VAR}")
+
+
+# ---------------------------------------------------------------------------
+# Login throttle storage warning (auth.local.throttle_storage)
+# ---------------------------------------------------------------------------
+
+
+def _with_throttle_storage(config, selector):
+    config.auth = SimpleNamespace(local=SimpleNamespace(throttle_storage=selector))
+    return config
+
+
+def _throttle_warnings(caplog):
+    return [r.message for r in caplog.records if "auth.local.throttle_storage" in r.message]
+
+
+def test_login_throttle_warning_fires_for_a_declared_multi_instance_deployment_on_memory(caplog):
+    """Explicit memory counters under N replicas hand an attacker N x max_login_attempts guesses."""
+    from deerflow.config.auth_config import LoginThrottleStorage
+
+    with caplog.at_level("WARNING"):
+        _validate_login_throttle_storage(_with_throttle_storage(_cluster_ready(deployment_multi_instance=True), LoginThrottleStorage.MEMORY))
+    messages = _throttle_warnings(caplog)
+    assert messages and "deployment.multi_instance=true" in messages[0]
+    assert "max_login_attempts" in messages[0]
+    # The selector is a StrEnum; the warning must render its value, not "LoginThrottleStorage.MEMORY".
+    assert "auth.local.throttle_storage=memory:" in messages[0]
+    assert "LoginThrottleStorage" not in messages[0]
+
+
+def test_login_throttle_warning_names_the_worker_variable(monkeypatch, caplog):
+    monkeypatch.setenv("WEB_CONCURRENCY", "2")
+    with caplog.at_level("WARNING"):
+        _validate_login_throttle_storage(_with_throttle_storage(_cluster_ready(), "memory"))
+    messages = _throttle_warnings(caplog)
+    assert messages and "WEB_CONCURRENCY=2" in messages[0]
+
+
+def test_login_throttle_auto_resolves_to_the_database_under_multi_instance_without_warning(caplog):
+    with caplog.at_level("WARNING"):
+        _validate_login_throttle_storage(_with_throttle_storage(_cluster_ready(deployment_multi_instance=True), "auto"))
+        _validate_login_throttle_storage(_with_throttle_storage(_cluster_ready(deployment_multi_instance=True), "db"))
+    assert _throttle_warnings(caplog) == []
+
+
+def test_login_throttle_memory_is_silent_for_a_single_instance(caplog):
+    with caplog.at_level("WARNING"):
+        _validate_login_throttle_storage(_with_throttle_storage(_config_with_backend("sqlite"), "memory"))
+    assert _throttle_warnings(caplog) == []
+
+
+def test_login_throttle_gate_tolerates_a_config_without_an_auth_section(caplog):
+    with caplog.at_level("WARNING"):
+        _validate_login_throttle_storage(_cluster_ready(deployment_multi_instance=True))
+    assert _throttle_warnings(caplog) == []
+
+
+# DeerMem retrieval index: a declared multi-instance deployment must keep the
+# derived SQLite index off the shared memory volume.
+# ---------------------------------------------------------------------------
+
+
+def _memory_config(*, enabled: bool = True, manager_class: str = "deermem", **backend_config):
+    return SimpleNamespace(enabled=enabled, manager_class=manager_class, backend_config=backend_config)
+
+
+def _retrieval_index_warnings(caplog) -> list[str]:
+    return [r.message for r in caplog.records if "retrieval_index_path" in r.message]
+
+
+def test_declared_multi_instance_warns_when_the_retrieval_index_shares_the_memory_root(monkeypatch, caplog, tmp_path):
+    monkeypatch.setenv(MULTI_INSTANCE_ENV_VAR, "true")
+    config = _cluster_ready()
+    config.memory = _memory_config(storage_path=str(tmp_path))
+    with caplog.at_level("WARNING"):
+        _validate_memory_retrieval_index(config)
+    messages = _retrieval_index_warnings(caplog)
+    assert messages, "the default index location is inside storage_path and therefore on the shared volume"
+    assert f"{MULTI_INSTANCE_ENV_VAR}=true" in messages[0], "must name the knob that declared the topology"
+    assert str(tmp_path / ".retrieval") in messages[0]
+    assert str(tmp_path) in messages[0]
+
+
+def test_declared_multi_instance_warns_when_a_relative_index_path_stays_below_storage_path(caplog, tmp_path):
+    config = _cluster_ready(deployment_multi_instance=True)
+    config.memory = _memory_config(storage_path=str(tmp_path), retrieval_index_path="pod-index")
+    with caplog.at_level("WARNING"):
+        _validate_memory_retrieval_index(config)
+    messages = _retrieval_index_warnings(caplog)
+    assert messages and "deployment.multi_instance=true" in messages[0]
+    assert str(tmp_path / "pod-index") in messages[0]
+
+
+def test_declared_multi_instance_defaults_the_memory_root_to_runtime_home(monkeypatch, caplog, tmp_path):
+    """An empty storage_path means the host injects runtime_home(), which is the shared home volume."""
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    config = _cluster_ready(deployment_multi_instance=True)
+    config.memory = _memory_config()
+    with caplog.at_level("WARNING"):
+        _validate_memory_retrieval_index(config)
+    messages = _retrieval_index_warnings(caplog)
+    assert messages and str(tmp_path.resolve() / ".retrieval") in messages[0]
+
+
+def test_declared_multi_instance_accepts_an_instance_local_retrieval_index(caplog, tmp_path):
+    config = _cluster_ready(deployment_multi_instance=True)
+    config.memory = _memory_config(storage_path=str(tmp_path / "home"), retrieval_index_path=str(tmp_path / "pod-local"))
+    with caplog.at_level("WARNING"):
+        _validate_memory_retrieval_index(config)
+    assert _retrieval_index_warnings(caplog) == []
+
+
+def test_retrieval_index_warning_requires_the_multi_instance_declaration(monkeypatch, caplog, tmp_path):
+    """Workers of one process tree share local disk, where a shared WAL index is supported."""
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    config = _cluster_ready()
+    config.memory = _memory_config(storage_path=str(tmp_path))
+    with caplog.at_level("WARNING"):
+        _validate_memory_retrieval_index(config)
+    assert _retrieval_index_warnings(caplog) == []
+
+
+@pytest.mark.parametrize(
+    "memory",
+    [
+        None,
+        _memory_config(enabled=False, storage_path="/shared/home"),
+        _memory_config(manager_class="mem0", storage_path="/shared/home"),
+        _memory_config(storage_path="/shared/home", retrieval_adapter=""),
+        _memory_config(storage_path="/shared/home", retrieval_adapter="my_pkg.retrieval:create"),
+    ],
+)
+def test_retrieval_index_warning_only_covers_the_bundled_fts5_index(caplog, memory):
+    config = _cluster_ready(deployment_multi_instance=True)
+    if memory is not None:
+        config.memory = memory
+    with caplog.at_level("WARNING"):
+        _validate_memory_retrieval_index(config)
+    assert _retrieval_index_warnings(caplog) == []
+
+
+# ---------------------------------------------------------------------------
+# At-rest credentials key (DEER_FLOW_CREDENTIALS_KEY)
+# ---------------------------------------------------------------------------
+
+_VALID_KEY = "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="
+
+
+def _with_channel_connections(config, *, enabled: bool = True):
+    config.channel_connections = SimpleNamespace(enabled=enabled)
+    return config
+
+
+def test_credentials_key_consumers_name_the_enabled_features():
+    assert credentials_key_consumers(_cluster_ready()) == [], "a config without the section uses no key"
+    assert credentials_key_consumers(_with_channel_connections(_cluster_ready(), enabled=False)) == []
+    assert credentials_key_consumers(_with_channel_connections(_cluster_ready())) == ["channel_connections.enabled=true"]
+
+
+def test_declared_multi_instance_with_channel_connections_requires_the_credentials_key():
+    """Each instance would otherwise generate its own key file and could not read its peers' credentials."""
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_credentials_key(_with_channel_connections(_cluster_ready(deployment_multi_instance=True)))
+    msg = str(exc_info.value)
+    assert CREDENTIALS_KEY_ENV_VAR in msg
+    assert "deployment.multi_instance=true" in msg
+    assert "channel_connections.enabled=true" in msg
+    assert GENERATE_KEY_COMMAND in msg, "the refusal must say how to generate a key"
+    assert "Helm" in msg
+    assert "deployment.multi_instance=false" in msg, "must name the rollback knob"
+    assert "or set channel_connections.enabled=false" in msg, "must name the setting that turns the consumer off"
+
+
+def test_env_declared_multi_instance_names_the_env_knob(monkeypatch):
+    monkeypatch.setenv(MULTI_INSTANCE_ENV_VAR, "1")
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_credentials_key(_with_channel_connections(_cluster_ready()))
+    msg = str(exc_info.value)
+    assert f"{MULTI_INSTANCE_ENV_VAR}=1" in msg
+    assert f"unset {MULTI_INSTANCE_ENV_VAR}" in msg
+
+
+def test_declared_multi_instance_accepts_a_shared_credentials_key(monkeypatch):
+    monkeypatch.setenv(CREDENTIALS_KEY_ENV_VAR, _VALID_KEY)
+    _enforce_credentials_key(_with_channel_connections(_cluster_ready(deployment_multi_instance=True)))
+
+
+@pytest.mark.parametrize("channel_connections", [None, False], ids=["section-absent", "disabled"])
+def test_declared_multi_instance_without_key_consumers_keeps_booting(channel_connections):
+    """Existing multi-instance deployments that store no credentials must not need the key."""
+    config = _cluster_ready(deployment_multi_instance=True)
+    if channel_connections is not None:
+        _with_channel_connections(config, enabled=channel_connections)
+    _enforce_credentials_key(config)
+
+
+def test_multi_worker_without_a_declaration_shares_the_generated_key_file(monkeypatch):
+    """Workers of one process tree share base_dir, where the exclusive-create key file converges."""
+    monkeypatch.setenv("GATEWAY_WORKERS", "4")
+    _enforce_credentials_key(_with_channel_connections(_cluster_ready()))
+
+
+def test_single_instance_without_a_credentials_key_keeps_booting():
+    _enforce_credentials_key(_with_channel_connections(_config_with_backend("sqlite")))
+
+
+@pytest.mark.parametrize("declared", [False, True], ids=["single-instance", "multi-instance"])
+@pytest.mark.parametrize("value", ["not-a-fernet-key", f"{_VALID_KEY},second-entry-is-garbage"], ids=["garbage", "bad-rotation-entry"])
+def test_a_malformed_credentials_key_is_refused_without_echoing_it(monkeypatch, declared, value):
+    monkeypatch.setenv(CREDENTIALS_KEY_ENV_VAR, value)
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_credentials_key(_with_channel_connections(_cluster_ready(deployment_multi_instance=declared)))
+    msg = str(exc_info.value)
+    assert CREDENTIALS_KEY_ENV_VAR in msg
+    assert "not-a-fernet-key" not in msg and "second-entry-is-garbage" not in msg and _VALID_KEY not in msg
+
+
+@pytest.mark.asyncio
+async def test_langgraph_runtime_enforces_the_credentials_key_before_persistence_setup():
+    init_engine_from_config = AsyncMock(name="init_engine_from_config")
+
+    @asynccontextmanager
+    async def _noop_stream_bridge(_config):
+        yield MagicMock()
+
+    with (
+        patch("deerflow.persistence.engine.init_engine_from_config", init_engine_from_config),
+        patch("deerflow.runtime.make_stream_bridge", side_effect=_noop_stream_bridge) as make_stream_bridge,
+    ):
+        startup_config = _with_channel_connections(_cluster_ready(deployment_multi_instance=True))
+        with pytest.raises(SystemExit, match=CREDENTIALS_KEY_ENV_VAR):
+            async with langgraph_runtime(FastAPI(), startup_config):
+                pass
+
+    init_engine_from_config.assert_not_called()
+    make_stream_bridge.assert_not_called()
