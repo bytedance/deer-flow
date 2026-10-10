@@ -28,6 +28,18 @@ def test_gate_keeps_virtual_paths_and_remote_schemes():
     assert model_visible_location("s3://bucket/report.pdf") == "s3://bucket/report.pdf"
 
 
+def test_gate_keeps_exact_virtual_root_and_descendants():
+    assert model_visible_location("/mnt/user-data") == "/mnt/user-data"
+    assert model_visible_location("/mnt/user-data/outputs/a.txt") == "/mnt/user-data/outputs/a.txt"
+
+
+def test_gate_withholds_sibling_directories_sharing_the_prefix():
+    """A sibling like ``/mnt/user-data-backups`` starts with the virtual prefix
+    but is a real host path: its location must be withheld like any other."""
+    assert model_visible_location("/mnt/user-data-backups/ops/private/report.pdf") is None
+    assert model_visible_location("/mnt/user-database/x") is None
+
+
 def test_gate_withholds_host_paths():
     assert model_visible_location("file:///Users/ops/secret.pdf") is None
     assert model_visible_location("/srv/deploy-internal/secret.pdf") is None

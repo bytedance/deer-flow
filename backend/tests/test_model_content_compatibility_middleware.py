@@ -266,6 +266,26 @@ class TestFileUrlProviderGating:
         assert prepared.messages[0].content == [{"type": "text", "text": "[Resource (text/html) available at ui://weather-app/card]"}]
 
 
+class TestSiblingPrefixLocationSuppression:
+    """``/mnt/user-data-backups/...`` shares the virtual prefix but is a real
+    host path: both downgrade branches must withhold its location (US-16)."""
+
+    def test_file_placeholder_withholds_sibling_prefix_location(self):
+        block = _url_file_block("/mnt/user-data-backups/ops/private/report.pdf", "application/pdf")
+        message = _tool_message([block])
+        prepared = _run_sync(ModelContentCompatibilityMiddleware(), _model_request([message]))
+
+        assert prepared.messages[0].content == [{"type": "text", "text": "[Resource (application/pdf)]"}]
+        assert "user-data-backups" not in prepared.messages[0].content[0]["text"]
+
+    def test_image_placeholder_withholds_sibling_prefix_location(self):
+        message = _tool_message([{"type": "image", "url": "/mnt/user-data-backups/ops/private/chart.png", "mime_type": "image/png"}])
+        prepared = _run_sync(ModelContentCompatibilityMiddleware(), _model_request([message]))
+
+        assert prepared.messages[0].content == [{"type": "text", "text": "[Resource (image/png)]"}]
+        assert "user-data-backups" not in prepared.messages[0].content[0]["text"]
+
+
 class TestPlaceholderMetadataNeutralization:
     """The middleware runs after the input/tool-result sanitization passes,
     and historical URL blocks never went through them (non-text content is

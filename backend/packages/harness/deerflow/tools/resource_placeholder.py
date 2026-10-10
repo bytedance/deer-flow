@@ -22,8 +22,11 @@ def model_visible_location(url: str | None) -> str | None:
     Shared by the conversion layer and the read-time middleware so both emit
     placeholders under the same rules:
 
-    - virtual paths (``/mnt/user-data/...``) and remote schemes (``http(s)``,
-      ``ui://``, ``s3://``, ...) carry no host-path risk and stay visible;
+    - virtual paths carry no host-path risk and stay visible — but only the
+      exact virtual root or a slash-delimited descendant: a sibling like
+      ``/mnt/user-data-backups/...`` shares the prefix yet is a real host
+      path, so it must collapse to ``None`` like any other host location;
+      remote schemes (``http(s)``, ``ui://``, ``s3://``, ...) stay visible;
     - a raw ``file://`` URI, a bare host path, or a Windows drive path
       (urlparse reads the drive letter as a single-character scheme) leaks the
       deployment's filesystem layout, so it collapses to ``None`` and the
@@ -35,7 +38,10 @@ def model_visible_location(url: str | None) -> str | None:
     """
     if not url:
         return None
-    if url.startswith(VIRTUAL_PATH_PREFIX):
+    if url == VIRTUAL_PATH_PREFIX or url.startswith(VIRTUAL_PATH_PREFIX + "/"):
+        # Exact virtual root or a slash-delimited descendant. A plain prefix
+        # match would also admit siblings such as ``/mnt/user-data-backups``,
+        # leaking the deployment's directory layout into model-visible text.
         return url
     try:
         scheme = urlparse(url).scheme
