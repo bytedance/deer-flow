@@ -168,3 +168,74 @@ async def test_expired_unreleased_row_is_reclaimed_on_next_redelivery():
         assert row is not None and row[0] is True
     finally:
         await store.release(key)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retirement", ["expired", "released", "outage"])
+async def test_old_manager_cannot_release_another_pods_claim(tmp_path, retirement):
+    """Retired admissions and recovered fail-open attempts require scoped cleanup."""
+    from unittest.mock import MagicMock
+
+    from sqlalchemy import text
+
+    from app.channels.manager import ChannelManager
+    from app.channels.message_bus import InboundMessage, MessageBus
+    from app.channels.store import JsonChannelStore
+    from deerflow.persistence.base import Base
+    from deerflow.persistence.engine import get_engine, get_session_factory
+    from deerflow.persistence.webhook_delivery.model import WebhookDeliveryRow
+
+    sf = get_session_factory()
+    async with get_engine().begin() as conn:
+        await conn.run_sync(Base.metadata.create_all, tables=[WebhookDeliveryRow.__table__], checkfirst=True)
+    store_a = PostgresInboundDedupeStore(session_factory=MagicMock(side_effect=RuntimeError("controlled storage outage")) if retirement == "outage" else sf)
+    store_b = PostgresInboundDedupeStore(session_factory=sf)
+    manager_a = ChannelManager(bus=MessageBus(), store=JsonChannelStore(path=tmp_path / "a.json"), inbound_dedupe_store=store_a)
+    manager_b = ChannelManager(bus=MessageBus(), store=JsonChannelStore(path=tmp_path / "b.json"), inbound_dedupe_store=store_b)
+    message_id = f"claim-{uuid.uuid4().hex}"
+    params = {"c": "slack", "w": "T1", "ch": "C1", "m": message_id}
+    predicate = "channel = :c AND workspace_id = :w AND chat_id = :ch AND message_id = :m"
+
+    def message():
+        return InboundMessage(channel_name="slack", chat_id="C1", user_id="U1", text="same provider payload", workspace_id="T1", metadata={"message_id": message_id})
+
+    async def stored_row():
+        async with sf() as session:
+            return (await session.execute(text(f"SELECT * FROM webhook_deliveries WHERE {predicate}"), params)).one_or_none()
+
+    old, replacement = message(), message()
+    try:
+        assert await manager_a._is_duplicate_inbound(old) is False
+        if retirement == "expired":
+            async with sf() as session:
+                async with session.begin():
+                    await session.execute(
+                        text(f"UPDATE webhook_deliveries SET first_seen = now() - make_interval(secs => :age) WHERE {predicate}"),
+                        {**params, "age": INBOUND_DEDUPE_TTL_SECONDS + 1},
+                    )
+        elif retirement == "released":
+            await manager_a._release_inbound_dedupe_key(old)
+            assert await stored_row() is None
+        else:
+            assert await stored_row() is None
+            # The old manager's DB recovers before its later failure cleanup.
+            store_a._session_factory = sf
+
+        assert await manager_b._is_duplicate_inbound(replacement) is False
+        replacement_row = await stored_row()
+        assert replacement_row is not None
+        await manager_a._release_inbound_dedupe_key(old)
+        assert await stored_row() == replacement_row
+        assert await manager_b._is_duplicate_inbound(message()) is True
+
+        # Repeating retired cleanup must remain harmless, while the current
+        # claimant must still be able to make an ordinary failure retryable.
+        await manager_a._release_inbound_dedupe_key(old)
+        assert await stored_row() == replacement_row
+        await manager_b._release_inbound_dedupe_key(replacement)
+        assert await stored_row() is None
+        assert await manager_b._is_duplicate_inbound(message()) is False
+    finally:
+        async with sf() as session:
+            async with session.begin():
+                await session.execute(text(f"DELETE FROM webhook_deliveries WHERE {predicate}"), params)
