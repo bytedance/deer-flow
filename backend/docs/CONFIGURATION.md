@@ -707,6 +707,31 @@ cannot cancel work already started by Jina. Enabling retries can send up to `1 +
 and incur additional cost. Successful content and final `Error:` results retain
 the existing contract.
 
+#### Jina crawl diagnostics
+
+Set `log_level: debug` in root `config.yaml` and restart the Gateway to enable
+`deerflow.community.jina_ai.jina_client` completion summaries. INFO emits no new
+summary. Each logical crawl emits one `Jina crawl completed` message containing:
+
+- `outcome`: `success`, `error`, or `cancelled`.
+- `reason`: `success`, `empty_response`, `response_limit`, `invalid_configuration`,
+  `nonretryable_http`, `attempt_exhaustion`, `retry_after_unfit`,
+  `budget_exhaustion`, `request_failure`, or `cancellation`.
+- `attempts`: calls started at HTTPX's POST/stream API, including failed connections;
+  zero for rejected settings. This does not prove remote delivery.
+- `elapsed_seconds`: monotonic duration through completion/cleanup.
+- `backoff_seconds`: measured time awaiting retry sleep, including a partially
+  cancelled wait, rather than the planned delay. Neither duration estimates
+  provider latency or cost.
+
+Fields remain in the message in plain and enhanced JSON logging. Existing
+`logging.enhance` trace filtering supplies the inherited request trace ID when
+enabled; no new ID is created. Concurrent crawls keep independent counters but
+may share a request trace. Summaries contain no URL, credentials, response body,
+headers, or exception text. Existing error logs and return values are unchanged.
+Emission is best effort if a logging handler fails. These provider-local records
+explain internal retry decisions; they do not replace tracing or tool results.
+
 #### Jina response byte budget
 
 On the same Jina `web_fetch` tool entry, optionally set `max_response_bytes: 1048576`

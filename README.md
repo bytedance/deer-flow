@@ -178,6 +178,8 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
 
    Jina fetches support opt-in bounded retries via `max_retries` (default `0`) and `retry_budget_seconds` (default `30`) in the tool configuration. Valid `Retry-After` hints set a minimum wait for HTTP 429/503; 429 without a valid hint stays terminal. Hints that cannot fit the remaining budget stop retries. Local backoff remains randomized. Retries may increase upstream requests and cost; see [Jina fetch retries](backend/docs/CONFIGURATION.md#jina-fetch-retries).
 
+   At DEBUG level, Jina emits one bounded crawl completion summary with attempts, elapsed/backoff seconds, outcome and stop reason. See [diagnostics](backend/docs/CONFIGURATION.md#jina-crawl-diagnostics) for configuration and correlation.
+
    Jina also accepts an opt-in `max_response_bytes` tool setting (positive integer; omitted/null disables it). It stops oversized decoded responses before extraction, with no partial success or retry. This leaves the 4096-character output cap unchanged and does not bound HTTPX decompressor allocations or wire bandwidth; see [response budget](backend/docs/CONFIGURATION.md#jina-response-byte-budget).
 
    Run `make doctor` at any time to verify your setup and get actionable fix hints.
