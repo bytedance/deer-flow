@@ -1125,6 +1125,37 @@ reclaim its warm VM on the next acquire; different threads cannot share a VM.
 evicted; active VMs continue and the provider may temporarily exceed the cap if
 all boxes are active.
 
+**Smol Machines microVM Sandbox** (local or Smol Cloud):
+
+```yaml
+sandbox:
+   use: deerflow.community.smol:SmolSandboxProvider
+   target: local                    # or cloud (set SMOL_CLOUD_TOKEN or run smol auth login)
+   image: python:3.12-slim          # OCI image for the agent workspace
+   cpus: 2                          # optional; SDK defaults when omitted
+   memory_mb: 2048                  # optional; SDK defaults when omitted
+   replicas: 3                      # active + warm VMs per gateway process (soft cap)
+   idle_timeout: 600                # seconds before an idle warm VM is deleted; 0 disables
+   ttl_seconds: 86400               # cloud only: cleanup even if the gateway stops unexpectedly
+```
+
+From a DeerFlow checkout, install the optional dependency with
+`cd backend && uv sync --extra smol`. For a published harness install, use
+`pip install "deerflow-harness[smol]"`. Local mode embeds the VM on Linux
+with KVM or macOS with Hypervisor.framework; `target: cloud` uses a hosted VM. If
+you start the Gateway through a container, that container needs access to the
+host virtualization device for local mode; cloud mode needs only the SDK and
+credentials. Both targets support the same DeerFlow command, file, and search
+tools. Each user/thread pair can reclaim its still-warm VM on a later turn;
+other users and threads cannot reuse it. A failed warm VM is replaced
+with a fresh one. `sandbox.bash_command_timeout` bounds command execution.
+
+The provider currently accepts `sandbox.network.mode: open` only, matching
+the default. It refuses `isolated` and `allowlist` so those settings cannot
+silently lose their outbound policy; use the AIO provider for dynamic network
+approvals. Local mode keeps project data on the host, while cloud mode moves
+sandbox workloads to Smol Cloud.
+
 **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service):
 
 This mode runs each sandbox in an isolated Kubernetes Pod on your **host machine's cluster**. Requires Docker Desktop K8s, OrbStack, or similar local K8s setup.
