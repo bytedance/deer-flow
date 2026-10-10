@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -37,6 +38,7 @@ from deerflow.mcp.cache import (
     publish_mcp_tools_cache_reset,
     reset_mcp_tools_cache,  # noqa: F401 - retained module attribute for compatibility/tests
 )
+from deerflow.mcp.lifecycle import LIFECYCLE_KEY, plan_mcp_lifecycle
 from deerflow.mcp.tasks.runtime import McpTaskConfigurationError, validate_mcp_task_config_snapshot
 from deerflow.utils.file_io import await_drained
 
@@ -1227,9 +1229,14 @@ def _commit_mcp_config_write(
     config_path: Path,
     raw_data: dict,
     *,
+    previous_raw: dict,
     check_installation_ids: bool = True,
 ) -> McpReconciliationPending:
     """Persist one validated candidate and install its committed binding fence.
+
+    ``previous_raw`` is the raw pre-mutation snapshot and is required: a
+    controlled MCP write must never be able to silently skip the lifecycle
+    generation update by omitting it.
 
     Must be called while the extensions-config write and file locks are held.
     The parsed candidate and the bytes on disk therefore describe the same
@@ -1239,6 +1246,9 @@ def _commit_mcp_config_write(
         raw_data,
         check_installation_ids=check_installation_ids,
     )
+    raw_data[LIFECYCLE_KEY] = plan_mcp_lifecycle(previous_raw, raw_data, candidate_config=candidate)
+    # Re-parse so the committed fence sees the ledger we just wrote.
+    candidate = validate_raw_extensions_config(raw_data)
     atomic_write_extensions_config(config_path, raw_data)
     try:
         reload_extensions_config()
@@ -1330,7 +1340,7 @@ def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> dict:
             raw_skills = {name: {"enabled": skill.enabled} for name, skill in current_config.skills.items()}
         config_data["skills"] = raw_skills
 
-        pending = _commit_mcp_config_write(config_path, config_data)
+        pending = _commit_mcp_config_write(config_path, config_data, previous_raw=copy.deepcopy(raw_data))
 
     try:
         logger.info(f"MCP configuration updated and saved to: {config_path}")
@@ -1356,6 +1366,7 @@ def _apply_mcp_server_state_update(body: McpServerStateUpdateRequest) -> dict:
             )
 
         raw_data = _load_raw_extensions_config(config_path, create=False)
+        previous_raw = copy.deepcopy(raw_data)
         raw_servers = _raw_mcp_servers(raw_data)
         if body.server_name not in raw_servers:
             raise HTTPException(
@@ -1373,7 +1384,7 @@ def _apply_mcp_server_state_update(body: McpServerStateUpdateRequest) -> dict:
             )
 
         raw_server["enabled"] = body.enabled
-        pending = _commit_mcp_config_write(config_path, raw_data)
+        pending = _commit_mcp_config_write(config_path, raw_data, previous_raw=previous_raw)
 
     try:
         logger.info("MCP server %s enabled state updated to %s", body.server_name, body.enabled)
@@ -1458,6 +1469,7 @@ def _apply_mcp_servers_create(body: McpConfigUpdateRequest) -> dict:
     config_path = _mcp_config_path(create=True)
     with extensions_config_write_lock, extensions_config_file_lock(config_path):
         raw_data = _load_raw_extensions_config(config_path, create=True)
+        previous_raw = copy.deepcopy(raw_data)
         raw_servers = _raw_mcp_servers(raw_data)
         duplicate = next((name for name in body.mcp_servers if name in raw_servers), None)
         if duplicate is not None:
@@ -1471,7 +1483,7 @@ def _apply_mcp_servers_create(body: McpConfigUpdateRequest) -> dict:
             raw_servers[name] = incoming.model_dump()
         raw_data["mcpServers"] = raw_servers
         _ensure_skills_key(raw_data)
-        pending = _commit_mcp_config_write(config_path, raw_data)
+        pending = _commit_mcp_config_write(config_path, raw_data, previous_raw=previous_raw)
 
     try:
         logger.info("Added MCP servers: %s", ", ".join(body.mcp_servers))
@@ -1485,6 +1497,7 @@ def _apply_mcp_server_config_update(body: McpServerConfigUpdateRequest) -> dict:
     config_path = _mcp_config_path(create=False)
     with extensions_config_write_lock, extensions_config_file_lock(config_path):
         raw_data = _load_raw_extensions_config(config_path, create=False)
+        previous_raw = copy.deepcopy(raw_data)
         raw_servers = _raw_mcp_servers(raw_data)
         if body.server_name not in raw_servers:
             raise HTTPException(
@@ -1501,7 +1514,7 @@ def _apply_mcp_server_config_update(body: McpServerConfigUpdateRequest) -> dict:
         _ensure_no_masked_secrets(merged)
         raw_servers[body.server_name] = merged.model_dump()
         raw_data["mcpServers"] = raw_servers
-        pending = _commit_mcp_config_write(config_path, raw_data)
+        pending = _commit_mcp_config_write(config_path, raw_data, previous_raw=previous_raw)
 
     try:
         logger.info("Updated MCP server: %s", body.server_name)
@@ -1515,6 +1528,7 @@ def _apply_mcp_server_delete(server_name: str) -> dict:
     config_path = _mcp_config_path(create=False)
     with extensions_config_write_lock, extensions_config_file_lock(config_path):
         raw_data = _load_raw_extensions_config(config_path, create=False)
+        previous_raw = copy.deepcopy(raw_data)
         raw_servers = _raw_mcp_servers(raw_data)
         if server_name not in raw_servers:
             raise HTTPException(
@@ -1529,6 +1543,7 @@ def _apply_mcp_server_delete(server_name: str) -> dict:
         pending = _commit_mcp_config_write(
             config_path,
             raw_data,
+            previous_raw=previous_raw,
             check_installation_ids=False,
         )
 

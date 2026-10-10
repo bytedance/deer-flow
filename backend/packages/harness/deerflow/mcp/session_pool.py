@@ -277,6 +277,7 @@ class MCPSessionPool:
         *,
         domain: MCPPoolDomain = "deployment",
         retire_unlisted: bool = False,
+        force_rebind: Collection[str] = (),
     ) -> PreparedRetirement:
         """Apply already-classified binding changes and detach only changed owners.
 
@@ -291,10 +292,21 @@ class MCPSessionPool:
         baseline of their own — a restarted process, where a durable-task caller's
         binding is the only record that a server exists — because enumerating
         those names separately would race a concurrent ``ensure_binding()``.
+
+        ``force_rebind`` names servers whose *shared lifecycle version* changed
+        even though ``active`` still reports the same connection fingerprint —
+        the cross-worker ``delete(A) -> identical re-add(A)`` case, where the
+        final effective configuration is indistinguishable from the applied one.
+        A forced server is re-epoched and has its owners detached in this same
+        critical section, exactly like a fingerprint change. Names are scoped to
+        ``domain``: forcing a ``deployment`` server never touches a same-named
+        ``personal`` binding. Callers must pass a name only once per observed
+        generation; passing it again would re-epoch an already-stable server.
         """
         entries: list[tuple[ClientSession, asyncio.AbstractEventLoop, asyncio.Task[Any], asyncio.Event]] = []
         inflight: list[tuple[asyncio.AbstractEventLoop, asyncio.Future[ClientSession], asyncio.Task[Any], asyncio.Event]] = []
         changed: set[str] = set()
+        forced = set(force_rebind)
 
         with self._lock:
             if retire_unlisted:
@@ -307,7 +319,7 @@ class MCPSessionPool:
                 binding_key = (domain, server_name)
                 self._binding_lifecycle_servers.add(binding_key)
                 current = self._bindings.get(binding_key)
-                if current is not None and current.fingerprint == fingerprint:
+                if current is not None and current.fingerprint == fingerprint and server_name not in forced:
                     continue
                 self._install_binding_locked(binding_key, fingerprint)
                 changed.add(server_name)
@@ -976,6 +988,18 @@ def get_session_pool() -> MCPSessionPool:
     with _pool_lock:
         if _pool is None:
             _pool = MCPSessionPool()
+        return _pool
+
+
+def current_session_pool() -> MCPSessionPool | None:
+    """Return the live pool singleton without creating one.
+
+    ``_pool`` is published and replaced under ``_pool_lock``. Callers that only
+    need to observe retained state (for example the MCP cache staleness check)
+    must not read the private global unsynchronized, and must not create a pool
+    as a side effect of a read.
+    """
+    with _pool_lock:
         return _pool
 
 
