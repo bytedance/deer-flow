@@ -47,9 +47,16 @@ The rewrite hooks ``wrap_model_call``/``awrap_model_call`` and hands the
 handler an overridden request, exactly like ``ViewImageMiddleware``: nothing is
 written to state, so checkpoints keep the original blocks (artifact capture and
 other state readers are unaffected) and a poisoned thread heals itself on its
-next turn with no migration. The placeholder text keeps the location visible to
-the model and to the artifact free-text scan; the original link also survives
-in the tool message's structured artifact channel.
+next turn with no migration. Note the placeholder visibility contract differs
+from the conversion layer's: there the placeholder text is checkpointed, so the
+location stays available to the artifact free-text scan and the link survives
+as a structured ``resource_links`` entry. Here the placeholder exists only in
+the request view — a referenceable original block (an http(s) URL, or an
+absolute host path) is still captured as an artifact entry, but from the
+capture-time scan of the *state* block, not from this placeholder; a
+non-referenceable one (raw ``file://``, ``data:``, ``blob:``) yields no entry
+either, and its only remaining copy is the original block in the checkpoint
+this rewrite deliberately never touches.
 
 Scope is deliberately role-agnostic: every request message with list-form
 content is rewritten, not just ``ToolMessage`` history. User uploads are
