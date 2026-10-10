@@ -18,7 +18,10 @@ file suffix. Query strings and fragments are retained in the reference and do
 not determine its file type; a file-like prefix inside a longer path is not
 registered as a shortened URL. Supported file suffixes are matched without
 case sensitivity. Both URL and sandbox-path text scans strip common trailing
-ASCII/CJK prose punctuation and closing quotes or brackets.
+ASCII/CJK prose punctuation and closing quotes or brackets. CJK closers paired
+with openers inside the detected reference are preserved, so a numbered glob
+result such as `/mnt/user-data/workspace/项目（归档）` retains its complete name
+through capture, checkpoint persistence and subsequent handle resolution.
 
 ## Durable projection
 

@@ -175,3 +175,49 @@ def test_remote_url_survives_capture_checkpoint_and_resolved_download(url, closi
     assert made["consumed_by"] == ["call_read"]
     persisted = next(entry for entry in agent.get_state(config).values["tool_artifacts"] if entry["tool_call_id"] == "call_make")
     assert persisted["real_ref"] == url
+
+
+def test_glob_directory_survives_capture_checkpoint_and_resolved_listing(tmp_path):
+    from deerflow.sandbox.tools import _format_glob_results
+
+    directory_name = "项目（归档）"
+    real_ref = f"/mnt/user-data/workspace/{directory_name}"
+    directory = tmp_path / directory_name
+    directory.mkdir()
+    (directory / "report.txt").write_text("report", encoding="utf-8")
+    listed = []
+
+    @tool("glob")
+    def glob_directory(path: str, include_dirs: bool) -> str:
+        """Find a directory using the sandbox's numbered glob result format."""
+        assert path == "/mnt"
+        assert include_dirs is True
+        return _format_glob_results(path, [real_ref], truncated=False)
+
+    @tool("ls")
+    def list_directory(path: str) -> str:
+        """List a directory by its sandbox path or artifact handle."""
+        listed.append(path)
+        return "\n".join(sorted(child.name for child in (tmp_path / path.rsplit("/", 1)[-1]).iterdir()))
+
+    model = _cycle_model()
+    model.responses[0].tool_calls[0].update(name="glob", args={"path": "/mnt", "include_dirs": True}, id="call_glob")
+    model.responses[1].tool_calls[0].update(name="ls", id="call_ls")
+    agent = create_agent(
+        model=model,
+        tools=[glob_directory, list_directory],
+        middleware=[DurableContextMiddleware(), ArtifactCaptureMiddleware(), ArtifactResolutionMiddleware()],
+        state_schema=ThreadState,
+        checkpointer=InMemorySaver(),
+    )
+    config = {"configurable": {"thread_id": THREAD_ID}}
+
+    result = agent.invoke({"messages": [HumanMessage(content="find then list the archive directory")]}, config, context={"thread_id": THREAD_ID})
+
+    assert listed == [real_ref]
+    assert next(message.content for message in result["messages"] if getattr(message, "tool_call_id", None) == "call_ls") == "report.txt"
+    found = next(entry for entry in result["tool_artifacts"] if entry["tool_call_id"] == "call_glob")
+    assert found["real_ref"] == real_ref
+    assert found["consumed_by"] == ["call_ls"]
+    persisted = next(entry for entry in agent.get_state(config).values["tool_artifacts"] if entry["tool_call_id"] == "call_glob")
+    assert persisted["real_ref"] == real_ref

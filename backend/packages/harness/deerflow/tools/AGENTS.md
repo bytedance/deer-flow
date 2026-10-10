@@ -2,8 +2,10 @@
 
 `artifact_registry.py` checks remote file suffixes against the complete parsed
 URL path without case sensitivity. Free-text URL and sandbox-path extraction
-strips common trailing ASCII/CJK prose punctuation; structured references
-remain literal. See [tool artifact middleware](../agents/middlewares/TOOL_ARTIFACTS.md).
+strips common trailing ASCII/CJK prose punctuation while preserving CJK
+closers paired with openers inside the detected reference (including literal
+glob directory names). Structured references remain literal. See
+[tool artifact middleware](../agents/middlewares/TOOL_ARTIFACTS.md).
 
 `task` and `batch_task` opt into JSON checks with `file:<path> json-valid`.
 See [subagents/AGENTS.md](../subagents/AGENTS.md) for read limits and UNVERIFIED semantics.

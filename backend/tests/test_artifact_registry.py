@@ -91,6 +91,28 @@ def test_text_refs_followed_by_cjk_punctuation(ref, suffix):
     assert [entry["ref"] for entry in _detect_refs_in_text(f"Report: {ref}{suffix}")] == [ref]
 
 
+@pytest.mark.parametrize("content_block", [False, True])
+@pytest.mark.parametrize("directory_name", ["项目（归档）", "项目【归档】", "项目《归档》", "项目“归档”", "项目‘归档’", "项目（归档【旧版】）", "项目）归档（完成）"])
+def test_glob_result_preserves_balanced_cjk_directory_names(directory_name, content_block):
+    from deerflow.sandbox.tools import _format_glob_results
+
+    root = "/mnt/user-data/workspace"
+    path = f"{root}/{directory_name}"
+    text = _format_glob_results(root, [path], truncated=False)
+    result = ToolMessage(content=[{"type": "text", "text": text}] if content_block else text, tool_call_id="call_glob", name="glob")
+
+    entries = extract_artifacts_from_result(result, thread_id="thread-glob")
+
+    assert [entry["real_ref"] for entry in entries] == [root, path]
+    assert entries[-1]["display_name"] == directory_name
+
+
+@pytest.mark.parametrize("suffix", ["", "。", "。）", "]"])
+@pytest.mark.parametrize("ref", ["/mnt/user-data/workspace/项目（归档）", "https://files.example/report.pdf?label=项目（归档）"])
+def test_text_refs_preserve_balanced_cjk_closers_while_stripping_prose(ref, suffix):
+    assert [entry["ref"] for entry in _detect_refs_in_text(f"Report: （{ref}{suffix}")] == [ref]
+
+
 @pytest.mark.parametrize(
     "url",
     [
