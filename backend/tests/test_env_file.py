@@ -19,11 +19,15 @@ ENTRYPOINTS = {
 def run_startup(tmp_path, entrypoint="config", selector=None, extra_env=None, prelude=""):
     # Only propagate interpreter necessities, never ambient credentials/config.
     env = {key: os.environ[key] for key in ("PATH", "SYSTEMROOT") if key in os.environ}
-    # The stripped env drops PYTHONUTF8/PYTHONIOENCODING, so the child writes
-    # its stderr in the host's ANSI codepage (cp936 on Chinese Windows) while
-    # a UTF-8-mode parent decodes it as UTF-8 — the reader thread dies on the
-    # first non-ASCII byte and stderr comes back None. Pin the child side.
-    env.update(PYTHONPATH=os.pathsep.join((str(BACKEND), str(BACKEND / "packages/harness"))), AUTH_JWT_SECRET="test-only", PYTHONIOENCODING="utf-8")
+    # The stripped env drops the suite's UTF-8 pins (PYTHONUTF8/PYTHONIOENCODING
+    # from `make test`), so the child's interpreter writes stderr in the host's
+    # ANSI codepage (cp936 on Chinese Windows) while a UTF-8-mode parent decodes
+    # it as UTF-8 — the reader thread dies on the first non-ASCII byte and
+    # stderr comes back None. Pin the child's interpreter to UTF-8 like the
+    # suite does, and pin the parent's capture explicitly so the round-trip is
+    # locale-independent even when pytest runs without the Makefile wrapper
+    # (bare `uv run pytest`, the bug class #6590 eliminated).
+    env.update(PYTHONPATH=os.pathsep.join((str(BACKEND), str(BACKEND / "packages/harness"))), AUTH_JWT_SECRET="test-only", PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
     if selector is not None:
         env["DEER_FLOW_ENV_FILE"] = str(selector)
     env.update(extra_env or {})
@@ -41,7 +45,7 @@ dotenv.main.find_dotenv = lambda *args, **kwargs: {str(default)!r}
 {ENTRYPOINTS[entrypoint]}
 print(json.dumps([os.getenv('ENV_FILE_TEST_VALUE'), os.getenv('ENV_FILE_TEST_DEFAULT_ONLY')]))
 """
-    return subprocess.run([sys.executable, "-c", script], cwd=cwd, env=env, capture_output=True, text=True, timeout=30)
+    return subprocess.run([sys.executable, "-c", script], cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
 
 
 @pytest.mark.parametrize("entrypoint", ENTRYPOINTS)

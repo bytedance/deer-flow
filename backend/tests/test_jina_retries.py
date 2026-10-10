@@ -95,8 +95,11 @@ async def test_backoff_jitter_is_capped_by_remaining_budget(requests, monkeypatc
     assert requests.await_count == 2
     sleep.assert_awaited_once()
     # Tolerance, not an exact bound: deadline = now + budget rounds, so the
-    # remaining-budget cap can land a few ulps above the exact 0.05.
-    assert 0 < sleep.await_args.args[0] <= 0.05 + 1e-9
+    # remaining-budget cap can land above the exact 0.05 by ~ulp(loop.time())/4
+    # — the error scales with the host's uptime, not with 0.05. A relative
+    # tolerance covers any realistic uptime while a genuine regression
+    # overshoots the cap by >= 0.025.
+    assert 0 < sleep.await_args.args[0] <= 0.05 * (1 + 2**-24)
 
 
 @pytest.mark.parametrize("during_backoff", [False, True])
