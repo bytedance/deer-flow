@@ -50,6 +50,10 @@ class _AgentSkillSyncProvider(_SyncProvider):
     def __init__(self) -> None:
         super().__init__()
         self.skill_syncs: list[tuple[str, str, str, object]] = []
+        self.sandbox = _SandboxStub("sync-sandbox")
+
+    def get(self, sandbox_id: str) -> Sandbox | None:
+        return self.sandbox if sandbox_id == self.sandbox.id else None
 
     def sync_agent_skills(
         self,

@@ -14,8 +14,8 @@ class FakeRepository:
         self.list_calls = []
         self.get_calls = []
 
-    async def list_by_thread(self, thread_id, *, user_id, thread_incarnation, limit):
-        self.list_calls.append((thread_id, user_id, thread_incarnation, limit))
+    async def list_by_thread(self, thread_id, *, user_id, thread_incarnation, limit, status=None, active_only=False):
+        self.list_calls.append((thread_id, user_id, thread_incarnation, limit, status, active_only))
         return list(self.rows)
 
     async def get(self, task_id, *, user_id, thread_id, thread_incarnation):
@@ -177,7 +177,7 @@ async def test_list_returns_only_safe_current_user_thread_fields(monkeypatch) ->
         limit=25,
     )
 
-    assert repo.list_calls == [("thread-1", "user-1", "incarnation-1", 25)]
+    assert repo.list_calls == [("thread-1", "user-1", "incarnation-1", 25, None, False)]
     assert response == [
         {
             "task_id": "mcp-task-1",

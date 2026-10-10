@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 57
+config_version: 58
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -594,8 +594,9 @@ models:
   #   supports_vision: true
   #   supports_thinking: true
   #   # PatchedChatMiniMax is the MiniMax adapter: it enables reasoning_split and
-  #   # maps MiniMax's structured reasoning into reasoning_content (the field
-  #   # DeerFlow understands), and it strips the per-message `name` field that
+  #   # maps MiniMax's structured reasoning_details and native reasoning_content
+  #   # into the reasoning_content field DeerFlow understands, and it strips the
+  #   # per-message `name` field that
   #   # DeerFlow middlewares attach — MiniMax rejects requests whose user-message
   #   # names differ with "user name must be consistent (2013)". Declare the
   #   # thinking toggle so non-thinking paths (flash mode, follow-up suggestions,
@@ -658,8 +659,9 @@ models:
   #   supports_vision: true
   #   supports_thinking: true
   #   # PatchedChatMiniMax is the MiniMax adapter: it enables reasoning_split and
-  #   # maps MiniMax's structured reasoning into reasoning_content (the field
-  #   # DeerFlow understands), and it strips the per-message `name` field that
+  #   # maps MiniMax's structured reasoning_details and native reasoning_content
+  #   # into the reasoning_content field DeerFlow understands, and it strips the
+  #   # per-message `name` field that
   #   # DeerFlow middlewares attach — MiniMax rejects requests whose user-message
   #   # names differ with "user name must be consistent (2013)". Declare the
   #   # thinking toggle so non-thinking paths (flash mode, follow-up suggestions,
@@ -933,6 +935,8 @@ tools:
   #   group: web
   #   use: deerflow.community.serper.tools:web_search_tool
   #   max_results: 5   # capped at 10 by the Serper provider
+  #   max_retries: 0  # Opt in with 1-3 extra requests; may incur cost
+  #   retry_budget_seconds: 30  # >0 to 300; scheduling budget, not an I/O deadline
   #   # base_url: https://google.serper.dev  # Overrides SERPER_BASE_URL; omit /search
   #   include_domains: []  # Optional domain-only lists, at most 10 entries each
   #   exclude_domains: []  # Exclusion wins; see backend/docs/CONFIGURATION.md
@@ -949,6 +953,14 @@ tools:
   #   # gl: us                       # Optional country code for the results
   #   # hl: en                       # Optional interface language
   #   # api_key: $SERPLY_API_KEY     # Optional if the env var is set
+
+  # News search tool (uses Webz.io News Search, requires WEBZ_API_KEY)
+  # Recent news coverage, not general web search. Replace the active web_search entry.
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.webz.tools:web_search_tool
+  #   max_results: 5  # Clamped to 1-100
+  #   # api_key: $WEBZ_API_KEY  # Otherwise read from WEBZ_API_KEY
 
   # Web search tool (uses Brave Search API, requires BRAVE_SEARCH_API_KEY)
   # Brave Search returns results from an independent index. Sign up at
@@ -1055,6 +1067,10 @@ tools:
   #   # token: $BROWSERLESS_TOKEN        # API token (required for Browserless Cloud; optional for self-hosted)
   #   timeout_s: 30                       # Request timeout in seconds
   #   # allow_private_addresses: false    # SSRF guard: keep false in production. Set true ONLY for intentional internal targets.
+  #   # network_isolation_confirmed: false # SSRF guard: the Browserless server resolves URLs, follows redirects,
+  #   #                                    # and loads subresources on its own side, so the target-URL guard above
+  #   #                                    # cannot be enforced end-to-end. Set true ONLY when its outbound network
+  #   #                                    # is isolated from private and cloud-metadata networks.
   #   # wait_for_event: "networkidle"    # Wait for a page event before returning (e.g. "load", "networkidle")
   #   # wait_for_timeout_ms: 2000        # Extra wait after page load in milliseconds
   #   # wait_for_selector: "article"     # CSS selector to wait for before returning
@@ -1085,6 +1101,10 @@ tools:
   #   token: $CRAWL4AI_TOKEN              # Bearer token; required by Crawl4AI >= 0.9
   #   timeout: 30                         # Request timeout in seconds
   #   # allow_private_addresses: false     # SSRF guard: keep false in production. Set true ONLY for intentional internal targets.
+  #   # network_isolation_confirmed: false # SSRF guard: the Crawl4AI server resolves URLs, follows redirects,
+  #   #                                    # and loads subresources on its own side, so the target-URL guard above
+  #   #                                    # cannot be enforced end-to-end. Set true ONLY when its outbound network
+  #   #                                    # is isolated from private and cloud-metadata networks.
   #   # filter: fit                       # Markdown filter: fit (default) | raw | bm25 | llm
 
   # Web capture tool (uses Browserless /screenshot to render a page as an artifact)
@@ -1109,6 +1129,11 @@ tools:
   #   # best_attempt: true                  # Continue with current page state if waits time out
   #   # allow_private_addresses: false      # SSRF guard: keep false in production. Set true ONLY to
   #   #                                     # capture internal/private targets (loopback, RFC1918, etc.)
+  #   # network_isolation_confirmed: false  # SSRF guard: the Browserless server resolves URLs, follows
+  #   #                                     # redirects, and loads subresources on its own side, so the
+  #   #                                     # target-URL guard above cannot be enforced end-to-end. Set true
+  #   #                                     # ONLY when its outbound network is isolated from private and
+  #   #                                     # cloud-metadata networks.
 
   # Agentic browser control (stateful navigate → observe → click/type loop).
   # Unlike web_fetch/web_capture (read-only, stateless), these tools keep a live
@@ -1210,6 +1235,11 @@ tools:
   #   use: deerflow.community.firecrawl.tools:web_fetch_tool
   #   # api_key: $FIRECRAWL_API_KEY
   #   # base_url: http://<host>:3002  # optional: self-hosted Firecrawl; no cloud API key needed
+  #   # allow_private_addresses: false      # SSRF guard: keep false in production. Set true ONLY for intentional internal targets.
+  #   # network_isolation_confirmed: false  # SSRF guard: the Firecrawl server resolves URLs, follows redirects,
+  #   #                                     # and loads subresources on its own side, so the target-URL guard above
+  #   #                                     # cannot be enforced end-to-end. Set true ONLY when its outbound network
+  #   #                                     # is isolated from private and cloud-metadata networks.
 
   # Web fetch tool (uses GroundRoute, requires GROUNDROUTE_API_KEY)
   # Fetches a page's extracted text via GroundRoute mode=page.
@@ -1230,6 +1260,10 @@ tools:
   #   # api_key: $CRW_API_KEY
   #   # base_url: https://fastcrw.com/api   # default cloud; set to e.g. http://localhost:3000 for self-host
   #   # allow_private_addresses: false      # SSRF guard: keep false in production. Set true ONLY for intentional internal targets.
+  #   # network_isolation_confirmed: false  # SSRF guard: the fastCRW server resolves URLs, follows redirects,
+  #   #                                     # and loads subresources on its own side, so the target-URL guard above
+  #   #                                     # cannot be enforced end-to-end. Set true ONLY when its outbound network
+  #   #                                     # is isolated from private and cloud-metadata networks.
 
   # Web fetch tool (uses Sofya, requires SOFYA_API_KEY)
   # Returns the page as markdown. Also handles PDF, DOCX and other documents.
@@ -1276,6 +1310,8 @@ tools:
   #   group: web
   #   use: deerflow.community.serper.tools:image_search_tool
   #   max_results: 5   # capped at 10 by the Serper provider
+  #   max_retries: 0  # Opt in with 1-3 extra requests; may incur cost
+  #   retry_budget_seconds: 30  # >0 to 300; scheduling budget, not an I/O deadline
   #   # base_url: https://google.serper.dev  # Overrides SERPER_BASE_URL; omit /images
   #   # api_key: $SERPER_API_KEY  # Optional explicit env-var reference
 
@@ -1472,10 +1508,11 @@ loop_detection:
 # rewritten to keyed, value-derived placeholders like
 # [EMAIL_bdqkxwcfmqvrqzblcchjkqbcdqw] before they reach the model. Tokens are
 # HMAC digests keyed by token_secret, so they cannot be re-derived offline.
+# The hidden /goal continuation is redacted before it is stored.
 # Raw text stays in thread state for the UI; queued memory-extraction
-# payloads are redacted too. Compaction and configured LLM title inputs are
-# redacted as well; placeholders are value-derived, so an identity redacted
-# before compaction renders the same token afterwards.
+# payloads are redacted too. Compaction, configured LLM title and /goal
+# evaluator inputs are redacted as well; placeholders are value-derived, so
+# an identity redacted before compaction renders the same token afterwards.
 pii_redaction:
   enabled: false
   # redact_email: true
@@ -1561,6 +1598,26 @@ projects:
   # Days a trashed project document stays recoverable before the retention
   # sweep may purge it permanently (range: 1-3650).
   trash_retention_days: 30
+  # Best-effort per-document LLM summaries on the shelf (default off). When
+  # enabled, each newly uploaded/promoted document gets a one-line generated
+  # description rendered into the injected <documents> index and returned by
+  # the documents API. Generation failures leave the summary empty and never
+  # affect uploads. Rendering of already-stored summaries stays on even when
+  # generation is disabled.
+  summaries_enabled: false
+  # Hard UTF-8 write-time cap for a generated summary (range: 64-1024).
+  summary_max_bytes: 256
+  # Optional model override for summary generation; unset uses the default
+  # chat model.
+  # summary_model_name: null
+  # Global cap on concurrent generation tasks (range: 1-16) and the bounded
+  # in-memory queue for pending tasks (range: 1-256); tasks arriving at a
+  # full queue are skipped.
+  summary_concurrency: 2
+  summary_queue_size: 32
+  # Caller-side wait limit in seconds for one summary model call (range:
+  # 5-300); abandons the wait, not the remote work.
+  summary_timeout_seconds: 60
 
 # ============================================================================
 # Provider Safety Termination Configuration
@@ -3380,7 +3437,9 @@ authorization:
 # auth:
 #   local:
 #     allow_registration: false
-#     # Login throttling per client IP. Raise max_login_attempts when many
+#     # Login throttling per client IP. The client IP is X-Real-IP from a
+#     # proxy listed in AUTH_TRUSTED_PROXIES (the Docker stack trusts its
+#     # bundled nginx), else the TCP peer. Raise max_login_attempts when many
 #     # users share one egress IP (corporate proxy / NAT) so shared-IP
 #     # lockouts don't block the whole office; lower it for a stricter
 #     # posture (minimum 2 — one failed attempt must never lock an IP, or a

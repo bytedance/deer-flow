@@ -4,8 +4,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langgraph.checkpoint.memory import InMemorySaver
 
 from deerflow.runtime import goal
+from deerflow.runtime.checkpoint_state import CheckpointStateAccessor, build_state_mutation_graph
 
 
 def test_build_goal_state_defaults_to_claude_stop_hook_cap():
@@ -645,6 +647,103 @@ def test_latest_visible_assistant_signature_tracks_last_ai_evidence():
     # Hidden continuations and human-only transcripts contribute no evidence.
     hidden = AIMessage(content="hidden", additional_kwargs={"hide_from_ui": True})
     assert goal.latest_visible_assistant_signature([HumanMessage(content="only human"), hidden]) == ""
+
+
+def test_latest_visible_assistant_message_id_skips_replies_without_text():
+    """The goal_outcome anchor is the reply the visible signature keys on."""
+    messages = [
+        HumanMessage(id="h1", content="Write the report"),
+        AIMessage(id="a1", content="The report is ready.", tool_calls=[{"id": "call-1", "name": "present_files", "args": {}}]),
+        ToolMessage(id="t1", content="presented", tool_call_id="call-1"),
+        AIMessage(id="a2", content="", tool_calls=[{"id": "call-2", "name": "ls", "args": {}}]),
+        ToolMessage(id="t2", content="report.md", tool_call_id="call-2"),
+        AIMessage(id="a3", content=""),
+        AIMessage(id="a4", content="hidden", additional_kwargs={"hide_from_ui": True}),
+    ]
+
+    assert goal.latest_visible_assistant_message_id(messages) == "a1"
+    assert goal.latest_visible_assistant_signature(messages) == goal.latest_visible_assistant_signature(messages[:2])
+    assert goal.latest_visible_assistant_message_id(messages[:1]) is None
+    assert goal.latest_visible_assistant_message_id([AIMessage(id="", content="Done.")]) is None
+
+
+def test_build_goal_outcome_records_the_met_goal_instance():
+    met_goal = {**goal.build_goal_state("Ship it", max_continuations=3, now="2026-10-07T00:00:00Z"), "continuation_count": 2}
+    evaluation = goal.GoalEvaluation(satisfied=True, blocker="none", reason="Shipped.", evidence_summary="Release notes posted.", relied_on_assumption=True)
+
+    assert goal.build_goal_outcome(met_goal, evaluation, reply_message_id="a9", now="2026-10-07T01:00:00Z") == {
+        "status": "achieved",
+        "objective": "Ship it",
+        "goal_created_at": "2026-10-07T00:00:00Z",
+        "achieved_at": "2026-10-07T01:00:00Z",
+        "continuation_count": 2,
+        "max_continuations": 3,
+        "reason": "Shipped.",
+        "relied_on_assumption": True,
+        "reply_message_id": "a9",
+    }
+    # Only a real True counts as relying on an assumption.
+    assert goal.build_goal_outcome(met_goal, {**evaluation, "relied_on_assumption": "false"}, reply_message_id=None)["relied_on_assumption"] is False
+    with pytest.raises(ValueError):
+        goal.build_goal_outcome(met_goal, {**evaluation, "satisfied": False}, reply_message_id=None)
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_write_thread_goal_keeps_goal_outcome_only_on_the_clearing_write(mode):
+    """Only the clear of a met goal writes the record; every other goal write drops it."""
+    checkpointer = InMemorySaver()
+    accessor = CheckpointStateAccessor.bind(build_state_mutation_graph("seed", mode), checkpointer, mode=mode)
+    config = {"configurable": {"thread_id": "outcome-thread", "checkpoint_ns": ""}}
+    met_goal = goal.build_goal_state("Ship it")
+    record = goal.build_goal_outcome(met_goal, goal.GoalEvaluation(satisfied=True, blocker="none", reason="Shipped."), reply_message_id="a1")
+
+    async def materialized():
+        return (await accessor.aget(config)).values
+
+    async def scenario():
+        await accessor.aupdate(config, {"messages": [HumanMessage(id="h1", content="Ship it"), AIMessage(id="a1", content="Shipped.")]}, as_node="seed")
+        await goal.write_thread_goal(checkpointer, "outcome-thread", met_goal)
+        published = await goal.write_thread_goal(checkpointer, "outcome-thread", None, as_node="goal_evaluator", outcome=record)
+        cleared = await checkpointer.aget_tuple(config)
+        after_clear = await materialized()
+        await goal.write_thread_goal(checkpointer, "outcome-thread", goal.build_goal_state("Next goal"))
+        after_set = await materialized()
+        await goal.write_thread_goal(checkpointer, "outcome-thread", None, outcome=record)
+        await goal.write_thread_goal(checkpointer, "outcome-thread", None)
+        return published, cleared, after_clear, after_set, await materialized()
+
+    published, cleared, after_clear, after_set, after_plain_clear = asyncio.run(scenario())
+
+    assert published["goal_outcome"] == record
+    assert "goal" not in published
+    assert cleared.metadata["writes"] == {"goal_evaluator": {"goal": None, "goal_outcome": record}}
+    assert after_clear["goal_outcome"] == record
+    assert "goal" not in after_clear
+    assert [message.id for message in after_clear["messages"]] == ["h1", "a1"]
+    assert after_set["goal"]["objective"] == "Next goal"
+    assert "goal_outcome" not in after_set
+    assert "goal_outcome" not in after_plain_clear
+    assert "goal" not in after_plain_clear
+    # The returned values are a snapshot, not the caller's record.
+    record["reason"] = "Edited later."
+    assert published["goal_outcome"]["reason"] == "Shipped."
+
+
+def test_write_thread_goal_leaves_threads_without_a_record_unchanged():
+    checkpointer = InMemorySaver()
+    active = goal.build_goal_state("Ship it")
+    record = goal.build_goal_outcome(active, goal.GoalEvaluation(satisfied=True, blocker="none", reason="Shipped."), reply_message_id=None)
+
+    async def scenario():
+        await goal.write_thread_goal(checkpointer, "plain-thread", active, create_if_missing=True)
+        with pytest.raises(ValueError):
+            await goal.write_thread_goal(checkpointer, "plain-thread", active, outcome=record)
+        return await checkpointer.aget_tuple({"configurable": {"thread_id": "plain-thread", "checkpoint_ns": ""}})
+
+    written = asyncio.run(scenario())
+
+    assert "goal_outcome" not in written.checkpoint["channel_versions"]
+    assert written.metadata["writes"] == {"goal": {"goal": active}}
 
 
 def test_no_progress_count_keys_on_evidence_not_volatile_free_text():

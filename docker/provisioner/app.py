@@ -12,6 +12,7 @@ Endpoints:
     POST   /api/sandboxes              — Create a sandbox Pod + Service
     DELETE /api/sandboxes/{sandbox_id} — Destroy a sandbox Pod + Service
     GET    /api/sandboxes/{sandbox_id} — Get sandbox status & URL
+    GET    /api/sandboxes/{sandbox_id}/presence — Inspect Pod presence & generation
     GET    /api/sandboxes              — List all sandboxes
     GET    /health                     — Provisioner health check
 
@@ -75,6 +76,14 @@ LARK_CLI_RUNTIME_VOLUME_NAME = "lark-cli-runtime"
 # broker off (Pattern A / legacy behavior). Broker supersedes Pattern A when both
 # are set.
 LARK_CLI_BROKER_IMAGE = os.environ.get("LARK_CLI_BROKER_IMAGE", "")
+# Machine-readable marker attached to lark provisioning-config conflict
+# responses (409/503) telling the Gateway to drop its cached broker
+# capability observation for this endpoint. Keep in sync with
+# deerflow.integrations.lark_cli.PROVISIONER_CAPABILITY_REFRESH_HEADER.
+CAPABILITY_REFRESH_HEADER = "X-DeerFlow-Capability-Refresh"
+# Marker value for lark broker capability changes. Keep in sync with
+# deerflow.integrations.lark_cli.PROVISIONER_CAPABILITY_REFRESH_LARK_BROKER.
+CAPABILITY_REFRESH_LARK_BROKER = "lark-broker"
 # Optional comma-separated lark-cli subcommand denylist forwarded to the broker
 # sidecar (issue #4338 hardening). Empty ⇒ no subcommand is blocked. See the
 # broker README's "subcommand denylist" section.
@@ -280,6 +289,25 @@ def _lark_cli_runtime_enabled(provision_lark_cli_runtime: bool) -> bool:
 def _lark_cli_broker_enabled(provision_lark_cli_broker: bool) -> bool:
     """Whether to provision the lark-cli broker sidecar (Pattern B)."""
     return bool(LARK_CLI_BROKER_IMAGE) and provision_lark_cli_broker
+
+
+def _validate_lark_provisioning_request(runtime: bool, broker: bool) -> None:
+    # Both conflicts mean the Gateway's cached capability observation no longer
+    # matches this deployment's configuration; the marker tells it to re-probe
+    # on the next acquire instead of repeating the failure for the cache TTL.
+    conflict_headers = {CAPABILITY_REFRESH_HEADER: CAPABILITY_REFRESH_LARK_BROKER}
+    if broker and not LARK_CLI_BROKER_IMAGE:
+        raise HTTPException(
+            status_code=503,
+            detail="Requested Lark broker image is not configured",
+            headers=conflict_headers,
+        )
+    if runtime and LARK_CLI_BROKER_IMAGE and not broker:
+        raise HTTPException(
+            status_code=409,
+            detail="Configured Lark broker is required; refresh provisioner capabilities",
+            headers=conflict_headers,
+        )
 
 
 def _runtime_provided_extra_mounts(
@@ -496,6 +524,14 @@ class SandboxResponse(BaseModel):
     sandbox_url: str
     status: str
     max_shell_sessions: int | None = None
+    container_id: str | None = None
+    lark_cli_broker: bool | None = None
+
+
+class SandboxPresenceResponse(BaseModel):
+    sandbox_id: str
+    exists: bool
+    container_id: str | None = None
 
 
 # ── K8s resource helpers ─────────────────────────────────────────────────
@@ -968,6 +1004,7 @@ def _build_pod(
     max_shell_sessions: int | None = None,
 ) -> k8s_client.V1Pod:
     """Construct a Pod manifest for a single sandbox."""
+    _validate_lark_provisioning_request(provision_lark_cli_runtime, provision_lark_cli_broker)
     init_containers = (
         _build_lark_cli_init_containers(provision_lark_cli_runtime, provision_lark_cli_broker) or None
     )
@@ -1139,18 +1176,7 @@ def _sandbox_access_url(sandbox_id: str, *, tolerate_read_errors: bool = False) 
     return _url_from_service(svc, sandbox_id)
 
 
-def _get_pod_phase(sandbox_id: str) -> str:
-    """Return the Pod phase (Pending / Running / Succeeded / Failed / Unknown)."""
-    try:
-        pod = core_v1.read_namespaced_pod(_pod_name(sandbox_id), K8S_NAMESPACE)
-        return pod.status.phase or "Unknown"
-    except ApiException:
-        return "NotFound"
-
-
-def _get_pod_shell_capacity(sandbox_id: str) -> int:
-    """Return the effective AIO shell capacity persisted in the sandbox Pod."""
-    pod = core_v1.read_namespaced_pod(_pod_name(sandbox_id), K8S_NAMESPACE)
+def _pod_shell_capacity(pod) -> int:
     containers = getattr(getattr(pod, "spec", None), "containers", None) or []
     sandbox_container = next((container for container in containers if getattr(container, "name", None) == "sandbox"), None)
     for env_var in getattr(sandbox_container, "env", None) or []:
@@ -1164,6 +1190,58 @@ def _get_pod_shell_capacity(sandbox_id: str) -> int:
             raise RuntimeError("Persisted sandbox has an invalid MAX_SHELL_SESSIONS value")
         return value
     return DEFAULT_MAX_SHELL_SESSIONS
+
+
+def _sandbox_response(
+    sandbox_id: str,
+    sandbox_url: str,
+    *,
+    required_capacity: int | None = None,
+    required_broker: bool | None = None,
+) -> SandboxResponse:
+    # Attest mode, generation and capacity from the same Pod observation,
+    # including idempotent create and the AlreadyExists race.
+    pod = core_v1.read_namespaced_pod(_pod_name(sandbox_id), K8S_NAMESPACE)
+    capacity = _pod_shell_capacity(pod)
+    containers = getattr(getattr(pod, "spec", None), "containers", None) or []
+    init_containers = getattr(getattr(pod, "spec", None), "init_containers", None) or []
+    sidecar = any(container.name == "lark-cli-broker" for container in containers)
+    shim = any(container.name == "lark-cli-shim-init" for container in init_containers)
+    sandbox = next((container for container in containers if container.name == "sandbox"), None)
+    credentials_mounted = any(mount.mount_path.startswith((LARK_CLI_CONFIG_CONTAINER_PATH, LARK_CLI_DATA_CONTAINER_PATH)) for mount in getattr(sandbox, "volume_mounts", None) or [])
+    broker = sidecar if sidecar == shim and not (sidecar and credentials_mounted) else None
+    if required_capacity is not None and capacity < required_capacity:
+        raise HTTPException(
+            status_code=409,
+            detail="Existing sandbox shell capacity is below the requested value; replacement must be coordinated by the Gateway",
+        )
+    if required_broker is not None and broker is not required_broker:
+        # Post-build conflicts (idempotent re-create, attestation drift,
+        # post-create verification) reach the Gateway through the same 409
+        # handling as the pre-build validation, so they must carry the
+        # capability-refresh marker too — otherwise a broker-mode deploy
+        # change lives out the Gateway's cache TTL instead of re-probing.
+        raise HTTPException(
+            status_code=409,
+            detail="Existing sandbox has an incompatible Lark broker mode; replacement must be coordinated by the Gateway",
+            headers={CAPABILITY_REFRESH_HEADER: CAPABILITY_REFRESH_LARK_BROKER},
+        )
+    metadata = getattr(pod, "metadata", None)
+    status = "Terminating" if getattr(metadata, "deletion_timestamp", None) else pod.status.phase or "Unknown"
+    # Only coordination requests (create with requirements) reject a
+    # Terminating Pod; status/get/list callers pass no requirements and read
+    # the phase as data — raising here would fail the whole fleet listing for
+    # one terminating Pod (HTTPException escapes their narrower catch clause).
+    if (required_capacity is not None or required_broker is not None) and status == "Terminating":
+        raise HTTPException(status_code=409, detail="Existing sandbox is still terminating")
+    return SandboxResponse(
+        sandbox_id=sandbox_id,
+        sandbox_url=sandbox_url,
+        status=status,
+        max_shell_sessions=capacity,
+        container_id=getattr(metadata, "uid", None),
+        lark_cli_broker=broker,
+    )
 
 
 # ── API endpoints ────────────────────────────────────────────────────────
@@ -1201,12 +1279,12 @@ def create_sandbox(req: CreateSandboxRequest):
     thread_id = req.thread_id or sandbox_id
     user_id = req.user_id
     include_legacy_skills = req.include_legacy_skills
-    skills_container_path = _normalize_skills_container_path(
-        req.skills_container_path
-    )
+    skills_container_path = _normalize_skills_container_path(req.skills_container_path)
     provision_lark_cli_runtime = req.provision_lark_cli_runtime
     provision_lark_cli_broker = req.provision_lark_cli_broker
     max_shell_sessions = req.max_shell_sessions
+    _validate_lark_provisioning_request(provision_lark_cli_runtime, provision_lark_cli_broker)
+    required_broker = provision_lark_cli_broker if provision_lark_cli_runtime or provision_lark_cli_broker else None
 
     logger.info(
         "Received request to create sandbox '%s' for thread '%s' user '%s' include_legacy_skills=%s skills_container_path=%s provision_lark_cli_runtime=%s provision_lark_cli_broker=%s max_shell_sessions=%s",
@@ -1224,26 +1302,17 @@ def create_sandbox(req: CreateSandboxRequest):
     existing_url = _sandbox_access_url(sandbox_id, tolerate_read_errors=True)
     if existing_url:
         try:
-            existing_shell_capacity = _get_pod_shell_capacity(sandbox_id)
+            return _sandbox_response(
+                sandbox_id,
+                existing_url,
+                required_capacity=max_shell_sessions,
+                required_broker=required_broker,
+            )
         except (ApiException, RuntimeError) as exc:
             # A Service can outlive its old Pod during asynchronous replacement.
             # Only a confirmed missing Pod may fall through to creation.
             if not isinstance(exc, ApiException) or exc.status != 404:
                 raise HTTPException(status_code=500, detail=f"Could not verify existing sandbox shell capacity: {exc}") from exc
-        else:
-            if max_shell_sessions is not None and existing_shell_capacity < max_shell_sessions:
-                # Only the Gateway can fence replacement against active owners.
-                # A transient discovery failure can route a live Pod through create.
-                raise HTTPException(
-                    status_code=409,
-                    detail="Existing sandbox shell capacity is below the requested value; replacement must be coordinated by the Gateway",
-                )
-            return SandboxResponse(
-                sandbox_id=sandbox_id,
-                sandbox_url=existing_url,
-                status=_get_pod_phase(sandbox_id),
-                max_shell_sessions=existing_shell_capacity,
-            )
 
     # ── Create Pod ───────────────────────────────────────────────────
     try:
@@ -1293,18 +1362,14 @@ def create_sandbox(req: CreateSandboxRequest):
     # A concurrent creator can win the 409 race with a lower-capacity Pod.
     # Never claim that the requested value was applied without reading it back.
     try:
-        actual_shell_capacity = _get_pod_shell_capacity(sandbox_id)
+        return _sandbox_response(
+            sandbox_id,
+            sandbox_url,
+            required_capacity=max_shell_sessions,
+            required_broker=required_broker,
+        )
     except (ApiException, RuntimeError) as exc:
         raise HTTPException(status_code=500, detail=f"Could not verify created sandbox shell capacity: {exc}") from exc
-    if max_shell_sessions is not None and actual_shell_capacity < max_shell_sessions:
-        raise HTTPException(status_code=409, detail="Existing sandbox shell capacity is below the requested value")
-
-    return SandboxResponse(
-        sandbox_id=sandbox_id,
-        sandbox_url=sandbox_url,
-        status=_get_pod_phase(sandbox_id),
-        max_shell_sessions=actual_shell_capacity,
-    )
 
 
 @app.delete("/api/sandboxes/{sandbox_id}")
@@ -1334,6 +1399,22 @@ def destroy_sandbox(sandbox_id: str):
     return {"ok": True, "sandbox_id": sandbox_id}
 
 
+@app.get("/api/sandboxes/{sandbox_id}/presence", response_model=SandboxPresenceResponse)
+def sandbox_presence(sandbox_id: str):
+    """Attest Pod presence even while its Service is missing or unready."""
+    try:
+        pod = core_v1.read_namespaced_pod(_pod_name(sandbox_id), K8S_NAMESPACE)
+    except ApiException as exc:
+        if exc.status != 404:
+            raise HTTPException(status_code=500, detail=f"Failed to check Pod presence: {exc.reason}") from exc
+        return SandboxPresenceResponse(sandbox_id=sandbox_id, exists=False)
+    return SandboxPresenceResponse(
+        sandbox_id=sandbox_id,
+        exists=True,
+        container_id=getattr(getattr(pod, "metadata", None), "uid", None),
+    )
+
+
 @app.get("/api/sandboxes/{sandbox_id}", response_model=SandboxResponse)
 def get_sandbox(sandbox_id: str):
     """Return current status and URL for a sandbox."""
@@ -1341,12 +1422,7 @@ def get_sandbox(sandbox_id: str):
     if not sandbox_url:
         raise HTTPException(status_code=404, detail=f"Sandbox '{sandbox_id}' not found")
 
-    return SandboxResponse(
-        sandbox_id=sandbox_id,
-        sandbox_url=sandbox_url,
-        status=_get_pod_phase(sandbox_id),
-        max_shell_sessions=_get_pod_shell_capacity(sandbox_id),
-    )
+    return _sandbox_response(sandbox_id, sandbox_url)
 
 
 @app.get("/api/sandboxes")
@@ -1369,20 +1445,13 @@ def list_sandboxes():
         if not sandbox_url:
             continue
         try:
-            shell_capacity = _get_pod_shell_capacity(sid)
+            response = _sandbox_response(sid, sandbox_url)
         except (ApiException, RuntimeError) as exc:
             if isinstance(exc, ApiException) and exc.status == 404:
                 continue
             reason = getattr(exc, "reason", str(exc))
             logger.warning("Skipping sandbox %s while inspecting shell capacity: %s", sid, reason)
             continue
-        sandboxes.append(
-            SandboxResponse(
-                sandbox_id=sid,
-                sandbox_url=sandbox_url,
-                status=_get_pod_phase(sid),
-                max_shell_sessions=shell_capacity,
-            )
-        )
+        sandboxes.append(response)
 
     return {"sandboxes": sandboxes, "count": len(sandboxes)}
