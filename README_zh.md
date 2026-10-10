@@ -573,10 +573,13 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 | `/new` | 开启新对话 |
 | `/status` | 查看当前 thread 信息 |
 | `/models` | 列出可用模型 |
+| `/model [name\|default]` | 查看或固定当前会话使用的模型 |
 | `/memory` | 查看 memory |
 | `/help` | 查看帮助 |
 
 > 没有命令前缀的消息会被当作普通聊天处理。DeerFlow 会自动创建 thread，并以对话方式回复。
+
+模型选择是会话级的：`/model <name>` 将模型固定到**当前**会话——会按调用方可见的模型列表校验，选择写入 thread 元数据（Gateway 重启后仍有效），从下一条消息开始生效，无需新开对话。`/model` 查看当前生效模型及其来源，`/model default` 清除固定，`/models` 会报告当前固定的模型。
 
 #### 请求链路关联
 
@@ -754,9 +757,9 @@ Web UI 输入框支持浏览器侧语音听写。浏览器提供 Web Speech API 
 /goal clear        # 清除它
 ```
 
-每次 Gateway 驱动的 run 结束后，DeerFlow 会用一个 non-thinking 的评估模型，把可见的对话内容（包括助手的工具调用和截短的工具结果）拿去和激活的 goal 比对。工具调用成功本身不代表 goal 已完成；如果助手不得不猜测缺失或含糊的信息，评估模型会报告 `needs_user_input`。评估模型必须返回一个带类型的 blocker（`missing_evidence`、`needs_user_input`、`run_failed`、`external_wait` 或 `goal_not_met_yet`），并附上可见证据。只有在最近一轮 assistant 回复已被持久化 checkpoint、blocker 是 `goal_not_met_yet`、评估期间 thread 没有变化、且无进展熔断器没有触发时，DeerFlow 才会注入一次 hidden continuation。安全上限默认是 8 次 hidden continuation；连续两次相同的无进展评估后就会停止。`/goal clear` 以及任何用户手动输入的新内容，优先级都高于排队中的 continuation。当 goal 被满足时，DeerFlow 会自动清除它，并发布更新后的 thread 状态。
+每次 Gateway 驱动的 run 结束后，DeerFlow 会用一个 non-thinking 的评估模型，把可见的对话内容（包括助手的工具调用和截短的工具结果）拿去和激活的 goal 比对。工具调用成功本身不代表 goal 已完成；如果助手不得不猜测缺失或含糊的信息，评估模型会报告 `needs_user_input`。评估模型必须返回一个带类型的 blocker（`missing_evidence`、`needs_user_input`、`run_failed`、`external_wait` 或 `goal_not_met_yet`），并附上可见证据。只有在最近一轮 assistant 回复已被持久化 checkpoint、blocker 是 `goal_not_met_yet`、评估期间 thread 没有变化、且无进展熔断器没有触发时，DeerFlow 才会注入一次 hidden continuation。安全上限默认是 8 次 hidden continuation；连续两次相同的无进展评估后就会停止。`/goal clear` 以及任何用户手动输入的新内容，优先级都高于排队中的 continuation。当 goal 被满足时，DeerFlow 会自动清除它，并发布更新后的 thread 状态。同一个 checkpoint 会把这次达成记为 `goal_outcome`，保留到下一次修改 goal。
 
-Web UI 会在输入框上方展示当前激活的 goal。同样的命令在 TUI 和受支持的 IM 渠道里也可用。在 Web UI 和受支持的 IM 渠道里，设置 `/goal <完成条件>` 还会以该条件作为任务启动一次 run；状态查询和清除命令则只管理 goal 状态本身。
+Web UI 会在输入框上方展示当前激活的 goal，说明自动续跑为什么停下，并在 goal 达成后显示「目标已达成」提示；设置了 goal 时不能编辑最后一条消息。同样的命令在 TUI 和受支持的 IM 渠道里也可用。在 Web UI 和受支持的 IM 渠道里，设置 `/goal <完成条件>` 还会以该条件作为任务启动一次 run；状态查询和清除命令则只管理 goal 状态本身。
 
 ### 手动上下文压缩
 

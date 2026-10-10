@@ -38,6 +38,16 @@ def test_known_channel_command_detection_only_matches_control_commands():
     assert not is_known_channel_command(" /new")
 
 
+def test_model_command_is_a_known_channel_command():
+    from app.channels.commands import KNOWN_CHANNEL_COMMANDS, is_known_channel_command
+
+    assert "/model" in KNOWN_CHANNEL_COMMANDS
+    assert is_known_channel_command("/model gpt-4")
+    assert is_known_channel_command("/MODEL")
+    # Prefix collisions must not classify as the /model command.
+    assert not is_known_channel_command("/modeling stuff")
+
+
 def test_strip_leading_mentions_only_drops_flush_leading_mentions():
     from app.channels.commands import is_known_channel_command, strip_leading_mentions
 
@@ -607,6 +617,46 @@ def _make_mock_langgraph_client(thread_id="test-thread-123", run_result=None):
     return mock_client
 
 
+def _mock_gateway_models(monkeypatch, model_names):
+    """Route GET /api/models through a stubbed httpx client returning *model_names*."""
+
+    class MockResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"models": [{"name": name} for name in model_names]}
+
+    class MockAsyncClient:
+        def __init__(self, *args, **kwargs):
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, url, **kwargs):
+            return MockResponse()
+
+    monkeypatch.setattr("app.channels.manager.httpx.AsyncClient", MockAsyncClient)
+
+
+def _make_allowlist_exc(model: str):
+    """Build the 400 admission error a stale model selection produces."""
+    import httpx
+    from langgraph_sdk.errors import BadRequestError
+
+    request = httpx.Request("POST", "http://gateway/api/runs")
+    response = httpx.Response(400, request=request)
+    return BadRequestError(
+        f"Model {model!r} is not in the configured model allowlist",
+        response=response,
+        body={"detail": f"Model {model!r} is not in the configured model allowlist"},
+    )
+
+
 async def _make_channel_connection_repo(tmp_path: Path):
     from deerflow.persistence.channel_connections import ChannelConnectionRepository, ChannelCredentialCipher
     from deerflow.persistence.engine import get_session_factory, init_engine
@@ -824,7 +874,7 @@ class TestChannelManager:
                 return None
 
             def json(self):
-                return {"models": [{"name": "default"}]}
+                return {"facts": [{"text": "a"}]}
 
         class MockAsyncClient:
             def __init__(self, *args, **kwargs):
@@ -848,10 +898,10 @@ class TestChannelManager:
             store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
             manager = ChannelManager(bus=bus, store=store, gateway_url="http://gateway:8001")
 
-            reply = await manager._fetch_gateway("/api/models", "models")
+            reply = await manager._fetch_gateway("/api/memory", "memory")
 
-            assert reply == "Available models:\n• default"
-            assert calls[0]["url"] == "http://gateway:8001/api/models"
+            assert reply == "Memory contains 1 fact(s)."
+            assert calls[0]["url"] == "http://gateway:8001/api/memory"
             assert calls[0]["timeout"] == 10
             assert calls[0]["headers"]["X-DeerFlow-Internal-Token"]
 
@@ -2528,6 +2578,7 @@ class TestChannelManager:
             manager._get_or_create_thread = AsyncMock(return_value=(thread_id, False))
             manager._update_thread_channel_metadata = AsyncMock()
             manager._load_thread_agent = AsyncMock(return_value=None)
+            manager._load_thread_model = AsyncMock(return_value=None)
             manager._publish_progress_update = AsyncMock(side_effect=asyncio.CancelledError())
             manager._handle_chat_on_thread = AsyncMock()
 
@@ -3545,6 +3596,1150 @@ class TestChannelManager:
 
         _run(go())
 
+    def test_handle_command_model_pin_persists_to_thread_metadata(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+        from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME
+
+        _mock_gateway_models(monkeypatch, ["model-a", "model-b"])
+
+        async def go():
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            await store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(bus=MessageBus(), store=store)
+            mock_client = _make_mock_langgraph_client(thread_id="thread-1")
+            manager._client = mock_client
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                owner_user_id="deerflow-user-1",
+                text="/model model-b",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            reply = await manager._handle_model_command(msg, "model-b")
+
+            assert reply == "Model 'model-b' selected. It applies to this conversation from the next message."
+            update_kwargs = mock_client.threads.update.call_args.kwargs
+            assert update_kwargs["metadata"]["channel_model_name"] == "model-b"
+            assert update_kwargs["headers"][INTERNAL_OWNER_USER_ID_HEADER_NAME] == "deerflow-user-1"
+            _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+            assert run_context["model_name"] == "model-b"
+
+        _run(go())
+
+    @pytest.mark.parametrize("config_carrier", ["context", "configurable"])
+    def test_model_pin_overrides_every_gateway_config_carrier(self, monkeypatch, config_carrier):
+        """A /model pin must win after the real Gateway config merge.
+
+        ``merge_run_context_overrides`` copies body.context into both
+        RunnableConfig containers with ``setdefault``, so a session-configured
+        ``model_name`` in either container would shadow a pin that only lives
+        in body.context.
+        """
+        from app.channels.manager import ChannelManager
+        from app.gateway.services import build_run_config, merge_run_context_overrides
+        from deerflow.agents.lead_agent.agent import _get_runtime_config
+
+        _mock_gateway_models(monkeypatch, ["model-a", "model-b"])
+
+        async def go():
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            await store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(
+                bus=MessageBus(),
+                store=store,
+                channel_sessions={
+                    "test": {
+                        "context": {"model_name": "session-model"},
+                        "config": {config_carrier: {"model_name": "configured-model"}},
+                    }
+                },
+            )
+            manager._client = _make_mock_langgraph_client(thread_id="thread-1")
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="/model model-b",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            await manager._handle_model_command(msg, "model-b")
+            assistant_id, run_config, run_context = manager._resolve_run_params(msg, "thread-1")
+            gateway_config = build_run_config("thread-1", run_config, None, assistant_id=assistant_id)
+            merge_run_context_overrides(gateway_config, run_context, internal=True)
+
+            assert gateway_config["configurable"]["model_name"] == "model-b"
+            assert gateway_config["context"]["model_name"] == "model-b"
+            assert _get_runtime_config(gateway_config)["model_name"] == "model-b"
+
+        _run(go())
+
+    def test_model_command_rejects_unknown_model(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+
+        _mock_gateway_models(monkeypatch, ["model-a"])
+
+        async def go():
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            await store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(bus=MessageBus(), store=store)
+            mock_client = _make_mock_langgraph_client(thread_id="thread-1")
+            manager._client = mock_client
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="/model nope",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            reply = await manager._handle_model_command(msg, "nope")
+
+            assert reply == "Unknown model 'nope'. Available models:\n• model-a"
+            mock_client.threads.update.assert_not_called()
+            _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+            assert "model_name" not in run_context
+
+        _run(go())
+
+    def test_model_default_clears_pin(self):
+        from app.channels.manager import CHANNEL_MODEL_METADATA_KEY, ChannelManager
+
+        async def go():
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            await store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(bus=MessageBus(), store=store)
+            manager._thread_model_names["thread-1"] = "model-b"
+            mock_client = _make_mock_langgraph_client(thread_id="thread-1")
+            manager._client = mock_client
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="/model default",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            reply = await manager._handle_model_command(msg, "default")
+
+            assert reply == "Model selection reset. This conversation now follows the configured default."
+            update_kwargs = mock_client.threads.update.call_args.kwargs
+            assert update_kwargs["metadata"][CHANNEL_MODEL_METADATA_KEY] is None
+            _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+            assert "model_name" not in run_context
+
+        _run(go())
+
+    def test_model_command_requires_active_conversation(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            manager = ChannelManager(
+                bus=MessageBus(),
+                store=JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"),
+            )
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="/model model-a",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            reply = await manager._handle_model_command(msg, "model-a")
+
+            assert reply == "No active conversation. Send a message first, then use /model."
+            mock_client.threads.update.assert_not_called()
+
+        _run(go())
+
+    def test_model_pin_restored_from_thread_metadata(self):
+        """After a Gateway restart the pin comes back from durable thread metadata."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            await store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(bus=MessageBus(), store=store)
+            mock_client = _make_mock_langgraph_client(thread_id="thread-1")
+            mock_client.threads.get = AsyncMock(return_value={"thread_id": "thread-1", "metadata": {"channel_model_name": "model-b"}})
+            manager._client = mock_client
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="hello",
+            )
+
+            pinned = await manager._load_thread_model(mock_client, msg, "thread-1")
+
+            assert pinned == "model-b"
+            _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+            assert run_context["model_name"] == "model-b"
+            # Second read hits the cache and does not re-fetch.
+            mock_client.threads.get.reset_mock()
+            assert await manager._load_thread_model(mock_client, msg, "thread-1") == "model-b"
+            mock_client.threads.get.assert_not_called()
+
+        _run(go())
+
+    def test_model_status_reports_pin_and_sources(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            await store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(
+                bus=MessageBus(),
+                store=store,
+                channel_sessions={"test": {"context": {"model_name": "session-model"}}},
+            )
+            mock_client = _make_mock_langgraph_client(thread_id="thread-1")
+            mock_client.threads.get = AsyncMock(return_value={"thread_id": "thread-1", "metadata": {"channel_model_name": "model-b"}})
+            manager._client = mock_client
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="/model",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            reply = await manager._handle_model_command(msg, "")
+            assert reply == "Current model: model-b (pinned for this conversation). Use /model default to reset."
+
+            # Cleared pin -> the session-configured model is reported.
+            manager._remember_thread_model("thread-1", None)
+            reply = await manager._handle_model_command(msg, "")
+            assert reply == "Current model: session-model (from session configuration)."
+
+            # No thread, no session config -> server default.
+            manager2 = ChannelManager(
+                bus=MessageBus(),
+                store=JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"),
+            )
+            reply = await manager2._handle_model_command(msg, "")
+            assert reply == "Current model: server default. Use /models to list available models."
+
+        _run(go())
+
+    def test_model_status_reads_configurable_carrier(self):
+        """Session layers can pin model_name under config.configurable too; the
+        status reply must report it instead of falling back to 'server default'."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            await store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(
+                bus=MessageBus(),
+                store=store,
+                channel_sessions={"test": {"config": {"configurable": {"model_name": "configured-model"}}}},
+            )
+            manager._client = _make_mock_langgraph_client(thread_id="thread-1")
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="/model",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            reply = await manager._handle_model_command(msg, "")
+
+            assert reply == "Current model: configured-model (from session configuration)."
+
+        _run(go())
+
+    def test_model_status_mirrors_runtime_precedence(self):
+        """Layer order (default < channel < user) applies within each carrier,
+        and the context carrier beats configurable (_get_runtime_config)."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            await store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(
+                bus=MessageBus(),
+                store=store,
+                default_session={
+                    "context": {"model_name": "default-ctx"},
+                    "config": {"configurable": {"model_name": "default-cfg"}},
+                },
+                channel_sessions={"test": {"context": {"model_name": "channel-ctx"}}},
+            )
+            manager._client = _make_mock_langgraph_client(thread_id="thread-1")
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="/model",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            # Within the context carrier, the channel layer beats the default layer.
+            reply = await manager._handle_model_command(msg, "")
+            assert reply == "Current model: channel-ctx (from session configuration)."
+
+            # A user-layer configurable entry cannot shadow a channel-layer context entry.
+            manager._channel_sessions["test"].setdefault("users", {}).setdefault("platform-user", {})["config"] = {"configurable": {"model_name": "user-cfg"}}
+            reply = await manager._handle_model_command(msg, "")
+            assert reply == "Current model: channel-ctx (from session configuration)."
+
+            # A user-layer context entry wins over every configurable entry.
+            manager._channel_sessions["test"]["users"]["platform-user"]["context"] = {"model_name": "user-ctx"}
+            reply = await manager._handle_model_command(msg, "")
+            assert reply == "Current model: user-ctx (from session configuration)."
+
+        _run(go())
+
+    def test_fresh_model_pin_survives_cache_eviction_during_cold_load(self, monkeypatch):
+        """A cold metadata GET racing a successful /model write plus a
+        clear-on-pressure eviction must not publish its stale snapshot: the
+        generation guard refetches after invalidation, so the committed pin
+        survives in the cache exactly as it does in durable metadata."""
+        from app.channels.manager import ChannelManager
+
+        monkeypatch.setattr("app.channels.manager.IN_PROCESS_CACHE_MAX_ENTRIES", 1)
+
+        async def go():
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            await store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(bus=MessageBus(), store=store)
+            mock_client = _make_mock_langgraph_client(thread_id="thread-1")
+            manager._client = mock_client
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="hello",
+            )
+
+            get_started = asyncio.Event()
+            release_get = asyncio.Event()
+            responses = [
+                {"thread_id": "thread-1", "metadata": {}},  # stale pre-pin snapshot
+                {"thread_id": "thread-1", "metadata": {"channel_model_name": "new-model"}},
+            ]
+
+            async def gated_get(tid, **kwargs):
+                if len(responses) > 1:
+                    get_started.set()
+                    await release_get.wait()
+                return responses.pop(0)
+
+            mock_client.threads.get = AsyncMock(side_effect=gated_get)
+
+            load = asyncio.create_task(manager._load_thread_model(mock_client, msg, "thread-1"))
+            await get_started.wait()
+            # A successful /model write commits, then clear-on-pressure evicts it.
+            manager._remember_thread_model("thread-1", "new-model")
+            manager._remember_thread_model("other-thread", "x")
+            manager._remember_thread_model("third-thread", "y")  # cap=1: len 2 > 1 → clear()
+            assert "thread-1" not in manager._thread_model_names
+            release_get.set()
+
+            assert await load == "new-model"
+            assert manager._thread_model_names["thread-1"] == "new-model"
+            assert mock_client.threads.get.await_count == 2
+
+        _run(go())
+
+    def test_model_status_resolves_context_carried_agent(self, monkeypatch):
+        """A session-carried agent_name (context carrier) resolves that agent's
+        configured model: the runtime honors the same carrier, so /model must
+        match the next run instead of reporting server default."""
+        from app.channels.manager import ChannelManager
+
+        def fake_load_agent_config(name, *, user_id=None):
+            assert name == "coder"
+            return SimpleNamespace(model="coder-model")
+
+        monkeypatch.setattr("app.channels.manager.load_agent_config", fake_load_agent_config)
+
+        async def go():
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            await store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(
+                bus=MessageBus(),
+                store=store,
+                channel_sessions={"test": {"context": {"agent_name": "coder"}}},
+            )
+            manager._client = _make_mock_langgraph_client(thread_id="thread-1")
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="/model",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            reply = await manager._handle_model_command(msg, "")
+            assert reply == "Current model: coder-model (from agent configuration)."
+
+        _run(go())
+
+    def test_model_status_context_agent_beats_session_assistant_id(self, monkeypatch):
+        """assistant_id from a session layer loses to a context-carried
+        agent_name: the run path only defaults the assistant-derived name into
+        context (setdefault), so the carrier wins — and the status must too."""
+        from app.channels.manager import ChannelManager
+
+        configs = {"coder": "coder-model", "writer": "writer-model"}
+
+        def fake_load_agent_config(name, *, user_id=None):
+            return SimpleNamespace(model=configs[name])
+
+        monkeypatch.setattr("app.channels.manager.load_agent_config", fake_load_agent_config)
+
+        async def go():
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            await store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(
+                bus=MessageBus(),
+                store=store,
+                channel_sessions={"test": {"assistant_id": "writer", "context": {"agent_name": "coder"}}},
+            )
+            manager._client = _make_mock_langgraph_client(thread_id="thread-1")
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="/model",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            reply = await manager._handle_model_command(msg, "")
+            assert reply == "Current model: coder-model (from agent configuration)."
+
+        _run(go())
+
+    def test_model_status_thread_agent_pin_beats_context_agent(self, monkeypatch):
+        """An explicit thread pin overwrites every carrier
+        (_apply_explicit_agent_choice), so it beats a context-carried
+        agent_name in the status reply too."""
+        from app.channels.manager import ChannelManager
+
+        configs = {"coder": "coder-model", "writer": "writer-model"}
+
+        def fake_load_agent_config(name, *, user_id=None):
+            return SimpleNamespace(model=configs[name])
+
+        monkeypatch.setattr("app.channels.manager.load_agent_config", fake_load_agent_config)
+
+        async def go():
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            await store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(
+                bus=MessageBus(),
+                store=store,
+                channel_sessions={"test": {"context": {"agent_name": "coder"}}},
+            )
+            manager._thread_agent_names["thread-1"] = "writer"
+            manager._client = _make_mock_langgraph_client(thread_id="thread-1")
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="/model",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            reply = await manager._handle_model_command(msg, "")
+            assert reply == "Current model: writer-model (from agent configuration)."
+
+        _run(go())
+
+    def test_handle_chat_continues_when_model_pin_preload_fails(self):
+        """A transient pin-lookup failure on a reused thread must not surface as
+        the generic error reply; the message is processed without the pin."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            await store.set_thread_id("test", "chat1", "test-thread-123", topic_id="topic1")
+            manager = ChannelManager(bus=bus, store=store)
+            manager._client = _make_mock_langgraph_client()
+
+            async def raising_pin_load(client, msg, thread_id):
+                raise RuntimeError("transient gateway failure")
+
+            manager._load_thread_model = raising_pin_load
+            outbound_received = []
+
+            async def capture_outbound(message):
+                outbound_received.append(message)
+
+            bus.subscribe_outbound(capture_outbound)
+            await manager.start()
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="test",
+                    chat_id="chat1",
+                    user_id="user1",
+                    text="hi",
+                    topic_id="topic1",
+                )
+            )
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            manager._client.runs.wait.assert_called_once()
+            assert outbound_received[0].text == "Hello from agent!"
+
+        _run(go())
+
+    def test_model_pin_write_wins_over_in_flight_cold_load(self, monkeypatch):
+        """A /model write committed while a cold threads.get is in flight must
+        survive: the older GET snapshot must never overwrite the fresh cache."""
+        from app.channels.manager import ChannelManager
+
+        _mock_gateway_models(monkeypatch, ["model-a", "model-b"])
+
+        async def go():
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            await store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(bus=MessageBus(), store=store)
+            mock_client = _make_mock_langgraph_client(thread_id="thread-1")
+
+            get_started = asyncio.Event()
+            release_get = asyncio.Event()
+
+            async def delayed_get(tid, **kwargs):
+                get_started.set()
+                await release_get.wait()
+                # The GET returns metadata captured before the pin was written.
+                return {"thread_id": tid, "metadata": {}}
+
+            mock_client.threads.get = delayed_get
+            manager._client = mock_client
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="/model model-b",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            load_task = asyncio.create_task(manager._load_thread_model(mock_client, msg, "thread-1"))
+            await get_started.wait()
+            pin_task = asyncio.create_task(manager._handle_model_command(msg, "model-b"))
+            # Without serialization the pin commits now; releasing the GET then
+            # lets the stale snapshot clobber the cache.
+            await asyncio.sleep(0.05)
+            release_get.set()
+            loaded, pin_reply = await asyncio.gather(load_task, pin_task)
+
+            assert pin_reply == "Model 'model-b' selected. It applies to this conversation from the next message."
+            assert manager._thread_model_names["thread-1"] == "model-b"
+            _, _, run_context = manager._resolve_run_params(msg, "thread-1")
+            assert run_context["model_name"] == "model-b"
+
+        _run(go())
+
+    @pytest.mark.parametrize(
+        ("channel_layer", "expected"),
+        [
+            # config.context survives build_run_config and beats every other carrier.
+            (
+                {
+                    "context": {"model_name": "ctx-model"},
+                    "config": {
+                        "context": {"model_name": "cfg-ctx-model"},
+                        "configurable": {"model_name": "cfg-conf-model"},
+                    },
+                },
+                "cfg-ctx-model",
+            ),
+            # No config.context: the top-level context carrier beats configurable.
+            (
+                {
+                    "context": {"model_name": "ctx-model"},
+                    "config": {"configurable": {"model_name": "cfg-conf-model"}},
+                },
+                "ctx-model",
+            ),
+            # Only configurable: it is what the run uses.
+            ({"config": {"configurable": {"model_name": "cfg-conf-model"}}}, "cfg-conf-model"),
+            # Only config.context.
+            ({"config": {"context": {"model_name": "cfg-ctx-model"}}}, "cfg-ctx-model"),
+        ],
+    )
+    def test_model_status_matches_merged_runtime_config(self, channel_layer, expected):
+        """The /model status reply must equal the model in the real merged runtime config."""
+        from app.channels.manager import ChannelManager
+        from app.gateway.services import build_run_config, merge_run_context_overrides
+        from deerflow.agents.lead_agent.agent import _get_runtime_config
+
+        async def go():
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            await store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(
+                bus=MessageBus(),
+                store=store,
+                channel_sessions={"test": channel_layer},
+            )
+            manager._client = _make_mock_langgraph_client(thread_id="thread-1")
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="/model",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            reported, _ = await manager._resolve_configured_model_name(manager._client, msg, "thread-1")
+
+            # Replay the manager's run params through the real Gateway merge.
+            _, run_config, run_context = manager._resolve_run_params(msg, "thread-1")
+            gateway_config = build_run_config("thread-1", run_config, None)
+            merge_run_context_overrides(gateway_config, run_context, internal=True)
+            runtime_model = _get_runtime_config(gateway_config).get("model_name")
+
+            assert reported == runtime_model == expected
+
+        _run(go())
+
+    def test_model_status_mirrors_nested_carrier_replacement(self):
+        """A later session layer carrying a carrier key replaces it wholesale
+        (shallow merge); the status must not resurrect the replaced value."""
+        from app.channels.manager import ChannelManager
+        from app.gateway.services import build_run_config, merge_run_context_overrides
+        from deerflow.agents.lead_agent.agent import _get_runtime_config
+
+        async def go():
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            await store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(
+                bus=MessageBus(),
+                store=store,
+                channel_sessions={
+                    "test": {
+                        "config": {"configurable": {"model_name": "chan-cfg"}},
+                        "users": {"platform-user": {"config": {"configurable": {}}}},
+                    }
+                },
+            )
+            manager._client = _make_mock_langgraph_client(thread_id="thread-1")
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="/model",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            reported, _ = await manager._resolve_configured_model_name(manager._client, msg, "thread-1")
+
+            _, run_config, run_context = manager._resolve_run_params(msg, "thread-1")
+            gateway_config = build_run_config("thread-1", run_config, None)
+            merge_run_context_overrides(gateway_config, run_context, internal=True)
+            runtime_model = _get_runtime_config(gateway_config).get("model_name")
+
+            assert reported is None and runtime_model is None
+            reply = await manager._handle_model_command(msg, "")
+            assert reply == "Current model: server default. Use /models to list available models."
+
+        _run(go())
+
+    def test_model_status_reports_custom_agent_model(self, monkeypatch):
+        """A conversation pinned to a custom agent whose config sets ``model:``
+        runs that model — the agent factory falls back to it when the request
+        carries none — so the status reply must report it, not 'server default'."""
+        from types import SimpleNamespace
+
+        from app.channels import manager as manager_module
+        from app.channels.manager import ChannelManager
+
+        monkeypatch.setattr(
+            manager_module,
+            "load_agent_config",
+            lambda name, *, user_id=None: SimpleNamespace(model="agent-model"),
+        )
+
+        async def go():
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            await store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(bus=MessageBus(), store=store, channel_sessions={"test": {}})
+            mock_client = _make_mock_langgraph_client(thread_id="thread-1")
+            mock_client.threads.get = AsyncMock(return_value={"thread_id": "thread-1", "metadata": {"channel_agent_name": "coder"}})
+            manager._client = mock_client
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="/model",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            reply = await manager._handle_model_command(msg, "")
+
+            assert reply == "Current model: agent-model (from agent configuration)."
+            # Session layer wins over the agent fallback (requested > agent_model_name).
+            manager._channel_sessions["test"]["context"] = {"model_name": "session-model"}
+            reply = await manager._handle_model_command(msg, "")
+            assert reply == "Current model: session-model (from session configuration)."
+
+        _run(go())
+
+    def test_model_status_agent_without_configured_model(self, monkeypatch):
+        """A custom agent with no ``model:`` (or an unloadable config) leaves the
+        conversation on the server default; the status must say so, not crash."""
+        from types import SimpleNamespace
+
+        from app.channels import manager as manager_module
+        from app.channels.manager import ChannelManager
+
+        monkeypatch.setattr(
+            manager_module,
+            "load_agent_config",
+            lambda name, *, user_id=None: SimpleNamespace(model=None),
+        )
+
+        async def go():
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            await store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(bus=MessageBus(), store=store)
+            mock_client = _make_mock_langgraph_client(thread_id="thread-1")
+            mock_client.threads.get = AsyncMock(return_value={"thread_id": "thread-1", "metadata": {"channel_agent_name": "coder"}})
+            manager._client = mock_client
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="/model",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            reply = await manager._handle_model_command(msg, "")
+
+            assert reply == "Current model: server default. Use /models to list available models."
+
+            # An unloadable agent config (deleted agent) degrades the same way.
+            def _raise(name, *, user_id=None):
+                raise FileNotFoundError(name)
+
+            monkeypatch.setattr(manager_module, "load_agent_config", _raise)
+            reply = await manager._handle_model_command(msg, "")
+            assert reply == "Current model: server default. Use /models to list available models."
+
+        _run(go())
+
+    def test_model_pin_write_does_not_wait_for_in_flight_cold_load(self, monkeypatch):
+        """The cold threads.get runs outside _model_pin_lock: a /model write must
+        commit while a slow GET is still in flight instead of queueing behind it,
+        and the finished GET must then lose to the committed write."""
+        from app.channels.manager import ChannelManager
+
+        _mock_gateway_models(monkeypatch, ["new-model"])
+
+        async def go():
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            await store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(bus=MessageBus(), store=store)
+            get_started = asyncio.Event()
+            release_get = asyncio.Event()
+
+            async def slow_get(thread_id, **kwargs):
+                get_started.set()
+                await release_get.wait()
+                return {"thread_id": thread_id, "metadata": {"channel_model_name": "old-model"}}
+
+            mock_client = _make_mock_langgraph_client(thread_id="thread-1")
+            mock_client.threads.get = AsyncMock(side_effect=slow_get)
+            mock_client.threads.update = AsyncMock(return_value={"thread_id": "thread-1"})
+            manager._client = mock_client
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="/model",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            load_task = asyncio.ensure_future(manager._load_thread_model(mock_client, msg, "thread-1"))
+            await get_started.wait()
+            # With the GET outside the pin lock this write completes without
+            # releasing the blocked GET.
+            reply = await asyncio.wait_for(manager._handle_model_command(msg, "new-model"), timeout=5)
+            assert reply == "Model 'new-model' selected. It applies to this conversation from the next message."
+            assert manager._thread_model_names["thread-1"] == "new-model"
+            # The stale snapshot arriving after the write must not overwrite it.
+            release_get.set()
+            assert await load_task == "new-model"
+            assert manager._thread_model_names["thread-1"] == "new-model"
+
+        _run(go())
+
+    def test_models_command_omits_pin_footer_on_fetch_failure(self, monkeypatch):
+        """The pin footer decorates only a successful listing — a failed fetch
+        must not advertise a pin next to an error that lists nothing."""
+        from app.channels.manager import ChannelManager
+
+        async def _raise(path, *, msg=None):
+            raise RuntimeError("gateway down")
+
+        monkeypatch.setattr(ChannelManager, "_fetch_gateway_json", _raise)
+
+        async def go():
+            bus = MessageBus()
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            await store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(bus=bus, store=store, gateway_url="http://gateway:8001")
+            manager._thread_model_names["thread-1"] = "model-b"
+            manager._client = _make_mock_langgraph_client(thread_id="thread-1")
+            outbound_received = []
+            bus.subscribe_outbound(outbound_received.append)
+
+            await manager._handle_command(
+                InboundMessage(
+                    channel_name="test",
+                    chat_id="chat1",
+                    user_id="platform-user",
+                    text="/models",
+                    msg_type=InboundMessageType.COMMAND,
+                )
+            )
+
+            assert outbound_received[0].text == "Failed to fetch models information."
+
+        _run(go())
+
+    def test_stale_model_pin_admission_failure_resets_pin(self, monkeypatch):
+        """A run rejected because the pinned model left the allowlist must not
+        leave the conversation bricked: the rejected selection is cleared
+        (durable write plus cache) and the reply names the recovery."""
+        from app.channels.manager import ChannelManager
+
+        _mock_gateway_models(monkeypatch, ["model-a"])
+
+        async def go():
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            await store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(bus=MessageBus(), store=store)
+            manager._remember_thread_model("thread-1", "gone-model")
+            mock_client = _make_mock_langgraph_client(thread_id="thread-1")
+            mock_client.threads.update = AsyncMock(return_value={"thread_id": "thread-1"})
+            manager._client = mock_client
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="hello",
+            )
+
+            recovery = await manager._stale_pin_recovery(msg, _make_allowlist_exc("gone-model"), expected_pin="gone-model", thread_id="thread-1")
+
+            assert recovery is not None and recovery.resolved is True
+            text = recovery.text
+            assert "gone-model" in text and "/model" in text
+            assert "not processed" in text
+            assert manager._thread_model_names["thread-1"] is None
+            mock_client.threads.update.assert_awaited_once()
+            assert mock_client.threads.update.await_args.kwargs["metadata"] == {"channel_model_name": None}
+
+        _run(go())
+
+    def test_stale_pin_recovery_does_not_erase_replacement_pin(self, monkeypatch):
+        """A delayed rejection for an old pin must not clear a newer selection
+        committed while the rejected run was in flight."""
+        from app.channels.manager import ChannelManager
+
+        _mock_gateway_models(monkeypatch, ["model-a"])
+
+        async def go():
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            await store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(bus=MessageBus(), store=store)
+            # The replacement selection is current; the failed run used gone-model.
+            manager._remember_thread_model("thread-1", "model-b")
+            mock_client = _make_mock_langgraph_client(thread_id="thread-1")
+            mock_client.threads.update = AsyncMock(return_value={"thread_id": "thread-1"})
+            manager._client = mock_client
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="hello",
+            )
+
+            recovery = await manager._stale_pin_recovery(msg, _make_allowlist_exc("gone-model"), expected_pin="gone-model", thread_id="thread-1")
+
+            assert recovery is not None and recovery.resolved is True
+            text = recovery.text
+            assert "gone-model" in text and "model-b" in text and "unchanged" in text
+            assert manager._thread_model_names["thread-1"] == "model-b"
+            mock_client.threads.update.assert_not_awaited()
+
+        _run(go())
+
+    def test_stale_pin_recovery_rechecks_pin_under_the_lock(self, monkeypatch):
+        """The under-lock re-check is the last line of defense: a /model write
+        that commits while recovery waits on _model_pin_lock must win over the
+        stale rejection. Without it, recovery persists a clear that silently
+        erases the user's fresh selection from durable metadata. (The sibling
+        test covers replacement visible at read time; this one covers the
+        replacement landing in the lock-wait window — the only window the
+        re-check exists for, and the one the background drain task is most
+        exposed to since it holds no serialized-run lock.)"""
+        from app.channels.manager import ChannelManager
+
+        _mock_gateway_models(monkeypatch, ["model-a"])
+
+        async def go():
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            await store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(bus=MessageBus(), store=store)
+            manager._remember_thread_model("thread-1", "gone-model")
+            mock_client = _make_mock_langgraph_client(thread_id="thread-1")
+            mock_client.threads.update = AsyncMock(return_value={"thread_id": "thread-1"})
+            manager._client = mock_client
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="hello",
+            )
+
+            # Hold the lock like an in-flight /model write does; recovery
+            # reads the stale cache value, then parks on the lock.
+            await manager._model_pin_lock.acquire()
+            recovery_task = asyncio.create_task(manager._stale_pin_recovery(msg, _make_allowlist_exc("gone-model"), expected_pin="gone-model", thread_id="thread-1"))
+            # Everything before the lock is synchronous, so one yield parks
+            # recovery on the acquire; the simulated write then publishes its
+            # value under the lock exactly like the real /model path.
+            await asyncio.sleep(0)
+            manager._remember_thread_model("thread-1", "new-model")
+            manager._model_pin_lock.release()
+
+            recovery = await recovery_task
+
+            # The re-check saw the newer pin: recovery persisted nothing, and
+            # the user's fresh selection survives — cache and durable alike.
+            assert recovery is not None and recovery.resolved is True
+            mock_client.threads.update.assert_not_awaited()
+            assert manager._thread_model_names["thread-1"] == "new-model"
+            assert "new-model" in recovery.text and "unchanged" in recovery.text
+
+        _run(go())
+
+    def test_stale_pin_recovery_ignores_other_failures(self, monkeypatch):
+        """Only the allowlist rejection for the run's own selection is handled:
+        other errors, unknown selections, and config-caused rejections are not."""
+        from app.channels.manager import ChannelManager
+
+        _mock_gateway_models(monkeypatch, ["model-a"])
+
+        async def go():
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            await store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(bus=MessageBus(), store=store)
+            manager._client = _make_mock_langgraph_client(thread_id="thread-1")
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="hello",
+            )
+
+            # Unrelated error.
+            assert await manager._stale_pin_recovery(msg, RuntimeError("boom"), expected_pin="gone-model", thread_id="thread-1") is None
+            # Allowlist rejection, but the caller cannot name the run's selection.
+            assert await manager._stale_pin_recovery(msg, _make_allowlist_exc("gone-model"), expected_pin=None, thread_id="thread-1") is None
+            # Allowlist rejection for a selection this thread does not hold
+            # (session-config-caused): nothing to clear, and the reply names
+            # the configuration source instead of claiming a default takeover.
+            recovery = await manager._stale_pin_recovery(msg, _make_allowlist_exc("cfg-model"), expected_pin="cfg-model", thread_id="thread-1")
+            assert recovery is not None and recovery.resolved is False
+            text = recovery.text
+            assert "cfg-model" in text and "session configuration" in text
+            assert "configured default" not in text
+
+        _run(go())
+
+    def test_streaming_chat_recovers_stale_model_pin(self, monkeypatch):
+        """Streaming channels never reach _handle_message's generic handler:
+        start_run's 400 surfaces inside _handle_streaming_chat, which must clear
+        the stale pin and deliver the recovery as its single final outbound."""
+        from app.channels.manager import ChannelManager
+
+        _mock_gateway_models(monkeypatch, ["model-a"])
+
+        async def go():
+            bus = MessageBus()
+            outbounds: list[OutboundMessage] = []
+            bus.subscribe_outbound(outbounds.append)
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            await store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(bus=bus, store=store)
+            manager._remember_thread_model("thread-1", "gone-model")
+            mock_client = _make_mock_langgraph_client(thread_id="thread-1")
+            mock_client.threads.update = AsyncMock(return_value={"thread_id": "thread-1"})
+
+            def failing_stream(*args, **kwargs):
+                async def gen():
+                    raise _make_allowlist_exc("gone-model")
+                    yield  # pragma: no cover
+
+                return gen()
+
+            mock_client.runs.stream = failing_stream
+            manager._client = mock_client
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="hello",
+            )
+
+            await manager._handle_streaming_chat(
+                mock_client,
+                msg,
+                "thread-1",
+                "lead_agent",
+                {"configurable": {"thread_id": "thread-1"}},
+                {"model_name": "gone-model", "thread_id": "thread-1"},
+                {"role": "user", "content": "hello"},
+            )
+
+            finals = [o for o in outbounds if o.is_final]
+            assert len(finals) == 1
+            assert "gone-model" in finals[0].text and "/model" in finals[0].text
+            assert "An error occurred while processing your request" not in finals[0].text
+            assert manager._thread_model_names["thread-1"] is None
+            mock_client.threads.update.assert_awaited_once()
+            assert mock_client.threads.update.await_args.kwargs["metadata"] == {"channel_model_name": None}
+
+        _run(go())
+
+    def test_models_command_marks_current_pin(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+
+        _mock_gateway_models(monkeypatch, ["model-a", "model-b"])
+
+        async def go():
+            bus = MessageBus()
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            await store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(bus=bus, store=store, gateway_url="http://gateway:8001")
+            manager._thread_model_names["thread-1"] = "model-b"
+            manager._client = _make_mock_langgraph_client(thread_id="thread-1")
+            outbound_received = []
+
+            async def capture_outbound(message):
+                outbound_received.append(message)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            await manager._handle_command(
+                InboundMessage(
+                    channel_name="test",
+                    chat_id="chat1",
+                    user_id="platform-user",
+                    text="/models",
+                    msg_type=InboundMessageType.COMMAND,
+                )
+            )
+
+            assert outbound_received[0].text == ("Available models:\n• model-a\n• model-b\nCurrent conversation model: model-b (pinned via /model)")
+
+        _run(go())
+
+    def test_models_command_skips_malformed_entries(self, monkeypatch):
+        """A malformed entry in the Gateway payload must not turn /models into
+        the generic internal-error reply: the listing renders the valid names,
+        mirroring the guarded comprehension in _handle_model_command."""
+        from app.channels.manager import ChannelManager
+
+        async def _payload(self, path, *, msg=None):
+            return {"models": [{"name": "model-a"}, {"broken": True}, "garbage", 42]}
+
+        monkeypatch.setattr(ChannelManager, "_fetch_gateway_json", _payload)
+
+        async def go():
+            bus = MessageBus()
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            await store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(bus=bus, store=store, gateway_url="http://gateway:8001")
+            manager._client = _make_mock_langgraph_client(thread_id="thread-1")
+            outbound_received = []
+
+            async def capture_outbound(message):
+                outbound_received.append(message)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            await manager._handle_command(
+                InboundMessage(
+                    channel_name="test",
+                    chat_id="chat1",
+                    user_id="platform-user",
+                    text="/models",
+                    msg_type=InboundMessageType.COMMAND,
+                )
+            )
+
+            assert outbound_received[0].text == "Available models:\n• model-a"
+
+        _run(go())
+
+    def test_model_command_usage_rejects_multiple_args(self):
+        """`/model a b` is rejected with usage text before any I/O happens."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            await store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(bus=MessageBus(), store=store)
+            mock_client = _make_mock_langgraph_client(thread_id="thread-1")
+            manager._client = mock_client
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="/model model-a model-b",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            reply = await manager._handle_model_command(msg, "model-a model-b")
+
+            assert reply == "Usage: /model [<name>|default]"
+            mock_client.threads.update.assert_not_called()
+
+        _run(go())
+
+    def test_model_status_degrades_when_pin_lookup_fails(self):
+        """A Gateway failure while reading the pin must not bubble into the
+        generic message error handler — the status reply degrades to unknown."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            await store.set_thread_id("test", "chat1", "thread-1")
+            manager = ChannelManager(bus=MessageBus(), store=store)
+            mock_client = _make_mock_langgraph_client(thread_id="thread-1")
+            mock_client.threads.get = AsyncMock(side_effect=RuntimeError("gateway down"))
+            manager._client = mock_client
+            msg = InboundMessage(
+                channel_name="test",
+                chat_id="chat1",
+                user_id="platform-user",
+                text="/model",
+                msg_type=InboundMessageType.COMMAND,
+            )
+
+            reply = await manager._handle_model_command(msg, "")
+
+            assert reply == "Current model: unknown. Use /models to list available models."
+            mock_client.threads.update.assert_not_called()
+
+        _run(go())
+
     def test_each_topic_creates_new_thread(self):
         """Messages with distinct topic_ids should each create a new DeerFlow thread."""
         from app.channels.manager import ChannelManager
@@ -4501,6 +5696,39 @@ class TestGithubFireAndForget:
         _run(go())
 
 
+async def _stale_pin_drain_setup(thread_id, *, model, pin=None, session_model=None):
+    """Assemble the shared drain-recovery fixture: a manager with one buffered
+    follow-up whose ``runs.create`` rejects *model* with an allowlist 400.
+
+    Returns ``(manager, carrier_msg, mock_client, bus)``; each test customizes
+    the durable-thread mocks it asserts on.
+    """
+    from app.channels.manager import ChannelManager
+
+    bus = MessageBus()
+    store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+    await store.set_thread_id("github", "zhfeng/llm-gateway", thread_id)
+    manager = ChannelManager(bus=bus, store=store)
+    if pin is not None:
+        manager._remember_thread_model(thread_id, pin)
+    if session_model is not None:
+        manager._default_session = {"context": {"model_name": session_model}}
+
+    carrier_msg = InboundMessage(
+        channel_name="github",
+        chat_id="zhfeng/llm-gateway",
+        user_id="zhfeng",
+        owner_user_id="agent-owner-1",
+        text="queued comment",
+    )
+    manager._buffer_followup(thread_id, carrier_msg)
+
+    mock_client = MagicMock()
+    mock_client.runs.create = AsyncMock(side_effect=_make_allowlist_exc(model))
+    manager._client = mock_client
+    return manager, carrier_msg, mock_client, bus
+
+
 class TestGithubFollowupBuffer:
     """Tests for issue #4121 Slice 2: buffer-and-drain of concurrent GitHub
     comments that arrive while a run is already active on the thread.
@@ -4841,6 +6069,153 @@ class TestGithubFollowupBuffer:
             await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
 
             assert len(manager._followup_buffers[thread_id]) == 1
+
+        _run(go())
+
+    def test_drain_clears_stale_model_pin_and_requeues(self, monkeypatch, caplog):
+        """A drained run rejected for a stale /model pin must clear the pin —
+        the drain is a run-creation path like _handle_chat, so the self-clear
+        invariant covers it too. The batch is still requeued: with the pin
+        gone, the next drain cycle succeeds instead of looping on the same
+        admission failure."""
+        _mock_gateway_models(monkeypatch, ["model-a"])
+
+        async def go():
+            thread_id = "gh-thread-stale-pin"
+            manager, carrier_msg, mock_client, bus = await _stale_pin_drain_setup(thread_id, model="gone-model", pin="gone-model")
+            mock_client.threads.update = AsyncMock(return_value={"thread_id": thread_id})
+
+            outbounds = []
+
+            async def capture_outbound(message):
+                outbounds.append(message)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            with caplog.at_level(logging.INFO):
+                await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
+
+            # Pin self-cleared, batch requeued for the next cycle. The recovery
+            # is logged, NOT sent: the buffered messages are retried
+            # automatically, so a "please resend" reply would double-process
+            # them (and the only buffering channel, GitHub, is log-only anyway).
+            assert manager._thread_model_names[thread_id] is None
+            assert len(manager._followup_buffers[thread_id]) == 1
+            mock_client.threads.update.assert_awaited_once()
+            assert mock_client.threads.update.await_args.kwargs["metadata"] == {"channel_model_name": None}
+            assert outbounds == []
+            # Anchored to the resolved branch: the WARNING branch prints the
+            # rejected model too, so the model name alone would not prove
+            # which path ran.
+            assert "recovered from stale model" in caplog.text
+            assert "could not self-recover" not in caplog.text
+
+        _run(go())
+
+    def test_drain_after_concurrent_model_replacement_persists_nothing(self, monkeypatch, caplog):
+        """A /model committed while the drained run was in flight makes the
+        rejected selection stale-but-already-replaced: recovery must NOT clear
+        anything (the newer choice wins) and the log verb must stay neutral —
+        "recovered", not "cleared" — because no reset ever happened."""
+        _mock_gateway_models(monkeypatch, ["model-a"])
+
+        async def go():
+            thread_id = "gh-thread-replaced"
+            manager, carrier_msg, mock_client, _bus = await _stale_pin_drain_setup(thread_id, model="gone-model", pin="gone-model")
+            mock_client.threads.update = AsyncMock()
+
+            async def reject_after_replacement(*args, **kwargs):
+                # The user pins a working model while the run rejection is in flight.
+                manager._remember_thread_model(thread_id, "new-model")
+                raise _make_allowlist_exc("gone-model")
+
+            mock_client.runs.create = AsyncMock(side_effect=reject_after_replacement)
+
+            with caplog.at_level(logging.INFO):
+                await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
+
+            # The replacement selection is untouched and no durable write ran…
+            assert manager._thread_model_names[thread_id] == "new-model"
+            mock_client.threads.update.assert_not_awaited()
+            # …but the batch is still requeued and the log does not claim a clear.
+            assert len(manager._followup_buffers[thread_id]) == 1
+            assert "recovered from stale model" in caplog.text
+            assert "cleared" not in caplog.text
+            assert "could not self-recover" not in caplog.text
+
+        _run(go())
+
+    def test_drain_recovery_uses_caller_thread_id_despite_lookup_failure(self, monkeypatch):
+        """Recovery takes the caller's authoritative thread_id and never
+        re-derives it from the message: even with the store lookup raising,
+        the stale pin is still cleared for the right conversation. (Before the
+        caller-thread_id contract, this same hiccup silently meant "no
+        recovery" — the failure mode no longer exists.)"""
+        from app.channels.manager import ChannelManager
+
+        _mock_gateway_models(monkeypatch, ["model-a"])
+
+        async def go():
+            thread_id = "gh-thread-lookup-boom"
+            manager, carrier_msg, mock_client, _bus = await _stale_pin_drain_setup(thread_id, model="gone-model", pin="gone-model")
+            mock_client.threads.update = AsyncMock(return_value={"thread_id": thread_id})
+
+            async def _boom(self, msg):
+                raise RuntimeError("connection repo down")
+
+            monkeypatch.setattr(ChannelManager, "_lookup_thread_id", _boom)
+
+            await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
+
+            # Recovery never consults the store: the pin is cleared for the
+            # caller's thread, the batch is requeued, the durable reset ran.
+            assert manager._thread_model_names[thread_id] is None
+            assert len(manager._followup_buffers[thread_id]) == 1
+            mock_client.threads.update.assert_awaited_once()
+
+        _run(go())
+
+    def test_drain_logs_warning_when_stale_pin_persist_fails(self, monkeypatch, caplog):
+        """When the durable pin reset fails, recovery returns without clearing,
+        so the next drain cycle rejects identically: the drain must keep an
+        operator-visible WARNING instead of a per-cycle INFO "recovered" line."""
+        _mock_gateway_models(monkeypatch, ["model-a"])
+
+        async def go():
+            thread_id = "gh-thread-persist-fails"
+            manager, carrier_msg, mock_client, _bus = await _stale_pin_drain_setup(thread_id, model="gone-model", pin="gone-model")
+            mock_client.threads.update = AsyncMock(side_effect=RuntimeError("store down"))
+
+            with caplog.at_level(logging.INFO):
+                await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
+
+            # Nothing cleared: pin and batch both intact, WARNING emitted.
+            assert manager._thread_model_names[thread_id] == "gone-model"
+            assert len(manager._followup_buffers[thread_id]) == 1
+            assert "could not self-recover from stale model" in caplog.text
+
+        _run(go())
+
+    def test_drain_logs_warning_when_rejection_comes_from_session_config(self, monkeypatch, caplog):
+        """When the drained run's stale model came from session configuration
+        (no /model pin held), recovery has nothing to clear and the next cycle
+        rejects identically — the drain must surface that as WARNING, not as a
+        per-cycle INFO "recovered" line, while still requeueing the batch."""
+        _mock_gateway_models(monkeypatch, ["model-a"])
+
+        async def go():
+            thread_id = "gh-thread-session-cfg"
+            manager, carrier_msg, mock_client, _bus = await _stale_pin_drain_setup(thread_id, model="cfg-model", session_model="cfg-model")
+            mock_client.threads.get = AsyncMock(return_value={"thread_id": thread_id, "metadata": {}})
+            mock_client.threads.update = AsyncMock()
+
+            with caplog.at_level(logging.INFO):
+                await manager._drain_followups_for_thread(mock_client, thread_id, carrier_msg)
+
+            # Nothing to clear (no pin): batch requeued, WARNING emitted, no durable write.
+            assert len(manager._followup_buffers[thread_id]) == 1
+            mock_client.threads.update.assert_not_awaited()
+            assert "could not self-recover from stale model" in caplog.text
 
         _run(go())
 

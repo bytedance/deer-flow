@@ -577,6 +577,47 @@ async def test_channel_service_start_imports_the_legacy_file_once_for_the_sql_st
         await engine.dispose()
 
 
+async def test_channel_service_stop_during_the_legacy_import_invalidates_that_start(tmp_path):
+    """The import runs under the start lock after the generation check: a ``stop()`` that lands
+    while it is in flight bumps the generation, so the start returns without starting the manager
+    (and a later ``start()`` imports nothing more because the table is populated)."""
+    from unittest.mock import AsyncMock
+
+    from app.channels.service import ChannelService
+
+    path = tmp_path / "channels" / "store.json"
+    _write_legacy(path, {"slack:C1": _legacy_entry("thread-1")})
+    engine = await _sqlite_engine(tmp_path / "bindings.db")
+    try:
+        store = _sql_store(engine, legacy_path=path)
+        import_entered = asyncio.Event()
+        release_import = asyncio.Event()
+        real_import = store.import_legacy_json
+
+        async def gated_import():
+            import_entered.set()
+            await release_import.wait()
+            return await real_import()
+
+        store.import_legacy_json = gated_import  # type: ignore[method-assign]
+        service = ChannelService(channels_config={}, store=store)
+        manager_start = AsyncMock(wraps=service.manager.start)
+        service.manager.start = manager_start  # type: ignore[method-assign]
+
+        start_task = asyncio.create_task(service.start())
+        await asyncio.wait_for(import_entered.wait(), timeout=1)
+        await service.stop()  # lands during the import: bumps the shutdown generation
+        release_import.set()
+        await asyncio.wait_for(start_task, timeout=5)
+
+        manager_start.assert_not_awaited()  # the invalidated start never started the manager
+        assert service._running is False
+        assert await store.get_thread_id("slack", "C1") == "thread-1"  # the import itself completed
+        assert not path.exists()
+    finally:
+        await engine.dispose()
+
+
 async def test_channel_service_start_leaves_a_json_store_untouched(tmp_path):
     from app.channels.service import ChannelService
 

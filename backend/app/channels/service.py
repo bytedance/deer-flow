@@ -166,6 +166,8 @@ class ChannelService:
         self._config = config
         self._running = False
         self._stopping = False
+        self._shutdown_generation = 0
+        self._manager_start_lock = asyncio.Lock()
         self._readiness_locks: dict[str, asyncio.Lock] = {}
         self._config_epochs: dict[str, int] = {}
 
@@ -211,14 +213,28 @@ class ChannelService:
         if self._stopping:
             raise RuntimeError("cannot start ChannelService while shutdown is incomplete")
 
-        if isinstance(self.store, SqlChannelStore):
-            # One-time move of a pre-database ``channels/store.json`` into the
-            # shared table (idempotent; a peer replica importing concurrently is
-            # tolerated). Must land before the manager routes its first message
-            # or a known chat would get a second thread.
-            await self.store.import_legacy_json()
-        await self.manager.start()
-        self._running = True
+        generation = self._shutdown_generation
+        async with self._manager_start_lock:
+            if generation != self._shutdown_generation or self._running:
+                return
+            if isinstance(self.store, SqlChannelStore):
+                # One-time move of a pre-database ``channels/store.json`` into the
+                # shared table (idempotent; a peer replica importing concurrently is
+                # tolerated). It runs under the start lock, after the generation
+                # check and before the manager starts, so the bindings are in the
+                # table before the first message is routed (a known chat would
+                # otherwise get a second thread), and a stop() that lands during
+                # the import bumps the generation and invalidates this start.
+                await self.store.import_legacy_json()
+                if generation != self._shutdown_generation:
+                    return
+            await self.manager.start()
+            if generation != self._shutdown_generation:
+                # Keep newer starts waiting until this late start is drained.
+                # stop() must remain free to invalidate an in-flight startup.
+                await self.manager.stop()
+                return
+            self._running = True
 
         ready_status = await self.ensure_ready_channels(attempts=2)
         ready_count = sum(1 for ready in ready_status.values() if ready)
@@ -308,6 +324,7 @@ class ChannelService:
 
     async def stop(self) -> None:
         """Drain accepted messages while channels can still deliver replies."""
+        self._shutdown_generation += 1
         self._stopping = True
         self._running = False
         # Reject new provider work first. Existing workers keep draining during
