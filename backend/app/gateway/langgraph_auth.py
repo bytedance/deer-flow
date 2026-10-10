@@ -276,10 +276,17 @@ async def authenticate(request):
             status_code=401,
             detail="User not found",
         )
-    if user.token_version != payload.ver:
+    # Same post-lookup verdicts as every other JWT surface — including
+    # account suspension, so a disabled user's still-valid cookie is
+    # rejected here exactly as the Gateway's HTTP dependency rejects it.
+    from app.gateway.auth.errors import AuthErrorCode
+    from app.gateway.deps import validate_resolved_session_user
+
+    failure = validate_resolved_session_user(user, payload)
+    if failure is not None:
         raise Auth.exceptions.HTTPException(
             status_code=401,
-            detail="Token revoked (password changed)",
+            detail="Token revoked (password changed)" if failure is AuthErrorCode.TOKEN_INVALID else "Account disabled",
         )
 
     return payload.sub
