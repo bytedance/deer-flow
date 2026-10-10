@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import MagicMock, patch
 
+import pytest
 from fastapi import HTTPException
 
 from deerflow.agents.memory.backends.deermem.deer_mem import DeerMem
@@ -26,7 +27,7 @@ def test_deermem_cancel_by_agent_uses_canonical_bucket(tmp_path) -> None:
     assert mem._queue._items[0].agent_name == "other"
 
 
-def test_deermem_clear_memory_cancels_before_and_after_clear(tmp_path) -> None:
+def test_deermem_clear_memory_cancels_after_successful_clear(tmp_path) -> None:
     mem = DeerMem(backend_config={"storage_path": str(tmp_path)})
     mem._queue._items = [
         ConversationContext(thread_id="t1", messages=["m"], agent_name="research-agent", user_id="u1"),
@@ -35,6 +36,7 @@ def test_deermem_clear_memory_cancels_before_and_after_clear(tmp_path) -> None:
     mem._updater = MagicMock()
 
     def _clear(**kwargs):
+        assert [c.thread_id for c in mem._queue._items] == ["t1", "t2"]
         mem._queue._items.append(ConversationContext(thread_id="t-mid", messages=["m"], agent_name="research-agent", user_id="u1"))
         return {"facts": []}
 
@@ -43,7 +45,27 @@ def test_deermem_clear_memory_cancels_before_and_after_clear(tmp_path) -> None:
     mem.clear_memory(agent_name="research-agent", user_id="u1")
 
     assert [c.agent_name for c in mem._queue._items] == ["other"]
-    mem._updater.clear_memory_data.assert_called_once_with(agent_name="research-agent", user_id="u1")
+    mem._updater.clear_memory_data.assert_called_once()
+    assert mem._updater.clear_memory_data.call_args.kwargs["agent_name"] == "research-agent"
+    assert mem._updater.clear_memory_data.call_args.kwargs["user_id"] == "u1"
+    assert callable(mem._updater.clear_memory_data.call_args.kwargs["after_commit"])
+    mem._updater.promote_clear_exclusions.assert_called_once_with(user_id="u1", agent_name="research-agent")
+
+
+def test_deermem_failed_clear_does_not_cancel_or_promote_exclusions(tmp_path) -> None:
+    mem = DeerMem(backend_config={"storage_path": str(tmp_path)})
+    mem._queue._items = [
+        ConversationContext(thread_id="t1", messages=["m"], agent_name="research-agent", user_id="u1"),
+        ConversationContext(thread_id="t2", messages=["m"], agent_name="other", user_id="u1"),
+    ]
+    mem._updater = MagicMock()
+    mem._updater.clear_memory_data.side_effect = TimeoutError("memory file lock timed out")
+
+    with pytest.raises(TimeoutError, match="memory file lock timed out"):
+        mem.clear_memory(agent_name="research-agent", user_id="u1")
+
+    assert [c.thread_id for c in mem._queue._items] == ["t1", "t2"]
+    mem._updater.promote_clear_exclusions.assert_not_called()
 
 
 def test_deermem_clear_all_cancels_all_pending_for_user(tmp_path) -> None:
@@ -60,7 +82,9 @@ def test_deermem_clear_all_cancels_all_pending_for_user(tmp_path) -> None:
 
     assert mem._queue.pending_count == 1
     assert mem._queue._items[0].user_id == "u2"
-    mem._updater.clear_all_memory_data.assert_called_once_with(user_id="u1")
+    mem._updater.clear_all_memory_data.assert_called_once()
+    assert mem._updater.clear_all_memory_data.call_args.kwargs["user_id"] == "u1"
+    assert callable(mem._updater.clear_all_memory_data.call_args.kwargs["after_commit"])
 
 
 def test_base_memory_manager_cancel_by_agent_defaults_to_zero() -> None:

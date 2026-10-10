@@ -2,13 +2,17 @@ import threading
 import time
 from unittest.mock import MagicMock, call, patch
 
+from langchain_core.messages import AIMessage, HumanMessage
+
 from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
 from deerflow.agents.memory.backends.deermem.deermem.core.queue import ConversationContext, MemoryUpdateQueue
 
 
 def _queue(updater: MagicMock | None = None) -> MemoryUpdateQueue:
     """A MemoryUpdateQueue with DI config + a (mock) updater; timer disabled."""
-    return MemoryUpdateQueue(DeerMemConfig(), updater or MagicMock())
+    updater = updater or MagicMock()
+    updater.peek_clear_generation.return_value = (0, 0)
+    return MemoryUpdateQueue(DeerMemConfig(), updater)
 
 
 def test_queue_add_preserves_existing_correction_flag_for_same_thread() -> None:
@@ -38,6 +42,8 @@ def test_process_queue_forwards_correction_flag_to_updater() -> None:
         user_id=None,
         trace_id=None,
         bypass_watermark=False,
+        expected_clear_generation=None,
+        sequence=0,
         judge=True,
     )
 
@@ -69,6 +75,8 @@ def test_process_queue_forwards_reinforcement_flag_to_updater() -> None:
         user_id=None,
         trace_id=None,
         bypass_watermark=False,
+        expected_clear_generation=None,
+        sequence=0,
         judge=True,
     )
 
@@ -226,8 +234,8 @@ def test_process_queue_updates_different_agents_in_same_thread_separately() -> N
     assert mock_updater.update_memory.call_count == 2
     mock_updater.update_memory.assert_has_calls(
         [
-            call(messages=["agent-a"], thread_id="thread-1", agent_name="agent-a", signals=frozenset(), user_id=None, trace_id=None, bypass_watermark=False, judge=True),
-            call(messages=["agent-b"], thread_id="thread-1", agent_name="agent-b", signals=frozenset(), user_id=None, trace_id=None, bypass_watermark=False, judge=True),
+            call(messages=["agent-a"], thread_id="thread-1", agent_name="agent-a", signals=frozenset(), user_id=None, trace_id=None, bypass_watermark=False, expected_clear_generation=(0, 0), sequence=1, judge=True),
+            call(messages=["agent-b"], thread_id="thread-1", agent_name="agent-b", signals=frozenset(), user_id=None, trace_id=None, bypass_watermark=False, expected_clear_generation=(0, 0), sequence=2, judge=True),
         ]
     )
 
@@ -248,6 +256,8 @@ def test_process_queue_forwards_trace_id_to_updater() -> None:
         user_id=None,
         trace_id="trace-memory-1",
         bypass_watermark=False,
+        expected_clear_generation=None,
+        sequence=0,
         judge=True,
     )
 
@@ -293,6 +303,8 @@ def test_flush_sync_drains_pending_queue_and_returns_true() -> None:
         user_id=None,
         trace_id=None,
         bypass_watermark=False,
+        expected_clear_generation=None,
+        sequence=0,
         judge=False,
     )
 
@@ -409,9 +421,439 @@ def test_flush_sync_skips_inter_item_delay_on_drain_path() -> None:
     assert mock_updater.update_memory.call_count == 3
 
 
+def test_queue_add_captures_clear_generation_from_updater_peek() -> None:
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.return_value = (2, 5)
+    queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="thread-1", messages=["first"], agent_name="researcher", user_id="alice")
+
+    mock_updater.peek_clear_generation.assert_called_once_with("researcher", user_id="alice")
+    assert queue._items[0].clear_generation == (2, 5)
+
+
+def test_queue_coalesce_keeps_earlier_clear_generation_when_unchanged() -> None:
+    mock_updater = MagicMock()
+    held_during_peek: list[bool] = []
+    queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
+
+    def peek(agent_name: str | None, *, user_id: str | None = None) -> tuple[int, int]:
+        held_during_peek.append(queue._lock.locked())
+        return (0, 0)
+
+    mock_updater.peek_clear_generation.side_effect = peek
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="thread-1", messages=["first"], agent_name="researcher", user_id="alice")
+        queue.add(thread_id="thread-1", messages=["second"], agent_name="researcher", user_id="alice")
+
+    assert queue.pending_count == 1
+    assert queue._items[0].messages == ["second"]
+    assert queue._items[0].clear_generation == (0, 0)
+    assert held_during_peek == [False, False]
+    mock_updater.mark_feed_consumed.assert_not_called()
+
+
+def test_queue_coalesce_after_newer_clear_starts_fresh_generation() -> None:
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.side_effect = [(0, 0), (1, 0)]
+    queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="thread-1", messages=["first"], agent_name="researcher", user_id="alice")
+        queue.add(thread_id="thread-1", messages=["second"], agent_name="researcher", user_id="alice")
+
+    assert queue.pending_count == 1
+    assert queue._items[0].messages == ["second"]
+    assert queue._items[0].clear_generation == (1, 0)
+    mock_updater.mark_feed_consumed.assert_called_once_with(
+        ["first"],
+        thread_id="thread-1",
+        user_id="alice",
+        agent_name="researcher",
+        bypass_watermark=False,
+        sequence=1,
+    )
+
+
+def test_queue_coalesce_keeps_stale_fence_when_pre_clear_consume_fails() -> None:
+    """A failed refresh must not install the post-clear messages on the old fence.
+
+    Those messages would be dropped before the LLM and their ids recorded as
+    cleared. The pre-clear snapshot stays so a later flush can still exclude
+    it, and the incoming messages are queued beside it under the generation
+    they captured.
+    """
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.side_effect = [(0, 0), (1, 0)]
+    mock_updater.mark_feed_consumed.side_effect = RuntimeError("watermark unavailable")
+    mock_updater.update_memory.return_value = True
+    queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="thread-1", messages=["first"], agent_name="researcher", user_id="alice")
+        queue.add(
+            thread_id="thread-1",
+            messages=["second"],
+            agent_name="researcher",
+            user_id="alice",
+            signals=frozenset({"preference"}),
+        )
+
+    assert queue.pending_count == 2
+    assert queue._items[0].messages == ["first"]
+    assert queue._items[0].clear_generation == (0, 0)
+    assert queue._items[0].signals == frozenset({"preference"})
+    assert queue._items[1].messages == ["second"]
+    assert queue._items[1].clear_generation == (1, 0)
+    assert queue._items[1].bypass_watermark is False
+    assert queue._items[1].signals == frozenset({"preference"})
+    mock_updater.mark_feed_consumed.assert_called_once_with(
+        ["first"],
+        thread_id="thread-1",
+        user_id="alice",
+        agent_name="researcher",
+        bypass_watermark=False,
+        sequence=1,
+    )
+
+    queue._process_queue()
+    assert mock_updater.update_memory.call_count == 2
+    first_call, second_call = mock_updater.update_memory.call_args_list
+    assert first_call.kwargs["messages"] == ["first"]
+    assert first_call.kwargs["expected_clear_generation"] == (0, 0)
+    assert second_call.kwargs["messages"] == ["second"]
+    assert second_call.kwargs["expected_clear_generation"] == (1, 0)
+    assert second_call.kwargs["signals"] == frozenset({"preference"})
+
+
+def test_queue_coalesce_refreshes_emergency_snapshot_after_newer_clear() -> None:
+    """A later emergency flush keeps its own fence and consumes the pending one.
+
+    Attaching the fresh messages to the pending pre-clear generation makes the
+    updater drop them before the LLM and record their ids as cleared.
+    """
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.side_effect = [(0, 0), (1, 0)]
+    queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
+    with patch.object(queue, "_schedule_timer"):
+        queue.add_nowait(thread_id="thread-1", messages=["first"], agent_name="researcher", user_id="alice")
+        queue.add_nowait(thread_id="thread-1", messages=["second"], agent_name="researcher", user_id="alice")
+
+    assert queue.pending_count == 1
+    assert queue._items[0].messages == ["second"]
+    assert queue._items[0].clear_generation == (1, 0)
+    assert queue._items[0].bypass_watermark is True
+    assert mock_updater.peek_clear_generation.call_count == 2
+    mock_updater.mark_feed_consumed.assert_called_once_with(
+        ["first"],
+        thread_id="thread-1",
+        user_id="alice",
+        agent_name="researcher",
+        bypass_watermark=True,
+        sequence=1,
+    )
+
+
+def test_queue_coalesce_keeps_emergency_snapshot_when_pre_clear_consume_fails() -> None:
+    """A failed emergency refresh must not brand the new flush as pre-clear.
+
+    Summarization is about to remove these messages, so recording their ids as
+    cleared would drop the preference permanently. The new flush stays queued
+    under the generation it captured.
+    """
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.side_effect = [(0, 0), (1, 0)]
+    mock_updater.mark_feed_consumed.side_effect = RuntimeError("watermark unavailable")
+    mock_updater.update_memory.return_value = True
+    queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
+    with patch.object(queue, "_schedule_timer"):
+        queue.add_nowait(thread_id="thread-1", messages=["first"], agent_name="researcher", user_id="alice")
+        queue.add_nowait(
+            thread_id="thread-1",
+            messages=["second"],
+            agent_name="researcher",
+            user_id="alice",
+            signals=frozenset({"preference"}),
+        )
+
+    assert queue.pending_count == 2
+    assert queue._items[0].messages == ["first"]
+    assert queue._items[0].clear_generation == (0, 0)
+    assert queue._items[0].bypass_watermark is True
+    assert queue._items[0].signals == frozenset({"preference"})
+    assert queue._items[1].messages == ["second"]
+    assert queue._items[1].clear_generation == (1, 0)
+    assert queue._items[1].bypass_watermark is True
+    assert queue._items[1].signals == frozenset({"preference"})
+    mock_updater.mark_feed_consumed.assert_called_once_with(
+        ["first"],
+        thread_id="thread-1",
+        user_id="alice",
+        agent_name="researcher",
+        bypass_watermark=True,
+        sequence=1,
+    )
+
+    queue._process_queue()
+    assert mock_updater.update_memory.call_count == 2
+    first_call, second_call = mock_updater.update_memory.call_args_list
+    assert first_call.kwargs["messages"] == ["first"]
+    assert first_call.kwargs["expected_clear_generation"] == (0, 0)
+    assert first_call.kwargs["bypass_watermark"] is True
+    assert second_call.kwargs["messages"] == ["second"]
+    assert second_call.kwargs["expected_clear_generation"] == (1, 0)
+    assert second_call.kwargs["bypass_watermark"] is True
+
+
+def test_queue_coalesce_after_failed_refresh_merges_into_fresh_snapshot() -> None:
+    """A later add merges into the post-clear snapshot and leaves the stale one queued."""
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.side_effect = [(0, 0), (1, 0), (1, 0)]
+    mock_updater.mark_feed_consumed.side_effect = RuntimeError("watermark unavailable")
+    queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="thread-1", messages=["first"], agent_name="researcher", user_id="alice")
+        queue.add(
+            thread_id="thread-1",
+            messages=["second"],
+            agent_name="researcher",
+            user_id="alice",
+            signals=frozenset({"preference"}),
+        )
+        queue.add(
+            thread_id="thread-1",
+            messages=["third"],
+            agent_name="researcher",
+            user_id="alice",
+            signals=frozenset({"correction"}),
+        )
+
+    assert queue.pending_count == 2
+    assert queue._items[0].messages == ["first"]
+    assert queue._items[0].clear_generation == (0, 0)
+    assert queue._items[0].signals == frozenset({"preference"})
+    assert queue._items[1].messages == ["third"]
+    assert queue._items[1].clear_generation == (1, 0)
+    assert queue._items[1].signals == frozenset({"preference", "correction"})
+    mock_updater.mark_feed_consumed.assert_called_once_with(
+        ["first"],
+        thread_id="thread-1",
+        user_id="alice",
+        agent_name="researcher",
+        bypass_watermark=False,
+        sequence=1,
+    )
+
+
+def test_queue_failed_refresh_strips_pre_clear_ids_from_fresh_snapshot() -> None:
+    """The fresh snapshot must not rely on the stale drop to exclude cleared turns.
+
+    That drop goes through the same updater call that just failed. If it fails
+    again, a full-conversation feed that still carries the pre-clear ids would
+    be extracted under the new generation and restore cleared facts.
+    """
+    pre_clear = [HumanMessage(content="I like Python", id="m1"), AIMessage(content="Noted", id="m2")]
+    post_clear = [*pre_clear, HumanMessage(content="I prefer typed Python", id="m3"), AIMessage(content="Noted again", id="m4")]
+    later = [*post_clear, HumanMessage(content="Use uv", id="m5")]
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.side_effect = [(0, 0), (1, 0), (1, 0)]
+    mock_updater.mark_feed_consumed.side_effect = RuntimeError("watermark unavailable")
+    mock_updater.update_memory.side_effect = [RuntimeError("watermark unavailable"), True]
+    queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="thread-1", messages=pre_clear, agent_name="researcher", user_id="alice")
+        queue.add(thread_id="thread-1", messages=post_clear, agent_name="researcher", user_id="alice")
+        assert [message.id for message in queue._items[1].messages] == ["m3", "m4"]
+        queue.add(thread_id="thread-1", messages=later, agent_name="researcher", user_id="alice")
+
+    assert queue.pending_count == 2
+    assert queue._items[0].messages == pre_clear
+    assert queue._items[0].excluded_message_ids == frozenset()
+    assert [message.id for message in queue._items[1].messages] == ["m3", "m4", "m5"]
+    assert queue._items[1].excluded_message_ids == frozenset({"m1", "m2"})
+
+    queue._process_queue()
+    assert mock_updater.update_memory.call_count == 2
+    stale_call, fresh_call = mock_updater.update_memory.call_args_list
+    assert stale_call.kwargs["messages"] == pre_clear
+    assert [message.id for message in fresh_call.kwargs["messages"]] == ["m3", "m4", "m5"]
+    assert fresh_call.kwargs["expected_clear_generation"] == (1, 0)
+
+
+def test_queue_failed_refresh_keeps_id_less_messages() -> None:
+    """Only an id proves a message predates the clear; id-less turns stay."""
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.side_effect = [(0, 0), (1, 0)]
+    mock_updater.mark_feed_consumed.side_effect = RuntimeError("watermark unavailable")
+    queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="thread-1", messages=[HumanMessage(content="I like Python")], agent_name="researcher", user_id="alice")
+        queue.add(thread_id="thread-1", messages=[HumanMessage(content="I like Python")], agent_name="researcher", user_id="alice")
+
+    assert queue.pending_count == 2
+    assert queue._items[1].excluded_message_ids == frozenset()
+    assert [message.content for message in queue._items[1].messages] == ["I like Python"]
+
+
+def test_queue_coalesce_does_not_refresh_missing_generation_from_storage() -> None:
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.return_value = (1, 0)
+    queue = _queue(mock_updater)
+    queue._items = [ConversationContext(thread_id="thread-1", messages=["first"], agent_name="researcher", user_id="alice")]
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="thread-1", messages=["second"], agent_name="researcher", user_id="alice")
+
+    assert queue._items[0].clear_generation is None
+    mock_updater.peek_clear_generation.assert_called_once_with("researcher", user_id="alice")
+
+
+def test_queue_refuses_older_generation_overwrite_of_newer_fenced_work() -> None:
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.return_value = (2, 0)
+    queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="thread-1", messages=["after clear"], agent_name="researcher", user_id="alice")
+        with queue._lock:
+            kept = queue._enqueue_locked(
+                thread_id="thread-1",
+                messages=["between clears"],
+                agent_name="researcher",
+                user_id="alice",
+                trace_id=None,
+                signals=frozenset({"correction"}),
+                bypass_watermark=False,
+                captured_clear_generation=(1, 0),
+                call_sequence=2,
+            )
+
+    assert kept.messages == ["after clear"]
+    assert kept.clear_generation == (2, 0)
+    assert kept.signals == frozenset({"correction"})
+    assert queue.pending_count == 1
+    assert queue._items[0].messages == ["after clear"]
+    assert queue._items[0].clear_generation == (2, 0)
+    assert queue._items[0].signals == frozenset({"correction"})
+    mock_updater.mark_feed_consumed.assert_called_once_with(
+        ["between clears"],
+        thread_id="thread-1",
+        user_id="alice",
+        agent_name="researcher",
+        bypass_watermark=False,
+        sequence=2,
+    )
+
+
+def test_queue_refuses_older_sequence_overwrite_of_newer_same_generation_snapshot() -> None:
+    """Same clear-generation merge must keep the newer call-arrival snapshot.
+
+    Sequence is stamped before the queue lock. A caller that peeked first
+    (lower sequence) but acquired the lock second used to replace the already
+    queued, longer snapshot. Watermark sequence guards cannot recover that
+    loss: the newer feed never ran.
+    """
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.return_value = (0, 0)
+    queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="thread-1", messages=["A", "B"], agent_name="researcher", user_id="alice")
+        with queue._lock:
+            kept = queue._enqueue_locked(
+                thread_id="thread-1",
+                messages=["A"],
+                agent_name="researcher",
+                user_id="alice",
+                trace_id=None,
+                signals=frozenset({"preference"}),
+                bypass_watermark=False,
+                captured_clear_generation=(0, 0),
+                call_sequence=0,
+            )
+
+    assert kept.messages == ["A", "B"]
+    assert kept.sequence == 1
+    assert kept.clear_generation == (0, 0)
+    assert kept.signals == frozenset({"preference"})
+    assert queue.pending_count == 1
+    assert queue._items[0].messages == ["A", "B"]
+    mock_updater.mark_feed_consumed.assert_not_called()
+
+
+def test_queue_keeps_newer_fence_when_older_incoming_consume_fails() -> None:
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.side_effect = [(1, 0), (0, 0)]
+    mock_updater.mark_feed_consumed.side_effect = RuntimeError("watermark unavailable")
+    queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="thread-1", messages=["POST-CLEAR turn"], agent_name="researcher", user_id="alice")
+        queue.add(
+            thread_id="thread-1",
+            messages=["PRE-CLEAR turn"],
+            agent_name="researcher",
+            user_id="alice",
+            signals=frozenset({"correction"}),
+        )
+
+    assert queue.pending_count == 1
+    assert queue._items[0].messages == ["POST-CLEAR turn"]
+    assert queue._items[0].clear_generation == (1, 0)
+    assert queue._items[0].signals == frozenset({"correction"})
+
+
+def test_queue_out_of_order_lock_does_not_let_older_snapshot_inherit_newer_fence() -> None:
+    mock_updater = MagicMock()
+    generation = [(1, 0)]
+    peeked_first = threading.Event()
+    release_first = threading.Event()
+
+    def peek(agent_name: str | None, *, user_id: str | None = None) -> tuple[int, int]:
+        value = generation[0]
+        if value == (1, 0) and not peeked_first.is_set():
+            peeked_first.set()
+            assert release_first.wait(timeout=2)
+        return value
+
+    mock_updater.peek_clear_generation.side_effect = peek
+    queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
+    errors: list[BaseException] = []
+
+    def older_add() -> None:
+        try:
+            queue.add(thread_id="thread-1", messages=["between clears"], agent_name="researcher", user_id="alice")
+        except BaseException as exc:
+            errors.append(exc)
+
+    with patch.object(queue, "_schedule_timer"):
+        older = threading.Thread(target=older_add)
+        older.start()
+        assert peeked_first.wait(timeout=2)
+        generation[0] = (2, 0)
+        queue.add(thread_id="thread-1", messages=["after clear"], agent_name="researcher", user_id="alice")
+        release_first.set()
+        older.join(timeout=2)
+        assert not older.is_alive()
+
+    assert errors == []
+    assert queue.pending_count == 1
+    assert queue._items[0].messages == ["after clear"]
+    assert queue._items[0].clear_generation == (2, 0)
+    # sequence=1, not 2: the "older" add's sequence is stamped at call-arrival
+    # (before it blocks on the peek, i.e. before the queue lock), not at
+    # lock-acquisition time -- it started first, so it must keep the lower
+    # number even though it is the *second* call to actually enter
+    # ``_enqueue_locked``. See ``MemoryUpdateQueue._next_sequence``.
+    mock_updater.mark_feed_consumed.assert_called_once_with(
+        ["between clears"],
+        thread_id="thread-1",
+        user_id="alice",
+        agent_name="researcher",
+        bypass_watermark=False,
+        sequence=1,
+    )
+
+
 def test_cancel_by_agent_drops_matching_pending_and_preserves_others() -> None:
     """#5037: deleting/clearing an agent must drop its debounce buffer only."""
-    queue = _queue()
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.return_value = (0, 0)
+    queue = _queue(mock_updater)
     with patch.object(queue, "_schedule_timer"):
         queue.add(thread_id="t1", messages=["keep"], agent_name="alice", user_id="u1")
         queue.add(thread_id="t2", messages=["drop"], agent_name="bob", user_id="u1")
@@ -426,6 +868,74 @@ def test_cancel_by_agent_drops_matching_pending_and_preserves_others() -> None:
     assert queue.pending_count == 2
     assert {(c.agent_name, c.user_id) for c in queue._items} == {("alice", "u1"), ("bob", "u2")}
     existing_timer.cancel.assert_not_called()
+    mock_updater.mark_feed_consumed.assert_called_once_with(
+        ["drop"],
+        thread_id="t2",
+        user_id="u1",
+        agent_name="bob",
+        bypass_watermark=False,
+        sequence=2,
+    )
+
+
+def test_clear_consumes_inflight_enqueue_that_has_not_peeked_yet() -> None:
+    """An add that assigned a sequence but is still waiting to peek is part of clear."""
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.return_value = (0, 1)
+    queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
+    inflight = queue._begin_inflight(
+        thread_id="thread-uncovered",
+        messages=["Remember that I like Python."],
+        agent_name="researcher",
+        user_id="alice",
+        trace_id=None,
+        signals=frozenset(),
+        bypass_watermark=True,
+    )
+    assert inflight.sequence == 1
+    assert inflight.consumed_by_clear is False
+
+    consumed = queue.consume_inflight_enqueues("researcher", user_id="alice")
+
+    assert consumed == 1
+    assert inflight.consumed_by_clear is True
+    mock_updater.mark_feed_consumed.assert_called_once_with(
+        ["Remember that I like Python."],
+        thread_id="thread-uncovered",
+        user_id="alice",
+        agent_name="researcher",
+        bypass_watermark=True,
+        sequence=1,
+    )
+    assert queue._end_inflight(inflight) is True
+
+
+def test_snapshot_by_agent_copies_matching_items_without_consume() -> None:
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.return_value = (0, 0)
+    queue = _queue(mock_updater)
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="t1", messages=["keep"], agent_name="alice", user_id="u1")
+        queue.add(thread_id="t2", messages=["drop"], agent_name="bob", user_id="u1")
+        queue.add(thread_id="t3", messages=["other-user"], agent_name="bob", user_id="u2")
+
+    snapped = queue.snapshot_by_agent("bob", user_id="u1")
+
+    assert [c.messages for c in snapped] == [["drop"]]
+    assert snapped[0].thread_id == "t2"
+    assert queue.pending_count == 3
+    mock_updater.mark_feed_consumed.assert_not_called()
+
+    queue.consume_pre_clear_feeds(snapped)
+    mock_updater.mark_feed_consumed.assert_called_once_with(
+        ["drop"],
+        thread_id="t2",
+        user_id="u1",
+        agent_name="bob",
+        bypass_watermark=False,
+        sequence=2,
+    )
+    assert queue.pending_count == 3
 
 
 def test_cancel_by_agent_all_agents_for_user_cancels_timer_when_empty() -> None:
