@@ -1133,18 +1133,25 @@ def _fork_bomb_name_start(text: str, paren: int) -> int | None:
     return start if start < paren else None
 
 
-def _fork_bomb_has_word(text: str, start: int, end: int, name: str) -> bool:
-    """Report whether ``name`` stands alone as a shell word in ``text[start:end]``.
+def _fork_bomb_words(text: str, start: int, end: int, name: str) -> list[int]:
+    """Absolute offsets where ``name`` stands alone as a shell word in ``text[start:end]``.
 
     An occurrence glued to other word characters (`ff` for `f`, `build.log`
     for `build`) is part of a longer word and does not count.
     """
+    words: list[int] = []
     length = len(name)
     index = text.find(name, start, end)
     while index != -1 and index + length <= end:
         if (index == 0 or text[index - 1] in _FORK_BOMB_NAME_EXCLUDED) and (index + length == len(text) or text[index + length] in _FORK_BOMB_NAME_EXCLUDED):
-            return True
+            words.append(index)
         index = text.find(name, index + 1, end)
+    return words
+
+
+def _fork_bomb_has_word(text: str, start: int, end: int, name: str) -> bool:
+    for word in _fork_bomb_words(text, start, end, name):
+        return True
     return False
 
 
@@ -1190,16 +1197,21 @@ def _fork_bomb_span(text: str) -> tuple[int, int] | None:
         if text.find("|", body_start, body_end) == -1 or text.find("&", body_start, body_end) == -1:
             continue
         name = text[name_start:paren]
-        pipe = text.find("|", body_start, body_end)
-        while pipe != -1:
+        words = _fork_bomb_words(text, body_start, body_end, name)
+        # Two word occurrences can only straddle a pipe together, so the
+        # candidate pipes are the ones between consecutive occurrences; the
+        # pipe list itself may be arbitrarily dense and is never walked.
+        for left, right in zip(words, words[1:]):
+            pipe = text.find("|", left, right)
+            if pipe == -1:
+                continue
             terminator = _fork_bomb_terminator(text, pipe + 1, body_end)
-            if terminator < body_end and text[terminator] == "&":
+            if terminator < body_end and text[terminator] == "&" and right < terminator:
                 left_start = 1 + max(text.rfind(";", body_start, pipe), text.rfind("&", body_start, pipe))
                 if left_start < body_start:
                     left_start = body_start
-                if _fork_bomb_has_word(text, left_start, pipe, name) and _fork_bomb_has_word(text, pipe + 1, terminator, name):
+                if _fork_bomb_has_word(text, left_start, pipe, name):
                     return (name_start, close + 1 if close != -1 else terminator + 1)
-            pipe = text.find("|", pipe + 1, body_end)
 
 
 def _scan_shell(rel_path: str, text: str) -> list[SecurityFinding]:
