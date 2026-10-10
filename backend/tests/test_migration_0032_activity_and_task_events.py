@@ -21,7 +21,8 @@ NEXT = "0033_batch_result_artifact"
 AFTER_NEXT = "0034_run_event_seq_watermark"
 LOGIN_THROTTLE = "0035_login_throttle"
 IDEMPOTENCY = "0036_run_idempotency_request"
-CURRENT_HEAD = "0037_project_document_summaries"
+DOC_SUMMARIES = "0037_project_document_summaries"
+CURRENT_HEAD = "0038_user_disabled"
 PREVIOUS = "0031_scheduled_streak_boundary"
 TABLES = {"thread_read_markers", "thread_read_versions", "scheduled_task_events"}
 INDEXES = {
@@ -40,7 +41,8 @@ async def test_0032_remains_in_the_single_migration_chain():
     assert script.get_revision(AFTER_NEXT).down_revision == NEXT
     assert script.get_revision(LOGIN_THROTTLE).down_revision == AFTER_NEXT
     assert script.get_revision(IDEMPOTENCY).down_revision == LOGIN_THROTTLE
-    assert script.get_revision(CURRENT_HEAD).down_revision == IDEMPOTENCY
+    assert script.get_revision(DOC_SUMMARIES).down_revision == IDEMPOTENCY
+    assert script.get_revision(CURRENT_HEAD).down_revision == DOC_SUMMARIES
     # alembic_version.version_num is VARCHAR(32).
     assert len(REVISION) <= 32
 

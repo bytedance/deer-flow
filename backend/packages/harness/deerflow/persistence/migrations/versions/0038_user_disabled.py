@@ -19,7 +19,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0036_user_disabled"
+revision: str = "0038_user_disabled"
 down_revision: str | None = "0037_project_document_summaries"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
