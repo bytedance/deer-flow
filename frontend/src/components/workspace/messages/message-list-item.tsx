@@ -11,6 +11,7 @@ import {
 import {
   memo,
   useCallback,
+  useId,
   useMemo,
   useState,
   type ImgHTMLAttributes,
@@ -146,6 +147,7 @@ export function MessageListItem({
   showWorkspaceChanges = false,
   durationSeconds,
   canEdit = false,
+  editLockedByGoal = false,
   isEditPending = false,
   onEditAndRegenerate,
 }: {
@@ -160,10 +162,13 @@ export function MessageListItem({
   showWorkspaceChanges?: boolean;
   durationSeconds?: number;
   canEdit?: boolean;
+  /** Edit would be allowed but for an active goal: show the pencil locked. */
+  editLockedByGoal?: boolean;
   isEditPending?: boolean;
   onEditAndRegenerate?: (replacementText: string) => void | Promise<boolean>;
 }) {
   const { t } = useI18n();
+  const editLockedId = useId();
   const isHuman = message.type === "human";
   // One derivation serves both editing and the toolbar, and only runs when
   // either consumer can use it: assistant rows never render this toolbar
@@ -245,8 +250,10 @@ export function MessageListItem({
             isHuman
               ? "absolute right-0 -bottom-9 left-0 justify-end"
               : "absolute right-0 bottom-0 left-0",
-            "z-20 opacity-0 transition-opacity delay-200 duration-300 group-hover/conversation-message:opacity-100",
+            // focus-within: a keyboard user tabbing to a button sees it.
+            "z-20 opacity-0 transition-opacity delay-200 duration-300 group-hover/conversation-message:opacity-100 focus-within:opacity-100",
           )}
+          data-testid="message-toolbar"
         >
           <div className="pointer-events-auto flex gap-1">
             <CopyButton clipboardData={copyData} />
@@ -264,6 +271,32 @@ export function MessageListItem({
                 </Button>
               </Tooltip>
             )}
+            {!canEdit &&
+              editLockedByGoal &&
+              isHuman &&
+              onEditAndRegenerate &&
+              !isEditing && (
+                <>
+                  <Tooltip content={t.inputBox.goalBar.editLocked}>
+                    <Button
+                      aria-label={t.common.editAndRerun}
+                      aria-disabled="true"
+                      aria-describedby={editLockedId}
+                      className="aria-disabled:cursor-not-allowed"
+                      size="icon-sm"
+                      type="button"
+                      variant="ghost"
+                      data-testid="message-edit-locked"
+                    >
+                      {/* Dim only the icon so the focus ring stays at full strength. */}
+                      <PencilIcon className="size-4 opacity-50" />
+                    </Button>
+                  </Tooltip>
+                  <span id={editLockedId} className="sr-only">
+                    {t.inputBox.goalBar.editLocked}
+                  </span>
+                </>
+              )}
             {feedback !== undefined && runId && threadId && (
               <FeedbackButtons
                 threadId={threadId}

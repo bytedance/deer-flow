@@ -29,6 +29,7 @@ import threading
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.read_file_contract import split_file_lines
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
@@ -299,7 +300,7 @@ class TenkiSandbox(Sandbox):
             return f"Error: {e}"
         if start_line is None and end_line is None:
             return content
-        lines = (content or "").splitlines()
+        lines = split_file_lines(content or "")
         # Clamp like LocalSandbox.read_file: a negative start would otherwise
         # wrap around through Python's negative-index slicing instead of
         # reading from the first line.

@@ -83,8 +83,11 @@ disabling or regrouping active policies; conflicting settings fail model
 construction instead of resetting a live budget.
 
 When enabled, exposed SDK `max_retries` settings are set to zero: SDK retries
-would bypass the admission hook. Agent middleware retries still work and each
-new attempt is paced. Calls outside that middleware no longer get SDK retries.
+would bypass the admission hook. Claude and Codex also set their provider-internal
+`retry_max_attempts` to one, regardless of config or caller overrides, and log a
+warning when reducing a larger value. Agent middleware retries still work,
+including HTTP 529 overloads, and each new attempt is paced. Calls outside that
+middleware no longer get SDK or Claude/Codex wrapper retries.
 Custom providers that bypass BaseChatModel admission hooks or perform hidden
 retries need their own integration. A caller-supplied `rate_limiter` cannot be
 combined with `request_admission`.
@@ -586,6 +589,7 @@ Notes:
 - `GET /health/ready` pings the Redis stream bridge on every probe and answers 503 (`stream_bridge: unreachable`) while Redis is down, so the orchestrator drains that instance instead of routing it runs it cannot publish or stream; the memory bridge reports `not_configured`. When `sandbox.provisioner_url` is set, the body also carries the provisioner's `/health` verdict (`provisioner: ok|unreachable`), which never changes the status code because every instance shares one provisioner. That probe follows the sandbox clients' proxy policy: loopback, private, link-local and cluster-local provisioner addresses bypass `HTTP_PROXY`, external hosts keep the environment's proxy settings.
 - The declaration also drives the `agent_storage.backend: file` divergence warning, the inbound webhook dedupe warning, the `auth.local.throttle_storage: memory` warning, and the WeChat QR-login guard, which otherwise only look at the worker count.
 - Login lockouts are shared through the database: `auth.local.throttle_storage` (startup-only) defaults to `auto`, which keeps the per-IP failed-login counters for `POST /api/v1/auth/login/local` in the `login_throttle` table whenever `database.backend` is `sqlite` or `postgres`, so every instance enforces one `max_login_attempts` limit per client IP and a lockout on one instance holds on all of them. `memory` keeps the historical per-process counter (N instances give an attacker N × `max_login_attempts` guesses; a declared multi-instance deployment logs a warning), and `db` forces the table (it falls back to memory with a warning when the database backend is `memory`, and refuses to start when the configured database's engine is unavailable; `auto` falls back with a warning in that case). `max_login_attempts` and `lockout_seconds` stay live-read.
+- IM chat-to-thread bindings are shared through the database too: with `database.backend: sqlite` or `postgres` the `ChannelManager` keeps the `channel_name:chat_id[:topic_id]` → thread mapping of unbound IM conversations in the `channel_thread_bindings` table (migration `0038_channel_thread_bindings`), so a conversation created on one instance continues on the same thread when its next message lands on another. On the first start after upgrading, an existing `{base_dir}/channels/store.json` is imported once — only into an empty table, with `INSERT … ON CONFLICT DO NOTHING` so concurrently starting instances cannot duplicate a binding — and renamed `store.json.migrated`; a populated table leaves the file untouched. `memory` keeps the per-process JSON file.
 - The declaration also drives the `agent_storage.backend: file` divergence warning, the inbound webhook dedupe warning, and the WeChat QR-login guard, which otherwise only look at the worker count.
 - With the default DeerMem backend, the declaration also warns when the derived SQLite retrieval index sits inside the shared `storage_path` (the default `{storage_path}/.retrieval`). Set `memory.backend_config.retrieval_index_path` to an instance-local directory (relative values resolve against `storage_path`): SQLite WAL is unsupported on network filesystems, and the index is rebuilt from the Markdown facts at startup and re-synced per user scope after a peer writes.
 - Restart-required: the gate runs once at startup. Restart all Gateway instances together after changing it.
@@ -731,6 +735,46 @@ Serper `web_search` also accepts the optional model argument
 to Serper. Omitting `time_range` or passing `null` omits the recency constraint from the
 search request. This option does not change Serper `image_search`.
 
+#### Serper retries
+
+Both Serper `web_search` and `image_search` accept these operator-only settings
+in their respective `tools` entries (the model-facing arguments are unchanged):
+
+```yaml
+max_retries: 0             # Default off; integer 0–3 extra requests
+retry_budget_seconds: 30   # Default 30; finite number >0 and <=300
+```
+
+Set `max_retries: 1` to enable recovery. Booleans, strings, nulls, out-of-range
+values, and non-finite budgets return a structured configuration error before
+HTTP. The three-retry cap limits additional quota/cost; the 300-second budget
+cap limits scheduling waits. No billing or idempotency guarantee is claimed.
+
+Only connection establishment failures (`ConnectError`/`ConnectTimeout`) and
+HTTP 502/503/504 are retried. HTTP 429 requires a valid `Retry-After` hint.
+Authentication errors, other statuses, read/write timeouts, malformed successful
+JSON and tool/result-processing failures are never retried.
+
+Backoff uses equal jitter: 0.25–0.5, 0.5–1, then 1–2 seconds. Valid nonnegative
+integer seconds or HTTP-date `Retry-After` hints on 429/503 set a minimum wait
+(past dates mean zero). HTTP dates include asctime and RFC 850 forms; RFC 850
+two-digit years resolve to the most recent matching year no more than 50 years
+in the future. Invalid hints leave 503 on local backoff;
+429 stays terminal. A hint or backoff that reaches/exceeds the remaining budget
+returns the last error without another request or a shortened wait.
+Both budget checks log `Serper retry time budget exhausted` at warning level,
+distinguishing budget stops from exhausting all configured attempts without
+changing the returned error.
+
+One monotonic scheduling deadline starts before client creation, counting elapsed
+requests and waits; it is checked before waiting and again before a retry.
+It does **not** interrupt active synchronous HTTP requests, response streaming,
+or worker threads. HTTPX's unchanged 30-second timeout applies per network phase,
+so this is **not** a hard end-to-end wall-clock deadline. The initial request is
+always allowed. Payload, API key, domain restrictions and time range stay identical
+across attempts; errors still report the cleaned original query. No refill,
+cache, global limiter or model-level retry is added.
+
 #### Serper endpoints
 
 To use a Serper-compatible provider for web and image search, set
@@ -818,7 +862,7 @@ including on provider errors.
 
 `time_range` still maps to `tbs`, and `max_results` caps the filtered results.
 `total_results` reports the actual remaining count (zero with `results: []`
-when none survive). One request is made: no refill or relaxed-filter retries.
+when none survive). No refill or relaxed-filter requests are made.
 These settings do not affect `image_search` or the model-facing tool schema.
 Source selection is neither a factuality guarantee nor a global URL-access
 policy for fetch tools, browsers, or redirects.
