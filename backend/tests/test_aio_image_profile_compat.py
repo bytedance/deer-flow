@@ -9,6 +9,7 @@ from deerflow.community.aio_sandbox import aio_sandbox_provider as provider_modu
 from deerflow.community.aio_sandbox import local_backend as local_backend_module
 from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
 from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
+from deerflow.community.aio_sandbox.backend import SandboxCreationError
 from deerflow.community.aio_sandbox.local_backend import LocalContainerBackend
 from deerflow.community.aio_sandbox.sandbox_info import SandboxInfo
 from deerflow.config.app_config import AppConfig
@@ -250,6 +251,35 @@ def test_local_image_creation_uses_capability_and_preserves_mounts(monkeypatch, 
     else:
         assert "extra_environment" not in calls[0][2]
         assert calls[1][2]["extra_environment"]["IMAGE_GENERATION_API_KEY"] == "synthetic-secret"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True])
+@pytest.mark.parametrize("failed_stage", ["probe", "final"])
+async def test_image_creation_rejection_cleans_up_the_failed_identity(monkeypatch, tmp_path, async_mode, failed_stage):
+    provider, sandbox_id, calls, destroyed, _ = _creation_provider(monkeypatch, tmp_path, supports_env=True)
+    original_create = provider._backend.create
+
+    def reject_stage(thread_id, created_id, **kwargs):
+        info = original_create(thread_id, created_id, **kwargs)
+        if (failed_stage == "probe" and len(calls) == 1) or (failed_stage == "final" and len(calls) == 2):
+            raise SandboxCreationError("synthetic rejection", info=info)
+        return info
+
+    provider._backend.create = reject_stage
+
+    async def ready(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(provider_module, "wait_for_sandbox_ready_async", ready)
+    with pytest.raises(SandboxCreationError, match="synthetic rejection"):
+        if async_mode:
+            await provider._create_sandbox_async("thread", sandbox_id, user_id="user")
+        else:
+            provider._create_sandbox("thread", sandbox_id, user_id="user")
+
+    assert len(calls) == (1 if failed_stage == "probe" else 2)
+    assert [created_id for created_id, _ in destroyed] == [created_id for _, created_id, _ in calls]
 
 
 @pytest.mark.asyncio
