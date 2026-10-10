@@ -31,6 +31,8 @@ from pathlib import Path
 
 import pytest
 
+from deerflow.config import paths as paths_module
+from deerflow.config.paths import Paths
 from deerflow.integrations import lark_cli
 
 # A code page that cannot represent the payload below and is not UTF-8.
@@ -100,6 +102,21 @@ def locale_decoding(monkeypatch: pytest.MonkeyPatch) -> None:
         return real_run(*args, **kwargs)
 
     monkeypatch.setattr(lark_cli.subprocess, "run", locale_run)
+
+
+@pytest.fixture(autouse=True)
+def isolated_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep the suite off the live runtime home.
+
+    ``_run_lark_cli_json`` and ``probe_lark_auth`` reach
+    ``ensure_lark_cli_credential_tree`` through the global ``get_paths()``
+    singleton, so without this every run would create and harden a real
+    ``<cwd>/.deer-flow/users/alice/integrations/lark-cli/{config,data}`` tree --
+    the same directory a live deployment keeps real per-user Lark credentials
+    in -- in whatever directory pytest runs from. The sibling
+    ``test_lark_cli_integration.py`` isolates it the same way.
+    """
+    monkeypatch.setattr(paths_module, "_paths", Paths(base_dir=tmp_path / "home"))
 
 
 def test_run_lark_cli_json_decodes_utf8_output_regardless_of_locale(fake_cli, locale_decoding: None) -> None:
