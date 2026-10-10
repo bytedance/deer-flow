@@ -16,13 +16,22 @@ These tests pin:
 2. that both scripts reach it — object identity for the aliased helpers, a
    single-delegation AST check for the two that pass the script's grouping, and
    an end-to-end table rendered through each script's real ``main()``;
-3. a source census over ``scripts/benchmark/``: no other script may restate one
-   of the four bodies, and exactly the two summarize scripts alias them.
+3. a source census over the checkpoint folder: each of the four rules is
+   recognized by a code-shape signature, and only the owner may match it. The
+   census is scoped to ``scripts/benchmark/checkpoint/``, not the whole
+   benchmark tree — see the out-of-scope note below.
 
-Out of scope on purpose: the two ``scripts/eval_*.py`` harnesses still share a
-nearest-rank ``_percentile`` with each other, which is a different function from
-``checkpoint_bench_common.percentile`` (interpolated, 0-100 scale) — folding
-those would change reported p95s, so they stay local.
+Out of scope on purpose:
+
+- ``scripts/benchmark/sandbox/summarize.py`` prints its own table too, but it is
+  a different rule, not a copy: fixed ``_COLUMNS`` rather than row-discovered
+  columns, a ``(no data)`` notice, and a ``csv`` mode. Unifying the three
+  summarize reporters needs a decision about column policy first, so it is left
+  for a follow-up rather than folded in here.
+- The two ``scripts/eval_*.py`` harnesses still share a nearest-rank
+  ``_percentile`` with each other, which is a different function from
+  ``checkpoint_bench_common.percentile`` (interpolated, 0-100 scale) — folding
+  those would change reported p95s, so they stay local.
 """
 
 import ast
@@ -61,11 +70,24 @@ scripts = {key: _load(f"summarize_single_owner_{key}", path) for key, path in SC
 GROUP_FIELDS = {key: list(module._GROUP_FIELDS) for key, module in scripts.items()}
 
 
-def _body_hash(fn: ast.FunctionDef) -> str:
+def _body_text(fn: ast.FunctionDef) -> str:
+    """The function's executable source, docstring excluded, names preserved."""
     body = list(fn.body)
     if body and isinstance(body[0], ast.Expr) and isinstance(getattr(body[0], "value", None), ast.Constant) and isinstance(body[0].value.value, str):
         body = body[1:]
     return ast.unparse(ast.Module(body=body, type_ignores=[]))
+
+
+# Shape signatures for the four owned rules. Deliberately not name-based: a
+# contributor must not be able to re-add a private copy under a new name.
+# Needles avoid quote characters because ast.unparse re-emits string literals
+# with its own quoting.
+SHAPES: dict[str, tuple[str, ...]] = {
+    "load_jsonl": ("json.loads(", "startswith(", "Malformed JSONL"),
+    "numeric_value": ("isinstance(value, bool)", "float(value)"),
+    "table_columns": ("paired_repetitions", "failed_rows", "sorted({"),
+    "print_table": ("rjust(", "widths["),
+}
 
 
 def _top_level_functions(path: Path) -> list[ast.FunctionDef]:
@@ -202,21 +224,25 @@ def test_channels_paired_rows_still_render_a_real_table(capsys: pytest.CaptureFi
     assert "0.5" in out.splitlines()[1], "the ratio column is what proves the table came from real summaries"
 
 
-# --- 3. census over scripts/benchmark/ ---------------------------------------
+# --- 3. census over the checkpoint family ---------------------------------------
 
 
-def test_no_other_benchmark_script_restates_an_owned_body() -> None:
-    owned_names = {"load_jsonl", "numeric_value", "table_columns", "print_table"}
-    owned = {_body_hash(fn) for fn in _top_level_functions(OWNER_PATH) if fn.name in owned_names}
-    assert len(owned) == 4, "the four owned bodies must stay distinguishable for this gate to mean anything"
-    offenders = []
-    for path in sorted((REPO_BACKEND / "scripts" / "benchmark").rglob("*.py")):
-        if path == OWNER_PATH:
-            continue
-        for fn in _top_level_functions(path):
-            if _body_hash(fn) in owned:
-                offenders.append(f"{path.relative_to(REPO_BACKEND)}::{fn.name}")
-    assert offenders == [], f"shared benchmark reporting belongs to checkpoint_bench_common: found in {offenders}"
+def test_shape_signatures_are_recognized_in_the_owner_only() -> None:
+    """A copy is caught by its code shape, so renaming it does not hide it.
+
+    Each shape is checked twice over: it must match the owner's own function —
+    otherwise this gate would pass by never matching anything at all — and it
+    must match nothing else in the checkpoint folder. Measured while writing
+    this: a verbatim-body comparison alone left a renamed copy of the table
+    printer passing.
+    """
+    for shape, needles in SHAPES.items():
+        matched = []
+        for path in sorted(CHECKPOINT_DIR.glob("*.py")):
+            for fn in _top_level_functions(path):
+                if all(needle in _body_text(fn) for needle in needles):
+                    matched.append(f"{path.name}::{fn.name}")
+        assert matched == [f"{OWNER_PATH.name}::{shape}"], f"{shape} shape escaped its owner: {matched}"
 
 
 def test_exactly_the_two_summarize_scripts_alias_the_shared_reporting() -> None:
