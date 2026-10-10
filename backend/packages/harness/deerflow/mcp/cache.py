@@ -816,12 +816,10 @@ async def initialize_mcp_tools() -> list[BaseTool]:
     loaded_tools = None
     loaded_snapshot = None
     loaded_lifecycle = None
-    loaded_lifecycle_ok = True
     post_path = None
     post_sig = None
     post_snapshot = None
     post_lifecycle = None
-    post_lifecycle_ok = True
     loaded_reset_signature = None
     post_reset_signature = None
     init_succeeded = False
@@ -846,8 +844,15 @@ async def initialize_mcp_tools() -> list[BaseTool]:
         try:
             loaded_lifecycle = effective_tokens(loaded_config, parse_mcp_lifecycle(loaded_config.model_extra or {}))
         except InvalidMcpLifecycle:
-            loaded_lifecycle = None
-            loaded_lifecycle_ok = False
+            # An unverifiable ledger can never be published. Returning an empty
+            # result would make the lazy caller retry forever and respawn stdio
+            # servers, so retire any local state and abort discovery instead.
+            with _init_condition:
+                retired_for_invalid = _reset_mcp_tools_cache_state_and_retire_pool_locked()
+            if retired_for_invalid is not None:
+                retired_for_invalid.close_all_sync()
+            logger.warning("Extensions config mcpLifecycle is invalid; aborting MCP tool discovery")
+            raise RuntimeError("Extensions config contains an invalid mcpLifecycle; fix or remove it before using MCP tools") from None
         loaded_reset_signature = _current_cache_reset_marker_signature(_resolve_config_path())
         # Claim the exact pool this generation owns under the same lock the
         # reset path takes, so verify-generation + capture-pool is one atomic
@@ -941,8 +946,6 @@ async def initialize_mcp_tools() -> list[BaseTool]:
                 _post_config, post_revision = post_loaded
                 post_snapshot = post_revision.effective_snapshot
                 post_lifecycle = post_revision.lifecycle_tokens
-            else:
-                post_lifecycle_ok = False
         elif post_path is not None:
             # The path resolved but its signature could not be read. Publishing
             # here would record an unpinned cache that later checks could never
@@ -978,15 +981,7 @@ async def initialize_mcp_tools() -> list[BaseTool]:
                 logger.info("MCP cache was reset during initialization; discarding stale result")
                 return []
 
-            publish = (
-                loaded_snapshot is not None
-                and post_snapshot is not None
-                and loaded_snapshot == post_snapshot
-                and loaded_lifecycle_ok
-                and post_lifecycle_ok
-                and loaded_lifecycle == post_lifecycle
-                and loaded_reset_signature == post_reset_signature
-            )
+            publish = loaded_snapshot is not None and post_snapshot is not None and loaded_snapshot == post_snapshot and loaded_lifecycle == post_lifecycle and loaded_reset_signature == post_reset_signature
             if not publish:
                 logger.warning("MCP config or shared reset generation changed during initialization; discarding stale result")
                 # Reconcile against the revision observed now instead of forcing
