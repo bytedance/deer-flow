@@ -4346,6 +4346,16 @@ This release closes that milestone with **439 merged pull requests**.
   always available, so skill tool policy could not remove it. Local targets
   are now confined to the configured skills root and the caller's own user
   directory; `skill://` and `inline://` targets are unchanged. ([#6580])
+- **sandbox:** `glob` and `grep` on the BoxLite, OpenSandbox and Tenki providers frame
+  their records with `str.splitlines()`, which also ends a line at a bare carriage
+  return, form feed, vertical tab, file/group/record separator, next-line, and
+  U+2028/U+2029 — all legal inside Linux filenames and inside matched text. A file
+  named `notes\x0bdraft.txt` was therefore reported as two unrelated paths (one of
+  them nonexistent), and a matched line such as `const s = "a\u2028b";` came back
+  truncated at that character. These providers now split on `"
+"` only, as the
+  shared parser already documents and as LocalSandbox, the AIO backend and E2B
+  already do. ([#6595])
 
 ### Documentation
 
@@ -9464,3 +9474,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6580]: https://github.com/bytedance/deer-flow/pull/6580
 [#6582]: https://github.com/bytedance/deer-flow/pull/6582
 [#6588]: https://github.com/bytedance/deer-flow/pull/6588
+[#6595]: https://github.com/bytedance/deer-flow/pull/6595

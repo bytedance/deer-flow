@@ -3360,6 +3360,14 @@
   `SKILL.md` 与 `references/` 内容。该工具始终可用，技能工具策略也无法移除它。
   现在本地目标仅限于配置的技能根目录和调用者自己的用户目录；`skill://` 与
   `inline://` 目标不受影响。([#6580])
+- **沙箱：** BoxLite、OpenSandbox、Tenki 三个提供者的 `glob` 与 `grep` 用
+  `str.splitlines()` 切分记录，而该函数还会在裸回车、换页符、垂直制表符、
+  文件/组分/记录分隔符、下一行符以及 U+2028/U+2029 处断行——这些字符在 Linux
+  文件名与被匹配文本中都是合法内容。因此名为 `notes\x0bdraft.txt` 的文件会被
+  报告成两条互不相关的路径（其中一条并不存在），而形如 `const s = "a\u2028b";`
+  的匹配行会在该字符处被截断。现在这三个提供者只按 `"
+"` 切分，与共享解析器
+  既有的约定以及 LocalSandbox、AIO 后端、E2B 的行为一致。([#6595])
 
 ### 文档
 
@@ -7622,3 +7630,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6580]: https://github.com/bytedance/deer-flow/pull/6580
 [#6582]: https://github.com/bytedance/deer-flow/pull/6582
 [#6588]: https://github.com/bytedance/deer-flow/pull/6588
+[#6595]: https://github.com/bytedance/deer-flow/pull/6595
