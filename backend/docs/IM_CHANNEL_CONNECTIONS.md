@@ -539,7 +539,7 @@ Connection records live in SQL tables under `deerflow.persistence.channel_connec
 - `channel_connections`: owner user, provider identity, workspace/guild/team, status, metadata.
 - `channel_oauth_states`: one-time connect codes and Telegram deep-link state.
 - `channel_conversations`: connection-scoped IM conversation to DeerFlow thread mapping.
-- `channel_credentials`: reserved for future provider-token flows, not used by the local/private binding flow.
+- `channel_credentials`: per-connection provider tokens for future provider-token flows, encrypted with `DEER_FLOW_CREDENTIALS_KEY` (see [CONFIGURATION.md](CONFIGURATION.md#credentials-encryption-key-deer_flow_credentials_key)); not written by the local/private binding flow.
 
 Incoming messages that resolve to a connection carry `connection_id`, `owner_user_id`, and `workspace_id`. `ChannelManager` uses `owner_user_id` as the DeerFlow run user id and preserves the raw platform user id as `channel_user_id`.
 
@@ -561,8 +561,11 @@ the channel state directory.
   responses mask password fields, and mutating runtime/channel-worker APIs
   require an admin user.
 - Stored per-connection credentials use the `channel_credentials` encryption
-  path. If stored credential material cannot be decrypted, DeerFlow treats it
-  as unavailable instead of using corrupt secrets.
+  path, keyed by `DEER_FLOW_CREDENTIALS_KEY` (or the generated
+  `{DEER_FLOW_HOME}/.credentials_key` on a single instance). If stored
+  credential material cannot be decrypted — a lost or changed key — DeerFlow
+  treats it as unavailable instead of using corrupt secrets. A declared
+  multi-instance deployment with channel connections enabled must set the key.
 - The local plaintext runtime credential fallback is documented above; prefer
   deployment-managed environment/config secrets for non-local deployments until
   a dedicated secret backend is configured.

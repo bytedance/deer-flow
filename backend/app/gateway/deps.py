@@ -30,6 +30,7 @@ from langgraph.types import Checkpointer
 
 from deerflow.community.browser_automation.session import browser_multi_worker_error
 from deerflow.config.app_config import AppConfig, get_app_config
+from deerflow.config.credentials_key import CREDENTIALS_KEY_ENV_VAR, CREDENTIALS_KEY_FILENAME, GENERATE_KEY_COMMAND, CredentialsKeyError, parse_credentials_keys
 from deerflow.config.deployment_config import multi_instance_declaration
 from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, STARTUP_ORPHAN_RECOVERY_ERROR, RunContext, RunManager, StreamBridge
@@ -225,6 +226,55 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
             "peer instances, so startup reconciliation would adopt and idle-destroy containers another instance is "
             "using (#4206). Set sandbox.ownership.type='redis', or omit the section so it is inferred from the redis stream bridge."
         )
+
+
+def credentials_key_consumers(config: AppConfig) -> list[str]:
+    """Return the enabled features that store data under ``DEER_FLOW_CREDENTIALS_KEY``.
+
+    Each entry is the setting that enabled the feature, as refusal text spells
+    it. The Gateway loads the key only when this list is non-empty, and the
+    multi-instance gate below refuses a missing key only for these features, so
+    a deployment that stores no credentials keeps booting without one.
+    """
+    consumers: list[str] = []
+    connections = getattr(config, "channel_connections", None)
+    if connections is not None and getattr(connections, "enabled", False):
+        # ChannelConnectionRepository encrypts per-connection credentials.
+        consumers.append("channel_connections.enabled=true")
+    return consumers
+
+
+def _enforce_credentials_key(config: AppConfig) -> None:
+    """Refuse a malformed credentials key, or a missing one where instances cannot share the generated file.
+
+    A set ``DEER_FLOW_CREDENTIALS_KEY`` must parse (any topology): starting with
+    a key that cannot decrypt anything would silently hide stored credentials.
+    Without it each instance generates ``{base_dir}/.credentials_key``. Workers
+    of one process tree share that file and converge on one key through its
+    exclusive create, so only the explicit multi-instance declaration -- Pods or
+    hosts that need not share a runtime home -- requires the variable, and only
+    when a feature from :func:`credentials_key_consumers` is enabled.
+    """
+    raw = os.environ.get(CREDENTIALS_KEY_ENV_VAR, "")
+    if raw.strip():
+        try:
+            parse_credentials_keys(raw)
+        except CredentialsKeyError as exc:
+            raise SystemExit(str(exc)) from None
+        return
+    declaration = multi_instance_declaration(config)
+    if declaration is None:
+        return
+    consumers = credentials_key_consumers(config)
+    if not consumers:
+        return
+    enabled = ", ".join(consumers)
+    raise SystemExit(
+        f"{declaration.knob} with {enabled} requires {CREDENTIALS_KEY_ENV_VAR}: without it every instance generates its own "
+        f"{{base_dir}}/{CREDENTIALS_KEY_FILENAME}, and credentials one instance stores cannot be decrypted on its peers. "
+        f"Generate one key with {GENERATE_KEY_COMMAND} and set the same value on every instance (the Helm chart and "
+        f"scripts/deploy.sh generate and inject it automatically), {declaration.rollback}, or disable {enabled}."
+    )
 
 
 def _validate_agent_storage(config: AppConfig) -> None:
@@ -599,6 +649,9 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
     # SQLite write-locks cannot support concurrent multi-process access.
     # ------------------------------------------------------------------
     _enforce_postgres_for_multi_worker(startup_config)
+    # Reject a malformed DEER_FLOW_CREDENTIALS_KEY, or a missing one where
+    # declared instances store credentials but cannot share the generated file.
+    _enforce_credentials_key(startup_config)
     # Reject agent_storage.backend='db' on a non-durable database, and warn on
     # node-divergent file storage under multi-worker Postgres.
     _validate_agent_storage(startup_config)

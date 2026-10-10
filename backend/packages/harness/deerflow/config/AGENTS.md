@@ -124,6 +124,25 @@ cache, including AppConfig's middleware snapshot, until a readable revision retu
 
 **Shared Reset Markers** (`shared_reset_marker.py`): caches derived from the extensions config can go stale without a byte of it changing (a remote MCP server's `tools/list`, a skill installed or edited on the shared volume by another process). `SharedResetMarker(suffix)` owns one hidden JSON file beside the resolved config, `.<config name>.<suffix>.json`; `publish()` replaces it atomically with a random generation under `extensions_config_write_lock` + `extensions_config_file_lock` (`publish_locked()` when the caller already holds both), chaining `previous_generation` and an optional `user_id`. `SharedResetMarkerTracker.poll()` re-reads the marker at most once per second (monotonic clock, never blocking behind a concurrent poller), adopts the current state silently on its first poll, and reports a `SharedResetChange`: `user_ids={user}` only when exactly one publication carrying that user happened since the last poll, otherwise `None` (retire everything), including deleted/unreadable markers and config-path switches. `note_own_publication()` lets the writer skip the redundant self-invalidation. `resolve_shared_config_path()` maps a missing explicit path to `None` (no shared directory: callers answer `scope=process`). Consumers: `mcp/cache.py` (`mcp-cache-reset`) and `agents/lead_agent/prompt.py` (`skills-cache-reset`). Tests: `tests/test_shared_reset_marker.py`.
 
+**Credentials key** (`credentials_key.py`): `DEER_FLOW_CREDENTIALS_KEY` is env-only
+(no `config.yaml` key, never derived from `AUTH_JWT_SECRET`): comma-separated
+Fernet keys, first encrypts, all decrypt (`MultiFernet`). `get_credentials_cipher()`
+is the process-wide entry point for consumers that store secrets at rest; it
+returns a `CredentialsCipher` (`encrypt_text`/`decrypt_text`/`rotate_text`,
+`fernet:v2:` prefix, legacy `fernet:v1:` readable). `decrypt_text` raises
+`CredentialsDecryptError` (an `InvalidToken`); callers treat that as missing data
+and never crash. Unset, it generates `{base_dir}/.credentials_key` -- file I/O,
+so async callers use `asyncio.to_thread`. Error text never carries key material.
+A new consumer must also join `app.gateway.deps.credentials_key_consumers`, which
+drives both Gateway loading and the multi-instance refusal.
+
+**Secret files** (`secret_file.py`): `read_or_create_secret_file` is the one way
+to create a shared secret file (`.credentials_key`, `.jwt_secret`, the managed
+model key): `O_EXCL` create (`0600`) plus read-back, so concurrent creators
+converge. It waits a bounded window for a peer's in-flight write, replaces an
+abandoned empty file, and refuses (never overwrites) a non-empty invalid one.
+Tests: `tests/test_secret_file.py`, `tests/test_credentials_key.py`.
+
 ### Config Schema
 
 **`config.yaml`** key sections:

@@ -60,6 +60,25 @@ def test_missing_encryption_key_never_replaced(store):
     assert not store.key_path.exists()
 
 
+def test_first_save_keeps_a_key_a_peer_created_concurrently(store, monkeypatch):
+    """A peer that publishes the key file first must win; replacing it would orphan the peer's catalog."""
+    from cryptography.fernet import Fernet
+
+    peer_key = Fernet.generate_key()
+    original_generate = Fernet.generate_key
+
+    def peer_wins_the_race():
+        store.key_path.parent.mkdir(parents=True, exist_ok=True)
+        store.key_path.write_bytes(peer_key)
+        return original_generate()
+
+    monkeypatch.setattr(Fernet, "generate_key", staticmethod(peer_wins_the_race))
+    store.save(profile(), expected_revision=None)
+
+    assert store.key_path.read_bytes() == peer_key
+    assert Fernet(peer_key).decrypt(store.path.read_bytes())
+
+
 @pytest.mark.parametrize("url", ["file:///tmp/test", "https://user:pass@example.com/v1", "https://example.com/v1?key=abc", "https://example.com/#fragment"])
 def test_endpoint_validation(url):
     with pytest.raises(ValidationError):
