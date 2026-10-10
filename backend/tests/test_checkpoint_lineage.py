@@ -17,12 +17,30 @@ from app.gateway.checkpoint_lineage import (
     CheckpointParentMissingError,
     find_checkpoint_before_message,
     find_checkpoint_before_message_chronologically,
+    is_duration_only_checkpoint,
+    resolve_channel_versions,
+    resolve_stamp_candidate_versions,
 )
 
 THREAD_ID = "thread-1"
 
+# The metadata a Postgres row carries for a duration-only checkpoint: the
+# writer's ``writes.runtime_run_duration`` stamp was dropped by langgraph's
+# Postgres metadata serialisation, so only the index keys and ``source``
+# survive the round trip.
+_POSTGRES_DURATION_METADATA = {
+    "source": "update",
+    "step": 3,
+    "run_durations": {"run-1": 12},
+    "run_message_ids": {"ai-1": "run-1"},
+}
 
-def _snapshot(checkpoint_id: str, messages: list[object], *, next_tasks: tuple[str, ...] = (), parent_id: str | None = None):
+# A Postgres-shaped leaf inherits these stamps whenever a metadata-copying
+# writer (title, goal) stacks on a stamped head, but bumps a channel version.
+_POSTGRES_INHERITED_STAMPS = {"source": "update", "step": 4, "run_durations": {"run-1": 12}}
+
+
+def _snapshot(checkpoint_id: str, messages: list[object], *, next_tasks: tuple[str, ...] = (), parent_id: str | None = None, metadata: dict | None = None, channel_versions: dict | None = None):
     parent_config = None
     if parent_id is not None:
         parent_config = {"configurable": {"thread_id": THREAD_ID, "checkpoint_ns": "", "checkpoint_id": parent_id}}
@@ -36,7 +54,8 @@ def _snapshot(checkpoint_id: str, messages: list[object], *, next_tasks: tuple[s
                 "checkpoint_map": None,
             }
         },
-        metadata={},
+        checkpoint={"channel_versions": dict(channel_versions or {})},
+        metadata=metadata or {},
         parent_config=parent_config,
         next=next_tasks,
     )
@@ -147,3 +166,453 @@ def test_unknown_pending_tasks_do_not_block_selection():
 
     assert found is True
     assert base.config["configurable"]["checkpoint_id"] == "ckpt-base"
+
+
+def test_memory_backed_duration_checkpoint_is_recognised():
+    """The marker memory and SQLite savers round-trip unchanged."""
+    snapshot = _snapshot(
+        "ckpt-duration",
+        [],
+        metadata={"source": "update", "step": 3, "writes": {"runtime_run_duration": {"run_ids": ["run-1"], "message_ids": []}}},
+    )
+
+    assert is_duration_only_checkpoint(snapshot) is True
+
+
+def test_postgres_duration_checkpoint_is_recognised_without_the_writes_marker():
+    """Postgres serialisation pops ``writes``; stamps plus the verbatim shape identify the leaf."""
+    parent = _snapshot("ckpt-real", [], channel_versions={"messages": 5})
+    snapshot = _snapshot(
+        "ckpt-duration",
+        [],
+        parent_id="ckpt-real",
+        metadata=dict(_POSTGRES_DURATION_METADATA),
+        channel_versions={"messages": 5},
+    )
+
+    assert is_duration_only_checkpoint(snapshot, parent=parent) is True
+
+
+def test_stamp_fallback_refuses_stamps_without_a_parent():
+    """Stamps alone are evidence, not proof — with no parent there is no verdict.
+
+    A title or goal leaf at a window boundary carries the same stamps; the
+    conservative answer keeps it addressable, which only ever costs one
+    scanned state-equivalent copy.
+    """
+    snapshot = _snapshot("ckpt-duration", [], metadata=dict(_POSTGRES_DURATION_METADATA), channel_versions={"messages": 5})
+
+    assert is_duration_only_checkpoint(snapshot) is False
+    assert is_duration_only_checkpoint(snapshot, parent=None) is False
+
+
+def test_goal_leaf_inheriting_stamps_is_not_duration_only():
+    """``write_thread_goal`` copies the head's metadata and changes the goal channel.
+
+    On Postgres its own ``writes.goal`` marker is popped too, so the inherited
+    stamps are the only trace of the duration writer — but the bumped ``goal``
+    version breaks the verbatim shape. Classifying it as duration-only made
+    the branch scan walk past the leaf and copy channel values from before
+    the goal write.
+    """
+    parent = _snapshot("ckpt-stamped-head", [], channel_versions={"messages": 5, "goal": 2})
+    goal_leaf = _snapshot(
+        "ckpt-goal",
+        [],
+        parent_id="ckpt-stamped-head",
+        metadata=dict(_POSTGRES_INHERITED_STAMPS),
+        channel_versions={"messages": 5, "goal": 3},
+    )
+
+    assert is_duration_only_checkpoint(goal_leaf, parent=parent) is False
+
+
+def test_postgres_attribution_only_duration_checkpoint_is_recognised():
+    """A leaf stamped for message attribution alone has an empty ``run_durations`` map."""
+    parent = _snapshot("ckpt-real", [], channel_versions={"messages": 5})
+    snapshot = _snapshot(
+        "ckpt-duration",
+        [],
+        parent_id="ckpt-real",
+        metadata={"source": "update", "step": 3, "run_durations": {}, "run_message_ids": {"ai-1": "run-1"}},
+        channel_versions={"messages": 5},
+    )
+
+    assert is_duration_only_checkpoint(snapshot, parent=parent) is True
+
+
+def test_client_update_state_is_not_a_duration_checkpoint():
+    """A leaf from langgraph's ``update_state`` carries none of the writer's stamps.
+
+    update_state persists metadata built from scratch on the pinned langgraph
+    (``{"source": "update", "step", "parents", ...}`` — no ``writes`` key at
+    all), so this shape reaches the stamp fallback tier and stays addressable
+    because the index keys are absent.
+    """
+    snapshot = _snapshot("ckpt-update", [], metadata={"source": "update", "step": 3})
+
+    assert is_duration_only_checkpoint(snapshot) is False
+
+
+def test_graph_step_checkpoints_are_not_duration_checkpoints():
+    for source in ("input", "loop", "step"):
+        snapshot = _snapshot("ckpt-step", [], metadata={"source": source, "step": 1, "writes": {"messages": "..."}})
+        assert is_duration_only_checkpoint(snapshot) is False
+    assert is_duration_only_checkpoint(_snapshot("ckpt-plain", [])) is False
+    assert is_duration_only_checkpoint(SimpleNamespace(values={}, config={}, metadata=None)) is False
+
+
+def test_chronological_scan_skips_postgres_shaped_duration_checkpoints():
+    """An interleaved import must not hand the replay base to a metadata-only leaf.
+
+    The duration leaf belongs to an older incarnation whose timestamps interleave
+    with the live branch; without the Postgres-shape classification it would be
+    selected as the replay base for a message that only the newer real state and
+    the head contain.
+    """
+    human = HumanMessage(id="h1", content="question")
+    answer = AIMessage(id="ai-1", content="answer")
+    history = [
+        _snapshot("ckpt-x-head", [human, answer]),
+        _snapshot("ckpt-a-early", [], channel_versions={"messages": 3}),
+        _snapshot("ckpt-a-duration", [human], parent_id="ckpt-a-early", metadata=dict(_POSTGRES_DURATION_METADATA), channel_versions={"messages": 3}),
+        _snapshot("ckpt-a-input", [], channel_versions={"messages": 2}),
+    ]
+
+    base, found = find_checkpoint_before_message_chronologically(history, "h1")
+
+    assert found is True
+    assert base.config["configurable"]["checkpoint_id"] == "ckpt-a-early"
+
+
+def test_chronological_scan_keeps_goal_leaf_addressable():
+    """The imported-history fallback must not walk past a goal write either.
+
+    The goal leaf inherits the stamps but bumped the goal version, so the
+    verbatim shape fails and it stays a replay-base candidate.
+    """
+    human = HumanMessage(id="h1", content="question")
+    ai = AIMessage(id="ai-1", content="answer")
+    human2 = HumanMessage(id="h2", content="follow-up")
+    ai2 = AIMessage(id="ai-2", content="answer-2")
+    history = [
+        _snapshot("ckpt-turn2-head", [human, ai, human2, ai2]),
+        _snapshot("ckpt-goal", [human, ai], parent_id="ckpt-turn1-tail", metadata=dict(_POSTGRES_INHERITED_STAMPS), channel_versions={"messages": 5, "goal": 3}),
+        _snapshot("ckpt-turn1-tail", [human, ai], channel_versions={"messages": 5}),
+    ]
+
+    base, found = find_checkpoint_before_message_chronologically(history, "h2")
+
+    assert found is True
+    assert base.config["configurable"]["checkpoint_id"] == "ckpt-goal"
+
+
+def test_lineage_walk_crosses_chained_postgres_duration_checkpoints():
+    """The lineage walk skips duration-only parents even when ``writes`` never comes back."""
+    swapped_human = HumanMessage(id="h1__user", content="question")
+    raw_human = HumanMessage(id="h1", content="question")
+    ai = AIMessage(id="ai-1", content="answer")
+    history = [
+        _snapshot("ckpt-head", [swapped_human, ai], parent_id="ckpt-leaf-2", channel_versions={"messages": 7}),
+        _snapshot("ckpt-leaf-2", [swapped_human, ai], parent_id="ckpt-leaf-1", metadata=dict(_POSTGRES_DURATION_METADATA), channel_versions={"messages": 5}),
+        _snapshot("ckpt-leaf-1", [swapped_human, ai], parent_id="ckpt-turn1-tail", metadata=dict(_POSTGRES_DURATION_METADATA), channel_versions={"messages": 5}),
+        _snapshot("ckpt-turn1-tail", [raw_human], channel_versions={"messages": 5}),
+    ]
+    accessor = _Accessor(history)
+
+    base = asyncio.run(find_checkpoint_before_message(accessor, history[0], "h1__user", max_depth=10))
+
+    assert base.config["configurable"]["checkpoint_id"] == "ckpt-turn1-tail"
+
+
+def test_lineage_walk_keeps_goal_leaf_addressable():
+    """A goal write stacked on a stamped head must remain a replay-base candidate.
+
+    The goal leaf inherits the duration stamps on Postgres but bumped the goal
+    version; treating it as duration-only would walk past it and hand back a
+    base whose channel values predate the goal write.
+    """
+    human = HumanMessage(id="h1", content="question")
+    ai = AIMessage(id="ai-1", content="answer")
+    human2 = HumanMessage(id="h2", content="follow-up")
+    history = [
+        _snapshot("ckpt-turn2-head", [human, ai, human2], parent_id="ckpt-goal", channel_versions={"messages": 6}),
+        _snapshot("ckpt-goal", [human, ai], parent_id="ckpt-turn1-tail", metadata=dict(_POSTGRES_INHERITED_STAMPS), channel_versions={"messages": 5, "goal": 3}),
+        _snapshot("ckpt-turn1-tail", [human, ai], channel_versions={"messages": 5}),
+    ]
+    accessor = _Accessor(history)
+
+    base = asyncio.run(find_checkpoint_before_message(accessor, history[0], "h2", max_depth=10))
+
+    assert base.config["configurable"]["checkpoint_id"] == "ckpt-goal"
+
+
+def test_lineage_walk_keeps_stamp_candidate_addressable_when_grandparent_is_gone():
+    """A stamp candidate whose own parent link was pruned stays addressable.
+
+    Retention may already have removed the grandparent; the walk must then
+    treat the candidate as addressable rather than skipping it on inherited
+    stamps — the returned replay base keeps the candidate's channel values.
+    """
+    human = HumanMessage(id="h1", content="question")
+    ai = AIMessage(id="ai-1", content="answer")
+    human2 = HumanMessage(id="h2", content="follow-up")
+    history = [
+        _snapshot("ckpt-turn2-head", [human, ai, human2], parent_id="ckpt-orphan-duration"),
+        _snapshot("ckpt-orphan-duration", [human, ai], parent_id="ckpt-pruned", metadata=dict(_POSTGRES_INHERITED_STAMPS), channel_versions={"messages": 5}),
+    ]
+    accessor = _Accessor(history)
+
+    base = asyncio.run(find_checkpoint_before_message(accessor, history[0], "h2", max_depth=10))
+
+    assert base.config["configurable"]["checkpoint_id"] == "ckpt-orphan-duration"
+
+
+def test_title_leaf_inheriting_duration_stamps_is_not_duration_only():
+    """``_ensure_interrupted_title`` copies the head's metadata, stamps included.
+
+    On memory/SQLite the leaf keeps its own ``writes.runtime_interrupt_title``
+    marker, which must win over the inherited ``run_durations`` — otherwise a
+    title write stacked on a stamped head would be classified as a duration
+    checkpoint even where the marker is authoritative.
+    """
+    snapshot = _snapshot(
+        "ckpt-title",
+        [],
+        metadata={
+            "source": "update",
+            "step": 4,
+            "writes": {"runtime_interrupt_title": {"title": "hi"}},
+            "run_durations": {"run-1": 12},
+            "run_message_ids": {"ai-1": "run-1"},
+        },
+    )
+
+    assert is_duration_only_checkpoint(snapshot) is False
+
+
+def test_stamp_fallback_disabled_requires_the_writes_marker():
+    """Destructive callers must see a Postgres-shaped leaf as *not* duration-only.
+
+    Without the ``writes`` marker the stamps are only evidence, not proof —
+    ``checkpoint_retention`` refuses them here and widens the class solely via
+    the parent-shape check in ``_mark_duration_leaves_without_the_marker``.
+    """
+    parent = _snapshot("ckpt-real", [], channel_versions={"messages": 5})
+    postgres_shaped = _snapshot("ckpt-duration", [], metadata=dict(_POSTGRES_DURATION_METADATA), channel_versions={"messages": 5})
+    marker_backed = _snapshot(
+        "ckpt-duration",
+        [],
+        metadata={"source": "update", "step": 3, "writes": {"runtime_run_duration": {"run_ids": [], "message_ids": []}}},
+    )
+
+    assert is_duration_only_checkpoint(postgres_shaped, parent=parent, stamp_fallback=False) is False
+    assert is_duration_only_checkpoint(marker_backed, parent=parent, stamp_fallback=False) is True
+
+
+async def _post_strip_writes(saver, tup) -> None:
+    """Rewrite *tup*'s persisted metadata without ``writes``, in place."""
+
+    checkpoint = dict(getattr(tup, "checkpoint", {}) or {})
+    metadata = dict(getattr(tup, "metadata", {}) or {})
+    metadata.pop("writes", None)
+    parent_config = getattr(tup, "parent_config", None)
+    write_config = parent_config if isinstance(parent_config, dict) else {"configurable": {"thread_id": tup.config["configurable"]["thread_id"], "checkpoint_ns": "", "checkpoint_id": None}}
+    await saver.aput(write_config, checkpoint, metadata, {})
+
+
+async def _seed_lineage(mode: str):
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.types import Overwrite
+
+    from deerflow.runtime.checkpoint_state import CheckpointStateAccessor, build_state_mutation_graph
+
+    saver = InMemorySaver()
+    accessor = CheckpointStateAccessor.bind(build_state_mutation_graph("seed", mode), saver, mode=mode)
+    config = {"configurable": {"thread_id": THREAD_ID, "checkpoint_ns": ""}}
+    await accessor.aupdate(config, {"messages": Overwrite([HumanMessage(content="q", id="h1"), AIMessage(content="a", id="ai-1")])}, as_node="seed")
+    return saver, accessor, config
+
+
+async def _stamp_duration(saver, accessor, config):
+    from deerflow.runtime.runs.worker import persist_run_history_metadata
+
+    await persist_run_history_metadata(checkpointer=saver, thread_id=THREAD_ID, durations={"run-1": 12}, message_run_ids={"ai-1": "run-1"})
+
+
+def test_classifier_uses_accessor_snapshots_in_full_mode() -> None:
+    """Real ``StateSnapshot`` objects must classify Postgres duration leaves (full)."""
+
+    async def scenario() -> None:
+        saver, accessor, config = await _seed_lineage("full")
+        await _stamp_duration(saver, accessor, config)
+        head = await saver.aget_tuple(config)
+        await _post_strip_writes(saver, head)
+
+        history = await accessor.ahistory(config)
+        leaf = history[0]
+        parent = history[1] if len(history) > 1 else None
+        assert is_duration_only_checkpoint(leaf, parent=parent, versions=await resolve_channel_versions(accessor, leaf), parent_versions=await resolve_channel_versions(accessor, parent) if parent is not None else None) is True
+
+    asyncio.run(scenario())
+
+
+def test_classifier_uses_accessor_snapshots_in_delta_mode() -> None:
+    """Same integration gap exists on the delta read path; both must be covered."""
+
+    async def scenario() -> None:
+        saver, accessor, config = await _seed_lineage("delta")
+        await _stamp_duration(saver, accessor, config)
+        head = await saver.aget_tuple(config)
+        await _post_strip_writes(saver, head)
+
+        history = await accessor.ahistory(config)
+        leaf = history[0]
+        parent = history[1] if len(history) > 1 else None
+        assert is_duration_only_checkpoint(leaf, parent=parent, versions=await resolve_channel_versions(accessor, leaf), parent_versions=await resolve_channel_versions(accessor, parent) if parent is not None else None) is True
+
+    asyncio.run(scenario())
+
+
+def test_goal_leaf_stays_addressable_with_accessor_snapshots() -> None:
+    """A goal write stacked on a stamped head bumps the goal version and must stay."""
+
+    async def scenario() -> None:
+        saver, accessor, config = await _seed_lineage("full")
+        await _stamp_duration(saver, accessor, config)
+
+        from deerflow.runtime.goal import write_thread_goal
+
+        await write_thread_goal(saver, THREAD_ID, {"objective": "ship", "continuation_count": 0, "no_progress_count": 0, "updated_at": "2026-10-08T00:00:00Z"})
+        goal_tup = await saver.aget_tuple(config)
+        await _post_strip_writes(saver, goal_tup)
+
+        history = await accessor.ahistory(config)
+        leaf = history[0]
+        parent = history[1] if len(history) > 1 else None
+        assert is_duration_only_checkpoint(leaf, parent=parent, versions=await resolve_channel_versions(accessor, leaf), parent_versions=await resolve_channel_versions(accessor, parent) if parent is not None else None) is False
+
+    asyncio.run(scenario())
+
+
+def test_degraded_raw_read_accessor_classifies_via_carried_versions() -> None:
+    """The degraded full-mode accessor ships channel versions on its snapshots."""
+
+    async def scenario() -> None:
+        saver, accessor, config = await _seed_lineage("full")
+        await _stamp_duration(saver, accessor, config)
+        head = await saver.aget_tuple(config)
+        await _post_strip_writes(saver, head)
+
+        from app.gateway.services import _RawCheckpointReadAccessor
+
+        raw = _RawCheckpointReadAccessor(saver, "full")
+        leaf_snap = await raw.aget(config)
+        parent_config = getattr(leaf_snap, "parent_config", None)
+        parent_snap = await raw.aget(parent_config) if isinstance(parent_config, dict) else None
+        assert leaf_snap.channel_versions is not None
+        assert is_duration_only_checkpoint(leaf_snap, parent=parent_snap, versions=_snapshot_versions_of(leaf_snap), parent_versions=_snapshot_versions_of(parent_snap)) is True
+
+    asyncio.run(scenario())
+
+
+def _snapshot_versions_of(obj):
+    checkpoint = getattr(obj, "checkpoint", None)
+    if isinstance(checkpoint, dict):
+        versions = checkpoint.get("channel_versions")
+        if isinstance(versions, dict):
+            return versions
+    return getattr(obj, "channel_versions", None)
+
+
+class _CountingAccessor(_Accessor):
+    """``_Accessor`` that records every read, pinning the walk's read budget."""
+
+    def __init__(self, snapshots: list[object]) -> None:
+        super().__init__(snapshots)
+        self.reads: list[str] = []
+
+    async def aget(self, config):
+        self.reads.append(config.get("configurable", {}).get("checkpoint_id"))
+        return await super().aget(config)
+
+
+class _RawVersionAccessor:
+    """Accessor whose snapshots hide the payload, like langgraph's materialized ones.
+
+    ``aget_tuple`` is the only way to reach ``channel_versions`` from such a
+    snapshot, so every call models one serial Postgres roundtrip.
+    """
+
+    def __init__(self, tuples: dict[str, object]) -> None:
+        self.tuples = tuples
+        self.raw_reads: list[str] = []
+
+    async def aget_tuple(self, config):
+        checkpoint_id = config.get("configurable", {}).get("checkpoint_id")
+        self.raw_reads.append(checkpoint_id)
+        return self.tuples.get(checkpoint_id)
+
+
+def _hidden_snapshot(checkpoint_id: str, metadata: dict) -> SimpleNamespace:
+    """A snapshot exposing neither ``checkpoint`` nor ``channel_versions``."""
+
+    return SimpleNamespace(
+        config={"configurable": {"thread_id": THREAD_ID, "checkpoint_ns": "", "checkpoint_id": checkpoint_id}},
+        metadata=dict(metadata),
+    )
+
+
+def test_lineage_walk_reads_a_refused_stamp_candidate_grandparent_once():
+    """A refused stamp candidate must not re-read its own parent.
+
+    The goal leaf inherits the duration stamps but bumped a channel version, so
+    the walk reads its parent for the shape check and then continues from the
+    candidate — whose parent link points at that very tuple. Both reads must hit
+    one entry in the walk's read cache.
+    """
+    human = HumanMessage(id="h1", content="question")
+    ai = AIMessage(id="ai-1", content="answer")
+    human2 = HumanMessage(id="h2", content="follow-up")
+    history = [
+        _snapshot("ckpt-head", [human, ai, human2], parent_id="ckpt-goal", channel_versions={"messages": 6}),
+        _snapshot("ckpt-goal", [human, ai, human2], parent_id="ckpt-turn1-tail", metadata=dict(_POSTGRES_INHERITED_STAMPS), channel_versions={"messages": 5, "goal": 3}),
+        _snapshot("ckpt-turn1-tail", [human, ai], channel_versions={"messages": 5}),
+    ]
+    accessor = _CountingAccessor(history)
+
+    base = asyncio.run(find_checkpoint_before_message(accessor, history[0], "h2", max_depth=10))
+
+    assert base.config["configurable"]["checkpoint_id"] == "ckpt-turn1-tail"
+    assert accessor.reads.count("ckpt-turn1-tail") == 1
+
+
+def test_stamp_candidate_versions_are_lazy_and_memoized():
+    """Only stamp candidates pay for version maps, and each tuple pays once.
+
+    Behind a materialized snapshot every lookup is a serial raw read, so a
+    window the marker tier or the stamp gate already decided must issue none,
+    and resolving a candidate must reuse the pass that resolved its parent.
+    """
+    candidate = _hidden_snapshot("ckpt-candidate", _POSTGRES_DURATION_METADATA)
+    parent = _hidden_snapshot("ckpt-parent", _POSTGRES_DURATION_METADATA)
+    marker_decided = _hidden_snapshot("ckpt-marker", {"source": "update", "step": 3, "writes": {"runtime_run_duration": {"run_id": "run-1"}}})
+    accessor = _RawVersionAccessor(
+        {
+            "ckpt-candidate": SimpleNamespace(checkpoint={"channel_versions": {"messages": 5}}),
+            "ckpt-parent": SimpleNamespace(checkpoint={"channel_versions": {"messages": 5}}),
+        }
+    )
+    cache: dict[tuple[str, str, str], object] = {}
+
+    assert asyncio.run(resolve_stamp_candidate_versions(accessor, marker_decided, parent, cache)) == (None, None)
+    assert accessor.raw_reads == []
+
+    assert asyncio.run(resolve_stamp_candidate_versions(accessor, candidate, parent, cache)) == ({"messages": 5}, {"messages": 5})
+    assert accessor.raw_reads == ["ckpt-candidate", "ckpt-parent"]
+
+    assert asyncio.run(resolve_stamp_candidate_versions(accessor, parent, candidate, cache)) == ({"messages": 5}, {"messages": 5})
+    assert accessor.raw_reads == ["ckpt-candidate", "ckpt-parent"]
+
+    assert asyncio.run(resolve_stamp_candidate_versions(accessor, candidate, None, cache)) == (None, None)
+    assert accessor.raw_reads == ["ckpt-candidate", "ckpt-parent"]

@@ -23,9 +23,10 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.checkpoint.base import empty_checkpoint, uuid6
 
 import deerflow.utils.llm_text as llm_text
-from deerflow.agents.goal_state import GoalBlocker, GoalEvaluation, GoalState
+from deerflow.agents.goal_state import GoalBlocker, GoalEvaluation, GoalOutcomeState, GoalState
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.interaction_policy import RunInteractionPolicy
+from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.models import create_chat_model
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.tracing import inject_langfuse_metadata
@@ -60,6 +61,8 @@ GOAL_BLOCKERS: set[GoalBlocker] = {
 CONTINUABLE_GOAL_BLOCKERS: set[GoalBlocker] = {"goal_not_met_yet"}
 
 GOAL_CLEAR_ALIASES = frozenset({"clear", "reset", "off"})
+
+GOAL_OUTCOME_CHANNEL = "goal_outcome"
 
 _extract_response_text = llm_text.extract_response_text
 _strip_markdown_code_fence = llm_text.strip_markdown_code_fence
@@ -120,6 +123,29 @@ def build_goal_state(
         max_continuations=capped_max,
         no_progress_count=0,
         max_no_progress_continuations=max(0, int(max_no_progress_continuations)),
+    )
+
+
+def is_active_goal(value: object) -> bool:
+    """Return true when a ``goal`` channel value is an active goal."""
+    return isinstance(value, dict) and value.get("status") == "active"
+
+
+def build_goal_outcome(goal: GoalState, evaluation: GoalEvaluation, *, reply_message_id: str | None, now: str | None = None) -> GoalOutcomeState:
+    """Build the record of a met goal from its satisfied completion verdict."""
+    if evaluation.get("satisfied") is not True:
+        raise ValueError("A goal outcome requires a satisfied evaluation.")
+    # POST /state and run input can store an active goal without created_at.
+    return GoalOutcomeState(
+        status="achieved",
+        objective=str(goal.get("objective") or ""),
+        goal_created_at=str(goal.get("created_at") or ""),
+        achieved_at=now or now_iso(),
+        continuation_count=int(goal.get("continuation_count", 0)),
+        max_continuations=int(goal.get("max_continuations", DEFAULT_MAX_GOAL_CONTINUATIONS)),
+        reason=evaluation.get("reason", ""),
+        relied_on_assumption=evaluation.get("relied_on_assumption") is True,
+        reply_message_id=reply_message_id,
     )
 
 
@@ -321,6 +347,16 @@ def _cap_evidence(lines: list[str]) -> str:
     return "\n\n".join([*head, *marker, *kept])
 
 
+def _evidence_window(messages: list[Any]) -> list[Any]:
+    """The messages the evaluator reads: from the first of the last ``MAX_GOAL_CONVERSATION_MESSAGES`` visible ones.
+
+    ``format_visible_conversation`` and the redaction pass in ``evaluate_goal_completion`` both
+    take their messages from here, so a change to the window moves both.
+    """
+    visible_positions = [index for index, message in enumerate(messages) if _is_visible_message(message)]
+    return messages[visible_positions[-MAX_GOAL_CONVERSATION_MESSAGES:][0] :] if visible_positions else []
+
+
 def format_visible_conversation(messages: list[Any]) -> str:
     """Return the conversation evidence for goal evaluation.
 
@@ -332,10 +368,9 @@ def format_visible_conversation(messages: list[Any]) -> str:
     except a clarification prompt, which the UI shows as its own card. The user's answer to such a
     card is a hidden message too, but the card shows it, so its value is included on its own line.
     """
-    visible_positions = [index for index, message in enumerate(messages) if _is_visible_message(message)]
-    if not visible_positions:
+    window = _evidence_window(messages)
+    if not window:
         return ""
-    window = messages[visible_positions[-MAX_GOAL_CONVERSATION_MESSAGES:][0] :]
     # Tool-call ids can repeat across turns, so each result is paired with the latest call
     # before it that has its id, not with the last call of that id anywhere in the window.
     calls: dict[str, tuple[str | None, bool]] = {}
@@ -419,7 +454,16 @@ async def evaluate_goal_completion(
     callbacks to lift it — same fix as PR #2944 (main graph) and PR #3902
     (memory_agent/suggest_agent).
     """
-    conversation = format_visible_conversation(messages)
+    # This model call bypasses PiiRedactionMiddleware. As TitleMiddleware does, whole messages are
+    # redacted before the evidence caps can split an identifier, and the input once more. Only the
+    # evidence window is redacted: the pass is synchronous work on the event loop, and the evaluator
+    # never sees earlier messages. Imported here because the redaction middleware reaches this module
+    # through deerflow.tools and the runtime.
+    from deerflow.agents.middlewares.memory_middleware import redact_queued_messages
+    from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
+
+    pii_redaction = getattr(app_config, "pii_redaction", None)
+    conversation = format_visible_conversation(redact_queued_messages(_evidence_window(messages), pii_redaction) if pii_redaction is not None and pii_redaction.enabled else messages)
     if not conversation or not has_visible_assistant_evidence(messages):
         return GoalEvaluation(
             satisfied=False,
@@ -469,7 +513,7 @@ async def evaluate_goal_completion(
     )
     prompt_messages = [
         SystemMessage(content=system_instruction),
-        HumanMessage(content=user_content),
+        HumanMessage(content=redact_text(user_content, pii_redaction)),
     ]
     source_id = "goal-evaluator:" + uuid4().hex
 
@@ -560,13 +604,26 @@ def latest_visible_assistant_signature(messages: list[Any]) -> str:
     continuation adds no new visible assistant output, the signature is
     unchanged and the breaker can recognise the stalled turn.
     """
+    reply = _latest_visible_assistant_reply(messages)
+    return hashlib.sha256(reply[1].encode("utf-8")).hexdigest() if reply else ""
+
+
+def latest_visible_assistant_message_id(messages: list[Any]) -> str | None:
+    """Return the id of the reply ``latest_visible_assistant_signature`` keys on."""
+    reply = _latest_visible_assistant_reply(messages)
+    message_id = _message_field(reply[0], "id") if reply else None
+    return message_id if isinstance(message_id, str) and message_id else None
+
+
+def _latest_visible_assistant_reply(messages: list[Any]) -> tuple[Any, str] | None:
+    """Return the latest visible AI message with non-empty text, and that text."""
     for message in reversed(messages):
         if not _is_visible_message(message) or _message_type(message) != "ai":
             continue
         text = message_to_text(message).strip()
         if text:
-            return hashlib.sha256(text.encode("utf-8")).hexdigest()
-    return ""
+            return message, text
+    return None
 
 
 def compute_goal_progress_key(evaluation: GoalEvaluation, *, evidence_signature: str = "") -> str:
@@ -598,13 +655,23 @@ def compute_no_progress_count(goal: GoalState, evaluation: GoalEvaluation, *, ev
     return 0
 
 
-def make_goal_continuation_message(goal: GoalState, evaluation: GoalEvaluation) -> HumanMessage:
-    """Build the hidden user message that asks the agent to keep working."""
+def make_goal_continuation_message(goal: GoalState, evaluation: GoalEvaluation, *, pii_redaction: PiiRedactionConfig | None = None) -> HumanMessage:
+    """Build the hidden user message that asks the agent to keep working.
+
+    PiiRedactionMiddleware skips this framework message, so with
+    ``pii_redaction`` enabled the objective, the reason and the evidence
+    summary are redacted here. The thread keeps the redacted message, which
+    the UI hides. A redaction error propagates; the caller must not send the
+    raw text instead.
+    """
+    from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
+
+    objective, reason, evidence_summary = (redact_text(text, pii_redaction) for text in (goal["objective"], evaluation["reason"], evaluation.get("evidence_summary") or ""))
     content = (
         "<goal_continuation>\n"
-        f"Active goal: {goal['objective']}\n"
-        f"Evaluator result: not satisfied. Blocker: {evaluation['blocker']}. Reason: {evaluation['reason'] or 'No reason provided.'}\n"
-        f"Visible evidence: {evaluation.get('evidence_summary') or 'No evidence summary provided.'}\n"
+        f"Active goal: {objective}\n"
+        f"Evaluator result: not satisfied. Blocker: {evaluation['blocker']}. Reason: {reason or 'No reason provided.'}\n"
+        f"Visible evidence: {evidence_summary or 'No evidence summary provided.'}\n"
         "Continue working toward the active goal. Use the available tools and conversation context. "
         "Do not ask the user to continue unless you are genuinely blocked.\n"
         "</goal_continuation>"
@@ -703,11 +770,16 @@ async def write_thread_goal(
     as_node: str = "goal",
     create_if_missing: bool = False,
     expected_checkpoint_id: str | None = None,
+    outcome: GoalOutcomeState | None = None,
 ) -> dict[str, Any]:
     """Write a new checkpoint with the thread goal set or cleared.
 
+    Every goal write removes the ``goal_outcome`` record in the same
+    checkpoint; only the write that clears a met goal passes ``outcome``.
     Returns the updated channel values.
     """
+    if goal is not None and outcome is not None:
+        raise ValueError("A goal outcome is written only when clearing the goal.")
     if create_if_missing:
         await ensure_thread_checkpoint(checkpointer, thread_id)
 
@@ -727,15 +799,20 @@ async def write_thread_goal(
     metadata: dict[str, Any] = dict(getattr(checkpoint_tuple, "metadata", {}) or {})
     channel_values: dict[str, Any] = dict(checkpoint.get("channel_values", {}) or {})
 
-    if goal is None:
-        channel_values.pop("goal", None)
-    else:
-        channel_values["goal"] = copy.deepcopy(goal)
+    writes: dict[str, Any] = {"goal": goal}
+    if GOAL_OUTCOME_CHANNEL in channel_values or outcome is not None:
+        # Threads that never had a record keep their checkpoint shape.
+        writes[GOAL_OUTCOME_CHANNEL] = outcome
+    for channel, value in writes.items():
+        if value is None:
+            channel_values.pop(channel, None)
+        else:
+            channel_values[channel] = copy.deepcopy(value)
 
     channel_versions = dict(checkpoint.get("channel_versions", {}) or {})
-    current_version = channel_versions.get("goal")
-    next_version = _next_channel_version(checkpointer, current_version)
-    channel_versions["goal"] = next_version
+    # The saver stores a channel's value only when its version is in new_versions.
+    new_versions = {channel: _next_channel_version(checkpointer, channel_versions.get(channel)) for channel in writes}
+    channel_versions.update(new_versions)
 
     checkpoint["channel_values"] = channel_values
     checkpoint["channel_versions"] = channel_versions
@@ -743,7 +820,7 @@ async def write_thread_goal(
     metadata["updated_at"] = now_iso()
     metadata["source"] = "update"
     metadata["step"] = metadata.get("step", 0) + 1
-    metadata["writes"] = {as_node: {"goal": goal}}
+    metadata["writes"] = {as_node: writes}
 
     write_config = {
         "configurable": {
@@ -756,7 +833,7 @@ async def write_thread_goal(
             "checkpoint_id": _checkpoint_id_from_tuple(checkpoint_tuple),
         }
     }
-    await _call_checkpointer_method(checkpointer, "aput", "put", write_config, checkpoint, metadata, {"goal": next_version})
+    await _call_checkpointer_method(checkpointer, "aput", "put", write_config, checkpoint, metadata, new_versions)
     return channel_values
 
 

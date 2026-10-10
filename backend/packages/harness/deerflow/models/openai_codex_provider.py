@@ -95,7 +95,15 @@ class CodexChatModel(BaseChatModel):
 
     def model_post_init(self, __context: Any) -> None:
         """Auto-load Codex CLI credentials."""
+        from deerflow.models.request_admission import RequestAdmission
+
         self._validate_retry_config()
+        if isinstance(self.rate_limiter, RequestAdmission):
+            # Wrapper retries bypass BaseChatModel's admission hook. Leave
+            # paced retries to the LLM middleware.
+            if self.retry_max_attempts != 1:
+                logger.warning("Request admission enabled; ignoring configured retry_max_attempts=%d; provider retries are handled by middleware", self.retry_max_attempts)
+            self.retry_max_attempts = 1
 
         cred = self._load_codex_auth()
         if cred:
