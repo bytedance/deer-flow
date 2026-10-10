@@ -262,11 +262,13 @@ def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRang
     if web is None:
         web = {}
     if not isinstance(web, dict):
+        logger.error("Brave Search returned unexpected 'web' payload type: %s", type(web).__name__)
         return _unexpected_format_error(query)
     web_results = web.get("results")
     if web_results is None:
         web_results = []
     if not isinstance(web_results, list):
+        logger.error("Brave Search returned unexpected 'web.results' payload type: %s", type(web_results).__name__)
         return _unexpected_format_error(query)
     if not web_results:
         return json.dumps({"error": "No results found", "query": query}, ensure_ascii=False)
@@ -281,6 +283,7 @@ def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRang
         if isinstance(r, dict)
     ]
     if not normalized_results:
+        logger.error("Brave Search returned 'web.results' with no usable result objects")
         return _unexpected_format_error(query)
 
     output = {
