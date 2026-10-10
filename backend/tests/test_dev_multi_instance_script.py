@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from support.shell import require_script_bash
 
 from app.gateway.deps import _enforce_postgres_for_multi_worker, _validate_memory_retrieval_index
 from deerflow.config.app_config import AppConfig
@@ -299,6 +300,7 @@ def test_each_process_resolves_its_own_retrieval_index(tmp_path, monkeypatch):
     assert resolved[0] != resolved[1]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="chmod cannot express owner-only modes on Windows")
 def test_render_config_writes_a_private_file_with_a_generated_header(tmp_path):
     out = tmp_path / "nested" / "config.yaml"
 
@@ -316,6 +318,7 @@ def test_render_config_writes_a_private_file_with_a_generated_header(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(os.name == "nt", reason="chmod cannot express owner-only modes on Windows")
 def test_secrets_file_is_private_complete_and_stable(tmp_path):
     path = tmp_path / "secrets.env"
 
@@ -332,6 +335,16 @@ def test_secrets_file_is_private_complete_and_stable(tmp_path):
     assert sorted(line.split("=", 1)[0] for line in path.read_text(encoding="utf-8").splitlines() if line and not line.startswith("#")) == sorted(mi.SHARED_SECRET_NAMES)
 
 
+def _nginx_quoted(path: Path) -> str:
+    """Return the quoted nginx string literal ``render_nginx_conf`` must emit for *path*.
+
+    nginx treats a backslash as an escape character inside quoted strings, so a
+    Windows separator has to be doubled in the generated config; building the
+    expectation here keeps the assertion correct on every platform.
+    """
+    return '"' + str(path).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def test_nginx_conf_balances_both_gateways(tmp_path):
     text = mi.render_nginx_conf(listen_port=2027, gateway_ports=[8001, 8011], frontend_port=3000, state_dir=tmp_path)
 
@@ -339,7 +352,7 @@ def test_nginx_conf_balances_both_gateways(tmp_path):
     assert "server 127.0.0.1:8001;" in text
     assert "server 127.0.0.1:8011;" in text
     assert "X-DeerFlow-Upstream $upstream_addr" in text
-    assert f'"{tmp_path / "run" / "nginx.pid"}"' in text
+    assert _nginx_quoted(tmp_path / "run" / "nginx.pid") in text
 
 
 def test_nginx_conf_quotes_paths_with_whitespace(tmp_path):
@@ -347,9 +360,9 @@ def test_nginx_conf_quotes_paths_with_whitespace(tmp_path):
 
     text = mi.render_nginx_conf(listen_port=2027, gateway_ports=[8001, 8011], frontend_port=3000, state_dir=state)
 
-    assert f'pid "{state / "run" / "nginx.pid"}";' in text
-    assert f'access_log "{state / "logs" / "nginx-access.log"}";' in text
-    assert f'proxy_temp_path "{state / "nginx" / "temp" / "proxy"}";' in text
+    assert f"pid {_nginx_quoted(state / 'run' / 'nginx.pid')};" in text
+    assert f"access_log {_nginx_quoted(state / 'logs' / 'nginx-access.log')};" in text
+    assert f"proxy_temp_path {_nginx_quoted(state / 'nginx' / 'temp' / 'proxy')};" in text
 
 
 def test_nginx_conf_rejects_paths_nginx_would_interpolate(tmp_path):
@@ -449,7 +462,7 @@ def test_sse_read_enforces_its_budget_while_only_heartbeats_arrive(tmp_path):
 
 
 def test_shell_script_parses():
-    result = subprocess.run(["bash", "-n", str(SHELL_PATH)], capture_output=True, text=True, timeout=30)
+    result = subprocess.run([require_script_bash(), "-n", str(SHELL_PATH)], capture_output=True, text=True, timeout=30)
 
     assert result.returncode == 0, result.stderr
 
@@ -458,7 +471,7 @@ def test_shell_script_parses():
 def test_shell_script_help_lists_every_command_without_side_effects(tmp_path, flag):
     env = {**os.environ, "DEERFLOW_MI_STATE_DIR": str(tmp_path / "state"), "PATH": os.environ.get("PATH", "")}
 
-    result = subprocess.run(["bash", str(SHELL_PATH), flag], capture_output=True, text=True, timeout=30, env=env)
+    result = subprocess.run([require_script_bash(), str(SHELL_PATH), flag], capture_output=True, text=True, timeout=30, env=env)
 
     assert result.returncode == 0, result.stderr
     for command in ("up", "down", "status", "logs", "check", "restart"):
@@ -469,7 +482,7 @@ def test_shell_script_help_lists_every_command_without_side_effects(tmp_path, fl
 def test_shell_script_rejects_unknown_commands(tmp_path):
     env = {**os.environ, "DEERFLOW_MI_STATE_DIR": str(tmp_path / "state")}
 
-    result = subprocess.run(["bash", str(SHELL_PATH), "frobnicate"], capture_output=True, text=True, timeout=30, env=env)
+    result = subprocess.run([require_script_bash(), str(SHELL_PATH), "frobnicate"], capture_output=True, text=True, timeout=30, env=env)
 
     assert result.returncode != 0
     assert "Unknown command" in result.stderr
