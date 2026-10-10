@@ -24,6 +24,8 @@ class _Serde:
             raise ValueError("unknown serializer")
         if payload == b"bad":
             raise ValueError("invalid serialized payload")
+        if payload == b"not-a-dict":
+            return ["writes"]
         if payload == b"wrong-shape":
             return {"writes": "not a list"}
         if payload == b"ok":
@@ -39,12 +41,11 @@ class _Serde:
         b"\xff\x00ok",
         b"json\x00bad",
         b"json\x00wrong-shape",
+        b"json\x00not-a-dict",
     ],
-    ids=["missing-separator", "invalid-tag-encoding", "serde-failure", "wrong-shape"],
+    ids=["missing-separator", "invalid-tag-encoding", "serde-failure", "wrong-shape", "not-a-dict"],
 )
-async def test_corrupt_entry_is_miss_while_valid_entry_is_preserved(
-    monkeypatch: pytest.MonkeyPatch, corrupt: bytes
-) -> None:
+async def test_corrupt_entry_is_miss_while_valid_entry_is_preserved(monkeypatch: pytest.MonkeyPatch, corrupt: bytes) -> None:
     client = _RedisClient({"good": b"json\x00ok", "bad": corrupt, "absent": None})
     monkeypatch.setattr(redis_cache, "_create_client", lambda *args, **kwargs: client)
     cache = redis_cache.RedisCheckpointHistoryCache("redis://unused", serde=_Serde(), ttl_seconds=60)
