@@ -935,6 +935,8 @@ tools:
   #   group: web
   #   use: deerflow.community.serper.tools:web_search_tool
   #   max_results: 5   # capped at 10 by the Serper provider
+  #   max_retries: 0  # Opt in with 1-3 extra requests; may incur cost
+  #   retry_budget_seconds: 30  # >0 to 300; scheduling budget, not an I/O deadline
   #   # base_url: https://google.serper.dev  # Overrides SERPER_BASE_URL; omit /search
   #   include_domains: []  # Optional domain-only lists, at most 10 entries each
   #   exclude_domains: []  # Exclusion wins; see backend/docs/CONFIGURATION.md
@@ -1278,6 +1280,8 @@ tools:
   #   group: web
   #   use: deerflow.community.serper.tools:image_search_tool
   #   max_results: 5   # capped at 10 by the Serper provider
+  #   max_retries: 0  # Opt in with 1-3 extra requests; may incur cost
+  #   retry_budget_seconds: 30  # >0 to 300; scheduling budget, not an I/O deadline
   #   # base_url: https://google.serper.dev  # Overrides SERPER_BASE_URL; omit /images
   #   # api_key: $SERPER_API_KEY  # Optional explicit env-var reference
 
