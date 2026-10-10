@@ -19,7 +19,7 @@ import pytest
 from app.channels import manager as manager_module
 from app.channels.manager import ChannelManager
 from app.channels.message_bus import InboundMessage, MessageBus
-from app.channels.store import ChannelStore
+from app.channels.store import JsonChannelStore
 
 pytestmark = pytest.mark.asyncio
 
@@ -39,9 +39,9 @@ async def test_resolve_configured_model_name_loads_agent_config_off_loop(monkeyp
     # would itself perform file reads under the Blockbuster gate.
     monkeypatch.setattr(manager_module, "load_agent_config", spy_load_agent_config)
 
-    # ChannelStore's constructor mkdirs: setup I/O stays off the loop, same
+    # The JSON store constructor only resolves paths; keep setup I/O off the loop, same
     # as the file writes above — only the manager call is the unit under test.
-    store = await asyncio.to_thread(ChannelStore, path=tmp_path / "store.json")
+    store = await asyncio.to_thread(JsonChannelStore, path=tmp_path / "store.json")
     manager = ChannelManager(bus=MessageBus(), store=store)
     thread_id = "thread-1"
     # Seeded cache: the assistant resolution needs no client round-trip.
