@@ -213,3 +213,83 @@ def test_web_search_tool_reads_ddgs_options_from_config() -> None:
         backend="auto",
         time_range="week",
     )
+
+
+def test_web_search_tool_reports_search_failure_instead_of_no_results(monkeypatch, caplog) -> None:
+    """A failed search must not masquerade as a genuinely empty result set."""
+
+    class FailingDDGS:
+        def __init__(self, timeout: int) -> None:
+            self.timeout = timeout
+
+        def text(self, query: str, **kwargs):
+            msg = "HTTP 429 Too Many Requests"
+            raise RuntimeError(msg)
+
+    monkeypatch.setitem(sys.modules, "ddgs", SimpleNamespace(DDGS=FailingDDGS))
+    monkeypatch.setattr(tools, "get_app_config", lambda: SimpleNamespace(get_tool_config=lambda name: None))
+    caplog.set_level(logging.ERROR, logger=tools.__name__)
+
+    parsed = json.loads(tools.web_search_tool.invoke({"query": "latest news"}))
+
+    assert parsed["query"] == "latest news"
+    assert "No results found" not in parsed["error"]
+    assert "429" in parsed["error"]
+    assert any(record.getMessage().startswith("DuckDuckGo search failed") for record in caplog.records)
+
+
+def test_web_search_tool_reports_missing_ddgs_dependency(monkeypatch) -> None:
+    monkeypatch.setitem(sys.modules, "ddgs", None)
+    monkeypatch.setattr(tools, "get_app_config", lambda: SimpleNamespace(get_tool_config=lambda name: None))
+
+    parsed = json.loads(tools.web_search_tool.invoke({"query": "latest news"}))
+
+    assert "not installed" in parsed["error"]
+
+
+def test_search_text_raises_on_execution_failure(monkeypatch) -> None:
+    from ddgs.exceptions import DDGSException
+
+    class FailingDDGS:
+        def __init__(self, timeout: int) -> None:
+            self.timeout = timeout
+
+        def text(self, query: str, **kwargs):
+            raise DDGSException("TimeoutException: search timed out")
+
+    monkeypatch.setitem(sys.modules, "ddgs", SimpleNamespace(DDGS=FailingDDGS))
+
+    with pytest.raises(tools.DDGSearchError, match="timed out"):
+        tools._search_text("latest news")
+
+
+def test_search_text_keeps_sdk_no_results_sentinel_empty(monkeypatch) -> None:
+    from ddgs.exceptions import DDGSException
+
+    class EmptyDDGS:
+        def __init__(self, timeout: int) -> None:
+            self.timeout = timeout
+
+        def text(self, query: str, **kwargs):
+            raise DDGSException("No results found.")
+
+    monkeypatch.setitem(sys.modules, "ddgs", SimpleNamespace(DDGS=EmptyDDGS))
+
+    assert tools._search_text("latest news") == []
+
+
+def test_search_text_treats_only_the_exact_sdk_sentinel_as_empty(monkeypatch) -> None:
+    """A failure message that merely embeds the sentinel phrase stays an error."""
+    from ddgs.exceptions import DDGSException
+
+    class AmbiguousDDGS:
+        def __init__(self, timeout: int) -> None:
+            self.timeout = timeout
+
+        def text(self, query: str, **kwargs):
+            raise DDGSException("No results found for 'latest news': HTTP 429")
+
+    monkeypatch.setitem(sys.modules, "ddgs", SimpleNamespace(DDGS=AmbiguousDDGS))
+
+    with pytest.raises(tools.DDGSearchError, match="429"):
+        tools._search_text("latest news")
