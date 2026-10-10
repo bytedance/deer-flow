@@ -17,6 +17,7 @@ from deerflow.config.shared_reset_marker import SharedResetMarker
 from deerflow.mcp.config_normalization import normalize_mcp_interceptor_paths, normalize_mcp_server_config
 from deerflow.mcp.lifecycle import (
     InvalidMcpLifecycle,
+    _stdio_fingerprints,
     effective_tokens,
     lifecycle_delta,
     parse_mcp_lifecycle,
@@ -252,25 +253,7 @@ def _mcp_revision_from_config(config) -> _AppliedMcpRevision:
     server — so presentation-only fields (``description``/``routing``/``tools``/
     ``tool_name_prefix``) cannot masquerade as a connection change.
     """
-    from deerflow.mcp.client import build_server_params
-    from deerflow.mcp.session_pool import normalized_connection_fingerprint
-
-    stdio_connections: dict[str, str] = {}
-    for server_name, server in config.get_enabled_mcp_servers().items():
-        try:
-            connection = build_server_params(server_name, server)
-        except Exception:
-            # ``build_servers_config`` drops a server whose parameters cannot be
-            # built, so it is absent from discovery too. Omitting it here keeps
-            # the connection-identity baseline aligned with what discovery can
-            # actually install instead of raising into the hot staleness check.
-            logger.debug(
-                "MCP server '%s' has unusable parameters; omitting it from the connection-identity baseline",
-                server_name,
-            )
-            continue
-        if connection.get("transport", "stdio") == "stdio":
-            stdio_connections[server_name] = normalized_connection_fingerprint(connection)
+    stdio_connections = _stdio_fingerprints(config)
     ledger = parse_mcp_lifecycle(config.model_extra or {})
     return _AppliedMcpRevision(
         effective_snapshot=_effective_mcp_config_snapshot(config),

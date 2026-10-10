@@ -162,3 +162,35 @@ async def test_targeted_metadata_update_keeps_token_and_session(
     assert harness._binding(pool, "A") is binding_before
     assert harness._entry(pool, "A") is entry_before
     assert json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]["A"]["description"] == "renamed"
+
+
+def test_skills_writer_preserves_the_lifecycle_ledger(
+    reconciler,  # noqa: F811 - fixture imported from the sibling suite
+    monkeypatch,
+    tmp_path,
+):
+    """A skills-only write must round-trip mcpLifecycle exactly (no recompute)."""
+    from unittest.mock import MagicMock
+
+    from app.gateway.routers import skills as skills_router
+
+    cfg = tmp_path / "extensions_config.json"
+    ledger = {"version": 1, "servers": {"A": "a" * 32, "B": "b" * 32}}
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {"A": {"enabled": True, "type": "stdio", "command": "npx"}},
+                "skills": {"demo": {"enabled": True}},
+                "mcpLifecycle": ledger,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+    monkeypatch.setattr("app.gateway.routers.skills.reload_extensions_config", lambda *a, **k: None)
+
+    skills_router._write_extensions_skill_state(MagicMock(), "demo", False, rebuild_public_projection=False)
+
+    written = json.loads(cfg.read_text(encoding="utf-8"))
+    assert written["mcpLifecycle"] == ledger  # preserved byte-for-value, never recomputed
+    assert written["skills"]["demo"]["enabled"] is False

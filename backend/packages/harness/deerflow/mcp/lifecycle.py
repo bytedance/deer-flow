@@ -23,12 +23,15 @@ readers, conservative migration for writers) rather than treat it as unchanged.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import secrets
 from collections.abc import Collection, Mapping
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, field_validator
+
+logger = logging.getLogger(__name__)
 
 LIFECYCLE_KEY = "mcpLifecycle"
 LIFECYCLE_VERSION = 1
@@ -112,6 +115,13 @@ def _stdio_fingerprints(config) -> dict[str, str]:
         try:
             connection = build_server_params(server_name, server)
         except Exception:  # noqa: BLE001 - unusable servers are absent from discovery too
+            # ``build_servers_config`` drops a server whose parameters cannot be
+            # built, so it is absent from discovery too. Omitting it keeps the
+            # connection-identity baseline aligned with what discovery installs.
+            logger.debug(
+                "MCP server '%s' has unusable parameters; omitting it from the connection-identity baseline",
+                server_name,
+            )
             continue
         if connection.get("transport", "stdio") != "stdio":
             continue

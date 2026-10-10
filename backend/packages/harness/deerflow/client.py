@@ -1456,6 +1456,9 @@ class DeerFlowClient:
         Raises:
             ValueError: If the resulting config would not load; nothing is written.
             OSError: If the config file cannot be written.
+            RuntimeError: If the configuration was saved but local MCP reconciliation or
+                teardown failed. The configuration may already have changed on disk, so
+                callers must not assume the write failed and blindly retry.
         """
         from deerflow.mcp.cache import (
             fail_mcp_reconciliation,
