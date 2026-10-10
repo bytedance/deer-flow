@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
+
+from deerflow.config._boolean_guards import reject_boolean
 
 
 class RunOwnershipConfig(BaseModel):
@@ -45,3 +47,8 @@ class RunOwnershipConfig(BaseModel):
         default=False,
         description="When True, the worker periodically renews leases on its active runs. Enable for multi-worker deployments (GATEWAY_WORKERS > 1).",
     )
+
+    @field_validator("lease_seconds", "grace_seconds", mode="before")
+    @classmethod
+    def _reject_boolean_seconds(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")

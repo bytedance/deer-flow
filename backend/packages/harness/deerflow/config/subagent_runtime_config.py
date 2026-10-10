@@ -2,7 +2,9 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
+
+from deerflow.config._boolean_guards import reject_boolean
 
 
 class SubagentRuntimeConfig(BaseModel):
@@ -30,3 +32,8 @@ class SubagentRuntimeConfig(BaseModel):
         le=86_400,
         description="Maximum wait for a queued native subagent before it fails admission.",
     )
+
+    @field_validator("max_running", "max_queued", "queue_timeout_seconds", mode="before")
+    @classmethod
+    def _reject_boolean_limits(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")

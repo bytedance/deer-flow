@@ -1,6 +1,8 @@
 """Configuration for deferred tool loading via tool_search."""
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
+
+from deerflow.config._boolean_guards import reject_boolean
 
 AUTO_PROMOTE_TOP_K_MIN = 1
 AUTO_PROMOTE_TOP_K_MAX = 5
@@ -27,6 +29,12 @@ class ToolSearchConfig(BaseModel):
         default=3,
         description="Maximum number of deferred MCP tool schemas auto-promoted from routing metadata per model call",
     )
+
+    @field_validator("auto_promote_top_k", mode="before")
+    @classmethod
+    def _reject_boolean_auto_promote_top_k(cls, value: object, info: ValidationInfo) -> object:
+        """Reject a boolean before the clamp below coerces it to 1 (see #6293)."""
+        return reject_boolean(value, info, kind="an integer")
 
     @field_validator("auto_promote_top_k")
     @classmethod

@@ -83,6 +83,11 @@ class CheckpointDeltaConfig(BaseModel):
         ),
     )
 
+    @field_validator("snapshot_frequency", mode="before")
+    @classmethod
+    def _reject_boolean_snapshot_frequency(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")
+
 
 class CheckpointGraphCacheConfig(BaseModel):
     """Size cap for the process-local compiled checkpoint graph cache.
@@ -99,6 +104,11 @@ class CheckpointGraphCacheConfig(BaseModel):
         ge=1,
         description=("Max compiled thread-state accessor graphs cached by the gateway (keyed per assistant, channel mode, and snapshot cadence)."),
     )
+
+    @field_validator("accessor_graph_max", mode="before")
+    @classmethod
+    def _reject_boolean_accessor_graph_max(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")
 
 
 class CheckpointCacheConfig(BaseModel):
@@ -138,6 +148,11 @@ class CheckpointCacheConfig(BaseModel):
         default="",
         description="Optional override for the redis key prefix; defaults to a hash of the database identity.",
     )
+
+    @field_validator("max_entries", "ttl_seconds", mode="before")
+    @classmethod
+    def _reject_boolean_cache_settings(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")
 
 
 class DatabaseConfig(BaseModel):
