@@ -23,7 +23,7 @@ from deerflow.agents.middlewares.input_sanitization_middleware import neutralize
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.tools.types import Runtime
-from deerflow.uploads.companions import companion_names
+from deerflow.uploads.companions import companion_names, resolve_companion
 from deerflow.uploads.manager import is_upload_staging_file
 from deerflow.utils.file_outline import extract_outline_for_file
 
@@ -265,6 +265,10 @@ def _list_uploaded_files_impl(
             "path": neutralize_untrusted_tags(f"/mnt/user-data/uploads/{filename}"),
             "extension": neutralize_untrusted_tags(file_path.suffix),
         }
+        companion = resolve_companion(file_path)
+        if companion is not None:
+            file_info["markdown_file"] = neutralize_untrusted_tags(companion.name)
+            file_info["markdown_path"] = neutralize_untrusted_tags(f"/mnt/user-data/uploads/{companion.name}")
 
         should_include_outline = outline_for_all or filename in outline_filenames
         if should_include_outline:
@@ -334,6 +338,10 @@ def list_uploaded_files(
     Skip this tool when:
     - The user names a specific file — use read_file or grep directly with the path
     - The file was uploaded in the current run — it's already in <current_uploads>
+
+    A converted document includes markdown_path. Call read_file on that path:
+    read_file cannot open the binary original, and outline line numbers refer to
+    the converted text. The converted file itself is omitted from this listing.
 
     Optional filters (`query`, `extensions`) run before the max_results cap, so
     older matching files are not displaced by newer unrelated uploads.
