@@ -104,6 +104,34 @@ class AuthMiddleware(BaseHTTPMiddleware):
             if owner_user_id:
                 owner_user_id = owner_user_id.strip()
             internal_user = get_internal_user(owner_user_id=owner_user_id or None)
+            if owner_user_id and not is_auth_disabled():
+                # The internal principal is synthesized from trusted headers
+                # without a users-row lookup, so suspension has no other chance
+                # to bite on this surface (#3462 gap 3): enforce it here, the
+                # one gate every owner-bound internal HTTP call (IM channel
+                # dispatch above all) passes through. Auth-disabled mode is
+                # exempt — its owner header carries the synthetic
+                # auth-disabled identity and no suspendable account exists.
+                # Owner ids without a users row stay allowed (a nonexistent
+                # account cannot be suspended), and a store that cannot be
+                # read cannot hold a suspension verdict either; run admission
+                # re-asserts the check when the row is readable.
+                from app.gateway.deps import get_local_provider
+
+                try:
+                    owner = await get_local_provider().get_user(owner_user_id)
+                except Exception:
+                    owner = None
+                if owner is not None and getattr(owner, "disabled", False):
+                    return JSONResponse(
+                        status_code=401,
+                        content={
+                            "detail": AuthErrorResponse(
+                                code=AuthErrorCode.ACCOUNT_DISABLED,
+                                message="Account disabled",
+                            ).model_dump()
+                        },
+                    )
 
         auth_source = AUTH_SOURCE_SESSION
         access_token = request.cookies.get("access_token")

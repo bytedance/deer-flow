@@ -1123,16 +1123,10 @@ async def get_current_user_from_request(request: Request):
             detail=AuthErrorResponse(code=AuthErrorCode.USER_NOT_FOUND, message="User not found").model_dump(),
         )
 
-    # Token version mismatch → password was changed, token is stale
-    if user.token_version != payload.ver:
-        raise HTTPException(
-            status_code=401,
-            detail=AuthErrorResponse(code=AuthErrorCode.TOKEN_INVALID, message="Token revoked (password changed)").model_dump(),
-        )
-
-    # Operator-disabled account (#3462 gap 3): existing sessions die at the
-    # next request, on every authentication surface (the password and PAT
-    # paths reject below; OAuth provisioning rejects at resolve time).
+    # Operator-disabled account (#3462 gap 3) and stale token versions are
+    # both verdicts of the shared post-lookup validator: the password and
+    # PAT paths reject at their own surfaces; OAuth provisioning rejects at
+    # resolve time.
     error = validate_resolved_session_user(user, payload)
     if error is not None:
         raise HTTPException(

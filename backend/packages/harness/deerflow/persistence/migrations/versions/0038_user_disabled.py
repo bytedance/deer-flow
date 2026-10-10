@@ -1,7 +1,7 @@
 """Account disabled flag on ``users``.
 
-Revision ID: 0036_user_disabled
-Revises: 0035_login_throttle
+Revision ID: 0038_user_disabled
+Revises: 0037_project_document_summaries
 
 Adds ``users.disabled`` (NOT NULL, server default ``0``): an
 operator-disabled account is rejected at every authentication surface while

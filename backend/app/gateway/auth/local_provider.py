@@ -42,8 +42,9 @@ class LocalAuthProvider(AuthProvider):
 
         # Operator-disabled account (#3462 gap 3): no password is even
         # compared — the failure is indistinguishable from unknown-credentials
-        # to the caller, and the login router surfaces the distinct code when
-        # the repository flags the account (see the disabled check below).
+        # to the caller, so nothing about the account state leaks through the
+        # login path (the distinct ACCOUNT_DISABLED code is surfaced only by
+        # the session dependency once a token exists).
         if getattr(user, "disabled", False):
             return None
 

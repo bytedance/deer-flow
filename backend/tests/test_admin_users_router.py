@@ -425,18 +425,22 @@ def test_langgraph_authenticate_rejects_suspended_session():
     with tempfile.TemporaryDirectory() as tmpdir:
         repo = _make_sqlite_repo(tmpdir)
 
+        import app.gateway.deps as deps_module
+        from app.gateway import langgraph_auth
+
+        # Point the cached provider at THIS test's repo (module-level
+        # caches otherwise leak a previous test's closed engine), and put
+        # the previous values back afterwards so later tests that call
+        # get_local_provider() do not see this test's closed engine.
+        saved_repo = deps_module._cached_repo
+        saved_provider = deps_module._cached_local_provider
+        deps_module._cached_repo = repo
+        deps_module._cached_local_provider = None
+
         async def _run():
             user = await repo.create_user(User(email="lg@example.com", system_role="user"))
             token = create_access_token(str(user.id), token_version=user.token_version)
             await repo.set_disabled(str(user.id), True)
-
-            import app.gateway.deps as deps_module
-            from app.gateway import langgraph_auth
-
-            # Point the cached provider at THIS test's repo (module-level
-            # caches otherwise leak a previous test's closed engine).
-            deps_module._cached_repo = repo
-            deps_module._cached_local_provider = None
 
             request = NS_stub_request(token)
 
@@ -454,6 +458,8 @@ def test_langgraph_authenticate_rejects_suspended_session():
             asyncio.run(_run())
         finally:
             asyncio.run(close_engine())
+            deps_module._cached_repo = saved_repo
+            deps_module._cached_local_provider = saved_provider
 
 
 def test_browser_ws_authenticator_rejects_suspended_session():
@@ -468,18 +474,22 @@ def test_browser_ws_authenticator_rejects_suspended_session():
     with tempfile.TemporaryDirectory() as tmpdir:
         repo = _make_sqlite_repo(tmpdir)
 
+        from types import SimpleNamespace as NS
+
+        import app.gateway.deps as deps_module
+        from app.gateway.routers.browser import _authenticate_ws
+
+        # Same cache hygiene as the authenticate test above: restore the
+        # module-level caches so this test's closed engine does not leak.
+        saved_repo = deps_module._cached_repo
+        saved_provider = deps_module._cached_local_provider
+        deps_module._cached_repo = repo
+        deps_module._cached_local_provider = None
+
         async def _run():
             user = await repo.create_user(User(email="ws@example.com", system_role="user"))
             token = create_access_token(str(user.id), token_version=user.token_version)
             await repo.set_disabled(str(user.id), True)
-
-            from types import SimpleNamespace as NS
-
-            import app.gateway.deps as deps_module
-            from app.gateway.routers.browser import _authenticate_ws
-
-            deps_module._cached_repo = repo
-            deps_module._cached_local_provider = None
 
             websocket = NS(cookies={"access_token": token}, headers={})
             assert await _authenticate_ws(websocket) is None
@@ -488,6 +498,8 @@ def test_browser_ws_authenticator_rejects_suspended_session():
             asyncio.run(_run())
         finally:
             asyncio.run(close_engine())
+            deps_module._cached_repo = saved_repo
+            deps_module._cached_local_provider = saved_provider
 
 
 def test_repo_set_disabled_field_scoped_and_last_active_admin():
