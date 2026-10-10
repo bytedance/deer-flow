@@ -670,3 +670,27 @@ async def test_client_close_failure_returns_permit(monkeypatch):
     monkeypatch.setattr(httpx, "AsyncClient", client)
     assert "client close failed" in await crawl()
     assert await crawl() == "ok"
+
+
+@pytest.mark.parametrize("max_retries", [0, 1])
+async def test_admitted_redirect_keeps_post_and_strips_cross_host_key(monkeypatch, max_retries):
+    requests = []
+
+    def handle(request):
+        assert json.loads(request.read()) == {"url": "https://example.com/page"}
+        assert admission_module._admission._active == 1
+        requests.append(request)
+        if request.url.host == "r.jina.ai":
+            return httpx.Response(307, headers={"Location": "https://redirect.example/final"})
+        return httpx.Response(200, text="Fetched page")
+
+    original = httpx.AsyncClient
+    monkeypatch.setenv("JINA_API_KEY", "dummy-test-key")
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original(transport=httpx.MockTransport(handle), **kwargs))
+
+    assert await crawl(max_retries=max_retries, trust_env=False) == "Fetched page"
+    assert [request.url.host for request in requests] == ["r.jina.ai", "redirect.example"]
+    assert all(request.method == "POST" for request in requests)
+    assert requests[0].headers["Authorization"] == "Bearer dummy-test-key"
+    assert "Authorization" not in requests[1].headers
+    assert admission_module._admission._active == 0
