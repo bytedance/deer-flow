@@ -38,10 +38,12 @@ from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.types import Overwrite
 
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
+from deerflow.agents.image_generation_choice import adapt_channel_image_choice_reply, selected_image_source_from_reply
 from deerflow.agents.interaction_policy import RunInteractionPolicy, resolve_run_interaction_policy
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.config.app_config import AppConfig
 from deerflow.config.database_config import CheckpointChannelMode
+from deerflow.config.image_generation import bind_image_generation_source, image_generation_source_for_run
 from deerflow.constants import CONVERSATION_READER_CONTEXT_KEY, TOOL_RESULTS_DIRNAME
 from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
 from deerflow.mcp_scope import (
@@ -1341,6 +1343,37 @@ async def run_agent(
         if scheduled_goal is None:
             await _clear_stale_scheduled_goal(record=record, run_manager=run_manager, bridge=bridge, checkpointer=checkpointer)
 
+        image_source = None
+        try:
+            from deerflow.config.app_config import get_app_config
+
+            image_config = ctx.app_config or await asyncio.to_thread(get_app_config)
+            if isinstance(image_config, AppConfig) and rollback_point is not None:
+                graph_input, image_source = await asyncio.to_thread(
+                    adapt_channel_image_choice_reply,
+                    graph_input,
+                    rollback_point.messages,
+                    image_config.image_generation_environment,
+                    runtime_ctx,
+                )
+            if isinstance(image_config, AppConfig) and rollback_point is not None and image_source is None:
+                image_source = await asyncio.to_thread(
+                    selected_image_source_from_reply,
+                    graph_input,
+                    rollback_point.messages,
+                    image_config.image_generation_environment,
+                )
+            if isinstance(image_config, AppConfig) and image_source is None:
+                image_source = await asyncio.to_thread(
+                    image_generation_source_for_run,
+                    image_config.image_generation_environment,
+                    allows_clarification=resolve_run_interaction_policy(config).allows_clarification,
+                )
+        except (OSError, ValueError):
+            # An unavailable catalog cannot authorize a provider. The image
+            # tool reports the configuration error before sandbox acquisition.
+            logger.warning("Run %s: image model choice could not be validated", run_id)
+
         # Capture the effective (resolved) model name from the agent's metadata.
         # _resolve_model_name in agent.py may return the default model if the
         # requested name is not in the allowlist — this update ensures the
@@ -1518,34 +1551,35 @@ async def run_agent(
                 if stand_down_reason.startswith("thread_changed"):
                     final_goal_verdict.update(satisfied=False, blocker="missing_evidence", relied_on_assumption=False)
 
-        await _stream_once(graph_input, initial_runnable_config)
-        while not record.abort_event.is_set() and not llm_error_fallback_message and (journal is None or not journal.had_llm_error_fallback):
-            continuation_input = await _prepare_goal_continuation_input(
-                bridge=bridge,
-                accessor=accessor,
-                checkpointer=checkpointer,
-                thread_id=thread_id,
-                run_id=run_id,
-                model_name=record.model_name,
-                app_config=ctx.app_config,
-                evaluator_model_factory=_get_goal_evaluator_model,
-                abort_event=record.abort_event,
-                user_id=resolve_runtime_user_id(runtime),
-                deerflow_trace_id=deerflow_trace_id,
-                task_store=task_store,
-                extensions=extensions,
-                run_stop_reason=runtime.context.get("stop_reason") if isinstance(runtime.context, dict) else None,
-                interaction_policy=resolve_run_interaction_policy(config),
-                expected_goal=scheduled_goal,
-                verdict_callback=capture_goal_verdict,
-                usage_callback=journal.record_external_llm_usage_records if journal is not None else None,
-            )
-            if isinstance(continuation_input, _GoalCompletionCandidate):
-                goal_completion = continuation_input
-                break
-            if continuation_input is None or record.abort_event.is_set():
-                break
-            await _stream_once(continuation_input, _continuation_runnable_config())
+        with bind_image_generation_source(image_source):
+            await _stream_once(graph_input, initial_runnable_config)
+            while not record.abort_event.is_set() and not llm_error_fallback_message and (journal is None or not journal.had_llm_error_fallback):
+                continuation_input = await _prepare_goal_continuation_input(
+                    bridge=bridge,
+                    accessor=accessor,
+                    checkpointer=checkpointer,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    model_name=record.model_name,
+                    app_config=ctx.app_config,
+                    evaluator_model_factory=_get_goal_evaluator_model,
+                    abort_event=record.abort_event,
+                    user_id=resolve_runtime_user_id(runtime),
+                    deerflow_trace_id=deerflow_trace_id,
+                    task_store=task_store,
+                    extensions=extensions,
+                    run_stop_reason=runtime.context.get("stop_reason") if isinstance(runtime.context, dict) else None,
+                    interaction_policy=resolve_run_interaction_policy(config),
+                    expected_goal=scheduled_goal,
+                    verdict_callback=capture_goal_verdict,
+                    usage_callback=journal.record_external_llm_usage_records if journal is not None else None,
+                )
+                if isinstance(continuation_input, _GoalCompletionCandidate):
+                    goal_completion = continuation_input
+                    break
+                if continuation_input is None or record.abort_event.is_set():
+                    break
+                await _stream_once(continuation_input, _continuation_runnable_config())
 
         record.goal_verdict = final_goal_verdict
 
