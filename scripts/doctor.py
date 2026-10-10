@@ -650,6 +650,53 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
             base_url = str(tool.get("base_url") or "http://localhost:3032").lower()
             return "browserless.io" not in base_url
 
+        def _delegated_backend_error(tool: dict) -> tuple[str, str] | None:
+            if tool_name not in {"web_fetch", "web_capture"}:
+                return None
+            providers = {
+                "browserless": ("Browserless", "http://localhost:3032"),
+                "crawl4ai": ("Crawl4AI", "http://localhost:11235"),
+                "firecrawl": ("Firecrawl", None),
+                "fastcrw": ("fastCRW", "https://fastcrw.com/api"),
+            }
+            use = str(tool.get("use") or "")
+            for provider, (provider_label, default_url) in providers.items():
+                if not use.startswith(f"deerflow.community.{provider}."):
+                    continue
+                if tool_name == "web_capture" and provider != "browserless":
+                    return None
+
+                from deerflow.community.url_safety import validate_delegated_backend_url
+                from deerflow.config.app_config import AppConfig
+
+                # Resolve only backend settings: credential diagnostics below
+                # still need the literal values and environment references.
+                cfg = AppConfig.resolve_env_variables({key: tool[key] for key in ("base_url", "network_isolation_confirmed") if key in tool})
+                base_url = cfg.get("base_url", default_url)
+                if provider == "fastcrw" and cfg.get("base_url") is None:
+                    base_url = os.environ.get("CRW_API_URL", default_url)
+                if provider == "firecrawl" and base_url is None:
+                    # The SDK uses its public cloud endpoint when unset.
+                    return None
+                confirmed = cfg.get("network_isolation_confirmed")
+                confirmed = confirmed if isinstance(confirmed, bool) else isinstance(confirmed, str) and confirmed.strip().lower() in {"1", "true", "yes", "on"}
+                error = validate_delegated_backend_url(base_url, network_isolation_confirmed=confirmed)
+                return (provider_label, error) if error else None
+            return None
+
+        # Check every delegated backend before any provider's early success.
+        # allow_private_addresses permits targets, not backend delegation.
+        for tool in tool_entries:
+            backend_error = _delegated_backend_error(tool)
+            if backend_error:
+                provider, error = backend_error
+                return CheckResult(
+                    label,
+                    "warn",
+                    f"{provider} backend: {error}",
+                    fix="Configure an HTTP(S) backend URL; for a private or unverifiable backend, isolate its egress before setting network_isolation_confirmed: true. See backend/docs/CONFIGURATION.md#delegated-fetch-backend-isolation",
+                )
+
         for tool in tool_entries:
             use = tool.get("use", "")
             for provider, detail in free_providers.get(tool_name, {}).items():
