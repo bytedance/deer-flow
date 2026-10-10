@@ -78,9 +78,10 @@ the `env_file` value); shell exports still win. Pinned by
 
 `deploy.sh` never sources the repo-root `.env`; Compose reads it via
 `--env-file`, and shell exports outrank that file during interpolation (an
-exported-but-empty variable still wins). So `BETTER_AUTH_SECRET` and
-`DEER_FLOW_INTERNAL_AUTH_TOKEN` resolve shell → `.env` → persisted file under
-`DEER_FLOW_HOME` → freshly generated, and a `.env`-provided value is left
+exported-but-empty variable still wins). So `BETTER_AUTH_SECRET`,
+`DEER_FLOW_INTERNAL_AUTH_TOKEN` and `DEER_FLOW_CREDENTIALS_KEY` resolve shell →
+`.env` → persisted file under `DEER_FLOW_HOME` → freshly generated, and a
+`.env`-provided value is left
 unexported so Compose parses it itself. Whether `.env` provides one is
 Compose's answer, not a `KEY=VALUE` grep: Compose also accepts `KEY: VALUE`
 lines and interpolates `${VAR}` inside values, so the script renders a stub
@@ -93,6 +94,9 @@ failing probe stops the script rather than guessing. `read_dotenv_value`
 stays for the end-of-run summary only. Do not export a value the script read
 from `.env`: that shadows Compose's own dotenv parsing and re-creates the bug
 where `make up` replaced the operator's secret with a generated one.
+The credentials key (a Fernet key) persists as `.credentials_key`, the file the
+Gateway itself generates in that runtime home, via a noclobber (`O_EXCL`)
+create that reads a concurrent winner back.
 `backend/tests/test_deploy_dotenv_secrets.py` pins the order and the probe;
 its real-Compose cases run against the installed `docker` CLI and against any
 standalone binaries listed in `DEER_FLOW_TEST_COMPOSE_BINARIES`.

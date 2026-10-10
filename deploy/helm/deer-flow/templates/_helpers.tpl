@@ -71,7 +71,8 @@ imagePullSecrets:
 {{- end -}}
 
 {{/* Name of the Secret holding the app secrets (BETTER_AUTH_SECRET,
-     DEER_FLOW_INTERNAL_AUTH_TOKEN, AUTH_JWT_SECRET, PROVISIONER_API_KEY).
+     DEER_FLOW_INTERNAL_AUTH_TOKEN, AUTH_JWT_SECRET, PROVISIONER_API_KEY,
+     DEER_FLOW_CREDENTIALS_KEY).
      `existingAppSecret` points every consumer (gateway, frontend,
      provisioner) at a user-managed Secret instead and skips generating one;
      it must carry PROVISIONER_API_KEY while the provisioner is enabled and

@@ -4355,6 +4355,22 @@ This release closes that milestone with **439 merged pull requests**.
   truncated at that character. These providers now split on `"
 "` only, as the shared parser already documents and as
   LocalSandbox, the AIO backend and E2B already do. ([#6595])
+- **security:** Add `DEER_FLOW_CREDENTIALS_KEY`, an env-only at-rest
+  encryption key for stored credentials. Per-connection IM channel credentials
+  had an encryption path that no production code wired up, so they could be
+  neither stored nor read and Slack always used the deployment bot token. The
+  Gateway now loads the key at startup (comma-separated Fernet keys: the first
+  encrypts, all decrypt, for rotation; values carry a `fernet:v2:` prefix and
+  earlier `fernet:v1:` values stay readable) and passes it to every channel
+  connection repository; undecryptable values are treated as missing. Unset, a
+  single instance generates `{DEER_FLOW_HOME}/.credentials_key`; a declared
+  multi-instance deployment with `channel_connections` enabled refuses to start
+  without the key, and a malformed key is refused without being echoed. The
+  Helm chart generates the key into its app Secret and preserves it across
+  upgrades, `make up` persists it next to the runtime home, and both compose
+  files pass it to the Gateway. `.jwt_secret` (and the managed-model key) are
+  now created exclusively and read back, so replicas cold-starting on a shared
+  volume no longer keep different session-signing secrets.
 
 ### Documentation
 
