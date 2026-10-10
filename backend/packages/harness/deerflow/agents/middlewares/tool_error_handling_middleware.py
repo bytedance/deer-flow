@@ -793,6 +793,18 @@ def build_subagent_runtime_middlewares(
     if summarization_middleware is not None:
         middlewares.append(summarization_middleware)
 
+    # ModelContentCompatibilityMiddleware — the subagent chain replays the
+    # same checkpointed ToolMessages the lead does, including any written
+    # before the conversion-layer fix (MCP ResourceLink results persisted as
+    # URL-sourced file blocks), which the Chat Completions serializer rejects
+    # on every subsequent model call. Same read-time request-view rewrite as
+    # the lead chain; placed after DurableContext/summarization so it sees the
+    # compacted, reinjected message list. Request view only — subagent
+    # checkpoints are never written.
+    from deerflow.agents.middlewares.model_content_compatibility_middleware import ModelContentCompatibilityMiddleware
+
+    middlewares.append(ModelContentCompatibilityMiddleware())
+
     # SubagentDateContextMiddleware (#4781) — inject framework-owned temporal
     # context before the first model call without registering the lead agent's
     # DynamicContextMiddleware. The latter also reads user memory, performs a
