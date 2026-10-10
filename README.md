@@ -178,6 +178,8 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
 
    Jina, Browserless, and InfoQuest web fetches resolve relative links and image sources using the requested page URL (or a usable HTML base URL), so returned Markdown includes complete destinations. Link resolution preserves the surrounding HTML source, including malformed-page formatting.
 
+   Self-hosted Browserless, Crawl4AI, Firecrawl, and fastCRW fetch backends require outbound isolation from private, loopback, link-local, and cloud-metadata networks before setting `network_isolation_confirmed: true` on each tool. DeerFlow rejects private or unverifiable backends by default because those services handle redirects, DNS resolution, and subresources themselves. `allow_private_addresses` permits intentional internal target URLs and does not bypass the backend check. See [delegated fetch deployment](backend/docs/CONFIGURATION.md#delegated-fetch-backend-isolation); `make doctor` reports backend configurations that would be refused.
+
    Jina fetches support opt-in bounded retries via `max_retries` (default `0`) and `retry_budget_seconds` (default `30`) in the tool configuration. Valid `Retry-After` hints set a minimum wait for HTTP 429/503; 429 without a valid hint stays terminal. Hints that cannot fit the remaining budget stop retries. Local backoff remains randomized. Retries may increase upstream requests and cost; see [Jina fetch retries](backend/docs/CONFIGURATION.md#jina-fetch-retries).
 
    Jina also accepts an opt-in `max_response_bytes` tool setting (positive integer; omitted/null disables it). It stops oversized decoded responses before extraction, with no partial success or retry. This leaves the 4096-character output cap unchanged and does not bound HTTPX decompressor allocations or wire bandwidth; see [response budget](backend/docs/CONFIGURATION.md#jina-response-byte-budget).
@@ -199,7 +201,8 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
    values override shell exports, and a project-root override alone still uses
    `backend/.deer-flow` first. Simple variable references such as
    `DEER_FLOW_HOME="$PWD/backend/.deer-flow"` use the checkout as `PWD`;
-   single-quoted references remain literal. For standalone Gateway launches using `backend/.env`
+   single-quoted references remain literal. If the checkout `.env` cannot be read or decoded
+   as UTF-8, thread diagnostics retain shell exports and default storage paths. For standalone Gateway launches using `backend/.env`
    or `DEER_FLOW_ENV_FILE`, export the effective `DEER_FLOW_HOME` when collecting
    the bundle and ensure the checkout `.env` does not override it.
    Doctor's internal tool probes also decode UTF-8 with replacement for invalid
@@ -365,6 +368,7 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
    - `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` accepts a UTF-8 token handoff and reuses it for later model instances in the same process. Undecodable handoffs are skipped so Claude Code can still try its override or default credentials file.
    - CLI credential JSON files accept UTF-8 with or without a BOM, independently of the host locale. `make doctor` accepts the same files when checking CLI authentication. Invalid text encoding is treated as an unreadable source; Claude Code can still try its default file after an invalid override.
    - ACP agent entries are separate from model providers — if you configure `acp_agents.codex`, point it at a Codex ACP adapter such as `npx -y @zed-industries/codex-acp`
+   - A bare ACP agent `command` is resolved before the agent starts, so npm-installed launchers work on Windows too: `npx` or `mcode` is spawned as its `npx.cmd`/`mcode.cmd` shim instead of failing with a command-not-found error. The lookup uses the `PATH` the agent subprocess will actually see (`acp_agents.<name>.env.PATH` when set, otherwise the Gateway's) and hands the spawn an absolute path, so a relative `PATH` entry cannot be re-interpreted inside the agent's own workspace. A `command` containing a path separator is used as configured, and a bare name that cannot be resolved is still reported with the install guidance below.
    - Each ACP agent's `timeout_seconds` (default: 1800) is one shared budget for initialization, session creation, and the prompt, starting after the subprocess launches. On timeout, DeerFlow aborts the invocation and closes the subprocess before returning an error. Workspace/MCP preparation and subprocess cleanup are outside this budget. A `TimeoutError` raised by the SDK before this deadline expires retains its own error message.
    - MiniMax Code speaks ACP directly. Install and authenticate it, then add it as an ACP agent:
 
@@ -1498,6 +1502,25 @@ Tavily search and fetch each read `api_key` from their own tool entry in
 reuse the search entry's key, so search can use a different provider. If you
 previously configured a shared Tavily key only under `web_search`, also set it
 under `web_fetch` or use `TAVILY_API_KEY` for both.
+
+For news-focused research, select **Webz.io News Search** in `make setup`, or
+replace the `web_search` tool's `use` with
+`deerflow.community.webz.tools:web_search_tool` and set `WEBZ_API_KEY`.
+An explicit tool `api_key` takes precedence over the environment variable.
+An explicit call's `max_results` overrides the configured default; omission
+uses configuration or 5 (clamped to 1–100). Invalid configured counts, including
+booleans and fractional numbers, fall back to 5. Results include the matching
+passage, title, URL, publication date, and source metadata. The chat search step
+displays source titles and links, including after reloading a conversation, and
+skips malformed source entries without losing valid links. `returned_results`
+counts the returned page, not all matching news articles. Malformed entries are
+skipped with a warning while valid entries are retained; invalid responses or
+pages with no valid entries return an error. Empty result lists remain valid. The tool accepts
+language, country, source-domain, sentiment, category, and publication-date
+filters. Its `time_range` maps to a UTC lower date bound of 1, 7, 30, or 365
+days; an explicit `published_from` overrides that bound. Webz searches recent
+news rather than the general web: date filters cannot extend the provider's
+[documented 30-day coverage](https://docs.webz.io/docs/webz/news-search-api-response-format).
 
 #### Exporting Custom Skills
 

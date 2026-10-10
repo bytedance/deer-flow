@@ -25,6 +25,32 @@ def _zip_text(zip_path, name: str) -> str:
         return zf.read(name).decode("utf-8")
 
 
+@pytest.mark.parametrize("failure", ["permission", "encoding"])
+@pytest.mark.parametrize("configured_home", [False, True])
+def test_unreadable_dotenv_keeps_thread_diagnostics(tmp_path, monkeypatch, failure, configured_home):
+    project = tmp_path / "checkout"
+    project.mkdir()
+    home = tmp_path / "data" if configured_home else project / ".deer-flow"
+    (home / "threads" / "broken-env" / "user-data").mkdir(parents=True)
+    env_file = project / ".env"
+    # A valid prefix must not partially change runtime paths when decoding fails.
+    env_file.write_bytes(b"DEER_FLOW_HOME=wrong-home\n" + b"#" * 10000 + b"\xff")
+    if configured_home:
+        monkeypatch.setenv("DEER_FLOW_HOME", str(home))
+    if failure == "permission":
+        original_open = Path.open
+
+        def guarded_open(path, *args, **kwargs):
+            if path == env_file:
+                raise PermissionError("Cannot read .env")
+            return original_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", guarded_open)
+
+    summary = support_bundle.collect_thread_summary(project, "broken-env")
+    assert summary["found"] is True
+
+
 @pytest.mark.parametrize("layout", ["threads/thread-home", "users/alice/threads/thread-home"])
 def test_thread_summary_uses_configured_runtime_home(tmp_path, monkeypatch, layout):
     project = tmp_path / "checkout"

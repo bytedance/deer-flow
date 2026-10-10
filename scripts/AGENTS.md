@@ -4,7 +4,9 @@ Thread manifests use a nonempty `DEER_FLOW_HOME` exclusively, resolving relative
 values from the checkout like the local launcher. Read root `.env` path settings
 without exporting secrets; dotenv overrides shell exports, including empty values.
 Expand unquoted leading tildes, preserving quoted literals. If python-dotenv is
-unavailable, retain shell/legacy lookup so troubleshooting remains usable.
+unavailable or `.env` cannot be read/decoded as UTF-8, retain shell/legacy lookup
+so troubleshooting remains usable. Read the complete file before applying any
+assignments so a decoding failure cannot partially override shell values.
 Resolve `$NAME`, `${NAME}` and `${NAME:-literal}` in unquoted/double-quoted
 values using a private environment with checkout `PWD` and earlier dotenv
 assignments. Single-quoted values and escaped dollars stay literal. Parse the
@@ -40,6 +42,18 @@ trimming its contents. Offline CLI coverage:
 `backend/tests/test_claude_keychain_export.py`.
 
 ## Service Startup Contracts
+
+The setup wizard offers Webz.io as a news-only `web_search` provider using
+`deerflow.community.webz.tools:web_search_tool` and `WEBZ_API_KEY`. Keep its
+entry aligned with the credential check in `doctor.py` and the example config.
+The adapter uses async HTTPS requests, offloads lazy config loading, and maps
+`source` to provider `domain`; explicit `published_from` overrides recency.
+Explicit `max_results` overrides the wizard's configured default; omission or
+null uses configuration or 5. Reject boolean/fractional configured counts before
+clamping to 1–100. `returned_results` is the normalized page size, not a match total.
+Skip malformed page entries with index-only warnings; retain valid neighbors.
+Reject malformed envelopes and nonempty pages with no valid entries, logging
+no provider payloads or credentials. Contract tests live in `backend/tests/test_webz_tools.py`.
 
 Optional browser dependency detection reads the top-level `tools:` sequence
 without requiring `name` to be its first mapping key. Both indented and
@@ -123,6 +137,14 @@ override the Gateway would reject (`DEER_FLOW_CONFIG_PATH` missing,
 Gateway's error, and the config-dependent checks skip. Any failure to import
 the harness is reported, never raised: doctor diagnoses broken environments.
 Pinned by `backend/tests/test_doctor.py::TestMainConfigResolution`.
+
+Doctor screens Browserless fetch/capture and Crawl4AI, Firecrawl, and fastCRW
+fetch backends with the runtime's `validate_delegated_backend_url`, before
+provider success shortcuts. Keep endpoint defaults, `CRW_API_URL` precedence,
+config environment resolution, and isolation acknowledgement coercion aligned
+with those tools. `allow_private_addresses` affects targets only. Doctor reports
+refused delegation with the deployment guide; it does not verify egress policies.
+Offline coverage lives in `backend/tests/test_doctor.py`.
 
 CLI credential JSON checks accept UTF-8 with or without a leading BOM, matching
 the runtime credential loader. Keep `_load_json_object` on `utf-8-sig`; malformed
