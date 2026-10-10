@@ -135,9 +135,9 @@ def _resolve_agent_command(command: str) -> str:
     commands, and keep the configured value when nothing matches so the
     not-found remediation still fires.
 
-    Only bare names are resolved. A configured path stays untouched because the
-    spawn runs in the per-thread ACP workspace, not in the Gateway's working
-    directory.
+    Only bare names are resolved. A configured path is handed to the spawn
+    unchanged, so the spawn -- not ``shutil.which`` -- decides what it refers
+    to.
 
     The lookup stats the filesystem (``shutil.which`` -> ``os.access``), so
     callers must run it off the event loop.
