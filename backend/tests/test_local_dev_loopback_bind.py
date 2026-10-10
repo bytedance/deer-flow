@@ -83,6 +83,20 @@ def test_serve_resolves_nginx_config_before_stopping_services():
     assert serve.index("scripts/nginx-local-conf.sh") < serve.index('if [ "$ACTION" = "restart" ]; then')
 
 
+def test_stop_signals_nginx_through_the_tracked_config():
+    """``stop_all`` quits nginx via the tracked config even when it runs the rendered copy.
+
+    ``nginx -s quit`` finds the master through the config's ``pid`` directive, so
+    this works because the render keeps that directive (pinned in
+    ``test_bind_host_renders_a_config_listening_there``). The tracked path stays
+    usable for ``--stop`` with an invalid ``BIND_HOST``, which never renders.
+    """
+    serve = SERVE_SH.read_text(encoding="utf-8")
+    stop_all = serve[serve.index("stop_all() {") : serve.index("\n}\n", serve.index("stop_all() {"))]
+
+    assert 'nginx -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT" -s quit' in stop_all
+
+
 # ── nginx-local-conf.sh ─────────────────────────────────────────────────────
 
 
@@ -118,6 +132,19 @@ def test_default_bind_host_uses_the_tracked_config(checkout: Path, bind_host: st
     assert not (checkout / "temp").exists()
 
 
+@pytest.mark.parametrize("bind_host", [None, "", "127.0.0.1"], ids=["unset", "blank", "loopback"])
+def test_default_bind_host_removes_a_config_rendered_for_an_earlier_bind_host(checkout: Path, bind_host: str | None):
+    assert _run(checkout, "0.0.0.0").returncode == 0
+    rendered = checkout / "temp" / "nginx.local.conf"
+    assert rendered.exists()
+
+    result = _run(checkout, bind_host)
+
+    assert result.returncode == 0, result.stderr
+    assert Path(result.stdout.strip()) == (checkout / "docker" / "nginx" / "nginx.local.conf").resolve()
+    assert not rendered.exists(), "a stale render with the old listen lines should not be left behind"
+
+
 @pytest.mark.parametrize(
     ("bind_host", "expected"),
     [
@@ -125,6 +152,11 @@ def test_default_bind_host_uses_the_tracked_config(checkout: Path, bind_host: st
         ("192.0.2.10", ["192.0.2.10:2026"]),
         ("fd00::1", ["[fd00::1]:2026"]),
         ("[fd00::1]", ["[fd00::1]:2026"]),
+        ("::", ["[::]:2026"]),
+        ("::ffff:192.0.2.10", ["[::ffff:192.0.2.10]:2026"]),
+        ("2001:db8:0:0:0:0:0:1", ["[2001:db8:0:0:0:0:0:1]:2026"]),
+        ("localhost", ["localhost:2026"]),
+        ("devbox.example-corp.internal", ["devbox.example-corp.internal:2026"]),
     ],
 )
 def test_bind_host_renders_a_config_listening_there(checkout: Path, bind_host: str, expected: list[str]):
@@ -141,9 +173,48 @@ def test_bind_host_renders_a_config_listening_there(checkout: Path, bind_host: s
         return [line for line in text.splitlines() if not line.strip().startswith("listen ")]
 
     assert without_listen(content) == without_listen(NGINX_LOCAL_CONF.read_text(encoding="utf-8"))
+    # serve.sh's stop_all finds the running master through the tracked config's pid file.
+    pid_directive = re.compile(r"^\s*pid\s+[^;]+;", re.M)
+    assert pid_directive.findall(content) == pid_directive.findall(NGINX_LOCAL_CONF.read_text(encoding="utf-8")) != []
 
 
-@pytest.mark.parametrize("bind_host", ["0.0.0.0; return 200", "a b", "$(id)"])
+@pytest.mark.parametrize(
+    "bind_host",
+    [
+        "0.0.0.0; return 200",
+        "a b",
+        "$(id)",
+        # nginx accepts these and binds an address the operator did not write:
+        # "0" resolves to 0.0.0.0, "1.2.3" to 1.2.0.3, "010.0.0.1" to 10.0.0.1.
+        "0",
+        "1.2.3",
+        "010.0.0.1",
+        # nginx fails on these at startup ("host not found", "invalid IPv6
+        # address"), after serve.sh has already stopped the running stack.
+        "256.1.1.1",
+        "1.2.3.4.5",
+        "-foo",
+        "foo-",
+        "foo..bar",
+        "foo.",
+        "host_name",
+        "a" * 64,
+        "[[fd00::1]]",
+        "[fd00::1",
+        "fd00::1]",
+        "[192.0.2.10]",
+        "[localhost]",
+        "fd00:::1",
+        "fd00::1::2",
+        "1:2:3:4:5:6:7",
+        "1:2:3:4:5:6:7:8:9",
+        "12345::1",
+        "fd00::1%eth0",
+        "::ffff:192.0.2",
+        ":1",
+        "1:",
+    ],
+)
 def test_bind_host_rejects_values_that_are_not_addresses(checkout: Path, bind_host: str):
     result = _run(checkout, bind_host)
 

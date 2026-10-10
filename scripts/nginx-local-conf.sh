@@ -18,19 +18,79 @@ RENDERED_CONF="$REPO_ROOT/temp/nginx.local.conf"
 
 bind_host="${BIND_HOST:-127.0.0.1}"
 if [ "$bind_host" = "127.0.0.1" ]; then
+    # Drop a copy rendered for an earlier BIND_HOST so its listen lines do not linger.
+    rm -f "$RENDERED_CONF"
     printf '%s\n' "$SOURCE_CONF"
     exit 0
 fi
 
-# The value is written into an nginx directive, so accept address and hostname
-# characters only.
-bind_host="${bind_host#[}"
-bind_host="${bind_host%]}"
+# Dotted-quad IPv4, every octet 0-255 without leading zeros. nginx resolves
+# shorthand forms itself ("0" binds 0.0.0.0, "1.2.3" binds 1.2.0.3).
+is_ipv4() {
+    local IFS=. octet
+    local -a octets
+    case "$1" in ''|*[!0-9.]*|.*|*.|*..*) return 1 ;; esac
+    read -r -a octets <<< "$1"
+    [ "${#octets[@]}" -eq 4 ] || return 1
+    for octet in "${octets[@]}"; do
+        case "$octet" in 0|[1-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5]) ;; *) return 1 ;; esac
+    done
+}
+
+# IPv6 literal: up to eight 1-4 digit hex groups, at most one "::", and an
+# optional trailing dotted-quad that counts as two groups. No zone index:
+# nginx rejects "%eth0" in listen.
+is_ipv6() {
+    local addr="$1" groups=0 group rest
+    case "$addr" in *:*) ;; *) return 1 ;; esac
+    case "$addr" in *[!0-9A-Fa-f:.]*|*:::*|*::*::*) return 1 ;; esac
+    case "$addr" in :[!:]*|*[!:]:) return 1 ;; esac
+    if [ "${addr%.*}" != "$addr" ]; then
+        is_ipv4 "${addr##*:}" || return 1
+        addr="${addr%:*}:0:0"
+    fi
+    rest="$addr:"
+    while [ -n "$rest" ]; do
+        group="${rest%%:*}"
+        rest="${rest#*:}"
+        case "$group" in
+            '') ;;
+            ?|??|???|????) case "$group" in *[!0-9A-Fa-f]*) return 1 ;; esac; groups=$((groups + 1)) ;;
+            *) return 1 ;;
+        esac
+    done
+    case "$addr" in
+        *::*) [ "$groups" -le 7 ] ;;
+        *) [ "$groups" -eq 8 ] ;;
+    esac
+}
+
+# RFC 1123 hostname: dot-separated labels of letters, digits and inner hyphens,
+# 1-63 characters each, 253 in all. All-numeric values are IPv4 or nothing.
+is_hostname() {
+    local IFS=. label
+    local -a labels
+    [ "${#1}" -le 253 ] || return 1
+    case "$1" in ''|.*|*.|*..*) return 1 ;; esac
+    case "$1" in *[!0-9.]*) ;; *) return 1 ;; esac
+    read -r -a labels <<< "$1"
+    for label in "${labels[@]}"; do
+        [ "${#label}" -le 63 ] || return 1
+        case "$label" in *[!A-Za-z0-9-]*|-*|*-) return 1 ;; esac
+    done
+}
+
+# The value is written into an nginx listen directive, so it must be exactly
+# one address or hostname; brackets are accepted around an IPv6 address only.
+invalid_bind_host() {
+    echo "BIND_HOST must be an IP address or hostname: ${BIND_HOST}" >&2
+    exit 1
+}
 case "$bind_host" in
-    ''|*[!A-Za-z0-9.:_-]*)
-        echo "BIND_HOST must be an IP address or hostname: ${BIND_HOST}" >&2
-        exit 1
-        ;;
+    \[*\]) bind_host="${bind_host#\[}"; bind_host="${bind_host%\]}"; is_ipv6 "$bind_host" || invalid_bind_host ;;
+    *[][]*) invalid_bind_host ;;
+    *:*) is_ipv6 "$bind_host" || invalid_bind_host ;;
+    *) is_ipv4 "$bind_host" || is_hostname "$bind_host" || invalid_bind_host ;;
 esac
 
 case "$bind_host" in
