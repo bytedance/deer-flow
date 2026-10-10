@@ -160,6 +160,22 @@ Unpaced models and unrelated custom rate limiters keep their wrapper retry polic
 - Resolve the beta header as the SDK does: client defaults, then request `betas` (including an empty list), then `extra_headers`. Match comma-separated beta names exactly; a removed or replaced beta must not relax the budget bound.
 - Automatic allocation replaces the payload's thinking mapping with a copy: LangChain aliases it to `self.thinking`, so in-place writes leak across requests and make smaller per-call output limits fail. `auto_thinking_budget=False` bypasses normalization/validation; absent, disabled and adaptive thinking remain untouched. Coverage: `tests/test_claude_provider_thinking.py`, including native request construction and offline SDK serialization.
 
+### Gemini thought signatures (`packages/harness/deerflow/models/patched_openai.py`)
+
+`PatchedChatOpenAI` must replay Gemini tool-call thought signatures, or the next
+request after a tool call fails with HTTP 400 `missing a thought_signature`.
+Google's OpenAI-compatible endpoint returns them as
+`tool_calls[i].extra_content.google.thought_signature` (streaming deltas carry
+the complete call with `index: null`); some gateways use a top-level
+`thought_signature` / `thoughtSignature`. langchain-openai 1.x stores no raw
+tool calls on either response path, so the adapter captures signed raw entries
+into `additional_kwargs["tool_calls"]` (the surface the tool-call middlewares
+keep in sync with `tool_calls`), dropping the streaming `index` so chunk merging
+cannot concatenate separate entries. It leaves an existing raw list from
+LangChain untouched. Replay copies `extra_content` verbatim and the top-level
+signature as-is. Coverage: `tests/test_patched_openai.py`, including a streamed
+tool round trip through the real SDK with only the HTTP boundary faked.
+
 ### vLLM Provider (`packages/harness/deerflow/models/vllm_provider.py`)
 
 - `VllmChatModel` subclasses `langchain_openai:ChatOpenAI` for vLLM 0.19.0 OpenAI-compatible endpoints

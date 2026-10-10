@@ -314,7 +314,7 @@ HTTP 400 INVALID_ARGUMENT: function call `<tool>` in the N. content block is
 missing a `thought_signature`.
 ```
 
-Standard `langchain_openai:ChatOpenAI` silently drops `thought_signature` when serialising messages.  Use `deerflow.models.patched_openai:PatchedChatOpenAI` instead — it re-injects the tool-call signatures (sourced from `AIMessage.additional_kwargs["tool_calls"]`) into every outgoing payload:
+Google's official endpoint returns the signature as `tool_calls[i].extra_content.google.thought_signature`; some gateways put a top-level `thought_signature` on the tool call instead. Standard `langchain_openai:ChatOpenAI` keeps neither when parsing responses or serialising messages.  Use `deerflow.models.patched_openai:PatchedChatOpenAI` instead — it stores signed raw tool calls from streaming and non-streaming responses in `AIMessage.additional_kwargs["tool_calls"]` and re-injects them (`extra_content` verbatim, or the top-level signature) into every outgoing payload. Conversations whose earlier tool calls were saved without a signature keep failing on Google's validation; start a new conversation for those:
 
 ```yaml
 models:
