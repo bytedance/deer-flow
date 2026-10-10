@@ -4353,9 +4353,8 @@ This release closes that milestone with **439 merged pull requests**.
   named `notes\x0bdraft.txt` was therefore reported as two unrelated paths (one of
   them nonexistent), and a matched line such as `const s = "a\u2028b";` came back
   truncated at that character. These providers now split on `"
-"` only, as the
-  shared parser already documents and as LocalSandbox, the AIO backend and E2B
-  already do. ([#6595])
+"` only, as the shared parser already documents and as
+  LocalSandbox, the AIO backend and E2B already do. ([#6595])
 
 ### Documentation
 

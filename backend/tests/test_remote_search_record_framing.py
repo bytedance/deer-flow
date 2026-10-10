@@ -247,9 +247,17 @@ def test_real_shell_glob_keeps_separator_named_file(tmp_path: Path, separator: s
 
     The fixture is created by the shell because Windows cannot create a name
     containing ``\\x0b`` at all.
+
+    ``printf`` converts octal escapes in its *format* string, so the separator is
+    emitted as one octal escape per UTF-8 byte (``\\342\\200\\250`` for U+2028).
+    ``%03o`` on a code point above 0xFF would emit ``\\20050``, which printf reads
+    as ``\\200`` plus the literal digits ``50``.
     """
-    octal = f"\\{ord(separator):03o}" if len(separator) == 1 else f"\\u{ord(separator):04x}"
-    script = f"mkdir -p {tmp_path} && printf 'x\\n' > {tmp_path}/notes$(printf '{octal}')draft.txt"
+    if ord(separator) <= 0xFF:
+        octal = f"\\{ord(separator):03o}"
+    else:
+        octal = "".join(f"\\{byte:03o}" for byte in separator.encode("utf-8"))
+    script = rf"mkdir -p {tmp_path} && printf 'x\n' > {tmp_path}/notes$(printf '{octal}')draft.txt"
     subprocess.run(["sh", "-c", script], capture_output=True, check=True, env=os.environ.copy())
     listing = subprocess.run(["sh", "-c", f"ls {tmp_path}"], capture_output=True, text=True, env=os.environ.copy()).stdout.strip()
     target = f"{tmp_path}/{listing}"
@@ -262,9 +270,16 @@ def test_real_shell_glob_keeps_separator_named_file(tmp_path: Path, separator: s
 
 @_RS_POSIX
 def test_real_shell_grep_keeps_separator_in_matched_text(tmp_path: Path) -> None:
-    """End-to-end through a real ``grep``: matched text is not cut at U+2028."""
-    body = 'const s = "a\\u2028b";\\n'
-    subprocess.run(["sh", "-c", f"mkdir -p {tmp_path} && printf '%s' \"{body}\" > {tmp_path}/mod.js"], capture_output=True, check=True, env=os.environ.copy())
+    """End-to-end through a real ``grep``: matched text is not cut at U+2028.
+
+    The escape belongs in ``printf``'s *format* string: ``%s`` does not interpret
+    backslash escapes, and the payload's own double quotes would otherwise close
+    the shell word and be eaten. The octals are assembled from the code point's
+    UTF-8 bytes so Python never decodes them into literal characters.
+    """
+    escapes = "".join(f"\\{byte:03o}" for byte in "\u2028".encode("utf-8"))
+    script = f"mkdir -p {tmp_path} && printf 'const s = \"a{escapes}b\";\\n' > {tmp_path}/mod.js"
+    subprocess.run(["sh", "-c", script], capture_output=True, check=True, env=os.environ.copy())
 
     matches, _truncated = _rs_box().grep(str(tmp_path), "const")
 
