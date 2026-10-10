@@ -101,3 +101,10 @@ from captured child tool messages only when the final/partial report cites those
 opaque source links. This preserves retrieval evidence across the delegation
 boundary without placing provider IDs in model-visible text. Never reconstruct
 source records from the child's prose or replace them with fresh provider reads.
+
+`DeferredToolCatalog.search` reserves `keywords:` for opt-in literal, casefolded,
+whitespace-separated terms (256 query characters, 16 unique terms). Rank by term
+coverage across name/description, then name hits; ties preserve catalog order and
+results stay capped at five. Keyword matching never invokes the regex helpers.
+Bare queries and `+required` keep regex semantics; `select:` stays exact and
+uncapped. Keep query grammar and examples in the `tool_search` description aligned.
