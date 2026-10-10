@@ -1,5 +1,12 @@
 ### Tool System (`packages/harness/deerflow/tools/`)
 
+`artifact_registry.py` checks remote file suffixes against the complete parsed
+URL path without case sensitivity. Free-text URL and sandbox-path extraction
+strips common trailing ASCII/CJK prose punctuation while preserving CJK
+closers paired with openers inside the detected reference (including literal
+glob directory names). Structured references remain literal. See
+[tool artifact middleware](../agents/middlewares/TOOL_ARTIFACTS.md).
+
 `task` and `batch_task` opt into JSON checks with `file:<path> json-valid`.
 See [subagents/AGENTS.md](../subagents/AGENTS.md) for read limits and UNVERIFIED semantics.
 Batch readers bound by assembly use its AppConfig output budget. Fit the complete escaped response under 10K and active per-tool/fallback limits; too-small envelopes stop reading. Numeric reader inputs are strict integers. Escape `<` in outer JSON to preserve untrusted data without exposing framework tags; decoding restores the document unchanged.

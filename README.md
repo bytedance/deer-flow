@@ -1472,6 +1472,13 @@ global URL-access policy. The model arguments and image search are unchanged.
 See [Serper configuration](backend/docs/CONFIGURATION.md#serper-source-filters)
 for validation and query-length limits.
 
+Serper web and image search support opt-in transient recovery with
+`max_retries: 1` (default `0`, maximum `3`) in each tool's configuration.
+`retry_budget_seconds` bounds retry scheduling, not active synchronous requests.
+Budget exhaustion is logged separately while the tool returns the last error.
+Extra requests may consume quota or incur cost. See
+[Serper retries](backend/docs/CONFIGURATION.md#serper-retries).
+
 When using Tavily for `web_fetch`, extracted pages without a title use their URL
 as the heading; their content remains available to the agent.
 Chat tool-step titles accept leading blank lines and up to three spaces before
@@ -2147,6 +2154,8 @@ Concurrent reads and writes to the same file share a gate across synchronous and
 
 The built-in `grep` tool searches either one text file or all matching text files below a directory, so an agent can search an uploaded document directly without first broadening the request to the entire uploads directory.
 E2B's `glob` filter preserves spaces, quotes, and dollar signs in filename patterns, while wildcard matching and root-relative directory scoping remain unchanged.
+E2B `grep` also preserves colons in file and directory names when reporting matching paths and line numbers.
+E2B `glob` and `grep` preserve non-LF separator characters, such as vertical tabs and Unicode line separators, inside returned paths; `grep` also preserves them inside matched text.
 
 Remote `ls` excludes ignored descendants before applying its 500-entry listing limit, so dependency and build trees do not crowd out visible files. Explicitly listing an ignored directory still lists its contents; normal depth and output limits remain in effect.
 
