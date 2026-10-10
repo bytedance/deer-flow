@@ -141,6 +141,89 @@ def test_an_abandoned_empty_file_is_replaced(tmp_path: Path, caplog: pytest.LogC
         assert path.stat().st_mode & 0o777 == 0o600
 
 
+def test_concurrent_replacers_of_an_abandoned_empty_file_converge(tmp_path: Path) -> None:
+    """Replicas restarting together after a crash all find the same abandoned empty file.
+
+    The replacement is a last-writer-wins rename, so a replacer must not trust
+    its own value until peers that decided to replace in the same window have
+    written theirs.
+    """
+    path = tmp_path / ".secret"
+    path.touch()
+    workers = 8
+    barrier = threading.Barrier(workers)
+    results: list[str] = []
+    errors: list[BaseException] = []
+    lock = threading.Lock()
+
+    def run(index: int) -> None:
+        def generate() -> str:
+            # Stagger the replacements so an early replacer would otherwise
+            # read back its own value before a later one overwrites it.
+            threading.Event().wait(0.01 * index)
+            return f"value-{index}"
+
+        try:
+            barrier.wait(timeout=10)
+            value = read_or_create_secret_file(path, generate, settle_seconds=0.2)
+            with lock:
+                results.append(value)
+        except BaseException as exc:  # noqa: BLE001 - surface every worker failure
+            with lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=run, args=(index,)) for index in range(workers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not errors
+    assert len(results) == workers
+    assert len(set(results)) == 1, f"replacers diverged: {sorted(set(results))}"
+    assert path.read_text(encoding="utf-8") == results[0]
+
+
+def test_waits_for_a_peer_that_holds_the_replacement_claim(tmp_path: Path) -> None:
+    path = tmp_path / ".secret"
+    path.touch()
+    claim = tmp_path / ".secret.replacing"
+    claim.write_text("peer-value", encoding="utf-8")
+    publisher = threading.Timer(0.3, lambda: os.replace(claim, path))
+    publisher.start()
+    try:
+        value = read_or_create_secret_file(path, lambda: "our-value", settle_seconds=0.05)
+    finally:
+        publisher.join()
+
+    assert value == "peer-value"
+    assert not claim.exists()
+
+
+def test_a_claim_left_by_a_crashed_replacer_is_refused_after_a_bounded_wait(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("deerflow.config.secret_file._CLAIM_WAIT_SECONDS", 0.2)
+    path = tmp_path / ".secret"
+    path.touch()
+    claim = tmp_path / ".secret.replacing"
+    claim.touch()
+
+    with pytest.raises(InvalidSecretFileError, match="interrupted replacement"):
+        read_or_create_secret_file(path, lambda: "our-value", settle_seconds=0.05)
+
+    assert path.read_text(encoding="utf-8") == ""
+
+
+def test_a_late_replacer_does_not_overwrite_a_published_replacement(tmp_path: Path) -> None:
+    """A process that saw the empty file before a peer's replacement landed must back off."""
+    path = tmp_path / ".secret"
+    path.write_text("peer-value", encoding="utf-8")
+    from deerflow.config.secret_file import _replace_abandoned
+
+    assert _replace_abandoned(path, lambda: "late-value") is True
+    assert path.read_text(encoding="utf-8") == "peer-value"
+    assert not (tmp_path / ".secret.replacing").exists()
+
+
 def test_a_persistently_invalid_file_is_refused_without_echoing_it(tmp_path: Path) -> None:
     """A non-empty value may be the only copy of a key that encrypted data: never overwrite it."""
     path = tmp_path / ".secret"
