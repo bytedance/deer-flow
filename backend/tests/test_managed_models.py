@@ -79,6 +79,36 @@ def test_first_save_keeps_a_key_a_peer_created_concurrently(store, monkeypatch):
     assert Fernet(peer_key).decrypt(store.path.read_bytes())
 
 
+def test_first_save_recovers_an_empty_key_left_by_an_interrupted_creation(store):
+    """An empty key file with no catalog encrypted no data, so the next save must replace it, not 503 forever."""
+    from cryptography.fernet import Fernet
+
+    store.key_path.parent.mkdir(parents=True, exist_ok=True)
+    store.key_path.write_bytes(b"")
+
+    store.save(profile(), expected_revision=None)
+
+    key = store.key_path.read_bytes()
+    assert key.strip()
+    assert Fernet(key).decrypt(store.path.read_bytes())
+    assert ManagedModelStore().list()[0].api_key.get_secret_value() == "test-secret"
+
+
+def test_an_empty_key_next_to_an_existing_catalog_is_never_replaced(store):
+    """The catalog was encrypted with the lost key; a new key would silently orphan it."""
+    store.save(profile(), expected_revision=None)
+    catalog = store.path.read_bytes()
+    store.key_path.write_bytes(b"")
+
+    with pytest.raises(ValueError):
+        store.save(profile(), expected_revision=None)
+    with pytest.raises(ValueError, match="restore it from backup"):
+        store._cipher(create=True)
+
+    assert store.key_path.read_bytes() == b""
+    assert store.path.read_bytes() == catalog
+
+
 @pytest.mark.parametrize("url", ["file:///tmp/test", "https://user:pass@example.com/v1", "https://example.com/v1?key=abc", "https://example.com/#fragment"])
 def test_endpoint_validation(url):
     with pytest.raises(ValidationError):
