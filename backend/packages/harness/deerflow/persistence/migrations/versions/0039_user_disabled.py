@@ -1,7 +1,7 @@
 """Account disabled flag on ``users``.
 
-Revision ID: 0038_user_disabled
-Revises: 0037_project_document_summaries
+Revision ID: 0039_user_disabled
+Revises: 0038_channel_thread_bindings
 
 Adds ``users.disabled`` (NOT NULL, server default ``0``): an
 operator-disabled account is rejected at every authentication surface while
@@ -19,8 +19,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0038_user_disabled"
-down_revision: str | None = "0037_project_document_summaries"
+revision: str = "0039_user_disabled"
+down_revision: str | None = "0038_channel_thread_bindings"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

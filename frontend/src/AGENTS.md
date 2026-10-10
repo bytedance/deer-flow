@@ -170,6 +170,12 @@ Array previews coalesce consecutive generated markers only at the end into one o
 
 ### Key Patterns
 
+Conversation exports read every persisted message page through
+`fetchThreadExportMessages` (200 rows/page). Run `mergeMessages` after history
+deduplication to restore earliest trusted positions for identities repeated across runs.
+Never export only the loaded UI window or compacted checkpoint. Fail the whole
+export on a page error or non-advancing cursor; demos keep their fixture path.
+
 - **Server Components by default**, `"use client"` only for interactive components
 - **Static root boundary** — `src/app/layout.tsx` must not read cookies or import
   chat-only KaTeX/Streamdown styles. Auth and workspace layouts own the cookie-derived

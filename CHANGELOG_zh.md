@@ -3170,6 +3170,14 @@
   条目在警告中丢弃，而配置了却得不到任何有效 ID 的值会拒绝所有公会并记录
   错误；未设置、`null`、`[]` 或空白字符串仍允许所有公会。
   `allowed_channels` 获得同样的标量处理。([#6338])
+- **发布：** `v*` 发布门禁现在会拦下过期的 `backend/uv.lock`。此前
+  `scripts/verify_versions.sh` 只比较 `Chart.yaml`、`pyproject.toml` 和
+  `package.json`，手动改这三处就能通过门禁，而 lock 里记录的根包版本仍是旧版本。
+  backend 镜像用 `uv sync --locked` 安装依赖，因此打标签后 chart 以及 frontend、
+  provisioner 镜像都已发布，backend 镜像却构建失败；chart 版本不可覆盖，修复只能
+  换一个新版本号。现在该脚本还会在 `backend/` 中运行 `uv lock --check`（PEP 440
+  规范化交给 uv，`2.1.0-rc0` 仍与 `2.1.0rc0` 匹配），缺少 `uv` 时直接失败；
+  `verify-versions.yml` 会安装与 backend 镜像相同的固定 uv 版本。([#6588])
 
 ### 安全
 
@@ -3345,6 +3353,19 @@
   文件。此前带一个杂散字节的 `hooks/install.jse` 既得不到静态分析，也
   不经过可执行代码审查。([#6321])
 
+- **脚本：** 本地 `make dev` / `make start` 改为绑定回环地址。此前 `serve.sh`
+  和 `backend/Makefile` 以 `--host 0.0.0.0` 启动 Gateway，`nginx.local.conf`
+  监听所有网卡，Next.js 在 Windows 之外也沿用监听所有网卡的默认值，因此在局域网
+  或 VPN 中，其他机器可以访问 `2026`、`8001` 和 `3000` 端口，包括首个管理员创建
+  之前的 `/setup`。Docker 部署栈和 README 的部署模型原本就只监听回环地址。现在
+  Gateway 和前端绑定 `127.0.0.1`，nginx 监听 `127.0.0.1` 和 `[::1]`，除非设置了
+  `BIND_HOST`（与 Docker 部署栈使用同一个变量）。`BIND_HOST` 无效时，会在停止任何
+  正在运行的服务之前报错退出。([#6587])
+
+  **行为变更：** 需要从其他设备访问本地部署时，请设置 `BIND_HOST`（例如在 `.env`
+  中设置 `BIND_HOST=0.0.0.0`）并使用 `2026` 入口；Gateway 和前端端口不再对其他
+  机器开放。
+
 - **技能：** `review_skill_package` 不再能读取其他用户的技能。此前本地路径
   目标只要位于 Gateway 工作目录或 `/tmp` 之下即被放行，而所有文档化的部署都把
   `DEER_FLOW_HOME` 放在工作目录之下，因此知道他人用户 id 的用户可以传入
@@ -3352,6 +3373,14 @@
   `SKILL.md` 与 `references/` 内容。该工具始终可用，技能工具策略也无法移除它。
   现在本地目标仅限于配置的技能根目录和调用者自己的用户目录；`skill://` 与
   `inline://` 目标不受影响。([#6580])
+- **沙箱：** BoxLite、OpenSandbox、Tenki 三个提供者的 `glob` 与 `grep` 用
+  `str.splitlines()` 切分记录，而该函数还会在裸回车、换页符、垂直制表符、
+  文件/组分/记录分隔符、下一行符以及 U+2028/U+2029 处断行——这些字符在 Linux
+  文件名与被匹配文本中都是合法内容。因此名为 `notes\x0bdraft.txt` 的文件会被
+  报告成两条互不相关的路径（其中一条并不存在），而形如 `const s = "a\u2028b";`
+  的匹配行会在该字符处被截断。现在这三个提供者只按 `"
+"` 切分，与共享解析器
+  既有的约定以及 LocalSandbox、AIO 后端、E2B 的行为一致。([#6595])
 
 ### 文档
 
@@ -3578,6 +3607,13 @@
   `make test-shard` 与 CI 的分片方式不变，live 与阻塞 I/O 测试仍被排除。
   新增测试用离线 worker 替身固定了分片并行启动与“等待全部分片再报失败”
   的行为。([#6324])
+- **集成：** Lark/Feishu CLI 的输出改为按 UTF-8 解码，不再使用宿主 locale。
+  `lark-cli`（通过 `@larksuite/cli` npm 包分发的原生二进制）与 npm 都会向管道
+  写入 UTF-8，但 `lark_cli.py` 中的每一处捕获都只传了 `text=True` 而未指定
+  `encoding`，因此在 ANSI 代码页非 UTF-8 的宿主上（cp936、cp1252）非 ASCII
+  字段会被静默破坏——`auth status --json` 返回的 `userName` 变成乱码，而无法
+  解码的字节还可能让读取线程异常退出、使 `stdout` 变成 `None`，从而把一个正常
+  的 CLI 报告为不可用。([#6590])
 
 ## [2.1.0] — 2026-09-24
 
@@ -7613,3 +7649,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6556]: https://github.com/bytedance/deer-flow/pull/6556
 [#6580]: https://github.com/bytedance/deer-flow/pull/6580
 [#6582]: https://github.com/bytedance/deer-flow/pull/6582
+[#6587]: https://github.com/bytedance/deer-flow/pull/6587
+[#6588]: https://github.com/bytedance/deer-flow/pull/6588
+[#6590]: https://github.com/bytedance/deer-flow/pull/6590
+[#6595]: https://github.com/bytedance/deer-flow/pull/6595
