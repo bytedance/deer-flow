@@ -4,6 +4,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+from langchain_core.messages import AIMessage
 
 from app.gateway.routers import input_polish
 from deerflow.utils import oneshot_llm
@@ -193,3 +195,26 @@ def test_polish_input_validates_and_sends_normalized_text(monkeypatch):
     human_content = messages[-1].content
     assert "summarize report" in human_content
     assert "   summarize report   " not in human_content
+
+
+@pytest.mark.parametrize("block_type", [[], {}])
+def test_polish_input_ignores_invalid_block_types(monkeypatch, block_type: object) -> None:
+    response = AIMessage(
+        content=[
+            {"type": block_type, "text": "ignored"},
+            {"type": "text", "text": "Please summarize the report."},
+        ],
+    )
+    model = FakeMessagesListChatModel(responses=[response])
+    monkeypatch.setattr(oneshot_llm, "create_chat_model", lambda **kwargs: model)
+
+    result = asyncio.run(
+        input_polish.polish_input.__wrapped__(
+            input_polish.InputPolishRequest(text="summarize report"),
+            request=None,
+            config=_config(),
+        ),
+    )
+
+    assert result.rewritten_text == "Please summarize the report."
+    assert result.changed is True
