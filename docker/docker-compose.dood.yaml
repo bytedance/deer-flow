@@ -22,5 +22,9 @@
 # onto it. DEER_FLOW_DOCKER_SOCKET defaults to /var/run/docker.sock.
 services:
   gateway:
+    # The base image now runs as an unprivileged user; talking to the host
+    # Docker socket (root:root by default) requires root, so this overlay
+    # opts the gateway back in explicitly.
+    user: root
     volumes:
       - ${DEER_FLOW_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
