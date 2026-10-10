@@ -201,7 +201,8 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
    values override shell exports, and a project-root override alone still uses
    `backend/.deer-flow` first. Simple variable references such as
    `DEER_FLOW_HOME="$PWD/backend/.deer-flow"` use the checkout as `PWD`;
-   single-quoted references remain literal. For standalone Gateway launches using `backend/.env`
+   single-quoted references remain literal. If the checkout `.env` cannot be read or decoded
+   as UTF-8, thread diagnostics retain shell exports and default storage paths. For standalone Gateway launches using `backend/.env`
    or `DEER_FLOW_ENV_FILE`, export the effective `DEER_FLOW_HOME` when collecting
    the bundle and ensure the checkout `.env` does not override it.
    Doctor's internal tool probes also decode UTF-8 with replacement for invalid
