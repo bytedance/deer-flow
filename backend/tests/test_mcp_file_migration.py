@@ -883,6 +883,23 @@ class TestConvertCallToolResultRewrites:
         assert all("data:" not in block.get("text", "") for block in content)
         assert artifact is None
 
+    def test_image_mime_data_uri_resource_link_is_downgraded(self, paths: Paths):
+        """An ``image/*`` ``data:`` link is downgraded too, by design: the
+        conversion layer keeps new inline payloads out of state, even though
+        the read-time middleware lets persisted ``data:`` image blocks pass."""
+        result = CallToolResult(
+            content=[ResourceLink(type="resource_link", name="shot", uri="data:image/png;base64,QUJD", mimeType="image/png")],
+            isError=False,
+        )
+
+        with _patch_paths(paths):
+            content, artifact = mcp_tools._convert_call_tool_result(result, thread_id="t1", user_id="u1")
+
+        assert content[0]["type"] == "text"
+        assert content[0]["text"] == "[Resource: shot (image/png)]"
+        assert all("data:" not in block.get("text", "") for block in content)
+        assert artifact is None
+
     def test_blob_uri_resource_link_never_enters_model_text_or_state(self, paths: Paths):
         url = "blob:https://example.com/550e8400-e29b-41d4-a716-446655440000"
         result = CallToolResult(

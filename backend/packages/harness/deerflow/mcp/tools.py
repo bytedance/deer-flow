@@ -511,7 +511,11 @@ def _convert_call_tool_result(
                 # embeds the whole payload, so inlining it would put megabytes
                 # of base64 into model-visible text and into checkpointed
                 # ``resource_links``; a ``blob:`` URI names a browser-local
-                # object nothing else can dereference. Neither is
+                # object nothing else can dereference. ``image/*`` links are
+                # downgraded here too, by design: the conversion layer keeps
+                # NEW inline payloads out of state, while the read-time
+                # middleware passes persisted ``data:`` image blocks through
+                # (it only heals blocks already in checkpoints). Neither is
                 # referenceable, so the raw URI is dropped from the artifact
                 # channel and the placeholder omits the location segment.
                 lc_content.append(create_text_block(text=resource_placeholder_text(name=item.name or "unnamed", mime_type=mime)))
