@@ -70,7 +70,7 @@ from `on_llm_end` before inspecting the response or touching any run state.
 **Skill history:** `record_skill_usage` saves lead-run snapshots on terminal
 answers for paginated history. See `docs/skill-usage-ui.md`.
 
-**Run delivery receipts:** Journal artifact evidence and terminal status must finalize before an ordinary satisfied goal is cleared. That cleanup uses a durable checkpoint-write reservation; delivery failure retains the ordinary goal without another continuation. The scheduled-only exception is described below. Details: `backend/docs/runtime-guidance-details.md`.
+**Run delivery receipts:** Journal artifact evidence and terminal status must finalize before an ordinary satisfied goal is cleared. That cleanup uses a durable checkpoint-write reservation; delivery failure retains the ordinary goal without another continuation. Only that clear passes `outcome` to `write_thread_goal`, which removes `goal_outcome` on every other goal write. The scheduled-only exception is described below. Details: `backend/docs/runtime-guidance-details.md`.
 
 **Deferred terminal commit:** With an event store, the worker stages its terminal
 status locally and commits it only after finalization's receipt and duration
@@ -119,6 +119,17 @@ part of the record. Preserve existing UTF-8 files and the writer format.
 idempotent writes, LF/CRLF, blank lines, and malformed records.
 Reads and deletes treat a run ID writes reject as an unknown run (routes pass
 URL IDs through); writes still raise.
+
+**JSONL sequence watermark:** before deleting a non-empty run, save the thread's
+allocation floor with atomic replacement of `runs/.seq-watermark`, off-loop under
+the existing mutation fence. Recovery takes the maximum of that floor and surviving
+run files, including legacy directories without a watermark. Copy the deleted run's
+permission bits onto the temporary watermark before publication, preserving both
+shared-read and restrictive modes. Failed permission setup or publication must leave
+the run intact; unreadable/corrupt watermarks fail closed. Complete
+thread deletion removes the watermark only after deleting all run files, including
+when no events remain. This does not add multi-process JSONL support. Coverage:
+`tests/test_jsonl_event_store_seq_watermark.py` and the mutation cancellation suite.
 
 **Targeted run-event attribution** (`runtime/events/store/`):
 `RunEventStore.find_latest_ai_message_run_ids()` has a complete-or-error

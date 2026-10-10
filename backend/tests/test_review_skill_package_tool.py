@@ -1,15 +1,20 @@
 import json
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from deerflow.config.paths import Paths, make_safe_user_id
 from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 from deerflow.tools.builtins.review_skill_package_tool import review_skill_package
 
 
-def _runtime() -> SimpleNamespace:
+def _runtime(user_id: str = "default") -> SimpleNamespace:
     return SimpleNamespace(
         state={},
-        context={"thread_id": "thread-1", "user_id": "default"},
-        config={"configurable": {"thread_id": "thread-1", "user_id": "default"}},
+        context={"thread_id": "thread-1", "user_id": user_id},
+        config={"configurable": {"thread_id": "thread-1", "user_id": user_id}},
         tool_call_id="tool-1",
     )
 
@@ -92,29 +97,30 @@ def test_review_skill_package_rejects_unsafe_local_path():
     assert "Local review targets must be under" in message.content
 
 
-def test_review_skill_package_rejects_local_directory_without_skill_md(tmp_path, monkeypatch):
+@pytest.fixture
+def deployment(tmp_path, monkeypatch):
+    """Mirror documented deployments: DEER_FLOW_HOME and the skills root sit under the Gateway cwd."""
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "notes.txt").write_text("workspace note", encoding="utf-8")
+    paths = Paths(tmp_path / ".deer-flow")
+    storage = LocalSkillStorage(host_path=str(tmp_path / "skills"), container_path="/mnt/skills")
+    monkeypatch.setattr("deerflow.tools.builtins.review_skill_package_tool.get_paths", lambda: paths)
+    monkeypatch.setattr("deerflow.tools.builtins.review_skill_package_tool.get_or_new_skill_storage", lambda: storage)
+    return paths
+
+
+def _write_package(package_dir, content: str) -> None:
+    package_dir.mkdir(parents=True)
+    (package_dir / "SKILL.md").write_text(content, encoding="utf-8")
+
+
+@pytest.mark.parametrize("user_id", ["alice", "feishu:ou_alice"])
+def test_review_skill_package_allows_callers_own_user_package(deployment, user_id):
+    package = deployment.user_custom_skills_dir(make_safe_user_id(user_id)) / "demo-skill"
+    _write_package(package, _skill_content())
 
     command = review_skill_package.func(
-        target=".",
-        runtime=_runtime(),
-    )
-
-    message = command.update["messages"][0]
-    assert message.status == "error"
-    assert "directories containing a root SKILL.md" in message.content
-
-
-def test_review_skill_package_allows_local_skill_package(tmp_path, monkeypatch):
-    package = tmp_path / "demo"
-    package.mkdir()
-    (package / "SKILL.md").write_text(_skill_content(), encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
-
-    command = review_skill_package.func(
-        target="demo",
-        runtime=_runtime(),
+        target=str(package),
+        runtime=_runtime(user_id),
         include_content="facts-only",
     )
 
@@ -122,3 +128,126 @@ def test_review_skill_package_allows_local_skill_package(tmp_path, monkeypatch):
     payload = json.loads(message.content)
     assert message.status == "success"
     assert payload["facts"]["subject"]["declared_name"] == "demo-skill"
+
+
+def test_review_skill_package_allows_shared_skills_root_package(deployment, tmp_path):
+    package = tmp_path / "skills" / "public" / "demo-skill"
+    _write_package(package, _skill_content())
+
+    command = review_skill_package.func(
+        target=str(package),
+        runtime=_runtime("alice"),
+        include_content="facts-only",
+    )
+
+    assert command.update["messages"][0].status == "success"
+
+
+@pytest.mark.parametrize(
+    "target_for",
+    [
+        pytest.param(lambda paths, victim: str(victim), id="absolute"),
+        pytest.param(lambda paths, victim: f"{paths.user_dir('alice')}/../bob/skills/custom/{victim.name}", id="dot-dot"),
+        pytest.param(lambda paths, victim: ".deer-flow/users/bob/skills/custom/secret-skill", id="cwd-relative"),
+    ],
+)
+def test_review_skill_package_rejects_another_users_package(deployment, target_for):
+    victim_package = deployment.user_custom_skills_dir("bob") / "secret-skill"
+    _write_package(victim_package, _skill_content("secret-skill") + "BOB_PRIVATE_BODY\n")
+    deployment.user_dir("alice").mkdir(parents=True)
+
+    command = review_skill_package.func(
+        target=target_for(deployment, victim_package),
+        runtime=_runtime("alice"),
+    )
+
+    message = command.update["messages"][0]
+    assert message.status == "error"
+    assert "Local review targets must be under" in message.content
+    assert "BOB_PRIVATE_BODY" not in message.content
+
+
+@pytest.mark.parametrize("skills_root_for", [lambda home: home, lambda home: home.parent], ids=["deer-flow-home", "ancestor"])
+def test_review_skill_package_ignores_skills_root_that_contains_user_dirs(deployment, monkeypatch, caplog, skills_root_for):
+    storage = LocalSkillStorage(host_path=str(skills_root_for(deployment.base_dir)), container_path="/mnt/skills")
+    monkeypatch.setattr("deerflow.tools.builtins.review_skill_package_tool.get_or_new_skill_storage", lambda: storage)
+    package = deployment.user_custom_skills_dir("bob") / "secret-skill"
+    _write_package(package, _skill_content("secret-skill"))
+
+    with caplog.at_level("WARNING", logger="deerflow.tools.builtins.review_skill_package_tool"):
+        command = review_skill_package.func(
+            target=str(package),
+            runtime=_runtime("alice"),
+            include_content="facts-only",
+        )
+
+    message = command.update["messages"][0]
+    assert message.status == "error"
+    assert "Local review targets must be under" in message.content
+    assert "secret-skill" not in message.content
+    assert "contains per-user directories" in caplog.text
+
+
+def test_review_skill_package_rejects_symlink_planted_in_callers_outputs(deployment):
+    """A sandbox can write symlinks into the caller's own outputs; the resolved target decides."""
+    victim_package = deployment.user_custom_skills_dir("bob") / "secret-skill"
+    _write_package(victim_package, _skill_content("secret-skill") + "BOB_PRIVATE_BODY\n")
+    outputs_dir = deployment.sandbox_outputs_dir("thread-1", user_id="alice")
+    outputs_dir.mkdir(parents=True)
+    link = outputs_dir / "borrowed-skill"
+    link.symlink_to(victim_package, target_is_directory=True)
+
+    command = review_skill_package.func(
+        target=str(link),
+        runtime=_runtime("alice"),
+    )
+
+    message = command.update["messages"][0]
+    assert message.status == "error"
+    assert "Local review targets must be under" in message.content
+    assert "BOB_PRIVATE_BODY" not in message.content
+
+
+def test_review_skill_package_rejects_package_only_under_cwd(deployment, tmp_path):
+    _write_package(tmp_path / "demo", _skill_content())
+
+    command = review_skill_package.func(
+        target="demo",
+        runtime=_runtime("alice"),
+        include_content="facts-only",
+    )
+
+    message = command.update["messages"][0]
+    assert message.status == "error"
+    assert "Local review targets must be under" in message.content
+
+
+def test_review_skill_package_rejects_local_directory_without_skill_md(deployment):
+    user_dir = deployment.user_dir("alice")
+    user_dir.mkdir(parents=True)
+    (user_dir / "notes.txt").write_text("workspace note", encoding="utf-8")
+
+    command = review_skill_package.func(
+        target=str(user_dir),
+        runtime=_runtime("alice"),
+    )
+
+    message = command.update["messages"][0]
+    assert message.status == "error"
+    assert "directories containing a root SKILL.md" in message.content
+
+
+def test_review_skill_package_rejects_package_under_shared_tmp(deployment):
+    with tempfile.TemporaryDirectory(dir=tempfile.gettempdir()) as shared_tmp:
+        package = Path(shared_tmp) / "demo"
+        _write_package(package, _skill_content())
+
+        command = review_skill_package.func(
+            target=str(package),
+            runtime=_runtime("alice"),
+            include_content="facts-only",
+        )
+
+    message = command.update["messages"][0]
+    assert message.status == "error"
+    assert "Local review targets must be under" in message.content

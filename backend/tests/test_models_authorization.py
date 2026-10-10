@@ -230,6 +230,86 @@ def test_list_models_provider_error_fail_closed_vs_open(monkeypatch, fail_closed
     assert len(response.json()["models"]) == expected_count
 
 
+def _internal_caller_app(app_config: AppConfig, internal_user) -> FastAPI:
+    """Models app whose request state mirrors AuthMiddleware's internal path."""
+
+    app = _make_models_app(app_config)
+
+    @app.middleware("http")
+    async def _stamp_internal_state(request, call_next):
+        request.state.user = internal_user
+        return await call_next(request)
+
+    return app
+
+
+def test_list_models_internal_caller_with_bound_owner_uses_owner_role(monkeypatch):
+    """Internal channel call with a trusted owner header filters by the owner's role.
+
+    Regression for the /model selection gate: with ``default_role=user``
+    restricted to cheap models, a bound admin must still see premium models —
+    run admission accepts them for that account, so the list (which doubles as
+    the selection validator) must too. Uses the real RBAC provider so the
+    owner role flows through the same principal pipeline as production.
+    """
+    provider = RbacAuthorizationProvider(
+        roles={
+            "user": {"models": {"allow": ["cheap"]}},
+            "admin": {"models": {"allow": "*"}},
+        },
+    )
+    _enable_authorization(monkeypatch, provider, default_role="user")
+
+    internal_user = _user(id="__internal__", system_role="internal", oauth_provider=None, oauth_id=None)
+    admin_owner = _user(id="admin-1", system_role="admin", oauth_provider=None, oauth_id=None)
+    monkeypatch.setattr(
+        "app.gateway.routers.models.get_optional_user_from_request",
+        AsyncMock(return_value=internal_user),
+    )
+    monkeypatch.setattr(
+        "app.gateway.services.get_local_provider",
+        lambda: SimpleNamespace(get_user=AsyncMock(return_value=admin_owner)),
+    )
+
+    app_config = _make_app_config(["cheap", "premium"])
+    app = _internal_caller_app(app_config, internal_user)
+
+    with TestClient(app) as client:
+        response = client.get("/api/models", headers={"X-DeerFlow-Owner-User-Id": "admin-1"})
+
+    assert response.status_code == 200
+    names = [m["name"] for m in response.json()["models"]]
+    assert names == ["cheap", "premium"]
+
+
+def test_list_models_internal_caller_without_owner_still_uses_default_role(monkeypatch):
+    """Internal calls without a trusted owner keep the default_role filter.
+
+    Pins the documented unbound-channel posture: no owner header → the
+    synthetic principal still falls under ``default_role``.
+    """
+    provider = RbacAuthorizationProvider(
+        roles={"user": {"models": {"allow": ["cheap"]}}},
+    )
+    _enable_authorization(monkeypatch, provider, default_role="user")
+
+    internal_user = _user(id="__internal__", system_role="internal", oauth_provider=None, oauth_id=None)
+    monkeypatch.setattr(
+        "app.gateway.routers.models.get_optional_user_from_request",
+        AsyncMock(return_value=internal_user),
+    )
+
+    app_config = _make_app_config(["cheap", "premium"])
+    app = _internal_caller_app(app_config, internal_user)
+
+    with TestClient(app) as client:
+        response = client.get("/api/models")
+
+    assert response.status_code == 200
+    names = [m["name"] for m in response.json()["models"]]
+    assert names == ["cheap"]
+
+
 # ── get_model tests ────────────────────────────────────────────────────
 
 
