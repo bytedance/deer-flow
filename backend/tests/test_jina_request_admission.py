@@ -694,3 +694,59 @@ async def test_admitted_redirect_keeps_post_and_strips_cross_host_key(monkeypatc
     assert requests[0].headers["Authorization"] == "Bearer dummy-test-key"
     assert "Authorization" not in requests[1].headers
     assert admission_module._admission._active == 0
+
+
+@pytest.mark.parametrize("exit_reason", ["cancel", "deadline"])
+async def test_redirect_cleanup_finishes_before_next_permit(monkeypatch, exit_reason):
+    redirect = Stream(hold_close=True)
+    dispatched = []
+    loop = asyncio.get_running_loop()
+    original_time = loop.time
+    clock_offset = [0.0]
+    monkeypatch.setattr(loop, "time", lambda: original_time() + clock_offset[0])
+
+    def handle(request):
+        name = json.loads(request.content)["url"].rsplit("/", 1)[1]
+        dispatched.append(name)
+        if name == "first":
+            assert request.url.host == "r.jina.ai"
+            return httpx.Response(307, headers={"Location": "https://redirect.example/final"}, stream=redirect)
+        assert redirect.closed
+        return httpx.Response(200, text="ok")
+
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original_client(transport=httpx.MockTransport(handle), **kwargs))
+    first = asyncio.create_task(crawl("first", trust_env=False, max_retries=int(exit_reason == "deadline"), retry_budget_seconds=1))
+    second = None
+    try:
+        await asyncio.wait_for(redirect.closing.wait(), 3)
+        second = asyncio.create_task(crawl("second", trust_env=False))
+        await until(lambda: queued(1))
+        if exit_reason == "cancel":
+            first.cancel()
+        else:
+            clock_offset[0] = 2.0
+        await until(lambda: first.cancelling() or first.done())
+        # Let cancellation and the HTTPX exception cleanup path run while the
+        # transport close is deliberately held at the event barrier.
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert not first.done()
+        assert not redirect.closed
+        assert dispatched == ["first"]
+        assert queued(1)
+        assert admission_module._admission._active == 1
+
+        redirect.release_close.set()
+        if exit_reason == "cancel":
+            with pytest.raises(asyncio.CancelledError):
+                await first
+        else:
+            assert "retry time budget exhausted" in await first
+        assert await second == "ok"
+        assert redirect.closed
+        assert dispatched == ["first", "second"]
+        assert admission_module._admission._active == 0
+    finally:
+        redirect.release_close.set()
+        await asyncio.gather(*(task for task in (first, second) if task is not None), return_exceptions=True)

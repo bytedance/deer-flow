@@ -99,12 +99,18 @@ async def _finish_cleanup(close):
             raise asyncio.CancelledError
 
 
+async def _protect_response_cleanup(response: httpx.Response):
+    # Response hooks run before HTTPX consumes intermediate redirect responses.
+    response.stream = _CleanupStream(response.stream)
+
+
 @asynccontextmanager
 async def _admission_client(options):
     # Keep one client across retries, matching the default transport behavior.
     # Cleanup is still shielded so cancellation always propagates after close.
     client = httpx.AsyncClient(**options)
     try:
+        client.event_hooks["response"].append(_protect_response_cleanup)
         yield client
     finally:
         await _finish_cleanup(client.aclose())
@@ -179,8 +185,6 @@ class JinaClient:
                                         response_text = response.text
                                     else:
                                         async with client.stream("POST", "https://r.jina.ai/", headers=headers, json=data, timeout=request_timeout) as response:
-                                            if admission:
-                                                response.stream = _CleanupStream(response.stream)
                                             content = bytearray()
                                             # Count decoded bytes before retaining a chunk; HTTPX
                                             # decompressor allocations remain outside the cap.
