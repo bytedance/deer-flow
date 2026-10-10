@@ -16,6 +16,7 @@ from app.channels.dedupe_store import (
     PostgresInboundDedupeStore,
     make_inbound_dedupe_store,
 )
+from app.channels.message_bus import InboundDedupeClaim
 
 
 @pytest.fixture(autouse=True)
@@ -246,11 +247,13 @@ async def test_postgres_try_record_new_then_conflict():
     store = PostgresInboundDedupeStore(session_factory=factory)
     key = ("github", "repo", "repo", "d1:uA:agentX")
     # First delivery is inserted -> proceed (not a duplicate).
-    assert await store.try_record(key) is False
+    claim = await store.try_record(key)
+    assert claim is not None and claim.key == key
+    assert len(claim.token) == 32
     # Redelivery (same key) on a still-live row: ON CONFLICT -> DO UPDATE WHERE
     # fails -> no row returned -> duplicate -> drop. Only the upsert runs.
     session.execute.side_effect = [MagicMock(fetchone=MagicMock(return_value=None))]
-    assert await store.try_record(key) is True
+    assert await store.try_record(key) is None
 
 
 @pytest.mark.asyncio
@@ -267,6 +270,7 @@ async def test_postgres_try_record_uses_atomic_on_conflict_and_lazy_cleanup():
     assert "first_seen < now()" in upsert_sql  # TTL reclamation condition
     assert "RETURNING" in upsert_sql
     assert "make_interval" in cleanup_sql
+    assert "claim_token = :token" in upsert_sql
 
 
 @pytest.mark.asyncio
@@ -280,7 +284,7 @@ async def test_postgres_try_record_reclaims_expired_unreleased_row():
     key = ("slack", "T1", "C1", "123.456")
     # The upsert result returns a row, meaning the expired row was re-admitted
     # (proceed, not a duplicate).
-    assert await store.try_record(key) is False
+    assert await store.try_record(key) is not None
 
     upsert_sql = session.execute.call_args_list[0].args[0].text
     # The reclaim is part of the atomic upsert: a conditional DO UPDATE gated on
@@ -302,7 +306,7 @@ async def test_postgres_try_record_alive_row_still_deduped_without_cleanup():
     session.execute.side_effect = [
         MagicMock(fetchone=MagicMock(return_value=None)),  # upsert: live conflict, no row
     ]
-    assert await store.try_record(key) is True
+    assert await store.try_record(key) is None
     assert len(session.execute.call_args_list) == 1
 
 
@@ -310,18 +314,21 @@ async def test_postgres_try_record_alive_row_still_deduped_without_cleanup():
 async def test_postgres_try_record_fail_open_on_exception():
     factory, _ = _fake_session_factory(execute_raises=RuntimeError("db down"))
     store = PostgresInboundDedupeStore(session_factory=factory)
-    # Storage error must NOT drop the webhook: fail open = proceed (return False).
-    assert await store.try_record(("discord", "G1", "C1", "111")) is False
+    # Storage error must NOT drop the webhook: retain this admission's receipt.
+    assert await store.try_record(("discord", "G1", "C1", "111")) is not None
 
 
 @pytest.mark.asyncio
-async def test_postgres_release_deletes_key():
+async def test_postgres_release_matches_the_claim_token():
     factory, session = _fake_session_factory()
     store = PostgresInboundDedupeStore(session_factory=factory)
-    await store.release(("telegram", "chat1", "chat1", "55"))
+    claim = InboundDedupeClaim(("telegram", "chat1", "chat1", "55"), "a" * 32)
+    await store.release(claim)
     sql = session.execute.call_args_list[0].args[0].text
     assert "DELETE FROM webhook_deliveries WHERE channel = " in sql
     assert "AND message_id = " in sql
+    assert "AND claim_token = :token" in sql
+    assert session.execute.call_args_list[0].args[1]["token"] == claim.token
 
 
 @pytest.mark.asyncio
@@ -332,8 +339,8 @@ async def test_postgres_try_record_fail_open_when_no_session_factory(monkeypatch
 
     monkeypatch.setattr(engine_mod, "get_session_factory", lambda: None)
     store = PostgresInboundDedupeStore()  # no injected factory -> resolved lazily
-    # No DB available must NOT drop the message: fail open = proceed (return False).
-    assert await store.try_record(("discord", "G1", "C1", "111")) is False
+    # No DB available must NOT drop the message: a receipt still permits handling.
+    assert await store.try_record(("discord", "G1", "C1", "111")) is not None
 
 
 def test_factory_resolves_postgres_store_when_db_is_postgres():

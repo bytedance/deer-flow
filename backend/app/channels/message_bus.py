@@ -35,6 +35,14 @@ class InboundMessageType(StrEnum):
     COMMAND = "command"
 
 
+@dataclass(frozen=True, slots=True)
+class InboundDedupeClaim:
+    """One admission's immutable cleanup receipt, never provider metadata."""
+
+    key: tuple[str, str, str, str]
+    token: str
+
+
 @dataclass
 class InboundMessage:
     """A message arriving from an IM channel toward the agent dispatcher.
@@ -74,6 +82,8 @@ class InboundMessage:
     files: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
+    # Manager-owned; copies used by commands must retain the original receipt.
+    _inbound_dedupe_claim: InboundDedupeClaim | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass

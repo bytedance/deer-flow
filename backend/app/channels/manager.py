@@ -12,7 +12,7 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from html import escape
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -2200,6 +2200,9 @@ class ChannelManager:
             with ensure_trace_context():
                 dedupe_recorded = False
                 try:
+                    # Each dispatch owns its receipt, even if a producer reuses
+                    # the same envelope for another queue delivery.
+                    msg = replace(msg, _inbound_dedupe_claim=None)
                     # Dedupe before logging "received" so a provider retrying an
                     # event N times does not log N accepts. Provider ack side
                     # effects may still happen before this manager-level dedupe.
@@ -2285,29 +2288,31 @@ class ChannelManager:
             return False
 
         # Delegated to the shared/per-pod dedupe store. The store owns TTL eviction
-        # and capacity bounds; try_record returns True when the key was already
-        # present (i.e. this is a duplicate delivery to drop).
-        is_duplicate = await self._inbound_dedupe_store.try_record(key)
-        if is_duplicate:
+        # and capacity bounds; each admission returns its own cleanup receipt.
+        claim = await self._inbound_dedupe_store.try_record(key)
+        if claim is None:
             logger.info(
                 "[Manager] duplicate inbound ignored: channel=%s, chat_id=%s, message_id=%s",
                 msg.channel_name,
                 msg.chat_id,
                 key[-1],
             )
-        return is_duplicate
+            return True
+        msg._inbound_dedupe_claim = claim
+        return False
 
     async def _release_inbound_dedupe_key(self, msg: InboundMessage) -> None:
-        """Drop a recorded dedupe key so a provider redelivery can be reprocessed.
+        """Release this admission so a provider redelivery can be reprocessed.
 
         Called only on transient/unexpected handling failures: the key was
         recorded on receipt so retries arriving *while* the message is being
         handled are still deduped, but if handling fails we must not turn a
         recoverable error into a TTL-long black hole for the same message_id.
+        Repeated or late cleanup must leave a replacement admission unchanged.
         """
-        key = self._inbound_dedupe_key(msg)
-        if key is not None:
-            await self._inbound_dedupe_store.release(key)
+        claim = msg._inbound_dedupe_claim
+        if claim is not None:
+            await self._inbound_dedupe_store.release(claim)
 
     @staticmethod
     def _log_task_error(task: asyncio.Task) -> None:
@@ -2893,7 +2898,10 @@ class ChannelManager:
             service = get_channel_service()
             channel = service.get_channel(msg.channel_name) if service else None
             logger.info("[Manager] preparing receive file context for %d attachments", len(msg.files))
-            msg = await channel.receive_file(msg, thread_id, user_id=storage_user_id) if channel else msg
+            if channel:
+                received = await channel.receive_file(msg, thread_id, user_id=storage_user_id)
+                received._inbound_dedupe_claim = msg._inbound_dedupe_claim
+                msg = received
         if extra_context:
             run_context.update(extra_context)
 
