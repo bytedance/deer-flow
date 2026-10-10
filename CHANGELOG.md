@@ -4317,6 +4317,15 @@ This release closes that milestone with **439 merged pull requests**.
   **Behavior change:** a local stack opened from another device needs
   `BIND_HOST` (e.g. `BIND_HOST=0.0.0.0` in `.env`) and the `2026` entry; the
   Gateway and frontend ports are no longer reachable from other machines.
+- **skills:** Stop `review_skill_package` from reading other users' skills.
+  Local path targets were allowed anywhere under the Gateway cwd or `/tmp`,
+  and every documented deployment keeps `DEER_FLOW_HOME` under the cwd, so a
+  user who knew another user's id could pass
+  `.deer-flow/users/<id>/skills/custom/<skill>` and get that skill's
+  `SKILL.md` and `references/` back in the model response. The tool is
+  always available, so skill tool policy could not remove it. Local targets
+  are now confined to the configured skills root and the caller's own user
+  directory; `skill://` and `inline://` targets are unchanged. ([#6580])
 
 ### Documentation
 
@@ -9431,5 +9440,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6537]: https://github.com/bytedance/deer-flow/pull/6537
 [#6543]: https://github.com/bytedance/deer-flow/pull/6543
 [#6556]: https://github.com/bytedance/deer-flow/pull/6556
+[#6580]: https://github.com/bytedance/deer-flow/pull/6580
 [#6582]: https://github.com/bytedance/deer-flow/pull/6582
 [#6587]: https://github.com/bytedance/deer-flow/pull/6587

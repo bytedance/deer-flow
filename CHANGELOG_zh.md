@@ -3357,6 +3357,13 @@
   **行为变更：** 需要从其他设备访问本地部署时，请设置 `BIND_HOST`（例如在 `.env`
   中设置 `BIND_HOST=0.0.0.0`）并使用 `2026` 入口；Gateway 和前端端口不再对其他
   机器开放。
+- **技能：** `review_skill_package` 不再能读取其他用户的技能。此前本地路径
+  目标只要位于 Gateway 工作目录或 `/tmp` 之下即被放行，而所有文档化的部署都把
+  `DEER_FLOW_HOME` 放在工作目录之下，因此知道他人用户 id 的用户可以传入
+  `.deer-flow/users/<id>/skills/custom/<skill>`，在模型响应中拿到该技能的
+  `SKILL.md` 与 `references/` 内容。该工具始终可用，技能工具策略也无法移除它。
+  现在本地目标仅限于配置的技能根目录和调用者自己的用户目录；`skill://` 与
+  `inline://` 目标不受影响。([#6580])
 
 ### 文档
 
@@ -7616,5 +7623,6 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6520]: https://github.com/bytedance/deer-flow/pull/6520
 [#6537]: https://github.com/bytedance/deer-flow/pull/6537
 [#6556]: https://github.com/bytedance/deer-flow/pull/6556
+[#6580]: https://github.com/bytedance/deer-flow/pull/6580
 [#6582]: https://github.com/bytedance/deer-flow/pull/6582
 [#6587]: https://github.com/bytedance/deer-flow/pull/6587

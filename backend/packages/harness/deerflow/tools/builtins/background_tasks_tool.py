@@ -7,6 +7,7 @@ from typing import Annotated, Any
 from langchain.tools import tool
 
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
+from deerflow.mcp.tasks.models import TaskStatus
 from deerflow.mcp.tasks.runtime import get_mcp_task_submitter
 from deerflow.mcp_scope import runtime_thread_incarnation
 from deerflow.tools.builtins.list_uploaded_files_tool import _resolve_thread_id, _resolve_user_id
@@ -30,6 +31,7 @@ async def _list_background_tasks_impl(
     *,
     active_only: bool = False,
     limit: int = 20,
+    status: TaskStatus | None = None,
 ) -> dict[str, Any]:
     thread_id = _resolve_thread_id(runtime)
     if thread_id is None:
@@ -40,6 +42,7 @@ async def _list_background_tasks_impl(
         thread_incarnation=runtime_thread_incarnation(runtime),
         limit=max(1, min(limit, 50)),
         active_only=active_only,
+        **({"status": TaskStatus(status)} if status is not None else {}),
     )
     tasks = [_public_task(record) for record in records]
     return {"tasks": tasks, "count": len(tasks)}
@@ -49,9 +52,10 @@ async def _list_background_tasks_impl(
 async def list_background_tasks(
     runtime: Runtime,
     active_only: Annotated[bool, "Return only tasks that are still active."] = False,
+    status: Annotated[TaskStatus | None, "Optional task status. Intersects with active_only and filters before the limit of 20 recent matching tasks."] = None,
 ) -> dict[str, Any]:
     """List current and recent durable background tasks for this chat."""
-    return await _list_background_tasks_impl(runtime, active_only=active_only)
+    return await _list_background_tasks_impl(runtime, active_only=active_only, status=status)
 
 
 @tool
