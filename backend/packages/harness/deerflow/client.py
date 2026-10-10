@@ -17,10 +17,12 @@ Usage:
 
 import asyncio
 import concurrent.futures
+import contextlib
 import copy
 import logging
 import mimetypes
 import os
+import shutil
 import tempfile
 import uuid
 from collections.abc import Generator, Iterator, Mapping, Sequence
@@ -73,6 +75,7 @@ from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, bind_trace_id, e
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 from deerflow.uploads.manager import (
     UnsafeUploadPathError,
+    _reject_same_file,
     claim_unique_filename,
     copy_upload_file_no_symlink,
     delete_file_safe,
@@ -1768,73 +1771,87 @@ class DeerFlowClient:
 
         try:
             for src_path, dest_name in resolved_files:
-                try:
-                    dest = copy_upload_file_no_symlink(uploads_dir, dest_name, src_path)
-                except UnsafeUploadPathError:
-                    logger.warning("Skipping upload with unsafe destination: %s", dest_name)
-                    skipped_files.append(dest_name)
-                    continue
-                invalidate_overwritten_upload(dest)
-
-                info: dict[str, Any] = {
-                    "filename": dest_name,
-                    "size": dest.stat().st_size,
-                    "path": str(dest),
-                    "virtual_path": upload_virtual_path(dest_name),
-                    "artifact_url": upload_artifact_url(thread_id, dest_name),
-                }
-                if dest_name != src_path.name:
-                    info["original_filename"] = src_path.name
-
-                if src_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
-                    # Reserve companion .md name before convert so two stems
-                    # that collapse to the same .md (or a prior .md upload)
-                    # cannot silently overwrite each other.
-                    provisional_md_name = Path(dest_name).with_suffix(".md").name
-                    unique_md_name = claim_unique_filename(provisional_md_name, seen_names)
+                convertible = src_path.suffix.lower() in CONVERTIBLE_EXTENSIONS
+                # Snapshot a convertible source before writing anything: the
+                # saved upload and its Markdown companion must come from one
+                # read of the caller's file, which can change between the
+                # upload copy and the conversion (#6600). The snapshot stays
+                # in a private temp dir, so conversion still never reopens a
+                # name inside the sandbox-writable uploads dir (#5611).
+                work_dir_manager = tempfile.TemporaryDirectory() if convertible else contextlib.nullcontext()
+                with work_dir_manager as work_dir:
+                    upload_source = src_path
+                    if convertible:
+                        _reject_same_file(uploads_dir, dest_name, src_path, os.stat(src_path))
+                        upload_source = Path(work_dir) / dest_name
+                        shutil.copy2(src_path, upload_source)
                     try:
-                        # Convert the caller's own file, not the copy that just
-                        # landed in the sandbox-writable uploads dir: a sandbox
-                        # that swaps that name for a symlink would otherwise have
-                        # a host file converted into this thread's uploads. Write
-                        # the result outside uploads too, then publish it without
-                        # following a symlink at the companion name.
-                        with tempfile.TemporaryDirectory() as md_dir:
-                            md_output = Path(md_dir) / unique_md_name
+                        dest = copy_upload_file_no_symlink(uploads_dir, dest_name, upload_source)
+                    except UnsafeUploadPathError:
+                        logger.warning("Skipping upload with unsafe destination: %s", dest_name)
+                        skipped_files.append(dest_name)
+                        continue
+                    invalidate_overwritten_upload(dest)
+
+                    info: dict[str, Any] = {
+                        "filename": dest_name,
+                        "size": dest.stat().st_size,
+                        "path": str(dest),
+                        "virtual_path": upload_virtual_path(dest_name),
+                        "artifact_url": upload_artifact_url(thread_id, dest_name),
+                    }
+                    if dest_name != src_path.name:
+                        info["original_filename"] = src_path.name
+
+                    if convertible:
+                        # Reserve companion .md name before convert so two stems
+                        # that collapse to the same .md (or a prior .md upload)
+                        # cannot silently overwrite each other.
+                        provisional_md_name = Path(dest_name).with_suffix(".md").name
+                        unique_md_name = claim_unique_filename(provisional_md_name, seen_names)
+                        try:
+                            # Convert the private snapshot, never the copy that
+                            # landed in the sandbox-writable uploads dir: a
+                            # sandbox that swaps that name for a symlink would
+                            # otherwise have a host file converted into this
+                            # thread's uploads. Write the result outside uploads
+                            # too, then publish it without following a symlink at
+                            # the companion name.
+                            md_output = Path(work_dir) / unique_md_name
                             if conversion_pool is not None:
-                                converted = conversion_pool.submit(_convert_in_thread, src_path, md_output).result()
+                                converted = conversion_pool.submit(_convert_in_thread, upload_source, md_output).result()
                             else:
-                                converted = asyncio.run(convert_file_to_markdown(src_path, output_path=md_output))
+                                converted = asyncio.run(convert_file_to_markdown(upload_source, output_path=md_output))
                             md_path = None
                             if converted is not None:
                                 # copy, not write_bytes: the companion keeps the
                                 # converter's permissions, so a sandbox running as
                                 # another uid can still read it.
                                 md_path = copy_upload_file_no_symlink(uploads_dir, unique_md_name, converted)
-                    except UnsafeUploadPathError:
-                        logger.warning("Skipping markdown companion with unsafe destination: %s", unique_md_name)
-                        md_path = None
-                    except Exception:
-                        logger.warning(
-                            "Failed to convert %s to markdown",
-                            src_path.name,
-                            exc_info=True,
-                        )
-                        md_path = None
+                        except UnsafeUploadPathError:
+                            logger.warning("Skipping markdown companion with unsafe destination: %s", unique_md_name)
+                            md_path = None
+                        except Exception:
+                            logger.warning(
+                                "Failed to convert %s to markdown",
+                                src_path.name,
+                                exc_info=True,
+                            )
+                            md_path = None
 
-                    if md_path is not None:
-                        register_companion(dest, md_path)
-                        info["markdown_file"] = md_path.name
-                        info["markdown_path"] = str(uploads_dir / md_path.name)
-                        info["markdown_virtual_path"] = upload_virtual_path(md_path.name)
-                        info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
-                    else:
-                        # No companion was written, so release the claim;
-                        # holding it would rename a later same-stem upload
-                        # against a name this request never filled.
-                        seen_names.discard(unique_md_name)
+                        if md_path is not None:
+                            register_companion(dest, md_path)
+                            info["markdown_file"] = md_path.name
+                            info["markdown_path"] = str(uploads_dir / md_path.name)
+                            info["markdown_virtual_path"] = upload_virtual_path(md_path.name)
+                            info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
+                        else:
+                            # No companion was written, so release the claim;
+                            # holding it would rename a later same-stem upload
+                            # against a name this request never filled.
+                            seen_names.discard(unique_md_name)
 
-                uploaded_files.append(info)
+                    uploaded_files.append(info)
         finally:
             if conversion_pool is not None:
                 conversion_pool.shutdown(wait=True)
