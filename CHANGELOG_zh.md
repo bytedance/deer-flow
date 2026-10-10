@@ -3177,7 +3177,7 @@
   provisioner 镜像都已发布，backend 镜像却构建失败；chart 版本不可覆盖，修复只能
   换一个新版本号。现在该脚本还会在 `backend/` 中运行 `uv lock --check`（PEP 440
   规范化交给 uv，`2.1.0-rc0` 仍与 `2.1.0rc0` 匹配），缺少 `uv` 时直接失败；
-  `verify-versions.yml` 会安装与 backend 镜像相同的固定 uv 版本。
+  `verify-versions.yml` 会安装与 backend 镜像相同的固定 uv 版本。([#6588])
 
 ### 安全
 
@@ -7621,3 +7621,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6556]: https://github.com/bytedance/deer-flow/pull/6556
 [#6580]: https://github.com/bytedance/deer-flow/pull/6580
 [#6582]: https://github.com/bytedance/deer-flow/pull/6582
+[#6588]: https://github.com/bytedance/deer-flow/pull/6588

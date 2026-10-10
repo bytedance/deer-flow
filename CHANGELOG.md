@@ -4113,6 +4113,7 @@ This release closes that milestone with **439 merged pull requests**.
   now also runs `uv lock --check` in `backend/` (uv owns the PEP 440
   normalization, so `2.1.0-rc0` still matches `2.1.0rc0`) and fails when `uv` is
   missing; `verify-versions.yml` installs the uv version the backend image pins.
+  ([#6588])
 
 ### Security
 
@@ -9438,3 +9439,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6556]: https://github.com/bytedance/deer-flow/pull/6556
 [#6580]: https://github.com/bytedance/deer-flow/pull/6580
 [#6582]: https://github.com/bytedance/deer-flow/pull/6582
+[#6588]: https://github.com/bytedance/deer-flow/pull/6588
