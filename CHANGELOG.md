@@ -4317,6 +4317,7 @@ This release closes that milestone with **439 merged pull requests**.
   **Behavior change:** a local stack opened from another device needs
   `BIND_HOST` (e.g. `BIND_HOST=0.0.0.0` in `.env`) and the `2026` entry; the
   Gateway and frontend ports are no longer reachable from other machines.
+
 - **skills:** Stop `review_skill_package` from reading other users' skills.
   Local path targets were allowed anywhere under the Gateway cwd or `/tmp`,
   and every documented deployment keeps `DEER_FLOW_HOME` under the cwd, so a
