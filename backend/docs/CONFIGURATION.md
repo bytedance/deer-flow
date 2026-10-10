@@ -595,6 +595,42 @@ Notes:
 - A declared multi-instance deployment that enables a feature storing credentials (today `channel_connections.enabled: true`) also needs one shared `DEER_FLOW_CREDENTIALS_KEY`; see [Credentials encryption key](#credentials-encryption-key-deer_flow_credentials_key).
 - Restart-required: the gate runs once at startup. Restart all Gateway instances together after changing it.
 
+#### Local two-Gateway harness
+
+`scripts/dev_multi_instance.sh` (also `make dev-multi`, `make dev-multi-check`, `make dev-multi-down`) runs this topology on one machine, so cross-instance behavior can be checked without a cluster:
+
+- Throwaway `postgres:17-alpine` and `redis:7-alpine` containers (`deerflow-mi-postgres`, `deerflow-mi-redis`) on `127.0.0.1:55432` and `127.0.0.1:56379`, Gateway A on `127.0.0.1:8001` and Gateway B on `127.0.0.1:8011` (8002 stays free for the provisioner). When nginx is installed, `http://localhost:2027` round-robins `/api` over both Gateways, names the Gateway that answered in an `X-DeerFlow-Upstream` response header, and forwards `/` to a frontend on port 3000 if you start one. Ports, container names and images are overridable; see `--help`.
+- The generated `config.yaml` is your own `config.yaml` (otherwise `config.example.yaml`; `DEERFLOW_MI_BASE_CONFIG` picks another file) plus `deployment.multi_instance: true`, `database.backend: postgres`, `run_events.backend: db`, `run_ownership.heartbeat_enabled: true` and `stream_bridge.type: redis`. Settings the startup gate refuses are changed and reported: process-local browser tools are removed and an enabled scheduler gets `scheduler.multi_instance: true`. Enabled IM channels are disabled because both Gateways would connect the same bot; `DEERFLOW_MI_KEEP_CHANNELS=1` keeps them.
+- Everything the pair writes stays in the harness, never in your own deployment: any `checkpointer` section is removed (it would win over `database` for checkpoints and the Store), an explicit `sandbox.ownership` and a Redis `database.checkpoint_cache` point at the harness Redis (ownership timing settings are kept), a DeerMem `storage_path` (either spelling) and `blob_storage.backend_config.root` are dropped so their data lands in the harness home, and a local AIO sandbox gets a `container_prefix` derived from the state dir, so the harness never adopts or reaps sandbox containers it did not start. A non-DeerMem memory backend is used as configured, and the harness says so.
+- Both processes share one `DEER_FLOW_HOME`, one copy of `extensions_config.json` (MCP and skill edits never reach your own file), and generated `AUTH_JWT_SECRET`, `DEER_FLOW_INTERNAL_AUTH_TOKEN` and `DEER_FLOW_CREDENTIALS_KEY` values. Each process keeps its own DeerMem `retrieval_index_path`, which the shared config reads from `$DEERFLOW_MI_RETRIEVAL_INDEX_PATH`.
+- Gateway B starts only after A answers `/health`. Alembic migrations are serialized by an advisory lock, but the LangGraph checkpointer and store `setup()` that runs next is not, so two cold starts against an empty database could race.
+- State lives in `.deer-flow/multi-instance/` (gitignored). `down` stops the Gateways and nginx, removes the containers together with their anonymous data volumes and deletes everything there except `logs/`. Each container is labelled with the state dir that created it, and only that state dir removes it: a harness started from another checkout or `DEERFLOW_MI_STATE_DIR` refuses to start rather than remove them (give it its own `DEERFLOW_MI_*_CONTAINER` names and ports). If `up` fails partway, everything it already started is torn down. Do not run `make dev` or `make stop` alongside the harness: both reclaim port 8001 and this checkout's Gateway processes.
+
+```bash
+scripts/dev_multi_instance.sh up             # containers, config, Gateway A, then B, then nginx
+scripts/dev_multi_instance.sh check          # automated cross-instance checks (below)
+scripts/dev_multi_instance.sh stop b --kill  # SIGKILL B to simulate a crash; `start b` brings it back
+scripts/dev_multi_instance.sh logs a -f
+scripts/dev_multi_instance.sh down
+```
+
+`check` signs in as a throwaway account it creates on first use (on a fresh database it becomes the first admin, which the skill toggle needs; the credentials are in `.deer-flow/multi-instance/check-user.json`) and verifies that:
+
+- `GET /health/ready` reports `ready` and `stream_bridge: ok` on both Gateways;
+- B accepts a session issued by A, and both accept the shared internal token while refusing a wrong one;
+- a thread created on A is readable on B, and a file uploaded on A is listed on B, which serves identical bytes from `GET /api/threads/{id}/artifacts/{path}`;
+- a public skill toggled with `PUT /api/skills/{name}` on A shows the new state on B within 30 s (the toggle is reverted afterwards);
+- nginx reaches both Gateways;
+- a run created on A can be joined on B and resumed on A from a `Last-Event-ID`. With no model configured the run fails before any LLM call; when models are configured, or the model list could not be read, this check is skipped unless you pass `check --with-llm`. Each stream read has a time budget that heartbeats do not extend.
+
+These still need a manual pass:
+
+- stop B with `stop b --kill` while A has an active run: A's run must not turn `error`;
+- cancel a run on B from A: it takes effect within about one heartbeat (~10 s; a lower `run_ownership.lease_seconds` makes the boundary easier to observe);
+- change an MCP filesystem server's args on A: B's local-bash allowlist follows;
+- edit a skill on A: B's system-prompt skills section changes within 30 s;
+- the IM channel gates (one leader per platform, failover after killing the leader, runtime-config changes), once channel leader election lands; run them with `DEERFLOW_MI_KEEP_CHANNELS=1`.
+
 ### Credentials encryption key (`DEER_FLOW_CREDENTIALS_KEY`)
 
 DeerFlow encrypts credentials it stores at rest (today: per-connection IM channel credentials in the `channel_credentials` table) with a deployment key read **only** from the environment — there is no `config.yaml` key, and it is never derived from `AUTH_JWT_SECRET`.

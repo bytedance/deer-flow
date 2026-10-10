@@ -167,6 +167,12 @@ defaults `DEER_FLOW_PROJECT_ROOT` to the checkout, as `serve.sh` does, so
 Only "no config anywhere" creates `<checkout>/config.yaml` from the example.
 `backend/tests/test_config_version.py::test_config_upgrade_*` pins this.
 
+## Multi-Instance Dev Harness
+
+`dev_multi_instance.{sh,py}` must keep the rendered config passing the real
+multi-instance gate and every endpoint/data root inside its state dir
+(`backend/tests/test_dev_multi_instance_script.py`).
+
 ## Shell Script Invocation Contract
 
 Root Makefile recipes must invoke repository `.sh` files through

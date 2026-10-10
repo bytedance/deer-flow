@@ -351,6 +351,24 @@ This release closes that milestone with **439 merged pull requests**.
   redis` or `DEER_FLOW_STREAM_BRIDGE_REDIS_URL` (docker-compose and the Helm
   chart already inject it). ([#6328])
 
+- **dev:** `scripts/dev_multi_instance.sh` (`make dev-multi`, `make dev-multi-check`,
+  `make dev-multi-down`) runs two Gateways as one local multi-instance cluster:
+  throwaway Postgres and Redis containers on loopback, Gateway A on port 8001 and
+  Gateway B on 8011 sharing one `DEER_FLOW_HOME` and generated `AUTH_JWT_SECRET`,
+  `DEER_FLOW_INTERNAL_AUTH_TOKEN` and `DEER_FLOW_CREDENTIALS_KEY` values, each with
+  its own DeerMem retrieval index, and an optional round-robin nginx on port 2027.
+  The config is the developer's own `config.yaml` (or `config.example.yaml`) plus
+  the settings the multi-instance startup gate requires; settings the gate refuses
+  are changed and reported, and the checkpointer, Redis endpoints, DeerMem and
+  blob data roots and local AIO sandbox container prefix the config names are
+  redirected into the harness (a non-DeerMem memory backend is used as
+  configured). Containers are labelled with the state dir that owns them and
+  removed with their volumes; a failed `up` tears down what it started. `check`
+  automates the scriptable cross-instance checks: readiness, shared sessions and
+  internal token, thread, upload and artifact visibility, skill toggles, nginx
+  balancing, and SSE `Last-Event-ID` resume across instances. See "Local
+  two-Gateway harness" in `backend/docs/CONFIGURATION.md`. ([#6613])
+
 - **config:** `DEER_FLOW_ENV_FILE` selects one explicit UTF-8 dotenv file for the backend at
   startup, shared by configuration loading, authentication startup, and the debug entry
   point; relative paths resolve from the backend process working directory, existing process
@@ -9534,3 +9552,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6590]: https://github.com/bytedance/deer-flow/pull/6590
 [#6595]: https://github.com/bytedance/deer-flow/pull/6595
 [#6611]: https://github.com/bytedance/deer-flow/pull/6611
+[#6613]: https://github.com/bytedance/deer-flow/pull/6613
