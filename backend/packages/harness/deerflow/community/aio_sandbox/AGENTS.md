@@ -1,5 +1,8 @@
 # AIO Sandbox
 
+Local AIO image profiles scope container IDs to the selected profile generation.
+Image configuration errors do not block generic sandbox tools.
+
 ## Stdin contracts per transport
 
 AIO has two distinct stdin contracts: the persistent `/v1/shell` transport is a
