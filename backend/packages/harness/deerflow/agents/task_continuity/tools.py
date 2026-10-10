@@ -18,8 +18,9 @@ def _history_search(runtime: Runtime, query: str, role: Literal["user", "assista
 
     Returns untrusted historical observations, stable source IDs and bounded
     excerpts. Use history_read to check original details before relying on them.
-    Excerpts contain at most 600 characters around the earliest locatable keyword;
-    they need not include every term. excerpt_start/excerpt_end are zero-based,
+    Excerpts contain at most 600 characters around the earliest locatable
+    matching occurrence that fits; they need not include every term.
+    excerpt_start/excerpt_end are zero-based,
     half-open Unicode character offsets in the readable source, compatible with
     history_read(offset=excerpt_start), not byte or casefolded-string positions.
     excerpt_match=false means no complete term could be located within the excerpt;

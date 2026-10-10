@@ -64,8 +64,9 @@ characters; it does not count UTF-8 bytes, UTF-16 code units, or grapheme cluste
 For example, if `Needle` appears after 5000 characters with enough surrounding
 context, searching for `needle` returns `excerpt_start=4703` and
 `excerpt_end=5303`. Call `history_read(source_id=result.id, offset=4703)` to read
-from that excerpt onward. The excerpt is centered on the earliest locatable term
-where possible and shifts at source boundaries, up to 600 characters. Multiple
+from that excerpt onward. The excerpt is centered on the earliest locatable
+matching occurrence that fits where possible and shifts at source boundaries,
+up to 600 characters. Multiple
 terms retain OR matching: choose the earliest source position, preferring the
 shorter term when starts tie. The excerpt need not cover all terms, and result
 ranking is unchanged. Repeated terms do not increase the result count.
@@ -76,8 +77,10 @@ token matching. Location shares the English-word and Chinese-bigram tokenizer.
 Length-changing casefolds such as `Straße` map back to original positions; the
 combining dot produced by folding `İ` follows the existing tokenization rules.
 FTS normalization may not map exactly to indexed terms, such as `cafe` matching
-`café`. If a complete match cannot be located, or the matched term's original span
-cannot fit within 600 characters, return the source opening with
+`café`. Skip occurrences whose original span exceeds 600 characters and continue
+searching for a fitting occurrence, including overlapping active matches. Only
+if no complete matching occurrence can be located within a 600-character excerpt,
+return the source opening with
 `excerpt_match=false` rather than claiming the excerpt contains the keyword.
 
 Offsets apply only to the source readable in the same state. The active version

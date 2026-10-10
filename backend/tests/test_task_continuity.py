@@ -903,3 +903,47 @@ def test_search_excerpt_falls_back_when_folded_term_cannot_fit(role_runtime, arc
     assert row["excerpt_match"] is False
     assert (row["excerpt_start"], row["excerpt_end"]) == (0, 600)
     assert row["excerpt"] == message.content[:600]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True])
+@pytest.mark.parametrize("archived", [False, True])
+@pytest.mark.parametrize("oversized_occurrences", [1, 2])
+async def test_search_excerpt_skips_oversized_occurrences_for_later_fitting_hit(role_runtime, async_mode, archived, oversized_occurrences):
+    import json
+
+    text = "padding " * 125 + ("s" * 800 + " gap " * 200) * oversized_occurrences + "ß" * 400 + " tail" * 200
+    message = HumanMessage(content=text, id="later-fitting-hit")
+    role_runtime.state = {"messages": [message]}
+    if archived:
+        role_runtime.state = {"task_history": archive.capture({}, role_runtime, [message], TaskContinuityConfig(enabled=True))}
+
+    arguments = {"runtime": role_runtime, "query": "ß" * 400, "role": "user"}
+    rows = json.loads(await history_search.ainvoke(arguments) if async_mode else history_search.invoke(arguments))["results"]
+    assert len(rows) == 1
+    row = rows[0]
+    expected_start = 900 + 1800 * oversized_occurrences
+    assert (row["excerpt_start"], row["excerpt_end"]) == (expected_start, expected_start + 600)
+    assert row["excerpt_match"] is True
+    assert "ß" * 400 in row["excerpt"]
+    assert row["excerpt"] == text[expected_start : expected_start + 600]
+    read_arguments = {"runtime": role_runtime, "source_id": row["id"], "offset": row["excerpt_start"]}
+    page = json.loads(await history_read.ainvoke(read_arguments) if async_mode else history_read.invoke(read_arguments))
+    assert page["text"].startswith(row["excerpt"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True])
+async def test_active_search_excerpt_keeps_overlapping_fitting_occurrence(role_runtime, async_mode):
+    import json
+
+    text = "padding " * 125 + "s" * 800 + "ß" * 400 + " tail" * 200
+    role_runtime.state = {"messages": [HumanMessage(content=text, id="overlapping-fitting-hit")]}
+    arguments = {"runtime": role_runtime, "query": "ß" * 400}
+    row = json.loads(await history_search.ainvoke(arguments) if async_mode else history_search.invoke(arguments))["results"][0]
+    assert (row["excerpt_start"], row["excerpt_end"]) == (1400, 2000)
+    assert row["excerpt_match"] is True
+    assert row["excerpt"] == text[1400:2000] == "s" * 400 + "ß" * 200
+    read_arguments = {"runtime": role_runtime, "source_id": row["id"], "offset": row["excerpt_start"]}
+    page = json.loads(await history_read.ainvoke(read_arguments) if async_mode else history_read.invoke(read_arguments))
+    assert page["text"].startswith(row["excerpt"])

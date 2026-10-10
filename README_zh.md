@@ -766,9 +766,9 @@ Web UI 会在输入框上方展示当前激活的 goal，说明自动续跑为�
 启用 `task_continuity.enabled` 后，可用 `history_search` 检索当前任务的活跃消息和
 已压缩历史。可选参数 `role` 接受 `user`、`assistant`、`tool`，在最多八条结果的
 截断前过滤；省略或 `null` 保持原有全角色搜索。
-搜索摘录会围绕可定位的匹配项返回最多 600 个字符，并提供 `excerpt_start` /
-`excerpt_end`，表示原文中从零开始、左闭右开的 Unicode 字符范围。若无法定位完整匹配项，
-或匹配项无法完整放入摘录，则返回原文开头并设置 `excerpt_match=false`。
+搜索摘录会围绕最早可完整放入摘录的匹配项返回最多 600 个字符，并提供 `excerpt_start` /
+`excerpt_end`，表示原文中从零开始、左闭右开的 Unicode 字符范围。过长的匹配项会被跳过，
+继续查找后续可完整放入摘录的匹配项；若没有这样的可定位匹配项，则返回原文开头并设置 `excerpt_match=false`。
 将 `excerpt_start` 作为 `history_read` 的 `offset` 即可从该位置继续读取。
 使用 `history_read` 核对来源原文，
 历史用户消息不代表当前授权。详见[任务连续性说明（英文）](docs/task-continuity.md)。

@@ -101,7 +101,7 @@ def index_text(text: str) -> str:
 
 
 def _search_excerpt(text: str, keywords: list[str], *, substring: bool) -> dict:
-    """Locate the first casefolded keyword match and return an excerpt from the readable source."""
+    """Locate the first fitting casefolded keyword match in the readable source."""
     folded = text.casefold()
     if substring:
         hits = [(position, position + len(term)) for term in keywords if (position := folded.find(term)) >= 0]
@@ -111,7 +111,21 @@ def _search_excerpt(text: str, keywords: list[str], *, substring: bool) -> dict:
     start = 0
     if hits:
         positions = [index for index, char in enumerate(text) for _ in char.casefold()]
-        hits = [(positions[left], positions[right - 1] + 1) for left, right in hits if positions[right - 1] + 1 - positions[left] <= 600]
+        fitting_hits = []
+        for left, right in hits:
+            term = folded[left:right]
+            while left >= 0:
+                match_start, match_end = positions[left], positions[right - 1] + 1
+                if match_end - match_start <= 600:
+                    fitting_hits.append((match_start, match_end))
+                    break
+                if not substring:
+                    break
+                # A later occurrence can have a shorter original span even
+                # though it casefolds to the same term. Preserve overlaps.
+                left = folded.find(term, left + 1)
+                right = left + len(term)
+        hits = fitting_hits
     if hits:
         match_start, match_end = min(hits)
         start = max(0, min(match_start - (600 - (match_end - match_start)) // 2, len(text) - 600))
