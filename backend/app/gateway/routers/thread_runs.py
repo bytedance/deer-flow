@@ -70,6 +70,7 @@ from deerflow.agents.middlewares.dynamic_context_middleware import strip_injecte
 from deerflow.authz.sandbox_authz import safe_app_config_async
 from deerflow.config.paths import get_paths, make_safe_user_id
 from deerflow.runtime import CancelOutcome, ConflictError, RunRecord, RunStatus, ThreadOperationKind, serialize_channel_values_for_api
+from deerflow.runtime.goal import is_active_goal
 from deerflow.runtime.runs.store.base import format_run_cursor_created_at, normalize_run_created_at_iso
 from deerflow.runtime.secret_context import redact_config_secrets, redact_metadata_secrets
 from deerflow.runtime.user_context import get_effective_user_id
@@ -567,8 +568,7 @@ def _has_title(values: dict[str, Any]) -> bool:
 
 
 def _has_active_goal(snapshot: Any) -> bool:
-    goal = _checkpoint_values(snapshot).get("goal")
-    return isinstance(goal, dict) and goal.get("status") == "active"
+    return is_active_goal(_checkpoint_values(snapshot).get("goal"))
 
 
 def _latest_editable_turn(messages: list[Any], human_message_id: str) -> tuple[int, Any, int, Any, list[str]]:
