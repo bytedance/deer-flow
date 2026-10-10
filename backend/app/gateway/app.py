@@ -437,7 +437,29 @@ async def _shutdown_subagent_batch_service(app: FastAPI) -> None:
         set_subagent_batch_submitter(None)
 
 
-def _scheduled_task_notification_repos(startup_config: AppConfig):
+async def _load_credentials_cipher(startup_config: AppConfig):
+    """Load the at-rest credentials cipher when an enabled feature stores credentials, else ``None``.
+
+    Without ``DEER_FLOW_CREDENTIALS_KEY`` the first load creates
+    ``{base_dir}/.credentials_key``, so it runs in a worker thread. The startup
+    gate has already refused a malformed environment key; a key file that
+    cannot be read or created leaves stored credentials unavailable (the
+    behaviour before the key existed) instead of failing the Gateway.
+    """
+    from app.gateway.deps import credentials_key_consumers
+
+    if not credentials_key_consumers(startup_config):
+        return None
+    from deerflow.config import credentials_key
+
+    try:
+        return await asyncio.to_thread(credentials_key.get_credentials_cipher)
+    except Exception:
+        logger.exception("Failed to load the credentials encryption key; stored channel connection credentials stay unavailable")
+        return None
+
+
+def _scheduled_task_notification_repos(startup_config: AppConfig, credentials_cipher=None):
     """Return ``(connection_repo, notification_repo)`` for the scheduled-run outbox (issue #4254).
 
     Both are None unless channel connections are enabled, because the completion
@@ -454,7 +476,7 @@ def _scheduled_task_notification_repos(startup_config: AppConfig):
     session_factory = get_session_factory()
     if session_factory is None:
         return None, None
-    return ChannelConnectionRepository(session_factory), NotificationDeliveryRepository(session_factory)
+    return ChannelConnectionRepository(session_factory, cipher=credentials_cipher), NotificationDeliveryRepository(session_factory)
 
 
 async def _start_scheduled_task_notification_delivery(app: FastAPI, startup_config: AppConfig, notification_repo, connection_repo) -> None:
@@ -680,12 +702,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.exception("Failed to start summary generation workers")
 
+        # At-rest credentials cipher (DEER_FLOW_CREDENTIALS_KEY) shared by every
+        # ChannelConnectionRepository this process builds; None when no enabled
+        # feature stores credentials.
+        credentials_cipher = await _load_credentials_cipher(startup_config)
+        app.state.credentials_cipher = credentials_cipher
+
         # Enqueue side of the scheduled-run notification outbox (issue #4254).
         # It only needs the durable table, so it is wired with the scheduler;
         # the delivery worker starts after the channel service, further down.
         notification_connection_repo = scheduled_notification_repo = None
         try:
-            notification_connection_repo, scheduled_notification_repo = _scheduled_task_notification_repos(startup_config)
+            notification_connection_repo, scheduled_notification_repo = _scheduled_task_notification_repos(startup_config, credentials_cipher)
         except Exception:
             logger.exception("Failed to prepare the scheduled-task notification outbox")
 
@@ -736,6 +764,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             channel_service = await start_channel_service(
                 startup_config,
                 get_stream_bridge=lambda: getattr(app.state, "stream_bridge", None),
+                credentials_cipher=credentials_cipher,
             )
             logger.info("Channel service started: %s", channel_service.get_status())
         except Exception:

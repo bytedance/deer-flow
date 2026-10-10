@@ -95,7 +95,8 @@ def _merge_channel_connection_runtime_config(channels_config: dict[str, Any], ap
     merge_runtime_channel_configs(channels_config, connection_config)
 
 
-def _make_connection_repo(connection_config: ChannelConnectionsConfig | None):
+def _make_connection_repo(connection_config: ChannelConnectionsConfig | None, *, credentials_cipher: Any | None = None):
+    """Build the connection repository; ``credentials_cipher`` encrypts per-connection credentials."""
     if connection_config is None or not getattr(connection_config, "enabled", False):
         return None
 
@@ -110,7 +111,7 @@ def _make_connection_repo(connection_config: ChannelConnectionsConfig | None):
     if session_factory is None:
         logger.warning("Channel connections are enabled but database persistence is not available")
         return None
-    return ChannelConnectionRepository(session_factory)
+    return ChannelConnectionRepository(session_factory, cipher=credentials_cipher)
 
 
 class ChannelService:
@@ -177,13 +178,16 @@ class ChannelService:
         app_config: AppConfig | None = None,
         *,
         get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
+        credentials_cipher: Any | None = None,
     ) -> ChannelService:
         """Create a ChannelService from the application config.
 
         ``get_stream_bridge`` is threaded straight through to the
         ``ChannelManager`` (see its docstring); it is optional so direct
         callers (including most tests) that don't need follow-up-buffer
-        auto-draining can omit it.
+        auto-draining can omit it. ``credentials_cipher`` is the Gateway's
+        ``DEER_FLOW_CREDENTIALS_KEY`` cipher for per-connection credentials;
+        without it stored credentials stay unavailable.
         """
         if app_config is None:
             from deerflow.config.app_config import get_app_config
@@ -200,7 +204,7 @@ class ChannelService:
         require_bound_identity = bool(connections_enabled and getattr(connection_config, "require_bound_identity", True))
         return cls(
             channels_config=channels_config,
-            connection_repo=_make_connection_repo(connection_config),
+            connection_repo=_make_connection_repo(connection_config, credentials_cipher=credentials_cipher),
             require_bound_identity=require_bound_identity,
             app_config=app_config,
             get_stream_bridge=get_stream_bridge,
@@ -663,6 +667,7 @@ async def start_channel_service(
     app_config: AppConfig | None = None,
     *,
     get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
+    credentials_cipher: Any | None = None,
 ) -> ChannelService:
     """Create and start the global ChannelService from app config.
 
@@ -679,7 +684,7 @@ async def start_channel_service(
     # from_app_config resolves the channel store path (realpath) and reads the
     # runtime config files; keep that disk IO off the event loop.
     # asyncio.to_thread forwards both args and kwargs to the target callable.
-    service = await asyncio.to_thread(ChannelService.from_app_config, app_config, get_stream_bridge=get_stream_bridge)
+    service = await asyncio.to_thread(ChannelService.from_app_config, app_config, get_stream_bridge=get_stream_bridge, credentials_cipher=credentials_cipher)
     _channel_service = service
 
     async def rollback_failed_start() -> None:

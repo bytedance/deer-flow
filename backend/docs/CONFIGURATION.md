@@ -592,7 +592,26 @@ Notes:
 - IM chat-to-thread bindings are shared through the database too: with `database.backend: sqlite` or `postgres` the `ChannelManager` keeps the `channel_name:chat_id[:topic_id]` → thread mapping of unbound IM conversations in the `channel_thread_bindings` table (migration `0038_channel_thread_bindings`), so a conversation created on one instance continues on the same thread when its next message lands on another. On the first start after upgrading, an existing `{base_dir}/channels/store.json` is imported once — only into an empty table, with `INSERT … ON CONFLICT DO NOTHING` so concurrently starting instances cannot duplicate a binding — and renamed `store.json.migrated`; a populated table leaves the file untouched. `memory` keeps the per-process JSON file.
 - The declaration also drives the `agent_storage.backend: file` divergence warning, the inbound webhook dedupe warning, and the WeChat QR-login guard, which otherwise only look at the worker count.
 - With the default DeerMem backend, the declaration also warns when the derived SQLite retrieval index sits inside the shared `storage_path` (the default `{storage_path}/.retrieval`). Set `memory.backend_config.retrieval_index_path` to an instance-local directory (relative values resolve against `storage_path`): SQLite WAL is unsupported on network filesystems, and the index is rebuilt from the Markdown facts at startup and re-synced per user scope after a peer writes.
+- A declared multi-instance deployment that enables a feature storing credentials (today `channel_connections.enabled: true`) also needs one shared `DEER_FLOW_CREDENTIALS_KEY`; see [Credentials encryption key](#credentials-encryption-key-deer_flow_credentials_key).
 - Restart-required: the gate runs once at startup. Restart all Gateway instances together after changing it.
+
+### Credentials encryption key (`DEER_FLOW_CREDENTIALS_KEY`)
+
+DeerFlow encrypts credentials it stores at rest (today: per-connection IM channel credentials in the `channel_credentials` table) with a deployment key read **only** from the environment — there is no `config.yaml` key, and it is never derived from `AUTH_JWT_SECRET`.
+
+```bash
+# Generate a key (urlsafe base64 of 32 random bytes, a Fernet key):
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+export DEER_FLOW_CREDENTIALS_KEY=<key>
+```
+
+- **Rotation:** the value may be a comma-separated list. The first key encrypts new values; every listed key decrypts. Prepend the new key (`new,old`), restart, and keep the old key listed until the values it encrypted have been rewritten. Stored values carry a `fernet:v2:` prefix; `fernet:v1:` values written by earlier builds stay readable under the same key.
+- **Single instance:** when the variable is unset or blank, the Gateway generates `{DEER_FLOW_HOME}/.credentials_key` (mode `0600`) on first use and reuses it. The file is created exclusively, so uvicorn workers sharing the runtime home converge on one key. It is only created when a feature that stores credentials is enabled.
+- **Multi-instance:** instances that do not share a runtime home would each generate their own file and could not decrypt what their peers stored. Startup therefore refuses a declared multi-instance deployment (`deployment.multi_instance: true` / `DEER_FLOW_MULTI_INSTANCE=1`) that enables `channel_connections` without the variable. Multiple workers of one process tree (`GATEWAY_WORKERS > 1` without the declaration) share the file and are not refused. Deployments that store no credentials keep booting without a key.
+- **Malformed keys** (wrong length, standard rather than urlsafe base64, any bad entry in the list) stop startup with an error that never repeats the key material.
+- **Backup:** losing the key makes every stored credential unreadable. Unreadable values are treated as missing (logged as a warning), never as a crash — Slack, for example, falls back to the deployment bot token.
+- **Deployment tooling:** the Helm chart generates the key into its app Secret and preserves it across upgrades; `make up` (`scripts/deploy.sh`) honors a shell or `.env` value and otherwise generates and persists `$DEER_FLOW_HOME/.credentials_key` — the same file the Gateway would generate, so whichever side created it first wins.
+- The persisted `.jwt_secret` (used when `AUTH_JWT_SECRET` is unset) is created the same exclusive way, so replicas cold-starting on a shared volume no longer keep different session-signing secrets.
 
 ### Agent Storage
 
@@ -1555,6 +1574,7 @@ models:
 - `DEER_FLOW_CONFIG_PATH` - Custom config file path
 - `DEER_FLOW_EXTENSIONS_CONFIG_PATH` - Custom extensions config file path
 - `DEER_FLOW_HOME` - Runtime state directory (defaults to `.deer-flow` under the project root)
+- `DEER_FLOW_CREDENTIALS_KEY` - At-rest encryption key(s) for stored credentials; comma-separate to rotate. See [Credentials encryption key](#credentials-encryption-key-deer_flow_credentials_key)
 - `DEER_FLOW_SKILLS_PATH` - Skills directory when `skills.path` is omitted
 - `GATEWAY_ENABLE_DOCS` - Set to `false` to disable Swagger UI (`/docs`), ReDoc (`/redoc`), and OpenAPI schema (`/openapi.json`) endpoints (default: `true`)
 
