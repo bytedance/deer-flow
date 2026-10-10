@@ -7,9 +7,14 @@ API. An API key is required. Sign up at https://serper.dev to get one.
 
 import json
 import logging
+import math
 import os
+import random
 import re
+import time
 from collections.abc import Mapping
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from ipaddress import IPv4Address, ip_address
 from urllib.parse import urlparse
 
@@ -249,8 +254,72 @@ def _safe_public_url(value: object) -> str:
     return url if ip.is_global else ""
 
 
-def _serper_post(endpoint: str, api_key: str, query: str, max_results: int, *, time_range: SearchTimeRange | None = None, base_url: object | None = None) -> tuple[dict | None, str | None]:
+def _retry_options(config) -> dict:
+    extra = config.model_extra if config is not None else {}
+    return {name: extra[name] for name in ("max_retries", "retry_budget_seconds") if name in extra}
+
+
+_DAY = r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)"
+_MONTH = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+_CLOCK = r"[0-9]{2}:[0-9]{2}:[0-9]{2}"
+_HTTP_DATE = re.compile(
+    rf"(?:{_DAY}, [0-9]{{2}} {_MONTH} [0-9]{{4}} {_CLOCK} GMT"
+    rf"|(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), [0-9]{{2}}-{_MONTH}-[0-9]{{2}} {_CLOCK} GMT"
+    rf"|{_DAY} {_MONTH} (?:[0-9]{{2}}| [0-9]) {_CLOCK} [0-9]{{4}})"
+)
+
+
+def _retry_after(response: httpx.Response) -> float | None:
+    """Return a server floor, or None for an invalid HTTP Retry-After value."""
+    value = response.headers.get("Retry-After")
+    if value is None:
+        return None
+    value = value.strip(" \t")
+    if value and value.isascii() and value.isdecimal():
+        digits = value.lstrip("0") or "0"
+        # Bound integer conversion work. Infinity is a valid, unfit floor, not
+        # a parsing failure that could cause an early fallback retry.
+        if len(digits) > 309:
+            return math.inf
+        seconds = int(digits)
+        try:
+            floor = float(seconds)
+        except OverflowError:
+            return math.inf
+        return math.nextafter(floor, math.inf) if floor < seconds else floor
+    if not _HTTP_DATE.fullmatch(value):
+        return None
+    try:
+        date = parsedate_to_datetime(value).replace(tzinfo=UTC)
+        now = time.time()
+        if "-" in value:
+            # RFC 850 two-digit years: choose the most recent matching year
+            # no more than 50 years in the future (RFC 9110 section 5.6.7).
+            current = datetime.fromtimestamp(now, UTC)
+            year = (current.year + 50) // 100 * 100 + date.year % 100
+            if (year, date.month, date.day, date.hour, date.minute, date.second) > (current.year + 50, current.month, current.day, current.hour, current.minute, current.second):
+                year -= 100
+            date = date.replace(year=year)
+        return max(0.0, date.timestamp() - now)
+    except (ValueError, OverflowError):
+        return None
+
+
+def _serper_post(
+    endpoint: str,
+    api_key: str,
+    query: str,
+    max_results: int,
+    *,
+    time_range: SearchTimeRange | None = None,
+    base_url: object | None = None,
+    max_retries: int = 0,
+    retry_budget_seconds: float = 30,
+) -> tuple[dict | None, str | None]:
     """Send a POST request to a Serper endpoint.
+
+    Retries share a scheduling deadline, not a hard synchronous I/O deadline.
+    HTTPX timeouts remain per phase; an active request cannot be cancelled here.
 
     ``query`` is expected to already be normalized via :func:`_clean_query`.
     A non-blank string ``base_url`` overrides ``SERPER_BASE_URL``; other raw
@@ -271,6 +340,11 @@ def _serper_post(endpoint: str, api_key: str, query: str, max_results: int, *, t
         payload["tbs"] = _SERPER_TBS_BY_TIME_RANGE[time_range]
 
     try:
+        if isinstance(max_retries, bool) or not isinstance(max_retries, int) or not 0 <= max_retries <= 3:
+            raise ValueError("max_retries must be an integer between 0 and 3")
+        if isinstance(retry_budget_seconds, bool) or not isinstance(retry_budget_seconds, (int, float)) or not 0 < retry_budget_seconds <= 300 or not math.isfinite(retry_budget_seconds):
+            raise ValueError("retry_budget_seconds must be a finite number greater than 0 and at most 300")
+        deadline = time.monotonic() + retry_budget_seconds
         # Resolve once before transport setup so retries can reuse this endpoint.
         if not isinstance(base_url, str) or not base_url.strip():
             base_url = os.getenv("SERPER_BASE_URL") or ""
@@ -294,8 +368,31 @@ def _serper_post(endpoint: str, api_key: str, query: str, max_results: int, *, t
                 parsed_endpoint.path,
             )
         with httpx.Client(timeout=30) as client:
-            response = client.post(endpoint, headers=headers, json=payload)
-        response.raise_for_status()
+            for attempt in range(max_retries + 1):
+                try:
+                    response = client.post(endpoint, headers=headers, json=payload)
+                    response.raise_for_status()
+                    break
+                except (httpx.ConnectError, httpx.ConnectTimeout, httpx.HTTPStatusError) as exc:
+                    if attempt >= max_retries:
+                        raise
+                    hint = None
+                    if isinstance(exc, httpx.HTTPStatusError):
+                        status = exc.response.status_code
+                        if status in (429, 503):
+                            hint = _retry_after(exc.response)
+                        if status not in (502, 503, 504) and not (status == 429 and hint is not None):
+                            raise
+                    # Equal jitter retains exponential pacing even for Retry-After: 0.
+                    backoff = min(0.5 * 2**attempt, 2.0)
+                    delay = max(random.uniform(backoff / 2, backoff), hint or 0.0)
+                    if delay >= deadline - time.monotonic():
+                        logger.warning("Serper retry time budget exhausted before backoff after %d attempt(s)", attempt + 1)
+                        raise
+                    time.sleep(delay)
+                    if time.monotonic() >= deadline:
+                        logger.warning("Serper retry time budget exhausted after backoff after %d attempt(s)", attempt + 1)
+                        raise
         data = response.json()
         if not isinstance(data, dict):
             logger.error("Serper returned an unexpected payload type: %s", type(data).__name__)
@@ -342,7 +439,7 @@ def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRang
         return _missing_key_error(query, "web_search")
 
     base_url = extra.get("base_url")
-    data, error_json = _serper_post(_SERPER_SEARCH_ENDPOINT, api_key, search_query, max_results, time_range=time_range, base_url=base_url)
+    data, error_json = _serper_post(_SERPER_SEARCH_ENDPOINT, api_key, search_query, max_results, time_range=time_range, base_url=base_url, **_retry_options(config))
     if error_json is not None:
         error = json.loads(error_json)
         error["query"] = query
@@ -399,7 +496,7 @@ def image_search_tool(query: str, max_results: int = 5) -> str:
         return _missing_key_error(query, "image_search")
 
     base_url = extra.get("base_url")
-    data, error_json = _serper_post(_SERPER_IMAGES_ENDPOINT, api_key, query, max_results, base_url=base_url)
+    data, error_json = _serper_post(_SERPER_IMAGES_ENDPOINT, api_key, query, max_results, base_url=base_url, **_retry_options(config))
     if error_json is not None:
         return error_json
 

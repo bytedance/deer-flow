@@ -160,9 +160,9 @@ These span both layers and require reading multiple files to understand:
 - **Long-running MCP** — a durable `McpTaskService` (leased rows, DB as source of truth)
   keeps remote task IDs/polling out of the agent loop.
 - **Version sources** — a release version must match in `backend/pyproject.toml`,
-  `frontend/package.json`, and `deploy/helm/deer-flow/Chart.yaml` (`version` + `appVersion`);
-  pushing a `v*` tag triggers CI that runs `scripts/verify_versions.sh` and blocks all
-  publishing on drift. See [`RELEASING.md`](../RELEASING.md).
+  `frontend/package.json`, and `deploy/helm/deer-flow/Chart.yaml` (`version` + `appVersion`),
+  and `backend/uv.lock` must not be stale; pushing a `v*` tag triggers CI that runs
+  `scripts/verify_versions.sh` (including `uv lock --check`) and blocks all publishing on drift. See [`RELEASING.md`](../RELEASING.md).
 
 ---
 

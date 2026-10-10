@@ -357,9 +357,9 @@ async def test_extension_handle_marks_its_threads_and_runs(gateway, monkeypatch,
 def _manager():
     from app.channels.manager import ChannelManager
     from app.channels.message_bus import MessageBus
-    from app.channels.store import ChannelStore
+    from app.channels.store import JsonChannelStore
 
-    return ChannelManager(bus=MessageBus(), store=ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"))
+    return ChannelManager(bus=MessageBus(), store=JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"))
 
 
 def _client(thread_id="im-thread"):

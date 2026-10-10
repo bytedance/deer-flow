@@ -356,7 +356,8 @@ class OpenSandboxSandbox(Sandbox):
         matches: list[str] = []
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
-        for entry in output.text.splitlines():
+        # Records are LF-delimited; other splitlines() boundaries can be path characters.
+        for entry in output.text.split("\n"):
             # Do NOT strip: trailing whitespace can be part of the filename.
             if not entry or (entry != root and not entry.startswith(root_prefix)) or should_ignore_path_under_root(entry, root):
                 continue
@@ -411,7 +412,8 @@ class OpenSandboxSandbox(Sandbox):
         root_prefix = root if root == "/" else f"{root}/"
         matches: list[GrepMatch] = []
         seen_positions: set[tuple[str, int]] = set()
-        for raw in output.text.splitlines():
+        # Keep non-LF separators inside filenames and matched text intact.
+        for raw in output.text.split("\n"):
             try:
                 file_path, line_number_text, line = raw.split(":", 2)
                 line_number = int(line_number_text)

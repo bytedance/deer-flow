@@ -147,7 +147,7 @@ BOUND_IDENTITY_UNAVAILABLE_MESSAGE = "Channel connection verification is tempora
 # GitHub). This is parity with every other IM channel's dedupe (same
 # mechanism, same TTL), not a channel-specific gap. True idempotency against
 # a late/manual redelivery would require persisting the dedupe key in
-# ``ChannelStore`` instead, which is not implemented here.
+# the database-backed ``ChannelStore`` instead, which is not implemented here.
 # Follow-up buffering for busy fire_and_forget threads (issue #4121 Slice 2).
 # A ConflictError on a channel opted into ChannelRunPolicy.buffer_followups_on_busy
 # buffers the triggering message per-thread instead of only logging it; a
@@ -2452,7 +2452,7 @@ class ChannelManager:
             )
             return
 
-        self.store.set_thread_id(
+        await self.store.set_thread_id(
             msg.channel_name,
             msg.chat_id,
             thread_id,

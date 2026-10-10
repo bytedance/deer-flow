@@ -604,6 +604,10 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
     _validate_agent_storage(startup_config)
     # Warn when login lockouts stay per-process under several Gateway processes.
     _validate_login_throttle_storage(startup_config)
+    # IM chat-to-thread bindings need no companion warning: ``resolve_channel_store``
+    # keeps them in the shared ``channel_thread_bindings`` table for every
+    # sqlite/postgres database, and the gate above already refuses a memory
+    # database -- the only JSON-file case -- under any multi-process signal.
     # Warn when a declared multi-instance deployment shares DeerMem's SQLite
     # retrieval index across instances through the memory volume.
     _validate_memory_retrieval_index(startup_config)

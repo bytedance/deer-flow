@@ -833,6 +833,29 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **channels:** IM conversations now keep their DeerFlow thread across Gateway
+  replicas. The `ChannelManager` kept its chat-to-thread bindings
+  (`channel_name:chat_id[:topic_id]` → `thread_id`) in a per-process JSON file,
+  `channels/store.json`, loaded once and rewritten whole on every change, so
+  with several Gateway instances a binding created on one was invisible to the
+  others — the next message for the same chat landing elsewhere opened a second
+  thread — and concurrent writers clobbered each other's file. The bindings now
+  live in the shared `channel_thread_bindings` table (migration
+  `0038_channel_thread_bindings`) whenever `database.backend` is `sqlite` or
+  `postgres`; `memory` keeps the JSON file. On the first start after upgrading,
+  an existing `store.json` is imported once into an empty table (`INSERT … ON
+  CONFLICT DO NOTHING`, so two replicas importing at the same time cannot
+  duplicate a binding) and renamed `store.json.migrated`; a populated table
+  leaves the file untouched; entries whose key components exceed the table's
+  column widths are skipped and counted instead of failing the whole import.
+  The store API is async so the database never blocks the Gateway loop;
+  Feishu's synchronous lark callback bridges its lookups to that loop with a
+  short bounded wait, and a lookup the database does not answer in time is
+  retried on the Gateway loop (up to 30 s, then the message is dropped with a
+  warning) rather than routed as a missing mapping onto a new thread; such
+  deferred messages hold a slot of the bounded inbound queue
+  (`channels.inbound_queue_maxsize`), so a database outage cannot grow the
+  backlog, and one that cannot be admitted is dropped with a warning. ([#6558])
 - **runtime:** The JSONL event store no longer loses events after a torn final
   line. A write interrupted mid-record left the file without a trailing newline,
   so the next append was glued onto the partial record and both became one
@@ -4103,6 +4126,17 @@ This release closes that milestone with **439 merged pull requests**.
   value that yields no valid ID denies every guild and logs an error. Unset,
   `null`, `[]`, or a blank string still allows all guilds; `allowed_channels`
   gains the same scalar handling. ([#6338])
+- **release:** The `v*` release gate now rejects a stale `backend/uv.lock`.
+  `scripts/verify_versions.sh` compared only `Chart.yaml`, `pyproject.toml` and
+  `package.json`, so bumping those three by hand passed the gate even though the
+  lock still recorded the previous root package version. The backend image
+  installs with `uv sync --locked`, so on a tag the chart and the frontend and
+  provisioner images published while the backend image failed to build, and the
+  immutable chart version meant the fix needed a new version number. The script
+  now also runs `uv lock --check` in `backend/` (uv owns the PEP 440
+  normalization, so `2.1.0-rc0` still matches `2.1.0rc0`) and fails when `uv` is
+  missing; `verify-versions.yml` installs the uv version the backend image pins.
+  ([#6588])
 
 ### Security
 
@@ -4327,6 +4361,15 @@ This release closes that milestone with **439 merged pull requests**.
   always available, so skill tool policy could not remove it. Local targets
   are now confined to the configured skills root and the caller's own user
   directory; `skill://` and `inline://` targets are unchanged. ([#6580])
+- **sandbox:** `glob` and `grep` on the BoxLite, OpenSandbox and Tenki providers frame
+  their records with `str.splitlines()`, which also ends a line at a bare carriage
+  return, form feed, vertical tab, file/group/record separator, next-line, and
+  U+2028/U+2029 — all legal inside Linux filenames and inside matched text. A file
+  named `notes\x0bdraft.txt` was therefore reported as two unrelated paths (one of
+  them nonexistent), and a matched line such as `const s = "a\u2028b";` came back
+  truncated at that character. These providers now split on `"
+"` only, as the shared parser already documents and as
+  LocalSandbox, the AIO backend and E2B already do. ([#6595])
 
 ### Documentation
 
@@ -4583,6 +4626,14 @@ This release closes that milestone with **439 merged pull requests**.
   coverage stays excluded. A new test pins the concurrent startup and the
   wait-for-every-shard failure reporting with offline worker doubles.
   ([#6324])
+- **integrations:** Lark/Feishu CLI output is decoded as UTF-8 instead of with
+  the host locale. `lark-cli` (a native binary shipped through the
+  `@larksuite/cli` npm package) and npm both write UTF-8 to a pipe, but every
+  capture in `lark_cli.py` passed `text=True` without an `encoding`, so a host
+  whose ANSI code page is not UTF-8 (cp936, cp1252) silently mangled non-ASCII
+  fields — `auth status --json` returned a garbled `userName`, and an
+  undecodable byte could kill the reader thread and leave `stdout` as `None`,
+  reporting a healthy CLI as unavailable. ([#6590])
 
 ## [2.1.0] — 2026-09-24
 
@@ -9441,6 +9492,10 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6537]: https://github.com/bytedance/deer-flow/pull/6537
 [#6543]: https://github.com/bytedance/deer-flow/pull/6543
 [#6556]: https://github.com/bytedance/deer-flow/pull/6556
+[#6558]: https://github.com/bytedance/deer-flow/pull/6558
 [#6580]: https://github.com/bytedance/deer-flow/pull/6580
 [#6582]: https://github.com/bytedance/deer-flow/pull/6582
 [#6587]: https://github.com/bytedance/deer-flow/pull/6587
+[#6588]: https://github.com/bytedance/deer-flow/pull/6588
+[#6590]: https://github.com/bytedance/deer-flow/pull/6590
+[#6595]: https://github.com/bytedance/deer-flow/pull/6595
