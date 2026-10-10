@@ -7,9 +7,9 @@ preserving valid objects in order. Missing or null `results` and an empty list k
 "No results found".
 
 `web_fetch` coerces non-string `content` (or its `snippet` fallback) to text before
-truncating to the snippet limit, and renders a missing or non-string title as empty, so
-a well-formed result object whose leaf fields are not strings still returns text
-rather than raising.
+truncating to the snippet limit, and renders a missing or falsy title as empty, so a
+well-formed result object whose leaf fields are not strings still returns text rather
+than raising.
 
 `web_search` returns the structured `{"error": ..., "query": ...}` response; `web_fetch`
 returns the `Error: ...` string. Log the malformed container's type, or that no usable
