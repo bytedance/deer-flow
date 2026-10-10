@@ -22,7 +22,7 @@ from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 
 REVISION = "0038_channel_thread_bindings"
 PREVIOUS = "0037_project_document_summaries"
-CURRENT_HEAD = "0039_user_disabled"
+CURRENT_HEAD = "0040_webhook_claim_tokens"
 TABLE = "channel_thread_bindings"
 COLUMNS = {"key", "channel_name", "chat_id", "topic_id", "thread_id", "user_id", "created_at", "updated_at"}
 INDEX = "ix_channel_thread_bindings_channel_chat"

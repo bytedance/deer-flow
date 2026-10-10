@@ -872,6 +872,10 @@ DeerFlow supports receiving tasks from messaging apps. Channels auto-start when 
 
 Cancelling a channel restart discards its pending configuration reload, preserving newer runtime settings applied afterward.
 
+Within the inbound dedupe window, late failure or cancellation cleanup cannot erase a newer admission of the same message. Expired or capacity-evicted messages may still be re-admitted; this is a bounded retry window, not permanent exactly-once delivery.
+
+For shared PostgreSQL dedupe, upgrade every Gateway replica before relying on this isolation; older replicas still release records by message key.
+
 DeerFlow can also expose user-owned IM channel connections in the workspace UI. When `channel_connections` is enabled, logged-in users can bind Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat, WeCom, QQ, or Buzz from the sidebar / Settings > Channels. It reuses the existing outbound `channels.*` transports, so no public IP or provider callback URL is required. Incoming IM messages then run under the connected DeerFlow user account. See [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md) for setup and security notes.
 
 | Channel | Transport | Difficulty |
