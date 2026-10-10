@@ -163,8 +163,8 @@ def validate_path_traversal(path: Path, base: Path) -> None:
         raise PathTraversalError("Path traversal detected") from None
 
 
-def validate_upload_destination(base_dir: Path, filename: str) -> Path:
-    """Validate an upload destination without mutating an existing file."""
+def validate_upload_destination(base_dir: Path, filename: str, *, exclusive: bool = False) -> Path:
+    """Validate a destination; exclusive creation treats regular hardlinks as collisions."""
     safe_name = normalize_filename(filename)
     dest = base_dir / safe_name
 
@@ -175,7 +175,7 @@ def validate_upload_destination(base_dir: Path, filename: str) -> Path:
 
     if st is not None and not stat.S_ISREG(st.st_mode):
         raise UnsafeUploadPathError(f"Upload destination is not a regular file: {safe_name}")
-    if st is not None and st.st_nlink > 1:
+    if not exclusive and st is not None and st.st_nlink > 1:
         raise UnsafeUploadPathError(f"Upload destination has multiple links: {safe_name}")
 
     validate_path_traversal(dest, base_dir)
@@ -248,7 +248,7 @@ def cleanup_stale_upload_staging_files(base_dir: Path | str | None = None, *, mi
     return removed
 
 
-def open_upload_file_no_symlink(base_dir: Path, filename: str) -> tuple[Path, object]:
+def open_upload_file_no_symlink(base_dir: Path, filename: str, *, exclusive: bool = False) -> tuple[Path, object]:
     """Open an upload destination for safe streaming writes.
 
     Upload directories may be mounted into local sandboxes. A sandbox process can
@@ -259,9 +259,13 @@ def open_upload_file_no_symlink(base_dir: Path, filename: str) -> tuple[Path, ob
     and ``fstat`` validation after ``open()`` to reduce the TOCTOU window; this does
     not eliminate all races but makes exploitation significantly harder. Path-traversal
     validation prevents escapes from *base_dir* in both cases.
+
+    ``exclusive=True`` atomically claims a new filename. An existing regular
+    file raises ``FileExistsError`` without truncation so the caller can retry
+    under another name. The default retains replacement semantics.
     """
     safe_name = normalize_filename(filename)
-    dest = validate_upload_destination(base_dir, safe_name)
+    dest = validate_upload_destination(base_dir, safe_name, exclusive=exclusive)
     try:
         st = os.lstat(dest)
     except FileNotFoundError:
@@ -272,6 +276,8 @@ def open_upload_file_no_symlink(base_dir: Path, filename: str) -> tuple[Path, ob
     if has_nofollow:
         # POSIX: O_NOFOLLOW makes open() fail with ELOOP if dest is a symlink.
         flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW
+        if exclusive:
+            flags |= os.O_EXCL
         if hasattr(os, "O_NONBLOCK"):
             flags |= os.O_NONBLOCK
 
@@ -299,10 +305,12 @@ def open_upload_file_no_symlink(base_dir: Path, filename: str) -> tuple[Path, ob
     # Note: a narrow race window remains between the pre-open lstat and open(); the
     # path-traversal check mitigates escapes from base_dir but cannot prevent an
     # attacker who can atomically replace dest with a symlink after the check.
-    if st is not None and st.st_nlink > 1:
+    if not exclusive and st is not None and st.st_nlink > 1:
         raise UnsafeUploadPathError(f"Upload destination has multiple links: {safe_name}")
 
     flags = os.O_WRONLY | os.O_CREAT
+    if exclusive:
+        flags |= os.O_EXCL
     if hasattr(os, "O_BINARY"):
         flags |= os.O_BINARY
 
@@ -313,7 +321,7 @@ def open_upload_file_no_symlink(base_dir: Path, filename: str) -> tuple[Path, ob
 
     if pre_open_st is not None and not stat.S_ISREG(pre_open_st.st_mode):
         raise UnsafeUploadPathError(f"Upload destination is not a regular file: {safe_name}")
-    if pre_open_st is not None and pre_open_st.st_nlink > 1:
+    if not exclusive and pre_open_st is not None and pre_open_st.st_nlink > 1:
         raise UnsafeUploadPathError(f"Upload destination has multiple links: {safe_name}")
 
     try:
@@ -336,9 +344,9 @@ def open_upload_file_no_symlink(base_dir: Path, filename: str) -> tuple[Path, ob
     return dest, fh
 
 
-def write_upload_file_no_symlink(base_dir: Path, filename: str, data: bytes) -> Path:
+def write_upload_file_no_symlink(base_dir: Path, filename: str, data: bytes, *, exclusive: bool = False) -> Path:
     """Write upload bytes without following a pre-existing destination symlink."""
-    dest, fh = open_upload_file_no_symlink(base_dir, filename)
+    dest, fh = open_upload_file_no_symlink(base_dir, filename, exclusive=exclusive)
     with fh:
         fh.write(data)
     return dest

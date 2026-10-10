@@ -177,7 +177,10 @@ export function stopLines(
   const secondary: string[] = [];
   let primary: string;
   if (condition) {
-    primary = fill(st.stop.pausesItself, { condition });
+    // The copy continues after the condition, so drop its own closing stop.
+    primary = fill(st.stop.pausesItself, {
+      condition: condition.replace(/[\s.。;；!！]+$/u, ""),
+    });
     const cap = capLine();
     if (cap) secondary.push(cap);
   } else if (max != null || end) {

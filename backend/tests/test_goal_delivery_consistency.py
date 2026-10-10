@@ -44,6 +44,7 @@ async def _run_goal_delivery(
     checkpoint_mode="full",
     after_terminal_completion=None,
     scheduled=False,
+    goal_without_created_at=False,
 ):
     """Keep graphs, checkpoints, output scanning and delivery verification real.
 
@@ -144,7 +145,7 @@ async def _run_goal_delivery(
             updates["artifacts"] = command.update.get("artifacts", [])
         if stop_reason is not None:
             context["stop_reason"] = stop_reason
-        updates["messages"] = [*messages, AIMessage(content="The report is complete and ready for delivery.")]
+        updates["messages"] = [*messages, AIMessage(id=f"reply-{turn}", content="The report is complete and ready for delivery.")]
         return updates
 
     graph = StateGraph(get_thread_state_schema(checkpoint_mode))
@@ -154,6 +155,9 @@ async def _run_goal_delivery(
     compiled = graph.compile(checkpointer=checkpointer)
     accessor = CheckpointStateAccessor.bind(compiled, checkpointer, mode=checkpoint_mode)
     goal = build_goal_state("Create and present report.md.", max_continuations=2)
+    if goal_without_created_at:
+        # POST /state and run input accept an active goal build_goal_state did not write.
+        del goal["created_at"]
     if not scheduled:
         await accessor.aupdate(
             {"configurable": {"thread_id": thread_id}},
@@ -184,6 +188,7 @@ async def _run_goal_delivery(
         durable_run=await run_store.get(record.run_id),
         original_goal=goal,
         goal=await read_thread_goal(checkpointer, thread_id),
+        goal_outcome=(await accessor.aget({"configurable": {"thread_id": thread_id}})).values.get("goal_outcome"),
         model_calls=model_calls,
         turns=turns,
         delivery=[event["content"] for event in events if event["event_type"] == "run.delivery"],
@@ -209,6 +214,7 @@ async def test_delivery_failure_preserves_satisfied_goal_without_continuing(tmp_
     assert result.goal["objective"] == result.original_goal["objective"]
     assert result.goal["continuation_count"] == 0
     assert all(call.args[2].get("goal") is not None for call in result.bridge.publish.call_args_list if call.args[1] == "values" and "goal" in call.args[2])
+    assert result.goal_outcome is None
 
 
 @pytest.mark.asyncio
@@ -221,6 +227,22 @@ async def test_successful_delivery_clears_satisfied_goal(tmp_path, monkeypatch, 
     assert result.record.status == RunStatus.success
     assert result.durable_run["status"] == "success"
     assert result.goal is None
+    outcome = dict(result.goal_outcome)
+    assert outcome.pop("achieved_at") > result.original_goal["created_at"]
+    assert outcome == {
+        "status": "achieved",
+        "objective": result.original_goal["objective"],
+        "goal_created_at": result.original_goal["created_at"],
+        "continuation_count": 0,
+        "max_continuations": 2,
+        "reason": "Fixed evaluator response for the worker regression.",
+        "relied_on_assumption": False,
+        "reply_message_id": "reply-1",
+    }
+    # The clear's own values frame carries the record before the stream ends.
+    last_values = [call.args[2] for call in result.bridge.publish.call_args_list if call.args[1] == "values"][-1]
+    assert last_values["goal_outcome"] == result.goal_outcome
+    assert "goal" not in last_values
     assert len(result.goals_at_receipt) == 1
     assert result.goals_at_receipt[0] is not None
     assert result.goals_at_receipt[0]["objective"] == result.original_goal["objective"]
@@ -244,6 +266,7 @@ async def test_goal_completion_waits_for_durable_delivery_receipt(tmp_path, monk
     assert result.delivery == []
     assert result.goal is not None
     assert result.goal["objective"] == result.original_goal["objective"]
+    assert result.goal_outcome is None
 
 
 @pytest.mark.asyncio
@@ -257,6 +280,22 @@ async def test_unmet_goal_can_still_continue_and_deliver(tmp_path, monkeypatch):
     assert result.delivery[0]["satisfied"] is True
     assert result.goal is None
     assert result.goals_at_receipt[0]["continuation_count"] == 1
+    assert result.goal_outcome["continuation_count"] == 1
+    assert result.goal_outcome["reply_message_id"] == "reply-2"
+    # The continuation moved updated_at; the record still names the goal instance.
+    assert result.goals_at_receipt[0]["updated_at"] != result.original_goal["created_at"]
+    assert result.goal_outcome["goal_created_at"] == result.original_goal["created_at"]
+
+
+@pytest.mark.asyncio
+async def test_satisfied_goal_without_created_at_is_still_cleared_and_recorded(tmp_path, monkeypatch):
+    result = await _run_goal_delivery(tmp_path, monkeypatch, present_on_turn=1, goal_without_created_at=True)
+
+    assert result.record.status == RunStatus.success
+    assert result.goal is None
+    assert result.goal_outcome["objective"] == result.original_goal["objective"]
+    assert result.goal_outcome["goal_created_at"] == ""
+    assert result.goal_outcome["reply_message_id"] == "reply-1"
 
 
 @pytest.mark.asyncio
@@ -271,6 +310,7 @@ async def test_cancellation_during_evaluation_preserves_goal(tmp_path, monkeypat
     assert result.record.status == RunStatus.interrupted
     assert result.durable_run["status"] == "interrupted"
     assert result.goal == result.original_goal
+    assert result.goal_outcome is None
 
 
 @pytest.mark.asyncio
@@ -283,6 +323,7 @@ async def test_scheduled_goal_cleanup_and_atomic_verdict_follow_delivery_finaliz
     assert result.durable_run["goal_verdict"]["satisfied"] is True
     assert result.durable_run["goal_verdict"]["relied_on_assumption"] is False
     assert result.goals_at_receipt[0]["objective"] == "Create and present report.md."
+    assert result.goal_outcome is None
 
 
 @pytest.mark.asyncio
@@ -298,6 +339,7 @@ async def test_new_goal_during_delivery_receipt_is_not_cleared(tmp_path, monkeyp
     assert result.turns == [1]
     assert result.record.status == RunStatus.success
     assert result.goal == replacement
+    assert result.goal_outcome is None
 
 
 @pytest.mark.asyncio
@@ -311,6 +353,7 @@ async def test_ownership_loss_during_delivery_receipt_preserves_goal(tmp_path, m
     assert result.turns == [1]
     assert result.record.ownership_lost is True
     assert result.goal == result.original_goal
+    assert result.goal_outcome is None
 
 
 @pytest.mark.asyncio
@@ -325,6 +368,7 @@ async def test_durable_cancellation_during_delivery_receipt_preserves_goal(tmp_p
     assert result.record.status == RunStatus.interrupted
     assert result.durable_run["status"] == "interrupted"
     assert result.goal == result.original_goal
+    assert result.goal_outcome is None
 
 
 @pytest.mark.asyncio
@@ -349,6 +393,7 @@ async def test_changed_goal_evaluation_during_delivery_receipt_is_preserved(tmp_
     assert result.record.status == RunStatus.success
     assert len(changed_goals) == 1
     assert result.goal == changed_goals[0]
+    assert result.goal_outcome is None
 
 
 @pytest.mark.asyncio
@@ -368,6 +413,7 @@ async def test_new_user_message_during_delivery_receipt_preserves_goal(tmp_path,
     assert result.turns == [1]
     assert result.record.status == RunStatus.success
     assert result.goal == result.original_goal
+    assert result.goal_outcome is None
 
 
 @pytest.mark.asyncio
@@ -381,6 +427,7 @@ async def test_user_clear_during_delivery_receipt_is_not_restored(tmp_path, monk
     assert result.turns == [1]
     assert result.record.status == RunStatus.error
     assert result.goal is None
+    assert result.goal_outcome is None
 
 
 @pytest.mark.asyncio
@@ -394,6 +441,7 @@ async def test_unconfirmed_terminal_status_preserves_goal(tmp_path, monkeypatch,
     assert result.failed_terminal_writes
     assert result.durable_run["status"] == "running"
     assert result.goal == result.original_goal
+    assert result.goal_outcome is None
 
 
 @pytest.mark.asyncio
@@ -406,6 +454,7 @@ async def test_recovered_terminal_status_can_clear_satisfied_goal(tmp_path, monk
     assert result.delivery[0]["satisfied"] is True
     assert result.durable_run["status"] == "success"
     assert result.goal is None
+    assert result.goal_outcome["status"] == "achieved"
 
 
 @pytest.mark.asyncio
@@ -418,9 +467,11 @@ async def test_delta_checkpoint_goal_follows_delivery_outcome(tmp_path, monkeypa
     if present_on_turn is None:
         assert result.record.status == RunStatus.error
         assert result.goal == result.original_goal
+        assert result.goal_outcome is None
     else:
         assert result.record.status == RunStatus.success
         assert result.goal is None
+        assert result.goal_outcome["reply_message_id"] == "reply-1"
 
 
 @pytest.mark.asyncio
@@ -437,6 +488,7 @@ async def test_peer_admitted_before_goal_clear_preserves_goal(tmp_path, monkeypa
     assert result.record.status == RunStatus.success
     assert result.durable_run["status"] == "success"
     assert result.goal == result.original_goal
+    assert result.goal_outcome is None
 
 
 @pytest.mark.asyncio

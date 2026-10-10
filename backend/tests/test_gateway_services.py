@@ -225,6 +225,59 @@ def test_external_image_runtime_state_is_rejected(boundary, channel):
     assert error.value.status_code == 400
 
 
+@pytest.mark.parametrize("boundary", ["run", "state"])
+def test_external_goal_outcome_is_rejected(boundary):
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input, strip_server_owned_state_metadata
+
+    transform = normalize_input if boundary == "run" else strip_server_owned_state_metadata
+    with pytest.raises(HTTPException) as error:
+        transform({"goal_outcome": {"status": "achieved", "objective": "forged"}})
+
+    assert error.value.status_code == 400
+    assert error.value.detail == "External goal_outcome state is not allowed"
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_external_run_goal_clears_the_previous_goal_outcome(mode):
+    """A caller goal replaces the goal, so the record of the earlier met goal must go."""
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import END, START, StateGraph
+
+    from app.gateway.services import normalize_input
+    from deerflow.agents.thread_state import get_thread_state_schema
+    from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
+    from deerflow.runtime.goal import build_goal_outcome, build_goal_state, write_thread_goal
+
+    checkpointer = InMemorySaver()
+    builder = StateGraph(get_thread_state_schema(mode))
+    builder.add_node("agent", lambda state: {})
+    builder.add_edge(START, "agent")
+    builder.add_edge("agent", END)
+    graph = builder.compile(checkpointer=checkpointer)
+    accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode=mode)
+    config = {"configurable": {"thread_id": "run-goal-thread"}}
+    record = build_goal_outcome(build_goal_state("Ship it"), {"satisfied": True, "blocker": "none", "reason": "Shipped."}, reply_message_id=None)
+    next_goal = build_goal_state("Ship the follow-up")
+
+    async def scenario():
+        await graph.ainvoke({"messages": [{"role": "user", "content": "Ship it"}]}, config)
+        await write_thread_goal(checkpointer, "run-goal-thread", None, outcome=record)
+        before = (await accessor.aget(config)).values
+        await graph.ainvoke(normalize_input({"messages": [{"role": "user", "content": "Now the follow-up"}], "goal": next_goal}), config)
+        return before, (await accessor.aget(config)).values
+
+    before, after = asyncio.run(scenario())
+
+    assert before["goal_outcome"] == record
+    assert after["goal"] == next_goal
+    assert after["goal_outcome"] is None
+    # merge_goal keeps the goal on None; trusted internal input is not rewritten.
+    assert "goal_outcome" not in normalize_input({"goal": None})
+    assert "goal_outcome" not in normalize_input({"goal": next_goal}, trusted_internal=True)
+
+
 def test_trusted_internal_run_preserves_image_runtime_state():
     from app.gateway.services import normalize_input
 
