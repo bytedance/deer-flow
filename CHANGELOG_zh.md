@@ -161,6 +161,17 @@
 
 #### 智能体与运行时
 
+- **目标：** 对话中达成的目标现在会记录在线程上，历史接口的最新一条也会保留目标状态。
+  评估器判定目标达成时，清除目标的同一个 checkpoint 会写入新的 `goal_outcome` 通道：
+  目标原文、设置和达成的时间、已用和允许的续跑次数、评估理由、`relied_on_assumption`
+  以及判定所依据回复的 id。之后任何一次目标写入都会删除它，定时任务的目标不写这条
+  记录。客户端无法写入：`POST /state` 或非内部的运行输入携带 `goal_outcome` 时返回
+  400。`POST /api/threads/{thread_id}/history` 的最新一条现在带上激活的 `goal` 和已
+  达成的 `goal_outcome`，停下的目标不会再在运行结束或刷新页面后从 Web UI 消失；其余
+  条目不变。从较早一轮分支出的对话不会再带回那一轮没有的目标或达成记录。
+  `contracts/thread_goal_contract.json` 固定了停止代码、检查失败代码、达成记录的
+  字段、历史头字段和主机自写的原因文本。([#6556])
+
 - **网关：** 服务端替你创建的对话无需刷新即可被发现。由定时任务、IM 渠道、GitHub
   智能体、扩展或 MCP 通知发起的运行，现在带有服务端维护的
   `metadata.deerflow_origin`（`{kind, provider?, namespace?}`，由新增的
@@ -692,8 +703,31 @@
   旧的已选技能气泡被移除，旧草稿中的技能选择会恢复为内联引用，手动输入的
   旧式斜杠文本仍按普通消息提交。([#6154])
 
+- **前端：** 输入框上方的目标栏现在说明激活的 `/goal` 在做什么、为什么停下。运行推进
+  目标时显示“进行中”；自动续跑停下后显示“已停止”“等你回复”“等待中”“未能检查目标”
+  或“已暂停”，第二行写明原因和下一步，不再一直显示“续跑中 8/8”或看起来像刚设置的
+  目标；“详情”里有完整目标和评估器原话。目标达成后显示“目标已达成”（以及自动续跑
+  了几次），直到对话继续往下走，刷新后也一样；第一次运行就达成的目标不会再残留在
+  目标栏里。设置了目标时，最后一轮的编辑铅笔改为灰显并附提示，而不是直接隐藏；消息
+  工具栏在键盘聚焦时也会显示。因还有运行未结束而被拒绝的 `/goal` 会保留草稿并说明
+  原因。([#6556])
+
 ### 修复
 
+- **运行时：** JSONL 事件存储在末行写坏后不再丢失事件。写入中途被打断会让文件缺少结尾换行，下一次追加会接在残缺记录后面，
+  两者合成一行无法解析；被截断的多字节字符还会让整个文件解码失败，所有完好记录都读不出来，序号恢复也随之失效。现在追加前
+  若文件末尾不是换行会先补一个分隔符，读取时逐个物理行单独解码、只跳过损坏的那一行，批量追加失败时仍会截回原始大小。
+  ([#6520])
+- **渠道：** 在启用 Gateway 认证（默认配置）时，从 IM 渠道发送的 `/goal <目标>` 和
+  `/goal clear` 恢复正常。此前这两个写请求只携带内部认证令牌，而 Gateway 的 CSRF 检查不会
+  豁免内部认证，因此返回 403，渠道回复“Failed to set goal.”或“Failed to clear goal.”。
+  现在它们会发送与渠道 SDK 客户端相同的 CSRF Cookie 和请求头。`/goal` 状态查询不受影响。([#6537])
+- **认证：** 在 Docker 部署中，某个客户端输错 5 次密码不会再让所有用户 5 分钟内无法登录。登录失败按客户端 IP 计数，而 Gateway
+  只在 TCP peer 属于 `AUTH_TRUSTED_PROXIES` 时信任 `X-Real-IP`，compose 文件却从未设置该变量；所有浏览器请求都经由 `nginx`
+  容器到达 Gateway，因此所有登录共用 nginx 的地址和同一个锁定。现在 `AUTH_TRUSTED_PROXIES` 也接受主机名，在事件循环外解析并
+  缓存 10 秒（包括解析失败），两个 compose 文件默认将其设为内置的 `nginx` 服务。nginx 在每个转发到 Gateway 的路由上都用
+  `$remote_addr` 覆盖 `X-Real-IP`，客户端无法自选地址。`.env` 中设置的 `AUTH_TRUSTED_PROXIES` 仍然优先，`make docker-start` 也是如此：它现在会像代理变量一样导出该值供 Compose 插值。位于其他反向代理之后的
+  部署还需要为该代理配置 nginx 的 `real_ip` 模块，详见 `.env.example`。([#6519])
 - **调度器：** 在一次性任务的执行时间之前点击“立即运行一次”，不会再取消原定的执行。此前这次试运行被当作任务本身的
   执行：任务被标记为 `running`，试运行结束后又按其结果把任务终结为 `completed`、`failed` 或 `cancelled`。轮询器只认领
   `enabled` 的任务，因此到了 `run_at` 也不会执行，尽管 `next_run_at` 仍显示该时间。现在在执行时间之前启动的试运行
@@ -3136,6 +3170,14 @@
   条目在警告中丢弃，而配置了却得不到任何有效 ID 的值会拒绝所有公会并记录
   错误；未设置、`null`、`[]` 或空白字符串仍允许所有公会。
   `allowed_channels` 获得同样的标量处理。([#6338])
+- **发布：** `v*` 发布门禁现在会拦下过期的 `backend/uv.lock`。此前
+  `scripts/verify_versions.sh` 只比较 `Chart.yaml`、`pyproject.toml` 和
+  `package.json`，手动改这三处就能通过门禁，而 lock 里记录的根包版本仍是旧版本。
+  backend 镜像用 `uv sync --locked` 安装依赖，因此打标签后 chart 以及 frontend、
+  provisioner 镜像都已发布，backend 镜像却构建失败；chart 版本不可覆盖，修复只能
+  换一个新版本号。现在该脚本还会在 `backend/` 中运行 `uv lock --check`（PEP 440
+  规范化交给 uv，`2.1.0-rc0` 仍与 `2.1.0rc0` 匹配），缺少 `uv` 时直接失败；
+  `verify-versions.yml` 会安装与 backend 镜像相同的固定 uv 版本。([#6588])
 
 ### 安全
 
@@ -3261,6 +3303,13 @@
   脱敏；缓存负载本身即为干净副本，消息通过 `model_copy` 重建、绝不改动原件。
   开关默认关闭，未设置时行为不变。([#5577])
 
+- **目标：** 开启 `pii_redaction` 后，`/goal` 评估器的输入现在也会被脱敏。评估器直接
+  调用模型，不经过 `PiiRedactionMiddleware`，因此此前会发送原始的用户消息、工具参数、
+  工具结果和 Human Input Card 回答。现在先对评估器读取的完整消息脱敏，避免证据截断把
+  标识符切成两半，再对拼好的输入（包括目标原文）脱敏一次；线程状态保留原文。脱敏出错
+  时这次检查按失败处理（`evaluator_failed`），不会发送原文。关闭脱敏时输入逐字节不变。
+  ([#6556])
+
 - **授权：** 技能授权现在在装配与激活两个环节强制执行，`skills: {allow:
   ["data-analysis"]}` 这类 RBAC 策略因此能真正拒绝某个技能——Phase 2A
   （#4439）覆盖的是 Gateway 路由，技能此前仍只受 agent 配置白名单约束。
@@ -3270,6 +3319,13 @@
   提示，provider 错误遵循既有的 fail-closed/fail-open 配置。被拒绝的
   `read_file` 读取 `SKILL.md` 时会打上 `skill_context_denied` 标记，持久上
   下文、技能 allowed-tools 与自主密钥绑定都不会激活被拒绝的技能。([#4541])
+
+- **目标：** 开启 `pii_redaction` 后，隐藏的 `/goal` 续跑消息现在也会被脱敏。
+  `PiiRedactionMiddleware` 不处理这条框架消息，因此每次续跑都会把目标原文以及评估器的
+  理由和证据摘要原样发给 agent 的模型，并留在线程里供之后的模型调用读取。现在先对这些
+  内容脱敏，再拼成消息；线程保存脱敏后的消息（界面不显示），目标状态仍保留原文。
+  脱敏出错时这次检查按失败处理（`evaluator_failed`），不计入续跑次数，也不会发送原文。
+  关闭脱敏时消息逐字节不变。([#6556])
 
 - **Lark：** 可选的 Lark broker 子命令拒绝列表
   （`DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS`）不再能被以独立 token 传入的选项
@@ -3296,6 +3352,35 @@
   安装器的可执行代码策略（warn 即拒绝安装）也适用于包内任意位置的这类
   文件。此前带一个杂散字节的 `hooks/install.jse` 既得不到静态分析，也
   不经过可执行代码审查。([#6321])
+
+- **脚本：** 本地 `make dev` / `make start` 改为绑定回环地址。此前 `serve.sh`
+  和 `backend/Makefile` 以 `--host 0.0.0.0` 启动 Gateway，`nginx.local.conf`
+  监听所有网卡，Next.js 在 Windows 之外也沿用监听所有网卡的默认值，因此在局域网
+  或 VPN 中，其他机器可以访问 `2026`、`8001` 和 `3000` 端口，包括首个管理员创建
+  之前的 `/setup`。Docker 部署栈和 README 的部署模型原本就只监听回环地址。现在
+  Gateway 和前端绑定 `127.0.0.1`，nginx 监听 `127.0.0.1` 和 `[::1]`，除非设置了
+  `BIND_HOST`（与 Docker 部署栈使用同一个变量）。`BIND_HOST` 无效时，会在停止任何
+  正在运行的服务之前报错退出。([#6587])
+
+  **行为变更：** 需要从其他设备访问本地部署时，请设置 `BIND_HOST`（例如在 `.env`
+  中设置 `BIND_HOST=0.0.0.0`）并使用 `2026` 入口；Gateway 和前端端口不再对其他
+  机器开放。
+
+- **技能：** `review_skill_package` 不再能读取其他用户的技能。此前本地路径
+  目标只要位于 Gateway 工作目录或 `/tmp` 之下即被放行，而所有文档化的部署都把
+  `DEER_FLOW_HOME` 放在工作目录之下，因此知道他人用户 id 的用户可以传入
+  `.deer-flow/users/<id>/skills/custom/<skill>`，在模型响应中拿到该技能的
+  `SKILL.md` 与 `references/` 内容。该工具始终可用，技能工具策略也无法移除它。
+  现在本地目标仅限于配置的技能根目录和调用者自己的用户目录；`skill://` 与
+  `inline://` 目标不受影响。([#6580])
+- **沙箱：** BoxLite、OpenSandbox、Tenki 三个提供者的 `glob` 与 `grep` 用
+  `str.splitlines()` 切分记录，而该函数还会在裸回车、换页符、垂直制表符、
+  文件/组分/记录分隔符、下一行符以及 U+2028/U+2029 处断行——这些字符在 Linux
+  文件名与被匹配文本中都是合法内容。因此名为 `notes\x0bdraft.txt` 的文件会被
+  报告成两条互不相关的路径（其中一条并不存在），而形如 `const s = "a\u2028b";`
+  的匹配行会在该字符处被截断。现在这三个提供者只按 `"
+"` 切分，与共享解析器
+  既有的约定以及 LocalSandbox、AIO 后端、E2B 的行为一致。([#6595])
 
 ### 文档
 
@@ -3404,6 +3489,13 @@
   以及 agent 循环、记忆、上下文压缩和鉴权相关的变更；既有贡献点无法表达
   时，为 `extension-api` 增加通用钩子并以扩展实现，而不是把业务逻辑硬编码
   进核心。([#6178])
+
+- **文档：** 让运行事件与扩展示例文档重新与代码一致。
+  `backend/docs/RUN_EVENT_STREAM.md` 现在列出目录与契约中早已存在的
+  `summarize` 中间件标签并说明 `middleware:summarize` 事件，并新增测试将文档中
+  的标签列表固定为 `MIDDLEWARE_EVENT_TAGS`；`backend/docs/summarization.md`
+  补充该事件缺失的三个 `changes` 字段。扩展示例不再声称覆盖全部贡献类型：
+  它演示八种中的五种，README 为其余类型指向观察者指南和 bookmarks 插件示例。([#6582])
 
 ### 内部改进
 
@@ -3515,6 +3607,13 @@
   `make test-shard` 与 CI 的分片方式不变，live 与阻塞 I/O 测试仍被排除。
   新增测试用离线 worker 替身固定了分片并行启动与“等待全部分片再报失败”
   的行为。([#6324])
+- **集成：** Lark/Feishu CLI 的输出改为按 UTF-8 解码，不再使用宿主 locale。
+  `lark-cli`（通过 `@larksuite/cli` npm 包分发的原生二进制）与 npm 都会向管道
+  写入 UTF-8，但 `lark_cli.py` 中的每一处捕获都只传了 `text=True` 而未指定
+  `encoding`，因此在 ANSI 代码页非 UTF-8 的宿主上（cp936、cp1252）非 ASCII
+  字段会被静默破坏——`auth status --json` 返回的 `userName` 变成乱码，而无法
+  解码的字节还可能让读取线程异常退出、使 `stdout` 变成 `None`，从而把一个正常
+  的 CLI 报告为不可用。([#6590])
 
 ## [2.1.0] — 2026-09-24
 
@@ -7544,3 +7643,13 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6484]: https://github.com/bytedance/deer-flow/pull/6484
 [#6506]: https://github.com/bytedance/deer-flow/pull/6506
 [#6512]: https://github.com/bytedance/deer-flow/pull/6512
+[#6519]: https://github.com/bytedance/deer-flow/pull/6519
+[#6520]: https://github.com/bytedance/deer-flow/pull/6520
+[#6537]: https://github.com/bytedance/deer-flow/pull/6537
+[#6556]: https://github.com/bytedance/deer-flow/pull/6556
+[#6580]: https://github.com/bytedance/deer-flow/pull/6580
+[#6582]: https://github.com/bytedance/deer-flow/pull/6582
+[#6587]: https://github.com/bytedance/deer-flow/pull/6587
+[#6588]: https://github.com/bytedance/deer-flow/pull/6588
+[#6590]: https://github.com/bytedance/deer-flow/pull/6590
+[#6595]: https://github.com/bytedance/deer-flow/pull/6595

@@ -126,7 +126,7 @@ def test_websocket_handshake_is_not_redirected(config_path: str, host: str) -> N
 @pytest.mark.parametrize("config_path", NGINX_CONFIGS)
 def test_main_server_redirects_to_the_canonical_origin(config_path: str) -> None:
     content = read_config(config_path)
-    server = _extract_block(content, re.compile(r"server\s*\{(?=[^}]*?listen\s+(?:\[::\]:)?2026\b)"))
+    server = _extract_block(content, re.compile(r"server\s*\{(?=[^}]*?listen\s+(?:\S+:)?2026\b)"))
     assert 'if ($loopback_origin != "")' in server
     assert "return 301 $scheme://$loopback_origin$request_uri;" in server
 

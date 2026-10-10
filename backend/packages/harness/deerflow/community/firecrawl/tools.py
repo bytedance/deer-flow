@@ -6,6 +6,7 @@ import logging
 from firecrawl import AsyncFirecrawlApp
 from langchain.tools import tool
 
+from deerflow.community.search_max_results import DEFAULT_MAX_RESULTS, coerce_max_results
 from deerflow.community.url_safety import validate_delegated_backend_url, validate_public_http_url
 from deerflow.config import get_app_config
 
@@ -34,25 +35,6 @@ async def _aclose_firecrawl_client(client: AsyncFirecrawlApp) -> None:
             await result
     except Exception:
         logger.warning("Failed to close the Firecrawl async HTTP pool", exc_info=True)
-
-
-DEFAULT_MAX_RESULTS = 5
-
-
-def _coerce_max_results(value: object) -> int:
-    """Normalize the configured ``max_results`` before handing it to Firecrawl."""
-    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
-        # int() accepts booleans and silently truncates a YAML value such as 3.5.
-        count = 0
-    else:
-        try:
-            count = int(value)  # type: ignore[call-overload]
-        except (TypeError, ValueError, OverflowError):
-            count = 0
-    if count <= 0:
-        logger.warning("Invalid Firecrawl max_results=%r; using default %s", value, DEFAULT_MAX_RESULTS)
-        return DEFAULT_MAX_RESULTS
-    return count
 
 
 def _get_tool_config_extra(tool_name: str) -> dict:
@@ -122,7 +104,7 @@ async def web_search_tool(query: str) -> str:
         config = get_app_config().get_tool_config("web_search")
         max_results = DEFAULT_MAX_RESULTS
         if config is not None:
-            max_results = _coerce_max_results(config.model_extra.get("max_results", max_results))
+            max_results = coerce_max_results(config.model_extra.get("max_results", max_results), provider="Firecrawl", logger=logger)
 
         client = _get_firecrawl_client("web_search")
         result = await client.search(query, limit=max_results)

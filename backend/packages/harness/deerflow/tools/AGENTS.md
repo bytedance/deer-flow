@@ -1,5 +1,12 @@
 ### Tool System (`packages/harness/deerflow/tools/`)
 
+`artifact_registry.py` checks remote file suffixes against the complete parsed
+URL path without case sensitivity. Free-text URL and sandbox-path extraction
+strips common trailing ASCII/CJK prose punctuation while preserving CJK
+closers paired with openers inside the detected reference (including literal
+glob directory names). Structured references remain literal. See
+[tool artifact middleware](../agents/middlewares/TOOL_ARTIFACTS.md).
+
 `task` and `batch_task` opt into JSON checks with `file:<path> json-valid`.
 See [subagents/AGENTS.md](../subagents/AGENTS.md) for read limits and UNVERIFIED semantics.
 Batch readers bound by assembly use its AppConfig output budget. Fit the complete escaped response under 10K and active per-tool/fallback limits; too-small envelopes stop reading. Numeric reader inputs are strict integers. Escape `<` in outer JSON to preserve untrusted data without exposing framework tags; decoding restores the document unchanged.
@@ -23,7 +30,10 @@ the same host reader serves; keep reading guidance separate from permission enfo
 
 Lead and bootstrap assembly pass the constructed `chat_model` to tool assembly.
 The cloned `write_file` budget hint uses that instance's effective `max_tokens`,
-including custom-agent and thinking-mode overrides; an absent cap omits the hint.
+including custom-agent and thinking-mode overrides; an absent or unusable cap
+(including non-finite values or caps that overflow the character estimate)
+omits the hint without aborting tool assembly. Guard estimate arithmetic as
+well as integer conversion; a huge finite cap can pass the latter.
 Only standalone tool discovery without a model falls back to the base profile.
 
 `get_available_tools(groups, include_mcp, model_name, subagent_enabled)` assembles:
@@ -56,6 +66,8 @@ Scheduled-task runtime note:
 - Scheduled background runs resolve to the `scheduled` interaction policy through trusted `context.non_interactive=true` and therefore exclude `ask_clarification` from the lead-agent tool list. The legacy `context.non_interactive=true` key remains accepted only for internally authenticated scheduler calls during migration; arbitrary HTTP/IM clients cannot set it.
 
 Durable MCP task-management tools are added only while the process-local task submitter is installed. They expose bounded local task fields, including whether cancellation was requested, but never the remote handle. Cancellation records that request durably and returns immediately; the background service owns the remote call and retries. These remain ordinary business tools under an active skill's `allowed-tools` policy and must be declared explicitly.
+
+`list_background_tasks` accepts an optional `TaskStatus` filter and intersects it with `active_only`. Omitting it or passing `None` preserves existing calls. The tool returns the 20 most recent matching records; `count` is the number returned. The tool schema validates statuses, and internal callers must not silently ignore invalid values. Scope comes from the runtime, never model-supplied user, thread, or incarnation values.
 
 **Community tools** (`packages/harness/deerflow/community/`): optional integrations, each in its own subpackage and wired through `config.yaml`. Documented examples:
 - `tavily/` - Web search (5 results default) and web fetch (4KB limit)

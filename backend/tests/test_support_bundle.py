@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 import zipfile
@@ -12,6 +11,7 @@ from pathlib import Path
 
 import pytest
 import support_bundle
+from support.shell import require_script_bash
 
 
 @pytest.fixture(autouse=True)
@@ -955,9 +955,7 @@ def test_thread_summary_honors_project_root_override(tmp_path, monkeypatch, sour
 
 def _local_launcher_home(project):
     """Execute the launcher's actual dotenv/default blocks without starting services."""
-    bash = shutil.which("bash")
-    if bash is None:
-        pytest.skip("Bash is required to exercise the local launcher")
+    bash = require_script_bash()
     serve = (Path(support_bundle.__file__).parent / "serve.sh").read_text(encoding="utf-8")
     dotenv_block = serve.split("# ── Load .env", 1)[1].split("\n\n", 1)[1].split("_pick_python()", 1)[0]
     defaults = serve[serve.index("# Runtime path defaults.") :].split("# Extra flags", 1)[0]
@@ -965,7 +963,10 @@ def _local_launcher_home(project):
         [
             bash,
             "-c",
-            'set -e\ncd "$REPO_ROOT"\n' + dotenv_block + defaults + '\nprintf "%s" "$DEER_FLOW_HOME"',
+            # Git Bash answers with POSIX paths, and its mount table (for example Windows TEMP
+            # at /tmp) is not reproducible from Python, so convert inside the shell. Passing the
+            # value through argv instead would let MSYS rewrite shell syntax inside it.
+            'set -e\ncd "$REPO_ROOT"\n' + dotenv_block + defaults + '\nif command -v cygpath >/dev/null 2>&1; then cygpath -w "$DEER_FLOW_HOME"; else printf "%s" "$DEER_FLOW_HOME"; fi',
         ],
         cwd=project,
         env={**os.environ, "REPO_ROOT": str(project)},
@@ -974,7 +975,7 @@ def _local_launcher_home(project):
         encoding="utf-8",
         check=True,
     )
-    return Path(result.stdout)
+    return Path(result.stdout.strip())
 
 
 @pytest.mark.parametrize("invocation_dir", [".", "backend"])
@@ -1009,6 +1010,10 @@ def test_dotenv_tilde_matches_launcher_quote_semantics(tmp_path, monkeypatch, va
     user_home = tmp_path / "user-home"
     user_home.mkdir()
     monkeypatch.setenv("HOME", str(user_home))
+    if os.name == "nt":
+        # Git Bash expands "~" from HOME, but Python's expanduser() reads USERPROFILE
+        # on Windows; pin both so the two resolution paths stay comparable.
+        monkeypatch.setenv("USERPROFILE", str(user_home))
     (project / ".env").write_text(f"{variable}={value}\n", encoding="utf-8")
     if variable == "DEER_FLOW_HOME":
         home = _local_launcher_home(project)
