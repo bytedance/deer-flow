@@ -363,7 +363,7 @@ This release closes that milestone with **439 merged pull requests**.
   checks: readiness, shared sessions and internal token, thread, upload and
   artifact visibility, skill toggles, nginx balancing, and SSE `Last-Event-ID`
   resume across instances. See "Local two-Gateway harness" in
-  `backend/docs/CONFIGURATION.md`.
+  `backend/docs/CONFIGURATION.md`. ([#6613])
 
 - **config:** `DEER_FLOW_ENV_FILE` selects one explicit UTF-8 dotenv file for the backend at
   startup, shared by configuration loading, authentication startup, and the debug entry
@@ -9497,3 +9497,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6588]: https://github.com/bytedance/deer-flow/pull/6588
 [#6590]: https://github.com/bytedance/deer-flow/pull/6590
 [#6595]: https://github.com/bytedance/deer-flow/pull/6595
+[#6613]: https://github.com/bytedance/deer-flow/pull/6613

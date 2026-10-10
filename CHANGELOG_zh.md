@@ -283,7 +283,7 @@
   启动门控要求的设置；门控拒绝的设置会被修改并逐项提示。`check` 自动执行可脚本化的跨实例
   检查：就绪探针、共享会话与内部令牌、线程/上传/产物可见性、技能开关、nginx 负载均衡，
   以及跨实例的 SSE `Last-Event-ID` 续接。详见 `backend/docs/CONFIGURATION.md` 的
-  “Local two-Gateway harness”一节。
+  “Local two-Gateway harness”一节。 ([#6613])
 
 - **配置：** 新增 `DEER_FLOW_ENV_FILE`，在后端启动时选择一个显式的 UTF-8 dotenv 文件，配置
   加载、认证启动和调试入口共用；相对路径以后端进程工作目录解析，已有进程环境变量保持
@@ -7650,3 +7650,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6588]: https://github.com/bytedance/deer-flow/pull/6588
 [#6590]: https://github.com/bytedance/deer-flow/pull/6590
 [#6595]: https://github.com/bytedance/deer-flow/pull/6595
+[#6613]: https://github.com/bytedance/deer-flow/pull/6613
