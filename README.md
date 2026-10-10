@@ -2899,10 +2899,13 @@ persisted injected instruction.
 
 ### Deployment Defaults
 
-The Docker stack publishes its entry port on `127.0.0.1` only, matching the
-local-trusted-environment model described above. To reach it from another
-machine, set `BIND_HOST` in `.env` (e.g. `BIND_HOST=0.0.0.0`) — and only after
-putting the security measures below in place.
+The Docker stack publishes its entry port on `127.0.0.1` only, and local
+`make dev` / `make start` bind nginx, the Gateway, and the frontend to loopback,
+matching the local-trusted-environment model described above. To reach it from
+another machine, set `BIND_HOST` in `.env` (e.g. `BIND_HOST=0.0.0.0`) — and only
+after putting the security measures below in place. Local runs apply `BIND_HOST`
+to nginx on port `2026` only; the Gateway and frontend stay on loopback behind
+it.
 
 **Complete first-run setup before the host becomes reachable.** A fresh
 instance has no accounts yet, so create the admin account through `/setup`

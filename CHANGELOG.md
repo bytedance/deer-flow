@@ -4303,6 +4303,21 @@ This release closes that milestone with **439 merged pull requests**.
   package. Previously a `hooks/install.jse` carrying one stray byte received
   no static analysis and no executable review. ([#6321])
 
+- **scripts:** Bind local `make dev` / `make start` to loopback. `serve.sh` and
+  `backend/Makefile` started the Gateway with `--host 0.0.0.0`,
+  `nginx.local.conf` listened on every interface, and Next.js kept its
+  all-interfaces default outside Windows, so on a LAN or VPN other machines could
+  reach ports `2026`, `8001`, and `3000`, including `/setup` before the first
+  admin existed. The Docker stack and the README's deployment model were already
+  loopback-only. The Gateway and frontend now bind `127.0.0.1`, and nginx
+  listens on `127.0.0.1` and `[::1]` unless `BIND_HOST` is set, the same
+  variable the Docker stack honors. An invalid `BIND_HOST` fails before any
+  running service is stopped.
+
+  **Behavior change:** a local stack opened from another device needs
+  `BIND_HOST` (e.g. `BIND_HOST=0.0.0.0` in `.env`) and the `2026` entry; the
+  Gateway and frontend ports are no longer reachable from other machines.
+
 ### Documentation
 
 - **docs:** Fix the Apple Container verification instructions. The guide

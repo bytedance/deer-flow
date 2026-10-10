@@ -44,7 +44,9 @@ This lets standard LangGraph SDK clients talk to DeerFlow without a separate Lan
 server. Both compose files publish nginx as `"${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"`
 — **loopback by default**; the Gateway's `8001` is never published. Any new published port
 must carry an explicit bind address (`backend/tests/test_compose_default_bind_host.py`
-pins this for every service in both compose files).
+pins this for every service in both compose files). Local `make dev` / `make start` follow
+the same model: the Gateway and frontend bind `127.0.0.1`, and nginx listens on loopback
+unless `BIND_HOST` is set (`backend/tests/test_local_dev_loopback_bind.py`).
 
 ---
 
