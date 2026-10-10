@@ -161,6 +161,17 @@
 
 #### 智能体与运行时
 
+- **目标：** 对话中达成的目标现在会记录在线程上，历史接口的最新一条也会保留目标状态。
+  评估器判定目标达成时，清除目标的同一个 checkpoint 会写入新的 `goal_outcome` 通道：
+  目标原文、设置和达成的时间、已用和允许的续跑次数、评估理由、`relied_on_assumption`
+  以及判定所依据回复的 id。之后任何一次目标写入都会删除它，定时任务的目标不写这条
+  记录。客户端无法写入：`POST /state` 或非内部的运行输入携带 `goal_outcome` 时返回
+  400。`POST /api/threads/{thread_id}/history` 的最新一条现在带上激活的 `goal` 和已
+  达成的 `goal_outcome`，停下的目标不会再在运行结束或刷新页面后从 Web UI 消失；其余
+  条目不变。从较早一轮分支出的对话不会再带回那一轮没有的目标或达成记录。
+  `contracts/thread_goal_contract.json` 固定了停止代码、检查失败代码、达成记录的
+  字段、历史头字段和主机自写的原因文本。([#6556])
+
 - **网关：** 服务端替你创建的对话无需刷新即可被发现。由定时任务、IM 渠道、GitHub
   智能体、扩展或 MCP 通知发起的运行，现在带有服务端维护的
   `metadata.deerflow_origin`（`{kind, provider?, namespace?}`，由新增的
@@ -692,8 +703,31 @@
   旧的已选技能气泡被移除，旧草稿中的技能选择会恢复为内联引用，手动输入的
   旧式斜杠文本仍按普通消息提交。([#6154])
 
+- **前端：** 输入框上方的目标栏现在说明激活的 `/goal` 在做什么、为什么停下。运行推进
+  目标时显示“进行中”；自动续跑停下后显示“已停止”“等你回复”“等待中”“未能检查目标”
+  或“已暂停”，第二行写明原因和下一步，不再一直显示“续跑中 8/8”或看起来像刚设置的
+  目标；“详情”里有完整目标和评估器原话。目标达成后显示“目标已达成”（以及自动续跑
+  了几次），直到对话继续往下走，刷新后也一样；第一次运行就达成的目标不会再残留在
+  目标栏里。设置了目标时，最后一轮的编辑铅笔改为灰显并附提示，而不是直接隐藏；消息
+  工具栏在键盘聚焦时也会显示。因还有运行未结束而被拒绝的 `/goal` 会保留草稿并说明
+  原因。([#6556])
+
 ### 修复
 
+- **运行时：** JSONL 事件存储在末行写坏后不再丢失事件。写入中途被打断会让文件缺少结尾换行，下一次追加会接在残缺记录后面，
+  两者合成一行无法解析；被截断的多字节字符还会让整个文件解码失败，所有完好记录都读不出来，序号恢复也随之失效。现在追加前
+  若文件末尾不是换行会先补一个分隔符，读取时逐个物理行单独解码、只跳过损坏的那一行，批量追加失败时仍会截回原始大小。
+  ([#6520])
+- **渠道：** 在启用 Gateway 认证（默认配置）时，从 IM 渠道发送的 `/goal <目标>` 和
+  `/goal clear` 恢复正常。此前这两个写请求只携带内部认证令牌，而 Gateway 的 CSRF 检查不会
+  豁免内部认证，因此返回 403，渠道回复“Failed to set goal.”或“Failed to clear goal.”。
+  现在它们会发送与渠道 SDK 客户端相同的 CSRF Cookie 和请求头。`/goal` 状态查询不受影响。([#6537])
+- **认证：** 在 Docker 部署中，某个客户端输错 5 次密码不会再让所有用户 5 分钟内无法登录。登录失败按客户端 IP 计数，而 Gateway
+  只在 TCP peer 属于 `AUTH_TRUSTED_PROXIES` 时信任 `X-Real-IP`，compose 文件却从未设置该变量；所有浏览器请求都经由 `nginx`
+  容器到达 Gateway，因此所有登录共用 nginx 的地址和同一个锁定。现在 `AUTH_TRUSTED_PROXIES` 也接受主机名，在事件循环外解析并
+  缓存 10 秒（包括解析失败），两个 compose 文件默认将其设为内置的 `nginx` 服务。nginx 在每个转发到 Gateway 的路由上都用
+  `$remote_addr` 覆盖 `X-Real-IP`，客户端无法自选地址。`.env` 中设置的 `AUTH_TRUSTED_PROXIES` 仍然优先，`make docker-start` 也是如此：它现在会像代理变量一样导出该值供 Compose 插值。位于其他反向代理之后的
+  部署还需要为该代理配置 nginx 的 `real_ip` 模块，详见 `.env.example`。([#6519])
 - **调度器：** 在一次性任务的执行时间之前点击“立即运行一次”，不会再取消原定的执行。此前这次试运行被当作任务本身的
   执行：任务被标记为 `running`，试运行结束后又按其结果把任务终结为 `completed`、`failed` 或 `cancelled`。轮询器只认领
   `enabled` 的任务，因此到了 `run_at` 也不会执行，尽管 `next_run_at` 仍显示该时间。现在在执行时间之前启动的试运行
@@ -3261,6 +3295,13 @@
   脱敏；缓存负载本身即为干净副本，消息通过 `model_copy` 重建、绝不改动原件。
   开关默认关闭，未设置时行为不变。([#5577])
 
+- **目标：** 开启 `pii_redaction` 后，`/goal` 评估器的输入现在也会被脱敏。评估器直接
+  调用模型，不经过 `PiiRedactionMiddleware`，因此此前会发送原始的用户消息、工具参数、
+  工具结果和 Human Input Card 回答。现在先对评估器读取的完整消息脱敏，避免证据截断把
+  标识符切成两半，再对拼好的输入（包括目标原文）脱敏一次；线程状态保留原文。脱敏出错
+  时这次检查按失败处理（`evaluator_failed`），不会发送原文。关闭脱敏时输入逐字节不变。
+  ([#6556])
+
 - **授权：** 技能授权现在在装配与激活两个环节强制执行，`skills: {allow:
   ["data-analysis"]}` 这类 RBAC 策略因此能真正拒绝某个技能——Phase 2A
   （#4439）覆盖的是 Gateway 路由，技能此前仍只受 agent 配置白名单约束。
@@ -3270,6 +3311,13 @@
   提示，provider 错误遵循既有的 fail-closed/fail-open 配置。被拒绝的
   `read_file` 读取 `SKILL.md` 时会打上 `skill_context_denied` 标记，持久上
   下文、技能 allowed-tools 与自主密钥绑定都不会激活被拒绝的技能。([#4541])
+
+- **目标：** 开启 `pii_redaction` 后，隐藏的 `/goal` 续跑消息现在也会被脱敏。
+  `PiiRedactionMiddleware` 不处理这条框架消息，因此每次续跑都会把目标原文以及评估器的
+  理由和证据摘要原样发给 agent 的模型，并留在线程里供之后的模型调用读取。现在先对这些
+  内容脱敏，再拼成消息；线程保存脱敏后的消息（界面不显示），目标状态仍保留原文。
+  脱敏出错时这次检查按失败处理（`evaluator_failed`），不计入续跑次数，也不会发送原文。
+  关闭脱敏时消息逐字节不变。([#6556])
 
 - **Lark：** 可选的 Lark broker 子命令拒绝列表
   （`DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS`）不再能被以独立 token 传入的选项
@@ -7544,3 +7592,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6484]: https://github.com/bytedance/deer-flow/pull/6484
 [#6506]: https://github.com/bytedance/deer-flow/pull/6506
 [#6512]: https://github.com/bytedance/deer-flow/pull/6512
+[#6519]: https://github.com/bytedance/deer-flow/pull/6519
+[#6520]: https://github.com/bytedance/deer-flow/pull/6520
+[#6537]: https://github.com/bytedance/deer-flow/pull/6537
+[#6556]: https://github.com/bytedance/deer-flow/pull/6556

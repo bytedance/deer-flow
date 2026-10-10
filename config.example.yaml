@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 57
+config_version: 58
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -594,8 +594,9 @@ models:
   #   supports_vision: true
   #   supports_thinking: true
   #   # PatchedChatMiniMax is the MiniMax adapter: it enables reasoning_split and
-  #   # maps MiniMax's structured reasoning into reasoning_content (the field
-  #   # DeerFlow understands), and it strips the per-message `name` field that
+  #   # maps MiniMax's structured reasoning_details and native reasoning_content
+  #   # into the reasoning_content field DeerFlow understands, and it strips the
+  #   # per-message `name` field that
   #   # DeerFlow middlewares attach — MiniMax rejects requests whose user-message
   #   # names differ with "user name must be consistent (2013)". Declare the
   #   # thinking toggle so non-thinking paths (flash mode, follow-up suggestions,
@@ -658,8 +659,9 @@ models:
   #   supports_vision: true
   #   supports_thinking: true
   #   # PatchedChatMiniMax is the MiniMax adapter: it enables reasoning_split and
-  #   # maps MiniMax's structured reasoning into reasoning_content (the field
-  #   # DeerFlow understands), and it strips the per-message `name` field that
+  #   # maps MiniMax's structured reasoning_details and native reasoning_content
+  #   # into the reasoning_content field DeerFlow understands, and it strips the
+  #   # per-message `name` field that
   #   # DeerFlow middlewares attach — MiniMax rejects requests whose user-message
   #   # names differ with "user name must be consistent (2013)". Declare the
   #   # thinking toggle so non-thinking paths (flash mode, follow-up suggestions,
@@ -1472,10 +1474,11 @@ loop_detection:
 # rewritten to keyed, value-derived placeholders like
 # [EMAIL_bdqkxwcfmqvrqzblcchjkqbcdqw] before they reach the model. Tokens are
 # HMAC digests keyed by token_secret, so they cannot be re-derived offline.
+# The hidden /goal continuation is redacted before it is stored.
 # Raw text stays in thread state for the UI; queued memory-extraction
-# payloads are redacted too. Compaction and configured LLM title inputs are
-# redacted as well; placeholders are value-derived, so an identity redacted
-# before compaction renders the same token afterwards.
+# payloads are redacted too. Compaction, configured LLM title and /goal
+# evaluator inputs are redacted as well; placeholders are value-derived, so
+# an identity redacted before compaction renders the same token afterwards.
 pii_redaction:
   enabled: false
   # redact_email: true
@@ -1561,6 +1564,26 @@ projects:
   # Days a trashed project document stays recoverable before the retention
   # sweep may purge it permanently (range: 1-3650).
   trash_retention_days: 30
+  # Best-effort per-document LLM summaries on the shelf (default off). When
+  # enabled, each newly uploaded/promoted document gets a one-line generated
+  # description rendered into the injected <documents> index and returned by
+  # the documents API. Generation failures leave the summary empty and never
+  # affect uploads. Rendering of already-stored summaries stays on even when
+  # generation is disabled.
+  summaries_enabled: false
+  # Hard UTF-8 write-time cap for a generated summary (range: 64-1024).
+  summary_max_bytes: 256
+  # Optional model override for summary generation; unset uses the default
+  # chat model.
+  # summary_model_name: null
+  # Global cap on concurrent generation tasks (range: 1-16) and the bounded
+  # in-memory queue for pending tasks (range: 1-256); tasks arriving at a
+  # full queue are skipped.
+  summary_concurrency: 2
+  summary_queue_size: 32
+  # Caller-side wait limit in seconds for one summary model call (range:
+  # 5-300); abandons the wait, not the remote work.
+  summary_timeout_seconds: 60
 
 # ============================================================================
 # Provider Safety Termination Configuration
@@ -3380,7 +3403,9 @@ authorization:
 # auth:
 #   local:
 #     allow_registration: false
-#     # Login throttling per client IP. Raise max_login_attempts when many
+#     # Login throttling per client IP. The client IP is X-Real-IP from a
+#     # proxy listed in AUTH_TRUSTED_PROXIES (the Docker stack trusts its
+#     # bundled nginx), else the TCP peer. Raise max_login_attempts when many
 #     # users share one egress IP (corporate proxy / NAT) so shared-IP
 #     # lockouts don't block the whole office; lower it for a stricter
 #     # posture (minimum 2 — one failed attempt must never lock an IP, or a

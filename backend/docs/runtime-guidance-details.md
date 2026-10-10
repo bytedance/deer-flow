@@ -2,6 +2,19 @@
 
 The runtime AGENTS.md indexes these detailed contracts. Preserve their behavior when changing the corresponding code.
 
+**JSONL tail recovery** (`runtime/events/store/jsonl.py`, #6520): every append
+path goes through `_append_records`. A nonempty file whose last byte is not LF
+gets a separator written first, so a crash that left either valid JSON without
+its newline or a partial record cannot glue the next event onto that tail.
+`_iter_records` reads physical byte lines and decodes each one on its own;
+`JSONDecodeError` and `UnicodeDecodeError` skip only that line, so an
+incomplete UTF-8/JSON tail cannot hide intact records or block sequence
+recovery. Existing bytes, Unicode separators inside JSON strings, and
+per-thread mutation ownership stay as they are. Batch rollback restores the
+pre-append byte size, including removal of a newly inserted separator. Tests
+live in `tests/test_jsonl_event_store_tail_recovery.py`. This does not add
+multi-process support or crash-atomic batches.
+
 **Message feed seq stamping** (#4666): a checkpoint carries no position of its
 own and loses messages to summarization, so a client merging a `values` frame
 with the seq-ordered `run_events` feed cannot place a checkpoint-kept message

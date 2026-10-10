@@ -69,6 +69,13 @@ keys the production Gateway would receive, and `make config` skips files that
 exist. Pinned by `backend/tests/test_compose_default_bind_host.py` and
 `backend/tests/test_gateway_startup.py`.
 
+`docker.sh start` runs Compose from `docker/` without `--env-file`, so
+dev-compose interpolation sees only the shell. `load_proxy_env_from_dotenv`
+exports the `.env` keys interpolation needs (proxy variables and
+`AUTH_TRUSTED_PROXIES`, whose `environment:` default would otherwise replace
+the `env_file` value); shell exports still win. Pinned by
+`backend/tests/test_compose_auth_trusted_proxies.py`.
+
 `deploy.sh` never sources the repo-root `.env`; Compose reads it via
 `--env-file`, and shell exports outrank that file during interpolation (an
 exported-but-empty variable still wins). So `BETTER_AUTH_SECRET` and
