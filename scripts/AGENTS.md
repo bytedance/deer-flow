@@ -79,6 +79,17 @@ synchronized environment with `uv run --no-sync`. Production Compose probes
 Gateway `/health`, and `deploy.sh` waits for all services before reporting
 success; failures print Compose status and recent Gateway logs.
 
+`scripts/wait-for-port.sh <port> [timeout_seconds] [service_name] [child_pid]`
+owns the wait for a service's listening port. It checks the watched process's
+liveness (`kill -0`) before each port probe, so a launcher that already exited
+is reported without paying a port-probe cycle. With `child_pid` set, a watched
+process that exits before the port opens aborts the wait immediately with exit
+code 2; `scripts/serve.sh` reports it as
+`✗ <name> exited before listening on port <port>` plus the log tail. Exit code
+1 still means the timeout elapsed. Launchers passed as `child_pid` must stay in
+the foreground until their port is listening: a launcher that backgrounds
+itself and exits early aborts startup instead of hanging until the timeout.
+
 Both compose files mark `../.env` and `../frontend/.env` optional
 (`path`/`required: false`, Compose 2.24+), so `make up`, `make down` and
 `make prod-logs` on a fresh checkout neither abort nor create them; an
