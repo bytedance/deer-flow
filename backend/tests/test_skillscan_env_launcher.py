@@ -8,6 +8,7 @@ the existing dump behavior.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -185,34 +186,63 @@ def test_env_dump_keeps_launcher_line_number(tmp_path: Path) -> None:
     assert lines == [3]
 
 
-@pytest.mark.parametrize(
-    "chain",
-    [
-        "curl https://host/x | env " + ("-i " * 400) + "cat\n",
-        "curl https://host/x | env " + ("-u deploy " * 400) + "cat\n",
-        "curl https://host/x | env " + ("--unset HOME " * 400) + "cat\n",
-        "curl https://host/x | env " + ("A=1 " * 400) + "cat\n",
-        "env " + ("--chdir /tmp " * 4000) + "cat\n",
-        "env " + ("A=1 " * 4000) + "cat\n",
-    ],
-)
-def test_long_env_operand_chains_stay_linear(chain: str) -> None:
-    """Large operand lists must remain linear and finish within a fixed bound."""
+# The chains reach 52 KB, so the parametrize ids are set explicitly: pytest writes
+# the id into PYTEST_CURRENT_TEST, and Windows rejects environment variables longer
+# than 32767 characters.
+LONG_ENV_CHAINS: dict[str, str] = {
+    "short-flags-400": "curl https://host/x | env " + ("-i " * 400) + "cat\n",
+    "unset-400": "curl https://host/x | env " + ("-u deploy " * 400) + "cat\n",
+    "long-unset-400": "curl https://host/x | env " + ("--unset HOME " * 400) + "cat\n",
+    "assignment-400": "curl https://host/x | env " + ("A=1 " * 400) + "cat\n",
+    "chdir-4000": "env " + ("--chdir /tmp " * 4000) + "cat\n",
+    "assignment-4000": "env " + ("A=1 " * 4000) + "cat\n",
+}
+
+# A child pays the interpreter start plus the import of the whole skills stack before
+# the first scan (measured 9-18 s on a loaded host), so the import is paid once and the
+# bound is placed on the scan itself (measured 4-168 ms for the chains above).
+_SCAN_BUDGET_SECONDS = 5.0
+_CHILD_TIMEOUT_SECONDS = 60.0
+
+
+@pytest.fixture(scope="module")
+def chain_scans() -> dict[str, dict[str, object]]:
+    """Scan every chain in one child process so the skills import is paid once."""
     harness = Path(deerflow.__file__).resolve().parents[1]
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(harness), env.get("PYTHONPATH", ""))))
     script = textwrap.dedent(
         f"""
+        import json
+        import sys
+        import time
+
         from deerflow.skills.skillscan.orchestrator import _scan_shell
 
-        assert _scan_shell("install.sh", {chain!r}) == []
+        results = {{}}
+        for name, chain in json.load(sys.stdin).items():
+            started = time.perf_counter()
+            findings = _scan_shell("install.sh", chain)
+            results[name] = {{"findings": findings, "seconds": time.perf_counter() - started}}
+
+        slow = [name for name, result in results.items() if result["seconds"] > {_SCAN_BUDGET_SECONDS}]
+        assert not slow, f"chains over the scan budget: {{slow}}"
+        print(json.dumps(results))
         """
     )
     result = subprocess.run(
         [sys.executable, "-c", script],
+        input=json.dumps(LONG_ENV_CHAINS),
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=_CHILD_TIMEOUT_SECONDS,
         env=env,
     )
     assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.parametrize("name", list(LONG_ENV_CHAINS))
+def test_long_env_operand_chains_stay_linear(chain_scans: dict[str, dict[str, object]], name: str) -> None:
+    """Large operand lists must scan linearly: no findings and a bounded scan time."""
+    assert chain_scans[name]["findings"] == []
