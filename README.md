@@ -1284,7 +1284,13 @@ hint for unquoted colon values. Fix the file on disk and select **Reload skills*
 to refresh the list and invalidate skill prompt caches for subsequent runs;
 active runs retain their existing snapshot. This covers caller-owned custom
 skills only, excluding legacy/global, public, integration, and external linked
-packages. Parsing remains strict and invalid skills stay unavailable to agents.
+packages. These warnings cover YAML syntax errors only: missing frontmatter,
+non-mapping metadata, missing/invalid name or description, invalid allowed-tools
+or required-secrets declarations, non-UTF-8 files, and file-read failures
+(including permission denied) are not reported. A missing warning does not
+establish that a package is valid or readable. The scope note remains visible
+even when there are no YAML warnings; check Gateway logs for other load failures.
+Parsing remains strict and invalid skills stay unavailable to agents.
 
 Skills are what make DeerFlow do *almost anything*.
 

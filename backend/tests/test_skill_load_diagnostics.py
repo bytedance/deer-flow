@@ -68,6 +68,80 @@ def test_locations_match_actual_file_and_other_yaml_errors_have_no_colon_hint(sc
     assert result[0].column == 23
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        "# No frontmatter\n",
+        "---\nname: broken\ndescription: normal\n",  # Unclosed frontmatter.
+        "---\n- not\n- a mapping\n---\n",
+        "---\nscalar\n---\n",
+        "---\nnull\n---\n",
+        "---\nname: broken\n---\n",
+        "---\ndescription: normal\n---\n",
+        '---\nname: " "\ndescription: normal\n---\n',
+        '---\nname: broken\ndescription: " "\n---\n',
+        "---\nname: 42\ndescription: normal\n---\n",
+        "---\nname: broken\ndescription: []\n---\n",
+        GOOD.replace("\n---\n", "\nallowed-tools: 42\n---\n"),
+        GOOD.replace("\n---\n", "\nallowed-tools: [42]\n---\n"),
+        GOOD.replace("\n---\n", "\nrequired-secrets: private-value\n---\n"),
+    ],
+)
+def test_non_yaml_load_failures_remain_outside_diagnostics(scope, content):
+    """The UI's YAML-only scope must not imply all omitted skills are reported."""
+    paths, config, storage = scope
+    root = paths.user_custom_skills_dir(USER_ID)
+    write(root, "broken", content)
+    write(root, "valid", GOOD.replace("broken", "valid"))
+    assert [s.name for s in storage.load_skills()] == ["valid"]
+    assert storage.load_custom_skill_diagnostics() == []
+    with client_for(config) as client:
+        response = client.get("/api/skills/diagnostics/custom")
+    assert response.status_code == 200
+    assert response.json() == {"diagnostics": []}
+
+
+def test_non_utf8_file_is_not_a_yaml_diagnostic(scope):
+    paths, config, storage = scope
+    path = write(paths.user_custom_skills_dir(USER_ID), "broken")
+    path.write_bytes(GOOD.encode("utf-8") + b"\xff")
+    assert storage.load_skills() == []
+    assert storage.load_custom_skill_diagnostics() == []
+    with client_for(config) as client:
+        response = client.get("/api/skills/diagnostics/custom")
+    assert response.status_code == 200
+    assert response.json() == {"diagnostics": []}
+
+
+def test_permission_denied_file_is_not_a_yaml_diagnostic(scope, monkeypatch):
+    paths, config, storage = scope
+    root = paths.user_custom_skills_dir(USER_ID)
+    unreadable = write(root, "unreadable", GOOD.replace("broken", "unreadable"))
+    write(root, "valid", GOOD.replace("broken", "valid"))
+    original = Path.read_text
+    denied_reads = []
+
+    def deny_owned_file(path, *args, **kwargs):
+        if path == unreadable:
+            denied_reads.append(path)
+            raise PermissionError(f"private-value: cannot read {path}")
+        return original(path, *args, **kwargs)
+
+    # Portable even when tests run as root or on hosts without POSIX chmod.
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_text", deny_owned_file)
+        assert [s.name for s in storage.load_skills()] == ["valid"]
+        assert storage.load_custom_skill_diagnostics() == []
+        with client_for(config) as client:
+            response = client.get("/api/skills/diagnostics/custom")
+        assert response.status_code == 200
+        assert response.json() == {"diagnostics": []}
+        for private in ["private-value", "unreadable", str(paths.base_dir)]:
+            assert private not in response.text
+        assert len(denied_reads) == 3
+    assert {s.name for s in storage.load_skills()} == {"valid", "unreadable"}
+
+
 def test_other_owners_and_global_sources_are_excluded(scope):
     paths, config, storage = scope
     write(paths.user_custom_skills_dir("another-user"), "other-private")

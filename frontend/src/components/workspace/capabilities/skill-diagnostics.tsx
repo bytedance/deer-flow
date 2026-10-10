@@ -44,6 +44,7 @@ export function SkillDiagnostics({ userId }: { userId: string }) {
             : text.diagnosticsRefresh}
         </Button>
       </div>
+      <p className="text-muted-foreground text-sm">{text.diagnosticsScope}</p>
       {(diagnostics.isError || reload.isError) && (
         <p role="alert" className="text-destructive text-sm">
           {reload.isError
@@ -60,9 +61,6 @@ export function SkillDiagnostics({ userId }: { userId: string }) {
             <AlertTriangleIcon className="size-4 text-amber-600" />
             {text.diagnosticsTitle}
           </h3>
-          <p className="text-muted-foreground mt-1 text-sm">
-            {text.diagnosticsScope}
-          </p>
           <ul className="mt-3 space-y-3">
             {failures.map((failure) => (
               <li

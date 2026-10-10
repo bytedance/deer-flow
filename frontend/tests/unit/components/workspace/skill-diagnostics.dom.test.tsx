@@ -10,6 +10,7 @@ import {
 } from "@testing-library/react";
 
 const api = rs.hoisted(() => ({ load: rs.fn(), reload: rs.fn() }));
+const i18n = rs.hoisted(() => ({ locale: "en-US" }));
 rs.mock("@/core/skills/api", () => ({
   loadSkillDiagnostics: api.load,
   reloadSkills: api.reload,
@@ -21,7 +22,10 @@ rs.mock("@/core/i18n/hooks", () => ({
       settings: {
         skills: {
           diagnosticsTitle: "Could not load",
-          diagnosticsScope: "Your custom skills only",
+          diagnosticsScope:
+            i18n.locale === "zh-CN"
+              ? zhCN.settings.skills.diagnosticsScope
+              : enUS.settings.skills.diagnosticsScope,
           diagnosticsInvalid: "Invalid YAML",
           diagnosticsQuote: "Quote colon values",
           diagnosticsRefresh: "Reload skills",
@@ -35,11 +39,65 @@ rs.mock("@/core/i18n/hooks", () => ({
 }));
 
 import { SkillDiagnostics } from "@/components/workspace/capabilities/skill-diagnostics";
+import { enUS } from "@/core/i18n/locales/en-US";
+import { zhCN } from "@/core/i18n/locales/zh-CN";
 
 afterEach(() => {
   cleanup();
   rs.clearAllMocks();
+  i18n.locale = "en-US";
 });
+
+it.each([
+  [
+    "en-US",
+    /Only YAML syntax errors/,
+    /Missing frontmatter, metadata validation errors, and unreadable or non-UTF-8 files are not reported/,
+    [],
+  ],
+  [
+    "en-US",
+    /Only YAML syntax errors/,
+    /Missing frontmatter, metadata validation errors, and unreadable or non-UTF-8 files are not reported/,
+    [{ package: "broken", path: "SKILL.md", code: "invalid_frontmatter" }],
+  ],
+  [
+    "zh-CN",
+    /仅报告.*YAML 语法错误/,
+    /不报告缺少头部、元数据校验错误、无法读取或非 UTF-8 编码的文件/,
+    [],
+  ],
+  [
+    "zh-CN",
+    /仅报告.*YAML 语法错误/,
+    /不报告缺少头部、元数据校验错误、无法读取或非 UTF-8 编码的文件/,
+    [{ package: "broken", path: "SKILL.md", code: "invalid_frontmatter" }],
+  ],
+])(
+  "explains YAML-only diagnostics and exclusions in %s",
+  async (locale, syntax, exclusions, failures) => {
+    i18n.locale = locale;
+    api.load.mockResolvedValue(failures);
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <QueryClientProvider client={client}>
+        <SkillDiagnostics userId="alice" />
+      </QueryClientProvider>,
+    );
+    await waitFor(() =>
+      expect(screen.getByRole<HTMLButtonElement>("button").disabled).toBe(
+        false,
+      ),
+    );
+    expect(screen.getByText(syntax)).toBeTruthy();
+    expect(screen.getByText(exclusions)).toBeTruthy();
+    expect(screen.queryByText("broken/SKILL.md") === null).toBe(
+      failures.length === 0,
+    );
+  },
+);
 
 it("keeps warnings on reload failure, then refetches both lists after success", async () => {
   const client = new QueryClient({

@@ -236,6 +236,9 @@ user-keyed diagnostics query is separate from `useSkills()` and every picker.
 Reload posts `/api/skills/reload` before invalidating both normal skills and
 diagnostics; failures retain the warning and show localized retry feedback.
 Never interpret raw parser exception wording in the UI.
+Keep the scope note visible even when diagnostics are empty. It must describe
+the YAML-syntax-only check and its exclusions (missing frontmatter, metadata
+validation, unreadable and non-UTF-8 files); it is not a package-validity check.
 
 `/workspace/capabilities` owns Plugins and Skills navigation. Plugins composes the
 MCP manager and a lazily loaded Lark configuration dialog; installation, OAuth,
