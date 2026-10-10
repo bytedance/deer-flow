@@ -17,7 +17,7 @@ import statistics
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
@@ -206,3 +206,87 @@ def run_child_case(
         row["success"] = False
         row["error"] = f"child process exited with status {completed.returncode}"
     return row
+
+
+# ---------------------------------------------------------------------------
+# Result reading and reporting
+#
+# ``summarize_channels.py`` and ``summarize_production.py`` each carried a
+# byte-identical copy of these four helpers plus the input-tag field name. They
+# live here because this module is already the checkpoint benchmark family's
+# shared infrastructure, and the two bench_ scripts import it the same way.
+# What stays per script is the grouping: each one declares its own
+# ``_GROUP_FIELDS``, so the reporting helpers take it as an argument.
+# ---------------------------------------------------------------------------
+
+#: Field carrying the index of the input file a row came from. Repetition
+#: numbers restart at zero for every benchmark invocation, so without this tag
+#: two result files could pair with, or overwrite, each other.
+INPUT_INDEX_FIELD = "_benchmark_input_index"
+
+#: Printed instead of a table when no group has both a full and a delta row.
+NO_PAIRS_NOTICE = "(no comparable full/delta pairs)"
+
+
+def load_jsonl(paths: list[Path]) -> list[dict[str, Any]]:
+    """Read JSONL result rows, tagging each with its input index.
+
+    Blank lines and ``#`` comments are skipped. Every unreadable line is
+    collected and reported together, so one malformed row in the third file
+    still names the file and line instead of stopping at the first failure.
+    """
+    rows: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for input_index, path in enumerate(paths):
+        with path.open("r", encoding="utf-8") as input_file:
+            for line_number, raw_line in enumerate(input_file, start=1):
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    errors.append(f"{path}:{line_number}: {exc.msg}")
+                    continue
+                if not isinstance(row, dict):
+                    errors.append(f"{path}:{line_number}: expected a JSON object")
+                    continue
+                row[INPUT_INDEX_FIELD] = input_index
+                rows.append(row)
+    if errors:
+        raise ValueError("Malformed JSONL row(s):\n" + "\n".join(errors))
+    return rows
+
+
+def numeric_value(row: dict[str, Any], metric: str) -> float | None:
+    """Return ``row[metric]`` as a float, or ``None`` when it is not a number.
+
+    ``bool`` is rejected on purpose: a JSON ``true`` in a metric column is a
+    broken row, and Python counts it as an int.
+    """
+    value = row.get(metric)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def table_columns(rows: list[dict[str, Any]], group_fields: Sequence[str]) -> list[str]:
+    """Group columns first in declared order, then any other key, sorted."""
+    preferred = [*group_fields, "paired_repetitions", "failed_rows"]
+    extras = sorted({key for row in rows for key in row if key not in preferred})
+    return [field for field in preferred if any(field in row for row in rows)] + extras
+
+
+def print_table(rows: list[dict[str, Any]], group_fields: Sequence[str]) -> None:
+    """Print the summary right-aligned, one column width per header or value."""
+    if not rows:
+        print(NO_PAIRS_NOTICE)
+        return
+    columns = table_columns(rows, group_fields)
+    widths = {column: len(column) for column in columns}
+    for row in rows:
+        for column in columns:
+            widths[column] = max(widths[column], len(str(row.get(column, ""))))
+    print("  ".join(column.rjust(widths[column]) for column in columns))
+    for row in rows:
+        print("  ".join(str(row.get(column, "")).rjust(widths[column]) for column in columns))
