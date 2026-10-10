@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import base64
 import copy
+import hashlib
 import json
 import os
 import secrets
@@ -69,15 +70,35 @@ def _is_browser_tool(tool: Any) -> bool:
     return str(tool.get("name") or "").startswith("browser_") or "browser_automation" in str(tool.get("use") or "")
 
 
+def _is_local_aio_sandbox(sandbox: Mapping[str, Any]) -> bool:
+    """AIO sandboxes run as named Docker containers on this host unless a provisioner owns them."""
+    return "aio_sandbox" in str(sandbox.get("use") or "") and not sandbox.get("provisioner_url")
+
+
+def sandbox_container_prefix(state_dir: Path | str) -> str:
+    """Docker name prefix for the local AIO sandboxes of one harness state directory.
+
+    Stable for a state directory (warm sandboxes survive restarts) and distinct
+    from the provider default, so the harness never adopts or reaps the
+    sandbox containers of `make dev` or of another harness.
+    """
+    digest = hashlib.sha256(os.path.abspath(state_dir).encode("utf-8")).hexdigest()[:10]
+    return f"deer-flow-mi-{digest}-sandbox"
+
+
 def build_multi_instance_config(
     base: Mapping[str, Any] | None,
     *,
     database_url: str,
     redis_url: str,
+    sandbox_container_prefix: str,
     keep_channels: bool = False,
 ) -> tuple[dict[str, Any], list[str]]:
     """Return ``(config, notes)``: *base* plus every multi-instance prerequisite.
 
+    Everything the harness writes must land in its own Postgres, Redis, home
+    and containers, never in the developer's own deployment, so every
+    persistence endpoint or data root the base config names is redirected.
     ``notes`` describes each change beyond the always-applied keys, so the
     harness can tell the developer what differs from their own config.
     """
@@ -89,6 +110,10 @@ def build_multi_instance_config(
     database = _section(config, "database")
     database["backend"] = "postgres"
     database["postgres_url"] = database_url
+    cache = database.get("checkpoint_cache")
+    if isinstance(cache, dict) and (cache.get("type") == "redis" or cache.get("redis_url")):
+        cache["redis_url"] = redis_url
+        notes.append("pointed database.checkpoint_cache at the harness Redis")
 
     _section(config, "run_events")["backend"] = "db"
     _section(config, "run_ownership")["heartbeat_enabled"] = True
@@ -97,12 +122,13 @@ def build_multi_instance_config(
     bridge["type"] = "redis"
     bridge["redis_url"] = redis_url
 
-    checkpointer = config.get("checkpointer")
-    if isinstance(checkpointer, Mapping) and checkpointer.get("type") != "postgres":
+    checkpointer = config.pop("checkpointer", None)
+    if checkpointer is not None:
         # An explicit checkpointer section wins over `database` for LangGraph
-        # state, so a per-process sqlite/memory checkpointer would split threads.
-        del config["checkpointer"]
-        notes.append(f"removed checkpointer (type {checkpointer.get('type')!r}); the shared Postgres database now holds checkpoints")
+        # checkpoints and the Store: a sqlite/memory one would split threads per
+        # process, a postgres one would write into the developer's database.
+        kind = checkpointer.get("type") if isinstance(checkpointer, Mapping) else None
+        notes.append(f"removed checkpointer (type {kind!r}); the harness Postgres holds checkpoints and the Store")
 
     scheduler = config.get("scheduler")
     if isinstance(scheduler, dict) and scheduler.get("enabled") and not scheduler.get("multi_instance"):
@@ -119,9 +145,18 @@ def build_multi_instance_config(
     sandbox = config.get("sandbox")
     if isinstance(sandbox, dict):
         ownership = sandbox.get("ownership")
-        if isinstance(ownership, Mapping) and ownership.get("type") == "memory":
-            del sandbox["ownership"]
-            notes.append("removed sandbox.ownership (type 'memory'); ownership is inferred from the Redis stream bridge")
+        if ownership is not None:
+            # An explicit section stops ownership from inheriting the bridge's
+            # Redis, so its endpoint must be rewritten; timing settings stay.
+            ownership = dict(ownership) if isinstance(ownership, Mapping) else {}
+            previous = f"type {ownership.get('type', 'memory')!r}" + (f", {ownership['redis_url']}" if ownership.get("redis_url") else "")
+            ownership.update(type="redis", redis_url=redis_url)
+            sandbox["ownership"] = ownership
+            notes.append(f"pointed sandbox.ownership at the harness Redis (was {previous})")
+        if _is_local_aio_sandbox(sandbox):
+            previous_prefix = sandbox.get("container_prefix") or "deer-flow-sandbox"
+            sandbox["container_prefix"] = sandbox_container_prefix
+            notes.append(f"set sandbox.container_prefix: {sandbox_container_prefix} (was {previous_prefix!r}) so the harness never adopts or reaps other sandbox containers")
 
     channels = config.get("channels")
     if not keep_channels and isinstance(channels, dict):
@@ -132,12 +167,25 @@ def build_multi_instance_config(
             notes.append(f"disabled IM channels {', '.join(disabled)}: both Gateways would connect the same bot (set DEERFLOW_MI_KEEP_CHANNELS=1 to keep them)")
 
     memory = _section(config, "memory")
-    if memory.get("manager_class") in (None, "", "deermem"):
+    manager_class = memory.get("manager_class")
+    if manager_class in (None, "", "deermem"):
         backend_config = memory.get("backend_config")
         if not isinstance(backend_config, dict):
             backend_config = {}
             memory["backend_config"] = backend_config
+        # Empty storage_path means the harness DEER_FLOW_HOME. Both spellings go:
+        # a legacy top-level memory.storage_path is migrated into backend_config on load.
+        dropped = [f"{label}={value!r}" for label, value in (("memory.storage_path", memory.pop("storage_path", None)), ("memory.backend_config.storage_path", backend_config.pop("storage_path", None))) if value]
+        if dropped:
+            notes.append(f"dropped {', '.join(dropped)}: DeerMem data stays in the harness home")
         backend_config["retrieval_index_path"] = f"${RETRIEVAL_INDEX_ENV_VAR}"
+    else:
+        notes.append(f"memory.manager_class={manager_class!r} is not DeerMem: the harness uses that backend as configured, shared with your own deployment")
+
+    blob_storage = config.get("blob_storage")
+    blob_config = blob_storage.get("backend_config") if isinstance(blob_storage, dict) else None
+    if isinstance(blob_config, dict) and blob_config.get("root"):
+        notes.append(f"dropped blob_storage.backend_config.root={blob_config.pop('root')!r}: blobs stay in the harness home")
 
     return config, notes
 
@@ -152,14 +200,20 @@ def _write_private_text(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
-def render_config(base_path: Path, out_path: Path, *, database_url: str, redis_url: str, keep_channels: bool = False) -> list[str]:
+def render_config(base_path: Path, out_path: Path, *, database_url: str, redis_url: str, state_dir: Path, keep_channels: bool = False) -> list[str]:
     """Write the generated multi-instance config (mode 0600) and return its notes."""
     import yaml
 
     base = yaml.safe_load(Path(base_path).read_text(encoding="utf-8-sig")) or {}
     if not isinstance(base, dict):
         raise SystemExit(f"{base_path} is not a YAML mapping")
-    config, notes = build_multi_instance_config(base, database_url=database_url, redis_url=redis_url, keep_channels=keep_channels)
+    config, notes = build_multi_instance_config(
+        base,
+        database_url=database_url,
+        redis_url=redis_url,
+        sandbox_container_prefix=sandbox_container_prefix(state_dir),
+        keep_channels=keep_channels,
+    )
     body = yaml.safe_dump(config, sort_keys=False, allow_unicode=True, default_flow_style=False)
     _write_private_text(Path(out_path), GENERATED_HEADER.format(base=base_path) + body)
     return notes
@@ -217,6 +271,19 @@ _PROXY_HEADERS = """            proxy_set_header Host $http_host;
             proxy_set_header X-Forwarded-Proto $scheme;"""
 
 
+def _nginx_path(path: Path) -> str:
+    """Render *path* as an nginx double-quoted string literal.
+
+    Quoting keeps whitespace and ``;``/``{`` inside one argument. ``$`` cannot be
+    escaped (nginx interpolates it in directives such as ``access_log``) and
+    control characters cannot be spelled, so both are refused.
+    """
+    text = str(path)
+    if "$" in text or any(ord(char) < 32 for char in text):
+        raise ValueError(f"nginx cannot reference {text!r}: choose a state directory without '$' or control characters")
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def render_nginx_conf(*, listen_port: int, gateway_ports: Sequence[int], frontend_port: int, state_dir: Path) -> str:
     """Return a minimal nginx config that round-robins ``/api`` over every Gateway."""
     state_dir = Path(state_dir)
@@ -224,20 +291,20 @@ def render_nginx_conf(*, listen_port: int, gateway_ports: Sequence[int], fronten
     servers = "\n".join(f"        server 127.0.0.1:{port};" for port in gateway_ports)
     return f"""# Generated by scripts/dev_multi_instance.sh; regenerated on every `up`.
 worker_processes 1;
-pid {run_dir / "nginx.pid"};
-error_log {log_dir / "nginx-error.log"} warn;
+pid {_nginx_path(run_dir / "nginx.pid")};
+error_log {_nginx_path(log_dir / "nginx-error.log")} warn;
 
 events {{
     worker_connections 1024;
 }}
 
 http {{
-    access_log {log_dir / "nginx-access.log"};
-    client_body_temp_path {temp_dir / "client_body"};
-    proxy_temp_path {temp_dir / "proxy"};
-    fastcgi_temp_path {temp_dir / "fastcgi"};
-    uwsgi_temp_path {temp_dir / "uwsgi"};
-    scgi_temp_path {temp_dir / "scgi"};
+    access_log {_nginx_path(log_dir / "nginx-access.log")};
+    client_body_temp_path {_nginx_path(temp_dir / "client_body")};
+    proxy_temp_path {_nginx_path(temp_dir / "proxy")};
+    fastcgi_temp_path {_nginx_path(temp_dir / "fastcgi")};
+    uwsgi_temp_path {_nginx_path(temp_dir / "uwsgi")};
+    scgi_temp_path {_nginx_path(temp_dir / "scgi")};
 
     upstream deerflow_gateways {{
 {servers}
@@ -548,28 +615,47 @@ def _check_nginx(h: Harness) -> str:
     return detail
 
 
+def bounded_lines(lines: Iterable[str], *, deadline: float, what: str, clock: Callable[[], float] = time.monotonic) -> Iterator[str]:
+    """Yield raw SSE lines until *deadline*, counting comment heartbeats too.
+
+    The production stream keeps an idle live run open with ``: heartbeat``
+    comments, which the event parser drops and which also reset httpx's read
+    timeout, so the budget must be enforced per raw line, not per event.
+    """
+    for line in lines:
+        if clock() > deadline:
+            raise CheckFailed(f"{what} exceeded its time budget without reaching `end`")
+        yield line
+
+
 def _read_stream(h: Harness, base: str, path: str, *, last_event_id: str | None = None, budget: float = 90.0) -> list[SSEEvent]:
     headers = {**h.headers(), "Accept": "text/event-stream"}
     if last_event_id:
         headers["Last-Event-ID"] = last_event_id
     events: list[SSEEvent] = []
     deadline = time.monotonic() + budget
-    with h.http.stream("GET", f"{base}{path}", headers=headers) as response:
-        if response.status_code != 200:
-            response.read()
-            raise CheckFailed(f"GET {base}{path} -> HTTP {response.status_code}: {response.text[:300]}")
-        for event in parse_sse_events(response.iter_lines()):
-            events.append(event)
-            if event.event == "end" or time.monotonic() > deadline:
-                break
-    h.http.cookies.clear()
+    try:
+        with h.http.stream("GET", f"{base}{path}", headers=headers) as response:
+            if response.status_code != 200:
+                response.read()
+                raise CheckFailed(f"GET {base}{path} -> HTTP {response.status_code}: {response.text[:300]}")
+            for event in parse_sse_events(bounded_lines(response.iter_lines(), deadline=deadline, what=f"GET {base}{path} ({budget:g}s budget)")):
+                events.append(event)
+                if event.event == "end":
+                    break
+    finally:
+        h.http.cookies.clear()
     return events
 
 
 def _check_sse_resume(h: Harness) -> str:
     thread_id = _require_thread(h)
-    if h.models and not h.with_llm:
-        raise CheckSkipped(f"{len(h.models)} model(s) configured: a run would call the LLM; rerun with `check --with-llm`")
+    if not h.with_llm:
+        # Only a confirmed empty model list makes the run free (it fails before any LLM call).
+        if h.models is None:
+            raise CheckSkipped("model discovery did not succeed, so a run might call an LLM; rerun with `check --with-llm`")
+        if h.models:
+            raise CheckSkipped(f"{len(h.models)} model(s) configured: a run would call the LLM; rerun with `check --with-llm`")
     body = {"assistant_id": "lead_agent", "input": {"messages": [{"role": "user", "content": "Reply with the single word: pong"}]}}
     run = h.request("POST", h.a, f"/api/threads/{thread_id}/runs", json=body).json()
     run_id = run["run_id"]
@@ -585,7 +671,7 @@ def _check_sse_resume(h: Harness) -> str:
     if resumed_ids != ids[1:]:
         raise CheckFailed(f"resuming on A after {ids[0]} returned ids {resumed_ids}, expected {ids[1:]}")
     status = h.request("GET", h.b, f"/api/threads/{thread_id}/runs/{run_id}").json().get("status")
-    kind = "LLM" if h.models else "no-model (fails fast, no LLM call)"
+    kind = "no-model (fails fast, no LLM call)" if h.models == [] else "LLM"
     return f"{kind} run {run_id} created on A (status {status}); B replayed {len(full)} events; A resumed from Last-Event-ID {ids[0]} with the remaining {len(resumed_ids)}"
 
 
@@ -651,6 +737,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     render.add_argument("--out", required=True, type=Path)
     render.add_argument("--database-url", required=True)
     render.add_argument("--redis-url", required=True)
+    render.add_argument("--state-dir", required=True, type=Path)
     render.add_argument("--keep-channels", action="store_true")
 
     secrets_cmd = sub.add_parser("secrets", help="create the shared secrets file if missing")
@@ -673,7 +760,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "render-config":
-        for note in render_config(args.base, args.out, database_url=args.database_url, redis_url=args.redis_url, keep_channels=args.keep_channels):
+        for note in render_config(args.base, args.out, database_url=args.database_url, redis_url=args.redis_url, state_dir=args.state_dir, keep_channels=args.keep_channels):
             print(f"  note: {note}")
         return 0
     if args.command == "secrets":

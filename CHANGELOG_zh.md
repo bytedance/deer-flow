@@ -280,7 +280,10 @@
   `DEER_FLOW_HOME` 以及生成的 `AUTH_JWT_SECRET`、`DEER_FLOW_INTERNAL_AUTH_TOKEN` 与
   `DEER_FLOW_CREDENTIALS_KEY`，各自使用独立的 DeerMem 检索索引，并可选在 2027 端口启动
   轮询 nginx。配置取开发者自己的 `config.yaml`（或 `config.example.yaml`），叠加多实例
-  启动门控要求的设置；门控拒绝的设置会被修改并逐项提示。`check` 自动执行可脚本化的跨实例
+  启动门控要求的设置；门控拒绝的设置会被修改并逐项提示，配置中引用的 checkpointer、Redis 端点、
+  DeerMem 与 blob 数据目录以及本地 AIO 沙箱容器名前缀都会被重定向到 harness 内部（非 DeerMem 的
+  记忆后端按原配置使用）。容器带有所属状态目录的标签，删除时连同其匿名卷一并
+  移除；`up` 中途失败会拆除已启动的部分。`check` 自动执行可脚本化的跨实例
   检查：就绪探针、共享会话与内部令牌、线程/上传/产物可见性、技能开关、nginx 负载均衡，
   以及跨实例的 SSE `Last-Event-ID` 续接。详见 `backend/docs/CONFIGURATION.md` 的
   “Local two-Gateway harness”一节。 ([#6613])

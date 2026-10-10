@@ -359,11 +359,15 @@ This release closes that milestone with **439 merged pull requests**.
   its own DeerMem retrieval index, and an optional round-robin nginx on port 2027.
   The config is the developer's own `config.yaml` (or `config.example.yaml`) plus
   the settings the multi-instance startup gate requires; settings the gate refuses
-  are changed and reported. `check` automates the scriptable cross-instance
-  checks: readiness, shared sessions and internal token, thread, upload and
-  artifact visibility, skill toggles, nginx balancing, and SSE `Last-Event-ID`
-  resume across instances. See "Local two-Gateway harness" in
-  `backend/docs/CONFIGURATION.md`. ([#6613])
+  are changed and reported, and the checkpointer, Redis endpoints, DeerMem and
+  blob data roots and local AIO sandbox container prefix the config names are
+  redirected into the harness (a non-DeerMem memory backend is used as
+  configured). Containers are labelled with the state dir that owns them and
+  removed with their volumes; a failed `up` tears down what it started. `check`
+  automates the scriptable cross-instance checks: readiness, shared sessions and
+  internal token, thread, upload and artifact visibility, skill toggles, nginx
+  balancing, and SSE `Last-Event-ID` resume across instances. See "Local
+  two-Gateway harness" in `backend/docs/CONFIGURATION.md`. ([#6613])
 
 - **config:** `DEER_FLOW_ENV_FILE` selects one explicit UTF-8 dotenv file for the backend at
   startup, shared by configuration loading, authentication startup, and the debug entry

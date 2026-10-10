@@ -38,6 +38,9 @@ HEALTH_TIMEOUT="${DEERFLOW_MI_HEALTH_TIMEOUT:-180}"
 
 LABEL_KEY="deerflow.harness"
 LABEL_VALUE="dev-multi-instance"
+# Container names are global, so each container also records the state dir
+# that created it; only that state dir may remove it.
+STATE_LABEL_KEY="deerflow.harness.state-dir"
 STATE_MARKER=".dev-multi-instance"
 RUN_DIR="$STATE_DIR/run"
 LOG_DIR="$STATE_DIR/logs"
@@ -183,18 +186,28 @@ container_exists() {
     docker inspect "$1" >/dev/null 2>&1
 }
 
-container_is_ours() {
-    [ "$(docker inspect -f "{{ index .Config.Labels \"$LABEL_KEY\" }}" "$1" 2>/dev/null || true)" = "$LABEL_VALUE" ]
+container_label() {
+    docker inspect -f "{{ index .Config.Labels \"$2\" }}" "$1" 2>/dev/null || true
 }
 
+# Remove container $1, with its anonymous volumes (both images declare a
+# VOLUME), when this state dir created it. A container from another harness
+# state dir, or from outside the harness, is never touched: returns 1.
 remove_container() {
+    local owner
     container_exists "$1" || return 0
-    if ! container_is_ours "$1"; then
+    if [ "$(container_label "$1" "$LABEL_KEY")" != "$LABEL_VALUE" ]; then
         echo "  ! container $1 was not created by this harness; leaving it alone" >&2
         return 1
     fi
-    docker rm -f "$1" >/dev/null
-    echo "✓ Removed container $1"
+    owner="$(container_label "$1" "$STATE_LABEL_KEY")"
+    if [ "$owner" != "$STATE_DIR" ]; then
+        echo "  ! container $1 belongs to the harness state dir ${owner:-<unrecorded>}; leaving it alone" >&2
+        echo "    (take that harness down from there, or 'docker rm -f -v $1' if it is stale)" >&2
+        return 1
+    fi
+    docker rm -f -v "$1" >/dev/null
+    echo "✓ Removed container $1 and its volumes"
 }
 
 wait_until() {
@@ -214,11 +227,11 @@ redis_pong() {
 start_containers() {
     echo "Starting Postgres ($PG_IMAGE) on 127.0.0.1:$PG_PORT..."
     POSTGRES_PASSWORD="$DEERFLOW_MI_POSTGRES_PASSWORD" docker run -d --name "$PG_CONTAINER" \
-        --label "$LABEL_KEY=$LABEL_VALUE" \
+        --label "$LABEL_KEY=$LABEL_VALUE" --label "$STATE_LABEL_KEY=$STATE_DIR" \
         -e POSTGRES_USER=deerflow -e POSTGRES_DB=deerflow -e POSTGRES_PASSWORD \
         -p "127.0.0.1:$PG_PORT:5432" "$PG_IMAGE" >/dev/null || return 1
     echo "Starting Redis ($REDIS_IMAGE) on 127.0.0.1:$REDIS_PORT..."
-    docker run -d --name "$REDIS_CONTAINER" --label "$LABEL_KEY=$LABEL_VALUE" \
+    docker run -d --name "$REDIS_CONTAINER" --label "$LABEL_KEY=$LABEL_VALUE" --label "$STATE_LABEL_KEY=$STATE_DIR" \
         -p "127.0.0.1:$REDIS_PORT:6379" "$REDIS_IMAGE" >/dev/null || return 1
 
     # TCP readiness: the image's init-time server listens on the Unix socket only.
@@ -243,12 +256,17 @@ start_gateway() {
     port="$(gateway_port "$name")"
     log="$LOG_DIR/gateway-$name.log"
     if pid="$(gateway_pid "$name")"; then
-        die "Gateway $(upper "$name") is already running (pid $pid)."
+        echo "✗ Gateway $(upper "$name") is already running (pid $pid)." >&2
+        return 1
     fi
     if port_in_use "$port"; then
-        die "Port $port is in use; free it or set DEERFLOW_MI_GATEWAY_$(upper "$name")_PORT."
+        echo "✗ Port $port is in use; free it or set DEERFLOW_MI_GATEWAY_$(upper "$name")_PORT." >&2
+        return 1
     fi
-    [ -f "$CONFIG_OUT" ] || die "Missing $CONFIG_OUT; run 'up' first."
+    if [ ! -f "$CONFIG_OUT" ]; then
+        echo "✗ Missing $CONFIG_OUT; run 'up' first." >&2
+        return 1
+    fi
     load_secrets
     mkdir -p "$STATE_DIR/index/$name" "$STATE_DIR/home"
     ensure_python
@@ -275,6 +293,9 @@ start_gateway() {
         exec nohup "$PYTHON_BIN" -m uvicorn app.gateway.app:app --host 127.0.0.1 --port "$port" </dev/null
     ) >>"$log" 2>&1 &
     pid=$!
+    # The Gateway outlives this script: drop it from the job table so stopping
+    # it later (teardown, stop/restart) prints no "Terminated" job notice.
+    disown "$pid" 2>/dev/null || true
     echo "$pid" >"$(pid_file "gateway-$name")"
 
     while ! curl -fsS --noproxy '*' -o /dev/null --max-time 2 "http://127.0.0.1:$port/health" 2>/dev/null; do
@@ -355,9 +376,21 @@ teardown() {
 
 fail_up() {
     echo "✗ $*" >&2
-    echo "  Tearing down; logs stay in $LOG_DIR" >&2
-    teardown
     exit 1
+}
+
+# EXIT trap while `up` starts things: any exit before the banner (fail_up, die,
+# set -e, Ctrl+C) stops what was started instead of leaving it running.
+UP_IN_PROGRESS=false
+on_up_exit() {
+    local status=$?
+    trap - EXIT INT TERM
+    if $UP_IN_PROGRESS; then
+        echo "  Tearing down the partial start; logs stay in $LOG_DIR" >&2
+        teardown
+        [ "$status" -ne 0 ] || status=1
+    fi
+    exit "$status"
 }
 
 # ── Inputs ───────────────────────────────────────────────────────────────────
@@ -435,9 +468,10 @@ cmd_up() {
     ensure_state_dir
     resolve_base_config
 
-    # A previous session that was not taken down: clear it before the port checks.
-    remove_container "$PG_CONTAINER" || die "Container name $PG_CONTAINER is taken; set DEERFLOW_MI_POSTGRES_CONTAINER."
-    remove_container "$REDIS_CONTAINER" || die "Container name $REDIS_CONTAINER is taken; set DEERFLOW_MI_REDIS_CONTAINER."
+    # A previous session of this state dir that was not taken down: clear it
+    # before the port checks. Containers of any other owner are refused.
+    remove_container "$PG_CONTAINER" || die "Container name $PG_CONTAINER is taken; set DEERFLOW_MI_POSTGRES_CONTAINER (and the ports) to run a second harness."
+    remove_container "$REDIS_CONTAINER" || die "Container name $REDIS_CONTAINER is taken; set DEERFLOW_MI_REDIS_CONTAINER (and the ports) to run a second harness."
     for port in "$GATEWAY_A_PORT" "$GATEWAY_B_PORT" "$PG_PORT" "$REDIS_PORT"; do
         if port_in_use "$port"; then
             die "Port $port is in use. Stop whatever holds it ('make stop' for make dev) or override the port (see --help)."
@@ -469,11 +503,13 @@ cmd_up() {
     # The URLs stay $VAR references so the file holds no harness secret; each
     # Gateway process exports them (see start_gateway).
     # shellcheck disable=SC2016
-    run_helper render-config --base "$BASE_CONFIG" --out "$CONFIG_OUT" \
+    run_helper render-config --base "$BASE_CONFIG" --out "$CONFIG_OUT" --state-dir "$STATE_DIR" \
         --database-url '$DEERFLOW_MI_DATABASE_URL' --redis-url '$DEERFLOW_MI_REDIS_URL' $keep_channels ||
         die "Could not render the multi-instance config."
     copy_extensions_config
 
+    UP_IN_PROGRESS=true
+    trap on_up_exit EXIT
     trap 'echo ""; fail_up "Interrupted"' INT TERM
     start_containers || fail_up "Containers failed to start."
     # Sequential cold start: Alembic migrations are advisory-locked, but the
@@ -483,7 +519,8 @@ cmd_up() {
     if $with_nginx; then
         start_nginx || fail_up "nginx failed to start."
     fi
-    trap - INT TERM
+    UP_IN_PROGRESS=false
+    trap - EXIT INT TERM
 
     echo ""
     echo "=========================================="

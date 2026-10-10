@@ -149,6 +149,11 @@ no harness secret. Gateways run from the resolved backend interpreter, not `uv r
 so the pid file names the serving process and `stop --kill` cannot orphan it. B
 starts after A answers `/health`: LangGraph's checkpointer/store `setup()` is not
 advisory-locked. Deletion is limited to a state dir holding the marker file.
+The overlay also redirects every endpoint and data root the base config names
+(checkpointer, sandbox ownership, checkpoint cache, DeerMem/blob roots, local AIO
+container prefix) into the harness. Containers carry a state-dir label; only the
+owning state dir removes them, always with `-v` (both images declare volumes).
+`up` installs an EXIT trap so any failure after the containers start tears down.
 
 ## Shell Script Invocation Contract
 
