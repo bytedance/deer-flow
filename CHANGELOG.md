@@ -4397,7 +4397,7 @@ This release closes that milestone with **439 merged pull requests**.
   helper now accepts exactly a dotted-quad IPv4 address, an IPv6 address
   (bracketed or not), or an RFC 1123 hostname. Returning to the loopback
   default also removes the `temp/nginx.local.conf` rendered for an earlier
-  value.
+  value. ([#6635])
 
 - **skills:** Stop `review_skill_package` from reading other users' skills.
   Local path targets were allowed anywhere under the Gateway cwd or `/tmp`,
@@ -9564,3 +9564,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6595]: https://github.com/bytedance/deer-flow/pull/6595
 [#6611]: https://github.com/bytedance/deer-flow/pull/6611
 [#6613]: https://github.com/bytedance/deer-flow/pull/6613
+[#6635]: https://github.com/bytedance/deer-flow/pull/6635
