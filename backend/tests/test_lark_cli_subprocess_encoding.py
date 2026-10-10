@@ -13,15 +13,15 @@ than as an exception.
 The tests drive the real functions with a stand-in CLI that emits non-ASCII
 UTF-8, and force the locale decoding path without depending on the host code
 page: the module's ``subprocess.run`` reference is wrapped so a text-mode call
-drops its pinned codec, and ``locale.getencoding`` is pinned to a code page that
-mangles UTF-8. That reproduces the behaviour of the pre-fix call sites on a
-cp936/cp1252 host even when the test host itself is UTF-8.
+that names no codec is decoded with one that mangles UTF-8, while a call that
+pins its own ``encoding`` is passed through untouched. That reproduces the
+behaviour of the pre-fix call sites on a cp936/cp1252 host even when the test
+host itself is UTF-8.
 """
 
 from __future__ import annotations
 
 import json
-import locale
 import os
 import stat
 import subprocess
@@ -40,10 +40,16 @@ MANGLING_CODEPAGE = "cp1252"
 
 EXPECTED_USER = "\u5f20\u4f1f"  # 张伟
 EXPECTED_TITLE = "\u5b63\u5ea6\u590d\u76d8"  # 季度复盘
+EXPECTED_VERSION = "lark-cli v1.0.65 \u5f20\u4f1f"  # the CLI's --version payload
 
 _FAKE_CLI_BODY = f"""\
 import json
 import os
+import sys
+
+if "--version" in sys.argv[1:]:
+    os.write(1, {EXPECTED_VERSION!r}.encode("utf-8"))
+    raise SystemExit(0)
 
 payload = {{
     "userName": {EXPECTED_USER!r},
@@ -76,7 +82,7 @@ def fake_cli(tmp_path: Path) -> tuple[list[str], str]:
         return argv, str(launcher)
 
     launcher = tmp_path / "lark-cli.cmd"
-    launcher.write_text(f'@echo off\r\n"{sys.executable}" "{script}"\r\n', encoding="mbcs")
+    launcher.write_text(f'@echo off\r\n"{sys.executable}" "{script}" %*\r\n', encoding="mbcs")
     return argv, str(launcher)
 
 
@@ -87,12 +93,13 @@ def locale_decoding(monkeypatch: pytest.MonkeyPatch) -> None:
     A call that names its own codec is passed through untouched, so a pinned
     ``encoding="utf-8"`` still wins; a text-mode call that names none is decoded
     with a code page that cannot represent non-ASCII -- exactly what happens on
-    cp936/cp1252 when the locale supplies the codec. Emulating it keeps these
-    tests meaningful on a host (or CI runner) whose own locale is UTF-8, where
-    the unpatched flip would otherwise pass on the pre-fix code too.
-    """
-    monkeypatch.setattr(locale, "getencoding", lambda: MANGLING_CODEPAGE)
+    cp936/cp1252 when the locale supplies the codec. Emulating it here keeps
+    these tests meaningful on a host (or CI runner) whose own locale is UTF-8,
+    where the unpatched flip would otherwise pass on the pre-fix code too.
 
+    ``locale.getencoding`` is deliberately not patched: ``lark_cli`` never calls
+    it, so pinning it would document a redirection that does not happen.
+    """
     real_run = subprocess.run
 
     def locale_run(*args, **kwargs):
@@ -142,13 +149,20 @@ def test_probe_lark_auth_decodes_utf8_user_name(fake_cli, locale_decoding: None,
 
 
 def test_probe_lark_cli_at_path_decodes_utf8_version_output(fake_cli, locale_decoding: None) -> None:
-    """A non-ASCII byte in ``--version`` output must not become a probe error."""
+    """The probe's reported version keeps a non-ASCII byte intact.
+
+    Asserting only ``available``/``error`` would not guard the pin: the probe
+    returns ``available=True, version=output or None`` for any non-empty output
+    with a zero exit code, so a mojibake version string still passes. Naming the
+    expected text is what fails on the unpinned call site.
+    """
     _argv, launcher = fake_cli
 
     probe = lark_cli._probe_lark_cli_at_path(launcher)
 
     assert probe.available is True
     assert probe.error is None
+    assert probe.version == EXPECTED_VERSION
 
 
 def test_unpinned_capture_corrupts_the_same_output(fake_cli) -> None:
