@@ -351,6 +351,24 @@ This release closes that milestone with **439 merged pull requests**.
   redis` or `DEER_FLOW_STREAM_BRIDGE_REDIS_URL` (docker-compose and the Helm
   chart already inject it). ([#6328])
 
+- **dev:** `scripts/dev_multi_instance.sh` (`make dev-multi`, `make dev-multi-check`,
+  `make dev-multi-down`) runs two Gateways as one local multi-instance cluster:
+  throwaway Postgres and Redis containers on loopback, Gateway A on port 8001 and
+  Gateway B on 8011 sharing one `DEER_FLOW_HOME` and generated `AUTH_JWT_SECRET`,
+  `DEER_FLOW_INTERNAL_AUTH_TOKEN` and `DEER_FLOW_CREDENTIALS_KEY` values, each with
+  its own DeerMem retrieval index, and an optional round-robin nginx on port 2027.
+  The config is the developer's own `config.yaml` (or `config.example.yaml`) plus
+  the settings the multi-instance startup gate requires; settings the gate refuses
+  are changed and reported, and the checkpointer, Redis endpoints, DeerMem and
+  blob data roots and local AIO sandbox container prefix the config names are
+  redirected into the harness (a non-DeerMem memory backend is used as
+  configured). Containers are labelled with the state dir that owns them and
+  removed with their volumes; a failed `up` tears down what it started. `check`
+  automates the scriptable cross-instance checks: readiness, shared sessions and
+  internal token, thread, upload and artifact visibility, skill toggles, nginx
+  balancing, and SSE `Last-Event-ID` resume across instances. See "Local
+  two-Gateway harness" in `backend/docs/CONFIGURATION.md`. ([#6613])
+
 - **config:** `DEER_FLOW_ENV_FILE` selects one explicit UTF-8 dotenv file for the backend at
   startup, shared by configuration loading, authentication startup, and the debug entry
   point; relative paths resolve from the backend process working directory, existing process
@@ -4337,6 +4355,24 @@ This release closes that milestone with **439 merged pull requests**.
   package. Previously a `hooks/install.jse` carrying one stray byte received
   no static analysis and no executable review. ([#6321])
 
+- **community:** Delegated `web_fetch`/`web_capture` backends fail closed by
+  default. Browserless, Crawl4AI, Firecrawl, and fastCRW resolve the target URL
+  in the backend's own network namespace, so the target-URL SSRF screen cannot
+  be enforced end-to-end. Each entry point now screens its resolved backend
+  base URL (config key, env fallback, and default) before delegating: a public
+  backend still works unchanged, but a loopback, private, or unverifiable
+  backend is refused unless the operator confirms its egress isolation.
+  **Upgrade note:** a deployment using the documented defaults (Browserless at
+  `http://localhost:3032`, Crawl4AI at `http://localhost:11235`, or a
+  self-hosted Firecrawl/fastCRW via `base_url`/`CRW_API_URL`) now sees a
+  delegation error on `web_fetch`/`web_capture` until it either points the
+  backend at its public address or sets `network_isolation_confirmed: true` in
+  each tool config after isolating the backend's egress. `make doctor` warns
+  about refused backend configurations, including `CRW_API_URL` overrides.
+  `allow_private_addresses` still controls target URLs only. See the
+  [deployment guidance](backend/docs/CONFIGURATION.md#delegated-fetch-backend-isolation).
+  ([#6531])
+
 - **scripts:** Bind local `make dev` / `make start` to loopback. `serve.sh` and
   `backend/Makefile` started the Gateway with `--host 0.0.0.0`,
   `nginx.local.conf` listened on every interface, and Next.js kept its
@@ -4370,6 +4406,22 @@ This release closes that milestone with **439 merged pull requests**.
   truncated at that character. These providers now split on `"
 "` only, as the shared parser already documents and as
   LocalSandbox, the AIO backend and E2B already do. ([#6595])
+- **security:** Add `DEER_FLOW_CREDENTIALS_KEY`, an env-only at-rest
+  encryption key for stored credentials. Per-connection IM channel credentials
+  had an encryption path that no production code wired up, so they could be
+  neither stored nor read and Slack always used the deployment bot token. The
+  Gateway now loads the key at startup (comma-separated Fernet keys: the first
+  encrypts, all decrypt, for rotation; values carry a `fernet:v2:` prefix and
+  earlier `fernet:v1:` values stay readable) and passes it to every channel
+  connection repository; undecryptable values are treated as missing. Unset, a
+  single instance generates `{DEER_FLOW_HOME}/.credentials_key`; a declared
+  multi-instance deployment with `channel_connections` enabled refuses to start
+  without the key, and a malformed key is refused without being echoed. The
+  Helm chart generates the key into its app Secret and preserves it across
+  upgrades, `make up` persists it next to the runtime home, and both compose
+  files pass it to the Gateway. `.jwt_secret` (and the managed-model key) are
+  now created exclusively and read back, so replicas cold-starting on a shared
+  volume no longer keep different session-signing secrets. ([#6611])
 
 ### Documentation
 
@@ -9499,3 +9551,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6588]: https://github.com/bytedance/deer-flow/pull/6588
 [#6590]: https://github.com/bytedance/deer-flow/pull/6590
 [#6595]: https://github.com/bytedance/deer-flow/pull/6595
+[#6611]: https://github.com/bytedance/deer-flow/pull/6611
+[#6613]: https://github.com/bytedance/deer-flow/pull/6613

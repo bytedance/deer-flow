@@ -274,6 +274,20 @@
   `stream_bridge.type: redis` 或 `DEER_FLOW_STREAM_BRIDGE_REDIS_URL`
   （docker-compose 与 Helm chart 已自动注入）。([#6328])
 
+- **开发：** 新增 `scripts/dev_multi_instance.sh`（`make dev-multi`、`make dev-multi-check`、
+  `make dev-multi-down`），在本机把两个 Gateway 作为一个多实例集群运行：回环地址上的
+  临时 Postgres 与 Redis 容器，Gateway A（8001 端口）与 Gateway B（8011 端口）共享同一
+  `DEER_FLOW_HOME` 以及生成的 `AUTH_JWT_SECRET`、`DEER_FLOW_INTERNAL_AUTH_TOKEN` 与
+  `DEER_FLOW_CREDENTIALS_KEY`，各自使用独立的 DeerMem 检索索引，并可选在 2027 端口启动
+  轮询 nginx。配置取开发者自己的 `config.yaml`（或 `config.example.yaml`），叠加多实例
+  启动门控要求的设置；门控拒绝的设置会被修改并逐项提示，配置中引用的 checkpointer、Redis 端点、
+  DeerMem 与 blob 数据目录以及本地 AIO 沙箱容器名前缀都会被重定向到 harness 内部（非 DeerMem 的
+  记忆后端按原配置使用）。容器带有所属状态目录的标签，删除时连同其匿名卷一并
+  移除；`up` 中途失败会拆除已启动的部分。`check` 自动执行可脚本化的跨实例
+  检查：就绪探针、共享会话与内部令牌、线程/上传/产物可见性、技能开关、nginx 负载均衡，
+  以及跨实例的 SSE `Last-Event-ID` 续接。详见 `backend/docs/CONFIGURATION.md` 的
+  “Local two-Gateway harness”一节。 ([#6613])
+
 - **配置：** 新增 `DEER_FLOW_ENV_FILE`，在后端启动时选择一个显式的 UTF-8 dotenv 文件，配置
   加载、认证启动和调试入口共用；相对路径以后端进程工作目录解析，已有进程环境变量保持
   优先，选择为空、缺失、不可读或编码无效时直接报错而不回退。不设置时保持默认 dotenv 发现；
@@ -3381,6 +3395,17 @@
   的匹配行会在该字符处被截断。现在这三个提供者只按 `"
 "` 切分，与共享解析器
   既有的约定以及 LocalSandbox、AIO 后端、E2B 的行为一致。([#6595])
+- **安全：** 新增仅从环境变量读取的静态凭据加密密钥 `DEER_FLOW_CREDENTIALS_KEY`。
+  按连接存储的 IM 渠道凭据此前虽有加密路径，但没有任何生产代码接入，既无法写入
+  也无法读取，Slack 因而始终使用部署级 bot token。现在 Gateway 在启动时加载该密钥
+  （逗号分隔的 Fernet 密钥：第一个用于加密，全部用于解密，以支持轮换；密文带
+  `fernet:v2:` 前缀，旧的 `fernet:v1:` 密文仍可读取），并传给所有渠道连接仓库；
+  无法解密的值按缺失处理。未设置时单实例会生成 `{DEER_FLOW_HOME}/.credentials_key`；
+  声明为多实例且启用 `channel_connections` 的部署在缺少密钥时拒绝启动，格式错误的
+  密钥同样会被拒绝且不会回显。Helm chart 将密钥生成到 app Secret 并在升级时保留，
+  `make up` 将其持久化到运行时目录，两个 compose 文件都会把它传给 Gateway。
+  `.jwt_secret`（以及托管模型密钥）现在以独占方式创建并回读，共享卷上同时冷启动的
+  副本不再各自保留不同的会话签名密钥。 ([#6611])
 
 ### 文档
 
@@ -7653,3 +7678,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6588]: https://github.com/bytedance/deer-flow/pull/6588
 [#6590]: https://github.com/bytedance/deer-flow/pull/6590
 [#6595]: https://github.com/bytedance/deer-flow/pull/6595
+[#6611]: https://github.com/bytedance/deer-flow/pull/6611
+[#6613]: https://github.com/bytedance/deer-flow/pull/6613
