@@ -285,8 +285,11 @@ def extract_artifacts_from_result(
        conservatively for sandbox paths and remote file URLs (gated by
        ``detect_refs_in_text``).
 
-    Error results produce no entries. Every reference from one result gets a
-    distinct handle via a sequential ordinal.
+    Error results produce no entries. Every distinct reference from one
+    result gets its own handle via a sequential ordinal; the same ``real_ref``
+    surfaced by several sources (e.g. a ``resource_links`` entry and the
+    placeholder text the conversion layer wrote for the same link) is kept
+    only from the first source, so one resource never gets two handles.
     """
     if result.status == "error":
         return []
@@ -296,6 +299,17 @@ def extract_artifacts_from_result(
     tool_call_id = result.tool_call_id or ""
     sink = _EntrySink(thread_id=thread_id, tool_call_id=tool_call_id, call_index=call_index, created_at=now, tool_name=tool_name, occurrence_id=result.id)
     entries: list[ArtifactEntry] = []
+    seen_refs: set[str] = set()
+
+    def _add_unique(**fields: Any) -> None:
+        # Several sources can surface the same ref for one result — e.g. the
+        # conversion layer's ``resource_links`` channel plus the placeholder
+        # text it wrote into a content block. Keep the first entry per ref so
+        # one resource never gets two handles; earlier (typed) sources win.
+        if fields["real_ref"] in seen_refs:
+            return
+        seen_refs.add(fields["real_ref"])
+        entries.append(sink.add(**fields))
 
     artifact = result.artifact
     if artifact is not None and isinstance(artifact, dict):
@@ -307,11 +321,11 @@ def extract_artifacts_from_result(
                     is_task = key in _STRUCTURED_TASK_KEYS
                     if not (_is_referenceable_task_id(value) if is_task else _is_referenceable_url(value)):
                         continue
-                    entries.append(sink.add(artifact_type="task" if is_task else "file", display_name=_display_name_for_ref(value), real_ref=value))
+                    _add_unique(artifact_type="task" if is_task else "file", display_name=_display_name_for_ref(value), real_ref=value)
                 if not entries and not any(value.startswith(("data:", "blob:")) for _, value in found):
                     encoded = _serialize_bounded_data(structured)
                     if encoded is not None:
-                        entries.append(sink.add(artifact_type="data", display_name=f"{tool_name} structured result", real_ref=encoded))
+                        _add_unique(artifact_type="data", display_name=f"{tool_name} structured result", real_ref=encoded)
 
         resource_links = artifact.get("resource_links")
         if isinstance(resource_links, list):
@@ -323,20 +337,18 @@ def extract_artifacts_from_result(
                     continue
                 name = link.get("name")
                 mime = link.get("mime_type")
-                entries.append(
-                    sink.add(
-                        artifact_type="file",
-                        display_name=name if isinstance(name, str) and name else _display_name_for_ref(uri),
-                        real_ref=uri,
-                        mime_type=mime if isinstance(mime, str) and mime else None,
-                    )
+                _add_unique(
+                    artifact_type="file",
+                    display_name=name if isinstance(name, str) and name else _display_name_for_ref(uri),
+                    real_ref=uri,
+                    mime_type=mime if isinstance(mime, str) and mime else None,
                 )
 
     content = result.content
     if isinstance(content, str):
         if detect_refs_in_text and content:
             for ref in _detect_refs_in_text(content):
-                entries.append(sink.add(artifact_type=ref["type"], display_name=ref["display"], real_ref=ref["ref"]))
+                _add_unique(artifact_type=ref["type"], display_name=ref["display"], real_ref=ref["ref"])
         return entries
     if not isinstance(content, list):
         return entries
@@ -352,13 +364,11 @@ def extract_artifacts_from_result(
                 continue
             url = source.get("url")
             if isinstance(url, str) and url and _is_referenceable_url(url):
-                entries.append(
-                    sink.add(
-                        artifact_type="file" if block_type == "file" else "image",
-                        display_name=_display_name_for_ref(url),
-                        real_ref=url,
-                        mime_type=source.get("mime_type") if isinstance(source.get("mime_type"), str) else None,
-                    )
+                _add_unique(
+                    artifact_type="file" if block_type == "file" else "image",
+                    display_name=_display_name_for_ref(url),
+                    real_ref=url,
+                    mime_type=source.get("mime_type") if isinstance(source.get("mime_type"), str) else None,
                 )
             continue
 
@@ -367,7 +377,7 @@ def extract_artifacts_from_result(
             if not isinstance(text, str):
                 continue
             for ref in _detect_refs_in_text(text):
-                entries.append(sink.add(artifact_type=ref["type"], display_name=ref["display"], real_ref=ref["ref"]))
+                _add_unique(artifact_type=ref["type"], display_name=ref["display"], real_ref=ref["ref"])
     return entries
 
 

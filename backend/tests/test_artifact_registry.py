@@ -163,6 +163,39 @@ def test_resource_links_reject_unreferenceable_uris():
     assert [entry["real_ref"] for entry in entries] == ["/mnt/user-data/outputs/keep.md"]
 
 
+def test_resource_links_and_placeholder_text_dedup_same_ref():
+    """The conversion layer writes both a ``resource_links`` artifact entry and
+    a model-visible placeholder text for one downgraded ResourceLink: the
+    registry must not mint two handles for the same ref — the typed
+    ``resource_links`` entry (with its display name) wins."""
+    path_uri = "/mnt/user-data/outputs/page.png"
+    url_uri = "https://example.com/files/report.pdf"
+    result = ToolMessage(
+        content=[
+            {
+                "type": "text",
+                "text": (f"[Resource: page (image/png) available at {path_uri}]\n[Resource: report (application/pdf) available at {url_uri}]"),
+            }
+        ],
+        tool_call_id="call-dup",
+        name="mcp_screenshot",
+        artifact={
+            "resource_links": [
+                {"name": "page", "uri": path_uri, "mime_type": "image/png"},
+                {"name": "report", "uri": url_uri, "mime_type": "application/pdf"},
+            ]
+        },
+    )
+    entries = extract_artifacts_from_result(result, thread_id="thread-1")
+    assert [(entry["artifact_type"], entry["real_ref"]) for entry in entries] == [
+        ("file", path_uri),
+        ("file", url_uri),
+    ]
+    assert entries[0]["display_name"] == "page"
+    assert entries[0]["mime_type"] == "image/png"
+    assert entries[1]["display_name"] == "report"
+
+
 def test_extract_from_text_with_path():
     result = ToolMessage(
         content=[{"type": "text", "text": "Report saved to /mnt/user-data/outputs/report.html"}],
