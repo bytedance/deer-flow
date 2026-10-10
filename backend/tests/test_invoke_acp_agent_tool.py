@@ -2,7 +2,6 @@
 
 import asyncio
 import contextlib
-import os
 import sys
 import time
 from pathlib import Path
@@ -18,6 +17,7 @@ from deerflow.tools.builtins.invoke_acp_agent_tool import (
     _build_permission_response,
     _format_invocation_error,
     _get_work_dir,
+    _resolve_agent_command,
     build_invoke_acp_agent_tool,
 )
 from deerflow.tools.tools import get_available_tools
@@ -192,9 +192,9 @@ async def test_invoke_acp_agent_uses_fixed_acp_workspace(monkeypatch, tmp_path):
     """ACP agent uses {base_dir}/acp-workspace/ when no thread_id is available (no config)."""
     from deerflow.config import paths as paths_module
 
-    # Empty PATH keeps the configured command unresolvable, so the spawn
-    # assertion below checks the configuration rather than the host PATH.
-    monkeypatch.setenv("PATH", "")
+    # An empty PATH directory keeps the configured command unresolvable, so the
+    # spawn assertion below checks the configuration rather than the host PATH.
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
     monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
 
     monkeypatch.setattr(
@@ -999,6 +999,19 @@ async def test_invoke_acp_agent_preserves_sdk_timeout_errors(acp_subprocess_tool
     assert acp_subprocess_tool.captured["proc"].returncode is not None
 
 
+def _write_launcher_shim(directory: Path, name: str, command: str) -> Path:
+    """Write an executable launcher shim for ``name`` under ``directory``."""
+    directory.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "win32":
+        shim = directory / f"{name}.cmd"
+        shim.write_text(f"@echo off\n{command}\n", encoding="utf-8")
+    else:
+        shim = directory / name
+        shim.write_text(f"#!/bin/sh\nexec {command}\n", encoding="utf-8")
+        shim.chmod(0o755)
+    return shim
+
+
 @pytest.mark.anyio
 async def test_invoke_acp_agent_spawns_the_path_resolved_command(monkeypatch, tmp_path):
     """A bare configured command reaches the ACP SDK as its PATH-resolved path.
@@ -1020,17 +1033,9 @@ async def test_invoke_acp_agent_spawns_the_path_resolved_command(monkeypatch, tm
     script_path.write_text(_ACP_AGENT_SCRIPT, encoding="utf-8")
     phase_path = tmp_path / "phase.txt"
 
-    shim_dir = tmp_path / "bin"
-    shim_dir.mkdir()
     shim_name = "deerflow-acp-probe"
-    if sys.platform == "win32":
-        shim = shim_dir / f"{shim_name}.cmd"
-        shim.write_text(f'@echo off\n"{sys.executable}" "{script_path}" "" 0 "{phase_path}"\n', encoding="utf-8")
-    else:
-        shim = shim_dir / shim_name
-        shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{script_path}" "" 0 "{phase_path}"\n', encoding="utf-8")
-        shim.chmod(0o755)
-    monkeypatch.setenv("PATH", str(shim_dir) + os.pathsep + os.environ["PATH"])
+    shim = _write_launcher_shim(tmp_path / "bin", shim_name, f'"{sys.executable}" "{script_path}" "" 0 "{phase_path}"')
+    monkeypatch.setenv("PATH", str(shim.parent))
 
     captured: dict[str, object] = {}
     real_spawn_agent_process = acp_module.spawn_agent_process
@@ -1072,3 +1077,48 @@ async def test_invoke_acp_agent_reports_guidance_for_an_unresolvable_command(mon
 
     assert "Command 'deerflow-missing-acp-agent' was not found on PATH" in result
     assert "acp_agents.probe.command" in result
+
+
+def test_resolve_agent_command_only_resolves_bare_names(monkeypatch):
+    """A configured path is left to the spawn, which runs in the ACP workspace."""
+    monkeypatch.setattr(
+        "deerflow.tools.builtins.invoke_acp_agent_tool.shutil.which",
+        lambda command: f"/resolved/{command}",
+    )
+
+    assert _resolve_agent_command("npx") == "/resolved/npx"
+    assert _resolve_agent_command("bin/agent") == "bin/agent"
+    assert _resolve_agent_command("./bin/agent") == "./bin/agent"
+
+
+@pytest.mark.anyio
+async def test_invoke_acp_agent_reports_the_configured_command_when_spawn_fails(monkeypatch, tmp_path):
+    """A command PATH resolves can still fail to launch.
+
+    The remediation text has to stay anchored to the configured command, so the
+    ``codex-acp`` hint below survives the resolution.
+    """
+    import acp as acp_module
+
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
+    monkeypatch.setattr(
+        "deerflow.config.extensions_config.ExtensionsConfig.from_file",
+        classmethod(lambda cls: ExtensionsConfig(mcp_servers={}, skills={})),
+    )
+    shim_dir = tmp_path / "bin"
+    _write_launcher_shim(shim_dir, "codex-acp", "echo")
+    _write_launcher_shim(shim_dir, "codex", "echo")
+    monkeypatch.setenv("PATH", str(shim_dir))
+
+    def _raise_missing(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(acp_module, "spawn_agent_process", _raise_missing)
+
+    tool = build_invoke_acp_agent_tool({"codex": ACPAgentConfig(command="codex-acp", description="Codex CLI", timeout_seconds=30)})
+    result = await asyncio.wait_for(tool.coroutine(agent="codex", prompt="do work"), timeout=20)
+
+    assert "Command 'codex-acp' was not found on PATH" in result
+    assert "does not speak ACP directly" in result

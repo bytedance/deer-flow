@@ -135,9 +135,15 @@ def _resolve_agent_command(command: str) -> str:
     commands, and keep the configured value when nothing matches so the
     not-found remediation still fires.
 
+    Only bare names are resolved. A configured path stays untouched because the
+    spawn runs in the per-thread ACP workspace, not in the Gateway's working
+    directory.
+
     The lookup stats the filesystem (``shutil.which`` -> ``os.access``), so
     callers must run it off the event loop.
     """
+    if os.path.dirname(command):
+        return command
     try:
         return shutil.which(command) or command
     except OSError:
@@ -287,7 +293,9 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
             return result or "(no response)"
         except Exception as e:
             logger.error("ACP agent '%s' invocation failed: %s", agent, e)
-            return await asyncio.to_thread(_format_invocation_error, agent, cmd, e)
+            # Report the configured command, not the resolved path: remediation
+            # text has to match what the operator wrote in config.yaml.
+            return await asyncio.to_thread(_format_invocation_error, agent, agent_config.command, e)
 
     return StructuredTool.from_function(
         name="invoke_acp_agent",

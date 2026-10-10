@@ -1,8 +1,8 @@
 """Regression test for ACP invocation setup on the event loop.
 
-The agent command is one that resolves on PATH (``sys.executable``) so the gate
-exercises the real ``shutil.which`` lookup rather than short-circuiting on a
-name that nothing matches.
+The configured command is a bare name backed by a launcher shim on a controlled
+``PATH``, so the gate really runs the ``shutil.which`` lookup (``os.access``)
+instead of short-circuiting on a name that resolves nowhere.
 """
 
 from __future__ import annotations
@@ -38,6 +38,14 @@ async def test_invoke_acp_agent_setup_does_not_block_event_loop(monkeypatch, tmp
     )
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_path))
 
+    shim_dir = tmp_path / "bin"
+    shim_dir.mkdir()
+    shim = shim_dir / ("test-agent.cmd" if sys.platform == "win32" else "test-agent")
+    shim.write_text("@echo off\n" if sys.platform == "win32" else "#!/bin/sh\n", encoding="utf-8")
+    if sys.platform != "win32":
+        shim.chmod(0o755)
+    monkeypatch.setenv("PATH", str(shim_dir))
+
     captured: dict[str, Any] = {}
 
     class _Connection:
@@ -59,7 +67,7 @@ async def test_invoke_acp_agent_setup_does_not_block_event_loop(monkeypatch, tmp
     monkeypatch.setattr(acp, "spawn_agent_process", fake_spawn_agent_process)
 
     tool = acp_tool.build_invoke_acp_agent_tool(
-        {"test-agent": ACPAgentConfig(command=sys.executable, description="Test agent")},
+        {"test-agent": ACPAgentConfig(command="test-agent", description="Test agent")},
     )
     result = await tool.coroutine(
         agent="test-agent",
