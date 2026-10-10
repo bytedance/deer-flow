@@ -440,7 +440,8 @@ class E2BSandbox(Sandbox):
         matches: list[str] = []
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
-        for entry in output.text.splitlines():
+        # Records are LF-delimited; other splitlines() boundaries can be path characters.
+        for entry in output.text.split("\n"):
             # Do NOT strip: trailing whitespace can be part of the filename.
             if not entry:
                 continue
@@ -478,7 +479,8 @@ class E2BSandbox(Sandbox):
         # Build a portable ``grep`` invocation:
         # -r recursive, -n line numbers, -H always print filename, -I skip
         # binary files, -E extended regex (or -F for literal/fixed strings).
-        flags = ["-r", "-n", "-H", "-I"]
+        # --null separates filenames from line numbers even when a path contains colons.
+        flags = ["-r", "-n", "-H", "-I", "--null"]
         if not case_sensitive:
             flags.append("-i")
         if literal:
@@ -519,9 +521,11 @@ class E2BSandbox(Sandbox):
 
         matches: list[GrepMatch] = []
         truncated = output.truncated
-        for raw in output.text.splitlines():
+        # Keep non-LF separators inside filenames and matched text intact.
+        for raw in output.text.split("\n"):
             try:
-                file_path, line_no_str, line_text = raw.split(":", 2)
+                file_path, match_text = raw.split("\0", 1)
+                line_no_str, line_text = match_text.split(":", 1)
             except ValueError:
                 continue
             try:
