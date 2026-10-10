@@ -887,6 +887,7 @@ def test_declared_multi_instance_with_channel_connections_requires_the_credentia
     assert GENERATE_KEY_COMMAND in msg, "the refusal must say how to generate a key"
     assert "Helm" in msg
     assert "deployment.multi_instance=false" in msg, "must name the rollback knob"
+    assert "or set channel_connections.enabled=false" in msg, "must name the setting that turns the consumer off"
 
 
 def test_env_declared_multi_instance_names_the_env_knob(monkeypatch):

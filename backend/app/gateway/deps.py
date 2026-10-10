@@ -269,11 +269,12 @@ def _enforce_credentials_key(config: AppConfig) -> None:
     if not consumers:
         return
     enabled = ", ".join(consumers)
+    disabled = ", ".join(consumer.removesuffix("=true") + "=false" for consumer in consumers)
     raise SystemExit(
         f"{declaration.knob} with {enabled} requires {CREDENTIALS_KEY_ENV_VAR}: without it every instance generates its own "
         f"{{base_dir}}/{CREDENTIALS_KEY_FILENAME}, and credentials one instance stores cannot be decrypted on its peers. "
         f"Generate one key with {GENERATE_KEY_COMMAND} and set the same value on every instance (the Helm chart and "
-        f"scripts/deploy.sh generate and inject it automatically), {declaration.rollback}, or disable {enabled}."
+        f"scripts/deploy.sh generate and inject it automatically), {declaration.rollback}, or set {disabled}."
     )
 
 
