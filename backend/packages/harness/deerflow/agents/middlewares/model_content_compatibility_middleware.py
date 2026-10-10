@@ -101,7 +101,18 @@ def _sanitize_block(block: Any) -> Any:
         return {"type": "text", "text": resource_placeholder_text(mime_type=_str_or_none(block.get("mime_type")), url=model_visible_location(url))}
     if block_type == "image":
         url = block.get("url")
-        if isinstance(url, str) and url and urlparse(url).scheme.lower() not in _FETCHABLE_IMAGE_SCHEMES:
+        if not (isinstance(url, str) and url):
+            return block
+        try:
+            scheme = urlparse(url).scheme.lower()
+        except ValueError:
+            # Structurally invalid URL (bad IPv6 literal, invalid netloc
+            # characters): urlparse raises instead of returning a scheme.
+            # Downgrade like any other non-fetchable location — one malformed
+            # persisted URL must not raise on every model call and re-brick
+            # the thread this middleware exists to heal.
+            scheme = ""
+        if scheme not in _FETCHABLE_IMAGE_SCHEMES:
             return {"type": "text", "text": resource_placeholder_text(mime_type=_str_or_none(block.get("mime_type")), url=model_visible_location(url))}
         return block
     return block

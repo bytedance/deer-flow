@@ -192,6 +192,15 @@ class TestImageBlockSchemeGating:
         assert prepared.messages[0].content == [{"type": "text", "text": "[Resource (image/png)]"}]
         assert "file://" not in prepared.messages[0].content[0]["text"]
 
+    def test_malformed_image_url_is_downgraded_without_raising(self):
+        """urlparse raises ValueError on structurally invalid URLs (a bad IPv6
+        literal here); the sanitizer must downgrade the block instead of
+        raising on every model call for the thread it is meant to heal."""
+        message = _tool_message([{"type": "image", "url": "http://[::1", "mime_type": "image/png"}])
+        prepared = _run_sync(ModelContentCompatibilityMiddleware(), _model_request([message]))
+
+        assert prepared.messages[0].content == [{"type": "text", "text": "[Resource (image/png)]"}]
+
 
 class TestLocationSuppression:
     """The placeholder's location segment goes through the shared
