@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_current_user, get_mcp_task_repo, get_mcp_task_service, get_thread_store
+from deerflow.mcp.tasks import TaskStatus
 from deerflow.mcp_scope import is_valid_thread_incarnation
 from deerflow.utils.thread_id import ThreadId
 
@@ -95,6 +96,8 @@ async def list_mcp_tasks(
     thread_id: ThreadId,
     request: Request,
     limit: int = Query(default=50, ge=1, le=100),
+    status: TaskStatus | None = None,
+    active_only: bool = False,
 ) -> list[dict[str, Any]]:
     """List the durable MCP background tasks recorded for a thread.
 
@@ -102,6 +105,8 @@ async def list_mcp_tasks(
         thread_id: Thread whose tasks are listed.
         request: Incoming request, used for auth and repository access.
         limit: Maximum number of tasks to return (1-100).
+        status: Optional task status filter applied in SQL before the limit.
+        active_only: Restrict to submitted, working, and input_required tasks; intersects with status.
 
     Returns:
         Tasks in repository order, each projected onto the list view.
@@ -119,6 +124,8 @@ async def list_mcp_tasks(
         user_id=user_id,
         thread_incarnation=thread_incarnation,
         limit=limit,
+        status=status,
+        active_only=active_only,
     )
     threshold = service.tracking_degraded_after_errors
     return [_list_item(record, threshold=threshold) for record in records]
