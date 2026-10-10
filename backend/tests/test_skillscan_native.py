@@ -2154,3 +2154,100 @@ def test_cleartext_http_uses_host_after_userinfo_without_exposing_credentials(tm
     finding = _finding_by_rule(findings, "network-cleartext-http")
     assert finding["evidence"] == "http://Example.COM:8080/"
     assert not [item for item in findings if item["rule_id"] == "network-local-http"]
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        # Canonical spelling: the only form the rule matched before the fix.
+        ":(){ :|:& };:",
+        # A renamed function is the same payload; the sandbox audit middleware
+        # already blocks this spelling (tests/test_sandbox_audit_middleware.py).
+        "bomb(){ bomb|bomb& };bomb",
+        "f(){ f | f & };f",
+        ":() { : | : & }; :",
+        ".(){ .|.& };.",
+        "forkbomb() {\n  forkbomb | forkbomb &\n}\nforkbomb\n",
+        "forkbomb(){ forkbomb | forkbomb & }",
+    ],
+)
+def test_fork_bomb_variants_block(tmp_path: Path, snippet: str) -> None:
+    skill_dir = tmp_path / "demo-skill"
+    _write_skill(skill_dir)
+    scripts_dir = skill_dir / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "run.sh").write_text(snippet + "\n", encoding="utf-8", newline="")
+
+    result = scan_skill_dir(skill_dir)
+
+    finding = _finding_by_rule(result["findings"], "resource-fork-bomb")
+    assert (finding["file"], finding["severity"]) == ("scripts/run.sh", "CRITICAL")
+    assert result["blocked"] is True
+
+
+def test_fork_bomb_variant_is_also_a_destructive_command(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "demo-skill"
+    _write_skill(skill_dir)
+    scripts_dir = skill_dir / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "run.sh").write_text("bomb(){ bomb|bomb& };bomb\n", encoding="utf-8", newline="")
+
+    findings = scan_skill_dir(skill_dir)["findings"]
+
+    assert _finding_by_rule(findings, "shell-destructive-command")["severity"] == "HIGH"
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        "cleanup(){ tail -f app.log | logger & }\n",
+        "start(){ run | tee out.log & }\n",
+        "each(){ f | ff & }\n",
+        'log(){ logger "log" | tee out.log & }\n',
+        "a(){ a; echo x | a & }\n",
+        "setup(){ setup_helpers; cat manifest.json | tar tz & }\n",
+    ],
+)
+def test_fork_bomb_lookalikes_stay_unflagged(tmp_path: Path, snippet: str) -> None:
+    skill_dir = tmp_path / "demo-skill"
+    _write_skill(skill_dir)
+    scripts_dir = skill_dir / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "run.sh").write_text(snippet, encoding="utf-8", newline="")
+
+    findings = scan_skill_dir(skill_dir)["findings"]
+
+    assert not [finding for finding in findings if finding["rule_id"] in {"resource-fork-bomb", "shell-destructive-command"}]
+
+
+def test_fork_bomb_matcher_finishes_on_repeated_lookalike_headers(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "demo-skill"
+    _write_skill(skill_dir)
+    scripts_dir = skill_dir / "scripts"
+    scripts_dir.mkdir()
+    # Closed and unclosed lookalike headers in bulk (~3.7 MB): the body window
+    # must bound the work per header instead of rescanning the rest of the
+    # file. A matcher that scans an unbounded body grows quadratically (~15s at
+    # this shape's 0.5 MB, ~4x per doubling, so minutes at 3.7 MB), which fails
+    # the timeout below decisively; the bounded matcher stays linear.
+    (scripts_dir / "run.sh").write_text("x(){ }\n" * 20_000 + "x(){" * 900_000, encoding="utf-8", newline="")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from pathlib import Path; from deerflow.skills.skillscan import scan_skill_dir; "
+            "findings = scan_skill_dir(Path(sys.argv[1]))['findings']; "
+            "assert not any(finding['rule_id'] == 'resource-fork-bomb' for finding in findings)",
+            str(skill_dir),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        # The budget leaves room for interpreter startup plus the harness
+        # import on a slow machine; the bounded matcher needs seconds at most.
+        timeout=150,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr

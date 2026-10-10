@@ -20,6 +20,7 @@ import zipfile
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 from urllib.parse import urlsplit
@@ -149,6 +150,19 @@ _DESTRUCTIVE_RM_RE = (
     r"(?:-\S+\s+|--no-preserve-root\s+)*"
     r"/(?:\*|\s|$|(?:bin|boot|dev|etc|home|lib|lib64|opt|proc|root|run|sbin|srv|sys|usr|var)(?:/\*?)?(?:\s|$))"
 )
+# A fork bomb is any function whose body starts the function itself twice in
+# the background; the canonical `:(){ :|:& };:` spelling is only one instance
+# of that shape, which the sandbox audit middleware already blocks
+# (`\S+\(\)\s*\{[^}]*\|\s*\S+\s*&`). SkillScan matched only the literal
+# spelling, so a renamed or respaced variant (`bomb(){ bomb|bomb& };bomb`)
+# passed the blocking gate. Matching stays bounded per header: the name is
+# capped at _FORK_BOMB_NAME_MAX characters and the body window at
+# _FORK_BOMB_BODY_WINDOW characters, so files full of lookalike headers cost
+# bounded work per header instead of rescanning to the end of the file.
+_FORK_BOMB_NAME_MAX = 64
+_FORK_BOMB_BODY_WINDOW = 512
+_FORK_BOMB_NAME_EXCLUDED = frozenset(" \t\n\r\f\v(){}|;&")
+_FORK_BOMB_HEADER_RE = re.compile(r"\(\)[ \t\n\r\f\v]*\{")
 # `env`, `printenv` and `export -p` count only at a real command position. The
 # text is first reduced to shell code by `_shell_code_only`, excluding comments
 # and heredoc bodies. The `env` match is classified separately because `env` may
@@ -1104,6 +1118,56 @@ def _env_launches_shell(tokens: list[str]) -> bool:
     return PurePosixPath(command_tokens[command_index]).name in _SHELL_NAMES
 
 
+@lru_cache(maxsize=128)
+def _fork_bomb_body_re(name: str) -> re.Pattern[str]:
+    """Match a function body that pipes the function name into itself in the background."""
+    boundary = r"[^ \t\n\r\f\v(){}|;&]"
+    escaped = re.escape(name)
+    return re.compile(rf"(?<!{boundary}){escaped}(?!{boundary})[^|;&]*\|[^|;&]*{escaped}[^;|&]*&")
+
+
+def _fork_bomb_name_start(text: str, paren: int) -> int | None:
+    start = paren
+    while start > 0 and text[start - 1] not in _FORK_BOMB_NAME_EXCLUDED:
+        start -= 1
+        if paren - start > _FORK_BOMB_NAME_MAX:
+            return None
+    return start if start < paren else None
+
+
+def _fork_bomb_span(text: str) -> tuple[int, int] | None:
+    """Return the span of the first fork-bomb definition, matching any function name.
+
+    Finds `<name>() {` headers and looks for the same name on both sides of a
+    pipeline that backgrounds the result. Work per header is bounded by the
+    name cap and body window; the closing brace ends the window when it comes
+    first. A definition without the invocation is still the payload the
+    middleware-level shape blocks, so it is reported too.
+    """
+    cursor = 0
+    while True:
+        paren = text.find("(", cursor)
+        if paren == -1:
+            return None
+        cursor = paren + 1
+        name_start = _fork_bomb_name_start(text, paren)
+        if name_start is None:
+            continue
+        header = _FORK_BOMB_HEADER_RE.match(text, paren)
+        if header is None:
+            continue
+        body_start = header.end()
+        window_end = min(body_start + _FORK_BOMB_BODY_WINDOW, len(text))
+        close = text.find("}", body_start, window_end)
+        body = text[body_start : close if close != -1 else window_end]
+        if "|" not in body or "&" not in body:
+            continue
+        match = _fork_bomb_body_re(text[name_start:paren]).search(body)
+        if match is None:
+            continue
+        return (name_start, close + 1 if close != -1 else body_start + match.end())
+
+
 def _scan_shell(rel_path: str, text: str) -> list[SecurityFinding]:
     findings: list[SecurityFinding] = []
     # Unmistakable reverse-shell signals hard-block; weaker idioms (bash -i,
@@ -1150,6 +1214,10 @@ def _scan_shell(rel_path: str, text: str) -> list[SecurityFinding]:
                 break
     if match := re.search(_DESTRUCTIVE_RM_RE + r"|:\(\)\{\s*:\|:&\s*\};:|dd\s+[^#\n]*\bof=/dev/", text):
         findings.append(_finding_from_match("shell-destructive-command", rel_path, text, match))
+    # The literal branch above pins the canonical spelling and its evidence;
+    # the fallback catches renamed or respaced variants of the same payload.
+    elif fork_bomb := _fork_bomb_span(text):
+        findings.append(_fork_bomb_finding("shell-destructive-command", rel_path, text, fork_bomb))
     # Only a command position counts, and only in shell code: see `_shell_code_only`.
     for match in _SHELL_ENV_COMMAND_RE.finditer(code):
         command = match.group("cmd")
@@ -1171,6 +1239,8 @@ def _scan_network_and_resource(rel_path: str, text: str) -> list[SecurityFinding
         findings.append(_finding_from_match("network-cloud-metadata", rel_path, text, match))
     if match := re.search(r":\(\)\{\s*:\|:&\s*\};:", text):
         findings.append(_finding_from_match("resource-fork-bomb", rel_path, text, match))
+    elif fork_bomb := _fork_bomb_span(text):
+        findings.append(_fork_bomb_finding("resource-fork-bomb", rel_path, text, fork_bomb))
     for match in _EXTERNAL_HTTP_RE.finditer(text):
         host = _http_host(match.group(0)) or ""
         if host in _LOCAL_HTTP_HOSTS or host.startswith("10.") or host.startswith("192.168.") or re.match(r"172\.(1[6-9]|2\d|3[01])\.", host):
@@ -1207,6 +1277,10 @@ def _finding_from_match(rule_id: str, rel_path: str, text: str, match: re.Match[
 def _finding_for_text(rule_id: str, rel_path: str, text: str, evidence: str) -> SecurityFinding:
     index = text.find(evidence)
     return _finding(rule_id, file=rel_path, line=_line_number(text, index if index >= 0 else 0), evidence=evidence)
+
+
+def _fork_bomb_finding(rule_id: str, rel_path: str, text: str, span: tuple[int, int]) -> SecurityFinding:
+    return _finding(rule_id, file=rel_path, line=_line_number(text, span[0]), evidence=text[span[0] : span[1]])
 
 
 def _finding_for_node(rule_id: str, rel_path: str, node: ast.AST | None, evidence: str) -> SecurityFinding:
