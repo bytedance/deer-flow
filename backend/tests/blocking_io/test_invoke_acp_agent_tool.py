@@ -1,9 +1,15 @@
-"""Regression test for ACP invocation setup on the event loop."""
+"""Regression test for ACP invocation setup on the event loop.
+
+The agent command is one that resolves on PATH (``sys.executable``) so the gate
+exercises the real ``shutil.which`` lookup rather than short-circuiting on a
+name that nothing matches.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import sys
 from types import SimpleNamespace
 from typing import Any
 
@@ -53,7 +59,7 @@ async def test_invoke_acp_agent_setup_does_not_block_event_loop(monkeypatch, tmp
     monkeypatch.setattr(acp, "spawn_agent_process", fake_spawn_agent_process)
 
     tool = acp_tool.build_invoke_acp_agent_tool(
-        {"test-agent": ACPAgentConfig(command="test-agent", description="Test agent")},
+        {"test-agent": ACPAgentConfig(command=sys.executable, description="Test agent")},
     )
     result = await tool.coroutine(
         agent="test-agent",

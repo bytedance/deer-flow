@@ -134,6 +134,9 @@ def _resolve_agent_command(command: str) -> str:
     ``PATH``. Resolve the name the way the MCP Python SDK normalizes stdio
     commands, and keep the configured value when nothing matches so the
     not-found remediation still fires.
+
+    The lookup stats the filesystem (``shutil.which`` -> ``os.access``), so
+    callers must run it off the event loop.
     """
     try:
         return shutil.which(command) or command
@@ -229,7 +232,7 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                 return response
 
         client = _CollectingClient()
-        cmd = _resolve_agent_command(agent_config.command)
+        cmd = await asyncio.to_thread(_resolve_agent_command, agent_config.command)
         args = agent_config.args or []
         physical_cwd = await asyncio.to_thread(_get_work_dir, thread_id)
         try:

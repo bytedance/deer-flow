@@ -192,6 +192,9 @@ async def test_invoke_acp_agent_uses_fixed_acp_workspace(monkeypatch, tmp_path):
     """ACP agent uses {base_dir}/acp-workspace/ when no thread_id is available (no config)."""
     from deerflow.config import paths as paths_module
 
+    # Empty PATH keeps the configured command unresolvable, so the spawn
+    # assertion below checks the configuration rather than the host PATH.
+    monkeypatch.setenv("PATH", "")
     monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
 
     monkeypatch.setattr(
@@ -1047,3 +1050,25 @@ async def test_invoke_acp_agent_spawns_the_path_resolved_command(monkeypatch, tm
     # normalized, so compare paths rather than raw strings.
     assert Path(captured["cmd"]) == shim
     assert result == "(no response)"
+
+
+@pytest.mark.anyio
+async def test_invoke_acp_agent_reports_guidance_for_an_unresolvable_command(monkeypatch, tmp_path):
+    """A command PATH cannot resolve still reports the configured name.
+
+    ``_resolve_agent_command`` falls back to the configured value when nothing
+    matches, so the not-found guidance must name what the user configured.
+    """
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
+    monkeypatch.setattr(
+        "deerflow.config.extensions_config.ExtensionsConfig.from_file",
+        classmethod(lambda cls: ExtensionsConfig(mcp_servers={}, skills={})),
+    )
+
+    tool = build_invoke_acp_agent_tool({"probe": ACPAgentConfig(command="deerflow-missing-acp-agent", description="Probe", timeout_seconds=30)})
+    result = await asyncio.wait_for(tool.coroutine(agent="probe", prompt="do work"), timeout=20)
+
+    assert "Command 'deerflow-missing-acp-agent' was not found on PATH" in result
+    assert "acp_agents.probe.command" in result
