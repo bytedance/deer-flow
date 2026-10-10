@@ -2,8 +2,10 @@
 
 import asyncio
 import contextlib
+import os
 import sys
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -992,3 +994,56 @@ async def test_invoke_acp_agent_preserves_sdk_timeout_errors(acp_subprocess_tool
     assert result == "Error invoking ACP agent 'test': SDK transport timed out"
     assert "timeout_seconds" not in result
     assert acp_subprocess_tool.captured["proc"].returncode is not None
+
+
+@pytest.mark.anyio
+async def test_invoke_acp_agent_spawns_the_path_resolved_command(monkeypatch, tmp_path):
+    """A bare configured command reaches the ACP SDK as its PATH-resolved path.
+
+    Windows resolves npm-installed launchers through ``PATHEXT`` (``npx`` ->
+    ``npx.cmd``) and ``asyncio.create_subprocess_exec`` does not, so the
+    resolved path must be handed to the SDK instead of the bare name.
+    """
+    import acp as acp_module
+
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
+    monkeypatch.setattr(
+        "deerflow.config.extensions_config.ExtensionsConfig.from_file",
+        classmethod(lambda cls: ExtensionsConfig(mcp_servers={}, skills={})),
+    )
+    script_path = tmp_path / "test_acp_agent.py"
+    script_path.write_text(_ACP_AGENT_SCRIPT, encoding="utf-8")
+    phase_path = tmp_path / "phase.txt"
+
+    shim_dir = tmp_path / "bin"
+    shim_dir.mkdir()
+    shim_name = "deerflow-acp-probe"
+    if sys.platform == "win32":
+        shim = shim_dir / f"{shim_name}.cmd"
+        shim.write_text(f'@echo off\n"{sys.executable}" "{script_path}" "" 0 "{phase_path}"\n', encoding="utf-8")
+    else:
+        shim = shim_dir / shim_name
+        shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{script_path}" "" 0 "{phase_path}"\n', encoding="utf-8")
+        shim.chmod(0o755)
+    monkeypatch.setenv("PATH", str(shim_dir) + os.pathsep + os.environ["PATH"])
+
+    captured: dict[str, object] = {}
+    real_spawn_agent_process = acp_module.spawn_agent_process
+
+    @contextlib.asynccontextmanager
+    async def _spying_spawn_agent_process(client, cmd, *args, env=None, cwd=None):
+        captured["cmd"] = cmd
+        async with real_spawn_agent_process(client, cmd, *args, env=env, cwd=cwd) as (conn, proc):
+            yield conn, proc
+
+    monkeypatch.setattr(acp_module, "spawn_agent_process", _spying_spawn_agent_process)
+
+    tool = build_invoke_acp_agent_tool({"probe": ACPAgentConfig(command=shim_name, description="Probe", timeout_seconds=30)})
+    result = await asyncio.wait_for(tool.coroutine(agent="probe", prompt="do work"), timeout=20)
+
+    # Windows PATHEXT matching reports the shim with its extension case
+    # normalized, so compare paths rather than raw strings.
+    assert Path(captured["cmd"]) == shim
+    assert result == "(no response)"

@@ -125,6 +125,22 @@ def _build_permission_response(options: list[Any], *, auto_approve: bool) -> Any
     return RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
 
 
+def _resolve_agent_command(command: str) -> str:
+    """Return the host path to spawn for a configured ACP agent command.
+
+    ``asyncio.create_subprocess_exec``, which the ACP SDK's stdio transport
+    uses, does not apply ``PATHEXT`` on Windows: a bare ``npx`` or ``mcode``
+    raises ``FileNotFoundError`` even though the npm shim (``npx.cmd``) is on
+    ``PATH``. Resolve the name the way the MCP Python SDK normalizes stdio
+    commands, and keep the configured value when nothing matches so the
+    not-found remediation still fires.
+    """
+    try:
+        return shutil.which(command) or command
+    except OSError:
+        return command
+
+
 def _format_invocation_error(agent: str, cmd: str, exc: Exception) -> str:
     """Return a user-facing ACP invocation error with actionable remediation."""
     if not isinstance(exc, FileNotFoundError):
@@ -213,7 +229,7 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                 return response
 
         client = _CollectingClient()
-        cmd = agent_config.command
+        cmd = _resolve_agent_command(agent_config.command)
         args = agent_config.args or []
         physical_cwd = await asyncio.to_thread(_get_work_dir, thread_id)
         try:
