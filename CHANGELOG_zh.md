@@ -3378,7 +3378,7 @@
   密钥同样会被拒绝且不会回显。Helm chart 将密钥生成到 app Secret 并在升级时保留，
   `make up` 将其持久化到运行时目录，两个 compose 文件都会把它传给 Gateway。
   `.jwt_secret`（以及托管模型密钥）现在以独占方式创建并回读，共享卷上同时冷启动的
-  副本不再各自保留不同的会话签名密钥。
+  副本不再各自保留不同的会话签名密钥。 ([#6611])
 
 ### 文档
 
@@ -7650,3 +7650,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6588]: https://github.com/bytedance/deer-flow/pull/6588
 [#6590]: https://github.com/bytedance/deer-flow/pull/6590
 [#6595]: https://github.com/bytedance/deer-flow/pull/6595
+[#6611]: https://github.com/bytedance/deer-flow/pull/6611

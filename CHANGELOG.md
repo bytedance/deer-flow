@@ -4370,7 +4370,7 @@ This release closes that milestone with **439 merged pull requests**.
   upgrades, `make up` persists it next to the runtime home, and both compose
   files pass it to the Gateway. `.jwt_secret` (and the managed-model key) are
   now created exclusively and read back, so replicas cold-starting on a shared
-  volume no longer keep different session-signing secrets.
+  volume no longer keep different session-signing secrets. ([#6611])
 
 ### Documentation
 
@@ -9499,3 +9499,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6588]: https://github.com/bytedance/deer-flow/pull/6588
 [#6590]: https://github.com/bytedance/deer-flow/pull/6590
 [#6595]: https://github.com/bytedance/deer-flow/pull/6595
+[#6611]: https://github.com/bytedance/deer-flow/pull/6611
