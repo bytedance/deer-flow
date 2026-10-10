@@ -1,13 +1,13 @@
 ---
 title: 子 Agent 目录
-description: 内置子 Agent 的默认值与可用条件，三种定义来源及其优先级，Custom Agent 的委派范围，以及外部 ACP Agent。
+description: 内置子 Agent 的默认值与可用条件，四种定义来源及其优先级，Custom Agent 的委派范围，以及外部 ACP Agent。
 ---
 
 import { Callout } from "nextra/components";
 
 # 子 Agent 目录
 
-`task` 工具能看到的子 Agent 集合叫做**目录**。目录由三种来源合并而成，再按调用方的允许列表过滤。本章说明每种来源怎么定义、冲突时谁生效。
+`task` 工具能看到的子 Agent 集合叫做**目录**。目录由四种来源合并而成，再按调用方的允许列表过滤。本章说明每种来源怎么定义、冲突时谁生效。
 
 ## 内置子 Agent
 
@@ -26,21 +26,21 @@ import { Callout } from "nextra/components";
 
 `general-purpose` 的系统提示里有一段 `tool_restrictions`，明确告诉它 `task` 不可用、不得再派生子 Agent；需要并行时用 bash 后台进程或顺序执行。
 
-## 三种定义来源与优先级
+## 四种定义来源与优先级
 
 | 来源               | 定义位置                                | 谁能改                   |
 | ------------------ | --------------------------------------- | ------------------------ |
 | 内置               | 代码                                    | 不可改，只能覆盖参数     |
 | `config.yaml`      | `subagents.custom_agents.<name>`        | 运维，改后重启           |
 | 设置页管理         | **设置 → 子智能体**                     | 管理员，即时生效         |
+| 用户 Custom Agent | `/api/agents` | 所属用户 |
 
-运行时合并顺序为**内置 → `config.yaml` → 设置页管理**。设置页管理的定义如果与内置或 `config.yaml` 同名，会继续保存并在设置页显示冲突标记，但被排除在运行时目录之外。
+运行时合并顺序为**内置 → `config.yaml` → 设置页管理 → 用户 Custom Agent**。设置页管理的定义如果与内置或 `config.yaml` 同名，会继续保存并在设置页显示冲突标记，但被排除在运行时目录之外。用户 Custom Agent 同样不能覆盖前面来源的同名定义。
 
 在此之上，`subagents.agents.<name>` 可以对任何来源的子 Agent 覆盖 `timeout_seconds`、`max_turns`、`model`、`skills` 和 `token_budget`。设置页目录会标出其中 `timeout_seconds`、`max_turns`、`model`、`skills` 的覆盖。
 
 <Callout type="warning">
-  全局的 `subagents.timeout_seconds` 和 `subagents.max_turns` 只作用于内置子
-  Agent。`config.yaml` 自定义和设置页管理的子 Agent 各自有默认值（900 秒、50
+  全局的 `subagents.timeout_seconds` 和 `subagents.max_turns` 作用于内置子 Agent 和用户 Custom Agent。`config.yaml` 自定义和设置页管理的子 Agent 各自有默认值（900 秒、50
   轮），要改它们请用 `subagents.agents.<name>` 的按 Agent 覆盖。
 </Callout>
 
@@ -64,7 +64,7 @@ subagents:
       timeout_seconds: 900
 ```
 
-`description` 的第一行会被渲染进 Lead Agent 系统提示的 `subagent_system` 块。它会先经过 HTML 转义，所以描述里的尖括号不会被当成标签。
+目录名称和描述按调用方生成快照，在每次模型请求中通过经过清理、隐藏的 `HumanMessage` 传递。它们属于不可信的路由数据，不会成为框架的系统指令。
 
 ## 在设置页管理
 
@@ -86,6 +86,14 @@ subagents:
 内置项和 `config.yaml` 项也会显示在同一个目录里，但只读。
 
 存储后端跟随 Custom Agent 的设置：`agent_storage.backend: file` 在 `DEER_FLOW_HOME/managed-subagents/` 下为每条定义写一个原子 JSON 文件；`agent_storage.backend: db` 写入共享应用数据库，供多实例部署共同读取。这些定义是部署级全局数据，不按用户隔离。对应的 API 在 `/api/subagents`：所有用户都可以读取目录（系统提示仅对管理员可见），创建、更新与删除仅管理员可用；运行时对定义有约 1 秒的缓存。
+
+## 用户隔离的 Custom Agent
+
+通过 `/api/agents` 创建的 Custom Agent 可以按名称交给 `task` 和 `batch_task` 调度。目录发现和派发使用父级 run 的用户身份及已捕获的 `allowed_subagents` 策略，不会暴露其他用户的智能体。
+
+委派保留智能体的 SOUL、技能、模型、模型参数、思考开关和推理强度。用户编写的 SOUL 以经过清理的角色数据在每次模型请求中提供，压缩上下文后仍然有效，但不能替换框架系统指令；模型授权沿用父级身份。`tool_groups: null` 继承父级可用工具，显式列表会展开为严格的工具名称允许列表，`[]` 不允许任何工具。`task`、`ask_clarification` 和 `present_files` 始终不可用。全局子 Agent 限制和按 Agent 的覆盖均适用。
+
+文件存储中，旧版共享 `{base_dir}/agents/` 定义为兼容升级仍可被所有用户读取，直到运维通过 `backend/scripts/migrate_user_isolation.py` 分配所有权。当前按用户存储的文件和数据库记录均按所属用户隔离。
 
 ## Custom Agent 的委派范围
 

@@ -872,6 +872,7 @@ class SubagentExecutor:
         tool_progress_recorder: Any | None = None,
         context_snapshot: ParentContextSnapshot | None = None,
         thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
+        authorized_model_name: str | None = None,
     ):
         """Initialize the executor.
 
@@ -882,6 +883,8 @@ class SubagentExecutor:
                 back to ``get_app_config()`` (matches the lead-agent factory's
                 pattern).
             parent_model: The parent agent's model name for inheritance.
+            authorized_model_name: Server-side dispatch decision used to assemble
+                ``tools``. Reuse it so model, middleware and deferred state agree.
             sandbox_state: Sandbox state from parent agent.
             thread_data: Thread data from parent agent.
             uploaded_files: Snapshot of files uploaded in the parent's current
@@ -938,8 +941,11 @@ class SubagentExecutor:
         # Resolve eagerly only when it does not require loading config.yaml; otherwise defer
         # to _create_agent (which already loads app_config) so unit tests can construct
         # executors without a config file present.
-        if config.model != "inherit" or parent_model is not None or app_config is not None:
-            self.model_name: str | None = resolve_subagent_model_name(config, parent_model, app_config=app_config)
+        self._model_authorized = authorized_model_name is not None
+        if authorized_model_name is not None:
+            self.model_name: str | None = authorized_model_name
+        elif config.model != "inherit" or parent_model is not None or app_config is not None:
+            self.model_name = resolve_subagent_model_name(config, parent_model, app_config=app_config)
         else:
             self.model_name = None
         self.sandbox_state = sandbox_state
@@ -1052,7 +1058,46 @@ class SubagentExecutor:
         app_config = self._get_resolved_app_config()
         if self.model_name is None:
             self.model_name = resolve_subagent_model_name(self.config, self.parent_model, app_config=app_config)
-        model = create_chat_model(name=self.model_name, thinking_enabled=False, app_config=app_config, attach_tracing=False)
+
+        # Enforce model authorization — prevents a user from bypassing model:use
+        # restrictions by naming a restricted model on a custom agent and dispatching
+        # it as a subagent.
+        if not self._model_authorized and getattr(app_config, "authorization", None) is not None and app_config.authorization.enabled is True:
+            from deerflow.agents.lead_agent.agent import _authorize_model_name
+
+            _authz_context: dict[str, Any] = {
+                "user_role": self.user_role,
+                "oauth_provider": self.oauth_provider,
+                "oauth_id": self.oauth_id,
+                "is_internal": self.is_internal,
+                "authz_attributes": dict(self.authz_attributes),
+                "user_id": self.user_id,
+                "channel_user_id": self.channel_user_id,
+            }
+            self.model_name = await asyncio.to_thread(
+                _authorize_model_name,
+                self.model_name,
+                context=_authz_context,
+                app_config=app_config,
+            )
+
+        # Pass model-behavior settings from subagent config so
+        # store-backed custom agents keep the same LLM behavior as direct chats.
+        # ``thinking_enabled`` stays as the explicit create_chat_model argument;
+        # adding it to **model_kwargs would bind the parameter twice.
+        model_kwargs: dict[str, Any] = {}
+        if self.config.model_settings:
+            model_kwargs["model_overrides"] = dict(self.config.model_settings)
+        if self.config.reasoning_effort is not None:
+            model_kwargs["reasoning_effort"] = self.config.reasoning_effort
+
+        model = create_chat_model(
+            name=self.model_name,
+            thinking_enabled=self.config.thinking_enabled or False,
+            app_config=app_config,
+            attach_tracing=False,
+            **model_kwargs,
+        )
 
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 
@@ -1095,6 +1140,10 @@ class SubagentExecutor:
         if mcp_routing_middleware is not None:
             middleware_kwargs["mcp_routing_middleware"] = mcp_routing_middleware
         middlewares = build_subagent_runtime_middlewares(**middleware_kwargs)
+        if self.config.user_soul:
+            from deerflow.subagents.catalog_context import SubagentPersonaMiddleware
+
+            middlewares.append(SubagentPersonaMiddleware(self.config.user_soul))
         # Authorization Layer 1 for middleware-declared tools (e.g. extension
         # contributions): collect from the built stack, decide with the same
         # provider/principal as the ordinary pass (offloaded off the event
@@ -1253,18 +1302,22 @@ class SubagentExecutor:
                     supports_vision=False,
                 )
             deferred_names = deferred_setup.deferred_names if deferred_setup is not None else frozenset()
-            # Subagents request thinking off; the model's reasoning contract
-            # decides what that means (a required-thinking model stays on), and
-            # the descriptor reports the effective policy the factory applied.
+            # Resolve the custom agent's requested settings against the same
+            # model contract the factory uses, including required thinking.
             from deerflow.models.reasoning import resolve_reasoning_contract, resolve_reasoning_request
 
-            effective_reasoning = resolve_reasoning_request(resolve_reasoning_contract(model_config), thinking_enabled=False, reasoning_effort=None)
+            effective_reasoning = resolve_reasoning_request(
+                resolve_reasoning_contract(model_config),
+                thinking_enabled=bool(self.config.thinking_enabled),
+                reasoning_effort=self.config.reasoning_effort,
+            )
             descriptor = build_assembly_descriptor(
                 namespace="deerflow",
                 agent_name=self.config.name,
                 requested_model=(self.config.model if self.config.model != "inherit" else self.parent_model),
                 effective_model=self.model_name,
                 model_config=model_config,
+                model_overrides=self.config.model_settings,
                 thinking_enabled=effective_reasoning.thinking_enabled,
                 reasoning_effort=effective_reasoning.reasoning_effort,
                 rendered_base_prompt=self._assembled_system_prompt,

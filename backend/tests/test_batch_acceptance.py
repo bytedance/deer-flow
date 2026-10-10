@@ -346,11 +346,12 @@ async def test_caller_sandbox_deny_applies_to_every_file_spelling(env, monkeypat
     from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
 
     env.service._app_config = SimpleNamespace(
+        models=[SimpleNamespace(name="model-a")],
         authorization=AuthorizationConfig(
             enabled=True,
             default_role="member",
             provider=AuthorizationProviderConfig(use="deerflow.authz.rbac:RbacAuthorizationProvider", config={"roles": {"member": {"sandbox": {"allow": False}}}}),
-        )
+        ),
     )
     # Embedded callers can have a different policy from the process global.
     monkeypatch.setattr("deerflow.sandbox.tools.safe_app_config", lambda: None)

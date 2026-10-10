@@ -33,7 +33,7 @@ from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_h
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
 from deerflow.subagents.acceptance_checks import check_acceptance_criteria, render_acceptance_section
 from deerflow.subagents.capacity import SubagentExecutionCapacity
-from deerflow.subagents.config import resolve_subagent_model_name
+from deerflow.subagents.config import authorize_subagent_model_name, resolve_subagent_model_name
 from deerflow.subagents.context_snapshot import ParentContextSnapshot
 from deerflow.subagents.executor import (
     SubagentStatus,
@@ -697,9 +697,10 @@ async def task_tool(
       Routine git, build, test, or deploy operations are not sufficient reason to delegate.
 
     Additional custom subagent types may be defined in config.yaml under
-    `subagents.custom_agents`. Each custom type can have its own system prompt,
-    tools, skills, model, and timeout configuration. If an unknown subagent_type
-    is provided, the error message will list all available types.
+    `subagents.custom_agents` or by the current user's Custom Agents store.
+    Each custom type can have its own system prompt, tools, skills, model, and
+    timeout configuration. If an unknown subagent_type is provided, the error
+    message will list all available types.
 
     When to use this tool:
     - Independent tasks that materially reduce wall-clock time when run in parallel
@@ -784,15 +785,23 @@ async def task_tool(
     runtime_app_config = _get_runtime_app_config(runtime)
     metadata: dict = runtime.config.get("metadata", {}) if runtime is not None else {}
     allowed_subagents = metadata.get("allowed_subagents")
-    if allowed_subagents is None:
-        available_subagent_names = get_available_subagent_names(app_config=runtime_app_config) if runtime_app_config is not None else get_available_subagent_names()
-    else:
-        available_subagent_names = get_available_subagent_names(app_config=runtime_app_config, allowed_subagents=allowed_subagents) if runtime_app_config is not None else get_available_subagent_names(allowed_subagents=allowed_subagents)
+    # Resolve the dispatching identity up front: user-scoped API agents are only
+    # resolvable for their owner, and the prompt/listing/config lookup must agree.
+    user_id = resolve_runtime_user_id(runtime)
+    available_subagent_names = await asyncio.to_thread(
+        get_available_subagent_names,
+        app_config=runtime_app_config,
+        allowed_subagents=allowed_subagents,
+        user_id=user_id,
+    )
 
     # Preserve the dedicated sandbox-policy guidance before the generic
     # registry/policy membership gate filters bash from the visible catalog.
     if subagent_type == "bash":
-        host_bash_allowed = is_host_bash_allowed(runtime_app_config) if runtime_app_config is not None else is_host_bash_allowed()
+        if runtime_app_config is not None:
+            host_bash_allowed = await asyncio.to_thread(is_host_bash_allowed, runtime_app_config)
+        else:
+            host_bash_allowed = await asyncio.to_thread(is_host_bash_allowed)
         if not host_bash_allowed:
             return _task_result_command(
                 tool_call_id=tool_call_id,
@@ -801,7 +810,12 @@ async def task_tool(
             )
 
     # Get subagent configuration
-    config = get_subagent_config(subagent_type, app_config=runtime_app_config) if runtime_app_config is not None else get_subagent_config(subagent_type)
+    config = await asyncio.to_thread(
+        get_subagent_config,
+        subagent_type,
+        app_config=runtime_app_config,
+        user_id=user_id,
+    )
     if config is None or subagent_type not in available_subagent_names:
         if available_subagent_names:
             available = ", ".join(available_subagent_names)
@@ -834,7 +848,6 @@ async def task_tool(
     thread_id = None
     parent_model = None
     trace_id = None
-    user_id = None
     deerflow_trace_id = None
     if runtime is not None:
         sandbox_state = runtime.state.get("sandbox")
@@ -857,9 +870,6 @@ async def task_tool(
 
         # Get or generate trace_id for distributed tracing
         trace_id = metadata.get("trace_id") or str(uuid.uuid4())[:8]
-
-    # Get user_id for tracing (uses standard resolution order)
-    user_id = resolve_runtime_user_id(runtime)
 
     # Propagate the authenticated runtime context so delegated tool calls are
     # evaluated by GuardrailMiddleware with the same identity/attribution as
@@ -911,9 +921,23 @@ async def task_tool(
     # Inherit parent agent's tool_groups so subagents respect the same restrictions
     parent_tool_groups = metadata.get("tool_groups")
     resolved_app_config = runtime_app_config
-    if config.model == "inherit" and parent_model is None and resolved_app_config is None:
-        resolved_app_config = get_app_config()
+    if resolved_app_config is None:
+        resolved_app_config = await asyncio.to_thread(get_app_config)
     effective_model = resolve_subagent_model_name(config, parent_model, app_config=resolved_app_config)
+    effective_model = await asyncio.to_thread(
+        authorize_subagent_model_name,
+        effective_model,
+        context={
+            "user_id": user_id,
+            "user_role": user_role,
+            "oauth_provider": oauth_provider,
+            "oauth_id": oauth_id,
+            "channel_user_id": channel_user_id,
+            "is_internal": is_internal,
+            "authz_attributes": authz_attributes,
+        },
+        app_config=resolved_app_config,
+    )
 
     # Subagents should not have subagent tools enabled (prevent recursive
     # nesting). Ordinary task subagents receive a snapshot of the parent's
@@ -941,6 +965,7 @@ async def task_tool(
         "config": config,
         "tools": tools,
         "parent_model": parent_model,
+        "authorized_model_name": effective_model,
         "sandbox_state": sandbox_state,
         "thread_data": thread_data,
         "uploaded_files": uploaded_files,

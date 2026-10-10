@@ -107,10 +107,11 @@ async def test_task_tool_assembles_off_loop(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(task_tool_module, "SubagentStatus", _FakeSubagentStatus)
     monkeypatch.setattr(task_tool_module, "SubagentExecutor", _DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_app_config", lambda: SimpleNamespace(authorization=SimpleNamespace(enabled=False)))
     monkeypatch.setattr(
         task_tool_module,
         "get_subagent_config",
-        lambda _name: SubagentConfig(
+        lambda _name, **_kwargs: SubagentConfig(
             name="general-purpose",
             description="General helper",
             system_prompt="Base system prompt",

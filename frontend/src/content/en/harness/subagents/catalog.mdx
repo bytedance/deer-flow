@@ -1,13 +1,13 @@
 ---
 title: Subagent Catalog
-description: Built-in subagent defaults and availability, the three definition sources and their precedence, Custom Agent delegation scope, and external ACP agents.
+description: Built-in subagent defaults and availability, the four definition sources and their precedence, Custom Agent delegation scope, and external ACP agents.
 ---
 
 import { Callout } from "nextra/components";
 
 # Subagent Catalog
 
-The set of subagents the `task` tool can see is the **catalog**. It is merged from three sources and then filtered by the caller's allowlist. This chapter explains how each source is defined and which one wins on conflict.
+The set of subagents the `task` tool can see is the **catalog**. It is merged from four sources and then filtered by the caller's allowlist. This chapter explains how each source is defined and which one wins on conflict.
 
 ## Built-in subagents
 
@@ -26,21 +26,22 @@ Both use the model `inherit`, meaning the Lead Agent's current model. Both deny 
 
 The `general-purpose` system prompt carries a `tool_restrictions` block stating that `task` is unavailable and that it must never spawn further subagents; when parallelism is needed it should use bash background processes or work sequentially.
 
-## Three definition sources and their precedence
+## Four definition sources and their precedence
 
 | Source        | Defined in                        | Who changes it                    |
 | ------------- | --------------------------------- | --------------------------------- |
 | Built-in      | Code                              | Nobody; only parameters can be overridden |
 | `config.yaml` | `subagents.custom_agents.<name>`  | Operators, restart required       |
 | Managed       | **Settings → Subagents**          | Administrators, effective at once |
+| User Custom Agents | `/api/agents` | The owning user |
 
-Runtime precedence is **built-in → `config.yaml` → managed**. A managed definition whose name collides with a built-in or `config.yaml` entry stays stored and shows a conflict marker in Settings, but is excluded from the runtime catalog.
+Runtime precedence is **built-in → `config.yaml` → managed → user Custom Agents**. A managed definition whose name collides with a built-in or `config.yaml` entry stays stored and shows a conflict marker in Settings, but is excluded from the runtime catalog. User Custom Agents likewise yield to all earlier sources.
 
 On top of that, `subagents.agents.<name>` can override `timeout_seconds`, `max_turns`, `model`, `skills`, and `token_budget` for a subagent from any source. The Settings catalog shows the `timeout_seconds`, `max_turns`, `model`, and `skills` overrides.
 
 <Callout type="warning">
   The global `subagents.timeout_seconds` and `subagents.max_turns` apply to
-  built-in subagents only. `config.yaml` custom agents and managed subagents
+  built-in subagents and user Custom Agents. `config.yaml` custom agents and managed subagents
   have their own defaults (900 seconds, 50 turns); change them through the
   per-agent `subagents.agents.<name>` override.
 </Callout>
@@ -65,7 +66,7 @@ subagents:
       timeout_seconds: 900
 ```
 
-The first line of `description` is rendered into the `subagent_system` block of the Lead Agent's system prompt. It is HTML-escaped first, so angle brackets in a description cannot become tags.
+Catalog names and descriptions are snapshotted for the caller and carried in a sanitized, hidden `HumanMessage` on each model request. They are untrusted routing data and never become framework-owned system instructions.
 
 ## Managing in Settings
 
@@ -87,6 +88,14 @@ Administrators add reusable workers under **Settings → Subagents**. Each defin
 Built-in and `config.yaml` definitions appear in the same catalog as read-only entries.
 
 Storage follows the Custom Agent backend: `agent_storage.backend: file` writes one atomic JSON file per definition under `DEER_FLOW_HOME/managed-subagents/`; `agent_storage.backend: db` stores them in the shared application database for multi-instance deployments. These definitions are deployment-wide, not user-scoped. The API lives at `/api/subagents`: any user can list the catalog (system prompts are shown to administrators only), while create, update, and delete require an administrator. The runtime caches definitions for about one second.
+
+## User-scoped Custom Agents
+
+Custom Agents created through `/api/agents` can be selected by name in both `task` and `batch_task`. Discovery and dispatch use the parent run's user identity and captured `allowed_subagents` policy; another user's agents are not exposed.
+
+Delegation preserves the agent's SOUL, skills, model, model settings, thinking, and reasoning effort. The user-authored SOUL is supplied as sanitized persona data on every model request, including after compaction; it cannot replace framework system instructions. Model authorization uses the parent identity. `tool_groups: null` inherits available parent tools, while an explicit list expands to a strict tool-name allowlist; `[]` allows none. `task`, `ask_clarification`, and `present_files` remain unavailable. Global subagent limits and per-agent overrides apply.
+
+With file storage, legacy shared `{base_dir}/agents/` definitions remain readable by every user for upgrade compatibility until an operator assigns ownership with `backend/scripts/migrate_user_isolation.py`. Current per-user files and database rows are owner-scoped.
 
 ## Custom Agent delegation scope
 

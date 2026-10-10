@@ -182,7 +182,11 @@ class TestTaskToolContract:
 
 class TestLeadDelegationWorkflow:
     def _build_section(self, monkeypatch: pytest.MonkeyPatch, max_concurrent: int) -> str:
-        monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda: ["general-purpose"])
+        monkeypatch.setattr(
+            prompt_module,
+            "get_available_subagent_descriptions",
+            lambda **_kwargs: {"general-purpose": "General purpose"},
+        )
         return prompt_module._build_subagent_section(max_concurrent)
 
     def test_single_subagent_workflow_verifies_citations_and_handles(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -202,7 +206,11 @@ class TestLeadDelegationWorkflow:
         assert "Resolve contradictions against primary evidence" in section
 
     def _build_section_receipts_disabled(self, monkeypatch: pytest.MonkeyPatch, max_concurrent: int) -> str:
-        monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda **kwargs: ["general-purpose"])
+        monkeypatch.setattr(
+            prompt_module,
+            "get_available_subagent_descriptions",
+            lambda **_kwargs: {"general-purpose": "General purpose"},
+        )
         app_config = SimpleNamespace(verification=SimpleNamespace(receipts_enabled=False))
         return prompt_module._build_subagent_section(max_concurrent, app_config=app_config)
 

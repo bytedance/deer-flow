@@ -128,13 +128,16 @@ def _subagent_release_policy(
     enabled: bool,
     max_concurrent: int,
     max_total: int,
+    user_id: str | None = None,
     allowed_subagents: list[str] | None = None,
 ) -> dict[str, object]:
     """Delegation limits as the run will actually enforce them.
 
     The per-type turn/timeout caps are read here rather than left implicit
     because a subagent config edit changes what the lead agent can spend
-    without changing anything visible in the lead's own configuration.
+    without changing anything visible in the lead's own configuration. The
+    catalog also respects the caller's ``allowed_subagents`` snapshot so the
+    descriptor matches the prompt and task()/batch_task() enforcement surface.
     """
     policy: dict[str, object] = {
         "enabled": enabled,
@@ -148,10 +151,18 @@ def _subagent_release_policy(
 
     from deerflow.subagents import get_available_subagent_names, get_subagent_config
 
-    type_allowlist = sorted(set(get_available_subagent_names(app_config=app_config, allowed_subagents=allowed_subagents)))
+    type_allowlist = sorted(
+        set(
+            get_available_subagent_names(
+                app_config=app_config,
+                allowed_subagents=allowed_subagents,
+                user_id=user_id,
+            )
+        )
+    )
     runtime_limits: dict[str, object] = {}
     for name in type_allowlist:
-        subagent_config = get_subagent_config(name, app_config=app_config)
+        subagent_config = get_subagent_config(name, app_config=app_config, user_id=user_id)
         if subagent_config is None:
             continue
         runtime_limits[name] = {
@@ -487,6 +498,7 @@ def build_middlewares(
     custom_middlewares: list[AgentMiddleware] | None = None,
     *,
     available_skills: set[str] | None = None,
+    subagent_descriptions: dict[str, str] | None = None,
     memory_enabled: bool = True,
     owns_agent_skill_projection: bool = True,
     app_config: AppConfig | None = None,
@@ -563,6 +575,13 @@ def build_middlewares(
     if authorization_provider is not None and deferred_setup is not None:
         runtime_middleware_kwargs["deferred_setup"] = deferred_setup
     middlewares = build_lead_runtime_middlewares(**runtime_middleware_kwargs)
+    if subagent_descriptions:
+        from deerflow.subagents.builtins import BUILTIN_SUBAGENTS
+        from deerflow.subagents.catalog_context import SubagentCatalogMiddleware
+
+        custom_descriptions = {name: description for name, description in subagent_descriptions.items() if name not in BUILTIN_SUBAGENTS}
+        if custom_descriptions:
+            middlewares.append(SubagentCatalogMiddleware(custom_descriptions))
 
     # Always inject current date (and optionally memory) as <system-reminder> into the
     # first HumanMessage to keep the system prompt fully static for prefix-cache reuse.
@@ -1006,6 +1025,9 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     # The request switch may disable delegation, but it can never widen the
     # server-side custom-agent policy. An explicit empty list is a hard deny.
     subagent_enabled = bool(requested_subagent_enabled and allowed_subagents != [])
+    from deerflow.subagents import get_available_subagent_descriptions
+
+    subagent_descriptions = get_available_subagent_descriptions(app_config=resolved_app_config, allowed_subagents=allowed_subagents, user_id=resolved_user_id) if subagent_enabled else {}
     config.setdefault("configurable", {})["subagent_enabled"] = subagent_enabled
     if isinstance(config.get("context"), dict):
         config["context"]["subagent_enabled"] = subagent_enabled
@@ -1206,6 +1228,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             authorization_provider=_authz_provider,
             skill_authorization=skill_authorization,
             subagent_execution_capacity=subagent_execution_capacity,
+            subagent_descriptions=subagent_descriptions,
         )
         middlewares, declared_authorized = narrow_declared_tools(
             middlewares,
@@ -1234,6 +1257,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             # denial.
             skill_names=skill_setup.skill_names if skill_search_enabled else None,
             allowed_subagents=allowed_subagents,
+            subagent_descriptions=subagent_descriptions,
             subagent_execution_capacity=subagent_execution_capacity,
             interaction_policy=interaction_policy,
             memory_enabled=memory_enabled,
@@ -1273,6 +1297,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
                     enabled=subagent_enabled,
                     max_concurrent=max_concurrent_subagents,
                     max_total=max_total_subagents,
+                    user_id=resolved_user_id,
                     allowed_subagents=allowed_subagents,
                 ),
                 "deferred_tools": {
@@ -1361,6 +1386,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         authorization_provider=_authz_provider,
         skill_authorization=skill_authorization,
         subagent_execution_capacity=subagent_execution_capacity,
+        subagent_descriptions=subagent_descriptions,
     )
     middlewares, declared_authorized = narrow_declared_tools(
         middlewares,
@@ -1381,6 +1407,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         user_id=resolved_user_id,
         skill_names=skill_setup.skill_names or None,
         allowed_subagents=allowed_subagents,
+        subagent_descriptions=subagent_descriptions,
         subagent_execution_capacity=subagent_execution_capacity,
         interaction_policy=interaction_policy,
         memory_enabled=memory_enabled,
@@ -1421,6 +1448,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
                 enabled=subagent_enabled,
                 max_concurrent=max_concurrent_subagents,
                 max_total=max_total_subagents,
+                user_id=resolved_user_id,
                 allowed_subagents=allowed_subagents,
             ),
             "deferred_tools": {

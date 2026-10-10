@@ -7,6 +7,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.community.ragflow.sources import durable_source_artifact
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.subagent_batches_config import SubagentBatchesConfig
@@ -16,7 +17,7 @@ from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.subagents.batch_acceptance import check_batch_acceptance
 from deerflow.subagents.batch_runtime import BatchSubmitRequest
 from deerflow.subagents.capacity import SubagentExecutionCapacity
-from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
+from deerflow.subagents.config import SubagentConfig, authorize_subagent_model_name, resolve_subagent_model_name
 from deerflow.subagents.executor import (
     SubagentExecutor,
     SubagentStatus,
@@ -267,6 +268,20 @@ class SubagentBatchService:
                 spec.get("parent_model"),
                 app_config=app_config,
             )
+            effective_model = await asyncio.to_thread(
+                authorize_subagent_model_name,
+                effective_model,
+                context={
+                    "user_id": batch["user_id"],
+                    "user_role": spec.get("user_role"),
+                    "oauth_provider": spec.get("oauth_provider"),
+                    "oauth_id": spec.get("oauth_id"),
+                    "channel_user_id": spec.get("channel_user_id"),
+                    "is_internal": spec.get("is_internal") is True,
+                    "authz_attributes": normalize_authz_attributes(spec.get("authz_attributes")),
+                },
+                app_config=app_config,
+            )
             # Assemble off-loop: tool assembly may block on MCP cache
             # initialization, which must not stall the calling event loop (issue #5172).
             tools = await run_assembly(
@@ -304,6 +319,7 @@ class SubagentBatchService:
                 tools=tools,
                 app_config=app_config,
                 parent_model=spec.get("parent_model"),
+                authorized_model_name=effective_model,
                 thread_id=batch["thread_id"],
                 user_id=batch["user_id"],
                 user_role=spec.get("user_role"),
