@@ -1766,11 +1766,21 @@ class DeerFlowClient:
         def _convert_in_thread(path: Path, output_path: Path | None = None):
             return asyncio.run(convert_file_to_markdown(path, output_path=output_path))
 
+        conversion_sources = None
         try:
             for src_path, dest_name in resolved_files:
                 try:
-                    dest = copy_upload_file_no_symlink(uploads_dir, dest_name, src_path)
+                    conversion_source = None
+                    if src_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
+                        if conversion_sources is None:
+                            conversion_sources = tempfile.TemporaryDirectory(prefix="deerflow-upload-source-")
+                        conversion_source = Path(conversion_sources.name) / dest_name
+                        dest = copy_upload_file_no_symlink(uploads_dir, dest_name, src_path, snapshot_path=conversion_source)
+                    else:
+                        dest = copy_upload_file_no_symlink(uploads_dir, dest_name, src_path)
                 except UnsafeUploadPathError:
+                    if conversion_source is not None:
+                        conversion_source.unlink(missing_ok=True)
                     logger.warning("Skipping upload with unsafe destination: %s", dest_name)
                     skipped_files.append(dest_name)
                     continue
@@ -1793,18 +1803,15 @@ class DeerFlowClient:
                     provisional_md_name = Path(dest_name).with_suffix(".md").name
                     unique_md_name = claim_unique_filename(provisional_md_name, seen_names)
                     try:
-                        # Convert the caller's own file, not the copy that just
-                        # landed in the sandbox-writable uploads dir: a sandbox
-                        # that swaps that name for a symlink would otherwise have
-                        # a host file converted into this thread's uploads. Write
-                        # the result outside uploads too, then publish it without
-                        # following a symlink at the companion name.
+                        # Convert the same private capture used to publish the
+                        # original. Neither an external source edit nor a sandbox
+                        # replacing the uploaded path can change these input bytes.
                         with tempfile.TemporaryDirectory() as md_dir:
                             md_output = Path(md_dir) / unique_md_name
                             if conversion_pool is not None:
-                                converted = conversion_pool.submit(_convert_in_thread, src_path, md_output).result()
+                                converted = conversion_pool.submit(_convert_in_thread, conversion_source, md_output).result()
                             else:
-                                converted = asyncio.run(convert_file_to_markdown(src_path, output_path=md_output))
+                                converted = asyncio.run(convert_file_to_markdown(conversion_source, output_path=md_output))
                             md_path = None
                             if converted is not None:
                                 # copy, not write_bytes: the companion keeps the
@@ -1834,10 +1841,14 @@ class DeerFlowClient:
                         # against a name this request never filled.
                         seen_names.discard(unique_md_name)
 
+                if conversion_source is not None:
+                    conversion_source.unlink(missing_ok=True)
                 uploaded_files.append(info)
         finally:
             if conversion_pool is not None:
                 conversion_pool.shutdown(wait=True)
+            if conversion_sources is not None:
+                conversion_sources.cleanup()
 
         message = f"Successfully uploaded {len(uploaded_files)} file(s)"
         if skipped_files:

@@ -10,6 +10,7 @@ import os
 import shutil
 import stat
 import time
+from contextlib import nullcontext
 from datetime import timedelta
 from pathlib import Path
 from urllib.parse import quote
@@ -370,7 +371,7 @@ def _reject_same_file(base_dir: Path, filename: str, src: Path, src_stat: os.sta
         raise shutil.SameFileError(f"{src!r} and {dest!r} are the same file")
 
 
-def copy_upload_file_no_symlink(base_dir: Path, filename: str, src: Path) -> Path:
+def copy_upload_file_no_symlink(base_dir: Path, filename: str, src: Path, *, snapshot_path: Path | None = None) -> Path:
     """Copy *src* into an upload destination without following a destination symlink.
 
     Matches ``shutil.copy2`` for content, permission bits and timestamps, but
@@ -385,18 +386,26 @@ def copy_upload_file_no_symlink(base_dir: Path, filename: str, src: Path) -> Pat
     truncates, which would otherwise leave the caller copying an emptied file
     over itself. Re-uploading a file that already sits in the uploads
     directory takes exactly that path.
+
+    With ``snapshot_path``, first capture the opened source there and publish
+    those captured bytes. The caller owns this path in a private directory
+    outside the sandbox tree and can convert it without reopening ``src``.
     """
     with open(src, "rb") as src_fh:
         src_stat = os.fstat(src_fh.fileno())
         _reject_same_file(base_dir, filename, src, src_stat)
-        dest, fh = open_upload_file_no_symlink(base_dir, filename)
-        with fh:
-            shutil.copyfileobj(src_fh, fh)
-            fh.flush()
-            if os.chmod in os.supports_fd:
-                os.chmod(fh.fileno(), stat.S_IMODE(src_stat.st_mode))
-            if os.utime in os.supports_fd:
-                os.utime(fh.fileno(), ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns))
+        with open(snapshot_path, "w+b") if snapshot_path is not None else nullcontext(src_fh) as captured:
+            if snapshot_path is not None:
+                shutil.copyfileobj(src_fh, captured)
+                captured.seek(0)
+            dest, fh = open_upload_file_no_symlink(base_dir, filename)
+            with fh:
+                shutil.copyfileobj(captured, fh)
+                fh.flush()
+                if os.chmod in os.supports_fd:
+                    os.chmod(fh.fileno(), stat.S_IMODE(src_stat.st_mode))
+                if os.utime in os.supports_fd:
+                    os.utime(fh.fileno(), ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns))
     return dest
 
 
