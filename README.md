@@ -174,6 +174,8 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
 
    Brave web search preserves valid entries in mixed result lists. Malformed response containers or lists containing no usable entries return a structured format error; missing, null, or empty results keep the existing "No results found" response. Format errors also log the malformed container's path and type, or the absence of usable result objects, without including search queries, credentials, or payload values.
 
+   GroundRoute web search and fetch contain malformed HTTP-success payloads the same way: a non-object payload, a `results` container that is not a list, or a non-empty list with no object entries returns the provider's format error, while non-object entries in an otherwise valid list are skipped in order. Missing, null, or empty results keep the existing "No results found" response.
+
    Jina, Browserless, and InfoQuest web fetches resolve relative links and image sources using the requested page URL (or a usable HTML base URL), so returned Markdown includes complete destinations. Link resolution preserves the surrounding HTML source, including malformed-page formatting.
 
    Jina fetches support opt-in bounded retries via `max_retries` (default `0`) and `retry_budget_seconds` (default `30`) in the tool configuration. Valid `Retry-After` hints set a minimum wait for HTTP 429/503; 429 without a valid hint stays terminal. Hints that cannot fit the remaining budget stop retries. Local backoff remains randomized. Retries may increase upstream requests and cost; see [Jina fetch retries](backend/docs/CONFIGURATION.md#jina-fetch-retries).
@@ -802,6 +804,11 @@ Signed-in users' notification toggle, default model, conversation mode, and reas
 In a new chat, the submitted question stays above its streamed reasoning and
 tool steps while the server creates the conversation and confirms the message.
 
+Markdown and JSON conversation exports from the chat header or sidebar read all
+persisted history pages, including earlier turns outside the loaded view or
+compacted model context. A failed history read stops the export instead of
+downloading a partial transcript. Public demos export their bundled messages.
+
 Capability Center groups plugins by office collaboration, documents and knowledge, search and research, business and data, and development and operations. The directory includes setup references alongside existing MCP configurations and Lark. Recommended integrations and built-in support do not imply an installed or verified connection; the Installed filter shows configured MCP entries and installed Lark only.
 
 Personal MCP connections configured in the web interface are persisted per user.
@@ -1280,6 +1287,8 @@ A skill directory is a package boundary: once DeerFlow finds its `SKILL.md`, nes
 Discovery follows operator-managed directory symlinks, but skips links back to an ancestor directory so a cyclic namespace does not repeatedly rescan the same tree. Independent links to the same external skill tree remain supported.
 
 Skill Markdown and bundled text resources use UTF-8. Skill-creator CLI and review utilities read and write text explicitly as UTF-8 so localized skills behave consistently across operating systems.
+
+Custom skill history preserves Unicode line separators inside saved content and metadata, keeping those revisions readable for history inspection and rollback. Malformed JSON history records are still rejected.
 
 Users can explicitly activate an enabled skill for a single turn by starting the request with `/skill-name`, for example `/data-analysis analyze uploads/foo.csv`. DeerFlow loads that skill's `SKILL.md` as hidden current-turn context while leaving the base prompt limited to skill metadata. Slash activation respects disabled skills, custom-agent skill whitelists, and existing channel commands such as `/new` and `/help`.
 
@@ -2914,10 +2923,13 @@ persisted injected instruction.
 
 ### Deployment Defaults
 
-The Docker stack publishes its entry port on `127.0.0.1` only, matching the
-local-trusted-environment model described above. To reach it from another
-machine, set `BIND_HOST` in `.env` (e.g. `BIND_HOST=0.0.0.0`) — and only after
-putting the security measures below in place.
+The Docker stack publishes its entry port on `127.0.0.1` only, and local
+`make dev` / `make start` bind nginx, the Gateway, and the frontend to loopback,
+matching the local-trusted-environment model described above. To reach it from
+another machine, set `BIND_HOST` in `.env` (e.g. `BIND_HOST=0.0.0.0`) — and only
+after putting the security measures below in place. Local runs apply `BIND_HOST`
+to nginx on port `2026` only; the Gateway and frontend stay on loopback behind
+it.
 
 **Complete first-run setup before the host becomes reachable.** A fresh
 instance has no accounts yet, so create the admin account through `/setup`
