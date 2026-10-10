@@ -146,6 +146,21 @@ def test_valid_fetch_keeps_existing_response(invoke_fetch, caplog):
     assert _error_logs(caplog) == []
 
 
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"results": [{"title": "Page", "content": 12345}]}, "# Page\n\n12345"),
+        ({"results": [{"title": "Page", "content": True}]}, "# Page\n\nTrue"),
+        ({"results": [{"title": "Page", "content": {"a": 1}}]}, "# Page\n\n{'a': 1}"),
+        ({"results": [{"title": "Page", "snippet": 6789}]}, "# Page\n\n6789"),
+        ({"results": [{"title": None, "content": "Body text"}]}, "# \n\nBody text"),
+    ],
+)
+def test_fetch_coerces_non_string_fields(invoke_fetch, payload, expected, caplog):
+    assert invoke_fetch(payload) == expected
+    assert _error_logs(caplog) == []
+
+
 def test_http_transport_patch_does_not_replace_global_client(invoke_search):
     real_client = httpx.Client
     invoke_search({"results": []})

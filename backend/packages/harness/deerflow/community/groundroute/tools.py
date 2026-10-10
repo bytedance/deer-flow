@@ -194,5 +194,6 @@ def web_fetch_tool(url: str) -> str:
 
     result = results[0]
     content = result.get("content") or result.get("snippet") or ""
-    title = result.get("title", "")
+    content = content if isinstance(content, str) else str(content)
+    title = result.get("title") or ""
     return f"# {title}\n\n{content[:_FETCH_SNIPPET_LIMIT]}"
