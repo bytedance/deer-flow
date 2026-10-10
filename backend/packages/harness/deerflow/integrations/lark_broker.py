@@ -21,10 +21,10 @@ import base64
 import json
 import logging
 import os
-import tempfile
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -451,23 +451,21 @@ def serve(config: BrokerConfig) -> ThreadingHTTPServer:
     return server
 
 
-def _write_text_atomically(path: str, content: str) -> None:
-    """Publish *content* at *path* without ever exposing a partial file.
+def _write_text_atomically(path: str, content: str, *, mode: int) -> None:
+    """Publish complete *content* and its final *mode* together at *path*.
 
-    The sandbox chmods the launcher 0o755 and execs it, so a crash between the
-    truncating open and the final write left an executable fragment behind; the
-    runtime marker is parsed as JSON and had the same problem. The storage
-    backends already publish through a temporary file plus ``os.replace``.
+    Set permissions on the temporary file before fsync and ``os.replace`` so
+    an interrupted install cannot publish a non-executable launcher. A write,
+    permission, or publish failure leaves the previous file untouched.
     """
     directory = os.path.dirname(os.path.abspath(path))
     os.makedirs(directory, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(
-        dir=directory, prefix=f".{os.path.basename(path)}.", suffix=".tmp"
-    )
+    fd, temporary = tempfile.mkstemp(dir=directory, prefix=f".{os.path.basename(path)}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(content)
             handle.flush()
+            os.chmod(temporary, mode)
             os.fsync(handle.fileno())
         os.replace(temporary, path)
     except BaseException:
@@ -498,13 +496,11 @@ def install_shim(dest_dir: str, *, version: str | None = None) -> str:
     bin_dir = os.path.join(dest, "bin")
     os.makedirs(bin_dir, exist_ok=True)
     shim_body = os.path.join(bin_dir, LARK_CLI_BROKER_SHIM_FILENAME)
-    _write_text_atomically(shim_body, LARK_CLI_BROKER_SHIM_SCRIPT)
-    os.chmod(shim_body, 0o755)
+    _write_text_atomically(shim_body, LARK_CLI_BROKER_SHIM_SCRIPT, mode=0o755)
     launcher = os.path.join(bin_dir, "lark-cli")
-    _write_text_atomically(launcher, render_launcher_script(shim_body))
-    os.chmod(launcher, 0o755)
+    _write_text_atomically(launcher, render_launcher_script(shim_body), mode=0o755)
     marker = os.path.join(dest, ".deerflow-lark-cli-runtime.json")
-    _write_text_atomically(marker, json.dumps({"version": version or "unknown", "kind": "shim"}))
+    _write_text_atomically(marker, json.dumps({"version": version or "unknown", "kind": "shim"}), mode=0o644)
     return launcher
 
 
