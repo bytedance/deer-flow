@@ -402,6 +402,59 @@ async def test_shutdown_preserves_status_of_run_completed_during_drain():
 
 
 @pytest.mark.asyncio
+async def test_shutdown_awaits_staged_terminal_finalization_without_cancelling():
+    """shutdown() must drain runs whose terminal status is staged in memory.
+
+    With an event store the worker stages its terminal status (in memory,
+    ``terminal_commit_pending=True``) and keeps finalizing: journal flush,
+    delivery receipt, workspace scan, the duration checkpoint write and the
+    deferred terminal commit. ``langgraph_runtime`` closes the checkpointer
+    right after ``shutdown()``, so a finalizing run that is not drained can
+    still write its duration checkpoint against a closed pool (#3373 class).
+    The run must be awaited — never cancelled, which would skip the terminal
+    tail (#5542) — and its staged status must survive the drain.
+    """
+    rm = RunManager()
+    record = await rm.create("t-finalizing")
+    await rm.set_status(record.run_id, RunStatus.running)
+
+    finalizer_started = asyncio.Event()
+    allow_finish = asyncio.Event()
+
+    async def finalizer() -> None:
+        finalizer_started.set()
+        await allow_finish.wait()
+        record.terminal_commit_pending = False
+
+    record.task = asyncio.create_task(finalizer())
+    try:
+        await asyncio.wait_for(finalizer_started.wait(), timeout=1.0)
+        # The worker stages the terminal status before the deferred commit.
+        record.status = RunStatus.success
+        record.terminal_commit_pending = True
+
+        shutdown_task = asyncio.create_task(rm.shutdown(timeout=5.0))
+        # The idle-manager shutdown path has no suspension points, so one
+        # scheduler turn is enough for the unfixed code to run to completion;
+        # the fixed path parks in ``asyncio.wait`` on the finalizer.
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert not shutdown_task.done(), "shutdown() returned without awaiting the staged-terminal finalizer"
+
+        allow_finish.set()
+        await asyncio.wait_for(shutdown_task, timeout=5.0)
+
+        assert not record.task.cancelled(), "shutdown() cancelled a staged-terminal finalizer"
+        assert record.terminal_commit_pending is False
+        assert record.status == RunStatus.success, f"shutdown overwrote the staged terminal status: {record.status}"
+    finally:
+        if not record.task.done():
+            record.task.cancel()
+            with suppress(asyncio.CancelledError):
+                await record.task
+
+
+@pytest.mark.asyncio
 async def test_shutdown_surfaces_failed_interrupted_persist(caplog):
     """A failed interrupted-status persist during the drain must be surfaced (with
     the run_id), not silently swallowed by the gather (maintainer review on
