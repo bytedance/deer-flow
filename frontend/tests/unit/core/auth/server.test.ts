@@ -200,6 +200,7 @@ describe("userSchema system_role", () => {
         email: "g@example.com",
         system_role: "",
         needs_setup: false,
+        disabled: false,
         oauth_provider: null,
         permissions: null,
       }),
