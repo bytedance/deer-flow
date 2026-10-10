@@ -125,7 +125,24 @@ def _build_permission_response(options: list[Any], *, auto_approve: bool) -> Any
     return RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
 
 
-def _resolve_agent_command(command: str) -> str:
+def _agent_path(env: dict[str, str] | None) -> str | None:
+    """Return the ``PATH`` the ACP SDK will give the agent subprocess.
+
+    The SDK builds the child environment by inheriting a trimmed copy of the
+    Gateway's environment and then applying ``acp_agents.<name>.env`` on top, so
+    a configured ``PATH`` -- not the Gateway's -- decides which launcher the
+    agent actually finds. ``None`` means the agent does not override ``PATH``,
+    which lets ``shutil.which`` fall back to the Gateway's own.
+
+    The lookup is case-insensitive because environment variable names are on
+    Windows, where ``Path`` and ``PATH`` name the same variable.
+    """
+    if not env:
+        return None
+    return next((value for key, value in env.items() if key.upper() == "PATH"), None)
+
+
+def _resolve_agent_command(command: str, path: str | None = None) -> str:
     """Return the host path to spawn for a configured ACP agent command.
 
     ``asyncio.create_subprocess_exec``, which the ACP SDK's stdio transport
@@ -139,15 +156,23 @@ def _resolve_agent_command(command: str) -> str:
     unchanged, so the spawn -- not ``shutil.which`` -- decides what it refers
     to.
 
+    ``path`` is the ``PATH`` the agent subprocess will actually see (see
+    ``_agent_path``); the Gateway's own is only the fallback. A successful
+    lookup is returned absolute: for a relative ``PATH`` entry ``shutil.which``
+    yields a result relative to the Gateway's cwd, while the spawn runs with
+    ``cwd`` set to the ACP workspace, where that path resolves elsewhere -- or
+    not at all.
+
     The lookup stats the filesystem (``shutil.which`` -> ``os.access``), so
     callers must run it off the event loop.
     """
     if os.path.dirname(command):
         return command
     try:
-        return shutil.which(command) or command
+        resolved = shutil.which(command, path=path)
     except OSError:
         return command
+    return os.path.abspath(resolved) if resolved else command
 
 
 def _format_invocation_error(agent: str, cmd: str, exc: Exception) -> str:
@@ -238,7 +263,12 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                 return response
 
         client = _CollectingClient()
-        cmd = await asyncio.to_thread(_resolve_agent_command, agent_config.command)
+        agent_env: dict[str, str] | None = None
+        if agent_config.env:
+            agent_env = {k: (os.environ.get(v[1:], "") if v.startswith("$") else v) for k, v in agent_config.env.items()}
+        # Resolve against the PATH the agent subprocess will see, not the Gateway's:
+        # the SDK merges agent_env over its inherited environment at spawn time.
+        cmd = await asyncio.to_thread(_resolve_agent_command, agent_config.command, _agent_path(agent_env))
         args = agent_config.args or []
         physical_cwd = await asyncio.to_thread(_get_work_dir, thread_id)
         try:
@@ -250,9 +280,6 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                 exc,
             )
             mcp_servers = []
-        agent_env: dict[str, str] | None = None
-        if agent_config.env:
-            agent_env = {k: (os.environ.get(v[1:], "") if v.startswith("$") else v) for k, v in agent_config.env.items()}
 
         try:
             from acp import spawn_agent_process
