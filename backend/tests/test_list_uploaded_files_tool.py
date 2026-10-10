@@ -252,6 +252,7 @@ class TestListUploadedFiles:
         files = {f["filename"]: f for f in result["files"]}
         assert set(files) == {"report.pdf", "report.md"}
         assert "outline" not in files["report.pdf"]
+        assert "markdown_path" not in files["report.pdf"]
         assert files["report.md"]["outline"] == [{"title": "My own notes", "line": 1}]
 
     def test_only_registered_companion_is_hidden_and_used_for_outline(self, tmp_path):
@@ -268,6 +269,9 @@ class TestListUploadedFiles:
         files = {f["filename"]: f for f in result["files"]}
         assert set(files) == {"report.pdf", "report.md"}
         assert files["report.pdf"]["outline"] == [{"title": "Converted document", "line": 1}]
+        assert files["report.pdf"]["markdown_file"] == "report_1.md"
+        assert files["report.pdf"]["markdown_path"] == "/mnt/user-data/uploads/report_1.md"
+        assert "markdown_path" not in files["report.md"]
 
     def test_replaced_companion_is_visible_and_not_used_for_outline(self, tmp_path):
         uploads_dir = _uploads_dir(tmp_path)
@@ -284,6 +288,7 @@ class TestListUploadedFiles:
         files = {f["filename"]: f for f in result["files"]}
         assert set(files) == {"report.pdf", "report.md"}
         assert "outline" not in files["report.pdf"]
+        assert "markdown_path" not in files["report.pdf"]
         assert files["report.md"]["outline"] == [{"title": "User replacement with different size", "line": 1}]
 
     def test_same_size_source_edit_exposes_companion_and_drops_stale_outline(self, tmp_path):
@@ -302,6 +307,7 @@ class TestListUploadedFiles:
         files = {f["filename"]: f for f in result["files"]}
         assert set(files) == {"report.pdf", "report.md"}
         assert "outline" not in files["report.pdf"]
+        assert "markdown_path" not in files["report.pdf"]
         assert files["report.md"]["outline"] == [{"title": "Original A", "line": 1}]
 
     def test_cross_turn_state_clear_does_not_exclude_historical_file(self, tmp_path):

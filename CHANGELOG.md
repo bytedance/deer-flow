@@ -833,6 +833,13 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **uploads:** Tell the agent which converted Markdown to read. Outline line
+  numbers already come from the recorded companion, but `<current_uploads>` and
+  `list_uploaded_files` only named the binary original, so `read_file` opened
+  the PDF or spreadsheet and failed. A verified companion now appears as
+  `Converted text` / `markdown_path` on the original file. The companion stays
+  hidden from the historical listing, and a same-stem Markdown file is not
+  used unless the server recorded it. ([#4981])
 - **runtime:** The JSONL event store no longer loses events after a torn final
   line. A write interrupted mid-record left the file without a trailing newline,
   so the next append was glued onto the partial record and both became one

@@ -138,17 +138,23 @@ The following files were uploaded in this message:
 
 - document.pdf (1.2 MB)
   Path: /mnt/user-data/uploads/document.pdf
+  Converted text: /mnt/user-data/uploads/document.md
+  Document outline (line numbers refer to the converted text; use `read_file` on that path):
 
 To work with these files:
-- Read from the file first — use the outline line numbers and `read_file` to locate relevant sections.
+- If a file lists Converted text, call `read_file` on that path. `read_file` cannot open binary originals such as .pdf or .xlsx.
+- Otherwise read from the listed Path first — use the outline line numbers and `read_file` to locate relevant sections.
 - Use `grep` to search for keywords when you are not sure which section to look at.
 - Use `glob` to find files by name pattern.
 </current_uploads>
 ```
 
+有归属记录时，`Converted text` 是转换后的 Markdown 虚拟路径，大纲行号属于这份文字稿。`read_file` 只能读文本，不能打开 PDF、Excel 等二进制原件。没有归属记录时不猜测同名 `.md`。
+
 以前轮次上传的文件不会在每次请求中重复注入。Agent 可按需调用
 `list_uploaded_files` 查询历史上传（可选 `query` 按文件名子串过滤、
-`extensions` 按类型过滤；过滤发生在默认 20 条上限之前）。如果已知文件名，也可直接使用
+`extensions` 按类型过滤；过滤发生在默认 20 条上限之前）。有归属记录的原文件条目会带上
+`markdown_file` 和 `markdown_path`，转换稿本身不单独列出。如果已知文件名，也可直接使用
 `read_file` 或 `grep` 访问 `/mnt/user-data/uploads/` 下的文件。
 
 历史上传支持有界续页：`max_results` 默认 20、每页最多 100。
@@ -173,10 +179,7 @@ To work with these files:
 Agent 在沙箱中运行，使用虚拟路径访问文件。Agent 可以直接使用 `read_file` 工具读取上传的文件：
 
 ```python
-# 读取原始 PDF（如果支持）
-read_file(path="/mnt/user-data/uploads/document.pdf")
-
-# 读取转换后的 Markdown（推荐）
+# 二进制原件无法用 read_file 打开；使用 Converted text / markdown_path
 read_file(path="/mnt/user-data/uploads/document.md")
 ```
 

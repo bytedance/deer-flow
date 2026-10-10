@@ -9,6 +9,7 @@ Batch readers bound by assembly use its AppConfig output budget. Fit the complet
 始终由 runtime 解析，游标只负责一致性校验。先过滤，再按修改时间降序和原始文件名
 排序分页；失效返回 `restart_required`，不得静默回到第一页或伪报末页。
 页大小及大纲选项不参与清单绑定；`total_count` 表示完整过滤结果，摘要只统计剩余项。
+有归属记录时，原文件条目带 `markdown_path`，大纲行号属于该路径；转换稿本身不单独列出。
 
 `conversation.py` supplies the optional `read_conversation` tool. Ordinary lead
 assembly opts in only with a host reader; default, bootstrap, embedded and

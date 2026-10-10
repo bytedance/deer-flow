@@ -740,7 +740,43 @@ class TestBeforeAgent:
         assert "PART I" in content
         assert "ITEM 1. BUSINESS" in content
         assert "ITEM 2. RISK" in content
+        assert "Converted text: /mnt/user-data/uploads/report.md" in content
+        assert "line numbers refer to the converted text" in content
         assert "read_file" in content
+        assert "cannot open binary originals" in content
+
+    def test_converted_text_uses_registered_companion_not_same_stem_notes(self, tmp_path):
+        """A collision-renamed companion is the path to read, not a same-stem user note."""
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "a.pdf").write_bytes(b"%PDF")
+        (uploads_dir / "a.md").write_text("# My notes\n", encoding="utf-8")
+        (uploads_dir / "a_1.md").write_text("# From the PDF\n", encoding="utf-8")
+        register_companion(uploads_dir / "a.pdf", uploads_dir / "a_1.md")
+
+        msg = _human("summarise", files=[{"filename": "a.pdf", "size": 4, "path": "/mnt/user-data/uploads/a.pdf"}])
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        content = result["messages"][-1].content
+        assert "Converted text: /mnt/user-data/uploads/a_1.md" in content
+        assert "Converted text: /mnt/user-data/uploads/a.md" not in content
+        assert "From the PDF" in content
+        assert "My notes" not in content
+
+    def test_no_converted_text_without_companion_record(self, tmp_path):
+        """A same-stem Markdown file is not advertised unless the server recorded it."""
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report.pdf").write_bytes(b"%PDF fake")
+        (uploads_dir / "report.md").write_text("# My notes\n", encoding="utf-8")
+
+        msg = _human("summarise", files=[{"filename": "report.pdf", "size": 9, "path": "/mnt/user-data/uploads/report.pdf"}])
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        content = result["messages"][-1].content
+        assert "Converted text:" not in content
+        assert "cannot open binary originals" not in content
+        assert "My notes" not in content
 
     def test_no_outline_when_no_md_file(self, tmp_path):
         """Files without a sibling .md have no outline section."""
