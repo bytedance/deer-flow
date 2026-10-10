@@ -585,6 +585,7 @@ class TestInboundFileSandboxPerms:
         # Best-effort helper: a missing file is a silent no-op.
         _make_inbound_file_sandbox_readable(tmp_path / "does-not-exist.txt")
 
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX-only: Windows CRT chmod cannot express the 0600 mode this test asserts")
     def test_make_inbound_file_sandbox_readable_swap_after_lstat_does_not_follow_symlink(self, tmp_path, monkeypatch):
         from app.channels.manager import _make_inbound_file_sandbox_readable
 
@@ -611,8 +612,14 @@ class TestInboundFileSandboxPerms:
             # the out-of-dir target immediately after lstat (the TOCTOU race).
             if path == upload:
                 os.unlink(path)
-                symlink_or_skip(path, target)
+                os.symlink(target, path)
             return st
+
+        # Staging the TOCTOU swap needs symlink creation; a host without the
+        # privilege cannot stage the race at all, so skip before installing the hook.
+        probe = tmp_path / ".symlink_probe"
+        symlink_or_skip(probe, upload)
+        probe.unlink()
 
         monkeypatch.setattr(os, "lstat", racing_lstat)
 
