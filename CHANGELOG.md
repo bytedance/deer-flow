@@ -4164,7 +4164,7 @@ This release closes that milestone with **439 merged pull requests**.
   that follows them and fall back to words given before them, as `--cli` does;
   a typed message wins over piped stdin. A message split around the flag
   (`deerflow hello --print there`) exits 2 with a hint to quote it, since its
-  word order cannot be recovered.
+  word order cannot be recovered. ([#6636])
 
 ### Security
 
@@ -9563,3 +9563,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6595]: https://github.com/bytedance/deer-flow/pull/6595
 [#6611]: https://github.com/bytedance/deer-flow/pull/6611
 [#6613]: https://github.com/bytedance/deer-flow/pull/6613
+[#6636]: https://github.com/bytedance/deer-flow/pull/6636

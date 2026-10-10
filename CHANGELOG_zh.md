@@ -3199,7 +3199,7 @@
   要求提供消息，而有管道 stdin 时命令行上输入的词会被悄悄忽略。现在两个选项会接收
   其后的所有词，并像 `--cli` 一样在没有值时使用选项之前的词；命令行上输入的消息
   优先于管道 stdin。消息被选项分隔在两侧时（`deerflow hello --print there`），
-  由于词序无法还原，会以退出码 2 退出并提示加引号。
+  由于词序无法还原，会以退出码 2 退出并提示加引号。([#6636])
 
 ### 安全
 
@@ -7688,3 +7688,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6595]: https://github.com/bytedance/deer-flow/pull/6595
 [#6611]: https://github.com/bytedance/deer-flow/pull/6611
 [#6613]: https://github.com/bytedance/deer-flow/pull/6613
+[#6636]: https://github.com/bytedance/deer-flow/pull/6636
