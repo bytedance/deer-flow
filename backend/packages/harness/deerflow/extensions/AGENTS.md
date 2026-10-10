@@ -436,3 +436,14 @@ and revoked before host shutdown; PAT/internal grants remain unsupported.
 Unstamped internal launches receive no handle and must still start normally.
 Action/tool dispatch scopes handles to each registered plugin namespace for
 idempotency isolation; request-resolved handles use `for_plugin` explicitly.
+
+**Recorded extension-first exception.** The project-shelf summary pipeline
+(`projects/summaries.py`) ships in core: its consumer-visible surface (the
+`project_documents.summary` column, the `<documents>` index rendering, and
+the shelf tool JSON) is core-owned, and the split design (host hook +
+extension-owned generation) was rejected — the write interface would have to
+enforce the sanitization and `updated_at`-preservation invariants across a
+plugin boundary, and the lifecycle hook would be a durable core contract with
+a single consumer. The generator sits behind the narrow `enqueue_summary`
+interface so a future document-lifecycle hook can lift generation into an
+extension without touching schema or rendering.

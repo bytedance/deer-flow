@@ -60,6 +60,8 @@ Scheduled-task runtime note:
 
 Durable MCP task-management tools are added only while the process-local task submitter is installed. They expose bounded local task fields, including whether cancellation was requested, but never the remote handle. Cancellation records that request durably and returns immediately; the background service owns the remote call and retries. These remain ordinary business tools under an active skill's `allowed-tools` policy and must be declared explicitly.
 
+`list_background_tasks` accepts an optional `TaskStatus` filter and intersects it with `active_only`. Omitting it or passing `None` preserves existing calls. The tool returns the 20 most recent matching records; `count` is the number returned. The tool schema validates statuses, and internal callers must not silently ignore invalid values. Scope comes from the runtime, never model-supplied user, thread, or incarnation values.
+
 **Community tools** (`packages/harness/deerflow/community/`): optional integrations, each in its own subpackage and wired through `config.yaml`. Documented examples:
 - `tavily/` - Web search (5 results default) and web fetch (4KB limit)
 - `sofya/` - Web search (5 results default, per-result content capped at 2000 chars) and web fetch (4KB limit)
