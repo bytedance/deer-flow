@@ -83,7 +83,11 @@ class RedisCheckpointHistoryCache:
             except Exception as exc:
                 # Cached history is optional. A malformed entry must not prevent
                 # rebuilding history from authoritative checkpoints.
-                logger.warning("checkpoint history cache decode failed; treating as miss: %s", type(exc).__name__)
+                logger.warning(
+                    "checkpoint history cache decode failed; treating as miss (key=%s): %s",
+                    key,
+                    type(exc).__name__,
+                )
                 self._misses += 1
                 continue
             self._hits += 1
