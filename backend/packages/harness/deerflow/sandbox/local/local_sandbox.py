@@ -59,7 +59,10 @@ class _BoundedPipeCapture:
         children (``python.exe``, CLI shims) inherit the pipe and keep writing the
         host code page, which is not valid in the forced encoding. Rather than
         replacing every such byte with U+FFFD, retry the whole buffer with
-        ``fallback_encoding`` (the locale) when the primary decode fails.
+        ``fallback_encoding`` (the host code page) when the primary decode
+        fails; because the retry covers the whole buffer, output that mixes the
+        shell's own UTF-8 with native-child code-page bytes decodes wholly as
+        host code page.
         """
         if self._fallback_encoding is None:
             return data.decode(self._encoding, errors="replace")
@@ -585,20 +588,34 @@ class LocalSandbox(Sandbox):
                 # page (GBK on zh-CN) must not decode it. Windows-native children
                 # it spawns (python.exe, CLI shims) inherit the pipe and keep
                 # writing the host code page, so a buffer that is not valid UTF-8
-                # falls back to the locale instead of being replaced wholesale.
+                # falls back to it instead of being replaced wholesale.
+                # locale.getencoding() reports the host code page even in Python
+                # UTF-8 mode, where getpreferredencoding() collapses to utf-8.
                 stdout, stderr, returncode, timed_out = self._run_windows_command(
                     args,
                     timeout,
                     sandbox_env,
                     encoding="utf-8",
-                    fallback_encoding=locale.getpreferredencoding(False),
+                    fallback_encoding=locale.getencoding(),
                 )
             elif self._is_powershell(shell):
                 # PowerShell is pinned to UTF-8 by the preamble above, so its own
                 # output must be decoded as UTF-8: any other code page (GBK on
                 # zh-CN) mangles non-ASCII output because the pipe decoder
-                # replaces instead of raising.
-                stdout, stderr, returncode, timed_out = self._run_windows_command(args, timeout, sandbox_env, encoding="utf-8")
+                # replaces instead of raising. Windows-native children the
+                # command runs (python.exe, CLI tools) inherit the pipe and
+                # keep writing the host code page, so a buffer that is not
+                # valid UTF-8 falls back to it instead of being replaced
+                # wholesale. locale.getencoding() reports the host code page
+                # even in Python UTF-8 mode, where getpreferredencoding()
+                # collapses to utf-8.
+                stdout, stderr, returncode, timed_out = self._run_windows_command(
+                    args,
+                    timeout,
+                    sandbox_env,
+                    encoding="utf-8",
+                    fallback_encoding=locale.getencoding(),
+                )
             else:
                 stdout, stderr, returncode, timed_out = self._run_windows_command(args, timeout, sandbox_env)
         else:
