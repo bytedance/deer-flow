@@ -1469,6 +1469,7 @@ for validation and query-length limits.
 Serper web and image search support opt-in transient recovery with
 `max_retries: 1` (default `0`, maximum `3`) in each tool's configuration.
 `retry_budget_seconds` bounds retry scheduling, not active synchronous requests.
+Budget exhaustion is logged separately while the tool returns the last error.
 Extra requests may consume quota or incur cost. See
 [Serper retries](backend/docs/CONFIGURATION.md#serper-retries).
 

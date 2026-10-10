@@ -41,3 +41,7 @@ extension hooks cannot isolate this boundary. Test with real MockTransport
 through both tools in `backend/tests/test_serper_retries.py`.
 Endpoint/retry regressions change configuration and environment during backoff;
 every attempt must keep the original provider URL, API key and request payload.
+Budget aborts before and after backoff log a warning identifying the stage,
+without query/key values, and preserve the last structured error. Date tests
+pin asctime UTC anchoring (under a non-UTC host timezone where supported) and
+the RFC 850 50-year cutoff down to the second.

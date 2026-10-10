@@ -755,10 +755,15 @@ Authentication errors, other statuses, read/write timeouts, malformed successful
 JSON and tool/result-processing failures are never retried.
 
 Backoff uses equal jitter: 0.25–0.5, 0.5–1, then 1–2 seconds. Valid nonnegative
-integer seconds or timezone-aware HTTP-date `Retry-After` hints on 429/503 set a
-minimum wait (past dates mean zero). Invalid hints leave 503 on local backoff;
+integer seconds or HTTP-date `Retry-After` hints on 429/503 set a minimum wait
+(past dates mean zero). HTTP dates include asctime and RFC 850 forms; RFC 850
+two-digit years resolve to the most recent matching year no more than 50 years
+in the future. Invalid hints leave 503 on local backoff;
 429 stays terminal. A hint or backoff that reaches/exceeds the remaining budget
 returns the last error without another request or a shortened wait.
+Both budget checks log `Serper retry time budget exhausted` at warning level,
+distinguishing budget stops from exhausting all configured attempts without
+changing the returned error.
 
 One monotonic scheduling deadline starts before client creation, counting elapsed
 requests and waits; it is checked before waiting and again before a retry.

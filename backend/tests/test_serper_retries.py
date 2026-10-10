@@ -1,6 +1,9 @@
 """Offline recovery through production tools and real HTTPX transports."""
 
 import json
+import logging
+import time
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import httpx
@@ -15,14 +18,14 @@ def search(request, monkeypatch):
     clients = []
     requests = []
     transports = []
-    clock = SimpleNamespace(now=0.0, waits=[], elapsed=0.0, oversleep=0.0, jitter=1.0, ranges=[])
+    clock = SimpleNamespace(now=0.0, wall=1700000000.0, waits=[], elapsed=0.0, oversleep=0.0, jitter=1.0, ranges=[])
     real_client = httpx.Client
 
     def sleep(delay):
         clock.waits.append(delay)
         clock.now += delay + clock.oversleep
 
-    monkeypatch.setattr(tools, "time", SimpleNamespace(monotonic=lambda: clock.now, time=lambda: 1700000000.0, sleep=sleep), raising=False)
+    monkeypatch.setattr(tools, "time", SimpleNamespace(monotonic=lambda: clock.now, time=lambda: clock.wall, sleep=sleep), raising=False)
 
     def uniform(low, high):
         clock.ranges.append((low, high))
@@ -83,6 +86,20 @@ def search(request, monkeypatch):
     return run
 
 
+@pytest.fixture
+def non_utc_timezone(monkeypatch):
+    if not hasattr(time, "tzset"):
+        yield
+        return
+    try:
+        with monkeypatch.context() as local_timezone:
+            local_timezone.setenv("TZ", "GMT-8")
+            time.tzset()
+            yield
+    finally:
+        time.tzset()
+
+
 @pytest.mark.parametrize("outcome", [502, 503, 504, (429, "0"), httpx.ConnectError("connect"), httpx.ConnectTimeout("connect")])
 def test_transient_recovers(search, outcome):
     result = search([outcome, 200], {"max_retries": 1})
@@ -103,10 +120,11 @@ def test_helper_recovery(search):
     assert len(search.requests) == 2
 
 
-def test_exhaustion(search):
+def test_exhaustion(search, caplog):
     assert search([503], {"max_retries": 3}) == {"query": "news", "error": "Serper API error: HTTP 503"}
     assert len(search.requests) == 4
     assert search.clock.waits == [0.5, 1.0, 2.0]
+    assert "retry time budget exhausted" not in caplog.text
 
 
 @pytest.mark.parametrize("outcome", [400, 401, 403, 429, 500, "bad-json", httpx.ReadTimeout("read"), httpx.WriteTimeout("write"), httpx.ReadError("read"), httpx.PoolTimeout("pool")])
@@ -157,6 +175,24 @@ def test_oversleep_prevents_request(search):
     search.clock.oversleep = 2
     assert "error" in search([503, 200], {"max_retries": 1, "retry_budget_seconds": 1})
     assert len(search.requests) == 1
+
+
+@pytest.mark.parametrize("outcome", [503, (429, "0"), httpx.ConnectTimeout("connect")])
+@pytest.mark.parametrize("budget,oversleep,stage,waits", [(0.5, 0, "before backoff", []), (1, 2, "after backoff", [0.5])])
+def test_budget_exhaustion_diagnostic(search, caplog, outcome, budget, oversleep, stage, waits):
+    search.clock.oversleep = oversleep
+    result = search([outcome, 200], {"max_retries": 1, "retry_budget_seconds": budget})
+    status = outcome[0] if isinstance(outcome, tuple) else outcome
+    last_error = "connect" if isinstance(outcome, Exception) else f"Serper API error: HTTP {status}"
+    assert result == {"error": last_error, "query": "news"}
+    assert len(search.requests) == 1
+    assert search.clock.waits == waits
+    diagnostics = [record for record in caplog.records if record.name == tools.logger.name and "retry time budget exhausted" in record.getMessage()]
+    assert len(diagnostics) == 1
+    assert diagnostics[0].levelno == logging.WARNING
+    assert stage in diagnostics[0].getMessage()
+    assert "dummy-key" not in diagnostics[0].getMessage()
+    assert "news" not in diagnostics[0].getMessage()
 
 
 def test_preserves_request_and_filters(search):
@@ -253,6 +289,48 @@ def test_legacy_http_date_is_valid(search, hint):
     result = search([(429, hint), 200], {"max_retries": 1})
     assert "error" not in result
     assert len(search.requests) == 2
+
+
+@pytest.mark.parametrize("status", [429, 503])
+@pytest.mark.parametrize(
+    "current,hint,delay",
+    [
+        (datetime(2023, 11, 14, 22, 13, 20, tzinfo=UTC), "Tue Nov 14 22:13:22 2023", 2.0),
+        (datetime(2023, 11, 14, 22, 13, 20, tzinfo=UTC), "Tue Nov 14 22:13:19 2023", 0.5),
+        (datetime(2023, 11, 5, 8, 49, 37, tzinfo=UTC), "Sun Nov  5 08:49:39 2023", 2.0),
+        (datetime(2023, 11, 5, 8, 49, 37, tzinfo=UTC), "Sun Nov  5 08:49:36 2023", 0.5),
+    ],
+)
+def test_asctime_hint_uses_utc_and_server_floor(search, non_utc_timezone, status, current, hint, delay):
+    search.clock.wall = current.timestamp()
+    assert "error" not in search([(status, hint), 200], {"max_retries": 1})
+    assert len(search.requests) == 2
+    assert search.clock.waits == [delay]
+
+
+@pytest.mark.parametrize("status", [429, 503])
+@pytest.mark.parametrize(
+    "hint,resolved",
+    [
+        ("Tuesday, 14-Nov-23 22:13:22 GMT", datetime(2023, 11, 14, 22, 13, 22, tzinfo=UTC)),
+        ("Saturday, 14-Nov-26 22:13:20 GMT", datetime(2026, 11, 14, 22, 13, 20, tzinfo=UTC)),
+        ("Sunday, 14-Nov-76 22:13:20 GMT", datetime(1976, 11, 14, 22, 13, 20, tzinfo=UTC)),
+        ("Tuesday, 14-Nov-73 22:13:20 GMT", datetime(2073, 11, 14, 22, 13, 20, tzinfo=UTC)),
+        ("Wednesday, 14-Nov-73 22:13:21 GMT", datetime(1973, 11, 14, 22, 13, 21, tzinfo=UTC)),
+    ],
+)
+def test_rfc850_hint_year_window_and_scheduling(search, status, hint, resolved):
+    floor = max(0.0, resolved.timestamp() - search.clock.wall)
+    assert tools._retry_after(httpx.Response(status, headers={"Retry-After": hint})) == floor
+    result = search([(status, hint), 200], {"max_retries": 1})
+    if floor >= 30:
+        assert result == {"error": f"Serper API error: HTTP {status}", "query": "news"}
+        assert len(search.requests) == 1
+        assert search.clock.waits == []
+    else:
+        assert "error" not in result
+        assert len(search.requests) == 2
+        assert search.clock.waits == [max(0.5, floor)]
 
 
 @pytest.mark.parametrize("hint", ["Wed, 21 Oct 2015 07:28:00 +0100", "Wed, 21 Oct 2015 07:28:00 UTC", "Wed, 21 Oct 2015 07:28 GMT"])

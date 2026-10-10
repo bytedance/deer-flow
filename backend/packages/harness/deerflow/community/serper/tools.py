@@ -387,9 +387,11 @@ def _serper_post(
                     backoff = min(0.5 * 2**attempt, 2.0)
                     delay = max(random.uniform(backoff / 2, backoff), hint or 0.0)
                     if delay >= deadline - time.monotonic():
+                        logger.warning("Serper retry time budget exhausted before backoff after %d attempt(s)", attempt + 1)
                         raise
                     time.sleep(delay)
                     if time.monotonic() >= deadline:
+                        logger.warning("Serper retry time budget exhausted after backoff after %d attempt(s)", attempt + 1)
                         raise
         data = response.json()
         if not isinstance(data, dict):
