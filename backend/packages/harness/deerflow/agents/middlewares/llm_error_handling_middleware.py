@@ -10,6 +10,7 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC
 from email.utils import parsedate_to_datetime
 from typing import Any, override
 
@@ -1079,6 +1080,8 @@ def _extract_retry_after_ms(exc: BaseException) -> int | None:
     except (TypeError, ValueError, OverflowError):
         try:
             target = parsedate_to_datetime(str(raw))
+            if target.tzinfo is None:
+                target = target.replace(tzinfo=UTC)
             delta = target.timestamp() - time.time()
             return bounded_retry_after_ms(delta * 1000)
         except (TypeError, ValueError, OverflowError):
