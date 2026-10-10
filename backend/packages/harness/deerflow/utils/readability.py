@@ -1,6 +1,7 @@
 import logging
 import re
 import subprocess
+from functools import lru_cache
 from html import escape, unescape
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse, uses_relative
@@ -8,6 +9,14 @@ from urllib.parse import urljoin, urlparse, uses_relative
 from bs4 import BeautifulSoup
 from markdownify import markdownify as md
 from readabilipy import simple_json_from_html_string
+
+try:
+    # An internal helper: readabilipy only promises >=0.3.0 compatibility, and a
+    # future upgrade may move or drop it. Failing gracefully here keeps every
+    # web_fetch alive on the Python fallback instead of breaking the import.
+    from readabilipy.simple_json import have_node
+except ImportError:  # pragma: no cover - depends on the installed readabilipy version
+    have_node = None
 
 logger = logging.getLogger(__name__)
 
@@ -150,24 +159,165 @@ class _DestinationRewriter(HTMLParser):
         return "".join(parts)
 
 
+@lru_cache(maxsize=1)
+def _readability_available() -> bool:
+    """Probe Readability.js availability once per process.
+
+    ``readabilipy``'s own check re-runs (and may re-attempt an ``npm
+    install`` into site-packages) on every extraction, which is wasteful
+    for environments where Node.js can never be found, such as Windows
+    hosts where ``npm`` is only resolvable as ``npm.cmd``.
+    """
+    if have_node is None:
+        # readabilipy reorganized its internals; the probe must degrade to the
+        # link-preserving Python fallback rather than fail the module import.
+        logger.warning("readabilipy does not expose simple_json.have_node; Readability.js extraction is disabled and the link-preserving Python fallback will be used for every fetch")
+        return False
+    try:
+        return bool(have_node())
+    except (OSError, subprocess.SubprocessError, ValueError):
+        # The probe must never break fetching, and unavailability must be
+        # cached: readabilipy's have_node() runs a network-bound `npm
+        # install` with check=True, so a failing install raises
+        # CalledProcessError (a SubprocessError, not an OSError) and a
+        # non-numeric `node -v` output raises ValueError — either escaping
+        # here would re-attempt the install on every fetch or fail it.
+        return False
+
+
+# Markup that never carries model-visible prose or links.
+_FALLBACK_DROP_TAGS = ("script", "style", "noscript", "template", "iframe", "svg", "form", "button")
+
+# Site chrome, removed only when no content container owns the element: an
+# ``<aside>`` inside the article is the article's own warning or callout and
+# carries prose and resolved links the model must still see, while a bare
+# sidebar ``<aside>`` — or a site-level ``<nav>``/``<footer>`` — is chrome.
+# readabilipy's own Python fallback whitelists ``aside`` for the same reason.
+_FALLBACK_CHROME_TAGS = ("nav", "footer", "aside")
+
+# The containers that make an element article-owned. Shared with
+# ``_fallback_article_title``'s site-header rule so both agree on what
+# "owned by the content" means.
+_FALLBACK_CONTENT_CONTAINERS = ("article", "main")
+
+
+def _fallback_article_title(soup: BeautifulSoup, root=None) -> str:
+    """Ranked headline extraction for the link-preserving fallback.
+
+    ``og:title`` is the site-published headline and comes first. ``<h1>``
+    candidates are restricted to the selected content container; a ``<h1>``
+    inside a ``<header>`` is skipped only when that header is site-level
+    chrome (no ``<article>``/``<main>`` ancestor) — a header owned by the
+    article itself, such as ``<article><header class="entry-header"><h1>``,
+    carries the real headline and must be kept. Headline text is joined
+    with spaces so inline children do not glue words together. A bare
+    ``<title>`` is the last resort.
+    """
+    og_title = soup.find("meta", attrs={"property": "og:title", "content": True})
+    if og_title is not None:
+        candidate = og_title["content"].strip()
+        if candidate:
+            return candidate
+    container = root if root is not None else soup
+    for h1 in container.find_all("h1"):
+        header = h1.find_parent("header")
+        if header is not None and header.find_parent(_FALLBACK_CONTENT_CONTAINERS) is None:
+            continue  # A site-level chrome heading, not an article headline.
+        candidate = " ".join(h1.get_text(" ", strip=True).split())
+        if candidate:
+            return candidate
+    if soup.title is not None:
+        return " ".join(soup.title.get_text(" ", strip=True).split())
+    return ""
+
+
+def _fallback_content_root(soup: BeautifulSoup):
+    """Pick a content container without truncating sibling content.
+
+    ``<main>`` is the canonical container and is kept whole. Without one,
+    the body is kept unless a single ``article`` dominates the page (the
+    text outside it is a rounding error) — the only case where narrowing
+    to that article cannot drop a teaser article or sibling sections the
+    way the previous first-``article`` selection did.
+    """
+    body = soup.body if soup.body is not None else soup
+    main = body.find("main")
+    if main is not None:
+        return main
+    articles = body.find_all("article")
+    if len(articles) == 1:
+        article = articles[0]
+        container_chars = len(body.get_text(strip=True))
+        outside_chars = container_chars - len(article.get_text(strip=True))
+        if outside_chars < min(200, container_chars // 10):
+            return article
+    return body
+
+
+def _prune_fallback_chrome(soup: BeautifulSoup) -> None:
+    """Drop site chrome, keeping the chrome a content container owns.
+
+    ``<aside>`` inside the selected article/main is tangent prose — a warning,
+    a callout, a pull quote — so removing it silently deletes instruction text
+    and resolved links the model is supposed to read. Only chrome outside every
+    content container is dropped.
+
+    The decision is made before :func:`_fallback_content_root` runs, because
+    sidebar text must not count towards the "does one article dominate the
+    page" measurement, so it is phrased as "does a content container own this
+    element" rather than "is this element inside the selected root".
+    """
+    for element in soup.find_all(_FALLBACK_CHROME_TAGS):
+        if element.parent is None:
+            continue  # Already removed together with a chrome ancestor.
+        if element.find_parent(_FALLBACK_CONTENT_CONTAINERS) is None:
+            element.decompose()
+
+
+def _python_fallback_article_json(html: str) -> dict[str, str | None]:
+    """Link-preserving extraction used when Readability.js is unavailable.
+
+    ``readabilipy``'s pure-Python tree strips element attributes, erasing
+    the ``href``/``src`` destinations that ``_resolve_html_urls`` has just
+    resolved. This fallback keeps the resolved destinations so the
+    model-visible Markdown stays navigable on hosts where Readability.js
+    can never run (Windows, npm-less containers). It also keeps prose that
+    lives in chrome elements the content container owns, such as the
+    article's own ``<aside>`` warning.
+    """
+    soup = BeautifulSoup(html, "html5lib")
+    for element in soup.find_all(_FALLBACK_DROP_TAGS):
+        element.decompose()
+    _prune_fallback_chrome(soup)
+    root = _fallback_content_root(soup)
+    return {
+        "title": _fallback_article_title(soup, root),
+        "date": None,
+        "content": str(root),
+    }
+
+
 class ReadabilityExtractor:
     def extract_article(self, html: str, *, url: str | None = None) -> Article:
         if url:
             html = _resolve_html_urls(html, url)
         try:
-            article = simple_json_from_html_string(html, use_readability=True)
+            if _readability_available():
+                article = simple_json_from_html_string(html, use_readability=True)
+            else:
+                article = _python_fallback_article_json(html)
         except (subprocess.CalledProcessError, FileNotFoundError) as exc:
             stderr = getattr(exc, "stderr", None)
             if isinstance(stderr, bytes):
                 stderr = stderr.decode(errors="replace")
             stderr_info = f"; stderr={stderr.strip()}" if isinstance(stderr, str) and stderr.strip() else ""
             logger.warning(
-                "Readability.js extraction failed with %s%s; falling back to pure-Python extraction",
+                "Readability.js extraction failed with %s%s; using the link-preserving Python fallback",
                 type(exc).__name__,
                 stderr_info,
                 exc_info=True,
             )
-            article = simple_json_from_html_string(html, use_readability=False)
+            article = _python_fallback_article_json(html)
 
         html_content = article.get("content")
         if not html_content or not str(html_content).strip():
