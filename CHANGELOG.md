@@ -4126,6 +4126,17 @@ This release closes that milestone with **439 merged pull requests**.
   value that yields no valid ID denies every guild and logs an error. Unset,
   `null`, `[]`, or a blank string still allows all guilds; `allowed_channels`
   gains the same scalar handling. ([#6338])
+- **release:** The `v*` release gate now rejects a stale `backend/uv.lock`.
+  `scripts/verify_versions.sh` compared only `Chart.yaml`, `pyproject.toml` and
+  `package.json`, so bumping those three by hand passed the gate even though the
+  lock still recorded the previous root package version. The backend image
+  installs with `uv sync --locked`, so on a tag the chart and the frontend and
+  provisioner images published while the backend image failed to build, and the
+  immutable chart version meant the fix needed a new version number. The script
+  now also runs `uv lock --check` in `backend/` (uv owns the PEP 440
+  normalization, so `2.1.0-rc0` still matches `2.1.0rc0`) and fails when `uv` is
+  missing; `verify-versions.yml` installs the uv version the backend image pins.
+  ([#6588])
 
 ### Security
 
@@ -9452,3 +9463,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6558]: https://github.com/bytedance/deer-flow/pull/6558
 [#6580]: https://github.com/bytedance/deer-flow/pull/6580
 [#6582]: https://github.com/bytedance/deer-flow/pull/6582
+[#6588]: https://github.com/bytedance/deer-flow/pull/6588

@@ -3170,6 +3170,14 @@
   条目在警告中丢弃，而配置了却得不到任何有效 ID 的值会拒绝所有公会并记录
   错误；未设置、`null`、`[]` 或空白字符串仍允许所有公会。
   `allowed_channels` 获得同样的标量处理。([#6338])
+- **发布：** `v*` 发布门禁现在会拦下过期的 `backend/uv.lock`。此前
+  `scripts/verify_versions.sh` 只比较 `Chart.yaml`、`pyproject.toml` 和
+  `package.json`，手动改这三处就能通过门禁，而 lock 里记录的根包版本仍是旧版本。
+  backend 镜像用 `uv sync --locked` 安装依赖，因此打标签后 chart 以及 frontend、
+  provisioner 镜像都已发布，backend 镜像却构建失败；chart 版本不可覆盖，修复只能
+  换一个新版本号。现在该脚本还会在 `backend/` 中运行 `uv lock --check`（PEP 440
+  规范化交给 uv，`2.1.0-rc0` 仍与 `2.1.0rc0` 匹配），缺少 `uv` 时直接失败；
+  `verify-versions.yml` 会安装与 backend 镜像相同的固定 uv 版本。([#6588])
 
 ### 安全
 
@@ -7613,3 +7621,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6556]: https://github.com/bytedance/deer-flow/pull/6556
 [#6580]: https://github.com/bytedance/deer-flow/pull/6580
 [#6582]: https://github.com/bytedance/deer-flow/pull/6582
+[#6588]: https://github.com/bytedance/deer-flow/pull/6588
