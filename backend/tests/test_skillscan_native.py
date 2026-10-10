@@ -2203,7 +2203,12 @@ def test_fork_bomb_variant_is_also_a_destructive_command(tmp_path: Path) -> None
         "cleanup(){ tail -f app.log | logger & }\n",
         "start(){ run | tee out.log & }\n",
         "each(){ f | ff & }\n",
+        # A hard block must not fire when a side only shares a prefix or suffix
+        # with the name: `ff` is not `f`, `build.log` is not `build`.
+        "f(){ f | ff & }\n",
+        "build(){ make build | tee build.log & }\n",
         'log(){ logger "log" | tee out.log & }\n',
+        # A `;` puts the left-side word in a different command than the pipe.
         "a(){ a; echo x | a & }\n",
         "setup(){ setup_helpers; cat manifest.json | tar tz & }\n",
     ],
@@ -2218,6 +2223,20 @@ def test_fork_bomb_lookalikes_stay_unflagged(tmp_path: Path, snippet: str) -> No
     findings = scan_skill_dir(skill_dir)["findings"]
 
     assert not [finding for finding in findings if finding["rule_id"] in {"resource-fork-bomb", "shell-destructive-command"}]
+
+
+def test_fork_bomb_variant_is_shell_only(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "demo-skill"
+    _write_skill(skill_dir)
+    # `mask | mask & 255` is a C/JS bitwise shape, not a shell fork bomb; the
+    # renamed-variant matcher must not hard-block non-shell sources. The
+    # canonical literal spelling stays matched file-agnostically.
+    (skill_dir / "bench.cpp").write_text("bool mask() { return mask | mask & 255; }\n", encoding="utf-8")
+
+    result = scan_skill_dir(skill_dir)
+
+    assert not [finding for finding in result["findings"] if finding["rule_id"] in {"resource-fork-bomb", "shell-destructive-command"}]
+    assert result["blocked"] is False
 
 
 def test_fork_bomb_matcher_finishes_on_repeated_lookalike_headers(tmp_path: Path) -> None:
