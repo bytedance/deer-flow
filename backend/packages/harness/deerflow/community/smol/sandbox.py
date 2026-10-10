@@ -27,9 +27,10 @@ class SmolSandbox(Sandbox):
 
     persistent_shell_sessions = False
 
-    def __init__(self, id: str, machine: Machine, *, default_env: dict[str, str] | None = None, default_timeout: float = 600) -> None:
+    def __init__(self, id: str, machine: Machine, *, default_env: dict[str, str] | None = None, default_timeout: float = 600, target: str = "local") -> None:
         super().__init__(id)
         self._machine = machine
+        self._target = target
         self._default_env = dict(default_env or {})
         self._default_timeout = default_timeout
         self._lock = threading.Lock()
@@ -55,6 +56,13 @@ class SmolSandbox(Sandbox):
             raise PermissionError(f"Access denied: path traversal detected in {path!r}")
         return path
 
+    def _resolve_file_path(self, path: str) -> str:
+        resolved = self._resolve_path(path)
+        # Cloud's file route can reinterpret URL delimiters and control bytes.
+        if self._target == "cloud" and (any(char in resolved for char in "?#%") or any(ord(char) < 32 or ord(char) == 127 for char in resolved)):
+            raise ValueError(f"Smol Cloud file path cannot contain ?, #, %, or control characters: {path!r}")
+        return resolved
+
     def _exec(self, command: list[str], *, env: dict[str, str] | None = None, timeout: float | None = None):
         from smol import ExecOptions
 
@@ -78,7 +86,7 @@ class SmolSandbox(Sandbox):
         return output or "(no output)"
 
     def read_file(self, path: str, start_line: int | None = None, end_line: int | None = None) -> str:
-        resolved = self._resolve_path(path)
+        resolved = self._resolve_file_path(path)
         try:
             with self._lock:
                 if self._closed:
@@ -100,7 +108,7 @@ class SmolSandbox(Sandbox):
         self._write(path, content, append=False)
 
     def _write(self, path: str, content: bytes, *, append: bool) -> None:
-        resolved = self._resolve_path(path)
+        resolved = self._resolve_file_path(path)
         with self._lock:
             if self._closed:
                 raise RuntimeError("sandbox has been closed")
@@ -119,7 +127,7 @@ class SmolSandbox(Sandbox):
             self._machine.write_file(resolved, content)
 
     def download_file(self, path: str) -> bytes:
-        resolved = self._resolve_path(path)
+        resolved = self._resolve_file_path(path)
         if resolved != VIRTUAL_PATH_PREFIX and not resolved.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
             raise PermissionError(f"Access denied: path must be under {VIRTUAL_PATH_PREFIX!r}: {path!r}")
         try:

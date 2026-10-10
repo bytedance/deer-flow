@@ -58,6 +58,14 @@ def test_smol_vm_lifecycle_and_tools(monkeypatch, target):
         assert box.grep("/mnt/user-data/workspace", "second", literal=True)[0][0].line_number == 2
         box.update_file(path, b"\x00\xff\n")
         assert box.download_file(path) == b"\x00\xff\n"
+        odd_path = "/mnt/user-data/workspace/deer-flow-odd#name.txt"
+        if target == "cloud":
+            with pytest.raises(ValueError, match="Smol Cloud file path"):
+                box.write_file(odd_path, "must not be written")
+            assert box.execute_command("test ! -e /mnt/user-data/workspace/deer-flow-odd && echo clean").strip() == "clean"
+        else:
+            box.write_file(odd_path, "local filenames are preserved")
+            assert box.download_file(odd_path) == b"local filenames are preserved"
         instance.release(sid)
         assert instance.acquire(thread_id, user_id="live-test") == sid
         assert instance.get(sid).download_file(path) == b"\x00\xff\n"

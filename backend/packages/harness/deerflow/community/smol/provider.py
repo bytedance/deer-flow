@@ -120,7 +120,7 @@ class SmolSandboxProvider(WarmPoolLifecycleMixin[SmolSandbox], SandboxProvider):
         except BaseException:
             machine.delete()
             raise
-        return SmolSandbox(sandbox_id, machine, default_env=config["environment"], default_timeout=config["bash_command_timeout"])
+        return SmolSandbox(sandbox_id, machine, default_env=config["environment"], default_timeout=config["bash_command_timeout"], target=config["target"])
 
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         if thread_id is None:

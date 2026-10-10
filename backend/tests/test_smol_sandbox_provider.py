@@ -118,6 +118,40 @@ def test_scope_warm_reclaim_and_binary_file_roundtrip(provider):
     assert _Machine.instances[0].deleted
 
 
+def test_cloud_file_paths_are_rejected_before_guest_mutation(provider):
+    p, _ = provider
+    p._config["target"] = "cloud"
+    sid = p.acquire("unsafe-filenames", user_id="alice")
+    sandbox = p.get(sid)
+    machine = _Machine.instances[-1]
+    calls_after_bootstrap = len(machine.calls)
+    for suffix in ("#draft", "?v=2", "%20draft", "\nname", "\x00name"):
+        path = f"/mnt/user-data/workspace/report{suffix}.txt"
+        with pytest.raises(ValueError, match="Smol Cloud file path"):
+            sandbox.write_file(path, "write")
+        with pytest.raises(ValueError, match="Smol Cloud file path"):
+            sandbox.write_file(path, "append", append=True)
+        with pytest.raises(ValueError, match="Smol Cloud file path"):
+            sandbox.update_file(path, b"binary")
+        with pytest.raises(ValueError, match="Smol Cloud file path"):
+            sandbox.read_file(path)
+        with pytest.raises(ValueError, match="Smol Cloud file path"):
+            sandbox.download_file(path)
+    assert machine.files == {}
+    assert len(machine.calls) == calls_after_bootstrap
+
+
+def test_local_file_paths_keep_url_delimiters(provider):
+    p, _ = provider
+    sid = p.acquire("local-filenames", user_id="alice")
+    sandbox = p.get(sid)
+    path = "/mnt/user-data/workspace/report#draft%20.txt"
+    sandbox.write_file(path, "first")
+    sandbox.write_file(path, "+second", append=True)
+    assert sandbox.download_file(path) == b"first+second"
+    assert sandbox.read_file(path) == "first+second"
+
+
 def test_failed_bootstrap_deletes_vm(provider):
     p, _ = provider
     _Machine.fail_bootstrap = True
