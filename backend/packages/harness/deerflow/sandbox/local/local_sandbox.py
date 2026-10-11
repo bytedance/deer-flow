@@ -597,8 +597,18 @@ class LocalSandbox(Sandbox):
                 # PowerShell is pinned to UTF-8 by the preamble above, so its own
                 # output must be decoded as UTF-8: any other code page (GBK on
                 # zh-CN) mangles non-ASCII output because the pipe decoder
-                # replaces instead of raising.
-                stdout, stderr, returncode, timed_out = self._run_windows_command(args, timeout, sandbox_env, encoding="utf-8")
+                # replaces instead of raising. Native children PowerShell runs
+                # (python.exe, CLI shims) inherit the pipe and keep writing the
+                # host code page, so a buffer that is not valid UTF-8 falls back
+                # to the locale instead of being replaced wholesale — the same
+                # guard the MSYS branch above already applies.
+                stdout, stderr, returncode, timed_out = self._run_windows_command(
+                    args,
+                    timeout,
+                    sandbox_env,
+                    encoding="utf-8",
+                    fallback_encoding=locale.getpreferredencoding(False),
+                )
             else:
                 stdout, stderr, returncode, timed_out = self._run_windows_command(args, timeout, sandbox_env)
         else:
