@@ -36,16 +36,23 @@ TABLE_MAP_SUFFIX = ".table_map.json"
 
 
 def compute_files_hash(files: list[str]) -> str:
-    """Compute a combined SHA256 hash of all input files for cache key."""
+    """Hash ordered file names and contents, independent of their directories."""
     hasher = hashlib.sha256()
-    for file_path in sorted(files):
+    for file_path in files:
+        # Names determine CSV tables/formats; order determines duplicate suffixes.
+        name = os.path.basename(file_path).encode("utf-8")
+        hasher.update(len(name).to_bytes(8, "big"))
+        hasher.update(name)
+        file_hasher = hashlib.sha256()
         try:
             with open(file_path, "rb") as f:
                 while chunk := f.read(8192):
-                    hasher.update(chunk)
+                    file_hasher.update(chunk)
         except OSError:
             # Include path as fallback if file can't be read
-            hasher.update(file_path.encode())
+            file_hasher.update(file_path.encode("utf-8"))
+        # A fixed-size digest preserves file boundaries, even for empty files.
+        hasher.update(file_hasher.digest())
     return hasher.hexdigest()
 
 
