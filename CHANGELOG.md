@@ -4184,6 +4184,16 @@ This release closes that milestone with **439 merged pull requests**.
   word order cannot be recovered. Passing both `--print` and `--json` now exits
   2 instead of running `--print` and dropping the `--json` message. ([#6636])
 
+- **frontend:** Signing in after a workspace session ends now returns to the
+  page that was open, query string and fragment included. Opening a workspace
+  page without a valid session (for example a scheduled-task notification link,
+  `/workspace/scheduled-tasks?task_id=...`, after the session expired) sent the
+  user to a bare `/login`, so signing in landed on the default workspace; the
+  workspace layout cannot read the request URL, so it now hands the redirect to
+  the browser, which keeps the full address in `next`. The client-side session
+  checks (`AuthProvider.refreshUser`, `useRequireAuth`) kept the path but
+  dropped the query string, and the shared fetcher dropped the fragment; all of
+  them now keep the full address. ([#6681])
 - **sandbox:** The AIO, E2B and OpenSandbox providers and ACP agents no longer
   resolve `sandbox.environment` / `acp_agents.<name>.env` values a second time.
   `config.yaml` loading already replaces each `$VAR`, so a resolved secret that
@@ -9605,3 +9615,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6636]: https://github.com/bytedance/deer-flow/pull/6636
 [#6666]: https://github.com/bytedance/deer-flow/pull/6666
 [#6673]: https://github.com/bytedance/deer-flow/pull/6673
+[#6681]: https://github.com/bytedance/deer-flow/pull/6681
