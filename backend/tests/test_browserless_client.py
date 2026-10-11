@@ -368,6 +368,16 @@ class TestBrowserlessTools:
         ):
             yield
 
+    @pytest.fixture(autouse=True)
+    def _backend_isolation_confirmed(self):
+        """Assume the delegated backend's egress is isolated for these tests.
+
+        These tests exercise fetch/capture behavior, not backend isolation; the
+        fail-closed backend guard is covered in TestBrowserlessBackendIsolation.
+        """
+        with patch("deerflow.community.browserless.tools._validate_backend_base_url", return_value=None):
+            yield
+
     async def test_get_browserless_client_uses_env_token_fallback(self):
         """Browserless tools use BROWSERLESS_TOKEN when config omits token."""
         with patch("deerflow.community.browserless.tools._get_tool_config") as mock_cfg:
@@ -981,5 +991,100 @@ class TestBrowserlessTools:
                 )
 
         assert "Thread outputs path is not available" in result.update["messages"][0].content
+        assert "artifacts" not in result.update
+        mock_get_client.assert_not_called()
+
+
+@pytest.mark.asyncio
+class TestBrowserlessBackendIsolation:
+    """Fail-closed delegated-backend SSRF guard (issue #5970)."""
+
+    @pytest.fixture(autouse=True)
+    def _resolve_host_addresses(self):
+        """Resolve hostnames to a public address to keep target validation offline."""
+        with patch(
+            "deerflow.community.browserless.tools._resolve_host_addresses",
+            return_value=[ipaddress.ip_address("93.184.216.34")],
+        ):
+            yield
+
+    @patch("deerflow.community.browserless.tools._get_browserless_client")
+    async def test_web_fetch_tool_fails_closed_on_default_backend(self, mock_get_client):
+        """A default (localhost) backend fails closed without isolation confirmation."""
+        with patch("deerflow.community.browserless.tools._get_tool_config", return_value=None):
+            result = await tools.web_fetch_tool.ainvoke("https://example.com")
+
+        assert "network_isolation_confirmed" in result
+        mock_get_client.assert_not_called()
+
+    @patch("deerflow.community.browserless.tools._get_browserless_client")
+    async def test_web_fetch_tool_fails_closed_even_with_allow_private(self, mock_get_client):
+        """allow_private_addresses governs the target, not the backend's egress."""
+        with patch(
+            "deerflow.community.browserless.tools._get_tool_config",
+            return_value={"allow_private_addresses": True},
+        ):
+            result = await tools.web_fetch_tool.ainvoke("https://example.com")
+
+        assert "network_isolation_confirmed" in result
+        mock_get_client.assert_not_called()
+
+    @patch("deerflow.community.browserless.tools._get_browserless_client")
+    async def test_web_fetch_tool_allows_self_hosted_backend_when_confirmed(self, mock_get_client):
+        """network_isolation_confirmed opts into a self-hosted backend."""
+        mock_client = MagicMock()
+        mock_client.fetch_html_with_status = AsyncMock(
+            return_value=BrowserlessFetchResult(
+                html="<html><body><p>ok</p></body></html>",
+                target_status_code="200",
+                target_status="OK",
+            )
+        )
+        mock_get_client.return_value = mock_client
+
+        with patch(
+            "deerflow.community.browserless.tools._get_tool_config",
+            return_value={"network_isolation_confirmed": True},
+        ):
+            result = await tools.web_fetch_tool.ainvoke("https://example.com")
+
+        assert "Error:" not in result
+        mock_client.fetch_html_with_status.assert_called_once()
+
+    @patch("deerflow.community.browserless.tools._get_browserless_client")
+    async def test_web_fetch_tool_allows_public_backend(self, mock_get_client):
+        """A public backend (Browserless Cloud) needs no isolation confirmation."""
+        mock_client = MagicMock()
+        mock_client.fetch_html_with_status = AsyncMock(
+            return_value=BrowserlessFetchResult(
+                html="<html><body><p>ok</p></body></html>",
+                target_status_code="200",
+                target_status="OK",
+            )
+        )
+        mock_get_client.return_value = mock_client
+
+        with patch(
+            "deerflow.community.browserless.tools._get_tool_config",
+            return_value={"base_url": "https://production-sfo.browserless.io"},
+        ):
+            result = await tools.web_fetch_tool.ainvoke("https://example.com")
+
+        assert "Error:" not in result
+        mock_client.fetch_html_with_status.assert_called_once()
+
+    @patch("deerflow.community.browserless.tools._get_browserless_client")
+    async def test_web_capture_tool_fails_closed_on_default_backend(self, mock_get_client):
+        """web_capture_tool applies the same fail-closed backend guard."""
+        runtime = SimpleNamespace(state={"thread_data": {}})
+
+        with patch("deerflow.community.browserless.tools._get_tool_config", return_value=None):
+            result = await tools.web_capture_tool.coroutine(
+                runtime=runtime,
+                url="https://example.com",
+                tool_call_id="tool-1",
+            )
+
+        assert "network_isolation_confirmed" in result.update["messages"][0].content
         assert "artifacts" not in result.update
         mock_get_client.assert_not_called()

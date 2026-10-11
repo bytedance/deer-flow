@@ -318,6 +318,26 @@ class RedisStreamBridge(StreamBridge):
                     )
                     return
 
+            # A syntactically valid but future Last-Event-ID cannot replay from
+            # this retained stream. In particular, an already-ended run would
+            # otherwise heartbeat forever because XREAD never sees its end marker.
+            if latest_entries and gap_detection_enabled:
+                latest_id = self._decode(latest_entries[0][0])
+                if self._stream_id_lt(latest_id, stream_id):
+                    earliest_id = self._decode(earliest_entries[0][0])
+                    logger.warning(
+                        "subscriber for Redis stream %s requested future cursor %s (latest %s)",
+                        key,
+                        stream_id,
+                        latest_id,
+                    )
+                    yield StreamGap(
+                        requested_event_id=stream_id,
+                        earliest_available_event_id=earliest_id,
+                        latest_available_event_id=latest_id,
+                    )
+                    return
+
             responses_to_process = []
             if pending_initial_response is not None:
                 responses_to_process.append(pending_initial_response)

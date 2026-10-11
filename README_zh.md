@@ -575,9 +575,14 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 | `/models` | 列出可用模型 |
 | `/model [name\|default]` | 查看或固定当前会话使用的模型 |
 | `/memory` | 查看 memory |
+| `/agent list` | 列出你的自定义智能体 |
+| `/agent use <name>` | 用自定义智能体开启一个新对话 |
 | `/help` | 查看帮助 |
 
 > 没有命令前缀的消息会被当作普通聊天处理。DeerFlow 会自动创建 thread，并以对话方式回复。
+
+智能体选择是会话级的：`/agent use <name>` 会开启一个新对话，并将该自定义智能体固定到 thread 元数据中。已有对话不会在中途切换智能体；该选择在 Gateway 重启后仍然有效，在 Web UI 中打开 IM 创建的 thread 时，也会继续使用同一个自定义智能体。
+使用 `/agent use lead_agent` 可在新对话中回到默认智能体。
 
 模型选择是会话级的：`/model <name>` 将模型固定到**当前**会话——会按调用方可见的模型列表校验，选择写入 thread 元数据（Gateway 重启后仍有效），从下一条消息开始生效，无需新开对话。`/model` 查看当前生效模型及其来源，`/model default` 清除固定，`/models` 会报告当前固定的模型。
 
@@ -765,7 +770,12 @@ Web UI 会在输入框上方展示当前激活的 goal，说明自动续跑为�
 
 启用 `task_continuity.enabled` 后，可用 `history_search` 检索当前任务的活跃消息和
 已压缩历史。可选参数 `role` 接受 `user`、`assistant`、`tool`，在最多八条结果的
-截断前过滤；省略或 `null` 保持原有全角色搜索。使用 `history_read` 核对来源原文，
+截断前过滤；省略或 `null` 保持原有全角色搜索。
+搜索摘录会围绕最早可完整放入摘录的匹配项返回最多 600 个字符，并提供 `excerpt_start` /
+`excerpt_end`，表示原文中从零开始、左闭右开的 Unicode 字符范围。过长的匹配项会被跳过，
+继续查找后续可完整放入摘录的匹配项；若没有这样的可定位匹配项，则返回原文开头并设置 `excerpt_match=false`。
+将 `excerpt_start` 作为 `history_read` 的 `offset` 即可从该位置继续读取。
+使用 `history_read` 核对来源原文，
 历史用户消息不代表当前授权。详见[任务连续性说明（英文）](docs/task-continuity.md)。
 
 在 Web UI 输入框中使用 `/compact`，可以把当前 thread 的早期上下文压缩成摘要。完整聊天记录仍会保留在界面上，但后续模型调用会基于压缩摘要和最近消息继续。当前历史不足时不会压缩；thread 正在运行任务时会阻止压缩。
@@ -1104,7 +1114,7 @@ PoC 不会自动清理。验证完成后，请用网页侧边栏的删除操作�
 
 ### 部署默认值
 
-Docker 部署栈默认只把入口端口发布在 `127.0.0.1` 上，与上文所述的本地可信环境模型一致。若需要从其他机器访问，请在 `.env` 中设置 `BIND_HOST`（例如 `BIND_HOST=0.0.0.0`），并且必须在落实下方的安全措施之后再这样做。
+Docker 部署栈默认只把入口端口发布在 `127.0.0.1` 上，本地 `make dev` / `make start` 也把 nginx、Gateway 和前端绑定在回环地址上，与上文所述的本地可信环境模型一致。若需要从其他机器访问，请在 `.env` 中设置 `BIND_HOST`（例如 `BIND_HOST=0.0.0.0`），并且必须在落实下方的安全措施之后再这样做。本地运行时 `BIND_HOST` 只作用于 `2026` 端口上的 nginx，Gateway 和前端始终留在其后的回环地址上。
 
 **请在主机变为可访问之前完成首次初始化设置。** 全新实例尚未创建任何账号，因此对于任何非仅回环访问的部署，请在启动后立即通过 `/setup` 创建管理员账号。
 

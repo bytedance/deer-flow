@@ -190,6 +190,17 @@ def test_extract_response_text_skips_blocks_with_non_string_text() -> None:
     assert extract_response_text(content) == "ok"
 
 
+@pytest.mark.parametrize("block_type", [[], {}, ["text"], {"type": "text"}, None, False, 0, "image"])
+def test_extract_response_text_skips_invalid_types_and_preserves_text(block_type: object) -> None:
+    content = [
+        "intro",
+        {"type": block_type, "text": "ignored"},
+        {"type": "text", "text": "body"},
+        {"type": "output_text", "text": "ending"},
+    ]
+    assert extract_response_text(content) == "intro\nbody\nending"
+
+
 def test_extract_response_text_returns_empty_for_empty_list() -> None:
     assert extract_response_text([]) == ""
 

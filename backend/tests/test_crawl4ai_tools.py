@@ -173,6 +173,16 @@ class TestCrawl4AiClient:
 class TestCrawl4AiTools:
     """Tests for the Crawl4AI tool functions."""
 
+    @pytest.fixture(autouse=True)
+    def _backend_isolation_confirmed(self):
+        """Assume the delegated backend's egress is isolated for these tests.
+
+        These tests exercise fetch behavior, not backend isolation; the
+        fail-closed backend guard is covered in TestCrawl4AiBackendIsolation.
+        """
+        with patch("deerflow.community.crawl4ai.tools._validate_backend_base_url", return_value=None):
+            yield
+
     @patch("deerflow.community.crawl4ai.tools._build_client")
     @pytest.mark.usefixtures("public_dns")
     async def test_web_fetch_tool_success(self, mock_build):
@@ -356,3 +366,69 @@ class TestCrawl4AiTools:
         assert tools._coerce_filter("  FIt ") == "fit"
         assert tools._coerce_filter("bogus") == "fit"
         assert tools._coerce_filter(None) == "fit"
+
+
+@pytest.mark.asyncio
+class TestCrawl4AiBackendIsolation:
+    """Fail-closed delegated-backend SSRF guard (issue #5970)."""
+
+    @patch("deerflow.community.crawl4ai.tools._build_client")
+    @pytest.mark.usefixtures("public_dns")
+    async def test_web_fetch_tool_fails_closed_on_default_backend(self, mock_build):
+        from deerflow.community.crawl4ai import tools
+
+        with patch("deerflow.community.crawl4ai.tools._get_tool_config", return_value=None):
+            result = await tools.web_fetch_tool.ainvoke("https://example.com")
+
+        assert "network_isolation_confirmed" in result
+        mock_build.assert_not_called()
+
+    @patch("deerflow.community.crawl4ai.tools._build_client")
+    @pytest.mark.usefixtures("public_dns")
+    async def test_web_fetch_tool_fails_closed_even_with_allow_private(self, mock_build):
+        from deerflow.community.crawl4ai import tools
+
+        with patch(
+            "deerflow.community.crawl4ai.tools._get_tool_config",
+            return_value={"allow_private_addresses": True},
+        ):
+            result = await tools.web_fetch_tool.ainvoke("https://example.com")
+
+        assert "network_isolation_confirmed" in result
+        mock_build.assert_not_called()
+
+    @patch("deerflow.community.crawl4ai.tools._build_client")
+    @pytest.mark.usefixtures("public_dns")
+    async def test_web_fetch_tool_allows_self_hosted_backend_when_confirmed(self, mock_build):
+        from deerflow.community.crawl4ai import tools
+
+        mock_client = MagicMock()
+        mock_client.fetch_markdown = AsyncMock(return_value="# ok")
+        mock_build.return_value = mock_client
+
+        with patch(
+            "deerflow.community.crawl4ai.tools._get_tool_config",
+            return_value={"network_isolation_confirmed": True},
+        ):
+            result = await tools.web_fetch_tool.ainvoke("https://example.com")
+
+        assert result == "# ok"
+        mock_client.fetch_markdown.assert_called_once()
+
+    @patch("deerflow.community.crawl4ai.tools._build_client")
+    @pytest.mark.usefixtures("public_dns")
+    async def test_web_fetch_tool_allows_public_backend(self, mock_build):
+        from deerflow.community.crawl4ai import tools
+
+        mock_client = MagicMock()
+        mock_client.fetch_markdown = AsyncMock(return_value="# ok")
+        mock_build.return_value = mock_client
+
+        with patch(
+            "deerflow.community.crawl4ai.tools._get_tool_config",
+            return_value={"base_url": "https://crawl4ai.example.com"},
+        ):
+            result = await tools.web_fetch_tool.ainvoke("https://example.com")
+
+        assert result == "# ok"
+        mock_client.fetch_markdown.assert_called_once()
