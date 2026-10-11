@@ -1971,6 +1971,11 @@ the stable English `name`. API callers can pass `display_name` to agent creation
 or update requests; an omitted update preserves it and `null` clears it. The
 same optional field is supported in the agent's `config.yaml`.
 
+The new-Agent page confirms creation only after the latest `setup_agent` call
+succeeds and the persisted Agent can be read back. A tool failure or an
+unconfirmed write keeps the draft visible and restores **Save agent** so the
+operation can be retried instead of reporting a false success.
+
 Custom Agents can also be moved between DeerFlow users or deployments from the
 Agents gallery. **Export Agent** downloads a versioned
 `*.deerflow-agent.json` package containing the portable definition and

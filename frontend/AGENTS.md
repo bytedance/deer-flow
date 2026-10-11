@@ -115,6 +115,11 @@ previewing the proposed local name; the Gateway is authoritative for schema,
 name, model, and conflict validation. Export downloads must never synthesize
 runtime state from browser caches.
 
+The new-Agent save flow is complete only when the latest `setup_agent` call has
+a non-error ToolMessage and the Agent API can read the persisted record. A tool
+error or an exhausted read retry returns the save control to `idle`; never reuse
+an older successful tool result or leave Save permanently disabled.
+
 - **Imports**: Enforced ordering (builtin → external → internal → parent → sibling), alphabetized, newlines between groups. Use inline type imports: `import { type Foo }`.
 - **Unused variables**: Prefix with `_`.
 - **Class names**: Use `cn()` from `@/lib/utils` for conditional Tailwind classes.

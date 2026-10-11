@@ -44,7 +44,7 @@ import {
   type HumanInputResponse,
 } from "@/core/messages/human-input";
 import { safeLocalStorage } from "@/core/settings/local";
-import { hasToolResult, useThreadStream } from "@/core/threads/hooks";
+import { getToolResultStatus, useThreadStream } from "@/core/threads/hooks";
 import { uuid } from "@/core/utils/uuid";
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
@@ -102,17 +102,24 @@ export default function NewAgentPage() {
       if (agent || setupAgentStatus !== "requested") {
         return;
       }
-      if (!agentName || !hasToolResult(state.messages, "setup_agent")) {
+      const resultStatus = getToolResultStatus(state.messages, "setup_agent");
+      if (!agentName || resultStatus === "pending") {
         setSetupAgentStatus("idle");
         return;
       }
-      setSetupAgentStatus("completed");
+      if (resultStatus === "error") {
+        setSetupAgentStatus("idle");
+        toast.error(t.agents.agentSaveFailed);
+        return;
+      }
       void getAgentWithRetry(agentName).then((fetched) => {
         if (fetched) {
+          setSetupAgentStatus("completed");
           setAgent(fetched);
           return;
         }
 
+        setSetupAgentStatus("idle");
         toast.error(t.agents.agentCreatedPendingRefresh);
       });
     },

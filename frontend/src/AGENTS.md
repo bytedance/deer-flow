@@ -114,6 +114,10 @@ Language-map membership checks only own properties; inherited names such as
    prompt/error, never permission to overwrite the existing Agent.
    Import errors join FastAPI 422 validation messages into readable text while
    preserving string conflict details; unusable error bodies use a status fallback.
+   The new-Agent save flow accepts only the latest `setup_agent` result, treats
+   ToolMessage status or `deerflow_tool_meta.status` errors as failures, and
+   marks creation complete only after the persisted Agent can be read. Failed
+   tool calls and exhausted read retries must restore the Save action.
 6. Components subscribe to thread state and render updates
 
 AI message grouping uses `extractContentFromMessage()` to identify visible answer content. A non-empty content array may contain only Anthropic thinking blocks; keep it in `assistant:processing` until answer content arrives. Cover both streamed snapshots in `tests/unit/core/messages/utils.test.ts`.
