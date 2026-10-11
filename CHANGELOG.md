@@ -4167,6 +4167,15 @@ This release closes that milestone with **439 merged pull requests**.
   word order cannot be recovered. Passing both `--print` and `--json` now exits
   2 instead of running `--print` and dropping the `--json` message. ([#6636])
 
+- **sandbox:** The AIO, E2B and OpenSandbox providers and ACP agents no longer
+  resolve `sandbox.environment` / `acp_agents.<name>.env` values a second time.
+  `config.yaml` loading already replaces each `$VAR`, so a resolved secret that
+  itself starts with `$` (a bcrypt hash such as `$2b$12$...`, a generated
+  password) was looked up again as a variable name and reached the sandbox or
+  agent as an empty string, or as an unrelated host variable's value when that
+  name existed. Values are now passed through as loaded, as BoxLite and the
+  local provider already did.
+
 ### Security
 
 - **authz:** Enforce permission checks on routes that only had authentication, and

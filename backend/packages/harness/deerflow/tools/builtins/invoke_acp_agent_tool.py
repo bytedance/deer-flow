@@ -265,7 +265,9 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
         client = _CollectingClient()
         agent_env: dict[str, str] | None = None
         if agent_config.env:
-            agent_env = {k: (os.environ.get(v[1:], "") if v.startswith("$") else v) for k, v in agent_config.env.items()}
+            # $VARS in config.yaml are already resolved by AppConfig.resolve_env_variables;
+            # resolving again would rewrite a secret that itself starts with $.
+            agent_env = dict(agent_config.env)
         # Resolve against the PATH the agent subprocess will see, not the Gateway's:
         # the SDK merges agent_env over its inherited environment at spawn time.
         cmd = await asyncio.to_thread(_resolve_agent_command, agent_config.command, _agent_path(agent_env))

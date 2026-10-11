@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from deerflow.config.acp_config import ACPAgentConfig
+from deerflow.config.app_config import AppConfig
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig, reset_extensions_config, set_extensions_config
 from deerflow.tools.builtins.invoke_acp_agent_tool import (
     _agent_path,
@@ -434,7 +435,7 @@ async def test_invoke_acp_agent_uses_per_thread_workspace_when_thread_id_in_conf
 
 @pytest.mark.anyio
 async def test_invoke_acp_agent_passes_env_to_spawn(monkeypatch, tmp_path):
-    """env map in ACPAgentConfig is passed to spawn_agent_process; $VAR values are resolved."""
+    """env map in ACPAgentConfig reaches spawn_agent_process exactly as AppConfig resolved it."""
     from deerflow.config import paths as paths_module
 
     monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
@@ -442,7 +443,8 @@ async def test_invoke_acp_agent_passes_env_to_spawn(monkeypatch, tmp_path):
         "deerflow.config.extensions_config.ExtensionsConfig.from_file",
         classmethod(lambda cls: ExtensionsConfig(mcp_servers={}, skills={})),
     )
-    monkeypatch.setenv("TEST_OPENAI_KEY", "sk-from-env")
+    # A resolved secret that itself starts with $ must not be resolved again.
+    monkeypatch.setenv("TEST_OPENAI_KEY", "$2b$12$from-env")
 
     captured: dict[str, object] = {}
 
@@ -511,7 +513,7 @@ async def test_invoke_acp_agent_passes_env_to_spawn(monkeypatch, tmp_path):
             "codex": ACPAgentConfig(
                 command="codex-acp",
                 description="Codex CLI",
-                env={"OPENAI_API_KEY": "$TEST_OPENAI_KEY", "FOO": "bar"},
+                env=AppConfig.resolve_env_variables({"OPENAI_API_KEY": "$TEST_OPENAI_KEY", "FOO": "bar"}),
             )
         }
     )
@@ -522,7 +524,7 @@ async def test_invoke_acp_agent_passes_env_to_spawn(monkeypatch, tmp_path):
         sys.modules.pop("acp", None)
         sys.modules.pop("acp.schema", None)
 
-    assert captured["env"] == {"OPENAI_API_KEY": "sk-from-env", "FOO": "bar"}
+    assert captured["env"] == {"OPENAI_API_KEY": "$2b$12$from-env", "FOO": "bar"}
 
 
 @pytest.mark.anyio
