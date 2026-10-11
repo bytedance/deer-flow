@@ -2,10 +2,13 @@
 
 import asyncio
 import concurrent.futures
+import getpass
 import json
 import os
 import shutil
 import stat
+import subprocess
+import sys
 import tempfile
 import zipfile
 from enum import Enum
@@ -18,6 +21,7 @@ from _thread_checkpoint_helpers import INDEXED_SAVER_KINDS, SAVER_KINDS, make_sa
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage  # noqa: F401
 from langchain_core.tools import StructuredTool
 
+import deerflow.client as client_module
 from app.gateway.routers.mcp import McpConfigResponse
 from app.gateway.routers.memory import MemoryConfigResponse, MemoryStatusResponse
 from app.gateway.routers.models import ModelResponse, ModelsListResponse
@@ -3141,6 +3145,100 @@ class TestUploads:
             companion = uploads_dir / result["files"][0]["markdown_file"]
             assert companion.read_bytes() == b"CONVERTED:pdf-bytes"
             assert b"HOST SECRET" not in companion.read_bytes()
+
+    def test_upload_files_conversion_matches_the_saved_upload_version(self, client):
+        """The upload copy and its companion must read the same source version (#6600)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+            source = tmp_path / "report.pdf"
+            source.write_bytes(b"VERSION A")
+
+            real_copy = client_module.copy_upload_file_no_symlink
+
+            def copy_then_overwrite(base, name, src):
+                dest = real_copy(base, name, src)
+                if Path(src) == source:
+                    # The caller's file changes between the copy and conversion.
+                    source.write_bytes(b"VERSION B")
+                return dest
+
+            async def fake_convert(path, output_path=None):
+                # Rewrite the caller's file too, so a regression that reads
+                # src_path again during conversion (instead of the snapshot)
+                # goes red even though the copy-time hook no longer fires on
+                # the fixed code path.
+                if Path(path) != source:
+                    source.write_bytes(b"VERSION B")
+                md_path = output_path if output_path is not None else path.with_suffix(".md")
+                md_path.write_bytes(b"CONVERTED:" + path.read_bytes())
+                return md_path
+
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                patch(
+                    "deerflow.client.copy_upload_file_no_symlink",
+                    side_effect=copy_then_overwrite,
+                ),
+                patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+                patch(
+                    "deerflow.utils.file_conversion.convert_file_to_markdown",
+                    side_effect=fake_convert,
+                ),
+            ):
+                result = client.upload_files("thread-1", [source])
+
+            saved = uploads_dir / result["files"][0]["filename"]
+            companion = uploads_dir / result["files"][0]["markdown_file"]
+            assert saved.read_bytes() == b"VERSION A"
+            assert companion.read_bytes() == b"CONVERTED:VERSION A"
+
+    def test_upload_files_acl_only_readable_source_survives(self, client):
+        """A source readable only via ACL must upload and convert (#6621 review).
+
+        copy2 drops ACLs; on macOS a mode-000 file with an ACL read grant is
+        readable, but the snapshot copy made from it was not. Reading through
+        one held descriptor keeps ACL-authorized sources working.
+        """
+        if sys.platform != "darwin":
+            pytest.skip("chmod +a ACL grants are macOS-only")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+            source = tmp_path / "report.pdf"
+            source.write_bytes(b"VERSION A")
+            source.chmod(0o000)
+            subprocess.run(
+                ["chmod", "+a", f"user:{getpass.getuser()} allow read", str(source)],
+                check=True,
+            )
+            try:
+
+                async def fake_convert(path, output_path=None):
+                    md_path = output_path if output_path is not None else path.with_suffix(".md")
+                    md_path.write_bytes(b"CONVERTED:" + path.read_bytes())
+                    return md_path
+
+                with (
+                    patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                    patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                    patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+                    patch(
+                        "deerflow.utils.file_conversion.convert_file_to_markdown",
+                        side_effect=fake_convert,
+                    ),
+                ):
+                    result = client.upload_files("thread-1", [source])
+
+                saved = uploads_dir / result["files"][0]["filename"]
+                companion = uploads_dir / result["files"][0]["markdown_file"]
+                assert saved.read_bytes() == b"VERSION A"
+                assert companion.read_bytes() == b"CONVERTED:VERSION A"
+            finally:
+                source.chmod(0o644)
 
     def test_upload_files_converts_the_source_inside_an_event_loop_too(self, client):
         """The pooled conversion branch reads the source file as well."""
