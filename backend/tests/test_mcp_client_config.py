@@ -275,3 +275,27 @@ def test_parallel_search_example_is_explicitly_opt_in_and_uses_anonymous_http_tr
         "url": "https://search.parallel.ai/mcp",
         "headers": {"User-Agent": "deer-flow"},
     }
+
+
+def test_fxmacrodata_example_is_explicitly_opt_in_and_uses_anonymous_http_transport():
+    """The optional FXMacroData entry ships disabled and without credentials."""
+    import json
+    from pathlib import Path
+
+    example = json.loads((Path(__file__).parents[2] / "extensions_config.example.json").read_text(encoding="utf-8"))
+    fxmacrodata = example["mcpServers"]["fxmacrodata"]
+
+    assert fxmacrodata["enabled"] is False
+    assert fxmacrodata["type"] == "http"
+    assert fxmacrodata["url"] == "https://mcp.fxmacrodata.com/mcp"
+    assert fxmacrodata["headers"] == {"User-Agent": "deer-flow"}
+
+    config = ExtensionsConfig.model_validate(example)
+    assert "fxmacrodata" not in build_servers_config(config)
+
+    config.mcp_servers["fxmacrodata"].enabled = True
+    assert build_servers_config(config)["fxmacrodata"] == {
+        "transport": "http",
+        "url": "https://mcp.fxmacrodata.com/mcp",
+        "headers": {"User-Agent": "deer-flow"},
+    }

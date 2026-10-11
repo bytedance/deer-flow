@@ -157,6 +157,52 @@ access. See the
 [Parallel Search MCP documentation](https://docs.parallel.ai/integrations/mcp/search-mcp)
 for details.
 
+## FXMacroData (optional)
+
+The `fxmacrodata` entry in `extensions_config.example.json` is disabled by
+default. To opt in, copy that entry into `mcpServers` in your root
+`extensions_config.json`, set `"enabled": true`, and restart DeerFlow. It connects
+to `https://mcp.fxmacrodata.com/mcp` over HTTP and adds read-only tools for
+official-source macroeconomic data: central-bank policy rates, CPI, GDP, labour
+data and bond yields, scheduled release calendars, and FX rates. With DeerFlow's
+default tool-name prefix the names start with `fxmacrodata_`, for example
+`fxmacrodata_release_calendar`, `fxmacrodata_indicator_query` and
+`fxmacrodata_data_catalogue`. Existing tools and defaults stay unchanged.
+
+This is a third-party service operated by FXMacroData. Tool calls send the
+arguments the agent chooses, such as currency codes, indicator names and date
+ranges, which can reflect what was asked in the conversation.
+
+Access is anonymous by default. Without a key the server answers USD
+questions: the indicator catalogue, latest releases and recent history (each
+release becomes readable 15 minutes after publication, covering the most recent
+90 days), and the release calendar. Other currencies, FX rates and full history
+need an FXMacroData API key; without one those tools return a
+`subscription_required` result rather than an error. Keep
+`"User-Agent": "deer-flow"` in the entry's `headers` so the integration's
+aggregate usage can be told apart from other clients; it does not identify a
+user or installation.
+
+To use a key, add authorization to the `headers` field of the `fxmacrodata`
+entry in your local `extensions_config.json`:
+
+```json
+{
+  "headers": {
+    "User-Agent": "deer-flow",
+    "Authorization": "$FXMACRODATA_AUTHORIZATION"
+  }
+}
+```
+
+Set `FXMACRODATA_AUTHORIZATION` in the DeerFlow backend's environment to the
+full value `Bearer <your-fxmacrodata-api-key>`, then restart DeerFlow. As with
+the other servers, DeerFlow expands only whole-string `$ENV_VAR` references, so
+`Bearer ` belongs in the environment variable. Keep the key out of committed
+files. See the
+[FXMacroData MCP documentation](https://fxmacrodata.com/documentation/mcp-server)
+for the full tool list.
+
 ## Routing Hints
 
 Use `routing` when an MCP server should be preferred for specific requests, such

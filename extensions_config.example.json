@@ -29,6 +29,15 @@
       },
       "description": "Optional anonymous Parallel Search tools for web search and fetching requested URLs"
     },
+    "fxmacrodata": {
+      "enabled": false,
+      "type": "http",
+      "url": "https://mcp.fxmacrodata.com/mcp",
+      "headers": {
+        "User-Agent": "deer-flow"
+      },
+      "description": "Optional FXMacroData tools for official-source macroeconomic data, central-bank rates, release calendars and FX rates"
+    },
     "openviking": {
       "enabled": false,
       "type": "http",
