@@ -102,6 +102,14 @@ policy or network-mode mismatch; only the provider may replace it after the
 orphan grace, local teardown reservation, and cross-instance teardown lease.
 Destroy the sandbox, sidecar, and both networks together.
 
+### Browser Egress Resolution
+
+SOCKS DNS runs on the private Playwright loop. Use a dedicated bounded executor
+so timed-out lookups cannot starve that loop's request guard. Retain permits until
+threads exit, including after loop shutdown; reject at capacity and propagate
+ContextVars. Keep the Gateway and browser loops separate in starvation tests.
+See `test_browser_egress.py`.
+
 ### Tenki `sticky`
 
 Env values stay strings; parse booleans before SDK calls (`bool("false")` is true).
