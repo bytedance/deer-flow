@@ -105,6 +105,62 @@ async def test_reconcile_detaches_only_changed_server_and_preserves_registry_key
 
 
 @pytest.mark.asyncio
+async def test_reconcile_force_rebind_reepochs_same_fingerprint_and_preserves_others():
+    """A shared generation change re-epochs A even though its fingerprint is unchanged.
+
+    ``force_rebind`` lets a caller that already knows a
+    server's shared lifecycle version changed install a fresh binding in the
+    same non-awaiting critical section, without a second teardown owner and
+    without touching any other domain or server.
+    """
+    pool = MCPSessionPool()
+    loop = asyncio.get_running_loop()
+    a = pool.ensure_binding("A", "same-fp")
+    b = pool.ensure_binding("B", "b-fp")
+    personal_a = pool.ensure_binding("A", "same-fp", domain="personal")
+    cm_a = _GatedSessionCm()
+    cm_b = _GatedSessionCm()
+    cm_personal = _GatedSessionCm()
+
+    with patch("langchain_mcp_adapters.sessions.create_session", side_effect=[cm_a, cm_b, cm_personal]):
+        session_a = await pool.get_session("A", "u:t", _CONNECTION, binding=a)
+        session_b = await pool.get_session("B", "u:t", _CONNECTION, binding=b)
+        session_personal = await pool.get_session("A", "u:p", _CONNECTION, binding=personal_a)
+
+    prepared = pool.reconcile_bindings({"A": "same-fp", "B": "b-fp"}, (), force_rebind={"A"})
+
+    current_a = pool._bindings[("deployment", "A")]
+    assert current_a is not a
+    assert current_a.fingerprint == "same-fp"
+    assert current_a.epoch > a.epoch
+
+    # Only the forced server changed; its sibling and the personal same-name
+    # binding keep their exact capability objects.
+    assert pool._bindings[("deployment", "B")] is b
+    assert pool._bindings[("personal", "A")] is personal_a
+
+    # Only the forced server's established session is detached and signalled.
+    assert [entry[0] for entry in prepared.entries] == [session_a]
+    assert prepared.inflight == ()
+    assert pool._entries[("B", "u:t", loop, "deployment")][0] is session_b
+    assert pool._entries[("A", "u:p", loop, "personal")][0] is session_personal
+    assert cm_b.closed is False
+    assert cm_personal.closed is False
+
+    # The old capability can no longer create or return the session.
+    with pytest.raises(StaleMCPBindingError):
+        await pool.get_session("A", "u:t", _CONNECTION, binding=a)
+
+    await asyncio.wait_for(prepared.entries[0][2], timeout=1)
+    assert cm_a.closed is True
+
+    # Re-consuming an already-applied generation is a no-op: A stays stable.
+    again = pool.reconcile_bindings({"A": "same-fp", "B": "b-fp"}, ())
+    assert again.entries == ()
+    assert pool._bindings[("deployment", "A")] is current_a
+
+
+@pytest.mark.asyncio
 async def test_stale_binding_fails_before_session_creation():
     pool = MCPSessionPool()
     old = pool.ensure_binding("A", "a1")
