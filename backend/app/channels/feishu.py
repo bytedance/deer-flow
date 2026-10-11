@@ -19,6 +19,11 @@ from typing import Any, Literal, TypeVar
 from app.channels.base import Channel, ChannelStopTimeout
 from app.channels.commands import is_known_channel_command, strip_leading_mentions
 from app.channels.connection_identity import attach_connection_identity
+from app.channels.feishu_card_interaction import (
+    ClarificationCardRequest,
+    PendingCardRegistry,
+    build_button_card,
+)
 from app.channels.message_bus import (
     PENDING_CLARIFICATION_METADATA_KEY,
     RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY,
@@ -168,6 +173,10 @@ class FeishuChannel(Channel):
         self._running_card_ids: dict[str, str] = {}
         self._running_card_tasks: dict[str, asyncio.Task] = {}
         self._pending_clarifications: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        # Interactive clarification cards (button answers). Off by default: the
+        # feature needs a one-time console subscription to card.action.trigger.
+        self._card_interaction_enabled = bool(config.get("card_interaction_enabled", False))
+        self._card_registry = PendingCardRegistry()
         self._pending_inbound_batches: dict[tuple[str, str], dict[str, Any]] = {}
         self._CreateFileRequest = None
         self._CreateFileRequestBody = None
@@ -691,12 +700,15 @@ class FeishuChannel(Channel):
         if not response.success():
             raise RuntimeError(f"Feishu card creation failed: code={response.code}, msg={response.msg}, log_id={response.get_log_id()}")
 
-    async def _update_card(self, message_id: str, text: str) -> None:
-        """Patch an existing card message in place."""
+    async def _update_card(self, message_id: str, text: str, *, raw_card_content: bool = False) -> None:
+        """Patch an existing card message in place.
+
+        ``raw_card_content=True`` means *text* is already a serialized card JSON.
+        """
         if not self._api_client or not self._PatchMessageRequest:
             return
 
-        content = self._build_card_content(text)
+        content = text if raw_card_content else self._build_card_content(text)
         request = self._PatchMessageRequest.builder().message_id(message_id).request_body(self._PatchMessageRequestBody.builder().content(content).build()).build()
         response = await asyncio.to_thread(self._api_client.im.v1.message.patch, request)
         if not response.success():
@@ -781,9 +793,30 @@ class FeishuChannel(Channel):
         except Exception:
             logger.exception("[Feishu] failed to send running reply for message %s", message_id)
 
+    def _register_pending_card(self, msg: OutboundMessage, request: ClarificationCardRequest, card_message_id: str | None) -> None:
+        """Register a delivered button card so its clicks can be validated later."""
+        user_id = self._non_empty_str(msg.metadata.get("user_id"))
+        if not (user_id and msg.thread_id and card_message_id):
+            logger.warning("[Feishu] button card delivered without full binding context, clicks will fail closed: request_id=%s", request.request_id)
+            return
+        self._card_registry.register(
+            request_id=request.request_id,
+            thread_id=msg.thread_id,
+            chat_id=msg.chat_id,
+            originator_open_id=user_id,
+            options=request.options,
+            card_message_id=card_message_id,
+        )
+
     async def _send_card_message(self, msg: OutboundMessage) -> None:
         """Send or update the Feishu card tied to the current request."""
         source_message_id = msg.thread_ts
+        # Option clarifications render as an interactive button card on the
+        # final outbound; everything else keeps the plain markdown card.
+        card_request = ClarificationCardRequest.from_metadata(msg.metadata) if (self._card_interaction_enabled and msg.is_final) else None
+        # Button cards arrive as serialized card JSON and bypass the markdown
+        # wrapper; the plain path keeps its exact historical call signature.
+        raw_card_kw: dict[str, bool] = {"raw_card_content": True} if card_request else {}
         if source_message_id:
             running_card_id = self._running_card_ids.get(source_message_id)
             awaited_running_card_task = False
@@ -795,9 +828,9 @@ class FeishuChannel(Channel):
                     running_card_id = await running_card_task
 
             if running_card_id:
-                card_text = self._compose_card_text(msg.text, msg.metadata)
+                card_text = build_button_card(card_request) if card_request else self._compose_card_text(msg.text, msg.metadata)
                 try:
-                    await self._update_card(running_card_id, card_text)
+                    await self._update_card(running_card_id, card_text, **raw_card_kw)
                 except Exception:
                     if not msg.is_final:
                         raise
@@ -805,20 +838,27 @@ class FeishuChannel(Channel):
                         "[Feishu] failed to patch running card %s, falling back to final reply",
                         running_card_id,
                     )
-                    fallback_card_id = await self._reply_card(source_message_id, card_text)
+                    fallback_card_id = await self._reply_card(source_message_id, card_text, **raw_card_kw)
                     await self._remember_thread_mapping(msg, source_message_id, fallback_card_id)
                     self._remember_pending_clarification(msg, fallback_card_id)
+                    if card_request:
+                        self._register_pending_card(msg, card_request, fallback_card_id)
                 else:
                     await self._remember_thread_mapping(msg, source_message_id, running_card_id)
                     self._remember_pending_clarification(msg, running_card_id)
+                    if card_request:
+                        self._register_pending_card(msg, card_request, running_card_id)
                     logger.info("[Feishu] running card updated: source=%s card=%s", source_message_id, running_card_id)
             elif msg.is_final:
                 final_card_id = await self._reply_card(
                     source_message_id,
-                    self._compose_card_text(msg.text, msg.metadata),
+                    build_button_card(card_request) if card_request else self._compose_card_text(msg.text, msg.metadata),
+                    **raw_card_kw,
                 )
                 await self._remember_thread_mapping(msg, source_message_id, final_card_id)
                 self._remember_pending_clarification(msg, final_card_id)
+                if card_request:
+                    self._register_pending_card(msg, card_request, final_card_id)
             elif awaited_running_card_task:
                 logger.warning(
                     "[Feishu] running card task finished without message_id for source=%s, skipping duplicate non-final creation",

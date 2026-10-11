@@ -1,0 +1,252 @@
+"""Tests for the Feishu interactive-card clarification module (outbound half).
+
+Boundary tests only: what the module emits (card payloads, registry state
+transitions), never its internals.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+
+import pytest
+
+from app.channels.feishu_card_interaction import (
+    MAX_CARD_OPTIONS,
+    ClarificationCardRequest,
+    PendingCardRegistry,
+    build_button_card,
+)
+
+
+def _metadata(payload: dict | None) -> dict:
+    return {} if payload is None else {"human_input_request": payload}
+
+
+def _payload(**overrides) -> dict:
+    base = {
+        "version": 1,
+        "kind": "human_input_request",
+        "source": "ask_clarification",
+        "request_id": "clarification:call_1",
+        "question": "Pick one",
+        "input_mode": "choice_with_other",
+        "options": [
+            {"id": "option-1", "label": "Alpha", "value": "Alpha"},
+            {"id": "option-2", "label": "Beta", "value": "Beta"},
+        ],
+    }
+    base.update(overrides)
+    return base
+
+
+class TestClarificationCardRequestExtraction:
+    def test_absent_payload_returns_none(self):
+        assert ClarificationCardRequest.from_metadata(_metadata(None)) is None
+
+    def test_free_text_mode_returns_none(self):
+        assert ClarificationCardRequest.from_metadata(_metadata(_payload(input_mode="free_text", options=[]))) is None
+
+    def test_form_mode_returns_none(self):
+        assert ClarificationCardRequest.from_metadata(_metadata(_payload(version=2, input_mode="form", fields=[{"key": "x"}]))) is None
+
+    def test_empty_options_returns_none(self):
+        assert ClarificationCardRequest.from_metadata(_metadata(_payload(options=[]))) is None
+
+    def test_overflow_options_returns_none(self):
+        options = [{"id": f"option-{i}", "label": f"L{i}", "value": f"L{i}"} for i in range(1, MAX_CARD_OPTIONS + 2)]
+        assert ClarificationCardRequest.from_metadata(_metadata(_payload(options=options))) is None
+
+    def test_choice_with_options_extracts(self):
+        req = ClarificationCardRequest.from_metadata(_metadata(_payload()))
+        assert req is not None
+        assert req.request_id == "clarification:call_1"
+        assert req.question == "Pick one"
+        assert req.options == ("Alpha", "Beta")
+
+    def test_malformed_payload_returns_none(self):
+        assert ClarificationCardRequest.from_metadata(_metadata({"kind": "other"})) is None
+        assert ClarificationCardRequest.from_metadata({"human_input_request": "not-a-dict"}) is None
+
+
+class TestBuildButtonCard:
+    def test_card_structure_binds_buttons_to_request(self):
+        req = ClarificationCardRequest.from_metadata(_metadata(_payload()))
+        card = json.loads(build_button_card(req))
+
+        assert card["header"]["title"]["content"]
+        elements = card["elements"]
+        markdown = next(e for e in elements if e["tag"] == "markdown")
+        assert "Pick one" in markdown["content"]
+
+        actions = next(e for e in elements if e["tag"] == "action")["actions"]
+        assert len(actions) == 2
+        for i, (action, label) in enumerate(zip(actions, ("Alpha", "Beta")), start=1):
+            assert action["tag"] == "button"
+            assert action["text"]["content"] == label
+            assert action["value"]["request_id"] == "clarification:call_1"
+            assert action["value"]["option_id"] == f"option-{i}"
+            assert action["value"]["option_value"] == label
+        assert actions[0]["type"] == "primary"
+        assert actions[1]["type"] == "default"
+
+
+class TestPendingCardRegistry:
+    def _entry(self, request_id: str = "clarification:call_1", **overrides) -> dict:
+        entry = {
+            "request_id": request_id,
+            "thread_id": "thread-1",
+            "chat_id": "chat-1",
+            "originator_open_id": "ou_originator",
+            "options": ("Alpha", "Beta"),
+        }
+        entry.update(overrides)
+        return entry
+
+    def test_register_then_consume_returns_entry_once(self):
+        registry = PendingCardRegistry()
+        registry.register(**self._entry())
+        entry = registry.consume("clarification:call_1")
+        assert entry is not None
+        assert entry["originator_open_id"] == "ou_originator"
+        assert registry.consume("clarification:call_1") is None  # one-time
+
+    def test_unknown_request_id_consumes_to_none(self):
+        registry = PendingCardRegistry()
+        assert registry.consume("clarification:nope") is None
+
+    def test_expired_entry_consumes_to_none(self):
+        registry = PendingCardRegistry()
+        registry.register(**self._entry())
+        future = time.time() + 31 * 60
+        assert registry.consume("clarification:call_1", now=future) is None
+
+    def test_mark_sent_backfills_card_message_id(self):
+        registry = PendingCardRegistry()
+        registry.register(**self._entry())
+        registry.mark_sent("clarification:call_1", "om_card_1")
+        entry = registry.consume("clarification:call_1")
+        assert entry is not None
+        assert entry["card_message_id"] == "om_card_1"
+
+    def test_reregister_same_request_id_replaces(self):
+        registry = PendingCardRegistry()
+        registry.register(**self._entry())
+        registry.register(**self._entry(originator_open_id="ou_new"))
+        entry = registry.consume("clarification:call_1")
+        assert entry["originator_open_id"] == "ou_new"
+        assert registry.consume("clarification:call_1") is None
+
+
+class TestFeishuChannelButtonCardWiring:
+    """Channel-level wiring: when the flag and payload line up, final
+    clarification outbounds go out as button cards; everything else is
+    byte-identical to today's plain-text path."""
+
+    def _channel(self, *, enabled: bool):
+        from unittest.mock import AsyncMock
+
+        from app.channels.feishu import FeishuChannel
+        from app.channels.message_bus import MessageBus
+
+        channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test", "card_interaction_enabled": enabled})
+        channel._reply_card = AsyncMock(return_value="om_card_final")
+        channel._update_card = AsyncMock()
+        channel._add_reaction = AsyncMock()
+        channel._remember_thread_mapping = AsyncMock()
+        return channel
+
+    def _clarification_outbound(self, *, with_options: bool = True):
+        from app.channels.message_bus import (
+            HUMAN_INPUT_REQUEST_METADATA_KEY,
+            PENDING_CLARIFICATION_METADATA_KEY,
+            OutboundMessage,
+        )
+
+        metadata = {
+            PENDING_CLARIFICATION_METADATA_KEY: True,
+            "user_id": "ou_originator",
+            "topic_id": "topic-1",
+            "message_id": "om_src",
+        }
+        if with_options:
+            metadata[HUMAN_INPUT_REQUEST_METADATA_KEY] = {
+                "version": 1,
+                "kind": "human_input_request",
+                "source": "ask_clarification",
+                "request_id": "clarification:call_1",
+                "question": "Pick one",
+                "input_mode": "choice_with_other",
+                "options": [
+                    {"id": "option-1", "label": "Alpha", "value": "Alpha"},
+                    {"id": "option-2", "label": "Beta", "value": "Beta"},
+                ],
+            }
+        else:
+            metadata[HUMAN_INPUT_REQUEST_METADATA_KEY] = {
+                "version": 1,
+                "kind": "human_input_request",
+                "source": "ask_clarification",
+                "request_id": "clarification:call_2",
+                "question": "Say anything",
+                "input_mode": "free_text",
+            }
+        return OutboundMessage(
+            channel_name="feishu",
+            chat_id="chat-1",
+            thread_id="thread-1",
+            text="Pick one",
+            is_final=True,
+            thread_ts="om_src",
+            metadata=metadata,
+        )
+
+    @pytest.mark.asyncio
+    async def test_flag_on_options_renders_button_card_and_registers(self):
+        channel = self._channel(enabled=True)
+        await channel._send_card_message(self._clarification_outbound())
+
+        card_json = channel._reply_card.call_args.args[1]
+        card = json.loads(card_json)
+        assert any(e.get("tag") == "action" for e in card["elements"])
+
+        entry = channel._card_registry.consume("clarification:call_1")
+        assert entry is not None
+        assert entry["originator_open_id"] == "ou_originator"
+        assert entry["thread_id"] == "thread-1"
+        assert entry["card_message_id"] == "om_card_final"
+
+    @pytest.mark.asyncio
+    async def test_flag_off_falls_back_to_plain_card(self):
+        channel = self._channel(enabled=False)
+        await channel._send_card_message(self._clarification_outbound())
+
+        # Plain-text path: markdown text, no raw-card bypass, nothing registered.
+        text_arg = channel._reply_card.call_args.args[1]
+        assert "Pick one" in text_arg
+        assert '"action"' not in text_arg
+        assert channel._reply_card.call_args.kwargs.get("raw_card_content") is not True
+        assert channel._card_registry.consume("clarification:call_1") is None
+
+    @pytest.mark.asyncio
+    async def test_flag_on_free_text_falls_back_to_plain_card(self):
+        channel = self._channel(enabled=True)
+        await channel._send_card_message(self._clarification_outbound(with_options=False))
+
+        text_arg = channel._reply_card.call_args.args[1]
+        assert '"action"' not in text_arg
+        assert channel._reply_card.call_args.kwargs.get("raw_card_content") is not True
+        assert channel._card_registry.consume("clarification:call_2") is None
+
+    @pytest.mark.asyncio
+    async def test_running_card_is_updated_into_button_card(self):
+        channel = self._channel(enabled=True)
+        channel._running_card_ids["om_src"] = "om_running"
+
+        await channel._send_card_message(self._clarification_outbound())
+
+        card_json = channel._update_card.call_args.args[1]
+        card = json.loads(card_json)
+        assert any(e.get("tag") == "action" for e in card["elements"])
+        entry = channel._card_registry.consume("clarification:call_1")
+        assert entry["card_message_id"] == "om_running"

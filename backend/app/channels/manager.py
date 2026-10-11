@@ -29,6 +29,7 @@ from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.connection_identity import lookup_thread_id
 from app.channels.dedupe_store import InboundDedupeStore, MemoryInboundDedupeStore
 from app.channels.message_bus import (
+    HUMAN_INPUT_REQUEST_METADATA_KEY,
     INBOUND_FILE_CONTENT_KEY,
     PENDING_CLARIFICATION_METADATA_KEY,
     InboundMessage,
@@ -752,6 +753,50 @@ def _has_current_turn_clarification(result: dict | list) -> bool:
             if msg.get("tool_calls"):
                 return False
     return False
+
+
+def _extract_human_input_payload(result: dict | list) -> dict[str, Any] | None:
+    """Return the clarification's structured ``human_input`` payload, if present.
+
+    The clarification middleware stashes it under the tool message's
+    ``artifact.human_input``. Only the current turn's trailing clarification
+    counts — a clarification answered earlier in the run must not leak into a
+    later final outbound.
+    """
+    for msg in reversed(_current_turn_messages(result)):
+        if msg.get("type") == "tool" and msg.get("name") == "ask_clarification":
+            artifact = msg.get("artifact")
+            if isinstance(artifact, dict):
+                payload = artifact.get("human_input")
+                if isinstance(payload, dict):
+                    return payload
+            return None
+        if msg.get("type") == "ai":
+            content = msg.get("content")
+            if isinstance(content, str) and content:
+                return None
+            if msg.get("tool_calls"):
+                return None
+    return None
+
+
+def _response_metadata_with_clarification(
+    result: dict | list,
+    base_metadata: dict[str, Any],
+    *,
+    pending_clarification: bool,
+) -> dict[str, Any]:
+    """``_response_metadata`` plus the clarification's structured payload.
+
+    Channels that render richer clarification affordances (e.g. Feishu button
+    cards) read the payload from metadata; channels that do not simply ignore it.
+    """
+    metadata = _response_metadata(base_metadata, pending_clarification=pending_clarification)
+    if pending_clarification:
+        payload = _extract_human_input_payload(result)
+        if payload is not None:
+            metadata[HUMAN_INPUT_REQUEST_METADATA_KEY] = payload
+    return metadata
 
 
 def _response_metadata(base_metadata: dict[str, Any], *, pending_clarification: bool = False) -> dict[str, Any]:
@@ -3022,7 +3067,7 @@ class ChannelManager:
             thread_ts=msg.thread_ts,
             connection_id=msg.connection_id,
             owner_user_id=msg.owner_user_id,
-            metadata=_response_metadata(msg.metadata, pending_clarification=pending_clarification),
+            metadata=_response_metadata_with_clarification(result, msg.metadata, pending_clarification=pending_clarification),
         )
         logger.info("[Manager] publishing outbound message to bus: channel=%s, chat_id=%s", msg.channel_name, msg.chat_id)
         await self.bus.publish_outbound(outbound)
@@ -3174,7 +3219,7 @@ class ChannelManager:
                     thread_ts=msg.thread_ts,
                     connection_id=msg.connection_id,
                     owner_user_id=msg.owner_user_id,
-                    metadata=_response_metadata(msg.metadata, pending_clarification=pending_clarification),
+                    metadata=_response_metadata_with_clarification(result, msg.metadata, pending_clarification=pending_clarification),
                 )
             )
             if stream_error is not None:

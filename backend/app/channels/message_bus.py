@@ -17,6 +17,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_INBOUND_QUEUE_MAXSIZE = 1000
 
 PENDING_CLARIFICATION_METADATA_KEY = "pending_clarification"
+# Full ``human_input`` payload (artifact of the ask_clarification tool message),
+# attached to the final outbound so channels can render richer affordances
+# (e.g. Feishu button cards) for option-based clarifications.
+HUMAN_INPUT_REQUEST_METADATA_KEY = "human_input_request"
 RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY = "resolved_from_pending_clarification"
 # Adapter-owned bytes may use this transient key while crossing the channel
 # boundary. ChannelManager consumes and removes it before persisting metadata.
