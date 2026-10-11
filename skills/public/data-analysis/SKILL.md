@@ -95,6 +95,8 @@ Supported output formats (auto-detected from extension):
 | `--table` | For `summary` | Table/sheet name to summarize |
 | `--output-file` | No | Path to export results (CSV/JSON/MD) |
 
+File paths and Excel sheet names may contain apostrophes, such as `O'Brien/report.csv` or `Q1's sales`. Quote file paths appropriately for the shell when passing `--files`.
+
 > [!NOTE]
 > Do NOT read the Python file, just call it with the parameters.
 

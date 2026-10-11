@@ -138,11 +138,12 @@ def _load_excel(
                 f"""
                 CREATE TABLE "{table_name}" AS
                 SELECT * FROM st_read(
-                    '{file_path}',
-                    layer = '{sheet_name}',
+                    ?,
+                    layer = ?,
                     open_options = ['HEADERS=FORCE', 'FIELD_TYPES=AUTO']
                 )
-            """
+            """,
+                [file_path, sheet_name],
             )
             table_map[sheet_name] = table_name
             row_count = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[
@@ -173,8 +174,9 @@ def _load_csv(
         con.execute(
             f"""
             CREATE TABLE "{table_name}" AS
-            SELECT * FROM read_csv_auto('{file_path}')
-        """
+            SELECT * FROM read_csv_auto(?)
+        """,
+            [file_path],
         )
         table_map[base_name] = table_name
         row_count = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[0]
