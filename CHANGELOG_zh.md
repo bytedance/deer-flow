@@ -3380,6 +3380,15 @@
   中设置 `BIND_HOST=0.0.0.0`）并使用 `2026` 入口；Gateway 和前端端口不再对其他
   机器开放。
 
+- **脚本：** 本地 `BIND_HOST` 不再接受会被 nginx 误读的值。此前本地 nginx
+  辅助脚本只检查字符是否属于地址或主机名，因此 `BIND_HOST=0` 会生成
+  `listen 0:2026;`，nginx 将其解析为 `0.0.0.0` 并监听所有 IPv4 网卡，`1.2.3`
+  则会绑定到 `1.2.0.3`。`[[fd00::1]]`、`-foo` 等 nginx 直接拒绝的值能通过
+  `serve.sh` 的预检，要等正在运行的服务被停止之后才失败。现在该脚本只接受
+  点分十进制 IPv4 地址、IPv6 地址（带或不带方括号）或符合 RFC 1123 的主机名。
+  改回默认的回环地址时，也会删除之前为其他值生成的
+  `temp/nginx.local.conf`。([#6635])
+
 - **技能：** `review_skill_package` 不再能读取其他用户的技能。此前本地路径
   目标只要位于 Gateway 工作目录或 `/tmp` 之下即被放行，而所有文档化的部署都把
   `DEER_FLOW_HOME` 放在工作目录之下，因此知道他人用户 id 的用户可以传入
@@ -7680,3 +7689,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6595]: https://github.com/bytedance/deer-flow/pull/6595
 [#6611]: https://github.com/bytedance/deer-flow/pull/6611
 [#6613]: https://github.com/bytedance/deer-flow/pull/6613
+[#6635]: https://github.com/bytedance/deer-flow/pull/6635
