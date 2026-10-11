@@ -1974,6 +1974,10 @@ The chat header also shows a context-window gauge when the selected model has a 
 
 When `token_budget.enabled` and `token_usage.enabled` are both enabled, each lead-agent run budget includes completed subagent usage, including the final batch. Hidden goal continuations share the budget; a new user run starts fresh.
 
+Loop detection requires `loop_detection.window_size >= hard_limit >= warn_threshold`.
+Configuration loading rejects a smaller window because the identical-call safety
+limit could never be reached; raise the window when raising that limit.
+
 ### Sub-Agents
 
 When a sub-agent ends with `return_direct=True` tools, including tools contributed by extension middleware, their outputs are returned in tool-call order. A failed tool marks the task as failed while preserving the batch outputs.

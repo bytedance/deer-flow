@@ -1,7 +1,11 @@
 """Tests for loop detection configuration."""
 
-import pytest
+from types import SimpleNamespace
 
+import pytest
+from langchain_core.messages import AIMessage
+
+from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.config.loop_detection_config import LoopDetectionConfig
 
 
@@ -91,6 +95,48 @@ class TestLoopDetectionConfig:
     def test_rejects_hard_limit_below_warn_threshold(self):
         with pytest.raises(ValueError, match="hard_limit"):
             LoopDetectionConfig(warn_threshold=5, hard_limit=4)
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"window_size": 3, "warn_threshold": 3, "hard_limit": 5},
+            {"window_size": 1, "warn_threshold": 1, "hard_limit": 5},
+            {"hard_limit": 21},
+            {"window_size": "3", "hard_limit": "5"},
+        ],
+    )
+    def test_rejects_window_that_cannot_reach_identical_call_hard_limit(self, payload):
+        with pytest.raises(ValueError, match="window_size must be greater than or equal to hard_limit"):
+            LoopDetectionConfig.model_validate(payload)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("async_hooks", [False, True], ids=["sync", "async"])
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {},
+            {"window_size": 5, "warn_threshold": 3, "hard_limit": 5},
+            {"window_size": 8, "warn_threshold": 4, "hard_limit": 8},
+            {"window_size": 1, "warn_threshold": 1, "hard_limit": 1},
+        ],
+        ids=["defaults", "exact-window", "custom-limit", "single-call"],
+    )
+    async def test_accepted_config_stops_identical_calls_at_configured_limit(self, payload, async_hooks):
+        config = LoopDetectionConfig.model_validate(payload)
+        middleware = LoopDetectionMiddleware.from_config(config)
+        runtime = SimpleNamespace(context={"thread_id": "test-thread", "run_id": "test-run"})
+
+        for step in range(1, config.hard_limit + 1):
+            # Distinct IDs represent real successive model responses, not replay.
+            message = AIMessage(id=f"response-{step}", content="", tool_calls=[{"name": "bash", "args": {"command": "echo repeat"}, "id": f"call-{step}"}])
+            state = {"messages": [message]}
+            result = await middleware.aafter_model(state, runtime) if async_hooks else middleware.after_model(state, runtime)
+            if step < config.hard_limit:
+                assert result is None
+            else:
+                assert result is not None
+                assert result["messages"][0].tool_calls == []
+        assert middleware.consume_stop_reason("test-run") == "loop_capped"
 
     def test_rejects_tool_freq_hard_limit_below_warn_threshold(self):
         with pytest.raises(ValueError, match="tool_freq_hard_limit"):

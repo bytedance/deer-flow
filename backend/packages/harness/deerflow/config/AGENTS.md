@@ -52,6 +52,13 @@ their tool-local settings unchanged.
 
 Top-level `recursion_limit` and `max_recursion_limit` are hot-reloaded per Gateway run. The former supplies the default when a request omits or provides an invalid value; the latter caps both configured and client-provided budgets.
 
+`LoopDetectionConfig` validates `window_size >= hard_limit >= warn_threshold`
+so the identical-call guard can reach both thresholds within its sliding history.
+Reject an unreachable hard limit explicitly; do not silently enlarge the selected
+window or conflate it with the separately sized per-tool frequency window.
+`tests/test_loop_detection_config.py` covers invalid inputs and sync/async hook
+enforcement for default and exact-window boundaries.
+
 `tool_output` character/count limits and every `tool_overrides` value share
 non-negative integer validation. Reject booleans before Pydantic coercion;
 preserve numeric strings from environment substitution and explicit zero.

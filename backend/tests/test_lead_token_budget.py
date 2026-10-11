@@ -163,7 +163,7 @@ async def test_enabled_budget_attribution_matches_calls_retained_by_guards(async
         memory=MemoryConfig(enabled=False),
         summarization=SummarizationConfig(enabled=False),
         token_budget=TokenBudgetConfig(enabled=True, max_tokens=1000 if guard == "budget" else 10000),
-        loop_detection=LoopDetectionConfig(warn_threshold=1 if guard == "loop" else 100, hard_limit=1 if guard == "loop" else 100),
+        loop_detection=LoopDetectionConfig(warn_threshold=1 if guard == "loop" else 100, hard_limit=1 if guard == "loop" else 100, window_size=100),
     )
     assembled = build_middlewares(
         {"configurable": {"subagent_enabled": True, "max_concurrent_subagents": 1, "max_total_subagents": 1}},

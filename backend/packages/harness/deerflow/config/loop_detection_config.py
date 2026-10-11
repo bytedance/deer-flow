@@ -88,6 +88,8 @@ class LoopDetectionConfig(BaseModel):
         """Ensure hard stop cannot happen before the warning threshold."""
         if self.hard_limit < self.warn_threshold:
             raise ValueError("hard_limit must be greater than or equal to warn_threshold")
+        if self.window_size < self.hard_limit:
+            raise ValueError("window_size must be greater than or equal to hard_limit")
         if self.tool_freq_hard_limit < self.tool_freq_warn:
             raise ValueError("tool_freq_hard_limit must be greater than or equal to tool_freq_warn")
         return self
