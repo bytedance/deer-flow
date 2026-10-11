@@ -2276,7 +2276,8 @@ summarization:
 #                         filesystems; peers would rebuild or delete each other's index).
 #   model               - LLM config for memory extraction: {provider, model, api_key, base_url,
 #                         temperature}. Omit all fields = no extraction (non-LLM ops still work).
-#   debounce_seconds    - Debounce wait before processing queued updates (default: 30)
+#   debounce_seconds    - Per-conversation quiet period (default: 30)
+#   max_wait_seconds    - Maximum debounce deferral; not a completion timeout (default: 300)
 #   max_facts           - Maximum facts to store (default: 100)
 #   fact_confidence_threshold - Minimum confidence for storing facts (default: 0.7)
 #   max_injection_tokens     - Token budget for memory injection (default: 2000)
@@ -2427,7 +2428,8 @@ memory:
     file_lock_timeout_seconds: 10 # per-scope cross-process advisory lock timeout (single-machine local filesystem)
     retrieval_adapter: fts5     # fts5 (default), empty to disable, or a dotted RetrievalPort factory(config)
     retrieval_index_path: ""    # empty = {storage_path}/.retrieval; relative = below storage_path; absolute as-is. Rebuildable derived data: keep it instance-local when Gateway instances share storage_path (the Helm chart uses an emptyDir)
-    debounce_seconds: 30 # Wait time before processing queued updates
+    debounce_seconds: 30 # Per-conversation quiet period before extraction is eligible
+    max_wait_seconds: 300 # Cap debounce deferral from first pending update; not an LLM/completion timeout
     # Backpressure cap on pending items. 0 = unlimited. At the cap, new
     # non-signal updates are rejected (QueueFull); signal updates are always
     # admitted so important memories are never shed.
