@@ -19,8 +19,8 @@ and templates. `preview-base.dom.test.ts` (happy-dom); RCDATA needs
 browser checks; other helpers use node.
 HTML assets: auth fetch current-thread artifacts only; reject redirects,
 bound bytes/count/CSS depth/time/expansion. Keep the opaque sandbox
-(no allow-same-origin); data URLs cross it, parent Blobs do not. External
-refs stay browser-loaded. Abort stale work; revoke document URLs;
+(no allow-same-origin); inline data URLs. External refs stay browser-loaded.
+Abort stale work; revoke document URLs;
 gate content/URL/scroll identity. Tests: `html-assets.dom.test.ts`,
 `artifact-file-preview.dom.test.tsx`, `tests/e2e/artifact-preview.spec.ts`.
 
