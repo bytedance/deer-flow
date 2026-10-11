@@ -4216,7 +4216,7 @@ This release closes that milestone with **439 merged pull requests**.
   a whole page before streaming it, so one request held about 280 MB with the
   default limit (roughly 1.7 GB at the 1,000,000 ceiling) and stalled the event
   loop for over half a second per page. The exported lines and their order are
-  unchanged.
+  unchanged. ([#6706])
 
 ### Security
 
@@ -9632,3 +9632,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6673]: https://github.com/bytedance/deer-flow/pull/6673
 [#6681]: https://github.com/bytedance/deer-flow/pull/6681
 [#6692]: https://github.com/bytedance/deer-flow/pull/6692
+[#6706]: https://github.com/bytedance/deer-flow/pull/6706

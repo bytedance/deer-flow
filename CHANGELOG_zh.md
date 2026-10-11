@@ -3235,7 +3235,7 @@
   现在每次读取 10 行已存储结果，而不是 500 行。每行最多可包含 `max_result_chars`
   的报告和同等长度的证据 JSON，而导出会先把整页载入内存再开始输出，因此默认上限下
   单个请求约占用 280 MB（上限 1,000,000 时约 1.7 GB），并且每页会阻塞事件循环
-  半秒以上。导出的行及其顺序不变。
+  半秒以上。导出的行及其顺序不变。([#6706])
 
 ### 安全
 
@@ -7739,3 +7739,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6673]: https://github.com/bytedance/deer-flow/pull/6673
 [#6681]: https://github.com/bytedance/deer-flow/pull/6681
 [#6692]: https://github.com/bytedance/deer-flow/pull/6692
+[#6706]: https://github.com/bytedance/deer-flow/pull/6706
