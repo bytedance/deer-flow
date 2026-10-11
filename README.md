@@ -2534,6 +2534,14 @@ delegations: `null` inherits all enabled MCP plugins, `[]` selects none, and
 installation IDs select only those plugins. Call `client.reset_agent()` after
 editing the saved agent configuration to refresh the selection.
 
+The saved `skills` selection also applies to the embedded agent and its
+delegations: `null` inherits all enabled skills, `[]` disables skills, and a
+list selects only those names. An explicit `available_skills` constructor
+argument overrides the saved selection (including an empty set), while role
+authorization can further narrow it. Call `reset_agent()` after editing the
+saved configuration. `list_skills()` remains a user-scoped catalog query;
+it does not report the named agent's runtime selection.
+
 `DeerFlowClient.stream()` includes `summary_text` in each `values` event. This is the current compacted context summary, or `None` when absent. Consumers can record changes without reading checkpoint internals; repeated snapshots may carry the same summary, and an initial snapshot may already contain one from an earlier turn.
 
 DeerFlow can be used as an embedded Python library without running the full HTTP services. The `DeerFlowClient` provides direct in-process access to all agent and Gateway capabilities, returning the same response schemas as the HTTP Gateway API. The HTTP Gateway also exposes `DELETE /api/threads/{thread_id}` to remove DeerFlow-managed local thread data after the LangGraph thread itself has been deleted:

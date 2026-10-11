@@ -234,7 +234,7 @@ class DeerFlowClient:
             subagent_enabled: Enable subagent delegation.
             plan_mode: Enable TodoList middleware for plan mode.
             agent_name: Name of the agent to use.
-            available_skills: Optional set of skill names to make available. If None (default), all scanned skills are available.
+            available_skills: Optional skill-name override. If None, use the named agent's saved skills selection, or all enabled skills when no selection is saved. An empty set disables skills.
             middlewares: Optional list of custom middlewares to inject into the agent.
             environment: Deployment environment label that ends up in
                 ``langfuse_tags`` (e.g. ``"production"`` / ``"staging"``).
@@ -273,6 +273,7 @@ class DeerFlowClient:
         # Lazy agent — created on first call, recreated when config changes.
         self._agent = None
         self._agent_config_key: tuple | None = None
+        self._agent_available_skills: set[str] | None = None
         self._effective_model_name: str | None = None
         self._loaded_agent_config_key: tuple[str, str] | None = None
         self._loaded_agent_config = None
@@ -356,6 +357,9 @@ class DeerFlowClient:
                 self._loaded_agent_config = agent_config
         memory_enabled = getattr(agent_config, "memory_enabled", True) is not False
         mcp_plugins = getattr(agent_config, "mcp_plugins", None)
+        selected_skills = self._available_skills
+        if selected_skills is None and agent_config is not None and agent_config.skills is not None:
+            selected_skills = set(agent_config.skills)
         # Delegation reads this run's metadata, including when the graph is cached.
         config.setdefault("metadata", {})["mcp_plugins"] = mcp_plugins
 
@@ -384,7 +388,7 @@ class DeerFlowClient:
             self._agent_name,
             memory_enabled,
             frozenset(mcp_plugins) if mcp_plugins is not None else None,
-            frozenset(self._available_skills) if self._available_skills is not None else None,
+            frozenset(selected_skills) if selected_skills is not None else None,
             self._checkpoint_channel_mode,
             self._checkpoint_snapshot_frequency,
             effective_user_id,
@@ -392,6 +396,9 @@ class DeerFlowClient:
         )
 
         if self._agent is not None and self._agent_config_key == key:
+            # Match the cached graph's authorized skill view on every run;
+            # task / batch_task read this metadata to constrain delegation.
+            config["metadata"]["available_skills"] = sorted(self._agent_available_skills) if self._agent_available_skills is not None else None
             return
 
         thinking_enabled = cfg.get("thinking_enabled", True)
@@ -410,9 +417,9 @@ class DeerFlowClient:
         # too, mirroring ``_make_lead_agent`` (agent.py:675). Without this, a
         # caller building the agent via ``DeerFlowClient(available_skills=...)``
         # bypasses the role's ``skills`` policy: ``SkillActivationMiddleware``
-        # and the catalog/prompt would see the unfiltered set. ``self._available_skills``
-        # is left untouched (it feeds the cache key at line 282); the filtered
-        # result is a local used for assembly only.
+        # and the catalog/prompt would see the unfiltered set. The constructor
+        # override and saved selection stay untouched; the filtered result
+        # binds both graph assembly and delegation metadata.
         from deerflow.authz.skill_filter import filter_available_skills_by_authorization, resolve_skill_authorization
 
         # One effective identity for the whole skill surface: the filter's
@@ -429,7 +436,7 @@ class DeerFlowClient:
         # instead of letting the filter rescan storage on every build; only
         # relevant when no agent-level allowlist is set.
         candidate_skill_names = None
-        if self._available_skills is None and skill_authorization is not None:
+        if selected_skills is None and skill_authorization is not None:
             try:
                 candidate_skill_names = [s.name for s in get_enabled_skills_for_config(self._app_config, user_id=effective_user_id)]
             except Exception:
@@ -438,13 +445,14 @@ class DeerFlowClient:
                 # its fail-closed semantics when that resolution also fails.
 
         available_skills = filter_available_skills_by_authorization(
-            self._available_skills,
+            selected_skills,
             context=cfg,
             app_config=self._app_config,
             user_id=effective_user_id,
             candidate_skill_names=candidate_skill_names,
             authorization=skill_authorization,
         )
+        config["metadata"]["available_skills"] = sorted(available_skills) if available_skills is not None else None
         subagent_enabled = cfg.get("subagent_enabled", False)
         from deerflow.config.subagents_config import effective_subagent_concurrency, effective_total_subagents_per_run
 
@@ -570,6 +578,7 @@ class DeerFlowClient:
 
         self._agent = create_agent(**kwargs)
         self._agent_config_key = key
+        self._agent_available_skills = set(available_skills) if available_skills is not None else None
         self._effective_model_name = model_name
         logger.info("Agent created: agent_name=%s, model=%s, thinking=%s", self._agent_name, model_name, thinking_enabled)
 

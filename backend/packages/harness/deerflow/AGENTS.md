@@ -63,9 +63,9 @@ drift.
   - `"end"` — current-turn cumulative `usage`, counted once per message id
 - **Custom-event invariant** — use `emit_custom_event` / `aemit_custom_event`, never `StreamWriter` alone. Built-in payloads require a non-empty string `type`; typeless payloads stay writer-only, absent from `astream_events`. The writer runs first and is authoritative for Gateway/Web UI/embedded clients; best-effort callbacks must not break it. Async graph hooks must await the async helper, never dispatch synchronously on a running event loop.
 - Lazy graph creation uses `create_agent()` + `build_middlewares()`.
-- Cache graphs by storage `user_id` and the unordered set of named-agent `mcp_plugins`. `stream()` materializes `user_id` before worker/loop boundaries in every auth mode.
+- Cache by storage `user_id` and unordered MCP/skill sets. Resolve the user before worker/loop boundaries in every auth mode.
 - Supports `checkpointer` parameter for state persistence across turns
-- `reset_agent()` reloads AgentConfig and rebuilds the graph. Every run's metadata carries `mcp_plugins` for delegation, including cache hits.
+- `reset_agent()` reloads AgentConfig/graph. Skills: constructor > saved > enabled, narrowed by authorization (`None` inherits; `[]` disables). Set delegation metadata `mcp_plugins`/authorized `available_skills`, including cache hits.
 - [Streaming design](../../../docs/STREAMING.md): Gateway/client parallel paths, LangGraph `stream_mode`, per-id deduplication, and regression tests
 
 **Gateway Equivalent Methods** (replaces Gateway API):
