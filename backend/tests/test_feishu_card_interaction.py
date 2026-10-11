@@ -89,6 +89,23 @@ class TestClarificationCardRequestExtraction:
 
 
 class TestBuildButtonCard:
+    def test_card_preserves_context_before_question(self):
+        req = ClarificationCardRequest.from_metadata(_metadata(_payload(question="是否继续？", context="这将**永久删除**生产表中的数据。\n请先确认已有备份。")))
+        assert req is not None
+
+        card = json.loads(build_button_card(req))
+        markdown = next(element for element in card["elements"] if element["tag"] == "markdown")
+        assert markdown["content"] == "这将**永久删除**生产表中的数据。\n请先确认已有备份。\n\n是否继续？"
+
+    @pytest.mark.parametrize("context", [None, "", " \t\n ", 42, ["background"]])
+    def test_missing_or_invalid_context_keeps_question_only(self, context):
+        req = ClarificationCardRequest.from_metadata(_metadata(_payload(context=context)))
+        assert req is not None
+
+        card = json.loads(build_button_card(req))
+        markdown = next(element for element in card["elements"] if element["tag"] == "markdown")
+        assert markdown["content"] == "Pick one"
+
     def test_card_structure_binds_buttons_to_request(self):
         req = ClarificationCardRequest.from_metadata(_metadata(_payload()))
         assert req is not None

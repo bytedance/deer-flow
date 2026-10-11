@@ -84,14 +84,22 @@ async def click_button(channel, value: dict):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("running_card", ["absent", "present", "patch_rejected"])
-async def test_button_delivery_uses_real_sdk_requests(card_channel, running_card):
+@pytest.mark.parametrize(
+    ("context", "expected_content"),
+    [(None, "Pick one"), ("这将**永久删除**生产表中的数据。", "这将**永久删除**生产表中的数据。\n\nPick one")],
+)
+async def test_button_delivery_uses_real_sdk_requests(card_channel, running_card, context, expected_content):
     channel = card_channel
     if running_card != "absent":
         channel._running_card_ids["source-1"] = "running-card"
     if running_card == "patch_rejected":
         channel._api_client.im.v1.message.patch.return_value = SimpleNamespace(success=lambda: False, code=230099, msg="offline rejection", get_log_id=lambda: "offline")
 
-    await channel.send(clarification_outbound(), _max_retries=1)
+    message = clarification_outbound()
+    if context is not None:
+        message.metadata[HUMAN_INPUT_REQUEST_METADATA_KEY]["context"] = context
+        message.text = expected_content
+    await channel.send(message, _max_retries=1)
 
     if running_card == "present":
         sdk_request = channel._api_client.im.v1.message.patch.call_args.args[0]
@@ -102,6 +110,8 @@ async def test_button_delivery_uses_real_sdk_requests(card_channel, running_card
         assert sdk_request.request_body.msg_type == "interactive"
     card = json.loads(sdk_request.request_body.content)
     assert card["config"]["update_multi"] is True
+    markdown = next(element for element in card["elements"] if element["tag"] == "markdown")
+    assert markdown["content"] == expected_content
     actions = next(element for element in card["elements"] if element["tag"] == "action")["actions"]
     assert [action["value"]["option_id"] for action in actions] == ["alpha", "beta"]
     assert [action["text"]["content"] for action in actions] == ["Alpha", "Beta"]

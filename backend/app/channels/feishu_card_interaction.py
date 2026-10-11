@@ -68,6 +68,7 @@ class ClarificationCardRequest:
     options: tuple[str, ...]
     option_ids: tuple[str, ...]
     callback_token: str
+    context: str | None = None
 
     @classmethod
     def from_metadata(cls, metadata: dict[str, Any] | None) -> ClarificationCardRequest | None:
@@ -84,6 +85,7 @@ class ClarificationCardRequest:
         request_id = payload.get("request_id")
         source = payload.get("source")
         question = payload.get("question")
+        context = payload.get("context")
         raw_options = payload.get("options")
         if not (isinstance(request_id, str) and request_id):
             return None
@@ -108,16 +110,25 @@ class ClarificationCardRequest:
             labels.append(label)
             option_ids.append(option_id)
 
-        return cls(request_id=request_id, source=source, question=question, options=tuple(labels), option_ids=tuple(option_ids), callback_token=secrets.token_urlsafe(32))
+        return cls(
+            request_id=request_id,
+            source=source,
+            question=question,
+            options=tuple(labels),
+            option_ids=tuple(option_ids),
+            callback_token=secrets.token_urlsafe(32),
+            context=context if isinstance(context, str) and context.strip() else None,
+        )
 
 
 def build_button_card(request: ClarificationCardRequest) -> str:
     """Render the clarification as a Feishu interactive card with one button per option."""
+    content = f"{request.context}\n\n{request.question}" if request.context else request.question
     card = {
         "config": {"wide_screen_mode": True, "update_multi": True},
         "header": {"title": {"tag": "plain_text", "content": "需要你的选择"}},
         "elements": [
-            {"tag": "markdown", "content": request.question},
+            {"tag": "markdown", "content": content},
             {
                 "tag": "action",
                 "actions": [
