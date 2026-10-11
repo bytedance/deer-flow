@@ -109,6 +109,73 @@ class MemorySignalClassificationConfig(BaseModel):
         return _yaml_off_is_the_off_mode(value)
 
 
+def _migrate_legacy_memory_fields(config_dict: dict) -> dict:
+    """Normalize legacy memory settings before model validation.
+
+    Host-shared fields (``enabled`` / ``mode`` / ``injection_enabled`` /
+    ``manager_class`` / ``backend_config``) are read directly. DeerMem-private
+    fields that used to live at the top level of ``memory:`` in config.yaml
+    (pre-abstraction: ``storage_path``, ``max_facts``, ``debounce_seconds``,
+    ``model_name``, ``token_counting``, ``staleness_*``, ``consolidation_*``,
+    ...) are **auto-migrated into ``backend_config``** with a warning, so an
+    upgrade from a pre-abstraction config does NOT silently revert customized
+    settings to defaults. Unknown top-level keys (likely typos) are warned and
+    ignored.
+    """
+    config_dict = dict(config_dict or {})
+    backend_config = dict(config_dict.get("backend_config") or {})
+    migrated: list[str] = []
+    for key in list(config_dict.keys()):
+        if key in _SHARED_FIELDS:
+            continue
+        if key in _LEGACY_DEERMEM_FIELDS:
+            value = config_dict.pop(key)
+            if value is None or value == "":
+                continue  # default / empty value, no migration needed
+            if key == "model_name":
+                # old top-level model_name -> backend_config.model.model
+                model_cfg = dict(backend_config.get("model") or {})
+                if "model" not in model_cfg:
+                    model_cfg["model"] = value
+                    backend_config["model"] = model_cfg
+                    migrated.append(f"{key} -> backend_config.model.model")
+            elif key == "storage_path" and str(value).endswith(".json"):
+                # Pre-abstraction storage_path was a FILE path (absolute = shared
+                # file opting out of per-user; a relative value like the old default
+                # "memory.json" was ignored for per-user). DeerMem now treats it as a
+                # root DIRECTORY. Carrying a file-style value verbatim would be
+                # resolved as a dir and either orphan per-user memory or hit
+                # NotADirectoryError on save. Drop it so the factory's zero-config
+                # runtime_home kicks in (per-user location unchanged:
+                # {base_dir}/users/{uid}/memory.json) and warn the operator.
+                logger.warning(
+                    "Legacy memory.storage_path=%r looks like a file path; DeerMem now "
+                    "treats storage_path as a root DIRECTORY (per-user memory under "
+                    "{storage_path}/users/{uid}/memory.json). Dropped -- memory now "
+                    "lands under the default root (runtime_home). Set "
+                    "memory.backend_config.storage_path to a directory if you want a "
+                    "custom location.",
+                    value,
+                )
+            elif key not in backend_config:
+                # don't override an explicit backend_config value
+                backend_config[key] = value
+                migrated.append(f"{key} -> backend_config.{key}")
+        else:
+            logger.warning(
+                "Unknown memory config key %r at top level (not a shared field %s nor a known legacy DeerMem field); ignored.",
+                key,
+                sorted(_SHARED_FIELDS),
+            )
+    if migrated:
+        logger.warning(
+            "Migrated legacy top-level memory fields into backend_config; move them under memory.backend_config in config.yaml to silence this: %s",
+            ", ".join(migrated),
+        )
+    config_dict["backend_config"] = backend_config
+    return config_dict
+
+
 class MemoryConfig(BaseModel):
     """Host-shared memory configuration (backend-agnostic)."""
 
@@ -176,6 +243,13 @@ class MemoryConfig(BaseModel):
         description="Signal-classification hints (off by default): reinforcement/correction labels from the batch text, plus a narrow veto over a pre-screen skip.",
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_fields(cls, data: Any) -> Any:
+        # AppConfig validates this model before dumping it to the singleton
+        # loader; legacy keys must survive that first validation as well.
+        return _migrate_legacy_memory_fields(data) if isinstance(data, dict) else data
+
     @model_validator(mode="after")
     def _check_judging_slots_are_usable(self) -> MemoryConfig:
         """A configured judging slot must name a provider (fail fast, never silently off).
@@ -240,69 +314,7 @@ def set_memory_config(config: MemoryConfig) -> None:
     _memory_config = config
 
 
-def load_memory_config_from_dict(config_dict: dict) -> None:
-    """Load memory configuration from a dictionary.
-
-    Host-shared fields (``enabled`` / ``mode`` / ``injection_enabled`` /
-    ``manager_class`` / ``backend_config``) are read directly. DeerMem-private
-    fields that used to live at the top level of ``memory:`` in config.yaml
-    (pre-abstraction: ``storage_path``, ``max_facts``, ``debounce_seconds``,
-    ``model_name``, ``token_counting``, ``staleness_*``, ``consolidation_*``,
-    ...) are **auto-migrated into ``backend_config``** with a warning, so an
-    upgrade from a pre-abstraction config does NOT silently revert customized
-    settings to defaults. Unknown top-level keys (likely typos) are warned and
-    ignored.
-    """
+def load_memory_config_from_dict(config_dict: dict | None) -> None:
+    """Load shared settings, migrating legacy DeerMem fields before validation."""
     global _memory_config
-    config_dict = dict(config_dict or {})
-    backend_config = dict(config_dict.get("backend_config") or {})
-    migrated: list[str] = []
-    for key in list(config_dict.keys()):
-        if key in _SHARED_FIELDS:
-            continue
-        if key in _LEGACY_DEERMEM_FIELDS:
-            value = config_dict.pop(key)
-            if value is None or value == "":
-                continue  # default / empty value, no migration needed
-            if key == "model_name":
-                # old top-level model_name -> backend_config.model.model
-                model_cfg = dict(backend_config.get("model") or {})
-                if "model" not in model_cfg:
-                    model_cfg["model"] = value
-                    backend_config["model"] = model_cfg
-                    migrated.append(f"{key} -> backend_config.model.model")
-            elif key == "storage_path" and str(value).endswith(".json"):
-                # Pre-abstraction storage_path was a FILE path (absolute = shared
-                # file opting out of per-user; a relative value like the old default
-                # "memory.json" was ignored for per-user). DeerMem now treats it as a
-                # root DIRECTORY. Carrying a file-style value verbatim would be
-                # resolved as a dir and either orphan per-user memory or hit
-                # NotADirectoryError on save. Drop it so the factory's zero-config
-                # runtime_home kicks in (per-user location unchanged:
-                # {base_dir}/users/{uid}/memory.json) and warn the operator.
-                logger.warning(
-                    "Legacy memory.storage_path=%r looks like a file path; DeerMem now "
-                    "treats storage_path as a root DIRECTORY (per-user memory under "
-                    "{storage_path}/users/{uid}/memory.json). Dropped -- memory now "
-                    "lands under the default root (runtime_home). Set "
-                    "memory.backend_config.storage_path to a directory if you want a "
-                    "custom location.",
-                    value,
-                )
-            elif key not in backend_config:
-                # don't override an explicit backend_config value
-                backend_config[key] = value
-                migrated.append(f"{key} -> backend_config.{key}")
-        else:
-            logger.warning(
-                "Unknown memory config key %r at top level (not a shared field %s nor a known legacy DeerMem field); ignored.",
-                key,
-                sorted(_SHARED_FIELDS),
-            )
-    if migrated:
-        logger.warning(
-            "Migrated legacy top-level memory fields into backend_config; move them under memory.backend_config in config.yaml to silence this: %s",
-            ", ".join(migrated),
-        )
-    config_dict["backend_config"] = backend_config
-    _memory_config = MemoryConfig(**config_dict)
+    _memory_config = MemoryConfig(**(config_dict or {}))

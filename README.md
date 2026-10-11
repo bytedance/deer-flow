@@ -2447,6 +2447,11 @@ The opt-in [DeerMem scope-isolation benchmark](backend/scripts/benchmark/deermem
 checks semantic safety across facts and summaries, and fact routing across users
 and agents. Failed extraction attempts are retryable execution errors, not safety passes.
 
+Older `memory:` settings such as `max_facts`, `debounce_seconds`, and
+`model_name` are migrated into `memory.backend_config` when loading YAML;
+explicit nested settings take precedence. Legacy `storage_path` values ending
+in `.json` are dropped with a warning because storage now expects a directory.
+
 For DeerMem, `memory.backend_config.storage_class: markdown` opts into tolerant
 summary reads while keeping JSON writes and the existing UI. A hand-edited
 `memory.json` can contain its JSON object inside a fenced `memory-json` block;
