@@ -1,7 +1,6 @@
 """Tests for the Feishu interactive-card clarification module (outbound half).
 
-Boundary tests only: what the module emits (card payloads, registry state
-transitions), never its internals.
+Rendering, ownership, one-time consumption and bounded registry lifecycle.
 """
 
 from __future__ import annotations
@@ -96,6 +95,7 @@ class TestBuildButtonCard:
         assert req.option_ids == ("option-1", "option-2")
         card = json.loads(build_button_card(req))
 
+        assert card["config"]["update_multi"] is True
         assert card["header"]["title"]["content"]
         elements = card["elements"]
         markdown = next(e for e in elements if e["tag"] == "markdown")
@@ -106,7 +106,7 @@ class TestBuildButtonCard:
         for i, (action, label) in enumerate(zip(actions, ("Alpha", "Beta")), start=1):
             assert action["tag"] == "button"
             assert action["text"]["content"] == label
-            assert action["value"]["request_id"] == "clarification:call_1"
+            assert action["value"]["callback_token"] == req.callback_token
             assert action["value"]["option_id"] == f"option-{i}"
             assert action["value"]["option_value"] == label
         assert actions[0]["type"] == "primary"
@@ -116,11 +116,14 @@ class TestBuildButtonCard:
 class TestPendingCardRegistry:
     def _entry(self, request_id: str = "clarification:call_1", **overrides) -> dict:
         entry = {
+            "callback_token": "callback-1",
             "request_id": request_id,
+            "source": "ask_clarification",
             "thread_id": "thread-1",
             "chat_id": "chat-1",
             "originator_open_id": "ou_originator",
             "options": ("Alpha", "Beta"),
+            "option_ids": ("option-1", "option-2"),
         }
         entry.update(overrides)
         return entry
@@ -128,22 +131,53 @@ class TestPendingCardRegistry:
     def test_register_then_consume_returns_entry_once(self):
         registry = PendingCardRegistry()
         registry.register(**self._entry(topic_id="topic-1", connection_id="conn-1", owner_user_id="deer-user-1"))
-        entry, reason = registry.consume_if_originator("clarification:call_1", "ou_originator", option_value="Alpha")
+        entry, reason = registry.consume_if_originator("callback-1", "ou_originator", option_id="option-1", option_value="Alpha")
         assert reason is None and entry is not None
         assert entry["originator_open_id"] == "ou_originator"
         assert entry["topic_id"] == "topic-1"
         assert entry["connection_id"] == "conn-1"
         assert entry["owner_user_id"] == "deer-user-1"
-        entry2, _ = registry.consume_if_originator("clarification:call_1", "ou_originator", option_value="Alpha")
+        entry2, _ = registry.consume_if_originator("callback-1", "ou_originator", option_id="option-1", option_value="Alpha")
         assert entry2 is None  # one-time
 
-    def test_reregister_same_request_id_replaces(self):
+    def test_same_request_id_keeps_independent_cards(self):
         registry = PendingCardRegistry()
         registry.register(**self._entry())
-        registry.register(**self._entry(originator_open_id="ou_new"))
-        entry, _ = registry.consume_if_originator("clarification:call_1", "ou_new", option_value="Alpha")
+        registry.register(**self._entry(callback_token="callback-2", originator_open_id="ou_new"))
+        first, _ = registry.consume_if_originator("callback-1", "ou_originator", option_id="option-1", option_value="Alpha")
+        assert first is not None and first["originator_open_id"] == "ou_originator"
+        entry, _ = registry.consume_if_originator("callback-2", "ou_new", option_id="option-1", option_value="Alpha")
         assert entry is not None
         assert entry["originator_open_id"] == "ou_new"
+
+    def test_duplicate_callback_token_cannot_replace_a_pending_card(self):
+        registry = PendingCardRegistry()
+        registry.register(**self._entry())
+        with pytest.raises(ValueError, match="already owns"):
+            registry.register(**self._entry(request_id="clarification:other"))
+        entry, _ = registry.consume_if_originator("callback-1", "ou_originator", option_id="option-1", option_value="Alpha")
+        assert entry is not None and entry["request_id"] == "clarification:call_1"
+
+    def test_register_prunes_expired_cards_without_clicks(self, monkeypatch):
+        clock = [100.0]
+        monkeypatch.setattr("app.channels.feishu_card_interaction.time.time", lambda: clock[0])
+        registry = PendingCardRegistry(ttl_seconds=10)
+        registry.register(**self._entry())
+        clock[0] += 11
+        registry.register(**self._entry(callback_token="callback-2"))
+        assert len(registry._entries) == 1
+        entry, _ = registry.consume_if_originator("callback-2", "ou_originator", option_id="option-1", option_value="Alpha")
+        assert entry is not None
+
+    def test_capacity_retires_oldest_card_and_keeps_new_cards_usable(self):
+        registry = PendingCardRegistry(max_entries=2)
+        for index in range(3):
+            registry.register(**self._entry(callback_token=f"callback-{index}"))
+        oldest, _ = registry.consume_if_originator("callback-0", "ou_originator", option_id="option-1", option_value="Alpha")
+        assert oldest is None
+        for index in (1, 2):
+            entry, _ = registry.consume_if_originator(f"callback-{index}", "ou_originator", option_id="option-1", option_value="Alpha")
+            assert entry is not None
 
 
 class TestFeishuChannelButtonCardWiring:
@@ -151,13 +185,13 @@ class TestFeishuChannelButtonCardWiring:
     clarification outbounds go out as button cards; everything else is
     byte-identical to today's plain-text path."""
 
-    def _channel(self, *, enabled: bool):
+    def _channel(self, *, enabled: bool, tmp_path):
         from unittest.mock import AsyncMock
 
         from app.channels.feishu import FeishuChannel
         from app.channels.message_bus import MessageBus
 
-        channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test", "card_interaction_enabled": enabled})
+        channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test", "card_interaction_enabled": enabled, "channel_store": JsonChannelStore(path=tmp_path / "routes.json")})
         channel._reply_card = AsyncMock(return_value="om_card_final")
         channel._update_card = AsyncMock()
         channel._add_reaction = AsyncMock()
@@ -210,23 +244,24 @@ class TestFeishuChannelButtonCardWiring:
         )
 
     @pytest.mark.asyncio
-    async def test_flag_on_options_renders_button_card_and_registers(self):
-        channel = self._channel(enabled=True)
+    async def test_flag_on_options_renders_button_card_and_registers(self, tmp_path):
+        channel = self._channel(enabled=True, tmp_path=tmp_path)
         await channel._send_card_message(self._clarification_outbound())
 
         card_json = channel._reply_card.call_args.args[1]
         card = json.loads(card_json)
         assert any(e.get("tag") == "action" for e in card["elements"])
 
-        entry, reason = channel._card_registry.consume_if_originator("clarification:call_1", "ou_originator", option_value="Alpha")
+        token = next(e for e in card["elements"] if e["tag"] == "action")["actions"][0]["value"]["callback_token"]
+        entry, reason = channel._card_registry.consume_if_originator(token, "ou_originator", option_id="option-1", option_value="Alpha")
         assert reason is None and entry is not None
         assert entry["originator_open_id"] == "ou_originator"
         assert entry["thread_id"] == "thread-1"
         assert entry["card_message_id"] == "om_card_final"
 
     @pytest.mark.asyncio
-    async def test_flag_off_falls_back_to_plain_card(self):
-        channel = self._channel(enabled=False)
+    async def test_flag_off_falls_back_to_plain_card(self, tmp_path):
+        channel = self._channel(enabled=False, tmp_path=tmp_path)
         await channel._send_card_message(self._clarification_outbound())
 
         # Plain-text path: markdown text, no raw-card bypass, nothing registered.
@@ -234,23 +269,23 @@ class TestFeishuChannelButtonCardWiring:
         assert "Pick one" in text_arg
         assert '"action"' not in text_arg
         assert channel._reply_card.call_args.kwargs.get("raw_card_content") is not True
-        entry, _ = channel._card_registry.consume_if_originator("clarification:call_1", "ou_originator", option_value="Alpha")
+        entry, _ = channel._card_registry.consume_if_originator("callback-1", "ou_originator", option_id="option-1", option_value="Alpha")
         assert entry is None
 
     @pytest.mark.asyncio
-    async def test_flag_on_free_text_falls_back_to_plain_card(self):
-        channel = self._channel(enabled=True)
+    async def test_flag_on_free_text_falls_back_to_plain_card(self, tmp_path):
+        channel = self._channel(enabled=True, tmp_path=tmp_path)
         await channel._send_card_message(self._clarification_outbound(with_options=False))
 
         text_arg = channel._reply_card.call_args.args[1]
         assert '"action"' not in text_arg
         assert channel._reply_card.call_args.kwargs.get("raw_card_content") is not True
-        entry, _ = channel._card_registry.consume_if_originator("clarification:call_2", "ou_originator", option_value="x")
+        entry, _ = channel._card_registry.consume_if_originator("clarification:call_2", "ou_originator", option_id="option-1", option_value="x")
         assert entry is None
 
     @pytest.mark.asyncio
-    async def test_running_card_is_updated_into_button_card(self):
-        channel = self._channel(enabled=True)
+    async def test_running_card_is_updated_into_button_card(self, tmp_path):
+        channel = self._channel(enabled=True, tmp_path=tmp_path)
         channel._running_card_ids["om_src"] = "om_running"
 
         await channel._send_card_message(self._clarification_outbound())
@@ -258,7 +293,8 @@ class TestFeishuChannelButtonCardWiring:
         card_json = channel._update_card.call_args.args[1]
         card = json.loads(card_json)
         assert any(e.get("tag") == "action" for e in card["elements"])
-        entry, _ = channel._card_registry.consume_if_originator("clarification:call_1", "ou_originator", option_value="Alpha")
+        token = next(e for e in card["elements"] if e["tag"] == "action")["actions"][0]["value"]["callback_token"]
+        entry, _ = channel._card_registry.consume_if_originator(token, "ou_originator", option_id="option-1", option_value="Alpha")
         assert entry is not None
         assert entry["card_message_id"] == "om_running"
 
@@ -270,65 +306,68 @@ class TestConsumeIfOriginator:
     def _registry_with_entry(self):
         registry = PendingCardRegistry()
         registry.register(
+            callback_token="callback-1",
             request_id="clarification:call_1",
+            source="ask_clarification",
             thread_id="thread-1",
             chat_id="chat-1",
             originator_open_id="ou_originator",
             options=("Alpha", "Beta"),
+            option_ids=("option-1", "option-2"),
             card_message_id="om_card_1",
         )
         return registry
 
     def test_originator_consumes_and_gets_entry(self):
         registry = self._registry_with_entry()
-        entry, reason = registry.consume_if_originator("clarification:call_1", "ou_originator", option_value="Alpha")
+        entry, reason = registry.consume_if_originator("callback-1", "ou_originator", option_id="option-1", option_value="Alpha")
         assert reason is None
         assert entry is not None
         assert entry["card_message_id"] == "om_card_1"
         # replayed click: entry already gone
-        entry2, reason2 = registry.consume_if_originator("clarification:call_1", "ou_originator", option_value="Alpha")
+        entry2, reason2 = registry.consume_if_originator("callback-1", "ou_originator", option_id="option-1", option_value="Alpha")
         assert entry2 is None
         assert reason2 == "unknown"
 
     def test_non_originator_rejected_without_consuming(self):
         registry = self._registry_with_entry()
-        entry, reason = registry.consume_if_originator("clarification:call_1", "ou_someone_else")
+        entry, reason = registry.consume_if_originator("callback-1", "ou_someone_else", option_id="option-1", option_value="Alpha")
         assert entry is None
         assert reason == "not_originator"
         # the real originator can still click afterwards
-        entry2, reason2 = registry.consume_if_originator("clarification:call_1", "ou_originator", option_value="Alpha")
+        entry2, reason2 = registry.consume_if_originator("callback-1", "ou_originator", option_id="option-1", option_value="Alpha")
         assert reason2 is None
         assert entry2 is not None
 
     def test_unknown_request_id(self):
         registry = self._registry_with_entry()
-        entry, reason = registry.consume_if_originator("clarification:nope", "ou_originator", option_value="Alpha")
+        entry, reason = registry.consume_if_originator("clarification:nope", "ou_originator", option_id="option-1", option_value="Alpha")
         assert entry is None
         assert reason == "unknown"
 
     def test_expired_entry_is_unknown(self):
         registry = self._registry_with_entry()
         future = time.time() + 31 * 60
-        entry, reason = registry.consume_if_originator("clarification:call_1", "ou_originator", option_value="Alpha", now=future)
+        entry, reason = registry.consume_if_originator("callback-1", "ou_originator", option_id="option-1", option_value="Alpha", now=future)
         assert entry is None
         assert reason == "unknown"
 
     def test_unknown_option_value_rejected_without_consuming(self):
         registry = self._registry_with_entry()
-        entry, reason = registry.consume_if_originator("clarification:call_1", "ou_originator", option_value="注入值")
+        entry, reason = registry.consume_if_originator("callback-1", "ou_originator", option_id="option-1", option_value="注入值")
         assert entry is None
         assert reason == "unknown"
         # the real button value still works afterwards
-        entry2, reason2 = registry.consume_if_originator("clarification:call_1", "ou_originator", option_value="Alpha")
+        entry2, reason2 = registry.consume_if_originator("callback-1", "ou_originator", option_id="option-1", option_value="Alpha")
         assert reason2 is None and entry2 is not None
 
 
-def _make_card_action_event(*, request_id: str, option_value: str, option_id: str = "option-1", operator_open_id: str = "ou_originator"):
+def _make_card_action_event(*, callback_token: str, option_value: str, option_id: str = "option-1", operator_open_id: str = "ou_originator"):
     """Build a minimal P2CardActionTrigger-shaped stand-in."""
     from unittest.mock import MagicMock
 
     event = MagicMock()
-    event.event.action.value = {"request_id": request_id, "option_id": option_id, "option_value": option_value}
+    event.event.action.value = {"callback_token": callback_token, "option_id": option_id, "option_value": option_value}
     event.event.operator.open_id = operator_open_id
     return event
 
@@ -344,16 +383,19 @@ class TestOnCardActionValidation:
 
         channel = FeishuChannel(MessageBus(), {"app_id": "t", "app_secret": "t", "card_interaction_enabled": True})
         channel._card_registry.register(
+            callback_token="callback-1",
             request_id="clarification:call_1",
+            source="ask_clarification",
             thread_id="thread-1",
             chat_id="chat-1",
             originator_open_id="ou_originator",
             options=("Alpha", "Beta"),
+            option_ids=("option-1", "option-2"),
             card_message_id="om_card_1",
         )
         channel._main_loop = MagicMock()
         channel._main_loop.is_running.return_value = True
-        channel._submit_threadsafe_coroutine = MagicMock(return_value=True)
+        channel._submit_threadsafe_coroutine = MagicMock(side_effect=lambda coroutine, *args, **kwargs: (coroutine.close(), True)[1])
 
         class _Toast:
             pass
@@ -367,39 +409,36 @@ class TestOnCardActionValidation:
 
     def test_non_originator_gets_refusal_toast_and_entry_survives(self):
         channel = self._channel()
-        resp = channel._on_card_action(_make_card_action_event(request_id="clarification:call_1", option_value="Alpha", operator_open_id="ou_other"))
+        resp = channel._on_card_action(_make_card_action_event(callback_token="callback-1", option_id="option-1", option_value="Alpha", operator_open_id="ou_other"))
         assert resp.toast is not None
         assert "发起人" in resp.toast.content
         channel._submit_threadsafe_coroutine.assert_not_called()
         # entry not consumed: originator can still click
-        entry, reason = channel._card_registry.consume_if_originator("clarification:call_1", "ou_originator")
+        entry, reason = channel._card_registry.consume_if_originator("callback-1", "ou_originator", option_id="option-1", option_value="Alpha")
         assert reason is None and entry is not None
 
     def test_unknown_request_id_gets_stale_toast(self):
         channel = self._channel()
-        resp = channel._on_card_action(_make_card_action_event(request_id="clarification:nope", option_value="Alpha"))
+        resp = channel._on_card_action(_make_card_action_event(callback_token="unknown", option_id="option-1", option_value="Alpha"))
         assert resp.toast is not None
         assert "失效" in resp.toast.content
         channel._submit_threadsafe_coroutine.assert_not_called()
 
     def test_dispatch_failure_returns_warning_toast(self):
         channel = self._channel()
-        channel._submit_threadsafe_coroutine = channel._submit_threadsafe_coroutine.__class__(return_value=False)
-        from unittest.mock import MagicMock
-
-        channel._submit_threadsafe_coroutine = MagicMock(return_value=False)
-        resp = channel._on_card_action(_make_card_action_event(request_id="clarification:call_1", option_value="Alpha"))
+        channel._submit_threadsafe_coroutine = MagicMock(side_effect=lambda coroutine, *args, **kwargs: (coroutine.close(), False)[1])
+        resp = channel._on_card_action(_make_card_action_event(callback_token="callback-1", option_id="option-1", option_value="Alpha"))
         assert resp.toast is not None
         assert resp.toast.type == "warning"
 
     def test_originator_gets_ack_toast_and_dispatches_async_resolution(self):
         channel = self._channel()
-        resp = channel._on_card_action(_make_card_action_event(request_id="clarification:call_1", option_value="Alpha"))
+        resp = channel._on_card_action(_make_card_action_event(callback_token="callback-1", option_id="option-1", option_value="Alpha"))
         assert resp.toast is not None
         assert "Alpha" in resp.toast.content
         channel._submit_threadsafe_coroutine.assert_called_once()
         # one-time: the entry is consumed by the click
-        entry, reason = channel._card_registry.consume_if_originator("clarification:call_1", "ou_originator")
+        entry, reason = channel._card_registry.consume_if_originator("callback-1", "ou_originator", option_id="option-1", option_value="Alpha")
         assert entry is None and reason == "unknown"
 
 
@@ -427,10 +466,12 @@ class TestResolveCardClick:
 
         entry = {
             "request_id": "clarification:call_1",
+            "source": "ask_clarification",
             "thread_id": "thread-1",
             "chat_id": "chat-1",
             "originator_open_id": "ou_originator",
             "options": ("Alpha", "Beta"),
+            "option_ids": ("option-1", "option-2"),
             "card_message_id": "om_card_1",
             "topic_id": "om_topic_1",
             "connection_id": "conn-1",
@@ -474,6 +515,7 @@ class TestResolveCardClick:
 
         entry = {
             "request_id": "clarification:call_1",
+            "source": "ask_clarification",
             "thread_id": "thread-1",
             "chat_id": "chat-1",
             "originator_open_id": "ou_originator",
@@ -554,7 +596,7 @@ class TestCardClickEndToEndRouting:
                     HUMAN_INPUT_RESPONSE_METADATA_KEY: {
                         "version": 1,
                         "kind": "human_input_response",
-                        "source": "feishu_card",
+                        "source": "ask_clarification",
                         "request_id": "clarification:call_1",
                         "response_kind": "option",
                         "option_id": "option-1",
@@ -641,10 +683,12 @@ class TestCardClickEndToEndRouting:
             channel._publish_inbound_or_drop = capture
             entry = {
                 "request_id": "clarification:call_1",
+                "source": "ask_clarification",
                 "thread_id": "thread-existing",
                 "chat_id": "chat-1",
                 "originator_open_id": "ou_originator",
                 "options": ("Alpha", "Beta"),
+                "option_ids": ("option-1", "option-2"),
                 "card_message_id": "om_card_1",
                 "topic_id": "om_topic_1",
                 "connection_id": conn["id"],

@@ -48,6 +48,7 @@ from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, gene
 from app.gateway.github import run_policy as _github_run_policy  # noqa: F401
 from app.gateway.internal_auth import create_internal_auth_headers
 from app.gateway.path_utils import resolve_outputs_confined_path
+from deerflow.agents.human_input import read_human_input_response
 from deerflow.config.agents_config import list_custom_agents, load_agent_config
 from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime import END_SENTINEL, StreamBridge
@@ -1031,7 +1032,7 @@ def _extract_artifacts(result: dict | list) -> list[str]:
 
 
 def _is_hidden_human_control_message(msg: Mapping[str, Any]) -> bool:
-    """Return whether a human message is an internal control message hidden from UI."""
+    """Distinguish internal control messages from real hidden user answers."""
     if msg.get("type") != "human":
         return False
 
@@ -1039,7 +1040,7 @@ def _is_hidden_human_control_message(msg: Mapping[str, Any]) -> bool:
     if not isinstance(additional_kwargs, Mapping):
         return False
 
-    return additional_kwargs.get("hide_from_ui") is True
+    return additional_kwargs.get("hide_from_ui") is True and read_human_input_response(additional_kwargs) is None
 
 
 def _format_artifact_text(artifacts: list[str]) -> str:

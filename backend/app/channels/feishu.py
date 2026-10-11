@@ -18,9 +18,10 @@ from typing import Any, Literal, TypeVar
 
 from app.channels.base import Channel, ChannelStopTimeout
 from app.channels.commands import is_known_channel_command, strip_leading_mentions
-from app.channels.connection_identity import attach_connection_identity
+from app.channels.connection_identity import attach_connection_identity, lookup_thread_id
 from app.channels.feishu_card_interaction import (
     ClarificationCardRequest,
+    PendingCardEntry,
     PendingCardRegistry,
     build_button_card,
 )
@@ -48,6 +49,7 @@ from deerflow.uploads.manager import (
 
 logger = logging.getLogger(__name__)
 PENDING_CLARIFICATION_TTL_SECONDS = 30 * 60
+_PENDING_CARD_METADATA_KEY = "_feishu_pending_card_id"
 # Channel-store deadlines. ``_on_message`` runs on lark-oapi's private event loop,
 # which also carries the SDK's websocket reads, pongs and its 120s ping loop:
 # every second the bridge blocks that loop is a second the connection cannot
@@ -110,6 +112,7 @@ class _Routing:
     topic_id: str | None
     from_stored_mapping: bool
     from_pending: bool
+    clarification_card_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -691,12 +694,12 @@ class FeishuChannel(Channel):
         except Exception:
             logger.exception("[Feishu] failed to add reaction '%s' to message %s", emoji_type, message_id)
 
-    async def _reply_card(self, message_id: str, text: str) -> str | None:
-        """Reply with an interactive card and return the created card message ID."""
+    async def _reply_card(self, message_id: str, text: str, *, raw_card_content: bool = False) -> str | None:
+        """Reply with text or serialized card JSON and return the card message ID."""
         if not self._api_client:
             return None
 
-        content = self._build_card_content(text)
+        content = text if raw_card_content else self._build_card_content(text)
         request = self._ReplyMessageRequest.builder().message_id(message_id).request_body(self._ReplyMessageRequestBody.builder().msg_type("interactive").content(content).build()).build()
         response = await asyncio.to_thread(self._api_client.im.v1.message.reply, request)
         if not response.success():
@@ -808,23 +811,57 @@ class FeishuChannel(Channel):
         except Exception:
             logger.exception("[Feishu] failed to send running reply for message %s", message_id)
 
-    def _register_pending_card(self, msg: OutboundMessage, request: ClarificationCardRequest, card_message_id: str | None) -> None:
+    async def _bind_card_thread(self, msg: OutboundMessage) -> str | None:
+        """Bind answers to their thread without changing the chat's /new route."""
+        user_id = self._non_empty_str(msg.metadata.get("user_id"))
+        if not (user_id and msg.thread_id and msg.thread_ts):
+            return None
+        # Provider message IDs cannot address this namespace, and the alias
+        # is reused across a thread's cards without exposing callback tokens.
+        topic_id = f"feishu-card:{msg.thread_id}"
+        try:
+            if msg.connection_id:
+                if self._connection_repo is None or not msg.owner_user_id:
+                    return None
+                await self._connection_repo.set_thread_id(connection_id=msg.connection_id, owner_user_id=msg.owner_user_id, provider=self.name, external_conversation_id=msg.chat_id, thread_id=msg.thread_id, external_topic_id=topic_id)
+            else:
+                store = self.config.get("channel_store")
+                if store is None:
+                    return None
+                await store.set_thread_id(self.name, msg.chat_id, msg.thread_id, topic_id=topic_id, user_id=user_id)
+        except Exception:
+            logger.exception("[Feishu] cannot bind clarification card to thread %s; using text fallback", msg.thread_id)
+            return None
+        return topic_id
+
+    def _register_pending_card(self, msg: OutboundMessage, request: ClarificationCardRequest, card_message_id: str | None, *, topic_id: str) -> None:
         """Register a delivered button card so its clicks can be validated later."""
         user_id = self._non_empty_str(msg.metadata.get("user_id"))
         if not (user_id and msg.thread_id and card_message_id):
             logger.warning("[Feishu] button card delivered without full binding context, clicks will fail closed: request_id=%s", request.request_id)
             return
         self._card_registry.register(
+            callback_token=request.callback_token,
             request_id=request.request_id,
+            source=request.source,
             thread_id=msg.thread_id,
             chat_id=msg.chat_id,
             originator_open_id=user_id,
             options=request.options,
+            option_ids=request.option_ids,
             card_message_id=card_message_id,
-            topic_id=self._non_empty_str(msg.metadata.get("topic_id")),
+            topic_id=topic_id,
             connection_id=msg.connection_id,
             owner_user_id=msg.owner_user_id,
         )
+
+    async def _remember_card_delivery(self, msg: OutboundMessage, request: ClarificationCardRequest | None, card_message_id: str | None, *, topic_id: str | None) -> None:
+        # Admit callbacks immediately after the SDK returns. Auxiliary message
+        # aliases may involve slow storage, but the thread alias is already bound.
+        if request and topic_id:
+            self._register_pending_card(msg, request, card_message_id, topic_id=topic_id)
+        self._remember_pending_clarification(msg, card_message_id, topic_id=topic_id)
+        await self._remember_thread_mapping(msg, msg.thread_ts, card_message_id)
 
     async def _send_card_message(self, msg: OutboundMessage) -> None:
         """Send or update the Feishu card tied to the current request."""
@@ -832,6 +869,10 @@ class FeishuChannel(Channel):
         # Option clarifications render as an interactive button card on the
         # final outbound; everything else keeps the plain markdown card.
         card_request = ClarificationCardRequest.from_metadata(msg.metadata) if (self._card_interaction_enabled and msg.is_final) else None
+        card_topic_id = await self._bind_card_thread(msg) if card_request else None
+        if card_topic_id is None:
+            card_request = None
+        card_text = build_button_card(card_request) if card_request else self._compose_card_text(msg.text, msg.metadata)
         # Button cards arrive as serialized card JSON and bypass the markdown
         # wrapper; the plain path keeps its exact historical call signature.
         raw_card_kw: dict[str, bool] = {"raw_card_content": True} if card_request else {}
@@ -846,7 +887,6 @@ class FeishuChannel(Channel):
                     running_card_id = await running_card_task
 
             if running_card_id:
-                card_text = build_button_card(card_request) if card_request else self._compose_card_text(msg.text, msg.metadata)
                 try:
                     await self._update_card(running_card_id, card_text, **raw_card_kw)
                 except Exception:
@@ -857,26 +897,17 @@ class FeishuChannel(Channel):
                         running_card_id,
                     )
                     fallback_card_id = await self._reply_card(source_message_id, card_text, **raw_card_kw)
-                    await self._remember_thread_mapping(msg, source_message_id, fallback_card_id)
-                    self._remember_pending_clarification(msg, fallback_card_id)
-                    if card_request:
-                        self._register_pending_card(msg, card_request, fallback_card_id)
+                    await self._remember_card_delivery(msg, card_request, fallback_card_id, topic_id=card_topic_id)
                 else:
-                    await self._remember_thread_mapping(msg, source_message_id, running_card_id)
-                    self._remember_pending_clarification(msg, running_card_id)
-                    if card_request:
-                        self._register_pending_card(msg, card_request, running_card_id)
+                    await self._remember_card_delivery(msg, card_request, running_card_id, topic_id=card_topic_id)
                     logger.info("[Feishu] running card updated: source=%s card=%s", source_message_id, running_card_id)
             elif msg.is_final:
                 final_card_id = await self._reply_card(
                     source_message_id,
-                    build_button_card(card_request) if card_request else self._compose_card_text(msg.text, msg.metadata),
+                    card_text,
                     **raw_card_kw,
                 )
-                await self._remember_thread_mapping(msg, source_message_id, final_card_id)
-                self._remember_pending_clarification(msg, final_card_id)
-                if card_request:
-                    self._register_pending_card(msg, card_request, final_card_id)
+                await self._remember_card_delivery(msg, card_request, final_card_id, topic_id=card_topic_id)
             elif awaited_running_card_task:
                 logger.warning(
                     "[Feishu] running card task finished without message_id for source=%s, skipping duplicate non-final creation",
@@ -904,13 +935,12 @@ class FeishuChannel(Channel):
         if store is None or not msg.thread_id:
             return
 
-        metadata_topic_ids = [
-            msg.metadata.get("message_id"),
-            msg.metadata.get("root_id"),
-            msg.metadata.get("parent_id"),
-            msg.metadata.get("thread_id"),
-            msg.metadata.get("topic_id"),
-        ]
+        topic_id = self._non_empty_str(msg.metadata.get("topic_id"))
+        metadata_topic_ids = [msg.metadata.get("message_id"), topic_id]
+        if not (topic_id and topic_id.startswith("feishu-card:")):
+            metadata_topic_ids.extend([msg.metadata.get("root_id"), msg.metadata.get("parent_id"), msg.metadata.get("thread_id")])
+        # A reply to an older card stays in that card's thread. Its inherited
+        # root/parent must not overwrite the conversation switched by /new.
         user_id = ""
         raw_user_id = msg.metadata.get("user_id")
         if isinstance(raw_user_id, str):
@@ -1005,16 +1035,16 @@ class FeishuChannel(Channel):
         """
         try:
             value = getattr(data.event.action, "value", None) or {}
-            request_id = value.get("request_id")
+            callback_token = value.get("callback_token")
             option_id = value.get("option_id")
             option_value = value.get("option_value")
             operator_open_id = getattr(data.event.operator, "open_id", None)
         except AttributeError:
             return self._card_action_toast("无法处理的卡片操作", toast_type="warning")
-        if not (request_id and option_value and operator_open_id):
+        if not all(isinstance(item, str) and item for item in (callback_token, option_id, option_value, operator_open_id)):
             return self._card_action_toast("无法处理的卡片操作", toast_type="warning")
 
-        entry, reason = self._card_registry.consume_if_originator(request_id, operator_open_id, option_value=option_value)
+        entry, reason = self._card_registry.consume_if_originator(callback_token, operator_open_id, option_id=option_id, option_value=option_value)
         if reason == "not_originator":
             return self._card_action_toast("仅提问发起人可操作", toast_type="warning")
         if entry is None:
@@ -1027,29 +1057,29 @@ class FeishuChannel(Channel):
                     self._resolve_card_click(entry, option_id=option_id, option_value=option_value, operator_open_id=operator_open_id),
                     self._main_loop,
                     name="resolve_card_click",
-                    msg_id=entry.get("card_message_id") or request_id,
+                    msg_id=entry.get("card_message_id") or entry["request_id"],
                 )
             )
         if not scheduled:
             # Never ack success for a click we could not dispatch: the entry is
             # already consumed, so an honest warning beats a fake "已选择".
-            logger.warning("[Feishu] card click could not be dispatched (no running loop or loop closing): request_id=%s", request_id)
+            logger.warning("[Feishu] card click could not be dispatched (no running loop or loop closing): request_id=%s", entry["request_id"])
             return self._card_action_toast("处理失败，请改用文字回复", toast_type="warning")
         return self._card_action_toast(f"已选择：{option_value}", toast_type="success")
 
-    async def _resolve_card_click(self, entry, *, option_id: str | None, option_value: str, operator_open_id: str) -> None:
+    async def _resolve_card_click(self, entry: PendingCardEntry, *, option_id: str, option_value: str, operator_open_id: str) -> None:
         """Apply a validated click: inject the hidden human-input response first
         (carrying the routing identity the ChannelManager keys on), then flip the
-        card to its terminal state only after the answer is durably in the bus —
+        card to its terminal state only after the answer is admitted to the bus —
         a dropped inbound must never leave a card claiming a choice was recorded."""
         card_message_id = entry.get("card_message_id")
         response = {
             "version": 1,
             "kind": "human_input_response",
-            "source": "feishu_card",
+            "source": entry["source"],
             "request_id": entry["request_id"],
             "response_kind": "option",
-            "option_id": option_id or "",
+            "option_id": option_id,
             "value": option_value,
         }
         inbound = self._make_inbound(
@@ -1060,6 +1090,7 @@ class FeishuChannel(Channel):
             metadata={
                 "message_id": card_message_id,
                 "user_id": operator_open_id,
+                "topic_id": entry.get("topic_id"),
                 "hide_from_ui": True,
                 HUMAN_INPUT_RESPONSE_METADATA_KEY: response,
             },
@@ -1078,18 +1109,30 @@ class FeishuChannel(Channel):
             logger.error("[Feishu] card answer dropped by intake queue; card left clickable but the entry is consumed (request_id=%s)", entry["request_id"])
             return
 
+        self._forget_pending_card_clarification(entry)
         if card_message_id:
             try:
                 await self._update_card(card_message_id, f"✅ 已选择：{option_value}")
             except Exception:
                 logger.exception("[Feishu] failed to mark card resolved: %s", card_message_id)
 
-    def _remember_pending_clarification(self, msg: OutboundMessage, card_message_id: str | None) -> None:
+    def _forget_pending_card_clarification(self, entry: PendingCardEntry) -> None:
+        """Retire only this accepted card's plain-text continuation hint."""
+        key = self._pending_key(entry["chat_id"], entry["originator_open_id"])
+        with self._thread_lock:
+            pending_items = self._pending_clarifications.get(key, [])
+            remaining = [pending for pending in pending_items if not (pending["card_message_id"] == entry.get("card_message_id") and pending["thread_id"] == entry["thread_id"])]
+            if remaining:
+                self._pending_clarifications[key] = remaining
+            else:
+                self._pending_clarifications.pop(key, None)
+
+    def _remember_pending_clarification(self, msg: OutboundMessage, card_message_id: str | None, *, topic_id: str | None = None) -> None:
         if not msg.is_final or msg.metadata.get(PENDING_CLARIFICATION_METADATA_KEY) is not True:
             return
 
         user_id = self._non_empty_str(msg.metadata.get("user_id"))
-        topic_id = self._non_empty_str(msg.metadata.get("topic_id"))
+        topic_id = topic_id or self._non_empty_str(msg.metadata.get("topic_id"))
         source_message_id = self._non_empty_str(msg.thread_ts) or self._non_empty_str(msg.metadata.get("message_id"))
         if not (user_id and topic_id and msg.thread_id and source_message_id and card_message_id):
             return
@@ -1115,7 +1158,7 @@ class FeishuChannel(Channel):
             msg.thread_id,
         )
 
-    def _consume_pending_clarification(self, chat_id: str, user_id: str) -> dict[str, Any] | None:
+    def _consume_pending_clarification(self, chat_id: str, user_id: str, *, reply_to_ids: list[str] | None = None) -> dict[str, Any] | None:
         key = self._pending_key(chat_id, user_id)
         with self._thread_lock:
             pending_items = self._pending_clarifications.get(key)
@@ -1123,19 +1166,23 @@ class FeishuChannel(Channel):
                 return None
 
             now = time.time()
-            while pending_items:
-                pending = pending_items.pop(0)
-                created_at = pending.get("created_at")
-                if isinstance(created_at, (int, float)) and now - created_at <= PENDING_CLARIFICATION_TTL_SECONDS:
-                    if pending_items:
-                        self._pending_clarifications[key] = pending_items
-                    else:
-                        self._pending_clarifications.pop(key, None)
-                    return pending
-                logger.info("[Feishu] pending clarification expired: chat_id=%s user_id=%s", chat_id, user_id)
-
-            self._pending_clarifications.pop(key, None)
-            return None
+            pending_items = [pending for pending in pending_items if isinstance(pending.get("created_at"), (int, float)) and now - pending["created_at"] <= PENDING_CLARIFICATION_TTL_SECONDS]
+            # Explicit replies target a card/source, while accepted ordinary
+            # replies use their current thread alias. Shared roots cannot select
+            # a card belonging to a conversation replaced by /new.
+            if reply_to_ids is None:
+                matched = 0 if pending_items else None
+            else:
+                matched = next(
+                    (index for field in ("card_message_id", "source_message_id", "topic_id") for candidate in reply_to_ids for index, pending in enumerate(pending_items) if pending.get(field) == candidate),
+                    None,
+                )
+            pending = pending_items.pop(matched) if matched is not None else None
+            if pending_items:
+                self._pending_clarifications[key] = pending_items
+            else:
+                self._pending_clarifications.pop(key, None)
+            return pending
 
     def _route_without_store(self, parsed: _ParsedMessage) -> _Routing:
         """Routing for a channel constructed without a ``channel_store`` (no lookups possible)."""
@@ -1144,11 +1191,14 @@ class FeishuChannel(Channel):
             topic_id = None
         if parsed.msg_type != InboundMessageType.CHAT:
             return _Routing(topic_id, False, False)
-        pending = self._consume_pending_clarification(parsed.chat_id, parsed.sender_id)
+        if self._card_interaction_enabled and parsed.chat_type == "p2p" and not (parsed.root_id or parsed.parent_id or parsed.feishu_thread_id):
+            return _Routing(None, False, False)
+        reply_to_ids = [parsed.parent_id] if self._card_interaction_enabled and parsed.parent_id else None
+        pending = self._consume_pending_clarification(parsed.chat_id, parsed.sender_id, reply_to_ids=reply_to_ids)
         pending_topic_id = self._non_empty_str(pending.get("topic_id")) if pending else None
         if not pending_topic_id:
             return _Routing(topic_id, False, False)
-        return _Routing(pending_topic_id, False, True)
+        return _Routing(pending_topic_id, False, True, self._non_empty_str(pending.get("card_message_id")))
 
     async def _resolve_routing(self, attempt: _RoutingAttempt) -> _Routing:
         """Decide a message's topic on the Gateway loop, consulting and updating the channel store.
@@ -1167,13 +1217,23 @@ class FeishuChannel(Channel):
             if candidates:
                 stored = await self._first_stored_topic(store, parsed.chat_id, candidates)
                 if stored:
+                    pending = (
+                        self._consume_pending_clarification(parsed.chat_id, parsed.sender_id, reply_to_ids=[parsed.parent_id]) if self._card_interaction_enabled and parsed.msg_type == InboundMessageType.CHAT and parsed.parent_id else None
+                    )
+                    if pending:
+                        return _Routing(pending["topic_id"], True, True, self._non_empty_str(pending.get("card_message_id")))
                     return _Routing(stored, True, False)
             topic_id: str | None = parsed.root_id or parsed.msg_id
             if parsed.chat_type == "p2p":
                 topic_id = None
             if parsed.msg_type != InboundMessageType.CHAT:
                 return _Routing(topic_id, False, False)
-            pending = self._consume_pending_clarification(parsed.chat_id, parsed.sender_id)
+            if self._card_interaction_enabled and parsed.chat_type == "p2p" and not candidates:
+                # Unthreaded P2P messages follow the current conversation,
+                # including /new. Only explicit card replies use the old alias.
+                return _Routing(None, False, False)
+            reply_to_ids = [parsed.parent_id] if self._card_interaction_enabled and parsed.parent_id else None
+            pending = self._consume_pending_clarification(parsed.chat_id, parsed.sender_id, reply_to_ids=reply_to_ids)
             if not (pending and self._non_empty_str(pending.get("topic_id"))):
                 return _Routing(topic_id, False, False)
             attempt.pending = pending
@@ -1181,7 +1241,7 @@ class FeishuChannel(Channel):
         thread_id = self._non_empty_str(attempt.pending.get("thread_id"))
         if thread_id:
             await store.set_thread_id(self.name, parsed.chat_id, thread_id, topic_id=pending_topic_id, user_id=parsed.sender_id)
-        return _Routing(pending_topic_id, False, True)
+        return _Routing(pending_topic_id, False, True, self._non_empty_str(attempt.pending.get("card_message_id")))
 
     async def _resolve_routing_bounded(self, attempt: _RoutingAttempt) -> _Routing | StoreLookupUnresolved:
         """``_resolve_routing`` under the store deadline; no answer in time (or a store error) is *unresolved*.
@@ -1340,6 +1400,8 @@ class FeishuChannel(Channel):
             }
             if source_preview:
                 metadata[SOURCE_PREVIEW_METADATA_KEY] = source_preview
+            if routing.clarification_card_id:
+                metadata[_PENDING_CARD_METADATA_KEY] = routing.clarification_card_id
 
             inbound = self._make_inbound(
                 chat_id=parsed.chat_id,
@@ -1530,7 +1592,16 @@ class FeishuChannel(Channel):
     ) -> None:
         """Kick off Feishu side effects without delaying inbound dispatch."""
         try:
+            clarification_card_id = inbound.metadata.pop(_PENDING_CARD_METADATA_KEY, None)
             inbound = await self._attach_connection_identity(inbound)
+            if self._card_interaction_enabled and not clarification_card_id and inbound.msg_type == InboundMessageType.CHAT:
+                # Ordinary answers retire only the current thread's buttons;
+                # older cards cannot redirect a fresh /new conversation.
+                thread_id = await lookup_thread_id(inbound, repo=self._connection_repo, store=self.config.get("channel_store"))
+                pending = self._consume_pending_clarification(inbound.chat_id, inbound.user_id, reply_to_ids=[f"feishu-card:{thread_id}"]) if thread_id else None
+                if pending:
+                    clarification_card_id = pending.get("card_message_id")
+                    inbound.metadata[RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY] = True
             reaction_message_ids = source_message_ids or [msg_id]
             for reaction_message_id in reaction_message_ids:
                 reaction_task = asyncio.create_task(self._add_reaction(reaction_message_id, "OK"))
@@ -1538,8 +1609,11 @@ class FeishuChannel(Channel):
             self._ensure_running_card_started(msg_id, metadata=inbound.metadata)
             if reservation is None:
                 await self.bus.publish_inbound(inbound)
+                published = True
             else:
-                self._commit_reserved_inbound(reservation, inbound)
+                published = self._commit_reserved_inbound(reservation, inbound)
+            if published and clarification_card_id:
+                self._card_registry.discard_card(inbound.chat_id, inbound.user_id, clarification_card_id)
         finally:
             if reservation is not None:
                 reservation.release()
