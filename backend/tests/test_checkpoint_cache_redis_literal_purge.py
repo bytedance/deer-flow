@@ -10,25 +10,26 @@ from deerflow.runtime.checkpoint_cache.redis import RedisCheckpointHistoryCache
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    ("prefix", "pattern"),
+    ("prefix", "thread_id", "sibling_thread_id", "pattern"),
     [
-        ("tenant*", r"tenant\*:t1:*"),
-        ("tenant?", r"tenant\?:t1:*"),
-        ("tenant[ab]", r"tenant\[ab\]:t1:*"),
-        (r"tenant\name", r"tenant\\name:t1:*"),
-        ("plain", "plain:t1:*"),
+        ("tenant*", "t1", "t10", r"tenant\*:t1:*"),
+        ("tenant?", "t1", "t10", r"tenant\?:t1:*"),
+        ("tenant[ab]", "t1", "t10", r"tenant\[ab\]:t1:*"),
+        (r"tenant\name", "t1", "t10", r"tenant\\name:t1:*"),
+        ("plain", "t1", "t10", "plain:t1:*"),
+        ("plain", "t1*", "t10", r"plain:t1\*:*"),
     ],
 )
-async def test_purge_escapes_namespace_and_filters_results(prefix, pattern):
+async def test_purge_escapes_namespace_and_filters_results(prefix, thread_id, sibling_thread_id, pattern):
     # Exercise the actual purge method without needing a running Redis server.
     # The expected SCAN pattern is a wire-level Redis glob contract; returned
     # keys also include a foreign namespace to pin the final deletion fence.
     cache = RedisCheckpointHistoryCache.__new__(RedisCheckpointHistoryCache)
     client = AsyncMock()
     cache._client = client
-    owned = make_history_key(prefix, "t1", "", "c1", "messages").encode()
-    foreign = make_history_key("tenant-other", "t1", "", "c1", "messages").encode()
-    sibling = make_history_key(prefix, "t10", "", "c1", "messages").encode()
+    owned = make_history_key(prefix, thread_id, "", "c1", "messages").encode()
+    foreign = make_history_key("tenant-other", thread_id, "", "c1", "messages").encode()
+    sibling = make_history_key(prefix, sibling_thread_id, "", "c1", "messages").encode()
 
     async def scan(*, cursor, match, count):
         assert match == pattern
@@ -41,7 +42,7 @@ async def test_purge_escapes_namespace_and_filters_results(prefix, pattern):
         return 0, [owned.decode()]
 
     client.scan.side_effect = scan
-    await cache.adelete_thread(prefix, "t1")
+    await cache.adelete_thread(prefix, thread_id)
     assert client.unlink.await_args_list[0].args == (owned,)
     assert client.unlink.await_args_list[1].args == (owned.decode(),)
 
