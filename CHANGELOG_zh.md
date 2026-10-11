@@ -3215,6 +3215,12 @@
   回到默认工作区；工作区布局无法读取请求 URL，因此现在改由浏览器发起跳转，在
   `next` 中保留完整地址。客户端会话检查（`AuthProvider.refreshUser`、
   `useRequireAuth`）此前保留了路径但丢掉了查询参数，共享 fetcher 则丢掉了锚点；现在都保留完整地址。([#6681])
+- **沙箱：** AIO、E2B、OpenSandbox 提供者和 ACP agent 不再对
+  `sandbox.environment` / `acp_agents.<name>.env` 的值做第二次解析。加载
+  `config.yaml` 时已替换每个 `$VAR`，因此本身以 `$` 开头的已解析密钥（如
+  `$2b$12$...` 形式的 bcrypt 哈希或生成的密码）会再次被当作变量名查找，传入沙箱
+  或 agent 时变成空字符串；若同名主机变量存在，则变成该变量的值。现在这些值按
+  加载结果原样传递，与 BoxLite 和本地提供者一致。([#6673])
 
 ### 安全
 
@@ -7715,4 +7721,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6635]: https://github.com/bytedance/deer-flow/pull/6635
 [#6636]: https://github.com/bytedance/deer-flow/pull/6636
 [#6666]: https://github.com/bytedance/deer-flow/pull/6666
+[#6673]: https://github.com/bytedance/deer-flow/pull/6673
 [#6681]: https://github.com/bytedance/deer-flow/pull/6681

@@ -4187,6 +4187,14 @@ This release closes that milestone with **439 merged pull requests**.
   checks (`AuthProvider.refreshUser`, `useRequireAuth`) kept the path but
   dropped the query string, and the shared fetcher dropped the fragment; all of
   them now keep the full address. ([#6681])
+- **sandbox:** The AIO, E2B and OpenSandbox providers and ACP agents no longer
+  resolve `sandbox.environment` / `acp_agents.<name>.env` values a second time.
+  `config.yaml` loading already replaces each `$VAR`, so a resolved secret that
+  itself starts with `$` (a bcrypt hash such as `$2b$12$...`, a generated
+  password) was looked up again as a variable name and reached the sandbox or
+  agent as an empty string, or as an unrelated host variable's value when that
+  name existed. Values are now passed through as loaded, as BoxLite and the
+  local provider already did. ([#6673])
 
 ### Security
 
@@ -9599,4 +9607,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6635]: https://github.com/bytedance/deer-flow/pull/6635
 [#6636]: https://github.com/bytedance/deer-flow/pull/6636
 [#6666]: https://github.com/bytedance/deer-flow/pull/6666
+[#6673]: https://github.com/bytedance/deer-flow/pull/6673
 [#6681]: https://github.com/bytedance/deer-flow/pull/6681

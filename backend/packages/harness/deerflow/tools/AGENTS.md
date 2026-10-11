@@ -7,6 +7,21 @@ closers paired with openers inside the detected reference (including literal
 glob directory names). Structured references remain literal. See
 [tool artifact middleware](../agents/middlewares/TOOL_ARTIFACTS.md).
 
+Deferred-tool regex discovery uses `regex.VERSION0` with a shared 100 ms
+deadline per ranked query, including required-name scoring. Validate the bounded
+pattern with stdlib `re` first to preserve the invalid-regex literal fallback
+and avoid admitting engine-specific recursion syntax. Compile once per query;
+bound each searchable field before concatenation and count matches with an
+iterator. Budget failure raises `ToolSearchLimitError`; the tool returns a retry
+hint and no promotions, never a partial ranking. `select:` and the literal
+`keywords:` path bypass these regex limits.
+Field-limit errors identify the tool (name preview capped at 128 characters),
+field and length, and direct the model to `keywords:` or `select:` rather than
+query simplification. Log the same bounded identity with the logical MCP server
+name when available; never log the oversized description. Keep the model-visible
+tool description aligned with these limits. Pathological-regex subprocess tests
+allow 30 seconds for cold startup while matching retains its 100 ms budget.
+
 `task` and `batch_task` opt into JSON checks with `file:<path> json-valid`.
 See [subagents/AGENTS.md](../subagents/AGENTS.md) for read limits and UNVERIFIED semantics.
 Batch readers bound by assembly use its AppConfig output budget. Fit the complete escaped response under 10K and active per-tool/fallback limits; too-small envelopes stop reading. Numeric reader inputs are strict integers. Escape `<` in outer JSON to preserve untrusted data without exposing framework tags; decoding restores the document unchanged.
