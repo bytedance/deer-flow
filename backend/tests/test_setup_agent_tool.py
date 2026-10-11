@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -203,3 +204,54 @@ class TestSetupAgentEmptySoulGuard:
         _call_setup_agent(tmp_path, soul="   ", description="desc")
 
         assert existing_soul.read_text(encoding="utf-8") == "original per-agent soul"
+
+
+class TestSetupAgentGlobalSoulAtomicPublish:
+    """The default agent's SOUL.md must never be observable half written."""
+
+    def _write_global_soul(self, tmp_path: Path, soul: str):
+        with patch("deerflow.tools.builtins.setup_agent_tool.get_paths", return_value=_make_paths_mock(tmp_path)), patch("deerflow.config.agents_config.get_paths", return_value=_make_paths_mock(tmp_path)):
+            return setup_agent.func(
+                soul=soul,
+                description="desc",
+                runtime=_DummyRuntime(context={"agent_name": None}, tool_call_id="tool-global"),
+            )
+
+    def test_publishes_full_soul_without_leaving_temps(self, tmp_path: Path):
+        result = self._write_global_soul(tmp_path, "# Persona\n\nBe kind.")
+
+        soul_path = tmp_path / "SOUL.md"
+        assert soul_path.read_text(encoding="utf-8") == "# Persona\n\nBe kind."
+        assert list(tmp_path.glob("*.tmp")) == []
+        assert "created successfully" in result.update["messages"][0].content
+
+    def test_failed_publish_keeps_the_previous_soul(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        soul_path = tmp_path / "SOUL.md"
+        soul_path.write_text("original global soul", encoding="utf-8")
+
+        def _boom(*args, **kwargs):
+            raise OSError("read-only filesystem")
+
+        monkeypatch.setattr(os, "replace", _boom)
+        result = self._write_global_soul(tmp_path, "replacement soul")
+
+        # A truncating write would have emptied SOUL.md before failing, leaving
+        # every later run with a persona file missing its instructions;
+        # publishing through a temporary file cannot.
+        assert soul_path.read_text(encoding="utf-8") == "original global soul"
+        assert list(tmp_path.glob("*.tmp")) == []
+        assert "Error" in result.update["messages"][0].content
+
+    def test_truncating_write_would_have_destroyed_it(self, tmp_path: Path):
+        """Control: the previous implementation loses the content in the same failure."""
+        soul_path = tmp_path / "SOUL.md"
+        soul_path.write_text("original global soul", encoding="utf-8")
+
+        try:
+            with open(soul_path, "w", encoding="utf-8") as handle:
+                handle.write("replacement soul")
+                raise OSError("read-only filesystem")
+        except OSError:
+            pass
+
+        assert soul_path.read_text(encoding="utf-8") != "original global soul"
