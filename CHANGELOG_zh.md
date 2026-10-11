@@ -3192,11 +3192,22 @@
   换一个新版本号。现在该脚本还会在 `backend/` 中运行 `uv lock --check`（PEP 440
   规范化交给 uv，`2.1.0-rc0` 仍与 `2.1.0rc0` 匹配），缺少 `uv` 时直接失败；
   `verify-versions.yml` 会安装与 backend 镜像相同的固定 uv 版本。([#6588])
+
 - **TUI：** TUI 拒绝发送的消息现在会保留在输入框中。此前提交时会先清空输入框再检查能否发送，
   因此在运行进行中、被中断的运行尚未停止，或运行无法启动时输入的提示会被一条提示信息取代，
   只能在输入历史中找回；命令行传入的启动消息在运行无法启动时则会完全丢失。
-  现在输入框会按输入历史记录的文本恢复消息，把光标放在末尾并保持命令面板关闭，按 `Enter` 即可重新发送；
+  现在输入框会按输入历史记录的文本恢复消息，把光标放在末尾并保持命令面板关闭，
+  按 `Enter` 即可重新发送；
   被接受的消息和本地斜杠命令仍会像以前一样清空输入框。([#6666])
+
+- **TUI：** `deerflow --print` 和 `--json` 不再丢弃未加引号消息中的词。此前这两个
+  选项只接收一个值，也从不读取位置参数，因此 `deerflow --print summarize this repo`
+  只会发送 `summarize`，`deerflow summarize this repo --print` 在终端中会以退出码 2
+  要求提供消息，而有管道 stdin 时命令行上输入的词会被悄悄忽略。现在两个选项会接收
+  其后的所有词，并像 `--cli` 一样在没有值时使用选项之前的词；命令行上输入的消息
+  优先于管道 stdin。消息被选项分隔在两侧时（`deerflow hello --print there`），
+  由于词序无法还原，会以退出码 2 退出并提示加引号。同时传入 `--print` 和 `--json`
+  现在会以退出码 2 退出，而不是运行 `--print` 并丢弃 `--json` 的消息。([#6636])
 
 ### 安全
 
@@ -7695,4 +7706,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6611]: https://github.com/bytedance/deer-flow/pull/6611
 [#6613]: https://github.com/bytedance/deer-flow/pull/6613
 [#6635]: https://github.com/bytedance/deer-flow/pull/6635
+[#6636]: https://github.com/bytedance/deer-flow/pull/6636
 [#6666]: https://github.com/bytedance/deer-flow/pull/6666

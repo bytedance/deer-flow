@@ -4155,6 +4155,7 @@ This release closes that milestone with **439 merged pull requests**.
   normalization, so `2.1.0-rc0` still matches `2.1.0rc0`) and fails when `uv` is
   missing; `verify-versions.yml` installs the uv version the backend image pins.
   ([#6588])
+
 - **tui:** A message the TUI refuses to send now stays in the composer. Submitting
   cleared the composer before the send was checked, so a prompt typed during an
   active run, while an interrupted run was still stopping, or when the run could
@@ -4164,6 +4165,17 @@ This release closes that milestone with **439 merged pull requests**.
   at its end and the command palette closed, so `Enter` resends it; accepted
   messages and local slash commands clear it as before.
   ([#6666])
+
+- **tui:** `deerflow --print` and `--json` no longer drop words of an unquoted
+  message. Each flag took a single value and never read the positional words,
+  so `deerflow --print summarize this repo` sent only `summarize`,
+  `deerflow summarize this repo --print` exited 2 asking for a message on a
+  terminal, and with piped stdin the typed words were silently ignored. Both flags now take every word
+  that follows them and fall back to words given before them, as `--cli` does;
+  a typed message wins over piped stdin. A message split around the flag
+  (`deerflow hello --print there`) exits 2 with a hint to quote it, since its
+  word order cannot be recovered. Passing both `--print` and `--json` now exits
+  2 instead of running `--print` and dropping the `--json` message. ([#6636])
 
 ### Security
 
@@ -9574,4 +9586,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6611]: https://github.com/bytedance/deer-flow/pull/6611
 [#6613]: https://github.com/bytedance/deer-flow/pull/6613
 [#6635]: https://github.com/bytedance/deer-flow/pull/6635
+[#6636]: https://github.com/bytedance/deer-flow/pull/6636
 [#6666]: https://github.com/bytedance/deer-flow/pull/6666
