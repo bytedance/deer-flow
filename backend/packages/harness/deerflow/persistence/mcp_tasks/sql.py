@@ -659,25 +659,46 @@ class McpTaskRepository:
         async with self._sf() as session:
             rows = list((await session.execute(stmt)).scalars())
             expires_at = now + timedelta(seconds=lease_seconds)
+            claimed: list[McpTaskRow] = []
             for row in rows:
                 row.notification_lease_owner = lease_owner
                 row.notification_lease_expires_at = expires_at
                 row.notification_lease_token = _new_claim_token()
                 rebuild_snapshot = row.notification_status in ("pending", "claimed") or (row.notification_status == "retry" and row.dispatch_version != row.event_version)
+                event = (
+                    _notification_event(
+                        row,
+                        tracking_degraded=int(row.consecutive_poll_error_count or 0) >= tracking_degraded_after_errors,
+                    )
+                    if rebuild_snapshot
+                    else row.dispatch_event
+                )
+                if event is None:
+                    # The condition behind this snapshot resolved before delivery
+                    # (for example tracking recovered, or an input_required prompt
+                    # was answered), or the row carries an empty snapshot left by
+                    # a pre-fix claim. Consume it instead of claiming an empty
+                    # notification; a later transition records a fresh pending
+                    # snapshot with a higher event version.
+                    row.notified_version = row.event_version
+                    row.notification_status = "none"
+                    row.notification_lease_owner = None
+                    row.notification_lease_expires_at = None
+                    row.notification_lease_token = None
+                    row.updated_at = now
+                    continue
                 if rebuild_snapshot:
                     if row.dispatch_version != row.event_version:
                         row.dispatch_attempt = 0
                         row.notification_attempt_count = 0
                     row.dispatch_version = row.event_version
-                    row.dispatch_event = _notification_event(
-                        row,
-                        tracking_degraded=int(row.consecutive_poll_error_count or 0) >= tracking_degraded_after_errors,
-                    )
+                    row.dispatch_event = event
                     row.notification_run_id = None
                     row.notification_status = "claimed"
                 row.updated_at = now
+                claimed.append(row)
             await session.commit()
-            return [self._row_to_dict(row) for row in rows]
+            return [self._row_to_dict(row) for row in claimed]
 
     async def begin_notification_launch(
         self,

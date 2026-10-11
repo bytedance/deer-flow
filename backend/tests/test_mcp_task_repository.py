@@ -1574,6 +1574,113 @@ async def test_notification_retry_rebuilds_a_newer_event_and_resets_its_budget(t
 
 
 @pytest.mark.asyncio
+async def test_resolved_notification_snapshot_is_consumed_instead_of_launched_empty(tmp_path):
+    """A degraded snapshot that recovers before delivery must not launch empty.
+
+    Three poll failures record the tracking-degraded snapshot; the next poll
+    succeeds before any notification worker claims it. The resolved snapshot
+    must be consumed (nothing to notify) instead of being rebuilt as an empty
+    event and launched.
+    """
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-recovered", now=now)
+
+    for _ in range(3):
+        claimed = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=10)
+        await repo.release_claim(
+            "task-recovered",
+            lease_owner="poller",
+            lease_token=claimed[0]["lease_token"],
+            next_poll_at=now - timedelta(seconds=1),
+            error="temporary network failure",
+        )
+    degraded = await repo.get("task-recovered", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+    assert degraded is not None
+    assert degraded["notification_status"] == "pending"
+    assert degraded["event_version"] == 1
+
+    claimed = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=10)
+    applied = await repo.apply_snapshot(
+        "task-recovered",
+        lease_owner="poller",
+        lease_token=claimed[0]["lease_token"],
+        status="working",
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        next_poll_at=now + timedelta(seconds=5),
+        polled_at=now,
+    )
+    assert applied is True
+
+    notifications = await repo.claim_notification_work(
+        now=datetime.now(UTC),
+        lease_owner="notifier",
+        lease_seconds=60,
+        limit=10,
+        tracking_degraded_after_errors=3,
+    )
+    assert notifications == []
+
+    stored = await repo.get("task-recovered", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+    assert stored is not None
+    assert stored["notification_status"] == "none"
+    assert stored["notified_version"] == stored["event_version"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_empty_notification_retry_is_consumed_on_claim(tmp_path):
+    """Rows left by pre-fix claims can carry no event; claiming must consume them.
+
+    A pre-fix worker could claim a stale snapshot, fail delivery, and release it
+    as ``retry`` while ``dispatch_event`` stayed ``None`` and ``dispatch_version``
+    already matched ``event_version``. Re-claiming would launch another empty
+    notification on every retry until dead-lettering, so the claim must consume
+    it instead.
+    """
+    from sqlalchemy import update as sql_update
+
+    from deerflow.persistence.mcp_tasks.model import McpTaskRow
+
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-legacy-empty", now=now)
+
+    async with repo._sf() as session:
+        await session.execute(
+            sql_update(McpTaskRow)
+            .where(McpTaskRow.id == "task-legacy-empty")
+            .values(
+                notification_status="retry",
+                event_version=1,
+                notified_version=0,
+                dispatch_version=1,
+                dispatch_event=None,
+                next_notification_at=now,
+            )
+        )
+        await session.commit()
+
+    notifications = await repo.claim_notification_work(
+        now=datetime.now(UTC),
+        lease_owner="notifier",
+        lease_seconds=60,
+        limit=10,
+        tracking_degraded_after_errors=3,
+    )
+    assert notifications == []
+
+    stored = await repo.get("task-legacy-empty", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+    assert stored is not None
+    assert stored["notification_status"] == "none"
+    assert stored["notified_version"] == stored["event_version"]
+
+
+@pytest.mark.asyncio
 async def test_unexpected_notification_failure_releases_lease_without_changing_phase(tmp_path):
     repo = await _make_repo(tmp_path)
     now = datetime.now(UTC)
