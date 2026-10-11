@@ -5,8 +5,8 @@
 floats and ``OverflowError``. Those audits had to be read file by file because
 each provider owned its own copy of the answer.
 
-``deerflow.community.search_max_results`` owns coercion for the four migrated
-providers whose copies were byte-identical. These tests pin three things the
+``deerflow.community.search_max_results`` owns coercion for the migrated
+providers. These tests pin three things the
 refactor must not silently give back:
 
 1. the shared function's behaviour, value by value (the bar itself);
@@ -31,6 +31,7 @@ from deerflow.community.fastcrw import tools as fastcrw_tools
 from deerflow.community.firecrawl import tools as firecrawl_tools
 from deerflow.community.image_search import tools as image_search_tools
 from deerflow.community.search_max_results import DEFAULT_MAX_RESULTS, coerce_max_results
+from deerflow.community.youcom import tools as youcom_tools
 
 COMMUNITY_ROOT = Path(ddg_search_tools.__file__).resolve().parent.parent
 
@@ -43,6 +44,7 @@ SHARED_OWNER_PROVIDERS = {
     "image_search": ("DDG image search", image_search_tools),
     "fastcrw": ("fastCRW", fastcrw_tools),
     "firecrawl": ("Firecrawl", firecrawl_tools),
+    "youcom": ("You.com", youcom_tools),
 }
 
 # Providers that still normalize locally, including Exa's generic helper and
