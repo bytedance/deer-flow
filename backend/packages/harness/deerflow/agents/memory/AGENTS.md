@@ -96,6 +96,14 @@ that deadline. Consumer backlog and LLM latency can still delay completion.
 Early wakeups rearm with a 50 ms minimum; arrivals during extraction wait for
 the finishing worker to rearm. Emergency snapshots are immediately eligible;
 `flush`, `flush_nowait`, and `flush_sync` make all pending items eligible.
+Coalesce only normal full-conversation updates. Each compaction snapshot must
+remain separate, even for the same key or while the consumer is busy: later
+snapshots do not contain earlier messages removed from graph state. Preserve
+each snapshot's signals, trace, and scope, and admit it under backpressure.
+`tests/test_memory_compaction_snapshots.py` covers repeated hooks through real
+file persistence, a busy worker, normal coalescing, scoped cancellation, and
+independent extraction failures. Failed snapshots remain best-effort, without
+durable replay.
 Tests in `tests/test_memory_queue_deadlines.py` use a fake monotonic clock and
 timer to exercise scheduling without timing-sensitive sleeps.
 

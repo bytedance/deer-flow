@@ -2460,6 +2460,10 @@ DeerMem debounces pending updates independently per conversation, user, and agen
 and `max_wait_seconds` caps debounce deferral from the first pending update
 (default 300 seconds). Activity in another conversation cannot extend that wait.
 Extraction remains serial, so backlog and LLM latency can still delay completion.
+Before context compaction removes messages, each memory snapshot is queued
+separately, including repeated compactions in the same conversation. Later
+snapshots cannot overwrite an earlier batch waiting for extraction. This is
+best-effort capture: failed extraction or abrupt shutdown can still lose a batch.
 
 The opt-in [DeerMem scope-isolation benchmark](backend/scripts/benchmark/deermem_scope_isolation/README.md)
 checks semantic safety across facts and summaries, and fact routing across users
