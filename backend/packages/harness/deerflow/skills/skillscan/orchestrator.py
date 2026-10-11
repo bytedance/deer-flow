@@ -141,6 +141,11 @@ _SENSITIVE_PATH_RE = re.compile(r"(~/.ssh|/etc/passwd|/etc/shadow|/var/run/docke
 _EXTERNAL_HTTP_RE = re.compile(r"(?i:http)://(?:[^/?#\s)'\"<>]*@)?(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(?::\d+)?(?:/|\b|(?=$|[\s)'\"<>?#]))")
 _URL_RE = re.compile(r"(?i:https?)://[^\s)'\"<>]+")
 _LOCAL_HTTP_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+# A fork bomb is matched by shape, not spelling: any shell function whose body
+# recurses through a pipe into a background job. Kept aligned with the runtime
+# gate in agents/middlewares/sandbox_audit_middleware.py so the pre-LLM static
+# scan never passes a payload (renamed or respaced included) the sandbox blocks.
+_FORK_BOMB_PATTERN = r"\S+\(\)\s*\{[^}]*\|\s*\S+\s*&"
 # `rm` with a recursive flag (any order/combination, optional --no-preserve-root)
 # targeting the filesystem root, a wildcard, or a complete system-root directory.
 # Subpaths like ``/tmp/scratch`` or ``/home/user/project`` stay unflagged.
@@ -1148,7 +1153,10 @@ def _scan_shell(rel_path: str, text: str) -> list[SecurityFinding]:
             if tokens and _env_launches_shell(tokens):
                 findings.append(_finding_from_match("shell-curl-pipe-shell", rel_path, code, pipe_match))
                 break
-    if match := re.search(_DESTRUCTIVE_RM_RE + r"|:\(\)\{\s*:\|:&\s*\};:|dd\s+[^#\n]*\bof=/dev/", text):
+    if match := re.search(
+        _DESTRUCTIVE_RM_RE + r"|" + _FORK_BOMB_PATTERN + r"|dd\s+[^#\n]*\bof=/dev/",
+        text,
+    ):
         findings.append(_finding_from_match("shell-destructive-command", rel_path, text, match))
     # Only a command position counts, and only in shell code: see `_shell_code_only`.
     for match in _SHELL_ENV_COMMAND_RE.finditer(code):
@@ -1169,7 +1177,7 @@ def _scan_network_and_resource(rel_path: str, text: str) -> list[SecurityFinding
     findings: list[SecurityFinding] = []
     if match := re.search(r"(169\.254\.169\.254|metadata\.google\.internal)", text, re.IGNORECASE):
         findings.append(_finding_from_match("network-cloud-metadata", rel_path, text, match))
-    if match := re.search(r":\(\)\{\s*:\|:&\s*\};:", text):
+    if match := re.search(_FORK_BOMB_PATTERN, text):
         findings.append(_finding_from_match("resource-fork-bomb", rel_path, text, match))
     for match in _EXTERNAL_HTTP_RE.finditer(text):
         host = _http_host(match.group(0)) or ""
