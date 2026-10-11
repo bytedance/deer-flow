@@ -352,11 +352,34 @@ class TestWebSearchTool:
         assert parsed["error"] == "timeout"
 
 
-def test_coerce_max_results_inf_falls_back_to_default():
-    """A YAML `.inf` max_results must fall back to the default, not crash."""
-    import deerflow.community.youcom.tools as youcom_mod
+@pytest.mark.parametrize(
+    "raw",
+    [float("inf"), True, 3.5],
+    ids=["yaml-inf", "bool", "non-integral-float"],
+)
+def test_invalid_max_results_shapes_fall_back_to_default(raw):
+    """Invalid max_results shapes fall back to the default, never crash or truncate.
 
-    assert youcom_mod._coerce_max_results(float("inf")) == youcom_mod._DEFAULT_MAX_RESULTS
+    These pin the shared-owner bar for this provider: a YAML ``.inf`` makes
+    ``int()`` raise ``OverflowError``, a YAML ``true`` is a bool (never 1),
+    and ``3.5`` must not silently truncate to 3. The shared
+    ``coerce_max_results`` owns the rejection profile; this provider only
+    adds the 1-100 cap on top.
+    """
+    with patch("deerflow.community.youcom.tools.get_app_config") as mock:
+        tool_config = MagicMock()
+        tool_config.model_extra = {"api_key": "***", "max_results": raw}
+        mock.return_value.get_tool_config.return_value = tool_config
+        patcher, mock_client_cls = _patch_get(_make_response({"results": {"web": [_web()]}}))
+        try:
+            from deerflow.community.youcom.tools import web_search_tool
+
+            web_search_tool.invoke({"query": "test"})
+            params = _get_call(mock_client_cls).kwargs["params"]
+        finally:
+            patcher.stop()
+
+    assert params["count"] == 5
 
 
 def test_package_exports_web_search_tool():

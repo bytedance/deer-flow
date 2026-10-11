@@ -36,6 +36,7 @@ from importlib.metadata import PackageNotFoundError, version
 import httpx
 from langchain.tools import tool
 
+from deerflow.community.search_max_results import coerce_max_results
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -84,13 +85,18 @@ def _get_api_key(tool_name: str = "web_search") -> str | None:
     return None
 
 
-def _coerce_max_results(value: object, *, default: int = _DEFAULT_MAX_RESULTS) -> int:
-    try:
-        coerced = int(value)
-    except (TypeError, ValueError, OverflowError):
-        logger.warning("Invalid You.com max_results=%r; using default %s", value, default)
-        coerced = default
-    return max(1, min(coerced, _MAX_RESULTS_CAP))
+def _count_for_request(value: object) -> int:
+    """Coerce ``max_results`` via the shared owner, then mirror You.com's clamp.
+
+    ``deerflow.community.search_max_results.coerce_max_results`` owns what
+    "invalid" means (booleans, non-integral floats and ``OverflowError`` all
+    fall back to the default); the 1-100 cap stays here because clamping
+    policy is deliberately per-provider.
+    """
+    return min(
+        coerce_max_results(value, provider="You.com", logger=logger, default=_DEFAULT_MAX_RESULTS),
+        _MAX_RESULTS_CAP,
+    )
 
 
 def _search(api_key: str | None, query: str, count: int) -> dict:
@@ -138,7 +144,7 @@ def web_search_tool(query: str, max_results: int | None = None) -> str:
         config = get_app_config().get_tool_config("web_search")
         if config is not None:
             max_results = (config.model_extra or {}).get("max_results")
-    count = _DEFAULT_MAX_RESULTS if max_results is None else _coerce_max_results(max_results)
+    count = _DEFAULT_MAX_RESULTS if max_results is None else _count_for_request(max_results)
 
     api_key = _get_api_key("web_search")
 
