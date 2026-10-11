@@ -595,6 +595,52 @@ class TestWaitForRunCompletion:
 
         asyncio.run(run())
 
+    def test_wait_completes_after_cancel_takeover_of_crashed_owner(self) -> None:
+        """A cancel takeover must wake a waiting consumer; no producer survives.
+
+        Regression: the takeover path wrote ``error`` without the
+        orphan-recovery stop reason, so ``/wait`` (and SSE joins) kept looping
+        on heartbeats waiting for an END the dead owner can no longer publish.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        from app.gateway.services import wait_for_run_completion
+        from deerflow.config.run_ownership_config import RunOwnershipConfig
+        from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+        async def run() -> None:
+            store = MemoryRunStore()
+            grace = 10
+            expired_lease = (datetime.now(UTC) - timedelta(seconds=grace + 5)).isoformat()
+            await store.put(
+                "takeover-wait",
+                thread_id=THREAD_ID,
+                status="running",
+                created_at=datetime.now(UTC).isoformat(),
+                owner_worker_id="dead-worker",
+                lease_expires_at=expired_lease,
+            )
+            mgr = RunManager(
+                store=store,
+                run_ownership_config=RunOwnershipConfig(lease_seconds=30, grace_seconds=grace, heartbeat_enabled=True),
+            )
+            record = await mgr.get("takeover-wait")
+            assert record is not None
+            assert record.store_only is True
+
+            outcome = await mgr.cancel("takeover-wait", action="interrupt")
+            assert outcome == CancelOutcome.taken_over
+
+            bridge = _FastHeartbeatBridge()
+            completed = await asyncio.wait_for(
+                wait_for_run_completion(bridge, record, _FakeRequest(), mgr),
+                timeout=1.0,
+            )
+
+            assert completed is True
+
+        asyncio.run(run())
+
 
 @pytest.mark.parametrize("route_name", ["stateless_wait", "thread_wait", "cancel_wait", "cancel_stream_wait"])
 def test_wait_routes_propagate_bridge_failures(route_name: str) -> None:
