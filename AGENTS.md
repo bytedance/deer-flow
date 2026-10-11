@@ -225,6 +225,8 @@ These apply repo-wide; module guides own the module-specific detail.
 - **Test-driven development** — features and bug fixes ship with tests. Backend tests live
   in `backend/tests/` (TDD is mandatory there; see [backend/AGENTS.md](backend/AGENTS.md));
   frontend tests live in `frontend/tests/`.
+  Public skill script regressions live in `tests/skills/`; exercise dependency fallbacks
+  with the optional import unavailable and mock HTTP transport to keep tests offline.
 - **Format before pushing** — run `make format` (backend) / `pnpm check` (frontend). Backend
   CI enforces `ruff format --check`, so formatting must be clean before a push.
 - **Skill text encoding** — treat `SKILL.md` and other textual skill resources as UTF-8;

@@ -14,6 +14,7 @@ try:
 except ImportError:
     # Fallback to urllib if requests not available
     import urllib.error
+    import urllib.parse
     import urllib.request
 
     class RequestsFallback:
@@ -35,7 +36,7 @@ except ImportError:
         @staticmethod
         def get(url: str, headers: dict = None, params: dict = None, timeout: int = 30):
             if params:
-                query = "&".join(f"{k}={v}" for k, v in params.items())
+                query = urllib.parse.urlencode(params)
                 url = f"{url}?{query}"
 
             req = urllib.request.Request(url, headers=headers or {})
