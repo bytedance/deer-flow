@@ -82,6 +82,15 @@ drift.
 
 **Gateway differences**: Upload takes local `Path`, not `UploadFile`, rejects directories before copying, and reuses one conversion worker inside an active event loop. Artifacts return `(bytes, mime_type)`, not HTTP Response. Gateway alone deletes `.deer-flow/threads/{thread_id}` after LangGraph thread deletion; the client has no equivalent. `update_mcp_config()` and `update_skill()` invalidate the cached agent.
 
+Embedded uploads snapshot existing regular filenames before copying. Exact names
+already present retain replacement semantics. Names absent from that snapshot,
+including converted companions, are staged under hidden names and published with a
+no-replace hard link; collisions retry from the original basename. Never expose
+a partially copied file as a new final name: another caller could classify it as
+an existing replacement. Preserve source timestamps only after publication, so
+the staging sweep cannot remove an in-flight copy of an old source. This does
+not serialize replacements of names already present at the start of a call.
+
 **Tests**: `tests/test_client.py` is offline, including `TestGatewayConformance`.
 `tests/test_client_live.py` requires root `config.yaml`, valid API credentials,
 and opt-in via `make test-live` or `DEER_FLOW_RUN_LIVE_TESTS=1`. It calls real

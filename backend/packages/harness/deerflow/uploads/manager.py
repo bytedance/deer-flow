@@ -9,6 +9,7 @@ import logging
 import os
 import shutil
 import stat
+import tempfile
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -397,6 +398,36 @@ def copy_upload_file_no_symlink(base_dir: Path, filename: str, src: Path) -> Pat
                 os.chmod(fh.fileno(), stat.S_IMODE(src_stat.st_mode))
             if os.utime in os.supports_fd:
                 os.utime(fh.fileno(), ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns))
+    return dest
+
+
+def copy_upload_file_no_replace(base_dir: Path, filename: str, src: Path) -> Path:
+    """Publish a complete copy without replacing a concurrently claimed name.
+
+    The staging file lives in the upload directory so the final hard link is
+    atomic and cannot cross filesystems. It remains hidden from upload listings
+    and is removed whether publication succeeds or fails.
+    """
+    safe_name = normalize_filename(filename)
+    dest = validate_upload_destination(base_dir, safe_name, exclusive=True)
+    with open(src, "rb") as src_fh:
+        src_stat = os.fstat(src_fh.fileno())
+        _reject_same_file(base_dir, safe_name, src, src_stat)
+        fd, staging_name = tempfile.mkstemp(prefix=UPLOAD_STAGING_PREFIX, suffix=UPLOAD_STAGING_SUFFIX, dir=base_dir)
+        staging = Path(staging_name)
+        try:
+            with os.fdopen(fd, "wb") as staged_fh:
+                shutil.copyfileobj(src_fh, staged_fh)
+                staged_fh.flush()
+                if os.chmod in os.supports_fd:
+                    os.chmod(staged_fh.fileno(), stat.S_IMODE(src_stat.st_mode))
+                os.link(staging, dest)
+                # Keep the staging mtime fresh until publication, so the orphan
+                # sweep cannot mistake a copy of an old source for stale work.
+                if os.utime in os.supports_fd:
+                    os.utime(staged_fh.fileno(), ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns))
+        finally:
+            staging.unlink(missing_ok=True)
     return dest
 
 

@@ -75,6 +75,7 @@ from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 from deerflow.uploads.manager import (
     UnsafeUploadPathError,
     claim_unique_filename,
+    copy_upload_file_no_replace,
     copy_upload_file_no_symlink,
     delete_file_safe,
     enrich_file_listing,
@@ -1783,6 +1784,8 @@ class DeerFlowClient:
                 has_convertible_file = True
 
         uploads_dir = ensure_uploads_dir(thread_id)
+        with os.scandir(uploads_dir) as entries:
+            existing_names = {entry.name for entry in entries if entry.is_file(follow_symlinks=False)}
         uploaded_files: list[dict] = []
         skipped_files: list[str] = []
 
@@ -1805,7 +1808,15 @@ class DeerFlowClient:
         try:
             for src_path, dest_name in resolved_files:
                 try:
-                    dest = copy_upload_file_no_symlink(uploads_dir, dest_name, src_path)
+                    if dest_name in existing_names:
+                        dest = copy_upload_file_no_symlink(uploads_dir, dest_name, src_path)
+                    else:
+                        while True:
+                            try:
+                                dest = copy_upload_file_no_replace(uploads_dir, dest_name, src_path)
+                                break
+                            except FileExistsError:
+                                dest_name = claim_unique_filename(src_path.name, seen_names)
                 except UnsafeUploadPathError:
                     logger.warning("Skipping upload with unsafe destination: %s", dest_name)
                     skipped_files.append(dest_name)
@@ -1846,7 +1857,15 @@ class DeerFlowClient:
                                 # copy, not write_bytes: the companion keeps the
                                 # converter's permissions, so a sandbox running as
                                 # another uid can still read it.
-                                md_path = copy_upload_file_no_symlink(uploads_dir, unique_md_name, converted)
+                                if unique_md_name in existing_names:
+                                    md_path = copy_upload_file_no_symlink(uploads_dir, unique_md_name, converted)
+                                else:
+                                    while True:
+                                        try:
+                                            md_path = copy_upload_file_no_replace(uploads_dir, unique_md_name, converted)
+                                            break
+                                        except FileExistsError:
+                                            unique_md_name = claim_unique_filename(provisional_md_name, seen_names)
                     except UnsafeUploadPathError:
                         logger.warning("Skipping markdown companion with unsafe destination: %s", unique_md_name)
                         md_path = None
