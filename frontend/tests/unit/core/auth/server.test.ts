@@ -203,11 +203,12 @@ describe("getServerSideUser — account_disabled contract", () => {
   function stubMeResponse(body: unknown, status = 401) {
     rs.stubGlobal(
       "fetch",
-      rs.fn(async () =>
-        new Response(JSON.stringify(body), {
-          status,
-          headers: { "Content-Type": "application/json" },
-        }),
+      rs.fn(
+        async () =>
+          new Response(JSON.stringify(body), {
+            status,
+            headers: { "Content-Type": "application/json" },
+          }),
       ),
     );
   }

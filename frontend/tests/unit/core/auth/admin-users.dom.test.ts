@@ -1,10 +1,14 @@
-import { afterEach, beforeEach, describe, expect, test, rs } from "@rstest/core";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  test,
+  rs,
+} from "@rstest/core";
 
 import { GatewayApiError } from "@/core/api/errors";
-import {
-  loadAdminUsers,
-  updateUserAccount,
-} from "@/core/auth/admin-users";
+import { loadAdminUsers, updateUserAccount } from "@/core/auth/admin-users";
 
 const jsonResponse = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), {
@@ -98,5 +102,37 @@ describe("admin user management client", () => {
       status: 409,
       message: "cannot disable the last remaining active admin",
     });
+  });
+
+  test("a coded-envelope 409 still surfaces its message verbatim", async () => {
+    globalThis.fetch = rs.fn(async () =>
+      jsonResponse(
+        {
+          detail: {
+            code: "last_active_admin",
+            message: "cannot disable the last remaining active admin",
+          },
+        },
+        409,
+      ),
+    ) as unknown as typeof globalThis.fetch;
+
+    const error = await updateUserAccount("u-1", { disabled: true }).catch(
+      (err: unknown) => err,
+    );
+
+    expect(error).toBeInstanceOf(GatewayApiError);
+    expect(error).toMatchObject({
+      status: 409,
+      message: "cannot disable the last remaining active admin",
+    });
+  });
+
+  test("a malformed row rejects instead of rendering a phantom user", async () => {
+    globalThis.fetch = rs.fn(async () =>
+      jsonResponse([{ email: "no-id@example.com" }]),
+    ) as unknown as typeof globalThis.fetch;
+
+    await expect(loadAdminUsers()).rejects.toThrow();
   });
 });

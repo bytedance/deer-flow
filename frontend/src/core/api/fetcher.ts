@@ -103,6 +103,10 @@ export async function fetch(
     // An operator-disabled account (#4063 gap 3) gets a distinct code on the
     // session surface; it cannot sign back in, so skip the `next` round-trip
     // and land on a login page that states the reason.
+    // Body-consumption contract: the JSON body is consumed for the code and
+    // must never be read again below this line — every branch exits by
+    // throwing UnauthorizedError, so a future fall-through (e.g. telemetry)
+    // must not re-read `res`.
     const code = await res
       .json()
       .then((data) => parseAuthError(data).code)

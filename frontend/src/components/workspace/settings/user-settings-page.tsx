@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { GatewayApiError } from "@/core/api/errors";
 import {
   loadAdminUsers,
   updateUserAccount,
@@ -41,9 +42,13 @@ export function UserSettingsPage() {
       await client.invalidateQueries({ queryKey: ["admin-users"] });
     } catch (err) {
       // The Gateway's own detail text (the last-active-admin 409 in
-      // particular) is the most actionable message available.
+      // particular) is the most actionable message available; anything
+      // else (network failure, a malformed 200 body failing the schema)
+      // falls back to the localized copy instead of a raw exception blob.
       setError(
-        err instanceof Error && err.message ? err.message : text.updateFailed,
+        err instanceof GatewayApiError && err.message
+          ? err.message
+          : text.updateFailed,
       );
     } finally {
       setPending(false);
@@ -66,15 +71,13 @@ export function UserSettingsPage() {
             </Button>
           </div>
           {users.isLoading && <p role="status">{text.loading}</p>}
-          {users.error && (
-            <div role="alert">
-              <p>{text.failed}</p>
+          {(users.error ?? error) && (
+            // One region, one verdict: a failed list load outranks a stale
+            // toggle error; react-query clears `users.error` on a successful
+            // refetch, so the banners cannot stack.
+            <div role="alert" className="text-sm text-red-500">
+              <p>{users.error ? text.failed : error}</p>
             </div>
-          )}
-          {error && (
-            <p role="alert" className="text-sm text-red-500">
-              {error}
-            </p>
           )}
           {users.data?.length === 0 && <p>{text.empty}</p>}
           <ul className="space-y-3">

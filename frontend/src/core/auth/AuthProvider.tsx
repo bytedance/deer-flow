@@ -36,6 +36,15 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+/**
+ * True when the SSR auth verdict for this auth-page render was
+ * `account_disabled`: the visitor holds a live session cookie for a
+ * suspended account, so /login states the known reason immediately instead
+ * of waiting for a login attempt the backend deliberately answers with the
+ * generic invalid-credentials message (#4063 gap 3).
+ */
+export const AuthDisabledContext = createContext(false);
+
 interface AuthProviderProps {
   children: ReactNode;
   initialUser: User | null;

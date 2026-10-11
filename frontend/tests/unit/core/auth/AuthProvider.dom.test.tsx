@@ -54,9 +54,12 @@ function mount() {
 test("an account_disabled 401 ends the session and states the reason", async () => {
   mount();
   globalThis.fetch = rs.fn(async () =>
-    jsonResponse({
-      detail: { code: "account_disabled", message: "Account disabled" },
-    }, 401),
+    jsonResponse(
+      {
+        detail: { code: "account_disabled", message: "Account disabled" },
+      },
+      401,
+    ),
   ) as unknown as typeof globalThis.fetch;
 
   await act(async () => {

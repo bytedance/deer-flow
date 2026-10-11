@@ -10,6 +10,7 @@ import {
 } from "@testing-library/react";
 
 import { UserSettingsPage } from "@/components/workspace/settings/user-settings-page";
+import { GatewayApiError } from "@/core/api/errors";
 import type * as AdminUsers from "@/core/auth/admin-users";
 import {
   loadAdminUsers,
@@ -156,7 +157,13 @@ test("enable toggle targets the suspended account", async () => {
 test("a 409 rejection surfaces the gateway detail verbatim", async () => {
   mount();
   rs.mocked(updateUserAccount).mockRejectedValueOnce(
-    new Error("cannot disable the last remaining active admin"),
+    new GatewayApiError({
+      message: "cannot disable the last remaining active admin",
+      status: 409,
+      code: null,
+      params: {},
+      rawMessage: "",
+    }),
   );
   await screen.findByText("admin@example.com");
 
@@ -169,4 +176,31 @@ test("a 409 rejection surfaces the gateway detail verbatim", async () => {
   expect(
     await screen.findByText("cannot disable the last remaining active admin"),
   ).toBeTruthy();
+});
+
+test("a non-gateway failure falls back to the localized copy", async () => {
+  mount();
+  rs.mocked(updateUserAccount).mockRejectedValueOnce(new Error("boom"));
+  await screen.findByText("admin@example.com");
+
+  fireEvent.click(
+    within(rowFor("admin@example.com")).getByRole("button", {
+      name: enUS.settings.users.disable,
+    }),
+  );
+
+  expect(
+    await screen.findByText(enUS.settings.users.updateFailed),
+  ).toBeTruthy();
+  expect(screen.queryByText("boom")).toBeNull();
+});
+
+test("a failed load shows one alert with the localized copy", async () => {
+  // mockRejectedValueOnce outranks the beforeEach default for the mount query.
+  rs.mocked(loadAdminUsers).mockRejectedValueOnce(new Error("gateway down"));
+  mount();
+
+  expect(await screen.findByRole("alert")).toBeTruthy();
+  expect(screen.getByText(enUS.settings.users.failed)).toBeTruthy();
+  expect(screen.queryByText("gateway down")).toBeNull();
 });
