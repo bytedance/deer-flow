@@ -49,6 +49,11 @@ class PendingCardEntry(TypedDict, total=False):
     options: tuple[str, ...]
     created_at: float
     card_message_id: str | None
+    # Routing identity the ChannelManager keys on; without these the synthetic
+    # inbound would open a new thread (groups) or be rejected as unbound.
+    topic_id: str | None
+    connection_id: str | None
+    owner_user_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +63,7 @@ class ClarificationCardRequest:
     request_id: str
     question: str
     options: tuple[str, ...]
+    option_ids: tuple[str, ...]
 
     @classmethod
     def from_metadata(cls, metadata: dict[str, Any] | None) -> ClarificationCardRequest | None:
@@ -82,15 +88,20 @@ class ClarificationCardRequest:
             return None
 
         labels: list[str] = []
-        for raw in raw_options:
+        option_ids: list[str] = []
+        for index, raw in enumerate(raw_options, start=1):
             if not isinstance(raw, dict):
                 return None
             label = raw.get("label")
             if not (isinstance(label, str) and label):
                 return None
+            option_id = raw.get("id")
+            if not (isinstance(option_id, str) and option_id):
+                option_id = f"option-{index}"
             labels.append(label)
+            option_ids.append(option_id)
 
-        return cls(request_id=request_id, question=question, options=tuple(labels))
+        return cls(request_id=request_id, question=question, options=tuple(labels), option_ids=tuple(option_ids))
 
 
 def build_button_card(request: ClarificationCardRequest) -> str:
@@ -109,11 +120,11 @@ def build_button_card(request: ClarificationCardRequest) -> str:
                         "type": "primary" if index == 1 else "default",
                         "value": {
                             "request_id": request.request_id,
-                            "option_id": f"option-{index}",
+                            "option_id": option_id,
                             "option_value": label,
                         },
                     }
-                    for index, label in enumerate(request.options, start=1)
+                    for index, (option_id, label) in enumerate(zip(request.option_ids, request.options), start=1)
                 ],
             },
         ],
@@ -142,6 +153,9 @@ class PendingCardRegistry:
         originator_open_id: str,
         options: tuple[str, ...],
         card_message_id: str | None = None,
+        topic_id: str | None = None,
+        connection_id: str | None = None,
+        owner_user_id: str | None = None,
     ) -> None:
         entry: PendingCardEntry = {
             "request_id": request_id,
@@ -151,29 +165,28 @@ class PendingCardRegistry:
             "options": options,
             "created_at": time.time(),
             "card_message_id": card_message_id,
+            "topic_id": topic_id,
+            "connection_id": connection_id,
+            "owner_user_id": owner_user_id,
         }
         with self._lock:
             self._entries[request_id] = entry
-
-    def mark_sent(self, request_id: str, card_message_id: str) -> None:
-        """Backfill the delivered card's message id once the send resolves."""
-        with self._lock:
-            entry = self._entries.get(request_id)
-            if entry is not None:
-                entry["card_message_id"] = card_message_id
 
     def consume_if_originator(
         self,
         request_id: str,
         operator_open_id: str,
         *,
+        option_value: str | None = None,
         now: float | None = None,
     ) -> tuple[PendingCardEntry | None, str | None]:
         """Atomically validate a click and consume the entry on success.
 
-        Returns ``(entry, None)`` for the originator; ``(None, "not_originator")``
-        for anyone else (entry kept — the real originator may still click);
-        ``(None, "unknown")`` for unknown or expired request ids (entry dropped).
+        Returns ``(entry, None)`` for the originator clicking a registered
+        option; ``(None, "not_originator")`` for anyone else (entry kept — the
+        real originator may still click); ``(None, "unknown")`` for unknown or
+        expired request ids (entry dropped) and for option values the registry
+        never issued (entry kept — the card payload itself is not trusted).
         """
         with self._lock:
             entry = self._entries.get(request_id)
@@ -187,18 +200,7 @@ class PendingCardRegistry:
                 return None, "unknown"
             if entry.get("originator_open_id") != operator_open_id:
                 return None, "not_originator"
+            if option_value is not None and option_value not in entry.get("options", ()):
+                return None, "unknown"
             del self._entries[request_id]
             return entry, None
-
-    def consume(self, request_id: str, *, now: float | None = None) -> PendingCardEntry | None:
-        """Pop the entry for *request_id*, or None when unknown or expired."""
-        with self._lock:
-            entry = self._entries.pop(request_id, None)
-        if entry is None:
-            return None
-        created_at = entry.get("created_at")
-        now = time.time() if now is None else now
-        if not isinstance(created_at, (int, float)) or now - created_at > self._ttl_seconds:
-            logger.info("[Feishu] pending card request expired: request_id=%s", request_id)
-            return None
-        return entry

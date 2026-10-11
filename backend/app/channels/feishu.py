@@ -821,6 +821,9 @@ class FeishuChannel(Channel):
             originator_open_id=user_id,
             options=request.options,
             card_message_id=card_message_id,
+            topic_id=self._non_empty_str(msg.metadata.get("topic_id")),
+            connection_id=msg.connection_id,
+            owner_user_id=msg.owner_user_id,
         )
 
     async def _send_card_message(self, msg: OutboundMessage) -> None:
@@ -1011,35 +1014,35 @@ class FeishuChannel(Channel):
         if not (request_id and option_value and operator_open_id):
             return self._card_action_toast("无法处理的卡片操作", toast_type="warning")
 
-        entry, reason = self._card_registry.consume_if_originator(request_id, operator_open_id)
+        entry, reason = self._card_registry.consume_if_originator(request_id, operator_open_id, option_value=option_value)
         if reason == "not_originator":
             return self._card_action_toast("仅提问发起人可操作", toast_type="warning")
         if entry is None:
             return self._card_action_toast("此卡片已失效或已处理", toast_type="warning")
 
+        scheduled = False
         if self._main_loop and self._main_loop.is_running():
-            scheduled = self._submit_threadsafe_coroutine(
-                self._resolve_card_click(entry, option_id=option_id, option_value=option_value, operator_open_id=operator_open_id),
-                self._main_loop,
-                name="resolve_card_click",
-                msg_id=entry.get("card_message_id") or request_id,
+            scheduled = bool(
+                self._submit_threadsafe_coroutine(
+                    self._resolve_card_click(entry, option_id=option_id, option_value=option_value, operator_open_id=operator_open_id),
+                    self._main_loop,
+                    name="resolve_card_click",
+                    msg_id=entry.get("card_message_id") or request_id,
+                )
             )
-            if not scheduled:
-                logger.warning("[Feishu] card click could not be dispatched (loop closing): request_id=%s", request_id)
-        else:
-            logger.warning("[Feishu] card click dropped, no running Gateway loop: request_id=%s", request_id)
+        if not scheduled:
+            # Never ack success for a click we could not dispatch: the entry is
+            # already consumed, so an honest warning beats a fake "已选择".
+            logger.warning("[Feishu] card click could not be dispatched (no running loop or loop closing): request_id=%s", request_id)
+            return self._card_action_toast("处理失败，请改用文字回复", toast_type="warning")
         return self._card_action_toast(f"已选择：{option_value}", toast_type="success")
 
     async def _resolve_card_click(self, entry, *, option_id: str | None, option_value: str, operator_open_id: str) -> None:
-        """Apply a validated click: mark the card resolved, then inject a hidden
-        human-input response routed at the card's thread mapping."""
+        """Apply a validated click: inject the hidden human-input response first
+        (carrying the routing identity the ChannelManager keys on), then flip the
+        card to its terminal state only after the answer is durably in the bus —
+        a dropped inbound must never leave a card claiming a choice was recorded."""
         card_message_id = entry.get("card_message_id")
-        if card_message_id:
-            try:
-                await self._update_card(card_message_id, f"✅ 已选择：{option_value}")
-            except Exception:
-                logger.exception("[Feishu] failed to mark card resolved: %s", card_message_id)
-
         response = {
             "version": 1,
             "kind": "human_input_response",
@@ -1061,7 +1064,20 @@ class FeishuChannel(Channel):
                 HUMAN_INPUT_RESPONSE_METADATA_KEY: response,
             },
         )
-        await self._publish_inbound_or_drop(inbound)
+        inbound.topic_id = entry.get("topic_id")
+        inbound.connection_id = entry.get("connection_id")
+        inbound.owner_user_id = entry.get("owner_user_id")
+
+        published = await self._publish_inbound_or_drop(inbound)
+        if not published:
+            logger.error("[Feishu] card answer dropped by intake queue; card left clickable but the entry is consumed (request_id=%s)", entry["request_id"])
+            return
+
+        if card_message_id:
+            try:
+                await self._update_card(card_message_id, f"✅ 已选择：{option_value}")
+            except Exception:
+                logger.exception("[Feishu] failed to mark card resolved: %s", card_message_id)
 
     def _remember_pending_clarification(self, msg: OutboundMessage, card_message_id: str | None) -> None:
         if not msg.is_final or msg.metadata.get(PENDING_CLARIFICATION_METADATA_KEY) is not True:
