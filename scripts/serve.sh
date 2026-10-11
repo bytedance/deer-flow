@@ -266,6 +266,9 @@ stop_all() {
     _kill_repo_processes "next dev"
     _kill_repo_processes "next start"
     _kill_repo_processes "next-server"
+    # -s quit finds the master through the config's pid directive. A BIND_HOST
+    # copy rendered by nginx-local-conf.sh keeps the same one, and the tracked
+    # config also works for --stop, which skips rendering.
     nginx -c "$REPO_ROOT/docker/nginx/nginx.local.conf" -p "$REPO_ROOT" -s quit 2>/dev/null || true
     sleep 1
     _kill_repo_nginx

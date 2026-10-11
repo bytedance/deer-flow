@@ -184,6 +184,8 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
 
    Jina also accepts an opt-in `max_response_bytes` tool setting (positive integer; omitted/null disables it). It stops oversized decoded responses before extraction, with no partial success or retry. This leaves the 4096-character output cap unchanged and does not bound HTTPX decompressor allocations or wire bandwidth; see [response budget](backend/docs/CONFIGURATION.md#jina-response-byte-budget).
 
+   Jina can also bound concurrent HTTP attempts and FIFO waiting with the opt-in `request_admission` tool extra. One immutable budget is shared across clients and agent threads in each process; replicas have independent budgets. See [Jina request admission](backend/docs/CONFIGURATION.md#jina-request-admission).
+
    Run `make doctor` at any time to verify your setup and get actionable fix hints.
    If you are opening a GitHub issue about a local setup or runtime problem, run
    `make support-bundle`. The command prints reporter next steps, writes a
@@ -1822,7 +1824,7 @@ Rebuild with `make up` after changing the managed extension set. See
 `config.example.yaml` and the
 [reference extension](examples/deerflow-extension-example/) for a complete example.
 
-Gateway-generated follow-up suggestions now normalize both plain-string model output and block/list-style rich content before parsing the JSON array response, so provider-specific content wrappers do not silently drop suggestions.
+Gateway-generated follow-up suggestions now normalize both plain-string model output and block/list-style rich content before parsing the JSON array response, so provider-specific content wrappers do not silently drop suggestions. Follow-up suggestions and input polishing skip content blocks with non-string types, preserving the surrounding text instead of failing the request
 
 Backend response cleanup preserves unrelated tag names such as `<think-tank>` and `<think:note>` in follow-up suggestions and polished drafts; only the exact `<think>` name (optionally followed by attributes) starts a reasoning block. Self-closing `<think/>` and `<think />` tags are empty reasoning blocks and leave the following answer intact. Delimiters inside quoted attributes, such as `<think note=">"/>`, also leave the following answer intact.
 
