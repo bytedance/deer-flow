@@ -4156,6 +4156,17 @@ This release closes that milestone with **439 merged pull requests**.
   missing; `verify-versions.yml` installs the uv version the backend image pins.
   ([#6588])
 
+- **tui:** `deerflow --print` and `--json` no longer drop words of an unquoted
+  message. Each flag took a single value and never read the positional words,
+  so `deerflow --print summarize this repo` sent only `summarize`,
+  `deerflow summarize this repo --print` exited 2 asking for a message on a
+  terminal, and with piped stdin the typed words were silently ignored. Both flags now take every word
+  that follows them and fall back to words given before them, as `--cli` does;
+  a typed message wins over piped stdin. A message split around the flag
+  (`deerflow hello --print there`) exits 2 with a hint to quote it, since its
+  word order cannot be recovered. Passing both `--print` and `--json` now exits
+  2 instead of running `--print` and dropping the `--json` message. ([#6636])
+
 ### Security
 
 - **authz:** Enforce permission checks on routes that only had authentication, and
@@ -9565,3 +9576,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6611]: https://github.com/bytedance/deer-flow/pull/6611
 [#6613]: https://github.com/bytedance/deer-flow/pull/6613
 [#6635]: https://github.com/bytedance/deer-flow/pull/6635
+[#6636]: https://github.com/bytedance/deer-flow/pull/6636

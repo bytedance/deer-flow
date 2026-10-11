@@ -67,6 +67,74 @@ def test_json_mode():
     assert p.message == "hello"
 
 
+@pytest.mark.parametrize("mode", ["--print", "--json"])
+def test_headless_unquoted_message_keeps_every_word(mode):
+    """An unquoted message must not be truncated to its first word."""
+    p = plan([mode, "summarize", "this", "repo"])
+    assert p.mode == mode.removeprefix("--")
+    assert p.message == "summarize this repo"
+    assert p.read_stdin is False
+
+
+@pytest.mark.parametrize("mode", ["--print", "--json"])
+def test_headless_message_before_the_flag_is_used(mode):
+    """Words before a bare --print/--json are the message, as with --cli."""
+    p = plan(["summarize", "this", "repo", mode])
+    assert p.mode == mode.removeprefix("--")
+    assert p.message == "summarize this repo"
+    assert p.read_stdin is False
+
+
+@pytest.mark.parametrize("mode", ["--print", "--json"])
+def test_headless_message_wins_over_piped_stdin(mode):
+    p = plan(["hello", mode], stdin_tty=False)
+    assert p.message == "hello"
+    assert p.read_stdin is False
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["hello", "--print", "there"],
+        ["--print", "hello", "--continue", "there"],
+        ["hello", "--json", "there"],
+    ],
+)
+def test_headless_message_split_around_the_flag_is_rejected(argv, capsys):
+    """Word order across the flag is lost by argparse, so refuse rather than guess."""
+    with pytest.raises(SystemExit) as exc:
+        plan(argv)
+    assert exc.value.code == 2
+    assert "pass the message in one place" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--print", "hello", "--json", "world"],
+        ["--print", "--json", "hello"],
+        ["--json", "hello", "--print"],
+        ["hello", "--print", "--json"],
+    ],
+)
+def test_print_and_json_together_are_rejected(argv, capsys):
+    """Only one headless mode runs, so the other flag's message must not vanish."""
+    with pytest.raises(SystemExit) as exc:
+        plan(argv, stdin_tty=False)
+    assert exc.value.code == 2
+    assert "not allowed with argument" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("mode", ["--print", "--json"])
+def test_headless_blank_message_is_treated_as_missing(mode):
+    p = plan([mode, "  "])
+    assert p.mode == "headless-help"
+
+
+def test_headless_help_documents_multi_word_messages():
+    assert "--print [MESSAGE ...]" in build_parser().format_help()
+
+
 def test_force_tui_even_without_tty():
     p = plan(["--tui"], stdin_tty=False, stdout_tty=False)
     assert p.mode == "tui"
