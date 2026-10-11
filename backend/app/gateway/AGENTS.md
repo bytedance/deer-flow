@@ -1,6 +1,6 @@
 ### Gateway API (`app/gateway/`)
 
-Reject external `sandbox`, `thread_data`, `viewed_images`, `goal_outcome`. Non-null goals need valid text, non-negative int counters/limits and no Overwrite markers; keep sparse values.
+Reject external `sandbox`, `thread_data`, `viewed_images`, `goal_outcome`. Non-null goals: valid text, int counters/limits >=0, no Overwrite; keep sparse data.
 
 Studio retains sanitized creation metadata.
 
