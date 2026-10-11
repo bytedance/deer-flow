@@ -4164,7 +4164,8 @@ This release closes that milestone with **439 merged pull requests**.
   that follows them and fall back to words given before them, as `--cli` does;
   a typed message wins over piped stdin. A message split around the flag
   (`deerflow hello --print there`) exits 2 with a hint to quote it, since its
-  word order cannot be recovered. ([#6636])
+  word order cannot be recovered. Passing both `--print` and `--json` now exits
+  2 instead of running `--print` and dropping the `--json` message. ([#6636])
 
 ### Security
 

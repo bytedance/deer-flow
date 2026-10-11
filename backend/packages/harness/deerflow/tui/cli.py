@@ -56,7 +56,9 @@ def build_parser() -> argparse.ArgumentParser:
         add_help=True,
     )
     parser.add_argument("message", nargs="*", help="initial prompt for the TUI, or the message for --print, --json or --cli")
-    parser.add_argument(
+    # One headless mode runs per invocation; refuse both so neither message is dropped.
+    headless = parser.add_mutually_exclusive_group()
+    headless.add_argument(
         "--print",
         dest="print",
         nargs="*",
@@ -64,7 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="MESSAGE",
         help="headless one-shot: print the final answer and exit (reads stdin if no MESSAGE)",
     )
-    parser.add_argument(
+    headless.add_argument(
         "--json",
         dest="json",
         nargs="*",

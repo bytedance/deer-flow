@@ -37,7 +37,7 @@ Launch modes:
 a bare flag (`deerflow summarize this repo --print`) are the message, as with
 `--cli`. A message given on the command line wins over piped stdin. Words on
 both sides of the flag are rejected with exit 2, since their order cannot be
-recovered.
+recovered. `--print` and `--json` cannot be combined; pick one output mode.
 
 If no TTY is available and no headless flag is given, `deerflow` prints guidance
 instead of hanging.

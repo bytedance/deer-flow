@@ -108,6 +108,23 @@ def test_headless_message_split_around_the_flag_is_rejected(argv, capsys):
     assert "pass the message in one place" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--print", "hello", "--json", "world"],
+        ["--print", "--json", "hello"],
+        ["--json", "hello", "--print"],
+        ["hello", "--print", "--json"],
+    ],
+)
+def test_print_and_json_together_are_rejected(argv, capsys):
+    """Only one headless mode runs, so the other flag's message must not vanish."""
+    with pytest.raises(SystemExit) as exc:
+        plan(argv, stdin_tty=False)
+    assert exc.value.code == 2
+    assert "not allowed with argument" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("mode", ["--print", "--json"])
 def test_headless_blank_message_is_treated_as_missing(mode):
     p = plan([mode, "  "])
