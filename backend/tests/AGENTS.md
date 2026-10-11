@@ -2,6 +2,13 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+`.github/workflows/backend-windows-live-policy.yml` runs the child-env contract and all
+four live-test collection policy cases on Windows/Python 3.12, weekly, manually,
+and for relevant PR changes. These children only collect live tests. Keep the
+make-dependent checks in the default suite. The workflow-selection regression
+in `test_client_live_policy.py` collects the configured pytest nodes and pins
+all five policy checks, so a partial name filter cannot silently omit cases.
+
 Channel reload cancellation regressions must assert the worker returned the
 stale snapshot before checking that newer runtime config survived. Completion
 alone cannot prove the race: loader exceptions are caught and return `None`.

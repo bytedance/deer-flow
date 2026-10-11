@@ -284,3 +284,40 @@ def test_blocking_io_ci_workflow_owns_dedicated_suite() -> None:
 
     assert "pytest tests/blocking_io" in command
     assert "make test-blocking-io" in workflow
+
+
+def test_windows_workflow_collects_all_five_policy_checks() -> None:
+    """Execute CI's selection so missing cases or accidental make tests fail."""
+    import shlex
+
+    import yaml
+
+    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "backend-windows-live-policy.yml").read_text(encoding="utf-8"))
+    job = workflow["jobs"]["windows-live-policy"]
+    assert job["runs-on"] == "windows-latest"
+    assert workflow["permissions"] == {"contents": "read"}
+    assert job["defaults"]["run"]["working-directory"] == "backend"
+    assert not job.get("services")
+    step = next(step for step in job["steps"] if "python -m pytest" in step.get("run", ""))
+    command = shlex.split(step["run"])
+    assert command[:5] == ["uv", "run", "python", "-m", "pytest"]
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", *command[5:], "--collect-only", "-p", "no:cacheprovider"],
+        cwd=BACKEND_ROOT,
+        env=_child_pytest_env(opt_in=False, ci=True),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    collected = {line.strip() for line in output.splitlines() if line.startswith("tests/test_client_live_policy.py::")}
+    assert collected == {
+        "tests/test_client_live_policy.py::test_child_env_stays_isolated_but_bootable_on_windows",
+        "tests/test_client_live_policy.py::test_config_alone_does_not_enable_live_collection",
+        "tests/test_client_live_policy.py::test_explicit_opt_in_collects_live_tests",
+        "tests/test_client_live_policy.py::test_ci_blocks_live_collection_even_with_opt_in",
+        "tests/test_client_live_policy.py::test_opt_in_without_config_reports_missing_config",
+    }, output
