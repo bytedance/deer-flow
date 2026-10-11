@@ -318,7 +318,7 @@ Direct auth-page visits with a live suspended-session cookie get the SSR
 verdict via `AuthDisabledContext`, so the login form states the known reason
 without waiting for a deliberately generic login failure.
 
-Other sign-in bounces keep path and query via `currentReturnPath()`. The
+Other sign-in bounces keep path, query and fragment via `currentReturnPath()`. The
 workspace layout cannot read the URL, so `unauthenticated` renders
 `WorkspaceLoginRedirect` (never `children`), not `redirect()`.
 

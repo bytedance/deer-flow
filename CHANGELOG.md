@@ -4178,15 +4178,15 @@ This release closes that milestone with **439 merged pull requests**.
   2 instead of running `--print` and dropping the `--json` message. ([#6636])
 
 - **frontend:** Signing in after a workspace session ends now returns to the
-  page that was open, query string included. Opening a workspace page without a
-  valid session (for example a scheduled-task notification link,
+  page that was open, query string and fragment included. Opening a workspace
+  page without a valid session (for example a scheduled-task notification link,
   `/workspace/scheduled-tasks?task_id=...`, after the session expired) sent the
   user to a bare `/login`, so signing in landed on the default workspace; the
   workspace layout cannot read the request URL, so it now hands the redirect to
   the browser, which keeps the full address in `next`. The client-side session
   checks (`AuthProvider.refreshUser`, `useRequireAuth`) kept the path but
-  dropped the query string; they now keep both, as the shared fetcher already
-  did. ([#6681])
+  dropped the query string, and the shared fetcher dropped the fragment; all of
+  them now keep the full address. ([#6681])
 
 ### Security
 

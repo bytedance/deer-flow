@@ -39,6 +39,15 @@ test.describe("workspace login bounce", () => {
     await expect(page).toHaveURL("/login?next=%2Fworkspace%2Fchats%2Fthread-1");
   });
 
+  test("keeps the fragment in next", async ({ page }) => {
+    // The server never sees the fragment; only the browser bounce can keep it.
+    await page.goto("/workspace/chats/thread-1#message-3");
+
+    await expect(page).toHaveURL(
+      "/login?next=%2Fworkspace%2Fchats%2Fthread-1%23message-3",
+    );
+  });
+
   test("does not mount workspace pages before the bounce", async ({ page }) => {
     // The layout renders only the redirect, so the chat page under it must
     // never start loading data for a visitor without a session.

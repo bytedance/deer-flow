@@ -48,16 +48,18 @@ export function buildLoginUrl(returnPath: string): string {
 }
 
 /**
- * The page the browser is on, query string included, as a `next` target.
+ * The page the browser is on, query string and fragment included, as a
+ * `next` target.
  *
  * Every client-side bounce for an expired session uses this, so they agree:
  * pages that carry their target in the query (a `?task_id=` deep link, the
  * artifact viewer) are otherwise unrecoverable after login, which lands on the
  * default workspace instead. Browser-only; the server cannot see the URL from
- * a layout.
+ * a layout, and never sees the fragment at all.
  */
 export function currentReturnPath(): string {
-  return `${window.location.pathname}${window.location.search}`;
+  const { pathname, search, hash } = window.location;
+  return `${pathname}${search}${hash}`;
 }
 
 /**

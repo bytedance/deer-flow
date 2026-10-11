@@ -28,3 +28,17 @@ test("sends the visitor to login with the page they opened as next", () => {
   expect(push).not.toHaveBeenCalled();
   expect(container.innerHTML).toBe("");
 });
+
+test("keeps the fragment, so an anchored deep link survives the round trip", () => {
+  window.history.replaceState(
+    {},
+    "",
+    "/workspace/chats/thread-1?x=1#message-3",
+  );
+
+  render(<WorkspaceLoginRedirect />);
+
+  expect(replace).toHaveBeenCalledWith(
+    "/login?next=%2Fworkspace%2Fchats%2Fthread-1%3Fx%3D1%23message-3",
+  );
+});
