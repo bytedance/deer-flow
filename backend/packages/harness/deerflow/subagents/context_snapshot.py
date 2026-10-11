@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -11,6 +12,8 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, conver
 
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.agents.middlewares.message_utils import is_genuine_user_message
+
+logger = logging.getLogger(__name__)
 
 SNAPSHOT_SYSTEM_NOTE = (
     "## Parent conversation snapshot\n"
@@ -145,6 +148,11 @@ class ParentContextSnapshot:
                         history.append({"type": "text", "text": "[Historical media omitted: content could not be serialized. Do not assume its contents.]"})
                     else:
                         history.append(_neutralize_document_text(media) if media["type"] == "document" else media)
+                elif isinstance(block, dict) and not isinstance(block.get("type"), str):
+                    # A non-string type is a malformed block, not one of the
+                    # deliberate exclusions above, so say why it vanished
+                    # instead of degrading the child's history silently.
+                    logger.warning("skipping content block with non-string type %r", block.get("type"))
             if isinstance(message, AIMessage):
                 # Every tool needs a retained result, including ordinary calls
                 # executing alongside the current delegation.
