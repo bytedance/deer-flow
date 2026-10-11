@@ -257,7 +257,7 @@ def _recompute_schedule(existing: dict[str, Any], updates: dict[str, Any], *, sc
             upcoming = next_run_at(schedule_type, schedule_spec, timezone, now=now)
     except (ValueError, OverflowError) as exc:
         raise scheduler_error(422, "invalid_schedule", str(exc)) from exc
-    # 已有任务的执行时间没有变化时，编辑内容无需重新满足创建时的最短延迟。
+    # An unchanged future instant already passed admission; editing other fields does not re-apply the creation-time minimum delay.
     unchanged_once = schedule_type == existing["schedule_type"] == "once" and existing["status"] not in TERMINAL_TASK_STATUSES and upcoming is not None and upcoming == _as_datetime(existing["next_run_at"])
     if not unchanged_once:
         _check_once_time(schedule_type, _as_datetime(upcoming), scheduler_config=scheduler_config, now=now)
