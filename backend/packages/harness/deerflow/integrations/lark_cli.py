@@ -1248,14 +1248,35 @@ def _extract_lark_cli_runtime_binary(archive: bytes, destination: Path) -> None:
     if not candidate:
         raise ValueError("Lark CLI runtime archive does not contain a lark-cli executable.")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(candidate)
+    _publish_bytes_atomically(destination, candidate)
     destination.chmod(0o755)
+
+
+def _publish_bytes_atomically(path: Path, content: bytes) -> None:
+    """Publish *content* at *path* without exposing a partial file.
+
+    Both callers chmod the result 0o755 and the sandbox execs it, so a crash
+    between the truncating open and the final write left an executable fragment
+    behind - for the extracted runtime that file can be large. The flow-state
+    writer in this module already publishes through a temporary file plus
+    ``os.replace``.
+    """
+    fd, temporary = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
 
 
 def _write_lark_cli_sandbox_launcher(staging: Path) -> None:
     launcher = staging / "bin" / "lark-cli"
     launcher.parent.mkdir(parents=True, exist_ok=True)
-    launcher.write_text(LARK_CLI_SANDBOX_LAUNCHER_SCRIPT, encoding="utf-8")
+    _publish_bytes_atomically(launcher, LARK_CLI_SANDBOX_LAUNCHER_SCRIPT.encode("utf-8"))
     launcher.chmod(0o755)
 
 
