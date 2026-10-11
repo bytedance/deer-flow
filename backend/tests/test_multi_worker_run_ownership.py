@@ -1194,8 +1194,14 @@ async def test_renewal_rejected_by_own_terminal_commit_releases_barrier():
     record.task = asyncio.create_task(asyncio.sleep(3600))
     record.terminal_commit_pending = True
     await manager.set_status(record.run_id, RunStatus.success, persist=False)
-    # The terminal write lands before the worker clears its barrier.
-    assert (await store.finalize_if_not_cancelled(record.run_id, status="success")).finalized
+    # The terminal commit goes through this worker's own manager path so the
+    # proof is attributable to this process. Writing the store directly and
+    # then trusting a row re-read is exactly the unattributable confirmation
+    # #5277 removes: a peer takeover can leave a matching terminal row.
+    assert await manager.set_status_if_not_cancelled(record.run_id, RunStatus.success) is None
+    assert record.terminal_committed is True
+    # The worker has not cleared its barrier yet when the heartbeat races in.
+    assert record.terminal_commit_pending is True
 
     try:
         await manager._renew_leases()

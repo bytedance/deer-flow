@@ -75,15 +75,101 @@ answers for paginated history. See `docs/skill-usage-ui.md`.
 **Deferred terminal commit:** With an event store, the worker stages its terminal
 status locally and commits it only after finalization's receipt and duration
 writes. `RunRecord.terminal_commit_pending` keeps `_renew_leases()` renewing that
-still-active row until the commit is attempted; a renewal rejected by the worker's
-own commit is confirmed by re-reading the row, while a peer claim fences the run.
-Never select runs for renewal by local status alone. Shutdown's drain treats the
-same state as active: such runs are awaited (never cancelled — cancellation would
-skip their terminal tail) so the duration checkpoint and terminal commit land
-before checkpointer teardown. A drain timeout leaves staged statuses and commit
-barriers intact without persisting `interrupted`. A finalizer that raises is
-logged with its run ID, staged status and exception while the other runs continue
-draining. Coverage: `tests/test_gateway_run_drain_shutdown.py`.
+still-active row until the commit is attempted. A renewal rejected after this
+worker's own terminal commit is reconciled using an attributable local commit
+acknowledgement, either already recorded in `terminal_committed` or obtained by
+joining the specific in-flight persistence attempt within a bounded deadline. A
+matching durable row read-back is never sufficient proof of this worker's commit;
+if no attributable proof is available the worker must fail closed and fence the
+run. Never select runs for renewal by local status alone.
+
+**Journal write outcomes and terminal finalization** (`runtime/journal.py`,
+`runtime/runs/worker.py`, `runtime/runs/manager.py`): a `put_batch` outcome is
+classified, never guessed. Returning normally is COMMITTED; raising
+`RunEventWriteNotCommittedError` (declared in `runtime/events/store/base.py`)
+proves the whole batch did not commit; every other exception and any
+store-originated `CancelledError` is UNKNOWN. The first unsafe outcome is
+quarantined out of the auto-flush buffer and blocks its successors: UNKNOWN is
+never replayed -- the quarantine also blocks the fire-and-forget threshold path,
+so a successor cannot land while its predecessor's outcome is unresolved -- and
+only a later explicit `flush_until_settled()` may retry a proven NOT_COMMITTED
+batch. `close()` never replays a quarantined batch, so no
+journal write starts after the terminal decision.
+
+`RunJournal.finish_for_terminal(still_owned=...)` runs one owned
+`seal_producers()` -> settled drain -> immutable snapshot -> write-free detach and
+returns `JournalFinishResult(disposition, snapshot, failure, caller_cancellation)`.
+The seal takes the admission lock and then waits on an owner-loop barrier, so an
+append admitted before it is guaranteed to be in the drained tail while a later
+one is rejected and counted in `_post_seal_rejected` instead of being silently
+dropped by the detach guard. Every state-mutating callback takes the same gate
+(`on_llm_end`, `on_tool_end`, `on_chain_end`, `on_chat_model_start`,
+`record_skill_usage`), so a post-seal callback cannot change the token
+accumulators, pending response events, message summaries or artifact statistics
+that the drain is about to snapshot. The snapshot exists only for COMMITTED (a finish on an
+already-released journal reports a non-committed failure instead of snapshotting
+cleared state), a joining caller's cancellation never changes the disposition,
+and a lease lost mid-drain fences *new* batches while the write already in flight
+is still observed. The
+worker consumes that result and must persist `snapshot.completion_data` for the
+terminal completion write: by then the journal has dropped its per-model usage and
+message summaries.
+
+The worker's terminal status write always goes through
+`set_status_if_not_cancelled`, so a durable cancel observed during the drain beats
+a locally staged success instead of being persisted verbatim by
+`persist_current_status`; the receipt stays a fact record about the committed
+journal, not a verdict.
+
+Cancellation owns exactly one restore per run: `ensure_checkpoint_restored()`
+creates a single owned child that every later cancellation joins, a repeated host
+cancellation stops only the join, and a cancelled or failed child is never
+reported as a completed rollback. The child's outcome is applied before the first
+host cancellation is re-raised, so a cancelled worker surfaces its cancellation
+after the safe terminal boundary. A provisional local `interrupt` (for example a
+shutdown intent) never outranks the accepted action: when the terminal CAS proves
+`rollback` won, the local outcome is upgraded before the single restore runs.
+
+Edit-replay recovery is driven by the final outcome, not the pre-drain status
+check: `_ensure_edit_replay_restored()` runs from the early failure path and again
+from the final outcome barrier (after late journal/receipt downgrades, before the
+durable terminal row and `publish_end`), joins the same owned restore, and
+publishes restored `values` at most once. A worker that lost ownership starts no
+new restore.
+
+`RunManager` keeps renewing a locally staged terminal run while its task is alive
+and its durable terminal row is unacknowledged (`RunRecord.terminal_committed`),
+fences it with `require_active=False` when renewal is rejected, on expiry, or when
+a renewal returns after the last confirmed deadline, and includes live
+staged-terminal tasks in the shutdown drain. A durable cancel observed during
+renewal — or received directly while a staged terminal is still live — reaches the
+running finalizer immediately instead of waiting for the next heartbeat.
+
+Shutdown's drain treats a run that still `_awaits_terminal_commit` as active: it is
+awaited but never cancelled, so the duration checkpoint and the deferred terminal
+commit land before the checkpointer is torn down. A drain timeout leaves the staged
+status and its commit barrier intact without persisting `interrupted`, and a
+finalizer that raises is logged with its run id, staged status and traceback while
+the remaining runs continue draining. Coverage:
+`tests/test_gateway_run_drain_shutdown.py`.
+
+Each renewal attempt is bounded by that run's own last-confirmed deadline and runs
+concurrently with the others, so one uninterruptible store call cannot stall every
+other lease; attempts that miss the deadline are cancelled, retained for
+observation, and their late results are never adopted.
+
+Terminal acknowledgement is attributable: `terminal_committed` is set only by a
+write this worker performed (`finalize_if_not_cancelled` returning `finalized`, or
+a definite success from `_persist_status`/`_persist_snapshot_to_store`). A row that
+merely matches `status + owner_worker_id` is not proof — SQL orphan takeover writes
+`error` while keeping the previous owner id — so a store re-read never publishes
+the acknowledgement; a renewal racing this worker's own in-flight CAS joins that
+process-local attempt within the deadline and otherwise fails closed.
+
+Known limits: there is no store-level idempotency key or durable lease-token
+fencing yet, so a batch that may have committed cannot be replayed and an
+already-issued write cannot be fenced; a peer takeover of a run whose renewal was
+rejected is detected by the terminal CAS rather than by the journal.
 
 **Deferred-tool promotion event deduplication** (`runtime/journal.py`): one
 `RunJournal` owns the lead graph's run-scoped atomic promotion claim. Parallel
@@ -107,9 +193,10 @@ journal mutation directly onto its owning event loop; they never mutate or
 flush `RunJournal._buffer` from the worker thread. The task-tool subagent proxy
 rejects a loop that differs from the journal owner, so its close fence always
 drains the only scheduling hop. `flush()` yields to the loop once before
-draining: since Python 3.13 an awaited executor future can complete without a
-loop iteration, so a hop queued by a worker that already returned may still be
-pending when flush starts.
+draining when its buffer is empty and the caller has not already requested
+cancellation: since Python 3.13 an awaited executor future can complete without
+a loop iteration, so a hop queued by a worker that already returned may still be
+pending when flush starts, and a non-empty buffer is re-scanned after each write.
 The persisted projection accepts
 only framework-defined error/action values and strict booleans (using null for
 invalid values) from the producer-supplied tool stamp; tool content, args,

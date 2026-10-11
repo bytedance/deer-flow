@@ -599,3 +599,100 @@ async def test_shutdown_surfaces_failed_interrupted_persist(caplog):
             record.task.cancel()
             with suppress(asyncio.CancelledError):
                 await record.task
+
+
+@pytest.mark.asyncio
+async def test_shutdown_awaits_staged_terminal_commit_until_it_lands():
+    """A deferred-terminal finalizer is awaited, never cancelled, and its commit lands.
+
+    Extends ``test_shutdown_awaits_staged_terminal_finalization_without_cancelling``
+    with a durable store: with ``terminal_commit_pending=True`` the run is
+    classified as finalizing, so shutdown must wait for the terminal write to
+    reach the store and must not overwrite the staged status with ``interrupted``.
+    """
+    store = MemoryRunStore()
+    rm = RunManager(store=store)
+    record = await rm.create("t-staged-commit")
+    await rm.set_status(record.run_id, RunStatus.running)
+
+    started = asyncio.Event()
+    allow_finish = asyncio.Event()
+
+    async def finalizer() -> None:
+        started.set()
+        await allow_finish.wait()
+        # Deferred terminal commit: persist the staged status, then release the
+        # commit barrier that kept _renew_leases renewing this run.
+        assert await rm.persist_current_status(record.run_id) is True
+        record.terminal_commit_pending = False
+
+    record.task = asyncio.create_task(finalizer())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        # The worker has staged a terminal status and is finalizing the run.
+        record.status = RunStatus.success
+        record.terminal_commit_pending = True
+
+        shutdown_task = asyncio.create_task(rm.shutdown(timeout=5.0))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert not shutdown_task.done(), "shutdown() returned without awaiting the staged-terminal finalizer"
+        assert record.task.cancelling() == 0, "shutdown() cancelled a staged-terminal finalizer"
+
+        allow_finish.set()
+        await asyncio.wait_for(shutdown_task, timeout=5.0)
+
+        assert not record.task.cancelled()
+        assert record.terminal_commit_pending is False
+        assert record.status == RunStatus.success, f"shutdown overwrote the staged terminal status: {record.status}"
+        row = await store.get(record.run_id)
+        assert row is not None and row["status"] == "success", f"terminal commit did not reach the store: {row}"
+    finally:
+        if not record.task.done():
+            record.task.cancel()
+            with suppress(asyncio.CancelledError):
+                await record.task
+
+
+@pytest.mark.asyncio
+async def test_shutdown_leaves_an_ownership_lost_run_untouched(caplog):
+    """A worker that lost its lease must not signal or write the run on shutdown.
+
+    The run still carries a deferred-terminal barrier, but its durable row now
+    belongs to whichever worker took over; shutdown must neither cancel the local
+    task nor persist an ``interrupted`` status for it.
+    """
+    store = MemoryRunStore()
+    rm = RunManager(store=store)
+    record = await rm.create("t-ownership-lost")
+    await rm.set_status(record.run_id, RunStatus.running)
+
+    started = asyncio.Event()
+    allow_finish = asyncio.Event()
+
+    async def holder() -> None:
+        started.set()
+        await allow_finish.wait()
+
+    record.task = asyncio.create_task(holder())
+    # Lost the lease while the deferred terminal commit was still pending: the
+    # row is now a peer's, so shutdown may drain the local task but must not
+    # cancel or persist anything for it.
+    record.status = RunStatus.success
+    record.ownership_lost = True
+    record.terminal_commit_pending = True
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        with caplog.at_level(logging.WARNING, logger="deerflow.runtime.runs.manager"):
+            await asyncio.wait_for(rm.shutdown(timeout=0.05), timeout=2.0)
+
+        assert record.task.cancelling() == 0, "shutdown() signalled a run whose lease was already lost"
+        assert not record.abort_event.is_set()
+        # The lost-ownership run must never be queued for interrupted persistence;
+        # the drain-timeout "before persisting" warning is the observable signal.
+        assert "before persisting" not in caplog.text
+        row = await store.get(record.run_id)
+        assert row is not None and row["status"] == "running", f"shutdown wrote over a peer-owned row: {row}"
+    finally:
+        allow_finish.set()
+        await asyncio.gather(record.task, return_exceptions=True)
