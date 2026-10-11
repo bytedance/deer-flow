@@ -8,6 +8,7 @@ import posixpath
 import re
 import shlex
 import threading
+import time
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -299,6 +300,10 @@ class OpenSandboxSandbox(Sandbox):
         self._file_op(lambda files: files.write_file(resolved, content, mode=644))
 
     def download_file(self, path: str) -> bytes:
+        return self._download_file_bounded(path, max_bytes=_MAX_DOWNLOAD_SIZE)
+
+    def _download_file_bounded(self, path: str, *, max_bytes: int, deadline: float | None = None) -> bytes:
+        """Use the native streaming transport with the release pass's remaining budget."""
         resolved = self._resolve_download_path(path)
 
         def read_bounded(files) -> bytes:
@@ -307,9 +312,11 @@ class OpenSandboxSandbox(Sandbox):
             stream = files.read_bytes_stream(resolved)
             try:
                 for chunk in stream:
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise TimeoutError("OpenSandbox output synchronization timed out")
                     total += len(chunk)
-                    if total > _MAX_DOWNLOAD_SIZE:
-                        raise OSError(errno.EFBIG, f"File exceeds maximum download size of {_MAX_DOWNLOAD_SIZE} bytes", path)
+                    if total > max_bytes:
+                        raise OSError(errno.EFBIG, f"File exceeds maximum download size of {max_bytes} bytes", path)
                     chunks.append(chunk)
             finally:
                 close = getattr(stream, "close", None)

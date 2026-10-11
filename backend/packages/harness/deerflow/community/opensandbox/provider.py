@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import atexit
+import base64
 import ipaddress
 import logging
 import math
 import os
+import shlex
+import stat
+import tempfile
 import threading
 import time
 import uuid
 from datetime import timedelta
 from functools import partial
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
@@ -22,7 +27,7 @@ from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 
 from ..warm_pool_lifecycle import WarmPoolLifecycleMixin
-from .sandbox import OpenSandboxSandbox, format_execution
+from .sandbox import _MAX_DOWNLOAD_SIZE, OpenSandboxSandbox, execution_stdout, format_execution
 
 if TYPE_CHECKING:
     from opensandbox.config.connection_sync import ConnectionConfigSync
@@ -75,6 +80,10 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
     uses_thread_data_mounts = False
     needs_upload_permission_adjustment = True
     _idle_checker_thread_name = "opensandbox-idle-reaper"
+    _MAX_SYNC_FILES = 2000
+    _MAX_SYNC_TOTAL_BYTES = 512 * 1024 * 1024
+    _MAX_SYNC_LISTING_BYTES = 512 * 1024
+    _SYNC_DEADLINE_SECONDS = 120.0
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -354,19 +363,131 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             return self._sandboxes.get(sandbox_id)
 
     def release(self, sandbox_id: str) -> None:
+        # Same scope lock as acquire: no next turn may reuse a client while its
+        # previous outputs are still being mirrored. Keep it active until sync
+        # finishes so the warm-pool reaper cannot destroy it during transfer.
         with self._lock:
-            sandbox = self._sandboxes.pop(sandbox_id, None)
+            if sandbox_id not in self._sandboxes:
+                return
+        try:
+            with self._acquire_serializer.hold(sandbox_id):
+                self._release_scope_locked(sandbox_id)
+        except RuntimeError as exc:
+            # reset/shutdown can close the serializer between the existence
+            # check and checkout. Preserve release's no-op after termination.
+            with self._lock:
+                untracked = sandbox_id not in self._sandboxes
+            if str(exc) != "AcquireSerializer is closed" or not untracked:
+                raise
+
+    def _release_scope_locked(self, sandbox_id: str) -> None:
+        with self._lock:
+            sandbox = self._sandboxes.get(sandbox_id)
+            scope = next((key for key, value in self._thread_sandboxes.items() if value == sandbox_id), None)
+        if sandbox is None:
+            return
+        if scope is not None and scope[0]:
+            try:
+                self._sync_outputs_to_host(sandbox, user_id=scope[0], thread_id=scope[1])
+            except Exception:
+                logger.warning("Failed to synchronize OpenSandbox outputs for %s", sandbox_id, exc_info=True)
+        with self._lock:
+            # Terminal transfer failures or shutdown may already untrack
+            # this client. Never resurrect it in the warm pool.
+            if self._sandboxes.get(sandbox_id) is not sandbox:
+                return
+            self._sandboxes.pop(sandbox_id)
             for key in [key for key, value in self._thread_sandboxes.items() if value == sandbox_id]:
                 self._thread_sandboxes.pop(key, None)
-            if sandbox is None:
-                return
-            if self._shutdown_called:
-                destroy_after_unlock = True
-            else:
+            destroy_after_unlock = self._shutdown_called
+            if not destroy_after_unlock:
                 self._warm_pool[sandbox_id] = (sandbox, time.time())
-                destroy_after_unlock = False
         if destroy_after_unlock:
             self._destroy_quietly(sandbox, context="released during shutdown")
+
+    @staticmethod
+    def _output_destination(root: Path, remote_path: str) -> Path:
+        prefix = "/mnt/user-data/outputs/"
+        if not remote_path.startswith(prefix) or "\\" in remote_path:
+            raise ValueError("Output path is outside the outputs directory")
+        parts = remote_path[len(prefix) :].split("/")
+        if any(part in {"", ".", ".."} or ":" in part or PureWindowsPath(part).is_reserved() or part.endswith((" ", ".")) for part in parts):
+            raise ValueError("Unsafe output path")
+        target = root.joinpath(*PurePosixPath(*parts).parts)
+        # Reject links/junctions in existing parents, including the owner/thread
+        # bucket. Resolving the root first would trust an escaped linked root.
+        for component in reversed((target, *target.parents)):
+            if component.is_symlink() or component.is_junction():
+                raise ValueError("Symlinked output destination")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists() and not stat.S_ISREG(target.stat().st_mode):
+            raise ValueError("Output destination is not a regular file")
+        return target
+
+    def _sync_outputs_to_host(self, sandbox: OpenSandboxSandbox, *, thread_id: str, user_id: str) -> None:
+        """Best-effort bounded mirror before parking a remote sandbox."""
+        from deerflow.config.paths import get_paths
+
+        root = get_paths().sandbox_outputs_dir(thread_id, user_id=user_id)
+        deadline = time.monotonic() + self._SYNC_DEADLINE_SECONDS
+        remote_root = shlex.quote("/mnt/user-data/outputs")
+        command = (
+            # POSIX sh lacks pipefail: preserve each stage's own exit status.
+            'set +e; ( for _tool in find head base64 mktemp; do command -v "$_tool" >/dev/null || exit 127; done; '
+            f"[ -d {remote_root} ] && [ ! -L {remote_root} ] || exit 1; "
+            "_st=$(mktemp -d) || exit 1; "
+            f'{{ find {remote_root} -type f -print0; echo $? > "$_st/find"; }} | '
+            f'{{ head -c {self._MAX_SYNC_LISTING_BYTES + 1}; echo $? > "$_st/head"; }} | base64; _enc=$?; '
+            '_find=$(cat "$_st/find" 2>/dev/null); _head=$(cat "$_st/head" 2>/dev/null); '
+            'rm -f "$_st/find" "$_st/head"; rmdir "$_st"; '
+            'printf "\\n__DF_OUTPUT_SYNC__:%s:%s:%s\\n" "$_find" "$_head" "$_enc"; exit 0 )'
+        )
+        execution = sandbox._run(command, timeout=self._SYNC_DEADLINE_SECONDS)
+        if getattr(execution, "exit_code", None) != 0 or getattr(execution, "error", None) is not None:
+            raise OSError("OpenSandbox output listing failed")
+        # SSE stdout is line-oriented. Base64 keeps event boundaries from
+        # inserting newlines into filenames (NUL frames alone cannot do that).
+        payload, marker = execution_stdout(execution).rsplit("\n", 1)
+        if marker not in {"__DF_OUTPUT_SYNC__:0:0:0", "__DF_OUTPUT_SYNC__:141:0:0"}:
+            raise OSError(f"OpenSandbox output listing failed: {marker}")
+        raw_listing = base64.b64decode("".join(payload.split()), validate=True)
+        if marker == "__DF_OUTPUT_SYNC__:141:0:0" and len(raw_listing) <= self._MAX_SYNC_LISTING_BYTES:
+            raise OSError("OpenSandbox output listing failed: unexpected SIGPIPE")
+        if len(raw_listing) > self._MAX_SYNC_LISTING_BYTES:
+            logger.warning("OpenSandbox output listing exceeded %d bytes; skipping synchronization", self._MAX_SYNC_LISTING_BYTES)
+            return
+        listing = raw_listing.decode("utf-8")
+        if listing and not listing.endswith("\0"):
+            raise OSError("OpenSandbox output listing was incomplete")
+        total = 0
+        for index, remote_path in enumerate(filter(None, listing.split("\0"))):
+            if index >= self._MAX_SYNC_FILES or total >= self._MAX_SYNC_TOTAL_BYTES or time.monotonic() >= deadline:
+                logger.warning("OpenSandbox output synchronization stopped at its file, byte or time limit")
+                break
+            staged: Path | None = None
+            transferring = False
+            try:
+                target = self._output_destination(root, remote_path)
+                transferring = True
+                data = sandbox._download_file_bounded(remote_path, max_bytes=min(_MAX_DOWNLOAD_SIZE, self._MAX_SYNC_TOTAL_BYTES - total), deadline=deadline)
+                transferring = False
+                total += len(data)
+                with tempfile.NamedTemporaryFile(prefix=".opensandbox-sync-", dir=target.parent, delete=False) as output:
+                    staged = Path(output.name)
+                    output.write(data)
+                # Recheck confinement after the network operation before
+                # publishing, preserving any previous complete version on error.
+                self._output_destination(root, remote_path)
+                staged.replace(target)
+            except (OSError, ValueError):
+                logger.warning("Could not synchronize OpenSandbox output %r", remote_path, exc_info=True)
+                # A failed stream may already have consumed bytes that the
+                # caller cannot account for. Stop rather than reset its budget.
+                if transferring:
+                    break
+            finally:
+                if staged is not None:
+                    staged.unlink(missing_ok=True)
 
     def reset(self) -> None:
         """Park active clients so the detached provider still owns their cleanup."""

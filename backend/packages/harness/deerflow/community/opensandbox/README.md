@@ -44,6 +44,25 @@ that itself starts with `$` reaches the sandbox intact.
 
 The provider derives a stable local ID from `(user_id, thread_id)`. A released
 sandbox enters an in-process warm pool and only the same scope may reclaim it.
+Before parking a user/thread-scoped sandbox, the provider copies regular files
+from `/mnt/user-data/outputs` to that owner's local thread outputs directory.
+This makes generated artifacts available to Gateway previews and downloads after
+the turn finishes. Nested paths and binary content are preserved; uploads and
+workspace files are not mirrored. The same scope waits for this copy before its
+next acquire.
+
+Output synchronization is best effort: failures log a warning and preserve any
+previous complete local copy. Each pass processes at most 2,000 files, a 512 KiB
+listing and 512 MiB of downloaded content, with a 100 MiB per-file limit. An
+oversized listing skips the pass; a failed or oversized download stops the pass
+because a partial stream cannot be charged accurately to the remaining budget.
+A 120-second
+cooperative deadline is checked between files and download chunks; an active SDK
+read is bounded by `request_timeout`, so this is not a hard wall-clock limit.
+The listing requires `find`, `head`, `base64` and `mktemp` in the remote image.
+Remote links are not followed and linked local destinations are rejected.
+Files deleted remotely are not removed from the local outputs directory.
+
 Create returns only after the SDK readiness check and DeerFlow's
 `/mnt/user-data/{workspace,uploads,outputs}` bootstrap succeed. A bootstrap
 failure explicitly destroys the newly created remote sandbox.

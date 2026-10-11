@@ -790,6 +790,10 @@ report `Exit Code: 124`; unsuccessful health checks cannot reclaim a warm sandbo
 Health probes tolerate login-shell output around the `ok` line, and failures log
 the sandbox ID and probe output before replacing the sandbox.
 
+The optional OpenSandbox provider mirrors generated output files to local thread
+storage at turn completion for Gateway previews and downloads; see its
+[synchronization limits and failure behavior](backend/packages/harness/deerflow/community/opensandbox/README.md#lifecycle-and-contract).
+
 BoxLite shutdown rejects late VM registration and keeps its SDK loop open while
 in-flight acquisitions finish. If they cannot drain within five seconds,
 shutdown fails with resources still owned and can be retried.

@@ -1,3 +1,20 @@
+### OpenSandbox output synchronization (`community/opensandbox/`)
+
+Release mirrors scoped regular output files to `Paths.sandbox_outputs_dir()`
+before parking the client. Hold the same scope serializer as acquire and retain
+the active entry during transfer so reuse and warm reaping cannot overlap it.
+Never repool a client invalidated or untracked during synchronization.
+
+The bounded listing uses base64-encoded NUL frames to survive line-oriented SSE
+events. POSIX pipelines must report every stage's exit status explicitly. Native
+downloads enforce the remaining byte budget and cooperative deadline and close
+the stream on failure. Publish via an exclusively created temporary file and
+atomic replacement; reject traversal and existing linked host destinations.
+Keep failed synchronization best effort, preserve prior complete copies, and
+do not remove remotely deleted files. Cover the real listing shell and release
+to Gateway artifact reader with offline transports in
+`tests/test_opensandbox_provider.py`.
+
 ### Request Trace Context (`packages/harness/deerflow/trace_context.py`)
 
 DeerFlow's request-level correlation id — the `X-Trace-Id` header and the `deerflow_trace_id` key. Not Langfuse's trace id, not `run_id`, not the short subagent `trace_id` log label.
