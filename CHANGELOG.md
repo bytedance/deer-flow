@@ -4210,7 +4210,7 @@ This release closes that milestone with **439 merged pull requests**.
   any list refresh, the next page started too early and fetched overlapping
   rows, and removing a chat from a full page stopped the list from loading more
   until it refetched. Each cached page now records how many rows it hid and
-  whether the server has more.
+  whether the server has more. ([#6702])
 
 ### Security
 
@@ -9625,3 +9625,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6666]: https://github.com/bytedance/deer-flow/pull/6666
 [#6673]: https://github.com/bytedance/deer-flow/pull/6673
 [#6681]: https://github.com/bytedance/deer-flow/pull/6681
+[#6702]: https://github.com/bytedance/deer-flow/pull/6702

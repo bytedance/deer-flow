@@ -3230,7 +3230,7 @@
   偏移量作为数组上的隐藏属性保存，TanStack Query 的结构共享和列表自身的缓存更新
   都会把它丢掉。重命名、运行结束或任何列表刷新之后，下一页会从过早的位置开始，
   取回重叠的行；从满页中移除一条对话也会让列表在重新获取前停止加载更多。现在每个
-  缓存页都会记录自己隐藏了多少行，以及服务端是否还有更多。
+  缓存页都会记录自己隐藏了多少行，以及服务端是否还有更多。([#6702])
 
 ### 安全
 
@@ -7733,3 +7733,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6666]: https://github.com/bytedance/deer-flow/pull/6666
 [#6673]: https://github.com/bytedance/deer-flow/pull/6673
 [#6681]: https://github.com/bytedance/deer-flow/pull/6681
+[#6702]: https://github.com/bytedance/deer-flow/pull/6702
