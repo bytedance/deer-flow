@@ -124,6 +124,17 @@ For owner-scoped route assertions, pass a stable `user_factory` and
 request state but leaves the ambient user context unchanged; the opt-in binding
 uses the stub user during the request and restores the previous context after it.
 
+## Lark skill-pack publication
+
+`test_lark_skill_manifest_atomic.py` injects `os.replace` failures at the actual
+guidance and manifest writes. Assert that existing file bytes survive and
+temporary files disappear. Reinstallation tests use complete ZIP fixtures and
+the real installer: the previous installed tree must stay byte-identical while
+the write is still in staging and after it fails, with no staging or backup
+tree left behind. Do not replace these behavioral checks with assertions about
+source formatting or duplicate the runtime publication control in
+`test_lark_cli_atomic_publish.py`.
+
 ## Lark CLI blocking-I/O fixtures
 
 `blocking_io/test_integrations_router.py` uses a real local CLI stub: a `.cmd`

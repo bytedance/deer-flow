@@ -1341,6 +1341,23 @@ async def run_agent(
         if scheduled_goal is None:
             await _clear_stale_scheduled_goal(record=record, run_manager=run_manager, bridge=bridge, checkpointer=checkpointer)
 
+        # Full-mode replay keeps its historical message fork, but the owner's
+        # current goal and budget must win. Read after scheduled-goal preflight
+        # so a cleaned-up occurrence goal cannot be reintroduced by the input.
+        configurable = config.get("configurable", {})
+        selected_checkpoint_id = configurable.get("checkpoint_id")
+        if checkpointer is not None and mode == "full" and isinstance(graph_input, dict) and isinstance(selected_checkpoint_id, str) and selected_checkpoint_id and not configurable.get("checkpoint_ns"):
+            async with _checkpoint_thread_lock(thread_id):
+                current = await accessor.aget(checkpoint_config)
+                if _checkpoint_id(current) != selected_checkpoint_id:
+                    current_values = getattr(current, "values", None) or {}
+                    graph_input = dict(graph_input)
+                    if graph_input.get("goal") is None:
+                        # merge_goal ignores plain None, including a goal that
+                        # the user cleared or completed after the selected turn.
+                        graph_input["goal"] = Overwrite(copy.deepcopy(current_values.get("goal")))
+                    graph_input["goal_outcome"] = None
+
         # Capture the effective (resolved) model name from the agent's metadata.
         # _resolve_model_name in agent.py may return the default model if the
         # requested name is not in the allowlist — this update ensures the
@@ -2689,6 +2706,10 @@ async def _linearize_delta_checkpoint_resume(
     ``None`` when the channel has no constructible default). The abandoned
     turn stays in checkpoint history as the rewritten head's ancestry.
 
+    The owner's current goal and continuation budget survive replay; the old
+    achievement record cannot certify the new answer. Full mode applies that
+    policy through the run input after scheduled-goal preflight instead.
+
     Returns the materialized messages when the resume was linearized, or
     ``None`` when there was nothing to do (full mode, no checkpoint selector,
     a non-root namespace, or a selector that already names the head). Failures
@@ -2731,6 +2752,8 @@ async def _linearize_delta_checkpoint_resume(
     selected_values = dict(values)
     head_values = getattr(head, "values", None) or {}
     head_values = dict(head_values) if isinstance(head_values, dict) else {}
+    selected_values["goal"] = head_values.get("goal")
+    selected_values["goal_outcome"] = None
     replacement_values = _complete_state_replacement_values(
         mutation_graph=mutation_graph,
         selected_values=selected_values,

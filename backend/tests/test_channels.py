@@ -7518,14 +7518,16 @@ class TestHandleChatWithArtifacts:
 
 
 class TestDiscordChannel:
+    # Auto-generated ids for these payloads run 2-36 KB; the 36 KB one exceeds the
+    # 32767-char PYTEST_CURRENT_TEST limit on Windows, so give them short ids.
     @pytest.mark.parametrize(
         "text",
         [
-            "x" * 1990 + "\n\n" + "y" * 30,
-            "x" * 2000 + "\n\n\n" + "y" * 30,
-            "x" * 2000 + "\n" + "y" * 2000,
-            ("第一段\n\n" + "句" * 1990 + "\n\n最后一段") * 3,
-            "x" * 4500,
+            pytest.param("x" * 1990 + "\n\n" + "y" * 30, id="paragraph-tail"),
+            pytest.param("x" * 2000 + "\n\n\n" + "y" * 30, id="paragraph-trailing-newlines"),
+            pytest.param("x" * 2000 + "\n" + "y" * 2000, id="newline-mid-message"),
+            pytest.param(("第一段\n\n" + "句" * 1990 + "\n\n最后一段") * 3, id="multibyte-paragraphs"),
+            pytest.param("x" * 4500, id="unbroken-run"),
         ],
     )
     def test_split_text_preserves_content_within_discord_limit(self, text: str):

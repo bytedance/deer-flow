@@ -7,6 +7,21 @@ closers paired with openers inside the detected reference (including literal
 glob directory names). Structured references remain literal. See
 [tool artifact middleware](../agents/middlewares/TOOL_ARTIFACTS.md).
 
+Deferred-tool regex discovery uses `regex.VERSION0` with a shared 100 ms
+deadline per ranked query, including required-name scoring. Validate the bounded
+pattern with stdlib `re` first to preserve the invalid-regex literal fallback
+and avoid admitting engine-specific recursion syntax. Compile once per query;
+bound each searchable field before concatenation and count matches with an
+iterator. Budget failure raises `ToolSearchLimitError`; the tool returns a retry
+hint and no promotions, never a partial ranking. `select:` and the literal
+`keywords:` path bypass these regex limits.
+Field-limit errors identify the tool (name preview capped at 128 characters),
+field and length, and direct the model to `keywords:` or `select:` rather than
+query simplification. Log the same bounded identity with the logical MCP server
+name when available; never log the oversized description. Keep the model-visible
+tool description aligned with these limits. Pathological-regex subprocess tests
+allow 30 seconds for cold startup while matching retains its 100 ms budget.
+
 `task` and `batch_task` opt into JSON checks with `file:<path> json-valid`.
 See [subagents/AGENTS.md](../subagents/AGENTS.md) for read limits and UNVERIFIED semantics.
 Batch readers bound by assembly use its AppConfig output budget. Fit the complete escaped response under 10K and active per-tool/fallback limits; too-small envelopes stop reading. Numeric reader inputs are strict integers. Escape `<` in outer JSON to preserve untrusted data without exposing framework tags; decoding restores the document unchanged.
@@ -93,7 +108,7 @@ E2B output sync records remote file versions and actual host file metadata in a 
 - `timeout_seconds` is one deadline shared by initialization, session creation, and prompt after process launch. Keep the SDK process context outside the timeout so teardown finishes before the tool returns; workspace/MCP preparation and teardown are outside the protocol budget. Real-process regressions in `tests/test_invoke_acp_agent_tool.py` cover every hung phase, the shared budget, success, and caller cancellation. Only report budget expiry when the timeout context's `expired()` is true; otherwise propagate SDK `TimeoutError` to `_format_invocation_error`.
 - ACP results collect only `agent_message_chunk` text. Thought chunks remain internal and must not be concatenated into the tool result
 - Missing ACP executables now return an actionable error message instead of a raw `[Errno 2]`
-- A bare configured `command` is resolved before the spawn (`_resolve_agent_command`), off the event loop because the lookup stats the filesystem. The ACP SDK's stdio transport calls `asyncio.create_subprocess_exec`, which performs no `PATHEXT` lookup on Windows, so a bare npm launcher (`npx`, `mcode`) would raise `FileNotFoundError` although its `.cmd` shim is on `PATH`. Resolution consults the `PATH` the agent subprocess will actually see (`acp_agents.<name>.env.PATH` when the agent config sets one, the Gateway's otherwise) and returns an absolute path, so a relative `PATH` entry cannot be re-interpreted inside the ACP workspace. A `command` containing a path separator goes to the spawn unchanged, so the spawn — not `shutil.which` — decides what it refers to, and `_format_invocation_error` always receives the configured value so its remediation still matches `config.yaml`
+- A configured `command` that is a bare name or an absolute path is resolved before the spawn (`_resolve_agent_command`), off the event loop because the lookup stats the filesystem. The ACP SDK's stdio transport calls `asyncio.create_subprocess_exec`, which performs no `PATHEXT` lookup on Windows, so a bare npm launcher (`npx`, `mcode`) would raise `FileNotFoundError`, and an absolute path without an extension (`C:\npm\mcode`, npm's shell script beside its `.cmd` shim) would die with `WinError 193`, although the shim exists. Resolution consults the `PATH` the agent subprocess will actually see (`acp_agents.<name>.env.PATH` when the agent config sets one, the Gateway's otherwise) and returns an absolute path, so a relative `PATH` entry cannot be re-interpreted inside the ACP workspace; an absolute command is resolved inside its own directory. A relative `command` goes to the spawn unchanged, so the spawn — not `shutil.which` — decides what it refers to, and `_format_invocation_error` always receives the configured value so its remediation still matches `config.yaml`
 - Each ACP agent uses a per-thread workspace at `{base_dir}/users/{user_id}/threads/{thread_id}/acp-workspace/`. The workspace is accessible to the lead agent via the virtual path `/mnt/acp-workspace/` (read-only). In docker sandbox mode, the directory is volume-mounted into the container at `/mnt/acp-workspace` (read-only); in local sandbox mode, path translation is handled by `tools.py`
 
 Ordinary `task` results forward bounded `artifact.knowledge_sources` records
