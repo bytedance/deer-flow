@@ -3038,7 +3038,7 @@ def _append_deerflow_lark_shared_guidance(root: Path) -> None:
 
 只有在用户明确说明已经完成授权后，才继续调用具体的 `lark-cli` 业务命令。
 """
-    skill_file.write_text(content.rstrip() + guidance + "\n", encoding="utf-8")
+    _publish_bytes_atomically(skill_file, (content.rstrip() + guidance + "\n").encode("utf-8"))
 
 
 def _write_manifest(root: Path, installed_skills: set[str], *, version: str | None, content_sha256: str) -> None:
@@ -3051,4 +3051,7 @@ def _write_manifest(root: Path, installed_skills: set[str], *, version: str | No
         "installed_at": datetime.now(UTC).isoformat(),
         "skills": sorted(installed_skills),
     }
-    (root / LARK_CLI_MANIFEST_FILE).write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _publish_bytes_atomically(
+        root / LARK_CLI_MANIFEST_FILE,
+        (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
+    )
