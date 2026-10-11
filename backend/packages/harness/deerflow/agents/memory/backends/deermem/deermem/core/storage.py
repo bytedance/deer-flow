@@ -248,10 +248,7 @@ def _normalize_category(fact: dict[str, Any]) -> None:
     raw_category = fact.get("category", "context")
     if not isinstance(raw_category, str):
         raise ValueError("fact.category must be a string")
-    category = raw_category or "context"
-    if category not in CORE_CATEGORIES:
-        fact.setdefault("categoryExtension", category)
-        fact["category"] = "other"
+    fact["category"] = raw_category or "context"
 
 
 def _require_string_list(fact: dict[str, Any], field: str) -> None:

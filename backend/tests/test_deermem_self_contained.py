@@ -537,6 +537,34 @@ def test_search_survives_non_float_confidence(deermem_data_dir):
     assert [r["id"] for r in results] == ["b", "a", "c"]
 
 
+def test_create_fact_category_round_trips_into_search_and_documents(deermem_data_dir):
+    """A non-core category label must survive the write and stay searchable.
+
+    Regression: ``storage._normalize_category`` rewrote every label outside
+    CORE_CATEGORIES to "other" (parking the original in a write-only
+    ``categoryExtension`` field), so a fact added via
+    ``memory_add(category="personal")`` -- an example label in the memory_add
+    docstring -- was persisted as "other", never matched
+    ``memory_search(category="personal")`` ("Only facts with this exact category
+    are returned"), and kept reporting "other" in get_memory documents.
+    """
+    dm = DeerMem(backend_config={"storage_path": str(deermem_data_dir)})
+    memory_data, fact_id = dm.create_fact(
+        "The user lives in Paris",
+        category="personal",
+        confidence=0.9,
+        user_id="u1",
+    )
+    assert fact_id is not None
+
+    assert next(f for f in memory_data["facts"] if f["id"] == fact_id)["category"] == "personal"
+    document = dm.get_memory(user_id="u1")
+    assert next(f for f in document["facts"] if f["id"] == fact_id)["category"] == "personal"
+
+    results = dm.search("Paris", top_k=10, user_id="u1", category="personal")
+    assert [f["id"] for f in results] == [fact_id]
+
+
 def test_query_search_records_access_but_default_injection_does_not(deermem_data_dir):
     dm = DeerMem(
         backend_config={
