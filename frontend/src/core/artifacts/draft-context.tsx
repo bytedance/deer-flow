@@ -25,12 +25,12 @@ const EMPTY_DRAFTS: Drafts = {};
 const useClientLayoutEffect =
   typeof window === "undefined" ? useEffect : useLayoutEffect;
 
-const ArtifactDraftsContext = createContext<{
-  store: DraftStore;
-  setStore: Dispatch<SetStateAction<DraftStore>>;
-} | null>(null);
+const ArtifactDraftsContext = createContext<DraftStore | null>(null);
+const ArtifactDraftsSetterContext = createContext<Dispatch<
+  SetStateAction<DraftStore>
+> | null>(null);
 
-// RootLayout survives both chat navigation and the workspace's link to home.
+// RootLayout survives chat navigation and workspace layout replacement.
 // File bodies stay in React memory, never in browser storage or a module cache.
 export function ArtifactDraftsProvider({ children }: { children: ReactNode }) {
   const [store, setStore] = useState<DraftStore>({
@@ -54,18 +54,21 @@ export function ArtifactDraftsProvider({ children }: { children: ReactNode }) {
   }, [hasUnsavedDrafts]);
 
   return (
-    <ArtifactDraftsContext.Provider value={{ store, setStore }}>
-      {children}
-    </ArtifactDraftsContext.Provider>
+    <ArtifactDraftsSetterContext.Provider value={setStore}>
+      <ArtifactDraftsContext.Provider value={store}>
+        {children}
+      </ArtifactDraftsContext.Provider>
+    </ArtifactDraftsSetterContext.Provider>
   );
 }
 
 // Every AuthProvider (including login pages) clears drafts when its owner
 // changes. Unmounting an auth layout to visit home deliberately retains them.
-export function useArtifactDraftOwner(owner: string | null) {
-  const context = useContext(ArtifactDraftsContext);
-  const setStore = context?.setStore;
+export function useArtifactDraftOwner(owner: string | null | undefined) {
+  const setStore = useContext(ArtifactDraftsSetterContext);
   useClientLayoutEffect(() => {
+    // An unavailable auth probe is not a logout or account change.
+    if (owner === undefined) return;
     setStore?.((current) =>
       current.owner === owner
         ? current
@@ -75,11 +78,11 @@ export function useArtifactDraftOwner(owner: string | null) {
 }
 
 export function useArtifactDrafts(pathname: string, owner: string | null) {
-  const context = useContext(ArtifactDraftsContext);
-  if (!context) {
+  const store = useContext(ArtifactDraftsContext);
+  const setStore = useContext(ArtifactDraftsSetterContext);
+  if (!store || !setStore) {
     throw new Error("ArtifactsProvider must be inside ArtifactDraftsProvider");
   }
-  const { store, setStore } = context;
   const generation = store.generation;
   const setDrafts: Dispatch<SetStateAction<Drafts>> = useCallback(
     (update) => {

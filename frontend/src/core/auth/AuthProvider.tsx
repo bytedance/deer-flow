@@ -51,6 +51,8 @@ export const AuthDisabledContext = createContext(false);
 interface AuthProviderProps {
   children: ReactNode;
   initialUser: User | null;
+  /** The Gateway could not determine authentication; null is not a confirmed logout. */
+  initialAuthUnknown?: boolean;
 }
 
 /**
@@ -61,9 +63,14 @@ interface AuthProviderProps {
  * - initialUser comes from server-side guard, avoiding client flicker
  * - Provides logout and refresh capabilities
  */
-export function AuthProvider({ children, initialUser }: AuthProviderProps) {
+export function AuthProvider({
+  children,
+  initialUser,
+  initialAuthUnknown = false,
+}: AuthProviderProps) {
   const [user, setUser] = useState<User | null>(initialUser);
-  useArtifactDraftOwner(user?.id ?? null);
+  const [authKnown, setAuthKnown] = useState(!initialAuthUnknown);
+  useArtifactDraftOwner(authKnown ? (user?.id ?? null) : undefined);
   const [isLoading, setIsLoading] = useState(false);
   const router = useRouter();
   const pathname = usePathname();
@@ -78,6 +85,7 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
    */
   const applyUser = useCallback((next: User | null) => {
     setUser(next);
+    setAuthKnown(true);
   }, []);
 
   /**
@@ -96,8 +104,10 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
       if (res.ok) {
         const data = await res.json();
         setUser(data);
+        setAuthKnown(true);
       } else if (res.status === 401) {
         setUser(null);
+        setAuthKnown(true);
         const code = await res
           .json()
           .then((data) => parseAuthError(data).code)
@@ -116,6 +126,7 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
     } catch (err) {
       console.error("Failed to refresh user:", err);
       setUser(null);
+      setAuthKnown(false);
     } finally {
       setIsLoading(false);
     }
@@ -135,6 +146,7 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
   const logout = useCallback(async () => {
     // Immediately clear local state to prevent UI flicker
     setUser(null);
+    setAuthKnown(true);
 
     if (staticMode) {
       router.push("/");

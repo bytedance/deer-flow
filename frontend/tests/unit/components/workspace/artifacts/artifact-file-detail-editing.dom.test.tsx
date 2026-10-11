@@ -164,6 +164,26 @@ afterEach(() => {
 });
 
 describe("ArtifactFileDetail complete editing baseline", () => {
+  it("retains a dirty draft and marks a remote conflict after A-B-A navigation", () => {
+    loadFull();
+    const { rerender } = renderDetail();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(source(), { target: { value: "retained draft" } });
+    mocks.pathname = "/workspace/chats/other";
+    rerender(<div />);
+    Object.assign(mocks.artifactContent, {
+      content: "agent regenerated the report",
+      sha256: "c".repeat(64),
+    });
+    mocks.pathname = "/workspace/chats/artifact-editing-test";
+    rerender(detail());
+    expect(source().value).toBe("retained draft");
+    expect(screen.getByText("Changed remotely")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(save().disabled).toBe(true);
+    expect(mockedFetch).not.toHaveBeenCalled();
+  });
+
   it("restores an actual editor draft after the chat provider is replaced", () => {
     loadFull();
     const { rerender } = renderDetail();
