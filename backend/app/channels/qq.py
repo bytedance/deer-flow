@@ -18,6 +18,7 @@ import httpx
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
+from app.channels.allowed_users import parse_allowed_users
 from app.channels.base import Channel
 from app.channels.commands import extract_connect_code, is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
@@ -58,6 +59,31 @@ def validate_gateway_url(url: str) -> str:
     return url
 
 
+def _parse_open_id(entry: Any) -> str | None:
+    """A QQ OpenID from a non-blank string, else ``None``.
+
+    OpenIDs are opaque strings. A YAML number is at best a QQ account number,
+    which never equals an OpenID, so it is rejected rather than stringified.
+    """
+    if isinstance(entry, str):
+        return entry.strip() or None
+    return None
+
+
+def _parse_allowed_users(allowed_users: Any) -> frozenset[str] | None:
+    """Parse OpenIDs without splitting a scalar string into its characters."""
+    if isinstance(allowed_users, str) and ("," in allowed_users or any(char.isspace() for char in allowed_users.strip())):
+        logger.warning("[qq] allowed_users is a scalar string containing separators; treating it as one literal OpenID. Use a YAML list for multiple IDs")
+    return parse_allowed_users(
+        allowed_users,
+        parse_user_id=_parse_open_id,
+        logger=logger,
+        channel_name="qq",
+        expected_id="a QQ OpenID string, not a numeric QQ account number",
+        valid_id_name="OpenID",
+    )
+
+
 class _GatewayConnect(connect):
     def process_redirect(self, exc: Exception) -> Exception:
         # Never forward Identify credentials through a redirected socket.
@@ -78,7 +104,7 @@ class QQChannel(Channel):
         super().__init__("qq", bus, config)
         self._app_id = str(config.get("app_id") or "").strip()
         self._client_secret = str(config.get("client_secret") or "").strip()
-        self._allowed_users = set(config.get("allowed_users") or [])
+        self._allowed_users = _parse_allowed_users(config.get("allowed_users"))
         self._api_url = "https://sandbox.api.sgroup.qq.com" if config.get("sandbox", False) else API_URL
         self._http: httpx.AsyncClient | None = None
         self._ssl: ssl.SSLContext | None = None
@@ -392,7 +418,7 @@ class QQChannel(Channel):
         # Binding codes are always control traffic, even without a repository.
         if extract_connect_code(text) and code is None:
             return
-        if not code and self._allowed_users and sender not in self._allowed_users:
+        if not code and self._allowed_users is not None and sender not in self._allowed_users:
             return
         key = (chat_id, message_id)
         self._replies.setdefault(

@@ -497,6 +497,13 @@ OpenIDs represent the same identity. Bind each context separately. Group
 conversation histories are isolated by sender, but replies remain visible to
 everyone in the group.
 
+List several OpenIDs as a YAML list. A single OpenID, such as an
+`allowed_users: $QQ_ALLOWED_USERS` reference, is one entry rather than a
+sequence of characters. Entries that are not OpenID strings, such as numeric
+QQ account numbers, are ignored with a warning, and a mapping is rejected as a
+whole, so none of its keys is authorized. A configured value with no valid
+OpenID denies every sender and logs an error.
+
 The MVP supports text-only `C2C_MESSAGE_CREATE` and `GROUP_AT_MESSAGE_CREATE`
 events and final text replies. It does not download/upload attachments, stream
 partial answers, handle guild/channel messages, or proactively push scheduled
