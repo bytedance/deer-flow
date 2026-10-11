@@ -9,20 +9,25 @@ import {
   useSettingsDialog,
 } from "./settings";
 
-const SETTINGS_SECTIONS = new Set<SettingsSection>([
-  "models",
-  "account",
-  "appearance",
-  "channels",
-  "memory",
-  "subagents",
-  "notification",
-  "about",
-]);
+// Record form: the compiler enforces one entry per SettingsSection, so a new
+// section cannot silently stay unreachable from `?settings=` deep links.
+const SETTINGS_SECTIONS: Record<SettingsSection, true> = {
+  models: true,
+  users: true,
+  account: true,
+  appearance: true,
+  channels: true,
+  memory: true,
+  subagents: true,
+  notification: true,
+  about: true,
+};
 
 function asSettingsSection(value: string | null): SettingsSection | null {
   if (!value) return null;
-  return SETTINGS_SECTIONS.has(value as SettingsSection)
+  // `=== true` rejects inherited keys ("toString" in obj is true) that both
+  // `in` and bare indexing would admit.
+  return SETTINGS_SECTIONS[value as SettingsSection] === true
     ? (value as SettingsSection)
     : null;
 }

@@ -17,6 +17,7 @@ import pytest
 from _thread_checkpoint_helpers import INDEXED_SAVER_KINDS, SAVER_KINDS, make_saver, put_goal_write, put_thread
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage  # noqa: F401
 from langchain_core.tools import StructuredTool
+from test_mcp_cache_reconciliation import reconciler  # noqa: F401 - fixture re-export
 
 from app.gateway.routers.mcp import McpConfigResponse
 from app.gateway.routers.memory import MemoryConfigResponse, MemoryStatusResponse
@@ -2500,6 +2501,73 @@ class TestGoalManagement:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.asyncio
+async def test_update_mcp_config_installs_the_local_committed_fence(
+    client,
+    reconciler,  # noqa: F811 - fixture imported from the sibling suite
+    monkeypatch,
+    tmp_path,
+):
+    """A client write must retire the writer process's own binding, not just publish the token."""
+    import test_mcp_cache_reconciliation as harness
+
+    from deerflow.mcp import session_pool as session_pool_module
+    from deerflow.mcp.session_pool import MCPSessionPool
+
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    log = harness._session_log()
+    servers = {"A": harness._stdio("cmd-A")}
+    await harness._initialize(monkeypatch, cfg, servers, log)
+    binding_before = harness._binding(pool, "A")
+
+    # Delete A, then identically re-add it through the client writer. The
+    # committing process must install the new epochs under the same lock.
+    client.update_mcp_config({})
+    client.update_mcp_config({"A": {"enabled": True, "type": "stdio", "command": "cmd-A"}})
+
+    await harness._wait_until(lambda: log["exited"].get("cmd-A") == 1)
+    assert harness._binding(pool, "A") is not binding_before
+
+
+@pytest.mark.asyncio
+async def test_update_mcp_config_post_commit_failure_still_resets_agent(
+    client,
+    reconciler,  # noqa: F811 - fixture imported from the sibling suite
+    monkeypatch,
+    tmp_path,
+):
+    """A committed write whose local handoff fails must not keep the old cached agent."""
+    import test_mcp_cache_reconciliation as harness
+
+    from deerflow.mcp import session_pool as session_pool_module
+    from deerflow.mcp.session_pool import MCPSessionPool
+
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    log = harness._session_log()
+    await harness._initialize(monkeypatch, cfg, {"A": harness._stdio("cmd-A")}, log)
+
+    client._agent = "cached-agent"
+    client._agent_config_key = ("old",)
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("prepare failed")
+
+    monkeypatch.setattr("deerflow.mcp.cache.prepare_mcp_reconciliation", _boom)
+
+    with pytest.raises(RuntimeError, match="saved, but local cache reconciliation failed"):
+        client.update_mcp_config({"A": {"enabled": True, "type": "stdio", "command": "cmd-A2"}})
+
+    # The config was committed...
+    assert json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]["A"]["command"] == "cmd-A2"
+    # ...so the old agent must not be reusable, and the local pool is retired.
+    assert client._agent is None
+    assert session_pool_module.get_session_pool() is not pool
+
+
 class TestMcpConfig:
     def test_get_mcp_config(self, client):
         server = MagicMock()
@@ -2546,7 +2614,7 @@ class TestMcpConfig:
         finally:
             tmp_path.unlink()
 
-    def test_update_mcp_config_preserves_raw_sibling_keys(self, client, tmp_path, monkeypatch):
+    def test_update_mcp_config_preserves_raw_sibling_keys(self, client, reconciler, tmp_path, monkeypatch):  # noqa: F811 - imported fixture
         """Only ``mcpServers`` is replaced; every other key keeps its on-disk ``$VAR`` form."""
         monkeypatch.setenv("DEERFLOW_TEST_GH_TOKEN", "ghp_live_secret_value")
         config_file = tmp_path / "extensions_config.json"
@@ -2567,13 +2635,37 @@ class TestMcpConfig:
         ):
             client.update_mcp_config({"new": {"type": "stdio", "command": "uvx", "env": {"TOKEN": "$DEERFLOW_TEST_GH_TOKEN"}}})
 
-        written_text = config_file.read_text(encoding="utf-8")
-        assert json.loads(written_text) == {
-            "mcpServers": {"new": {"type": "stdio", "command": "uvx", "env": {"TOKEN": "$DEERFLOW_TEST_GH_TOKEN"}}},
-            "mcpInterceptors": {"auth": "$DEERFLOW_TEST_GH_TOKEN"},
-            "skills": {"kept": {"enabled": False}},
-        }
-        assert "ghp_live_secret_value" not in written_text
+        written = json.loads(config_file.read_text(encoding="utf-8"))
+        assert written["mcpServers"] == {"new": {"type": "stdio", "command": "uvx", "env": {"TOKEN": "$DEERFLOW_TEST_GH_TOKEN"}}}
+        assert written["mcpInterceptors"] == {"auth": "$DEERFLOW_TEST_GH_TOKEN"}
+        assert written["skills"] == {"kept": {"enabled": False}}
+        # The controlled writer also commits the shared lifecycle ledger: "old"
+        # was removed (tombstone) and "new" was added, both with fresh tokens.
+        lifecycle = written["mcpLifecycle"]
+        assert lifecycle["version"] == 1
+        assert set(lifecycle["servers"]) == {"old", "new"}
+        assert all(len(token) == 32 and all(c in "0123456789abcdef" for c in token) for token in lifecycle["servers"].values())
+        # Raw $VAR placeholders are never expanded into the file.
+        assert "ghp_live_secret_value" not in config_file.read_text(encoding="utf-8")
+
+    def test_update_mcp_config_delete_then_identical_readd_advances_generation(self, client, reconciler, tmp_path, monkeypatch):  # noqa: F811 - imported fixture
+        """The client writer must not coalesce delete -> identical re-add."""
+        config_file = tmp_path / "extensions_config.json"
+        config_file.write_text(
+            json.dumps({"mcpServers": {"A": {"enabled": True, "type": "stdio", "command": "cmd-A"}}, "skills": {}}),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
+            patch("deerflow.client.reload_extensions_config", return_value=ExtensionsConfig()),
+        ):
+            client.update_mcp_config({})
+            after_delete = json.loads(config_file.read_text(encoding="utf-8"))["mcpLifecycle"]["servers"]["A"]
+            client.update_mcp_config({"A": {"enabled": True, "type": "stdio", "command": "cmd-A"}})
+            after_readd = json.loads(config_file.read_text(encoding="utf-8"))["mcpLifecycle"]["servers"]["A"]
+
+        assert after_readd != after_delete
 
     def test_update_mcp_config_rejects_invalid_candidate_without_writing(self, client, tmp_path):
         config_file = tmp_path / "extensions_config.json"
