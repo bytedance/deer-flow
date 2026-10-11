@@ -22,6 +22,7 @@ from deerflow.config.file_signature import get_config_signature
 from deerflow.config.managed_model_providers import resolve_managed_model_provider
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.runtime_paths import runtime_home
+from deerflow.config.secret_file import read_or_create_secret_file
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -81,10 +82,14 @@ class ManagedModelStore:
     def _cipher(self, *, create: bool = False):
         from cryptography.fernet import Fernet
 
-        if not self.key_path.exists():
+        # An empty key file is an older release's interrupted first save: it
+        # encrypted nothing, so it is recoverable exactly when no catalog exists.
+        if not self.key_path.exists() or not self.key_path.read_bytes().strip():
             if not create or self.path.exists():
                 raise ValueError("Managed model encryption key is missing; restore it from backup")
-            self._write(self.key_path, Fernet.generate_key())
+            # Exclusive create (replacing an abandoned empty file): a peer sharing
+            # the runtime home that published first keeps its key.
+            read_or_create_secret_file(self.key_path, lambda: Fernet.generate_key().decode("ascii"))
         return Fernet(self.key_path.read_bytes())
 
     def list(self) -> list[ManagedModel]:

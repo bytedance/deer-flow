@@ -22,15 +22,16 @@ from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 
 REVISION = "0038_channel_thread_bindings"
 PREVIOUS = "0037_project_document_summaries"
+CURRENT_HEAD = "0039_user_disabled"
 TABLE = "channel_thread_bindings"
 COLUMNS = {"key", "channel_name", "chat_id", "topic_id", "thread_id", "user_id", "created_at", "updated_at"}
 INDEX = "ix_channel_thread_bindings_channel_chat"
 pytestmark = pytest.mark.asyncio
 
 
-async def test_0038_is_the_single_head_and_chains_after_0037():
+async def test_0038_remains_in_the_single_migration_chain():
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
-    assert script.get_heads() == [REVISION]
+    assert script.get_heads() == [CURRENT_HEAD]
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     # alembic_version.version_num is VARCHAR(32).
     assert len(REVISION) <= 32
@@ -182,6 +183,8 @@ async def test_bootstrap_provisions_the_table_on_an_empty_database_and_is_idempo
         assert set(shape["columns"]) == COLUMNS
         assert INDEX in shape["indexes"]
         async with engine.connect() as conn:
-            assert (await conn.execute(sa.text("SELECT version_num FROM alembic_version"))).scalar_one() == REVISION
+            # Bootstrap runs the chain to its head, which this test no longer
+            # owns once later revisions chain after 0038.
+            assert (await conn.execute(sa.text("SELECT version_num FROM alembic_version"))).scalar_one() == CURRENT_HEAD
     finally:
         await engine.dispose()

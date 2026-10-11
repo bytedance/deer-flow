@@ -379,6 +379,25 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   JWT=$(kubectl -n deer-flow exec deploy/deer-flow-gateway -- cat /app/backend/.deer-flow/.jwt_secret)
   kubectl -n deer-flow patch secret deer-flow-app -p "{\"stringData\":{\"AUTH_JWT_SECRET\":\"$JWT\"}}"
   ```
+- **Credentials key.** The app Secret also holds `DEER_FLOW_CREDENTIALS_KEY`,
+  the Fernet key the gateway encrypts stored credentials with (per-connection
+  IM channel credentials today). The chart generates it once (32 random bytes,
+  urlsafe base64) and preserves it across upgrades via `lookup`; every gateway
+  Pod reads the same value. **Back it up**: deleting the Secret or the release
+  generates a new key, and credentials stored under the old one become
+  unreadable (they are treated as missing, never as an error). To rotate,
+  prepend a new key — `new,old` — and keep the old one listed until stored
+  values have been rewritten. An `existingAppSecret` should carry it; the env
+  entry is optional, so without it a single Pod falls back to an auto-generated
+  `.credentials_key` on the home volume, while a multi-instance gateway with
+  `channel_connections.enabled` refuses to start. If you add the key to an
+  `existingAppSecret` later, copy that file's value so stored credentials stay
+  readable:
+
+  ```bash
+  KEY=$(kubectl -n deer-flow exec deploy/deer-flow-gateway -- cat /app/backend/.deer-flow/.credentials_key)
+  kubectl -n deer-flow patch secret my-app-secret -p "{\"stringData\":{\"DEER_FLOW_CREDENTIALS_KEY\":\"$KEY\"}}"
+  ```
 - **Scheduled task recovery.** If a deployment explicitly enables
   `scheduler.multi_instance: true`, it must use shared Postgres,
   `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`.
@@ -493,7 +512,7 @@ but not file mode — so a PVC written by an earlier **root** run (e.g. a cluste
 that ran the gateway as root before enabling this hardening, or a backup restore
 of root-owned files) will keep files like `.jwt_secret` at `0600 root:root`. The
 non-root gateway (uid 1000) then can't read them and crashes on the first auth
-request with `RuntimeError: Failed to read JWT secret from .../​.jwt_secret`.
+request with `RuntimeError: Failed to read or persist the JWT secret at .../​.jwt_secret`.
 
 **Fresh installs are unaffected** — uid 1000 creates every file as `1000:1000`.
 

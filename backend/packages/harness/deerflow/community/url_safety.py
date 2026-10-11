@@ -99,9 +99,9 @@ def validate_public_http_url(
     resolves the name again, so a rebinding DNS server can still hand that
     connect a private address unless the connection is pinned to the vetted
     IPs (:func:`resolve_public_addresses`), as ``deerflow.mcp.personal_network``
-    and the browser egress proxy do. Delegated fetch services (crawl4ai,
-    Browserless, fastcrw) resolve on their own side and cannot be pinned from
-    here.
+    and the browser egress proxy do. Delegated fetch services (Browserless,
+    crawl4ai, fastcrw, firecrawl) resolve on their own side and cannot be pinned
+    from here.
     """
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -118,4 +118,53 @@ def validate_public_http_url(
         resolve_public_addresses(hostname, action=action, resolver=resolver)
     except ValueError as exc:
         return str(exc)
+    return None
+
+
+def validate_delegated_backend_url(
+    base_url: str,
+    *,
+    network_isolation_confirmed: bool = False,
+    resolver: Callable[[str], list[ipaddress._BaseAddress]] | None = None,
+) -> str | None:
+    """Validate a delegated fetch backend's base URL before delegating navigation.
+
+    Browserless, Crawl4AI, fastCRW, and Firecrawl resolve the target URL, follow
+    redirects, and load subresources in the backend's own network namespace, so
+    the target-URL screen in :func:`validate_public_http_url` cannot be enforced
+    end-to-end. The only safe way to delegate is to ensure the backend's outbound
+    network is isolated from the deployment's private and metadata networks.
+
+    A backend reachable at a public address (for example Browserless Cloud) runs
+    outside the deployment network, so delegation needs no extra confirmation. A
+    backend at a loopback, private, or unverifiable address is self-hosted inside
+    the deployment network, so this fails closed unless the operator confirms the
+    backend's egress is isolated via ``network_isolation_confirmed=True``.
+
+    The check resolves the backend hostname once, at validation time only. A
+    backend client built afterwards connects by hostname and resolves the name
+    again, so a DNS name that answers with a public address during screening and
+    a private one at connect time still passes. Pin the connection to the vetted
+    addresses (:func:`resolve_public_addresses`) to close that rebinding window.
+
+    Returns an ``"Error: ..."`` string when delegation must be refused, or
+    ``None`` when the caller may proceed. Blocking like
+    :func:`resolve_public_addresses`; from a coroutine, call it via
+    ``asyncio.to_thread``.
+    """
+    parsed = urlparse(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return "Error: Only http:// and https:// backend URLs are supported"
+
+    if network_isolation_confirmed:
+        return None
+
+    hostname = parsed.hostname
+    if not hostname:
+        return "Error: Backend URL host could not be parsed"
+
+    try:
+        resolve_public_addresses(hostname, action="delegate to", resolver=resolver)
+    except ValueError as exc:
+        return f"{exc}. To delegate to a self-hosted backend, set network_isolation_confirmed: true."
     return None

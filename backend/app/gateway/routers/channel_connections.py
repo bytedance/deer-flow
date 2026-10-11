@@ -229,7 +229,8 @@ def _get_repository(request: Request, config: ChannelConnectionsConfig) -> Chann
     if sf is None:
         raise HTTPException(status_code=503, detail="Channel connection persistence is not available")
 
-    repo = ChannelConnectionRepository(sf)
+    # The lifespan loads the DEER_FLOW_CREDENTIALS_KEY cipher off the event loop.
+    repo = ChannelConnectionRepository(sf, cipher=getattr(request.app.state, "credentials_cipher", None))
     request.app.state.channel_connection_repo = repo
     return repo
 

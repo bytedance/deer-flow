@@ -150,6 +150,18 @@ spec:
                   name: {{ include "deer-flow.appSecret" . }}
                   key: AUTH_JWT_SECRET
                   optional: {{ ne (include "deer-flow.gatewayMultiInstance" .) "true" }}
+            # At-rest key for stored credentials, shared by every Pod so one
+            # Pod can decrypt what another stored. Optional so a user-managed
+            # existingAppSecret without it still boots: a single Pod then falls
+            # back to .credentials_key on the home volume, and the Gateway's own
+            # startup gate refuses a multi-instance deployment that stores
+            # credentials (channel_connections) without the key.
+            - name: DEER_FLOW_CREDENTIALS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "deer-flow.appSecret" . }}
+                  key: DEER_FLOW_CREDENTIALS_KEY
+                  optional: true
             {{- if .Values.provisioner.enabled }}
             # Shared gateway -> bundled-provisioner key. config.yaml references
             # it as sandbox.provisioner_api_key: $PROVISIONER_API_KEY, and the

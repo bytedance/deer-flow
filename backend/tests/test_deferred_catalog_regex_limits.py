@@ -54,6 +54,16 @@ def test_oversized_field_rejected_but_exact_selection_still_works(field):
     assert catalog.search("select:" + tool.name) == [tool]
 
 
+def test_keyword_search_bypasses_regex_limits(monkeypatch):
+    def reject_regex_path(*args):
+        pytest.fail("Literal keyword search must not enter the regex budget path.")
+
+    monkeypatch.setattr(search_module, "_compile_catalog_regex", reject_regex_path)
+    monkeypatch.setattr(search_module, "monotonic", reject_regex_path)
+    tool = make_tool(description="a" * (MAX_REGEX_FIELD_CHARS + 1))
+    assert DeferredToolCatalog((tool,)).search("keywords:aaa") == [tool]
+
+
 @pytest.mark.parametrize("query", ["a", "+aaa a", "+aaa (?=a)"])
 def test_query_uses_one_budget_across_candidates(monkeypatch, query):
     # Deterministic elapsed time: the second candidate crosses the deadline.

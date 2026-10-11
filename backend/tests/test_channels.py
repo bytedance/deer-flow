@@ -6513,7 +6513,7 @@ class TestGithubFollowupBuffer:
             def get_status(self):
                 return {}
 
-        def fake_from_app_config(app_config=None, *, get_stream_bridge=None):
+        def fake_from_app_config(app_config=None, *, get_stream_bridge=None, credentials_cipher=None):
             captured["get_stream_bridge"] = get_stream_bridge
             return _FakeService()
 

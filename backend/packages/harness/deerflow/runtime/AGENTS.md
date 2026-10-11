@@ -77,7 +77,13 @@ status locally and commits it only after finalization's receipt and duration
 writes. `RunRecord.terminal_commit_pending` keeps `_renew_leases()` renewing that
 still-active row until the commit is attempted; a renewal rejected by the worker's
 own commit is confirmed by re-reading the row, while a peer claim fences the run.
-Never select runs for renewal by local status alone.
+Never select runs for renewal by local status alone. Shutdown's drain treats the
+same state as active: such runs are awaited (never cancelled — cancellation would
+skip their terminal tail) so the duration checkpoint and terminal commit land
+before checkpointer teardown. A drain timeout leaves staged statuses and commit
+barriers intact without persisting `interrupted`. A finalizer that raises is
+logged with its run ID, staged status and exception while the other runs continue
+draining. Coverage: `tests/test_gateway_run_drain_shutdown.py`.
 
 **Deferred-tool promotion event deduplication** (`runtime/journal.py`): one
 `RunJournal` owns the lead graph's run-scoped atomic promotion claim. Parallel

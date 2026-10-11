@@ -298,6 +298,53 @@ elif [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_INTERNAL_AUTH_TOKEN" ]; then
     fi
 fi
 
+# ── DEER_FLOW_CREDENTIALS_KEY ────────────────────────────────────────────────
+# At-rest Fernet key the Gateway encrypts stored credentials with. Losing it
+# makes those credentials unreadable, so back the file up. It is persisted
+# under the name the Gateway itself generates in its runtime home (the
+# $DEER_FLOW_HOME bind mount), so a key either side created first is the one
+# both keep. noclobber turns the redirection into an exclusive (O_EXCL)
+# create: when a concurrent run wins, its key is read back instead of ours.
+
+_credentials_key_file="$DEER_FLOW_HOME/.credentials_key"
+if [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_CREDENTIALS_KEY" ] && dotenv_provides_secret DEER_FLOW_CREDENTIALS_KEY; then
+    echo -e "${GREEN}✓ DEER_FLOW_CREDENTIALS_KEY loaded from $ENV_FILE${NC}"
+elif [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_CREDENTIALS_KEY" ]; then
+    _generated_credentials_key=""
+    if [ ! -f "$_credentials_key_file" ]; then
+        # urlsafe base64 of 32 random bytes, the Fernet key format.
+        if command -v python3 > /dev/null 2>&1 && \
+            _generated_credentials_key="$(python3 -c 'import sys; sys.version_info >= (3, 6) or sys.exit(1); import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())' 2>/dev/null)"; then
+            true
+        elif command -v python > /dev/null 2>&1 && \
+            _generated_credentials_key="$(python -c 'import sys; sys.version_info >= (3, 6) or sys.exit(1); import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())' 2>/dev/null)"; then
+            true
+        elif command -v openssl > /dev/null 2>&1 && \
+            _generated_credentials_key="$(openssl rand -base64 32 | tr '+/' '-_')"; then
+            true
+        else
+            echo -e "${RED}✗ Cannot generate DEER_FLOW_CREDENTIALS_KEY: python3, python, and openssl are all unavailable.${NC}" >&2
+            echo -e "${RED}  Set DEER_FLOW_CREDENTIALS_KEY manually before running make up.${NC}" >&2
+            exit 1
+        fi
+        if ! ( umask 077; set -o noclobber; printf '%s\n' "$_generated_credentials_key" > "$_credentials_key_file" ) 2>/dev/null; then
+            _generated_credentials_key=""
+        fi
+    fi
+    if [ -n "$_generated_credentials_key" ]; then
+        export DEER_FLOW_CREDENTIALS_KEY="$_generated_credentials_key"
+        echo -e "${GREEN}✓ DEER_FLOW_CREDENTIALS_KEY generated → $_credentials_key_file (back it up)${NC}"
+    else
+        if [ ! -r "$_credentials_key_file" ]; then
+            fail_home_permission "$_credentials_key_file" readable
+        fi
+        export DEER_FLOW_CREDENTIALS_KEY
+        DEER_FLOW_CREDENTIALS_KEY="$(cat "$_credentials_key_file")"
+        echo -e "${GREEN}✓ DEER_FLOW_CREDENTIALS_KEY loaded from $_credentials_key_file${NC}"
+    fi
+    unset _generated_credentials_key
+fi
+
 # ── UV_EXTRAS auto-detection ─────────────────────────────────────────────────
 # The production Dockerfile accepts UV_EXTRAS as a single build-arg token and
 # adds the --extra prefix itself. Convert the detector's uv flag string

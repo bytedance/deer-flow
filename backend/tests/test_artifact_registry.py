@@ -230,6 +230,84 @@ def test_structured_url_key_rejects_non_http_uris():
     assert types["job-11"] == "task"
 
 
+def test_extract_from_resource_links_artifact():
+    """The MCP conversion layer preserves ResourceLinks under the artifact's
+    ``resource_links`` key; a result whose ONLY artifact signal is that key
+    still yields file entries, named after the link."""
+    result = ToolMessage(
+        content=[{"type": "text", "text": "done"}],
+        tool_call_id="call-rl",
+        name="mcp_report_gen",
+        artifact={
+            "resource_links": [
+                {"name": "quarterly report", "uri": "https://example.com/report.pdf", "mime_type": "application/pdf"},
+                {"name": "", "uri": "/mnt/user-data/outputs/notes.txt", "mime_type": "text/plain"},
+            ]
+        },
+    )
+    entries = extract_artifacts_from_result(result, thread_id="thread-1")
+    assert [(entry["artifact_type"], entry["real_ref"]) for entry in entries] == [
+        ("file", "https://example.com/report.pdf"),
+        ("file", "/mnt/user-data/outputs/notes.txt"),
+    ]
+    assert entries[0]["display_name"] == "quarterly report"
+    assert entries[0]["mime_type"] == "application/pdf"
+    assert entries[1]["display_name"] == "notes.txt"
+
+
+def test_resource_links_reject_unreferenceable_uris():
+    """``resource_links`` entries get the same referenceability gate as every
+    other ref source: embedded-payload and non-fetchable URIs stay out of
+    thread state."""
+    result = ToolMessage(
+        content=[{"type": "text", "text": "done"}],
+        tool_call_id="call-rl2",
+        name="mcp_embedded",
+        artifact={
+            "resource_links": [
+                {"name": "blob", "uri": "data:application/pdf;base64," + "A" * 500, "mime_type": "application/pdf"},
+                {"name": "card", "uri": "ui://app/card.html", "mime_type": "text/html"},
+                {"name": "keep", "uri": "/mnt/user-data/outputs/keep.md", "mime_type": "text/markdown"},
+            ]
+        },
+    )
+    entries = extract_artifacts_from_result(result, thread_id="thread-1")
+    assert [entry["real_ref"] for entry in entries] == ["/mnt/user-data/outputs/keep.md"]
+
+
+def test_resource_links_and_placeholder_text_dedup_same_ref():
+    """The conversion layer writes both a ``resource_links`` artifact entry and
+    a model-visible placeholder text for one downgraded ResourceLink: the
+    registry must not mint two handles for the same ref — the typed
+    ``resource_links`` entry (with its display name) wins."""
+    path_uri = "/mnt/user-data/outputs/page.png"
+    url_uri = "https://example.com/files/report.pdf"
+    result = ToolMessage(
+        content=[
+            {
+                "type": "text",
+                "text": (f"[Resource: page (image/png) available at {path_uri}]\n[Resource: report (application/pdf) available at {url_uri}]"),
+            }
+        ],
+        tool_call_id="call-dup",
+        name="mcp_screenshot",
+        artifact={
+            "resource_links": [
+                {"name": "page", "uri": path_uri, "mime_type": "image/png"},
+                {"name": "report", "uri": url_uri, "mime_type": "application/pdf"},
+            ]
+        },
+    )
+    entries = extract_artifacts_from_result(result, thread_id="thread-1")
+    assert [(entry["artifact_type"], entry["real_ref"]) for entry in entries] == [
+        ("file", path_uri),
+        ("file", url_uri),
+    ]
+    assert entries[0]["display_name"] == "page"
+    assert entries[0]["mime_type"] == "image/png"
+    assert entries[1]["display_name"] == "report"
+
+
 def test_extract_from_text_with_path():
     result = ToolMessage(
         content=[{"type": "text", "text": "Report saved to /mnt/user-data/outputs/report.html"}],

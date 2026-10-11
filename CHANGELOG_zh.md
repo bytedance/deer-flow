@@ -274,6 +274,20 @@
   `stream_bridge.type: redis` 或 `DEER_FLOW_STREAM_BRIDGE_REDIS_URL`
   （docker-compose 与 Helm chart 已自动注入）。([#6328])
 
+- **开发：** 新增 `scripts/dev_multi_instance.sh`（`make dev-multi`、`make dev-multi-check`、
+  `make dev-multi-down`），在本机把两个 Gateway 作为一个多实例集群运行：回环地址上的
+  临时 Postgres 与 Redis 容器，Gateway A（8001 端口）与 Gateway B（8011 端口）共享同一
+  `DEER_FLOW_HOME` 以及生成的 `AUTH_JWT_SECRET`、`DEER_FLOW_INTERNAL_AUTH_TOKEN` 与
+  `DEER_FLOW_CREDENTIALS_KEY`，各自使用独立的 DeerMem 检索索引，并可选在 2027 端口启动
+  轮询 nginx。配置取开发者自己的 `config.yaml`（或 `config.example.yaml`），叠加多实例
+  启动门控要求的设置；门控拒绝的设置会被修改并逐项提示，配置中引用的 checkpointer、Redis 端点、
+  DeerMem 与 blob 数据目录以及本地 AIO 沙箱容器名前缀都会被重定向到 harness 内部（非 DeerMem 的
+  记忆后端按原配置使用）。容器带有所属状态目录的标签，删除时连同其匿名卷一并
+  移除；`up` 中途失败会拆除已启动的部分。`check` 自动执行可脚本化的跨实例
+  检查：就绪探针、共享会话与内部令牌、线程/上传/产物可见性、技能开关、nginx 负载均衡，
+  以及跨实例的 SSE `Last-Event-ID` 续接。详见 `backend/docs/CONFIGURATION.md` 的
+  “Local two-Gateway harness”一节。 ([#6613])
+
 - **配置：** 新增 `DEER_FLOW_ENV_FILE`，在后端启动时选择一个显式的 UTF-8 dotenv 文件，配置
   加载、认证启动和调试入口共用；相对路径以后端进程工作目录解析，已有进程环境变量保持
   优先，选择为空、缺失、不可读或编码无效时直接报错而不回退。不设置时保持默认 dotenv 发现；
@@ -3179,6 +3193,15 @@
   规范化交给 uv，`2.1.0-rc0` 仍与 `2.1.0rc0` 匹配），缺少 `uv` 时直接失败；
   `verify-versions.yml` 会安装与 backend 镜像相同的固定 uv 版本。([#6588])
 
+- **TUI：** `deerflow --print` 和 `--json` 不再丢弃未加引号消息中的词。此前这两个
+  选项只接收一个值，也从不读取位置参数，因此 `deerflow --print summarize this repo`
+  只会发送 `summarize`，`deerflow summarize this repo --print` 在终端中会以退出码 2
+  要求提供消息，而有管道 stdin 时命令行上输入的词会被悄悄忽略。现在两个选项会接收
+  其后的所有词，并像 `--cli` 一样在没有值时使用选项之前的词；命令行上输入的消息
+  优先于管道 stdin。消息被选项分隔在两侧时（`deerflow hello --print there`），
+  由于词序无法还原，会以退出码 2 退出并提示加引号。同时传入 `--print` 和 `--json`
+  现在会以退出码 2 退出，而不是运行 `--print` 并丢弃 `--json` 的消息。([#6636])
+
 ### 安全
 
 - **鉴权：** 仅有认证而无权限校验的路由现在会强制执行权限检查，且
@@ -3353,6 +3376,28 @@
   文件。此前带一个杂散字节的 `hooks/install.jse` 既得不到静态分析，也
   不经过可执行代码审查。([#6321])
 
+- **脚本：** 本地 `make dev` / `make start` 改为绑定回环地址。此前 `serve.sh`
+  和 `backend/Makefile` 以 `--host 0.0.0.0` 启动 Gateway，`nginx.local.conf`
+  监听所有网卡，Next.js 在 Windows 之外也沿用监听所有网卡的默认值，因此在局域网
+  或 VPN 中，其他机器可以访问 `2026`、`8001` 和 `3000` 端口，包括首个管理员创建
+  之前的 `/setup`。Docker 部署栈和 README 的部署模型原本就只监听回环地址。现在
+  Gateway 和前端绑定 `127.0.0.1`，nginx 监听 `127.0.0.1` 和 `[::1]`，除非设置了
+  `BIND_HOST`（与 Docker 部署栈使用同一个变量）。`BIND_HOST` 无效时，会在停止任何
+  正在运行的服务之前报错退出。([#6587])
+
+  **行为变更：** 需要从其他设备访问本地部署时，请设置 `BIND_HOST`（例如在 `.env`
+  中设置 `BIND_HOST=0.0.0.0`）并使用 `2026` 入口；Gateway 和前端端口不再对其他
+  机器开放。
+
+- **脚本：** 本地 `BIND_HOST` 不再接受会被 nginx 误读的值。此前本地 nginx
+  辅助脚本只检查字符是否属于地址或主机名，因此 `BIND_HOST=0` 会生成
+  `listen 0:2026;`，nginx 将其解析为 `0.0.0.0` 并监听所有 IPv4 网卡，`1.2.3`
+  则会绑定到 `1.2.0.3`。`[[fd00::1]]`、`-foo` 等 nginx 直接拒绝的值能通过
+  `serve.sh` 的预检，要等正在运行的服务被停止之后才失败。现在该脚本只接受
+  点分十进制 IPv4 地址、IPv6 地址（带或不带方括号）或符合 RFC 1123 的主机名。
+  改回默认的回环地址时，也会删除之前为其他值生成的
+  `temp/nginx.local.conf`。([#6635])
+
 - **技能：** `review_skill_package` 不再能读取其他用户的技能。此前本地路径
   目标只要位于 Gateway 工作目录或 `/tmp` 之下即被放行，而所有文档化的部署都把
   `DEER_FLOW_HOME` 放在工作目录之下，因此知道他人用户 id 的用户可以传入
@@ -3368,6 +3413,17 @@
   的匹配行会在该字符处被截断。现在这三个提供者只按 `"
 "` 切分，与共享解析器
   既有的约定以及 LocalSandbox、AIO 后端、E2B 的行为一致。([#6595])
+- **安全：** 新增仅从环境变量读取的静态凭据加密密钥 `DEER_FLOW_CREDENTIALS_KEY`。
+  按连接存储的 IM 渠道凭据此前虽有加密路径，但没有任何生产代码接入，既无法写入
+  也无法读取，Slack 因而始终使用部署级 bot token。现在 Gateway 在启动时加载该密钥
+  （逗号分隔的 Fernet 密钥：第一个用于加密，全部用于解密，以支持轮换；密文带
+  `fernet:v2:` 前缀，旧的 `fernet:v1:` 密文仍可读取），并传给所有渠道连接仓库；
+  无法解密的值按缺失处理。未设置时单实例会生成 `{DEER_FLOW_HOME}/.credentials_key`；
+  声明为多实例且启用 `channel_connections` 的部署在缺少密钥时拒绝启动，格式错误的
+  密钥同样会被拒绝且不会回显。Helm chart 将密钥生成到 app Secret 并在升级时保留，
+  `make up` 将其持久化到运行时目录，两个 compose 文件都会把它传给 Gateway。
+  `.jwt_secret`（以及托管模型密钥）现在以独占方式创建并回读，共享卷上同时冷启动的
+  副本不再各自保留不同的会话签名密钥。 ([#6611])
 
 ### 文档
 
@@ -7636,6 +7692,11 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6556]: https://github.com/bytedance/deer-flow/pull/6556
 [#6580]: https://github.com/bytedance/deer-flow/pull/6580
 [#6582]: https://github.com/bytedance/deer-flow/pull/6582
+[#6587]: https://github.com/bytedance/deer-flow/pull/6587
 [#6588]: https://github.com/bytedance/deer-flow/pull/6588
 [#6590]: https://github.com/bytedance/deer-flow/pull/6590
 [#6595]: https://github.com/bytedance/deer-flow/pull/6595
+[#6611]: https://github.com/bytedance/deer-flow/pull/6611
+[#6613]: https://github.com/bytedance/deer-flow/pull/6613
+[#6635]: https://github.com/bytedance/deer-flow/pull/6635
+[#6636]: https://github.com/bytedance/deer-flow/pull/6636

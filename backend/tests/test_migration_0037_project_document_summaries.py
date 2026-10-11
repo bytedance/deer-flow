@@ -18,14 +18,16 @@ from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 
 REVISION = "0037_project_document_summaries"
 PREVIOUS = "0036_run_idempotency_request"
-CURRENT_HEAD = "0038_channel_thread_bindings"
+CHANNEL_BINDINGS = "0038_channel_thread_bindings"
+CURRENT_HEAD = "0039_user_disabled"
 pytestmark = pytest.mark.asyncio
 
 
 async def test_0037_chains_after_0036_and_is_single_head():
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
     assert script.get_heads() == [CURRENT_HEAD]
-    assert script.get_revision(CURRENT_HEAD).down_revision == REVISION
+    assert script.get_revision(CHANNEL_BINDINGS).down_revision == REVISION
+    assert script.get_revision(CURRENT_HEAD).down_revision == CHANNEL_BINDINGS
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     # alembic_version.version_num is VARCHAR(32).
     assert len(REVISION) <= 32

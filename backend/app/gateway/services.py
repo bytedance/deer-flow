@@ -2048,6 +2048,19 @@ async def start_run(
         internal_owner_user = await resolve_trusted_internal_owner_for_attribution(request, owner_user_id)
         if internal_owner_user is None and owner_user_id == AUTH_DISABLED_USER_ID and is_auth_disabled():
             internal_owner_user = get_auth_disabled_user()
+        if getattr(internal_owner_user, "disabled", False):
+            # The scheduler's in-process launches (and MCP task-event
+            # delivery) fabricate requests that skip AuthMiddleware, where
+            # the internal-auth suspension gate lives. Re-assert it at run
+            # admission (#3462 gap 3): a disabled owner's occurrence fails
+            # here instead of driving the agent. The scheduler records the
+            # rejection as the occurrence's launch error.
+            from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
+
+            raise HTTPException(
+                status_code=401,
+                detail=AuthErrorResponse(code=AuthErrorCode.ACCOUNT_DISABLED, message="Account disabled").model_dump(),
+            )
         inject_authenticated_user_context(
             config,
             request,
