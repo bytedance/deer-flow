@@ -161,21 +161,41 @@ _BASE_ENV_KEYS = frozenset(
 )
 
 
-def test_child_env_stays_isolated_but_bootable_on_windows() -> None:
+# Representative values for the Windows base variables. The contract test
+# below seeds them so its assertions do not depend on which optional
+# variables the host happens to export: a host without TEMP/TMP still lets
+# CPython fall back to %USERPROFILE%\AppData\Local\Temp, so an unseeded
+# assertion would fail on valid host configurations.
+_SEEDED_WINDOWS_BASE_ENV = {
+    "SystemRoot": r"C:\Windows",
+    "windir": r"C:\Windows",
+    "COMSPEC": r"C:\Windows\System32\cmd.exe",
+    "PATHEXT": ".COM;.EXE;.BAT;.CMD",
+    "TEMP": r"C:\Windows\Temp",
+    "TMP": r"C:\Windows\Temp",
+    "USERPROFILE": r"C:\Users\runneradmin",
+}
+
+
+def test_child_env_stays_isolated_but_bootable_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
     """The scrubbed child env must not starve the Windows interpreter.
 
     A child spawned with only the pytest-relevant variables fails on Windows
     during `import asyncio` (WinError 10106, missing SystemRoot) and cannot
     resolve a temp directory, so the live-policy tests below spuriously fail.
     """
+    if os.name == "nt":
+        for name, value in _SEEDED_WINDOWS_BASE_ENV.items():
+            monkeypatch.setenv(name, value)
+
     env = _child_pytest_env(opt_in=True, ci=True)
 
     extra = set(env) - _BASE_ENV_KEYS - {LIVE_OPT_IN, "CI"}
     if os.name == "nt":
-        # Only base system variables may pass through — never credentials.
-        assert extra <= set(_WINDOWS_BASE_ENV_VARS)
-        assert "SystemRoot" in extra
-        assert "TEMP" in extra or "TMP" in extra
+        # Exactly the base system variables pass through — never credentials.
+        # The seeded set covers the bootability-critical names: SystemRoot for
+        # winsock init, TEMP/TMP/USERPROFILE for tempfile resolution.
+        assert extra == set(_WINDOWS_BASE_ENV_VARS)
     else:
         assert not extra
 
