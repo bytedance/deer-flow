@@ -2212,6 +2212,16 @@ export const enUS: Translations = {
       },
     },
     skills: {
+      diagnosticsTitle: "Could not load",
+      diagnosticsScope:
+        "Only YAML syntax errors in your own custom skills are shown. After correcting a SKILL.md file, reload skills. Missing frontmatter, metadata validation errors, and unreadable or non-UTF-8 files are not reported. Shared and externally linked packages are excluded.",
+      diagnosticsInvalid: "Invalid YAML frontmatter.",
+      diagnosticsQuote: "Quote values containing a colon followed by a space.",
+      diagnosticsRefresh: "Reload skills",
+      diagnosticsRefreshing: "Reloading skills…",
+      diagnosticsFailed:
+        "Could not check custom skills for YAML errors. Reload to try again.",
+      diagnosticsReloadFailed: "Could not reload skills. Try again.",
       exportPrevious: "Previous 50 files",
       exportNotices: {
         skill_export_yaml_alias:
