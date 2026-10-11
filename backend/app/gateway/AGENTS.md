@@ -1,5 +1,11 @@
 ### Gateway API (`app/gateway/`)
 
+Scheduled-task update validation compares one-time execution instants in UTC.
+Preserve an unchanged future instant on a live task even inside
+`scheduler.min_once_delay_seconds`; creation, changed instants and reactivation
+of terminal tasks still enforce the minimum delay. HTTP and conversation edits
+share `_recompute_schedule` in `scheduled_task_validation.py`.
+
 Reject external run/state writes with `sandbox`, `thread_data`, `viewed_images`, or `goal_outcome`.
 
 Studio retains sanitized creation metadata.
