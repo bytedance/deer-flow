@@ -1,6 +1,6 @@
 ### Gateway API (`app/gateway/`)
 
-Reject external run/state writes with `sandbox`, `thread_data`, `viewed_images`, or `goal_outcome`.
+Reject external `sandbox`, `thread_data`, `viewed_images`, `goal_outcome`. Non-null goals need valid text, non-negative int counters/limits and no Overwrite markers; keep sparse values.
 
 Studio retains sanitized creation metadata.
 
