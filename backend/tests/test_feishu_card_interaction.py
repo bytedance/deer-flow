@@ -578,3 +578,88 @@ class TestCardClickEndToEndRouting:
             asyncio.run(go())
         finally:
             asyncio.run(close_engine())
+
+    def test_card_answer_passes_bound_identity_admission(self, tmp_path, monkeypatch):
+        """Connections-enabled deployments (require_bound_identity=True) re-read the
+        binding with workspace_id; Feishu binds connections with workspace_id=chat_id,
+        so the synthetic inbound must carry it or every click is rejected as unbound."""
+        from app.channels.manager import ChannelManager
+        from deerflow.persistence.channel_connections import ChannelConnectionRepository, ChannelCredentialCipher
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+        async def go():
+            await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'cc.db'}", sqlite_dir=str(tmp_path))
+            repo = ChannelConnectionRepository(get_session_factory(), cipher=ChannelCredentialCipher.from_key("test-channel-key"))
+            conn = await repo.upsert_connection(
+                owner_user_id="deer-user-1",
+                provider="feishu",
+                external_account_id="ou_originator",
+                workspace_id="chat-1",
+            )
+            await repo.set_thread_id(
+                connection_id=conn["id"],
+                owner_user_id="deer-user-1",
+                provider="feishu",
+                external_conversation_id="chat-1",
+                thread_id="thread-existing",
+                external_topic_id="om_topic_1",
+            )
+
+            bus = MessageBus()
+            store = JsonChannelStore(path=tmp_path / "legacy-store.json")
+            manager = ChannelManager(bus=bus, store=store, connection_repo=repo, require_bound_identity=True)
+            mock_client = MagicMock()
+            mock_client.threads.create = AsyncMock(return_value={"thread_id": "thread-existing"})
+            mock_client.threads.update = AsyncMock(return_value={"thread_id": "thread-existing"})
+            mock_client.threads.get = AsyncMock(return_value={"thread_id": "thread-existing"})
+
+            class _Part:
+                def __init__(self, event, data):
+                    self.event = event
+                    self.data = data
+
+            async def _stream(*args, **kwargs):
+                yield _Part("values", {"messages": [{"type": "human", "content": "Alpha"}, {"type": "ai", "content": "resumed"}], "artifacts": []})
+
+            mock_client.runs.stream = MagicMock(side_effect=lambda *args, **kwargs: _stream(*args, **kwargs))
+            manager._client = mock_client
+
+            # Build the inbound through the channel's real click-resolution path,
+            # then hand it to the manager — this is the production seam.
+            from app.channels.feishu import FeishuChannel
+
+            channel = FeishuChannel(MessageBus(), {"app_id": "t", "app_secret": "t", "card_interaction_enabled": True})
+            channel._update_card = AsyncMock()
+            produced = []
+
+            async def capture(msg):
+                produced.append(msg)
+                return True
+
+            channel._publish_inbound_or_drop = capture
+            entry = {
+                "request_id": "clarification:call_1",
+                "thread_id": "thread-existing",
+                "chat_id": "chat-1",
+                "originator_open_id": "ou_originator",
+                "options": ("Alpha", "Beta"),
+                "card_message_id": "om_card_1",
+                "topic_id": "om_topic_1",
+                "connection_id": conn["id"],
+                "owner_user_id": "deer-user-1",
+            }
+            await channel._resolve_card_click(entry, option_id="option-1", option_value="Alpha", operator_open_id="ou_originator")
+            assert len(produced) == 1
+
+            await manager._handle_chat(produced[0])
+
+            mock_client.threads.create.assert_not_called()
+            assert mock_client.runs.stream.call_count == 1
+            assert mock_client.runs.stream.call_args.args[0] == "thread-existing"
+
+        try:
+            asyncio.run(go())
+        finally:
+            asyncio.run(close_engine())

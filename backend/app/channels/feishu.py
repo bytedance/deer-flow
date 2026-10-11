@@ -1067,6 +1067,11 @@ class FeishuChannel(Channel):
         inbound.topic_id = entry.get("topic_id")
         inbound.connection_id = entry.get("connection_id")
         inbound.owner_user_id = entry.get("owner_user_id")
+        # Bound-identity admission re-reads the connection with the message's
+        # workspace_id, and Feishu connections are bound with workspace_id =
+        # chat_id (see _bind_connection_from_connect_code). Without this the
+        # re-read misses and every click is rejected as unbound.
+        inbound.workspace_id = entry.get("chat_id")
 
         published = await self._publish_inbound_or_drop(inbound)
         if not published:
