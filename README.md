@@ -2773,6 +2773,8 @@ To inspect failures without downloading every successful occurrence, authenticat
 
 Filtering happens before pagination. `limit` (1–200, default 50) and `offset` (nonnegative, default 0) apply to matching records, ordered by creation time then ID, both descending. Omitting `status` preserves the existing mixed-history array response; no matches return `[]`. The API does not change task execution, and the workspace history UI remains unfiltered.
 
+Scheduled notification worker shutdown keeps its poller ownership until repository or transport cleanup has finished, including repeated shutdown cancellation. The stop timeout bounds the graceful wait before cancellation; asynchronous cleanup still must terminate before a restart can begin.
+
 Current MVP limits:
 
 - No text-only notification jobs

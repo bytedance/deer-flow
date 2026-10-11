@@ -49,9 +49,8 @@ ConnectionResolver = Callable[[str], Any]
 # in seconds, and resetting too eagerly would double-send live deliveries.
 _STALE_SENDING_TIMEOUT_SECONDS = 600
 
-# Matches Gateway ``_SHUTDOWN_HOOK_TIMEOUT_SECONDS``: this worker sits in
-# front of external IM I/O, so an unbounded join would stall the whole
-# lifespan shutdown path the channel-service bound was added to protect.
+# Grace period before cancelling external IM I/O. As with asyncio.wait_for,
+# cancellation cleanup must still finish before releasing poller ownership.
 _STOP_TIMEOUT_SECONDS = 5.0
 
 
@@ -99,22 +98,51 @@ class NotificationDeliveryWorker:
             if task is None:
                 return
             self._stop.set()
+            # Own the join separately so repeated caller cancellation cannot
+            # interrupt the poller's async cleanup or release the restart fence.
+            join = asyncio.create_task(self._join_poller(task))
             try:
                 try:
-                    await asyncio.wait_for(task, timeout=self._stop_timeout_seconds)
-                except TimeoutError:
-                    logger.warning(
-                        "Notification delivery worker stop exceeded %.1fs; cancelling in-flight poll",
-                        self._stop_timeout_seconds,
-                    )
-                    task.cancel()
+                    await asyncio.shield(join)
+                except asyncio.CancelledError as cancellation:
+                    # The grace deadline may already have cancelled the poller.
+                    # A second cancel would interrupt its in-progress cleanup.
+                    if not task.cancelling():
+                        task.cancel()
                     try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
+                        while True:
+                            try:
+                                await asyncio.shield(join)
+                                break
+                            except asyncio.CancelledError:
+                                if join.done():
+                                    join.result()
+                    except BaseException as error:
+                        raise cancellation from error
+                    raise cancellation
             finally:
                 if self._task is task:
                     self._task = None
+
+    async def _join_poller(self, task: asyncio.Task) -> None:
+        done, _pending = await asyncio.wait({task}, timeout=self._stop_timeout_seconds)
+        if done:
+            await task
+            return
+        logger.warning(
+            "Notification delivery worker stop exceeded %.1fs; cancelling in-flight poll",
+            self._stop_timeout_seconds,
+        )
+        # Observe the deadline without wait_for's unconditional cancellation:
+        # the stop caller may already have started the poller's async cleanup.
+        cancelled_on_timeout = not task.cancelling()
+        if cancelled_on_timeout:
+            task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            if not cancelled_on_timeout:
+                raise
 
     async def run_once(self, *, now: datetime) -> None:
         await self._recover_stale_sending(now)
