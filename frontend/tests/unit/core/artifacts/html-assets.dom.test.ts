@@ -1,22 +1,84 @@
 import { afterEach, expect, rs, test } from "@rstest/core";
 
-import { fetch } from "@/core/api/fetcher";
 import { prepareHtmlPreview } from "@/core/artifacts/html-assets";
-
-rs.mock("@/core/api/fetcher", () => ({ fetch: rs.fn() }));
 
 const url =
   "https://app.example/api/threads/chat/artifacts/mnt/user-data/outputs/report.html";
-const request = rs.mocked(fetch);
+const request = rs.spyOn(globalThis, "fetch");
 
 afterEach(() => {
   request.mockReset();
 });
 
+test("preserves missing and legacy doctypes and comments outside the HTML element", async () => {
+  for (const declaration of [
+    "",
+    "<!doctype html>",
+    '<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">',
+    '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">',
+  ]) {
+    const content = `<!--before-->${declaration}<html><body><h1>Report</h1></body></html><!--after-->`;
+    const result = await prepareHtmlPreview(content, url);
+    const expected = new DOMParser().parseFromString(content, "text/html");
+    const actual = new DOMParser().parseFromString(result.content, "text/html");
+    expect(actual.doctype?.name).toBe(expected.doctype?.name);
+    expect(actual.doctype?.publicId).toBe(expected.doctype?.publicId);
+    expect(actual.doctype?.systemId).toBe(expected.doctype?.systemId);
+    expect(result.content).toContain("<!--before-->");
+    expect(result.content).toContain("<!--after-->");
+    expect(actual.querySelector("base")?.getAttribute("href")).toBe(
+      url.replace("report.html", ""),
+    );
+  }
+});
+
+test("rewrites URLs inside SVG style elements and inline style attributes", async () => {
+  request.mockImplementation(async () => new Response("image"));
+  // happy-dom's HTML parser drops SVG children; create the namespace nodes
+  // directly. The real parser is also exercised by the browser regression.
+  const fixture = document.implementation.createHTMLDocument("");
+  const svg = fixture.createElementNS("http://www.w3.org/2000/svg", "svg");
+  const style = fixture.createElementNS("http://www.w3.org/2000/svg", "style");
+  style.textContent = ".chart{fill:url(chart.svg#paint)}";
+  const rect = fixture.createElementNS("http://www.w3.org/2000/svg", "rect");
+  rect.setAttribute("style", "filter:url(filters.svg#blur)");
+  svg.append(style, rect);
+  fixture.body.append(svg);
+  const parse = rs
+    .spyOn(DOMParser.prototype, "parseFromString")
+    .mockReturnValueOnce(fixture);
+  const result = await prepareHtmlPreview(
+    '<svg xmlns="http://www.w3.org/2000/svg"><style>.chart{fill:url(chart.svg#paint)}</style><rect class="chart" style="filter:url(filters.svg#blur)"/></svg>',
+    url,
+  );
+  parse.mockRestore();
+  expect(
+    request.mock.calls.map(([input]) =>
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.href
+          : input.url,
+    ),
+  ).toEqual([
+    url.replace("report.html", "chart.svg"),
+    url.replace("report.html", "filters.svg"),
+  ]);
+  expect(style.textContent).toContain("data:");
+  expect(rect.getAttribute("style")).toContain("data:");
+  expect(result.content).toContain("#paint");
+  expect(result.content).toContain("#blur");
+});
+
 test("authenticates images, scripts and nested CSS assets in the parent", async () => {
   request.mockImplementation(async (input) => {
-    const pathname = new URL(typeof input === "string" ? input : input.url)
-      .pathname;
+    const pathname = new URL(
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.href
+          : input.url,
+    ).pathname;
     if (pathname.endsWith("main.css"))
       return new Response(
         '@import "nested.css" screen; .hero{background:url("chart%2520.png")}',
@@ -34,7 +96,11 @@ test("authenticates images, scripts and nested CSS assets in the parent", async 
   expect(result.failedResources).toBe(0);
   expect(
     request.mock.calls.map(([input]) =>
-      typeof input === "string" ? input : input.url,
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.href
+          : input.url,
     ),
   ).toEqual([
     url.replace("report.html", "main.css"),
@@ -65,9 +131,23 @@ test("never fetches another thread, external origin, non-artifact route or encod
 
 test("bounds cycles and failed resources without losing the HTML", async () => {
   request.mockImplementation(async (input) => {
-    if ((typeof input === "string" ? input : input.url).endsWith("a.css"))
+    if (
+      (typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.href
+          : input.url
+      ).endsWith("a.css")
+    )
       return new Response('@import "b.css";');
-    if ((typeof input === "string" ? input : input.url).endsWith("b.css"))
+    if (
+      (typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.href
+          : input.url
+      ).endsWith("b.css")
+    )
       return new Response('@import "a.css";');
     return new Response("missing", { status: 404 });
   });
@@ -122,7 +202,11 @@ test("supports responsive pictures, SVG fragments and CSS escaped filenames", as
   );
   expect(
     request.mock.calls.map(([input]) =>
-      typeof input === "string" ? input : input.url,
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.href
+          : input.url,
     ),
   ).toEqual([
     url.replace("report.html", "one.png"),
@@ -145,7 +229,13 @@ test("caps distinct resources and CSS import depth", async () => {
   expect(result.failedResources).toBe(8);
   request.mockClear();
   request.mockImplementation(async (input) => {
-    const name = new URL(typeof input === "string" ? input : input.url).pathname
+    const name = new URL(
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.href
+          : input.url,
+    ).pathname
       .split("/")
       .pop()!;
     return new Response(`@import "${Number.parseInt(name) + 1}.css";`);
@@ -207,7 +297,14 @@ test("bounds repeated data URLs and preserves out-of-route CSS resolution", asyn
 test("aborts late responses before exposing prepared HTML", async () => {
   const controller = new AbortController();
   request.mockImplementation(async (input) => {
-    if ((typeof input === "string" ? input : input.url).endsWith("late.png"))
+    if (
+      (typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.href
+          : input.url
+      ).endsWith("late.png")
+    )
       controller.abort();
     return new Response("image");
   });

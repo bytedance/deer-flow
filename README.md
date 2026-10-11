@@ -2299,6 +2299,9 @@ previews. Dynamic JavaScript requests, ES module imports, nested iframes and
 navigation remain subject to sandbox restrictions; see the
 [frontend preview notes](frontend/README.md#development-notes) for the supported
 scope and limits.
+Optional resource failures, including 401 responses, keep the conversation open
+with a partial-preview notice. HTML doctypes and doctype-less rendering modes
+are preserved, and CSS references inside inline SVG styles are prepared too.
 
 If the sample cuts a CRLF line ending in half, the preview keeps the earlier complete rows and omits the incomplete final record, including when its last field is quoted.
 

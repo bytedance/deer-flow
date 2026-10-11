@@ -17,10 +17,10 @@ Language maps use own properties; `constructor`/`__proto__` keep fallback.
 HTML bases skip DOM without base text; inert templates ignore comments/scripts
 and templates. `preview-base.dom.test.ts` (happy-dom); RCDATA needs
 browser checks; other helpers use node.
-HTML assets: auth fetch current-thread artifacts only; reject redirects,
-bound bytes/count/CSS depth/time/expansion. Keep the opaque sandbox
-(no allow-same-origin); inline data URLs. External refs stay browser-loaded.
-Abort stale work; revoke document URLs;
+HTML assets: credential GET, no 401 navigation; current-thread only, no redirects,
+bound bytes/count/CSS depth/time/expansion; keep doctype, rewrite SVG style.
+Keep opaque sandbox/data URLs; external refs stay browser-loaded.
+Abort stale work; revoke URLs;
 gate content/URL/scroll identity. Tests: `html-assets.dom.test.ts`,
 `artifact-file-preview.dom.test.tsx`, `tests/e2e/artifact-preview.spec.ts`.
 

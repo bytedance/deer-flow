@@ -152,6 +152,9 @@ preparation is capped at 32 resources, 4 MiB per resource, 16 MiB total, eight
 nested CSS imports, 24 MiB of expanded references and ten seconds; unavailable or oversized resources show a
 partial-preview notice. Switching artifacts cancels preparation and releases
 the generated document Blob URL.
+Resource 401 responses remain local to the partial preview; only the document
+load uses the application's login-redirect policy. Preparation preserves the
+original doctype (including its absence) and handles inline SVG styles.
 
 This supports static generated reports rather than a complete website runtime.
 ES module imports, resources created dynamically by JavaScript, `fetch()`/XHR,

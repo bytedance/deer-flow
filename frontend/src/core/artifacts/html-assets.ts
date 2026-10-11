@@ -1,5 +1,3 @@
-import { fetch } from "@/core/api/fetcher";
-
 import { appendHtmlPreviewBaseHref } from "./preview";
 
 const MAX_RESOURCES = 32;
@@ -216,7 +214,10 @@ export async function prepareHtmlPreview(
     loading.add(key);
     try {
       controller.signal.throwIfAborted();
-      const response = await fetch(target.href, {
+      // A failed optional asset must not trigger the API client's page-wide
+      // login redirect. The top-level document load keeps that auth policy.
+      const response = await globalThis.fetch(target.href, {
+        credentials: "include",
         signal: controller.signal,
         redirect: "error",
         ...(integrity ? { integrity } : {}),
@@ -271,10 +272,7 @@ export async function prepareHtmlPreview(
   }
 
   try {
-    const document = new DOMParser().parseFromString(
-      unchanged.content,
-      "text/html",
-    );
+    const document = new DOMParser().parseFromString(content, "text/html");
     const base = new URL(
       document.querySelector("base[href]")?.getAttribute("href") ?? source.href,
       source.href,
@@ -326,7 +324,7 @@ export async function prepareHtmlPreview(
           if (rewritten !== value) element.removeAttribute("integrity");
         }
       }
-      if (element.tagName === "STYLE")
+      if (element.localName === "style")
         element.textContent = await rewriteCss(
           element.textContent ?? "",
           (reference, imported) => resource(reference, base, imported),
@@ -342,7 +340,14 @@ export async function prepareHtmlPreview(
     }
     signal?.throwIfAborted();
     return {
-      content: `<!doctype html>${document.documentElement.outerHTML}`,
+      content: appendHtmlPreviewBaseHref(
+        Array.from(document.childNodes, (node) =>
+          node === document.documentElement
+            ? document.documentElement.outerHTML
+            : new XMLSerializer().serializeToString(node),
+        ).join(""),
+        artifactUrl,
+      ),
       failedResources,
     };
   } finally {
