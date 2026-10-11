@@ -1146,7 +1146,9 @@ async def test_keyed_input_remains_compatible_with_legacy_explicit_atomic_signat
                 idempotency_key=idempotency_key,
             )
 
-    manager = RunManager(store=LegacyAtomicMemoryStore())
+    store = LegacyAtomicMemoryStore()
+    manager = RunManager(store=store, worker_id="worker-a")
+    peer = RunManager(store=store, worker_id="worker-b")
 
     record = await manager.create_or_reject(
         "thread-1",
@@ -1154,6 +1156,12 @@ async def test_keyed_input_remains_compatible_with_legacy_explicit_atomic_signat
     )
 
     assert record.idempotency_key == "http-run:key"
+    persisted = await store.get(record.run_id)
+    assert persisted is not None
+    assert persisted["idempotency_key"] == "http-run:key"
+    reused = await peer.create_or_reject("thread-1", idempotency_key="http-run:key")
+    assert reused.run_id == record.run_id
+    assert reused.idempotency_reused is True
 
     with pytest.raises(RunIdempotencyUnsupported, match="does not support keyed resume"):
         await manager.create_or_reject(
@@ -1218,6 +1226,158 @@ async def test_keyed_resume_allows_explicit_kwargs_store_capability():
     persisted = await store.get(record.run_id)
     assert persisted is not None
     assert persisted["idempotency_request"] == identity
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("multitask_strategy", ["reject", "interrupt", "rollback"])
+async def test_keyed_input_rejects_ambiguous_kwargs_store_before_admission(multitask_strategy):
+    from deerflow.runtime import RunIdempotencyUnsupported
+
+    class DroppingKwargsStore(MemoryRunStore):
+        atomic_called = False
+
+        async def create_thread_operation_atomic(self, run_id, **kwargs):
+            self.atomic_called = True
+            kwargs.pop("idempotency_key", None)
+            return await super().create_thread_operation_atomic(run_id, **kwargs)
+
+    store = DroppingKwargsStore()
+    manager = RunManager(store=store)
+
+    with pytest.raises(RunIdempotencyUnsupported, match="does not support keyed run"):
+        await manager.create_or_reject(
+            "thread-1",
+            idempotency_key="http-run:input",
+            multitask_strategy=multitask_strategy,
+        )
+
+    assert store.atomic_called is False
+    assert await store.list_by_thread("thread-1") == []
+    assert await manager.list_by_thread("thread-1") == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("with_resume_identity", [False, True])
+async def test_explicit_resume_parameter_does_not_imply_key_support(with_resume_identity):
+    from deerflow.runtime import RunIdempotencyUnsupported
+
+    class DroppingKeyStore(MemoryRunStore):
+        async def create_thread_operation_atomic(self, run_id, *, idempotency_request=None, **kwargs):
+            kwargs.pop("idempotency_key", None)
+            return await super().create_thread_operation_atomic(run_id, idempotency_request=idempotency_request, **kwargs)
+
+    store = DroppingKeyStore()
+    manager = RunManager(store=store)
+    identity = {"version": 1, "kind": "resume", "sha256": "a" * 64} if with_resume_identity else None
+
+    with pytest.raises(RunIdempotencyUnsupported, match="does not support keyed run"):
+        await manager.create_or_reject("thread-1", idempotency_key="http-run:key", idempotency_request=identity)
+
+    assert await store.list_by_thread("thread-1") == []
+    assert await manager.list_by_thread("thread-1") == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("with_resume_identity", [False, True])
+@pytest.mark.parametrize("declaration", ["replaced_parent_method", "child_flag", "mixin_flag"])
+async def test_kwargs_store_capability_must_belong_to_implementation_owner(declaration, with_resume_identity):
+    from deerflow.runtime import RunIdempotencyUnsupported
+
+    class OptedInParent(MemoryRunStore):
+        supports_idempotency_request_kwargs = True
+
+        async def create_thread_operation_atomic(self, run_id, **kwargs):
+            return await super().create_thread_operation_atomic(run_id, **kwargs)
+
+    class ReplacingChild(OptedInParent):
+        async def create_thread_operation_atomic(self, run_id, **kwargs):
+            kwargs.pop("idempotency_key", None)
+            kwargs.pop("idempotency_request", None)
+            return await super().create_thread_operation_atomic(run_id, **kwargs)
+
+    class UnoptedParent(MemoryRunStore):
+        async def create_thread_operation_atomic(self, run_id, **kwargs):
+            kwargs.pop("idempotency_key", None)
+            kwargs.pop("idempotency_request", None)
+            return await super().create_thread_operation_atomic(run_id, **kwargs)
+
+    class FlagOnlyChild(UnoptedParent):
+        supports_idempotency_request_kwargs = True
+
+    class FlagMixin:
+        supports_idempotency_request_kwargs = True
+
+    class MixinStore(FlagMixin, UnoptedParent):
+        async def create_thread_operation_atomic(self, run_id, **kwargs):
+            return await super().create_thread_operation_atomic(run_id, **kwargs)
+
+    stores = {"replaced_parent_method": ReplacingChild, "child_flag": FlagOnlyChild, "mixin_flag": MixinStore}
+    store = stores[declaration]()
+    manager = RunManager(store=store)
+    identity = {"version": 1, "kind": "resume", "sha256": "a" * 64} if with_resume_identity else None
+
+    with pytest.raises(RunIdempotencyUnsupported):
+        await manager.create_or_reject("thread-1", idempotency_key="http-run:key", idempotency_request=identity)
+
+    assert await store.list_by_thread("thread-1") == []
+    assert await manager.list_by_thread("thread-1") == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("with_resume_identity", [False, True])
+async def test_kwargs_store_inherits_capability_with_unchanged_implementation(with_resume_identity):
+    class OptedInParent(MemoryRunStore):
+        supports_idempotency_request_kwargs = True
+
+        async def create_thread_operation_atomic(self, run_id, **kwargs):
+            return await super().create_thread_operation_atomic(run_id, **kwargs)
+
+    class InheritingStore(OptedInParent):
+        pass
+
+    store = InheritingStore()
+    owner = RunManager(store=store, worker_id="worker-a")
+    peer = RunManager(store=store, worker_id="worker-b")
+    identity = {"version": 1, "kind": "resume", "sha256": "a" * 64} if with_resume_identity else None
+
+    record = await owner.create_or_reject("thread-1", idempotency_key="http-run:key", idempotency_request=identity)
+    reused = await peer.create_or_reject("thread-1", idempotency_key="http-run:key", idempotency_request=identity)
+
+    assert reused.run_id == record.run_id
+    assert reused.idempotency_reused is True
+    persisted = await store.get(record.run_id)
+    assert persisted is not None
+    assert persisted["idempotency_key"] == "http-run:key"
+    assert persisted["idempotency_request"] == identity
+    assert len(await store.list_by_thread("thread-1")) == 1
+
+
+@pytest.mark.anyio
+async def test_start_run_returns_503_for_ambiguous_key_only_store(_stub_app_config):
+    class DroppingKeyStore(MemoryRunStore):
+        async def create_thread_operation_atomic(self, run_id, **kwargs):
+            kwargs.pop("idempotency_key", None)
+            return await super().create_thread_operation_atomic(run_id, **kwargs)
+
+    store = DroppingKeyStore()
+    manager = RunManager(store=store)
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=AssertionError("worker must not attach")),
+        pytest.raises(HTTPException) as excinfo,
+    ):
+        await services.start_run(
+            RunCreateRequest(input={"messages": [{"role": "user", "content": "hello"}]}),
+            "thread-1",
+            _make_start_run_request(manager),
+            idempotency_key="http-run:input",
+        )
+
+    assert excinfo.value.status_code == 503
+    assert "does not support keyed run" in str(excinfo.value.detail)
+    assert await store.list_by_thread("thread-1") == []
+    assert await manager.list_by_thread("thread-1") == []
 
 
 @pytest.mark.anyio

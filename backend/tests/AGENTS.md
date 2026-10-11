@@ -22,6 +22,15 @@ Assert both writer formats: old workers reuse conflicting decisions, upgraded
 workers reject conflicts, and identity-less legacy rows fail closed even for
 identical retries. This pins why rollout requires routing to upgraded workers.
 
+Run-store capability tests in that file check keyed input separately from resume
+identity and assert that rejected admissions create no durable or local run.
+An explicit `idempotency_key` parameter must keep supporting keyed input even
+without resume support. For kwargs-only stores, pin the opt-in on the class
+that defines `create_thread_operation_atomic`: replacing an opted-in parent's
+method requires a fresh declaration; a flag-only child or mixin cannot opt in
+another class's implementation. Also cover unchanged inheritance and durable
+retry reuse, so the rejection tests cannot pass by rejecting every custom store.
+
 Upload case-collision coverage uses separate HTTP requests and preserves both
 reported payloads. Observe real filename-claim inputs to pin the disk seed;
 case-insensitive hosts can otherwise mask a missing seed through link retries.

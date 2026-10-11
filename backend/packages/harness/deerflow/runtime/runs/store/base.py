@@ -118,9 +118,13 @@ def run_is_before_cursor(
 
 
 class RunStore(abc.ABC):
-    # A create_thread_operation_atomic override that accepts the resume
-    # identity only through **kwargs must opt in on that same class. Explicit
-    # idempotency_request parameters are capability declarations themselves.
+    # Explicit idempotency_key / idempotency_request keyword parameters each
+    # declare support for that field. An override accepting them only through
+    # **kwargs must opt in below and persist both the key and resume identity.
+    # The flag must be declared on the class that literally defines
+    # create_thread_operation_atomic: a flag-only child or mixin cannot opt in
+    # another class's method, and a new override cannot inherit a parent's opt-in.
+    # Inheriting the opted-in method unchanged preserves its capability.
     supports_idempotency_request_kwargs = False
 
     async def list_changed(

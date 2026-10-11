@@ -185,11 +185,11 @@ class PersistenceRetryPolicy:
 
 
 class RunIdempotencyUnsupported(RuntimeError):
-    """The configured store cannot safely persist keyed-resume identity."""
+    """The configured store cannot safely persist the requested idempotency fields."""
 
 
-def _store_accepts_idempotency_request(store: RunStore) -> bool:
-    """Best-effort capability check for old explicit RunStore overrides."""
+def _store_accepts_idempotency_parameter(store: RunStore, parameter_name: str) -> bool:
+    """Require an explicit keyword parameter or an opt-in owned by the method."""
     callable_ = store.create_thread_operation_atomic
     if getattr(callable_, "__func__", None) is RunStore.create_thread_operation_atomic:
         return False
@@ -197,7 +197,8 @@ def _store_accepts_idempotency_request(store: RunStore) -> bool:
         parameters = inspect.signature(callable_).parameters
     except (TypeError, ValueError):
         return False
-    if "idempotency_request" in parameters:
+    parameter = parameters.get(parameter_name)
+    if parameter is not None and parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
         return True
     if not any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
         return False
@@ -1736,8 +1737,10 @@ class RunManager:
             # 2) Persist to store while still holding the local lock. The
             #    store is the source of truth for cross-process atomicity.
             if self._store is not None:
-                if idempotency_request is not None and not _store_accepts_idempotency_request(self._store):
+                if idempotency_request is not None and not _store_accepts_idempotency_parameter(self._store, "idempotency_request"):
                     raise RunIdempotencyUnsupported("The configured RunStore does not support keyed resume idempotency")
+                if idempotency_key is not None and not _store_accepts_idempotency_parameter(self._store, "idempotency_key"):
+                    raise RunIdempotencyUnsupported("The configured RunStore does not support keyed run idempotency")
                 if multitask_strategy == "reject":
                     create_kwargs = {
                         "run_id": run_id,
