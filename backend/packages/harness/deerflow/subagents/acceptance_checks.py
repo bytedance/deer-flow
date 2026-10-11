@@ -8,6 +8,9 @@ requirement.
 
 Leaf families:
 
+- ``file:<path> csv-columns:["id","name"]`` — UTF-8 CSV header only, optional BOM,
+  exact required columns. Bounded prefix; no data-row or schema validation.
+
 - ``file:<path> json-valid`` — explicit UTF-8 JSON syntax check, capped at 50,000 bytes.
   Read up to the cap plus one byte and verify completeness; oversize, truncated reads
   and parser resource limits remain UNVERIFIED. Reject NaN/Infinity; no schema or semantic validation.
@@ -60,6 +63,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import csv
+import io
 import json
 import ntpath
 import os
@@ -67,6 +72,7 @@ import posixpath
 import re
 import shlex
 import stat
+import time
 import unicodedata
 from collections.abc import Callable, Mapping
 from typing import Any, TypedDict
@@ -93,6 +99,7 @@ _PROVIDER_ERROR_PREFIX = "Error:"
 
 _FILE_LEAF_RE = re.compile(r"^file:(?P<path>.+?)\s+(?P<mode>exists|non-empty)$", re.IGNORECASE)
 _JSON_FILE_LEAF_RE = re.compile(r"^file:(?P<path>.+?)\s+json-valid$", re.IGNORECASE)
+_CSV_FILE_LEAF_RE = re.compile(r"^file:(?P<path>.+?)\s+csv-columns:(?P<columns>.+)$", re.IGNORECASE)
 _FILE_WRITTEN_RE = re.compile(r"^file_written:(?P<path>.+)$", re.IGNORECASE)
 _TESTS_PASSED_RE = re.compile(r"^tests_passed:(?P<command>.+)$", re.IGNORECASE)
 
@@ -137,7 +144,7 @@ _TEST_FAIL_SHAPE_RE = re.compile(
 
 class AcceptanceLeaf(TypedDict):
     criterion: str  # original criterion text (bounded)
-    family: str  # file_exists | file_non_empty | file_json_valid | file_written | tests_passed | undecidable
+    family: str  # file_exists | file_non_empty | file_json_valid | file_csv_columns | file_written | tests_passed | undecidable
     checked: bool  # a deterministic check ran
     holds: bool  # checked AND the condition holds; always False when unchecked
     detail: str  # short evidence note (bounded)
@@ -164,6 +171,9 @@ def parse_file_criterion(criterion: str) -> tuple[str, str] | None:
     json_match = _JSON_FILE_LEAF_RE.match(criterion)
     if json_match is not None:
         return "file_json_valid", json_match.group("path")
+    csv_match = _CSV_FILE_LEAF_RE.match(criterion)
+    if csv_match is not None:
+        return "file_csv_columns", csv_match.group("path")
     written_match = _FILE_WRITTEN_RE.match(criterion)
     if written_match is not None:
         return "file_written", written_match.group("path")
@@ -420,7 +430,7 @@ _JSON_READ_INNER_SCRIPT = (
 )
 
 
-def _read_bounded_json_content(runtime: Any, resolved: str, thread_data: Mapping[str, Any] | None) -> bytes | None:
+def _read_bounded_file_content(runtime: Any, resolved: str, thread_data: Mapping[str, Any] | None, *, deadline: float | None = None) -> bytes | None:
     """Read up to the cap plus one byte to detect growth; return None if completeness is uncertain."""
     from deerflow.authz.sandbox_authz import authorize_sandbox_execution, safe_app_config
     from deerflow.sandbox.tools import _resolve_local_read_path, ensure_sandbox_initialized, is_local_sandbox
@@ -460,10 +470,14 @@ def _read_bounded_json_content(runtime: Any, resolved: str, thread_data: Mapping
         content = bytearray()
         # Disable buffered read-ahead; continue short reads to EOF or cap plus one to distinguish complete from truncated content.
         while len(content) <= _FILE_CONTENT_READ_CAP_BYTES:
+            if deadline is not None and time.monotonic() >= deadline:
+                return None
             chunk = handle.read(_FILE_CONTENT_READ_CAP_BYTES + 1 - len(content))
             if not chunk:
                 break
             content.extend(chunk)
+        if deadline is not None and time.monotonic() >= deadline:
+            return None
         return bytes(content)
 
 
@@ -483,7 +497,7 @@ def _check_json_file(base: AcceptanceLeaf, runtime: Any, resolved: str, thread_d
         base["detail"] = f"JSON file exceeds {_FILE_CONTENT_READ_CAP_BYTES}-byte read cap; content not read"
         return base
     try:
-        content = _read_bounded_json_content(runtime, resolved, thread_data)
+        content = _read_bounded_file_content(runtime, resolved, thread_data)
     except (FileNotFoundError, SandboxFileNotFoundError):
         base["checked"] = True
         base["detail"] = "file does not exist"
@@ -510,6 +524,82 @@ def _check_json_file(base: AcceptanceLeaf, runtime: Any, resolved: str, thread_d
     return base
 
 
+def _parse_csv_columns(criterion: str) -> list[str] | None:
+    """Require an explicit JSON array of unique, nonempty, exact column names."""
+    match = _CSV_FILE_LEAF_RE.match(criterion)
+    if match is None:
+        return None
+    try:
+        columns = json.loads(match.group("columns"))
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(columns, list) or not columns or any(not isinstance(column, str) or not column for column in columns):
+        return None
+    return columns if len(set(columns)) == len(columns) else None
+
+
+def _check_csv_header(base: AcceptanceLeaf, runtime: Any, resolved: str, thread_data: Mapping[str, Any] | None, probed_size: int, columns: list[str]) -> AcceptanceLeaf:
+    """Check only the first CSV record from a bounded prefix, never the data rows."""
+    from deerflow.sandbox.exceptions import SandboxError, SandboxFileNotFoundError
+
+    deadline = time.monotonic() + 5
+    try:
+        content = _read_bounded_file_content(runtime, resolved, thread_data, deadline=deadline)
+    except (FileNotFoundError, SandboxFileNotFoundError):
+        base["checked"] = True
+        base["detail"] = "file does not exist"
+        return base
+    except (OSError, SandboxError):
+        base["detail"] = "bounded CSV read failed"
+        return base
+    if time.monotonic() >= deadline:
+        base["detail"] = "CSV header deadline exceeded"
+        return base
+    if content is None or len(content) != min(probed_size, _FILE_CONTENT_READ_CAP_BYTES + 1):
+        base["detail"] = "complete CSV prefix unavailable within the read cap"
+        return base
+    # Surrogate escape lets an invalid or split UTF-8 sequence in a data row
+    # remain irrelevant. Validate UTF-8 only in the consumed header below.
+    text = content.decode("utf-8-sig", errors="surrogateescape")
+    stream = io.StringIO(text, newline="")
+    complete = len(content) == probed_size
+    try:
+        header = next(csv.reader(stream, strict=True), [])
+    except csv.Error as exc:
+        if "field larger than field limit" in str(exc):
+            base["detail"] = "CSV parser resource limit; header unverified"
+            return base
+        base["checked"] = complete and len(content) <= _FILE_CONTENT_READ_CAP_BYTES
+        base["detail"] = "invalid CSV header" if base["checked"] else "CSV header incomplete within the read cap"
+        return base
+    except MemoryError:
+        base["detail"] = "CSV parser resource limit; header unverified"
+        return base
+    consumed = text[: stream.tell()]
+    header_bytes = len(consumed.encode("utf-8", errors="surrogateescape")) + (3 if content.startswith(b"\xef\xbb\xbf") else 0)
+    if header_bytes > _FILE_CONTENT_READ_CAP_BYTES or (not complete and not consumed.endswith(("\r", "\n"))):
+        base["detail"] = "CSV header incomplete within the read cap"
+        return base
+    if time.monotonic() >= deadline:
+        base["detail"] = "CSV header deadline exceeded"
+        return base
+    try:
+        consumed.encode("utf-8")
+    except UnicodeEncodeError:
+        base["checked"] = True
+        base["detail"] = "CSV header is not UTF-8"
+        return base
+    base["checked"] = True
+    if not header or any(not column for column in header) or len(set(header)) != len(header):
+        base["detail"] = "CSV header is empty or contains empty or duplicate column names"
+    elif not set(columns).issubset(header):
+        base["detail"] = "CSV header is missing required columns"
+    else:
+        base["holds"] = True
+        base["detail"] = "CSV header contains required columns; data rows not validated"
+    return base
+
+
 def _check_file_leaf(
     family: str,
     path: str,
@@ -519,6 +609,7 @@ def _check_file_leaf(
     content_reader: Callable[[Any, str], str],
     size_prober: Callable[[Any, str, Mapping[str, Any] | None], int | None],
     readable_prober: Callable[[Any, str, Mapping[str, Any] | None], bool | None],
+    csv_columns: list[str] | None = None,
 ) -> AcceptanceLeaf:
     criterion_path = path.strip()
     # Lazy imports: the sandbox helpers pull the provider stack, and this
@@ -528,14 +619,17 @@ def _check_file_leaf(
     from deerflow.sandbox.tools import is_local_sandbox
 
     base: AcceptanceLeaf = {"criterion": "", "family": family, "checked": False, "holds": False, "detail": ""}
-    if family == "file_json_valid" and is_local_sandbox(runtime):
+    if family == "file_csv_columns" and csv_columns is None:
+        base["detail"] = "csv-columns requires a nonempty JSON array of unique nonempty strings"
+        return base
+    if family in ("file_json_valid", "file_csv_columns") and is_local_sandbox(runtime):
         from deerflow.authz.sandbox_authz import authorize_sandbox_execution, safe_app_config
 
         # Authorize before canonicalization or metadata probes can disclose file existence.
         try:
             authorize_sandbox_execution(context=getattr(runtime, "context", None) or {}, app_config=safe_app_config())
         except SandboxError:
-            base["detail"] = "sandbox access denied; JSON file unverified"
+            base["detail"] = "sandbox access denied; file unverified"
             return base
 
     # Symlink escapes are a local-sandbox concern (host-visible links); remote
@@ -558,6 +652,8 @@ def _check_file_leaf(
         # worker — degrade to UNVERIFIED instead.
         base["detail"] = "file size could not be established by a bounded probe; content not read"
         return base
+    if family == "file_csv_columns" and csv_columns is not None:
+        return _check_csv_header(base, runtime, resolved, thread_data, probed_size, csv_columns)
     if family == "file_json_valid":
         return _check_json_file(base, runtime, resolved, thread_data, probed_size)
     if probed_size > _FILE_CONTENT_READ_CAP_BYTES:
@@ -1876,7 +1972,16 @@ def check_acceptance_criteria(
         tests_match = _TESTS_PASSED_RE.match(criterion)
         if file_criterion is not None:
             family, path = file_criterion
-            leaf = _check_file_leaf(family, path, runtime=runtime, thread_data=thread_data, content_reader=content_reader, size_prober=size_prober, readable_prober=readable_prober)
+            leaf = _check_file_leaf(
+                family,
+                path,
+                runtime=runtime,
+                thread_data=thread_data,
+                content_reader=content_reader,
+                size_prober=size_prober,
+                readable_prober=readable_prober,
+                csv_columns=_parse_csv_columns(criterion) if family == "file_csv_columns" else None,
+            )
         elif tests_match is not None:
             leaf = _check_tests_passed_leaf(tests_match.group("command"), bash_executions, thread_data)
         else:

@@ -4,6 +4,8 @@ Result-reader acceptance runs on SQLite and, with TEST_POSTGRES_URI, an isolated
 PostgreSQL schema; both exercise submission, completion, reopen and ToolNode
 continuation without paid model work. Always clean up the temporary schema.
 
+**CSV headers**: `file:<path> csv-columns:["id","name"]` uses shared file admission and authorized bounded reads. Parse only the first logical record; preserve UNVERIFIED for incomplete prefixes and exhausted budgets. See README for exact matching and dialect.
+
 **JSON**: See README. Authorize before local metadata and reads; inaccessible paths stay UNVERIFIED.
 
 Apply each subagent's prompt overlay after assembling its full SystemMessage.

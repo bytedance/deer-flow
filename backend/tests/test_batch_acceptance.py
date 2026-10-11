@@ -172,6 +172,20 @@ async def test_json_criterion_survives_batch_execution_and_storage(env):
 
 
 @pytest.mark.asyncio
+async def test_csv_header_criterion_survives_batch_execution_and_storage(env):
+    """CSV criteria use the same authorized batch lease and persisted verdict."""
+    output = env.paths.sandbox_outputs_dir("thread-1", user_id="user-1") / "report.csv"
+    output.write_bytes(b"id,other\n")
+    batch = await _submit(env, ['file:../outputs/report.csv csv-columns:["id","name"]'])
+    await _execute(env)
+    item = (await env.repo.list_items(batch["id"], user_id="user-1"))[0]
+    assert item["status"] == "succeeded"
+    leaf = item["acceptance_verdict"]["leaves"][0]
+    assert (leaf["family"], leaf["checked"], leaf["holds"]) == ("file_csv_columns", True, False)
+    assert item["attempt"] == 1
+
+
+@pytest.mark.asyncio
 async def test_no_criteria_skips_checker_and_preserves_success(env, monkeypatch):
     checker = AsyncMock(side_effect=AssertionError("no checklist"))
     monkeypatch.setattr(batch_service, "check_batch_acceptance", checker)
