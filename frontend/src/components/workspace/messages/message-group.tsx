@@ -887,11 +887,11 @@ function ToolCall({
     }
     const results = (
       result as {
-        results: {
-          source_url: string;
-          thumbnail_url: string;
-          image_url: string;
-          title: string;
+        results?: {
+          source_url?: string;
+          thumbnail_url?: string;
+          image_url?: string;
+          title?: string;
         }[];
       }
     )?.results;
@@ -904,24 +904,54 @@ function ToolCall({
         {Array.isArray(results) && (
           <ChainOfThoughtSearchResults>
             {Array.isArray(results) &&
-              results.map((item) => {
+              results.map((item, index) => {
+                // Provider rows are untrusted input: the default DuckDuckGo
+                // provider (and Serper/InfoQuest) sends no source_url, and any
+                // field may be missing, null or a non-string. A missing source
+                // URL is not a rejected URL — the row renders unlinked rather
+                // than through the UnsafeLink marker; a row with no usable
+                // image URL at all is skipped entirely.
+                if (typeof item !== "object" || item === null) {
+                  return null;
+                }
+                const sourceUrl =
+                  typeof item.source_url === "string"
+                    ? item.source_url
+                    : undefined;
+                const imageUrl =
+                  typeof item.image_url === "string"
+                    ? item.image_url
+                    : undefined;
+                const thumbnailUrl =
+                  typeof item.thumbnail_url === "string"
+                    ? item.thumbnail_url
+                    : undefined;
+                const displayUrl = thumbnailUrl ?? imageUrl;
+                if (displayUrl === undefined) {
+                  return null;
+                }
+                const title = typeof item.title === "string" ? item.title : "";
                 const thumbnail = (
                   <div className="bg-accent size-24">
                     <img
                       className="size-full object-cover"
-                      src={item.thumbnail_url}
-                      alt={item.title}
+                      src={displayUrl}
+                      alt={title}
                       width={100}
                       height={100}
                     />
                   </div>
                 );
                 return (
-                  <Tooltip key={item.image_url} content={item.title}>
-                    {isSafeHref(item.source_url) ? (
+                  <Tooltip key={`${index}:${displayUrl}`} content={title}>
+                    {sourceUrl === undefined ? (
+                      <div className="size-24 overflow-hidden rounded-lg">
+                        {thumbnail}
+                      </div>
+                    ) : isSafeHref(sourceUrl) ? (
                       <a
                         className="size-24 overflow-hidden rounded-lg object-cover"
-                        href={item.source_url}
+                        href={sourceUrl}
                         target="_blank"
                         rel="noopener noreferrer"
                       >
@@ -929,7 +959,7 @@ function ToolCall({
                       </a>
                     ) : (
                       <UnsafeLink
-                        href={item.source_url}
+                        href={sourceUrl}
                         className="size-24 overflow-hidden rounded-lg"
                       >
                         {thumbnail}

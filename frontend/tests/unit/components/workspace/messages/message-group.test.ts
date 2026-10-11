@@ -834,6 +834,116 @@ describe("MessageGroup tool links", () => {
   });
 });
 
+// Provider rows are untrusted input: the default DuckDuckGo provider (and
+// Serper/InfoQuest) sends no source_url at all, and any field may be missing,
+// null or a non-string. A missing source URL is not a rejected URL — the row
+// must render unlinked rather than through the UnsafeLink marker (#6718).
+describe("MessageGroup image_search rows", () => {
+  it("renders default-provider rows without source_url as unlinked images", () => {
+    const html = renderToolCall(
+      "image_search",
+      { query: "DeerFlow" },
+      JSON.stringify({
+        results: [
+          {
+            title: "Reference image",
+            image_url: "https://images.example/full.png",
+            thumbnail_url: "https://images.example/thumb.png",
+          },
+        ],
+      }),
+    );
+
+    expect(html).toContain('src="https://images.example/thumb.png"');
+    expect(unsafeMarkerCount(html)).toBe(0);
+    expect(anchorCount(html)).toBe(0);
+    expect(html).not.toContain("Unsafe link scheme in undefined");
+  });
+
+  it("falls back to the full image URL when no thumbnail is sent", () => {
+    const html = renderToolCall(
+      "image_search",
+      { query: "DeerFlow" },
+      JSON.stringify({
+        results: [
+          { title: "Full only", image_url: "https://images.example/full.png" },
+        ],
+      }),
+    );
+
+    expect(html).toContain('src="https://images.example/full.png"');
+    expect(unsafeMarkerCount(html)).toBe(0);
+  });
+
+  it("skips rows with no usable image URL instead of rendering broken images", () => {
+    const html = renderToolCall(
+      "image_search",
+      { query: "DeerFlow" },
+      JSON.stringify({
+        results: [
+          { title: "No urls" },
+          null,
+          {
+            title: "Usable",
+            image_url: "https://images.example/full.png",
+            thumbnail_url: null,
+          },
+        ],
+      }),
+    );
+
+    expect(html).toContain('src="https://images.example/full.png"');
+    expect(html.match(/<img\s/g)?.length).toBe(1);
+  });
+
+  it("still links safe source_urls and marks present-but-unsafe ones", () => {
+    const html = renderToolCall(
+      "image_search",
+      { query: "DeerFlow" },
+      JSON.stringify({
+        results: [
+          {
+            title: "Safe source",
+            source_url: "https://example.com/source",
+            thumbnail_url: "https://images.example/safe.png",
+            image_url: "https://images.example/safe-full.png",
+          },
+          {
+            title: "Injected image",
+            source_url: "javascript:alert(1)",
+            thumbnail_url: "https://images.example/injected.png",
+            image_url: "https://images.example/injected-full.png",
+          },
+        ],
+      }),
+    );
+
+    expect(html).toContain('href="https://example.com/source"');
+    expect(html).toContain('src="https://images.example/injected.png"');
+    expect(unsafeMarkerCount(html)).toBe(1);
+    expect(anchorCount(html)).toBe(1);
+  });
+
+  it("never lets a non-string title reach an attribute or tooltip", () => {
+    const html = renderToolCall(
+      "image_search",
+      { query: "DeerFlow" },
+      JSON.stringify({
+        results: [
+          {
+            title: { injected: true },
+            image_url: "https://images.example/full.png",
+          },
+        ],
+      }),
+    );
+
+    expect(html).not.toContain("[object Object]");
+    expect(html).not.toContain("injected");
+    expect(html).toContain('src="https://images.example/full.png"');
+  });
+});
+
 function renderToolCall(
   name: string,
   args: Record<string, unknown>,
