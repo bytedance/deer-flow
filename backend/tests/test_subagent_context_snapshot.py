@@ -246,6 +246,26 @@ def test_snapshot_preserves_visible_text_blocks_without_private_block_fields(mes
     assert all(block["type"] == "text" for block in snapshot.to_message().content)
 
 
+@pytest.mark.parametrize("message_type", [HumanMessage, AIMessage, ToolMessage])
+@pytest.mark.parametrize("block_type", [[], {}, ["text"], {"type": "text"}])
+def test_snapshot_skips_blocks_with_unhashable_types_without_losing_history(message_type, block_type):
+    # `type: []` / `type: {}` are legal JSON from a provider; probing the type
+    # by equality skips the block instead of raising TypeError out of the
+    # dispatch snapshot the child subagent is built from.
+    content = [
+        {"type": block_type, "text": "MALFORMED BLOCK"},
+        {"type": "text", "text": "kept answer"},
+    ]
+    kwargs = {"tool_call_id": "parent-tool"} if message_type is ToolMessage else {}
+    snapshot = ParentContextSnapshot.from_state({"messages": [message_type(content=content, **kwargs)]})
+
+    assert snapshot is not None
+    text = message_content_to_text(snapshot.to_message().content)
+    assert "kept answer" in text
+    assert "MALFORMED BLOCK" not in text
+    assert "MALFORMED BLOCK" not in snapshot.content_json
+
+
 @pytest.mark.parametrize("content, expected", [({"key": "value"}, ["key", "value"]), (["text", 42, None, True], ["text", "42", "None", "True"])])
 def test_snapshot_keeps_tool_content_normalized_by_message_constructor(content, expected):
     # ToolMessage coerces non-list payloads and non-dict list items to strings.

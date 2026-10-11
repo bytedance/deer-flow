@@ -1824,6 +1824,8 @@ Rebuild with `make up` after changing the managed extension set. See
 
 Gateway-generated follow-up suggestions now normalize both plain-string model output and block/list-style rich content before parsing the JSON array response, so provider-specific content wrappers do not silently drop suggestions. Follow-up suggestions and input polishing skip content blocks with non-string types, preserving the surrounding text instead of failing the request
 
+Visible-content detection (`has_visible_content`, shared by the empty-response, terminal-response and model-length middlewares) and the subagent dispatch snapshot (`ParentContextSnapshot.from_state`) probe content-block types by equality rather than set membership, so a provider-emitted block with an unhashable type such as `type: []` degrades to a skipped block — keeping the surrounding history — instead of raising TypeError out of the middleware chain
+
 Backend response cleanup preserves unrelated tag names such as `<think-tank>` and `<think:note>` in follow-up suggestions and polished drafts; only the exact `<think>` name (optionally followed by attributes) starts a reasoning block. Self-closing `<think/>` and `<think />` tags are empty reasoning blocks and leave the following answer intact. Delimiters inside quoted attributes, such as `<think note=">"/>`, also leave the following answer intact.
 
 The Web UI composer can polish draft input before sending. The rewrite runs as a short Gateway LLM request using the `input_polish` model configuration, keeps slash skill prefixes such as `/data-analysis`, and only replaces the local draft after the user clicks the polish button; it does not create a thread run or persist a message.
