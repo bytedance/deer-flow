@@ -7,6 +7,9 @@ the #5852 bar; folding the identical copies into one function is what lets the
 remaining providers be brought onto the same bar one at a time without
 re-deciding in each file what "invalid" means.
 
+You.com also uses this shared coercion, then applies its 100-result cap to
+the normalized count before sending the request.
+
 Other providers retain local normalization, including Exa's generic integer
 helper and SearXNG's inline validation; Tavily passes configured values through.
 ``tests/test_search_max_results_single_owner.py`` tracks the known helper and
