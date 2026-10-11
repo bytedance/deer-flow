@@ -61,6 +61,9 @@ cooperative deadline is checked between files and download chunks; an active SDK
 read is bounded by `request_timeout`, so this is not a hard wall-clock limit.
 The listing requires `find`, `head`, `base64` and `mktemp` in the remote image.
 Remote links are not followed and linked local destinations are rejected.
+Mirrored names must also be portable host paths: traversal, backslashes, colons,
+Windows reserved components and components ending in a space or dot are skipped
+with a warning, including when the Gateway runs on Unix.
 Files deleted remotely are not removed from the local outputs directory.
 
 Create returns only after the SDK readiness check and DeerFlow's
