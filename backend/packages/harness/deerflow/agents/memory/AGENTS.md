@@ -201,15 +201,38 @@ to `--user-id` (default `default`); `threads/` go to their `threads_meta` owner.
 DeerMem selects persistent SQLite FTS5 by default.
 An empty value selects the substring fallback.
 
-SQLite index data lives below `.retrieval/` and remains rebuildable.
+The SQLite index is rebuildable derived data below `retrieval_index_path`
+(empty = `{storage_path}/.retrieval`; relative resolves against `storage_path`;
+`paths.retrieval_index_directory` is the one resolver). Instances sharing
+`storage_path` keep it instance-local: SQLite WAL is unsupported on network
+filesystems, and the full rebuild and one-shot corruption recovery touch only
+that local index. `deps._validate_memory_retrieval_index` warns when a declared
+multi-instance deployment leaves it inside `storage_path`.
 Chinese tokenization uses `jieba` only with the `memory-zh` extra.
 Malformed facts are logged and skipped during rebuild.
 A fatal rebuild failure keeps lazy retry active.
-A corrupt persistent database is deleted and recreated once.
 
 Storage sends adapter updates after it releases durable locks.
 Adapter failures mark the scope dirty.
 Search then uses canonical substring matching until rebuild succeeds.
+
+Cross-process freshness: `rebuild_index` records each agent scope's manifest
+signature `(mtime_ns, size, revision)` before reading that scope's complete
+fact list (never a `list_facts` page); `search_facts` rebuilds a scope whose
+live signature differs (a peer wrote the user's memory), and a manifest read
+failure during that compare logs and serves the local index. A commit that produced
+a new revision advances the recorded signatures of that user's scopes that were
+in sync at the pre-commit revision read under the user lock; a no-op commit
+advances nothing. Own writes therefore never rebuild while an interleaved peer
+write still does. Promotion is generation-fenced: `rebuild_index` bumps a
+per-scope (full rebuild: storage-wide) generation under `_cache_lock` when it
+publishes or forgets rows, the dispatcher snapshots them before its first
+adapter call, and a scope whose generation moved keeps the rebuild's own
+signature for the next search to compare; an own delta that cannot be proved
+compatible with the published snapshot forgets the mutated scope's signature
+instead of merely skipping promotion. A rebuild's row replacement and its
+publication run as one unit under `_retrieval_publish_lock` (fact reads stay
+outside), so overlapping refreshes of a scope publish in install order.
 
 Gateway startup schedules `DeerMem.warm_retrieval()` without delaying readiness.
 The first search can rebuild its exact scope.

@@ -37,6 +37,14 @@ monotonically for their supported deployment modes. JSONL only provides this
 guarantee within one process; shared multi-process deployments must use the
 database store.
 
+The database store additionally keeps a per-thread high-water mark
+(`run_event_thread_seq`) that is independent of the event rows. Deleting a run
+therefore never lowers the next allocated `seq`: values are not reused within a
+thread, and a consumer whose `after_seq` cursor already advanced past a deleted
+run does not miss later events. Thread deletion drops the mark only when no
+events remain for the thread across every owner and category; surviving rows
+retain the allocation floor.
+
 ## Categories
 
 `category="message"` means an event is eligible for a message projection; it
@@ -78,7 +86,7 @@ through run-event or specialized APIs:
 
 Current middleware tags are `guardrail`, `loop_detection`,
 `safety_termination`, `skill_activation`, `skill_secrets`, `tool_promotion`,
-and `tool_progress`. The pattern is intentionally open so new middleware tags
+`tool_progress`, and `summarize`. The pattern is intentionally open so new middleware tags
 are additive. Because the full event type is limited to 32 characters and
 `middleware:` uses 11, a tag must contain 1-21 characters.
 
@@ -125,6 +133,14 @@ authorization execution policies. Repeated model passes or searches that add
 no names emit no event. Queries, routing keywords, catalog hashes, tool schemas
 and descriptions, arguments, and results are not copied into this middleware
 event. Other event types retain their existing payload contracts.
+
+`middleware:summarize` records each successful summary result from
+`SummarizationMiddleware` with `action` `summary_result`, including results
+reused from the no-op cache. The `changes` object carries the no-op and
+cache-skip flags, summary and previous-summary lengths, the number of
+summarized messages, and the middleware's cumulative counters; see
+[summarization.md](summarization.md). Summary text and message content are
+never copied into this event.
 
 Ordinary task-tool subagents forward loop-detection, tool-promotion, and
 tool-progress appends to the parent run loop through dedicated recorder context

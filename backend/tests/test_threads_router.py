@@ -34,6 +34,7 @@ from deerflow.persistence.thread_meta.memory import THREADS_NS, MemoryThreadMeta
 from deerflow.runtime import ConflictError, ThreadOperationKind
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY
+from deerflow.runtime.goal import build_goal_outcome, build_goal_state, write_thread_goal
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.uploads.companions import companion_names, register_companion, resolve_companion
 from deerflow.utils.file_outline import extract_outline_for_file
@@ -3737,6 +3738,162 @@ def test_update_thread_state_overwrite_into_never_written_channel(monkeypatch, m
         read_response = client.get(f"/api/threads/{source_thread_id}/state")
         assert read_response.status_code == 200, read_response.text
         assert read_response.json()["values"]["goal"] == {"objective": "finish"}
+
+
+def _met_goal_record(reply_message_id: str | None = "a2") -> dict:
+    return build_goal_outcome(build_goal_state("ship the fix"), {"satisfied": True, "blocker": "none", "reason": "Shipped."}, reply_message_id=reply_message_id)
+
+
+def _record_met_goal(checkpointer, thread_id: str, record: dict) -> None:
+    asyncio.run(write_thread_goal(checkpointer, thread_id, None, as_node="goal_evaluator", outcome=record))
+
+
+def _create_extension_thread(client, checkpointer, custom_factory, mode, thread_id) -> None:
+    created = client.post("/api/threads", json={"thread_id": thread_id, "metadata": {}, "assistant_id": "extension-agent"})
+    assert created.status_code == 200, created.text
+    asyncio.run(_seed_extension_source(checkpointer, custom_factory, mode, thread_id))
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_history_head_carries_goal_state_without_messages(monkeypatch, mode) -> None:
+    """useStream rebuilds thread values from the head, so a goal set on /chats/new
+    and a met-goal record must be there even before any message exists."""
+    app, _store, checkpointer = _build_thread_app()
+    _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    thread_id = f"goal-head-{mode}"
+    record = _met_goal_record(None)
+
+    with TestClient(app) as client:
+        goal_response = client.put(f"/api/threads/{thread_id}/goal", json={"objective": "ship the fix"})
+        assert goal_response.status_code == 200, goal_response.text
+        set_head = client.post(f"/api/threads/{thread_id}/history", json={"limit": 1}).json()[0]["values"]
+        _record_met_goal(checkpointer, thread_id, record)
+        met_history = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10}).json()
+
+    assert set_head == {"goal": goal_response.json()["goal"]}
+    assert met_history[0]["values"] == {"goal_outcome": record}
+    # Older entries stay title/thread_data only.
+    assert len(met_history) > 1
+    assert all(not {"goal", "goal_outcome"} & set(entry["values"]) for entry in met_history[1:])
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_history_head_skips_goal_state_that_is_not_active_or_achieved(monkeypatch, mode) -> None:
+    """POST /state stores an unbuilt goal; the head must not show it as a goal the backend ignores."""
+    app, _store, checkpointer = _build_thread_app()
+    custom_factory = _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    thread_id = f"malformed-goal-head-{mode}"
+
+    with TestClient(app) as client:
+        _create_extension_thread(client, checkpointer, custom_factory, mode, thread_id)
+        update_response = client.post(f"/api/threads/{thread_id}/state", json={"values": {"goal": {"objective": "finish"}}})
+        assert update_response.status_code == 200, update_response.text
+        malformed_goal_head = client.post(f"/api/threads/{thread_id}/history", json={"limit": 1}).json()[0]["values"]
+        _record_met_goal(checkpointer, thread_id, {**_met_goal_record(), "status": "cleared"})
+        unknown_outcome_head = client.post(f"/api/threads/{thread_id}/history", json={"limit": 1}).json()[0]["values"]
+
+    assert "goal" not in malformed_goal_head
+    assert [message["id"] for message in malformed_goal_head["messages"]] == ["h1", "a1", "h2", "a2"]
+    assert "goal_outcome" not in unknown_outcome_head
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_goal_writes_drop_the_met_goal_record(monkeypatch, mode) -> None:
+    """PUT/DELETE /goal and a POST /state goal write must not leave an older 'goal met' behind."""
+    app, _store, checkpointer = _build_thread_app()
+    custom_factory = _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    thread_id = f"goal-outcome-writers-{mode}"
+    record = _met_goal_record()
+    writers = {
+        "put": lambda client: client.put(f"/api/threads/{thread_id}/goal", json={"objective": "next goal"}),
+        "delete": lambda client: client.delete(f"/api/threads/{thread_id}/goal"),
+        "state": lambda client: client.post(f"/api/threads/{thread_id}/state", json={"values": {"goal": None}}),
+    }
+    after = {}
+
+    with TestClient(app) as client:
+        _create_extension_thread(client, checkpointer, custom_factory, mode, thread_id)
+        for name, write in writers.items():
+            _record_met_goal(checkpointer, thread_id, record)
+            assert client.get(f"/api/threads/{thread_id}/state").json()["values"]["goal_outcome"] == record
+            response = write(client)
+            assert response.status_code == 200, response.text
+            after[name] = client.get(f"/api/threads/{thread_id}/state").json()["values"]
+        head = client.post(f"/api/threads/{thread_id}/history", json={"limit": 1}).json()[0]["values"]
+
+    assert after["put"]["goal"]["objective"] == "next goal"
+    assert all(values.get("goal_outcome") is None for values in after.values())
+    assert "goal_outcome" not in head
+
+
+def _seed_turn(checkpointer, custom_factory, mode, thread_id, human_id: str, ai_id: str, **values) -> None:
+    accessor = CheckpointStateAccessor.bind(custom_factory(), checkpointer, mode=mode)
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+
+    async def seed() -> None:
+        await accessor.aupdate(config, {"messages": [HumanMessage(id=human_id, content=f"question {human_id}")], **values}, as_node="model")
+        await accessor.aupdate(config, {"messages": [AIMessage(id=ai_id, content=f"answer {ai_id}")]}, as_node="model")
+
+    asyncio.run(seed())
+
+
+def _branch_head(client, thread_id: str, message_id: str) -> tuple[str, dict]:
+    branch_response = client.post(f"/api/threads/{thread_id}/branches", json={"message_id": message_id, "message_ids": [message_id]})
+    assert branch_response.status_code == 200, branch_response.text
+    branch_thread_id = branch_response.json()["thread_id"]
+    return branch_thread_id, client.post(f"/api/threads/{branch_thread_id}/history", json={"limit": 1}).json()[0]["values"]
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_branch_from_the_met_turn_keeps_the_record_without_the_met_goal(monkeypatch, mode) -> None:
+    """The branch head is written onto the replay base from before the turn, where the
+    goal was still active; the branch keeps the record and its message ids, not the goal."""
+    app, _store, checkpointer = _build_thread_app()
+    custom_factory = _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    thread_id = f"met-goal-branch-{mode}"
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": thread_id, "metadata": {}, "assistant_id": "extension-agent"})
+        assert created.status_code == 200, created.text
+        _seed_turn(checkpointer, custom_factory, mode, thread_id, "h1", "a1")
+        goal_response = client.put(f"/api/threads/{thread_id}/goal", json={"objective": "ship the fix"})
+        assert goal_response.status_code == 200, goal_response.text
+        _seed_turn(checkpointer, custom_factory, mode, thread_id, "h2", "a2")
+        record = build_goal_outcome(goal_response.json()["goal"], {"satisfied": True, "blocker": "none", "reason": "Shipped."}, reply_message_id="a2")
+        _record_met_goal(checkpointer, thread_id, record)
+        branch_thread_id, branch_head = _branch_head(client, thread_id, "a2")
+        branch_goal = client.get(f"/api/threads/{branch_thread_id}/goal").json()["goal"]
+
+    assert branch_head["goal_outcome"] == record
+    assert "goal" not in branch_head
+    assert branch_goal is None
+    assert [message["id"] for message in branch_head["messages"]] == ["h1", "a1", "h2", "a2"]
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_branch_does_not_take_an_older_met_goal_record_from_the_replay_base(monkeypatch, mode) -> None:
+    """A run-input goal clears the older record and a stand-down then drops the cleared
+    key, so only the replay base still holds that record; the branch must not revive it."""
+    app, _store, checkpointer = _build_thread_app()
+    custom_factory = _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    thread_id = f"older-record-branch-{mode}"
+    next_goal = build_goal_state("next goal")
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": thread_id, "metadata": {}, "assistant_id": "extension-agent"})
+        assert created.status_code == 200, created.text
+        _seed_turn(checkpointer, custom_factory, mode, thread_id, "h1", "a1")
+        _record_met_goal(checkpointer, thread_id, _met_goal_record("a1"))
+        # normalize_input's shape for an external run-input goal.
+        _seed_turn(checkpointer, custom_factory, mode, thread_id, "h2", "a2", goal=next_goal, goal_outcome=None)
+        asyncio.run(write_thread_goal(checkpointer, thread_id, next_goal, as_node="goal_evaluator"))
+        source_head = client.post(f"/api/threads/{thread_id}/history", json={"limit": 1}).json()[0]["values"]
+        _branch_thread_id, branch_head = _branch_head(client, thread_id, "a2")
+
+    assert source_head["goal"] == next_goal
+    assert "goal_outcome" not in source_head
+    assert branch_head["goal"] == next_goal
+    assert "goal_outcome" not in branch_head
 
 
 @pytest.mark.parametrize("mode", ["full", "delta"])

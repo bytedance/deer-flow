@@ -239,8 +239,9 @@ class LocalFsBlobStore(BlobStore):
             "writer_thread_id": thread_id,
             "created_at": time.time(),
         }
-        fd, tmp_name = tempfile.mkstemp(prefix=".meta-", suffix=".tmp", dir=meta_path.parent)
+        tmp_name: str | None = None
         try:
+            fd, tmp_name = tempfile.mkstemp(prefix=".meta-", suffix=".tmp", dir=meta_path.parent)
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle)
             os.replace(tmp_name, meta_path)
@@ -248,10 +249,11 @@ class LocalFsBlobStore(BlobStore):
             # The sidecar is an optimization for later GC, not a read
             # dependency: losing it must not fail a put that already
             # succeeded.
-            try:
-                os.unlink(tmp_name)
-            except OSError:
-                pass
+            if tmp_name is not None:
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
             logger.warning("Could not write blob sidecar %s", meta_path, exc_info=True)
 
 

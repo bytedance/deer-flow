@@ -23,6 +23,12 @@ def test_defaults_when_section_absent():
     assert config.projects.shelf_index_max_entries == 50
     assert config.projects.shelf_index_max_bytes == 4096
     assert config.projects.trash_retention_days == 30
+    assert config.projects.summaries_enabled is False
+    assert config.projects.summary_max_bytes == 256
+    assert config.projects.summary_model_name is None
+    assert config.projects.summary_concurrency == 2
+    assert config.projects.summary_queue_size == 32
+    assert config.projects.summary_timeout_seconds == 60
 
 
 def test_null_section_falls_back_to_defaults():
@@ -89,6 +95,37 @@ def test_int_valued_float_is_accepted_and_coerced():
     config = AppConfig.model_validate({**_MINIMAL_APP_CONFIG, "projects": {"instructions_max_bytes": 8192.0}})
     assert config.projects.instructions_max_bytes == 8192
     assert isinstance(config.projects.instructions_max_bytes, int)
+
+
+def test_summary_bool_field_rejects_non_bool():
+    config = AppConfig.model_validate({**_MINIMAL_APP_CONFIG, "projects": {"summaries_enabled": "yes"}})
+    assert config.projects.summaries_enabled is False
+
+
+def test_summary_model_name_rejects_non_str():
+    config = AppConfig.model_validate({**_MINIMAL_APP_CONFIG, "projects": {"summary_model_name": 42}})
+    assert config.projects.summary_model_name is None
+    config = AppConfig.model_validate({**_MINIMAL_APP_CONFIG, "projects": {"summary_model_name": "gpt-x"}})
+    assert config.projects.summary_model_name == "gpt-x"
+
+
+def test_summary_int_bounds_fall_back():
+    config = AppConfig.model_validate({**_MINIMAL_APP_CONFIG, "projects": {"summary_concurrency": 99, "summary_queue_size": 0, "summary_timeout_seconds": 1}})
+    assert config.projects.summary_concurrency == 2
+    assert config.projects.summary_queue_size == 32
+    assert config.projects.summary_timeout_seconds == 60
+
+
+def test_summary_fields_are_registered_startup_only():
+    """The generator captures every summary knob at lifespan startup, so the
+    fields must be registered restart-required and carry the standard prefix
+    (config/AGENTS.md "Config Hot-Reload Boundary")."""
+    from deerflow.config.reload_boundary import STARTUP_ONLY_PREFIX, is_startup_only_field
+
+    for name in ("summaries_enabled", "summary_max_bytes", "summary_model_name", "summary_concurrency", "summary_queue_size", "summary_timeout_seconds"):
+        assert is_startup_only_field(f"projects.{name}")
+        description = ProjectsConfig.model_fields[name].description
+        assert description is not None and description.startswith(STARTUP_ONLY_PREFIX)
 
 
 def test_valid_sibling_values_survive_an_invalid_value():

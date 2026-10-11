@@ -2,7 +2,7 @@
 
 Read this guide before changing `ClarificationMiddleware`, the Human Input Card
 payload shape, or the journal reconciliation that keeps those cards across a
-reload. It is the depth for entry 38 of the
+reload. It is the depth for entry 41 of the
 [middlewares guide](../packages/harness/deerflow/agents/middlewares/AGENTS.md),
 which only names the middleware and its load-bearing constraints and links here:
 that chain is within a few hundred bytes of `scripts/check_agent_guidance.py`'s

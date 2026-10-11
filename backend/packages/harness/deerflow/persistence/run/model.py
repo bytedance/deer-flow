@@ -21,6 +21,7 @@ class RunRow(Base):
     # "pending" | "running" | "success" | "error" | "timeout" | "interrupted"
     operation_kind: Mapped[str] = mapped_column(String(32), nullable=False, default="run", server_default=text("'run'"))
     idempotency_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    idempotency_request_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     model_name: Mapped[str | None] = mapped_column(String(128))
     multitask_strategy: Mapped[str] = mapped_column(String(20), default="reject")

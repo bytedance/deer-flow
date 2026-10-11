@@ -84,6 +84,15 @@ class DeerMemConfig(BaseModel):
             "Search bypasses this adapter when retrieval_relevance_enabled is true; indexing remains configured."
         ),
     )
+    retrieval_index_path: str = Field(
+        default="",
+        description=(
+            "Directory holding the derived SQLite FTS5 retrieval index. Empty (default) = ``{storage_path}/.retrieval``; "
+            "a relative path is resolved against storage_path; an absolute path is used as-is. The index is rebuildable, "
+            "so Gateway instances that share storage_path must each point this at instance-local disk: SQLite WAL is "
+            "unsupported on network filesystems, and peers would rebuild or delete each other's index."
+        ),
+    )
     fact_dedup_enabled: bool = Field(
         default=False,
         description=(

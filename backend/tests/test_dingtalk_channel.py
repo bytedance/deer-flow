@@ -408,7 +408,7 @@ class TestOnChatbotMessage:
     def test_p2p_message_without_sender_is_dropped(self, sender_staff_id):
         """A P2P chat_id *is* the sender, so an empty one keys every user to one thread.
 
-        ``ChannelStore._key`` builds ``f"{channel}:{chat_id}"`` for a topic-less conversation,
+        ``binding_key`` builds ``f"{channel}:{chat_id}"`` for a topic-less conversation,
         so publishing this would put every senderless P2P message under the literal
         ``"dingtalk:"`` — one shared thread, one shared history, across users.
         """
@@ -1851,10 +1851,13 @@ def _patch_uploads(monkeypatch, uploads_dir, *, sandbox_id="local", sandbox=None
     async def _acquire_async(thread_id, user_id=None):
         return sandbox_id
 
-    monkeypatch.setattr(
-        "app.channels.dingtalk.get_sandbox_provider",
-        lambda: SimpleNamespace(acquire_async=_acquire_async, get=lambda sid: sandbox),
+    provider = SimpleNamespace(
+        uses_thread_data_mounts=sandbox_id == "local" or sandbox_id.startswith("local:"),
+        acquire_async=_acquire_async,
+        get=lambda sid: sandbox,
+        release=lambda sid: None,
     )
+    monkeypatch.setattr("app.channels.dingtalk.get_sandbox_provider", lambda: provider)
 
 
 class TestExtractFiles:

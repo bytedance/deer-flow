@@ -317,11 +317,10 @@ async def test_cancelled_stop_drains_http_client_cleanup():
 @pytest.mark.asyncio
 async def test_service_registers_starts_and_disposes_qq(tmp_path, monkeypatch):
     from app.channels import service as service_module
-    from app.channels.store import ChannelStore
+    from app.channels.store import JsonChannelStore
     from deerflow.config.app_config import AppConfig
 
-    store = ChannelStore(tmp_path / "channels.json")
-    monkeypatch.setattr(service_module, "ChannelStore", lambda: store)
+    store = JsonChannelStore(tmp_path / "channels.json")
     config = {
         "app_id": "fixture-app",
         "client_secret": "fixture-secret",
@@ -329,7 +328,7 @@ async def test_service_registers_starts_and_disposes_qq(tmp_path, monkeypatch):
     }
     app_config = AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}})
     repository = object()
-    service = service_module.ChannelService({"qq": config}, connection_repo=repository, app_config=app_config)
+    service = service_module.ChannelService({"qq": config}, connection_repo=repository, app_config=app_config, store=store)
 
     async def connected(self, url):
         self._ready.set()
@@ -341,6 +340,7 @@ async def test_service_registers_starts_and_disposes_qq(tmp_path, monkeypatch):
         AsyncMock(return_value={"url": "wss://api.sgroup.qq.com/websocket/"}),
     )
     monkeypatch.setattr(qq.QQChannel, "_run_connection", connected)
+    service._running = True  # Direct-start fixture models an active service.
     try:
         assert await service._start_channel("qq", config)
         channel = service.get_channel("qq")

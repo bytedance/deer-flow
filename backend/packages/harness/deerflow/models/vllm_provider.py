@@ -72,7 +72,8 @@ def _normalize_vllm_chat_template_kwargs(payload: dict[str, Any]) -> None:
     normalized_chat_template_kwargs = dict(chat_template_kwargs)
     normalized_chat_template_kwargs.setdefault("enable_thinking", normalized_chat_template_kwargs["thinking"])
     normalized_chat_template_kwargs.pop("thinking", None)
-    extra_body["chat_template_kwargs"] = normalized_chat_template_kwargs
+    # LangChain may reuse the caller's or model's extra_body mapping across requests.
+    payload["extra_body"] = {**extra_body, "chat_template_kwargs": normalized_chat_template_kwargs}
 
 
 def _reasoning_to_text(reasoning: Any) -> str:

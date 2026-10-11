@@ -416,7 +416,11 @@ async def enforce_thread_retention(
                 cp_id=cp_id,
                 parent_ns=parent_ns,
                 parent_id=parent_id,
-                duration_only=is_duration_only_checkpoint(tuple_),
+                # Pruning is destructive, so the stamp fallback is disabled:
+                # title and goal leaves inherit the writer's stamps, and only
+                # the shape confirmation in
+                # _mark_duration_leaves_without_the_marker may widen the class.
+                duration_only=is_duration_only_checkpoint(tuple_, stamp_fallback=False),
                 metadata_source=metadata.get("source"),
                 carries_run_durations=isinstance(run_durations, dict) and bool(run_durations),
                 versions=frozenset(channel_versions.values()) if isinstance(channel_versions, dict) else frozenset(),

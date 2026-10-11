@@ -1307,6 +1307,37 @@ def test_prepare_edit_regenerate_payload_rejects_active_goal():
     assert exc.value.detail == "Cannot edit while a goal is active"
 
 
+@pytest.mark.parametrize(
+    "latest_values",
+    [
+        # Clearing a met goal leaves only its record.
+        {"goal_outcome": {"status": "achieved", "objective": "finish", "reply_message_id": "ai-1"}},
+        # POST /state stores an unbuilt goal the history head does not show as active.
+        {"goal": {"objective": "finish"}},
+    ],
+    ids=["met-goal-record", "goal-without-status"],
+)
+def test_prepare_edit_regenerate_payload_allows_editing_without_an_active_goal(latest_values):
+    from app.gateway.routers.thread_runs import _prepare_edit_regenerate_payload
+
+    human = HumanMessage(id="human-1", content="question")
+    ai = AIMessage(id="ai-1", content="answer v1")
+    latest = _checkpoint("ckpt-ai", [human, ai])
+    latest.checkpoint["channel_values"].update(latest_values)
+    event_store, run_manager = _answer_run_fixtures()
+
+    response = asyncio.run(
+        _prepare_edit_regenerate_payload(
+            "thread-1",
+            "human-1",
+            "updated question",
+            _request(FakeCheckpointer([latest, _checkpoint("ckpt-human", [human]), _checkpoint("ckpt-base", [])]), event_store, run_manager=run_manager),
+        )
+    )
+
+    assert response.checkpoint["checkpoint_id"] == "ckpt-base"
+
+
 def test_prepare_edit_regenerate_payload_requires_successful_source_run():
     from app.gateway.routers.thread_runs import _prepare_edit_regenerate_payload
 

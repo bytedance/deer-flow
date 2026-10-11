@@ -48,7 +48,7 @@ def _seed_database_that_skipped_0023(db_path) -> None:
             # change_seq, so it goes before the column.
             conn.execute(sa.text("DROP INDEX IF EXISTS ix_runs_thread_change_seq"))
             conn.execute(sa.text("ALTER TABLE runs DROP COLUMN origin_kind"))
-            for table in ("thread_read_markers", "thread_read_versions", "scheduled_task_events"):
+            for table in ("login_throttle", "thread_read_markers", "thread_read_versions", "scheduled_task_events"):
                 conn.execute(sa.text(f"DROP TABLE IF EXISTS {table}"))
             # Remove everything 0023_run_change_seq owns.
             conn.execute(sa.text("DROP INDEX IF EXISTS ix_runs_change_seq"))

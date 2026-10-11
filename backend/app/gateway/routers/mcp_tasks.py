@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_current_user, get_mcp_task_repo, get_mcp_task_service, get_thread_store
+from deerflow.mcp.tasks import TaskStatus
 from deerflow.mcp_scope import is_valid_thread_incarnation
 from deerflow.utils.thread_id import ThreadId
 
@@ -17,16 +18,19 @@ _MAX_PUBLIC_ERROR_CHARS = 500
 
 
 def _short_error(value: Any) -> str | None:
+    """Return ``value`` as a string truncated to the public error limit."""
     if value is None:
         return None
     return str(value)[:_MAX_PUBLIC_ERROR_CHARS]
 
 
 def _tracking_degraded(record: dict[str, Any], *, threshold: int) -> bool:
+    """Report whether polling has failed at least ``threshold`` times in a row."""
     return int(record.get("consecutive_poll_error_count") or 0) >= threshold
 
 
 def _list_item(record: dict[str, Any], *, threshold: int) -> dict[str, Any]:
+    """Project a task record onto the fields returned by the list endpoint."""
     return {
         "task_id": record["id"],
         "task_name": record["task_name"],
@@ -40,6 +44,7 @@ def _list_item(record: dict[str, Any], *, threshold: int) -> dict[str, Any]:
 
 
 def _detail(record: dict[str, Any], *, threshold: int) -> dict[str, Any]:
+    """Project a task record onto the richer detail view."""
     return {
         **_list_item(record, threshold=threshold),
         "last_polled_at": record.get("last_polled_at"),
@@ -91,7 +96,21 @@ async def list_mcp_tasks(
     thread_id: ThreadId,
     request: Request,
     limit: int = Query(default=50, ge=1, le=100),
+    status: TaskStatus | None = None,
+    active_only: bool = False,
 ) -> list[dict[str, Any]]:
+    """List the durable MCP background tasks recorded for a thread.
+
+    Args:
+        thread_id: Thread whose tasks are listed.
+        request: Incoming request, used for auth and repository access.
+        limit: Maximum number of tasks to return (1-100).
+        status: Optional task status filter applied in SQL before the limit.
+        active_only: Restrict to submitted, working, and input_required tasks; intersects with status.
+
+    Returns:
+        Tasks in repository order, each projected onto the list view.
+    """
     repository = get_mcp_task_repo(request)
     service = get_mcp_task_service(request)
     user_id = await _current_user_id(request)
@@ -105,6 +124,8 @@ async def list_mcp_tasks(
         user_id=user_id,
         thread_incarnation=thread_incarnation,
         limit=limit,
+        status=status,
+        active_only=active_only,
     )
     threshold = service.tracking_degraded_after_errors
     return [_list_item(record, threshold=threshold) for record in records]
@@ -117,6 +138,19 @@ async def get_mcp_task(
     task_id: str,
     request: Request,
 ) -> dict[str, Any]:
+    """Return the full record for one MCP task owned by the thread.
+
+    Args:
+        thread_id: Thread that owns the task.
+        task_id: Identifier of the task to fetch.
+        request: Incoming request, used for auth and repository access.
+
+    Returns:
+        The task projected onto the detail view.
+
+    Raises:
+        HTTPException: 404 when the task does not exist for this thread.
+    """
     repository = get_mcp_task_repo(request)
     service = get_mcp_task_service(request)
     user_id = await _current_user_id(request)
@@ -146,6 +180,20 @@ async def cancel_mcp_task(
     task_id: str,
     request: Request,
 ) -> dict[str, Any]:
+    """Request cancellation of a running MCP task.
+
+    Args:
+        thread_id: Thread that owns the task.
+        task_id: Identifier of the task to cancel.
+        request: Incoming request, used for auth and repository access.
+
+    Returns:
+        The task projected onto the detail view after the cancel request.
+
+    Raises:
+        HTTPException: 503 when no cancellation worker is running, or 404 when
+            the task does not exist for this thread.
+    """
     service = get_mcp_task_service(request)
     user_id = await _current_user_id(request)
     thread_incarnation = await _current_thread_incarnation(

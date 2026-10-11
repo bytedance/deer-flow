@@ -14,7 +14,7 @@ from deerflow.persistence.run import RunRepository
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.finalization import FinalizationObserver, end_condition_reached, finalize_occurrence, finish_task_at_end_condition, is_host_pause_marker
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
-from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project
+from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project, once_run_still_scheduled
 from deerflow.persistence.scheduled_tasks.model import (
     ACTIVE_RUN_STATUSES,
     TERMINAL_RUN_STATUSES,
@@ -220,7 +220,9 @@ class ScheduledTaskRunRepository:
         task.lease_owner = None
         task.lease_expires_at = None
         task.updated_at = datetime.now(UTC)
-        if task.schedule_type == "once":
+        # A trial ahead of a once task's run time is projected like a
+        # recurring task's run, so the once run stays scheduled.
+        if task.schedule_type == "once" and not once_run_still_scheduled(task, row):
             if candidate.status == "success":
                 task.status = "completed"
                 task.last_error = None

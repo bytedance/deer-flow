@@ -493,6 +493,54 @@ class TestDelete:
         assert messages[0]["run_id"] == "r1"
 
     @pytest.mark.anyio
+    @pytest.mark.parametrize("backend", ["memory", "jsonl", "db"])
+    async def test_delete_by_run_preserves_seq_watermark(self, tmp_path, backend):
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store.db import DbRunEventStore
+        from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
+
+        if backend == "db":
+            await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'test.db'}", sqlite_dir=str(tmp_path))
+            event_store = DbRunEventStore(get_session_factory())
+        elif backend == "jsonl":
+            event_store = JsonlRunEventStore(base_dir=tmp_path / "jsonl")
+        else:
+            event_store = MemoryRunEventStore()
+
+        try:
+            r1 = await event_store.put(
+                thread_id="t1",
+                run_id="r1",
+                event_type="human_message",
+                category="message",
+                content="one",
+            )
+            r2 = await event_store.put(
+                thread_id="t1",
+                run_id="r2",
+                event_type="human_message",
+                category="message",
+                content="two",
+            )
+            assert [r1["seq"], r2["seq"]] == [1, 2]
+
+            assert await event_store.delete_by_run("t1", "r2", user_id=None) == 1
+
+            r3 = await event_store.put(
+                thread_id="t1",
+                run_id="r3",
+                event_type="human_message",
+                category="message",
+                content="three",
+            )
+            assert r3["seq"] > r2["seq"]
+            messages = await event_store.list_messages("t1", limit=50, after_seq=r2["seq"], user_id=None)
+            assert [message["seq"] for message in messages] == [r3["seq"]]
+        finally:
+            if backend == "db":
+                await close_engine()
+
+    @pytest.mark.anyio
     async def test_delete_by_thread_accepts_owner_scope(self, store):
         """Every backend accepts the owner scope the Gateway passes (#2803 wiring).
 
@@ -564,7 +612,7 @@ class TestDbRunEventStore:
             def __init__(self):
                 self.dialect = postgresql.dialect()
                 self.execute_calls = []
-                self.scalar_stmt = None
+                self.scalar_stmts = []
 
             def get_bind(self):
                 return self
@@ -573,7 +621,7 @@ class TestDbRunEventStore:
                 self.execute_calls.append((stmt, params))
 
             async def scalar(self, stmt):
-                self.scalar_stmt = stmt
+                self.scalar_stmts.append(stmt)
                 return 41
 
         session = FakeSession()
@@ -584,8 +632,9 @@ class TestDbRunEventStore:
         assert session.execute_calls
         assert session.execute_calls[0][1] == {"thread_id": "thread-1"}
         assert "pg_advisory_xact_lock" in str(session.execute_calls[0][0])
-        compiled = str(session.scalar_stmt.compile(dialect=postgresql.dialect()))
-        assert "FOR UPDATE" not in compiled
+        compiled = [str(stmt.compile(dialect=postgresql.dialect())) for stmt in session.scalar_stmts]
+        assert compiled
+        assert all("FOR UPDATE" not in stmt for stmt in compiled)
 
     @pytest.mark.anyio
     async def test_delete_by_thread_takes_postgres_advisory_lock(self):
@@ -659,6 +708,12 @@ class TestDbRunEventStore:
             async def scalar(self, _stmt):
                 return 2
 
+            async def get(self, _model, _thread_id):
+                return None
+
+            def add(self, _obj) -> None:
+                return None
+
             async def commit(self) -> None:
                 return None
 
@@ -670,6 +725,7 @@ class TestDbRunEventStore:
         assert session.execute_calls
         assert "pg_advisory_xact_lock" in str(session.execute_calls[0][0])
         assert session.execute_calls[0][1] == {"thread_id": "thread-1"}
+        assert sum("pg_advisory_xact_lock" in str(call[0]) for call in session.execute_calls) == 1
 
     @pytest.mark.anyio
     async def test_basic_crud(self, tmp_path):
@@ -949,6 +1005,126 @@ class TestDbRunEventStore:
         await close_engine()
 
     @pytest.mark.anyio
+    @pytest.mark.parametrize("user_id", ["owner-a", None], ids=["owner-scoped", "unscoped"])
+    @pytest.mark.parametrize("delete_run_first", [False, True], ids=["with-events", "already-empty"])
+    async def test_delete_by_thread_clears_watermark_when_empty(self, tmp_path, user_id, delete_run_first):
+        from types import SimpleNamespace
+
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.persistence.models.run_event import RunEventThreadSeqRow
+        from deerflow.runtime.events.store.db import DbRunEventStore
+        from deerflow.runtime.user_context import reset_current_user, set_current_user
+
+        await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'test.db'}", sqlite_dir=str(tmp_path))
+        owner_token = set_current_user(SimpleNamespace(id="owner-a"))
+        try:
+            session_factory = get_session_factory()
+            s = DbRunEventStore(session_factory)
+            for _ in range(2):
+                await s.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
+            await s.put(thread_id="t2", run_id="r2", event_type="human_message", category="message")
+            if delete_run_first:
+                assert await s.delete_by_run("t1", "r1", user_id=user_id) == 2
+            async with session_factory() as session:
+                assert (await session.get(RunEventThreadSeqRow, "t1")).seq == 2
+
+            assert await s.delete_by_thread("t1", user_id=user_id) == (0 if delete_run_first else 2)
+
+            assert await s.list_messages("t1", user_id=None) == []
+            async with session_factory() as session:
+                assert await session.get(RunEventThreadSeqRow, "t1") is None
+                assert (await session.get(RunEventThreadSeqRow, "t2")).seq == 1
+            recreated = await s.put(thread_id="t1", run_id="r3", event_type="human_message", category="message")
+            assert recreated["seq"] == 1
+        finally:
+            reset_current_user(owner_token)
+            await close_engine()
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("remaining_category", ["message", "trace"])
+    async def test_owner_scoped_thread_delete_preserves_watermark_for_remaining_events(self, tmp_path, remaining_category):
+        from types import SimpleNamespace
+
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.persistence.models.run_event import RunEventThreadSeqRow
+        from deerflow.runtime.events.store.db import DbRunEventStore
+        from deerflow.runtime.user_context import reset_current_user, set_current_user
+
+        await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'test.db'}", sqlite_dir=str(tmp_path))
+        owner_b_token = set_current_user(SimpleNamespace(id="owner-b"))
+        try:
+            session_factory = get_session_factory()
+            s = DbRunEventStore(session_factory)
+            await s.put(thread_id="t1", run_id="r1", event_type="human_message", category=remaining_category)
+            owner_a_token = set_current_user(SimpleNamespace(id="owner-a"))
+            try:
+                for _ in range(2):
+                    last_deleted = await s.put(thread_id="t1", run_id="r2", event_type="human_message", category="message")
+            finally:
+                reset_current_user(owner_a_token)
+
+            assert await s.delete_by_thread("t1", user_id="owner-a") == 2
+            assert await s.delete_by_thread("t1", user_id="missing-owner") == 0
+            remaining = await s.list_events("t1", "r1", user_id=None)
+            assert [(event["user_id"], event["seq"]) for event in remaining] == [("owner-b", 1)]
+            async with session_factory() as session:
+                assert (await session.get(RunEventThreadSeqRow, "t1")).seq == last_deleted["seq"]
+
+            appended = await s.put(thread_id="t1", run_id="r3", event_type="human_message", category="message")
+            assert appended["seq"] == last_deleted["seq"] + 1
+            page = await s.list_messages("t1", after_seq=last_deleted["seq"], user_id="owner-b")
+            assert [event["seq"] for event in page] == [appended["seq"]]
+        finally:
+            reset_current_user(owner_b_token)
+            await close_engine()
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("write_path", ["put", "put_batch", "put_if_absent"])
+    async def test_delete_by_run_preserves_watermark_for_every_write_path(self, tmp_path, write_path):
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        s = DbRunEventStore(get_session_factory())
+
+        await s.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
+        r2 = await s.put(thread_id="t1", run_id="r2", event_type="human_message", category="message")
+        await s.delete_by_run("t1", "r2", user_id=None)
+
+        if write_path == "put":
+            r3 = await s.put(thread_id="t1", run_id="r3", event_type="human_message", category="message", content="three")
+        elif write_path == "put_batch":
+            r3 = (
+                await s.put_batch(
+                    [
+                        {
+                            "thread_id": "t1",
+                            "run_id": "r3",
+                            "event_type": "human_message",
+                            "category": "message",
+                            "content": "three",
+                        }
+                    ]
+                )
+            )[0]
+        else:
+            r3, created = await s.put_if_absent(
+                thread_id="t1",
+                run_id="r3",
+                event_type="run.delivery",
+                category="message",
+                content="three",
+            )
+            assert created is True
+
+        assert r3["seq"] > r2["seq"]
+        messages = await s.list_messages("t1", limit=50, after_seq=r2["seq"], user_id=None)
+        assert [message["seq"] for message in messages] == [r3["seq"]]
+
+        await close_engine()
+
+    @pytest.mark.anyio
     async def test_put_batch_seq_continuity(self, tmp_path):
         """Batch write produces continuous seq values with no gaps."""
         from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
@@ -1084,7 +1260,7 @@ class TestDbRunEventStoreWriteLock:
 
         # Deleting the thread must evict the now-orphaned lock so the registry
         # does not grow unbounded across the singleton store's lifetime.
-        await s.delete_by_thread("t1")
+        await s.delete_by_thread("t1", user_id=None)
         assert "t1" not in s._write_locks
 
         # A subsequent write recreates a fresh lock and seq restarts from 1.

@@ -6,8 +6,10 @@ import threading
 from types import SimpleNamespace
 
 import pytest
+from _thread_checkpoint_helpers import make_saver
 
-from deerflow.runtime.goal import build_goal_state, read_thread_goal, write_thread_goal
+from deerflow.agents.goal_state import GoalEvaluation
+from deerflow.runtime.goal import build_goal_outcome, build_goal_state, read_thread_goal, write_thread_goal
 
 
 class _BlockingSyncCheckpointer:
@@ -118,3 +120,43 @@ async def test_goal_read_keeps_not_implemented_without_sync_method() -> None:
 
     with pytest.raises(NotImplementedError):
         await read_thread_goal(_AsyncOnlyUnsupportedCheckpointer(), "thread-1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("saver_kind", ["sqlite", "cached-sqlite", "postgres"])
+async def test_goal_outcome_round_trips_through_the_sync_fallback(saver_kind) -> None:
+    """On a sync-only saver the clear writes ``goal_outcome`` and the next goal write drops it."""
+    config = {"configurable": {"thread_id": "outcome-thread", "checkpoint_ns": ""}}
+    met_goal = build_goal_state("Ship it")
+    record = build_goal_outcome(met_goal, GoalEvaluation(satisfied=True, blocker="none", reason="Shipped."), reply_message_id="a1")
+
+    with make_saver(saver_kind) as saver:
+        with pytest.raises(NotImplementedError):
+            await saver.aget_tuple(config)
+        sync_put = saver.put
+        put_versions: list[set[str]] = []
+        put_writes: list[object] = []
+
+        def recording_put(write_config, checkpoint, metadata, new_versions):
+            put_versions.append(set(new_versions))
+            put_writes.append(metadata.get("writes"))
+            return sync_put(write_config, checkpoint, metadata, new_versions)
+
+        saver.put = recording_put
+        await write_thread_goal(saver, "outcome-thread", met_goal, create_if_missing=True)
+        await write_thread_goal(saver, "outcome-thread", None, as_node="goal_evaluator", outcome=record)
+        cleared = await asyncio.to_thread(saver.get_tuple, config)
+        await write_thread_goal(saver, "outcome-thread", build_goal_state("Next goal"))
+        replaced = await asyncio.to_thread(saver.get_tuple, config)
+
+    assert put_versions == [set(), {"goal"}, {"goal", "goal_outcome"}, {"goal", "goal_outcome"}]
+    assert put_writes[2] == {"goal_evaluator": {"goal": None, "goal_outcome": record}}
+    assert put_writes[3]["goal"]["goal_outcome"] is None
+    assert cleared.checkpoint["channel_values"]["goal_outcome"] == record
+    assert "goal" not in cleared.checkpoint["channel_values"]
+    assert replaced.checkpoint["channel_values"]["goal"]["objective"] == "Next goal"
+    assert "goal_outcome" not in replaced.checkpoint["channel_values"]
+    # PostgresSaver drops metadata["writes"] on put; the others store it.
+    if saver_kind != "postgres":
+        assert cleared.metadata["writes"] == put_writes[2]
+        assert replaced.metadata["writes"] == put_writes[3]

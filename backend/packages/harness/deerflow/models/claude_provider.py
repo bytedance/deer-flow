@@ -30,6 +30,8 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import BaseMessage
 from pydantic import PrivateAttr
 
+from deerflow.utils.retry_after import bounded_retry_after_ms
+
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
@@ -82,8 +84,15 @@ class ClaudeChatModel(ChatAnthropic):
             is_oauth_token,
             load_claude_code_credential,
         )
+        from deerflow.models.request_admission import RequestAdmission
 
         self._validate_retry_config()
+        if isinstance(self.rate_limiter, RequestAdmission):
+            # These wrapper retries, like SDK retries, bypass BaseChatModel's
+            # admission hook. Leave paced retries to the LLM middleware.
+            if self.retry_max_attempts != 1:
+                logger.warning("Request admission enabled; ignoring configured retry_max_attempts=%d; provider retries are handled by middleware", self.retry_max_attempts)
+            self.retry_max_attempts = 1
 
         # Extract actual key value (SecretStr.str() returns '**********')
         current_key = ""
@@ -427,8 +436,10 @@ class ClaudeChatModel(ChatAnthropic):
             retry_after = error.response.headers.get("Retry-After")
             if retry_after:
                 try:
-                    total_ms = int(retry_after) * 1000
-                except (ValueError, TypeError):
+                    hint_ms = bounded_retry_after_ms(int(retry_after) * 1000)
+                    if hint_ms is not None:
+                        total_ms = hint_ms
+                except (ValueError, TypeError, OverflowError):
                     pass
 
         return total_ms

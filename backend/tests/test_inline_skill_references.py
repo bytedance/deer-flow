@@ -66,10 +66,10 @@ def test_inline_batch_activates_once_with_owner_scoped_secrets_and_usage(catalog
     async def ahandler(value):
         return handler(value)
 
-    def invoke():
-        return asyncio.run(middleware.awrap_model_call(original, ahandler)) if async_call else middleware.wrap_model_call(original, handler)
+    def invoke(model_request):
+        return asyncio.run(middleware.awrap_model_call(model_request, ahandler)) if async_call else middleware.wrap_model_call(model_request, handler)
 
-    response = invoke()
+    response = invoke(original)
     reminder = seen[0].messages[0]
     assert isinstance(reminder, HumanMessage)
     assert reminder.additional_kwargs["hide_from_ui"] is True
@@ -86,8 +86,10 @@ def test_inline_batch_activates_once_with_owner_scoped_secrets_and_usage(catalog
     assert [entry["name"] for entry in usages] == names
     assert journal.record_skill_usage.call_count == count
     assert context[_SLASH_SKILL_ACTIVATION_RUN_KEY]
-    invoke()
-    assert seen[1].messages == original.messages
+    # The tool loop's next call sees the answered slash message in state.
+    follow_up = original.override(messages=[*original.messages, response])
+    invoke(follow_up)
+    assert seen[1].messages == follow_up.messages
     assert journal.record_skill_usage.call_count == count
     assert context[ACTIVE_SECRETS_CONTEXT_KEY] == {f"KEY_{i}": f"value-{i}" for i in range(count)}
 

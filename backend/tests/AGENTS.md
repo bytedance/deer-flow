@@ -2,6 +2,43 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+Local nginx path fixtures convert MSYS output through the selected Git Bash's
+PATH and decode both renderer and converter output as UTF-8. POSIX Git-layout
+stubs exercise Windows-style locale decoding and missing/failed/empty converters;
+native Windows keeps the real Git Bash renderer checks, including Unicode paths.
+
+`test_skills_custom_multiprocess.py` starts independent spawn workers sharing a
+temporary custom-skill root. Park edit/rollback before the write and before the
+history append, observe the peer reaching the mutation lock, then check both
+exclusion and the persisted predecessor chain. Always release and reap workers
+on assertion failures; do not replace this with two threads sharing a mutex.
+
+Search coercion ownership tests audit executable helper bodies/call sites and
+inline integer assignments. Include Exa and SearXNG in the deferred census;
+pin new-provider copies and docstring false positives with source fixtures.
+This pattern gate does not establish arbitrary provider semantics or change
+deferred providers' validation policy.
+Include You.com in the shared-owner provider checks; it applies its 100-result
+cap after shared normalization. Pin invalid-value defaults and positive count
+bounds through the outbound request in `test_youcom_tools.py`.
+
+Mixed-version resume admission in `test_thread_run_idempotency.py` uses a real
+shared SQL repository and an old-column projection. The frozen pre-6499 helper
+models only null-input resume retry matching from `02ce9ab2`; do not update it
+to the new identity-aware policy or claim it runs a complete old Gateway.
+Assert both writer formats: old workers reuse conflicting decisions, upgraded
+workers reject conflicts, and identity-less legacy rows fail closed even for
+identical retries. This pins why rollout requires routing to upgraded workers.
+
+Run-store capability tests in that file check keyed input separately from resume
+identity and assert that rejected admissions create no durable or local run.
+An explicit `idempotency_key` parameter must keep supporting keyed input even
+without resume support. For kwargs-only stores, pin the opt-in on the class
+that defines `create_thread_operation_atomic`: replacing an opted-in parent's
+method requires a fresh declaration; a flag-only child or mixin cannot opt in
+another class's implementation. Also cover unchanged inheritance and durable
+retry reuse, so the rejection tests cannot pass by rejecting every custom store.
+
 Upload case-collision coverage uses separate HTTP requests and preserves both
 reported payloads. Observe real filename-claim inputs to pin the disk seed;
 case-insensitive hosts can otherwise mask a missing seed through link retries.
@@ -60,6 +97,12 @@ an actionable reason; cover version detection offline in `test_support_compose.p
 Real rendering and production entry-point tests use only read-only Compose calls.
 Never start or stop a stack from these tests.
 
+## Jina client options
+
+Retry/response-budget compatibility tests pin client count and caller-supplied
+`proxy`/`trust_env` settings. Additional provider-owned HTTPX options must not
+break those assertions.
+
 ## Claude provider tests
 
 `test_claude_provider_prompt_caching.py` exercises real Anthropic SDK serialization
@@ -88,6 +131,12 @@ script on Windows and an executable shell script on POSIX. Resolve it through
 the production PATH lookup, including a directory containing spaces. Seed fake
 app credentials so auth completion reaches the CLI instead of returning early,
 and keep fixture filesystem work behind `asyncio.to_thread`.
+
+## Remote read fixtures
+
+Remote ranged-read fixtures pass POSIX sandbox paths to adapters and map those
+paths to native temporary files in fake transports. LocalSandbox keeps the native
+host path; do not relax remote path validation to accommodate Windows fixtures.
 
 ## Shared sandbox search contracts
 
@@ -188,3 +237,21 @@ assignment. Use offline transports. Detection is not behavioral defense; do not 
 the final model input from an isolated hook test. `test_jev_screening_policy.py` uses
 the host descriptor builder to pin policy identity; hash endpoint/prompt text and
 never project credential values.
+
+## Deploy home permission tests
+
+`test_deploy_home_writability.py` covers the production deploy permission
+preflight. It runs the complete script with a recording Docker stub and
+isolated runtime paths. Permission cases remove directory write bits or secret
+file read bits and restore them during teardown; they skip on Windows, as root,
+or when the filesystem does not enforce those bits. Cover both persisted
+secrets, shell/Compose dotenv overrides, readable read-only secrets, and teardown
+without secret exports. `down` must not probe, read, or generate secrets.
+Writable-directory cases remain portable.
+
+## Workspace text cache
+
+`test_scanner_text_cache_atomic.py` verifies complete publication and preservation
+of an existing entry on failure. A cleanup failure must preserve the original
+publish exception, including interruption. Import the scanner during fixture
+setup, after the autouse fixtures initialize runtime, to avoid the package cycle.

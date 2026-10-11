@@ -1,8 +1,15 @@
 # DeerFlow extension example
 
-This directory is a compact, standalone Python package showing all five DeerFlow
-extension contribution kinds. It depends on the public
+This directory is a compact, standalone Python package showing five of the
+eight DeerFlow extension contribution kinds: middleware, task lifecycle,
+system-model observer, service, and router. It depends on the public
 `deerflow-extension-api` contract and never imports `deerflow.*` or `app.*`.
+
+It does not register an agent-assembly observer, a context-compaction observer,
+or a full-stack plugin. The observers are covered in the
+[Lifecycle and Observers](../../frontend/src/content/en/harness/extensions/observers.mdx)
+guide, and [`deerflow-extension-bookmarks`](../deerflow-extension-bookmarks/)
+shows a plugin.
 
 The contract package intentionally has no framework dependencies. An extension
 must therefore declare every framework it imports itself; this example explicitly
@@ -184,7 +191,7 @@ name or the `module:install` value.
 ```text
 deerflow_extension_example/
 ├── __init__.py  # version-stamped install() entry point
-└── plugin.py    # state plus all five small contribution implementations
+└── plugin.py    # state plus the five demonstrated contribution implementations
 tests/
 ├── test_entry_point.py
 ├── test_plugin.py

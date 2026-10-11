@@ -179,8 +179,10 @@ _SECRETS_BINDING_AUDIT_KEY = "__skill_secrets_binding_audit"
 # The reminder is injected into the per-call model request only and never written
 # back to graph state, so a scan of ``request.messages`` cannot detect a prior
 # activation on the 2nd..Nth model call — the run context is the only signal that
-# survives (mirroring ``_SLASH_SECRET_SOURCE_KEY``). Holds a message id / content
-# digest, never a secret value; listed below to keep the redaction guard complete.
+# survives (mirroring ``_SLASH_SECRET_SOURCE_KEY``). Holds the message id / content
+# digest plus the activation it produced (skill content, never a secret value), so
+# a retry of the activation call can replay the same reminder; listed below to
+# keep the redaction guard complete.
 _SLASH_SKILL_ACTIVATION_RUN_KEY = "__slash_skill_activation_run"
 
 # Run-context keys whose values are request-scoped secrets and must be stripped

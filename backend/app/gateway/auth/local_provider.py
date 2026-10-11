@@ -40,6 +40,14 @@ class LocalAuthProvider(AuthProvider):
         if user is None:
             return None
 
+        # Operator-disabled account (#3462 gap 3): no password is even
+        # compared — the failure is indistinguishable from unknown-credentials
+        # to the caller, so nothing about the account state leaks through the
+        # login path (the distinct ACCOUNT_DISABLED code is surfaced only by
+        # the session dependency once a token exists).
+        if getattr(user, "disabled", False):
+            return None
+
         if user.password_hash is None:
             # OAuth user without local password
             return None

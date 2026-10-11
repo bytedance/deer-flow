@@ -990,6 +990,7 @@ class E2BSandboxProvider(SandboxProvider):
                 active=len(self._sandboxes),
                 warm=len(self._warm_pool),
                 reserved=self._reserved_slots,
+                transitioning=self._transitioning_slots,
                 replicas=int(self._config["replicas"]),
                 reason=reason,
             )
@@ -1166,6 +1167,7 @@ class E2BSandboxProvider(SandboxProvider):
                             active=len(self._sandboxes),
                             warm=len(self._warm_pool),
                             reserved=self._reserved_slots,
+                            transitioning=self._transitioning_slots,
                             replicas=int(self._config["replicas"]),
                         )
 
@@ -1175,16 +1177,19 @@ class E2BSandboxProvider(SandboxProvider):
                             active=len(self._sandboxes),
                             warm=len(self._warm_pool),
                             reserved=self._reserved_slots,
+                            transitioning=self._transitioning_slots,
                             replicas=int(self._config["replicas"]),
                         )
 
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
+                        counts = f"replicas={self._config['replicas']}, active={len(self._sandboxes)}, warm={len(self._warm_pool)}, reserved={self._reserved_slots}, transitioning={self._transitioning_slots}"
                         raise SandboxCapacityExceededError(
-                            f"Timed out after {timeout}s waiting for a sandbox capacity slot (replicas={self._config['replicas']}, active={len(self._sandboxes)}, warm={len(self._warm_pool)}, reserved={self._reserved_slots})",
+                            f"Timed out after {timeout}s waiting for a sandbox capacity slot ({counts})",
                             active=len(self._sandboxes),
                             warm=len(self._warm_pool),
                             reserved=self._reserved_slots,
+                            transitioning=self._transitioning_slots,
                             replicas=int(self._config["replicas"]),
                         )
                     self._capacity_cond.wait(timeout=min(remaining, 1.0))
@@ -1917,13 +1922,18 @@ class E2BSandboxProvider(SandboxProvider):
 
         ``Sandbox.connect`` may succeed even after the E2B control plane has
         reaped the VM. Closing that host-side client before returning ``None``
-        keeps both acquire paths from leaking a connection.
+        keeps both acquire paths from leaking a connection.  ``connect`` may
+        equally *fail* with a trusted "sandbox not found" error once the VM
+        is reaped; that confirmed-gone result also returns ``None`` so every
+        caller takes its already-gone cleanup path instead of retaining local
+        capacity for a kill that can never succeed.
         """
         try:
             client = self._reconnect_client(sandbox_cls, sandbox_id)
         except Exception as error:
             if _is_sandbox_gone_error(error):
                 self._release_deployment_sandbox(sandbox_id)
+                return None
             raise
         if self._client_alive(client):
             return client
