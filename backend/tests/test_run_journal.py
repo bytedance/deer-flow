@@ -2001,6 +2001,49 @@ class TestBufferFlush:
         assert [event["event_type"] for event in events] == ["run.delivery"]
 
     @pytest.mark.anyio
+    async def test_flush_keeps_nonempty_buffer_and_queued_cross_thread_event(self):
+        """A buffered event plus a hop queued before flush must both persist, in order.
+
+        Complements the empty-buffer ``test_close_commits_cross_thread_event_still_pending_when_flush_starts``
+        by pinning the non-empty branch of the merged flush: the leading
+        cross-thread yield is skipped when the buffer already holds work, so the
+        hop can only be recovered by a later scheduling point in the drain. A or
+        B missing, duplicated or reordered fails this test.
+        """
+        store = MemoryRunEventStore()
+        # Built on the running loop so a foreign thread's record_middleware hops
+        # onto the owner loop via call_soon_threadsafe instead of a direct put.
+        journal = RunJournal("r-nonempty", "t-nonempty", store, flush_threshold=100)
+        assert journal._owner_loop is asyncio.get_running_loop()
+        # Event A: already buffered when flush() starts.
+        journal.record_delivery()
+
+        def record_from_tool_worker() -> None:
+            journal.record_middleware(
+                "tool_progress",
+                name="ToolProgressMiddleware",
+                hook="wrap_tool_call",
+                action="warn",
+                changes={"from_phase": "active", "to_phase": "warned"},
+            )
+
+        worker = threading.Thread(target=record_from_tool_worker)
+        worker.start()
+        # Joined with no await in between, so event B's call_soon_threadsafe hop
+        # is queued but has provably not run when flush() starts. A is the only
+        # buffered event until the drain yields.
+        worker.join()
+        assert [event["event_type"] for event in journal._buffer] == ["run.delivery"]
+
+        await journal.flush()
+
+        events = await store.list_events("t-nonempty", "r-nonempty")
+        assert [event["event_type"] for event in events] == [
+            "run.delivery",
+            "middleware:tool_progress",
+        ]
+
+    @pytest.mark.anyio
     async def test_flush_propagates_cancellation_while_write_pending(self, monkeypatch):
         import deerflow.runtime.journal as journal_module
 
