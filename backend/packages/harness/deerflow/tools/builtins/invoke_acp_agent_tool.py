@@ -167,6 +167,10 @@ def _resolve_agent_command(command: str, path: str | None = None) -> str:
     ``cwd`` set to the ACP workspace, where that path resolves elsewhere -- or
     not at all.
 
+    An already-absolute result is returned unchanged: a lexical ``abspath``
+    would collapse a ``..`` that follows a symlink, changing which file the
+    spawn actually runs.
+
     The lookup stats the filesystem (``shutil.which`` -> ``os.access``), so
     callers must run it off the event loop.
     """
@@ -176,7 +180,9 @@ def _resolve_agent_command(command: str, path: str | None = None) -> str:
         resolved = shutil.which(command, path=path)
     except OSError:
         return command
-    return os.path.abspath(resolved) if resolved else command
+    if not resolved:
+        return command
+    return resolved if os.path.isabs(resolved) else os.path.abspath(resolved)
 
 
 def _format_invocation_error(agent: str, cmd: str, exc: Exception) -> str:

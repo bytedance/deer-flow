@@ -1165,6 +1165,22 @@ def test_resolve_agent_command_resolves_absolute_paths_through_the_lookup(monkey
     assert seen == [(absolute, str(tmp_path / "agent-bin"))]
 
 
+def test_resolve_agent_command_keeps_an_absolute_lookup_result_as_returned(monkeypatch, tmp_path):
+    """An already-absolute lookup result must not be lexically rewritten.
+
+    ``os.path.abspath`` collapses a ``..`` that the kernel resolves after a
+    symlink, which changes the file the spawn runs; the anchoring exists for
+    relative ``PATH`` results only.
+    """
+    literal = str(tmp_path / "current" / ".." / "shared" / "agent")
+    monkeypatch.setattr(
+        "deerflow.tools.builtins.invoke_acp_agent_tool.shutil.which",
+        lambda command, path=None: command,
+    )
+
+    assert _resolve_agent_command(literal) == literal
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="PATHEXT sibling resolution is Windows-only")
 def test_resolve_agent_command_resolves_a_windows_path_without_an_extension(tmp_path):
     """npm's extensionless sh script and its ``.cmd`` shim sit side by side.
@@ -1193,6 +1209,29 @@ def test_resolve_agent_command_keeps_an_absolute_posix_command(tmp_path):
     tool.chmod(0o755)
 
     assert _resolve_agent_command(str(tool)) == str(tool)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlink-plus-parent-segment resolution is POSIX-specific")
+def test_resolve_agent_command_keeps_a_posix_symlink_that_precedes_a_parent_segment(tmp_path):
+    """An absolute command is returned as configured, not lexically rewritten.
+
+    With ``current -> releases/v1``, ``current/../shared/agent`` resolves to
+    ``releases/shared/agent`` for the kernel, while a lexical ``abspath``
+    would collapse it to the nonexistent ``shared/agent`` beside the symlink
+    or to a different file that happens to live there.
+    """
+    release = tmp_path / "releases" / "v1"
+    release.mkdir(parents=True)
+    tool = tmp_path / "releases" / "shared" / "agent"
+    tool.parent.mkdir(parents=True)
+    tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    tool.chmod(0o755)
+    current = tmp_path / "current"
+    current.symlink_to(release, target_is_directory=True)
+
+    configured = str(current / ".." / "shared" / "agent")
+
+    assert _resolve_agent_command(configured) == configured
 
 
 def test_resolve_agent_command_hands_the_effective_path_to_the_lookup(monkeypatch, tmp_path):
