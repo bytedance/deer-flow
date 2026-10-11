@@ -4209,6 +4209,14 @@ This release closes that milestone with **439 merged pull requests**.
   the trailing `-07` as a UTC offset and displayed UTC midnight instead: 08:00 in
   `Asia/Shanghai`, and the previous evening west of UTC, in the task list,
   detail, chat card and the edit form's prefilled time. ([#6692])
+- **gateway:** The subagent batch JSONL export
+  (`GET /api/threads/{thread_id}/subagent-batches/{batch_id}/results.jsonl`)
+  now reads stored results 10 rows at a time instead of 500. Each row can hold
+  `max_result_chars` of report plus as much evidence JSON, and the export loads
+  a whole page before streaming it, so one request held about 280 MB with the
+  default limit (roughly 1.7 GB at the 1,000,000 ceiling) and stalled the event
+  loop for over half a second per page. The exported lines and their order are
+  unchanged.
 
 ### Security
 
