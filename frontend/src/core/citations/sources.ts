@@ -541,10 +541,17 @@ function maskFencedCodeBlocks(markdown: string): string {
       // state the next line's first container marker has to interrupt. Headings
       // and thematic breaks (including a setext underline) are leaf blocks, and
       // a blank line ends the paragraph.
+      //
+      // The two predicates read the same CR-normalized line `linePosition`
+      // classifies: after the split on "\n" a CRLF ending still carries its
+      // "\r", and `THEMATIC_BREAK_RE` is anchored at the end of the line, so an
+      // underline `---\r` failed it and kept a finished paragraph blocking the
+      // list that followed.
+      const boundary = line.endsWith("\r") ? line.slice(0, -1) : line;
       if (
         position.body !== "" &&
-        !ATX_HEADING_RE.test(line) &&
-        !THEMATIC_BREAK_RE.test(line)
+        !ATX_HEADING_RE.test(boundary) &&
+        !THEMATIC_BREAK_RE.test(boundary)
       ) {
         paragraphColumn = containerColumn;
         paragraphQuote = position.quoteDepth;

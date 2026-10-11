@@ -864,6 +864,65 @@ describe("extractCitationSources", () => {
     expect(extractCitationSources(markdown)).toEqual([]);
   });
 
+  it("keeps the citation a newly entered quote renders as a paragraph", () => {
+    // Pinned against the parser rather than against a rule: remark's tree for
+    // these lines is blockquote > [paragraph "2. ```md", paragraph with the
+    // Fake link, code], so `2. ```md` never becomes a list item inside the
+    // fresh quote and `>    ``` ` is the opener of an unclosed fence. Both
+    // citations render, and Sources has to surface both.
+    const markdown = [
+      "Intro",
+      "> 2. ```md",
+      ">",
+      ">    [citation:Fake](https://example.com/fake)",
+      ">    ```",
+      "[citation:Real](https://example.com/real)",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/fake",
+      "https://example.com/real",
+    ]);
+  });
+
+  it("ends the paragraph for a setext underline over LF", () => {
+    const markdown = [
+      "Intro",
+      "---",
+      "2. ```md",
+      "   [citation:Fake1](https://example.com/fake1)",
+      "",
+      "   [citation:Fake2](https://example.com/fake2)",
+      "   ```",
+      "[citation:Real](https://example.com/real)",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
+  it("ends the paragraph for a setext underline over CRLF", () => {
+    // The trailing "\r" belongs to the line ending, so `---` is still a setext
+    // underline and the paragraph is over: `2.` opens a real list, both of its
+    // citations are fenced code, and the `   ``` ` line closes that fence rather
+    // than starting a new one that would hide the rendered citation to EOF.
+    const markdown = [
+      "Intro",
+      "---",
+      "2. ```md",
+      "   [citation:Fake1](https://example.com/fake1)",
+      "",
+      "   [citation:Fake2](https://example.com/fake2)",
+      "   ```",
+      "[citation:Real](https://example.com/real)",
+    ].join("\r\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
   it("uses the source domain when the citation label is generic", () => {
     const markdown = "See [citation:Source](https://www.example.com/path).";
 
