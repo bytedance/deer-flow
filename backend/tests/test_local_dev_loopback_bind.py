@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from support.shell import require_script_bash
@@ -86,9 +88,11 @@ def test_serve_resolves_nginx_config_before_stopping_services():
 # ── nginx-local-conf.sh ─────────────────────────────────────────────────────
 
 
-@pytest.fixture
-def checkout(tmp_path: Path) -> Path:
+@pytest.fixture(params=["checkout", "checkout-测试 with spaces"], ids=["ascii", "unicode-spaces"])
+def checkout(tmp_path: Path, request: pytest.FixtureRequest) -> Path:
     """A minimal checkout: the script resolves the repo root from its own location."""
+    tmp_path = tmp_path / request.param
+    tmp_path.mkdir()
     (tmp_path / "scripts").mkdir()
     (tmp_path / "docker" / "nginx").mkdir(parents=True)
     shutil.copy2(NGINX_LOCAL_CONF_SH, tmp_path / "scripts" / NGINX_LOCAL_CONF_SH.name)
@@ -105,6 +109,7 @@ def _run(checkout: Path, bind_host: str | None) -> subprocess.CompletedProcess[s
         env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
 
@@ -114,20 +119,99 @@ def _normalize_rendered_path(rendered: str) -> str:
 
     ``pwd -P`` inside Git Bash yields the MSYS mount form (``/tmp/...`` for the
     Windows temp dir), which the test's Windows-side ``Path`` can neither
-    compare nor read. cygpath ships with the same Git for Windows installation
-    as the bash that ran the script.
+    compare nor read. Resolve cygpath through the selected Git Bash's PATH,
+    including when bash.exe lives in Git's wrapper directory.
     """
     if os.name != "nt" or not rendered.startswith("/"):
         return rendered
-    cygpath = Path(require_script_bash()).with_name("cygpath.exe")
-    if not cygpath.exists():
-        return rendered
-    return subprocess.run(
-        [str(cygpath), "-w", rendered],
+    result = subprocess.run(
+        [require_script_bash(), "-c", 'cygpath -w "$DEERFLOW_TEST_RENDERED_PATH"'],
+        env={**os.environ, "DEERFLOW_TEST_RENDERED_PATH": rendered},
         capture_output=True,
         text=True,
-        check=True,
-    ).stdout.strip()
+        encoding="utf-8",
+        check=False,
+    )
+    if result.returncode != 0:
+        pytest.fail(f"Git Bash cygpath failed to normalize {rendered!r} (exit {result.returncode}): {result.stderr.strip()}")
+    normalized = result.stdout.strip()
+    if not normalized:
+        pytest.fail(f"Git Bash cygpath returned an empty path for {rendered!r}")
+    return normalized
+
+
+def _simulate_windows_locale(monkeypatch) -> None:
+    native_run = subprocess.run
+
+    def run_with_windows_locale(*args, **kwargs):
+        # Exercise real byte decoding even on UTF-8 POSIX hosts.
+        if kwargs.get("text"):
+            kwargs.setdefault("encoding", "cp1252")
+        return native_run(*args, **kwargs)
+
+    monkeypatch.setitem(globals(), "subprocess", SimpleNamespace(run=run_with_windows_locale))
+
+
+@pytest.fixture(params=["bin", "usr/bin"], ids=["wrapper", "usr-bin"])
+def git_bash_layout(tmp_path: Path, monkeypatch, request: pytest.FixtureRequest) -> Path:
+    """Run a POSIX shim with Git for Windows' wrapper and usr/bin layouts."""
+    if os.name == "nt":
+        pytest.skip("POSIX executable shims; native Windows uses the real renderer tests")
+    native_bash = require_script_bash()
+    git_root = tmp_path / "Git installation"
+    usr_bin = git_root / "usr" / "bin"
+    usr_bin.mkdir(parents=True)
+    bash = git_root / request.param / "bash.exe"
+    bash.parent.mkdir(parents=True, exist_ok=True)
+    bash.write_text(f'#!/bin/sh\nexport PATH={shlex.quote(str(usr_bin))}\nexec {shlex.quote(native_bash)} "$@"\n', encoding="utf-8")
+    bash.chmod(0o755)
+    monkeypatch.setitem(globals(), "require_script_bash", lambda: str(bash))
+    monkeypatch.setitem(globals(), "os", SimpleNamespace(name="nt", environ=os.environ))
+    return usr_bin
+
+
+def _write_cygpath_stubs(directory: Path, body: str) -> None:
+    # POSIX Bash resolves the bare name; the .exe also models the old lookup.
+    for name in ("cygpath", "cygpath.exe"):
+        path = directory / name
+        path.write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8")
+        path.chmod(0o755)
+
+
+def test_rendered_path_uses_selected_git_bash(git_bash_layout: Path, monkeypatch):
+    rendered = "/tmp/测试 user/$(printf changed)/nginx.local.conf"
+    native = r"C:\Users\测试 User\AppData\Local\Temp\nginx.local.conf"
+    monkeypatch.setenv("EXPECTED_MSYS_PATH", rendered)
+    monkeypatch.setenv("EXPECTED_NATIVE_PATH", native)
+    _write_cygpath_stubs(
+        git_bash_layout,
+        '[ "$1" = "-w" ] || exit 2\n[ "$2" = "$EXPECTED_MSYS_PATH" ] || exit 3\nprintf "%s\\n" "$EXPECTED_NATIVE_PATH"',
+    )
+    _simulate_windows_locale(monkeypatch)
+
+    assert _normalize_rendered_path(rendered) == native
+
+
+@pytest.mark.parametrize("behavior", ["missing", "failed", "empty"])
+def test_rendered_path_conversion_fails_loudly(git_bash_layout: Path, behavior: str):
+    if behavior == "failed":
+        _write_cygpath_stubs(git_bash_layout, 'echo "converter failed" >&2\nexit 5')
+    elif behavior == "empty":
+        _write_cygpath_stubs(git_bash_layout, "exit 0")
+
+    with pytest.raises(pytest.fail.Exception, match="cygpath") as failure:
+        _normalize_rendered_path("/tmp/nginx.local.conf")
+    if behavior == "failed":
+        assert "converter failed" in str(failure.value)
+
+
+def test_renderer_decodes_paths_as_utf8(checkout: Path, monkeypatch):
+    _simulate_windows_locale(monkeypatch)
+
+    result = _run(checkout, None)
+
+    assert result.returncode == 0, result.stderr
+    assert Path(_normalize_rendered_path(result.stdout.strip())) == (checkout / "docker" / "nginx" / "nginx.local.conf").resolve()
 
 
 @pytest.mark.parametrize("bind_host", [None, "", "127.0.0.1"], ids=["unset", "blank", "loopback"])
