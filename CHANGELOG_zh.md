@@ -3207,7 +3207,7 @@
   `config.yaml` 时已替换每个 `$VAR`，因此本身以 `$` 开头的已解析密钥（如
   `$2b$12$...` 形式的 bcrypt 哈希或生成的密码）会再次被当作变量名查找，传入沙箱
   或 agent 时变成空字符串；若同名主机变量存在，则变成该变量的值。现在这些值按
-  加载结果原样传递，与 BoxLite 和本地提供者一致。
+  加载结果原样传递，与 BoxLite 和本地提供者一致。([#6673])
 
 ### 安全
 
@@ -7707,3 +7707,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6613]: https://github.com/bytedance/deer-flow/pull/6613
 [#6635]: https://github.com/bytedance/deer-flow/pull/6635
 [#6636]: https://github.com/bytedance/deer-flow/pull/6636
+[#6673]: https://github.com/bytedance/deer-flow/pull/6673

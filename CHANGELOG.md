@@ -4174,7 +4174,7 @@ This release closes that milestone with **439 merged pull requests**.
   password) was looked up again as a variable name and reached the sandbox or
   agent as an empty string, or as an unrelated host variable's value when that
   name existed. Values are now passed through as loaded, as BoxLite and the
-  local provider already did.
+  local provider already did. ([#6673])
 
 ### Security
 
@@ -9586,3 +9586,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6613]: https://github.com/bytedance/deer-flow/pull/6613
 [#6635]: https://github.com/bytedance/deer-flow/pull/6635
 [#6636]: https://github.com/bytedance/deer-flow/pull/6636
+[#6673]: https://github.com/bytedance/deer-flow/pull/6673
