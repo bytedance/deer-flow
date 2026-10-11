@@ -290,6 +290,25 @@ keeps the saved key, explicit removal sends an empty key. Saving invalidates bot
 admin catalog and `MODELS_QUERY_KEY`. Editor unmount aborts probes and fences late
 callbacks. Static demos and non-admin users must not query the management API.
 
+### Admin user management
+
+Settings → Users (admin-only nav entry; `?settings=users`) suspends and restores
+accounts through `core/auth/admin-users.ts` → `/api/v1/admin/users`. The page
+reuses `userSchema` for rows — both endpoints parse against it, so a
+malformed payload fails the load instead of rendering a phantom row
+(`disabled` optional — absent means not disabled) — and PATCHes only
+`{disabled}`; role stays a read-only column. The Gateway's rejection detail
+(last-active-admin 409) renders verbatim. A session
+that turns out to be disabled maps `account_disabled` (see `AUTH_ERROR_CODES`)
+to a login redirect with a stated reason (login surface only — sign-up keeps
+the backend message so a suspended account cannot be probed) on all three
+surfaces: SSR
+`AuthResult` tag (consumed exhaustively by the workspace/artifacts/auth
+layouts), the shared fetcher's 401 interception, and `AuthProvider.refreshUser`.
+Direct auth-page visits with a live suspended-session cookie get the SSR
+verdict via `AuthDisabledContext`, so the login form states the known reason
+without waiting for a deliberately generic login failure.
+
 ### Model reasoning capabilities
 
 `/api/models` projects a per-model `reasoning` contract (issue #5073) beside the
