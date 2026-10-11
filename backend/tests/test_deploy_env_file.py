@@ -215,4 +215,7 @@ exit 0
 
     assert observed["BETTER_AUTH_SECRET"] == ""
     assert observed["DEER_FLOW_INTERNAL_AUTH_TOKEN"] == ""
-    assert not list(home.iterdir()), "Selected dotenv secrets must not be replaced with generated secrets"
+    assert project["services"]["frontend"]["environment"]["BETTER_AUTH_SECRET"] == "test-auth"
+    assert project["services"]["gateway"]["environment"]["DEER_FLOW_INTERNAL_AUTH_TOKEN"] == "test-internal"
+    for key in ("BETTER_AUTH_SECRET", "DEER_FLOW_INTERNAL_AUTH_TOKEN"):
+        assert not (home / deploy_secret_tests.PERSISTED_FILE[key]).exists(), f"Selected dotenv {key} must not be replaced with a generated secret"
