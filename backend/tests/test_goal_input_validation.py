@@ -13,11 +13,21 @@ from _router_auth_helpers import make_authed_test_app
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import StateGraph
+from langgraph.types import Overwrite
 
 from app.gateway import services
 from app.gateway.auth.models import User
 from app.gateway.routers import runs, thread_runs, threads
+from deerflow.agents.thread_state import get_thread_state_schema
 from deerflow.utils.goal_objective import MAX_GOAL_OBJECTIVE_CHARS
+
+_JSON_OVERWRITE_GOAL = {
+    "objective": "outer objective",
+    "type": "__overwrite__",
+    "value": {"status": "active", "continuation_count": "many"},
+}
+_KEYED_OVERWRITE_GOAL = {"objective": "outer objective", "__overwrite__": {"status": "active", "continuation_count": "many"}}
 
 
 @pytest.mark.parametrize("boundary", [services.normalize_input, services.strip_server_owned_state_metadata])
@@ -63,6 +73,63 @@ def test_external_goal_rejects_invalid_present_counters(boundary, field, value):
     assert f"goal.{field}" in rejected.value.detail
     assert "many" not in rejected.value.detail
     assert source == {"goal": {"objective": "finish", field: value}}
+
+
+@pytest.mark.parametrize("boundary", [services.normalize_input, services.strip_server_owned_state_metadata])
+@pytest.mark.parametrize(
+    "goal",
+    [
+        pytest.param(_JSON_OVERWRITE_GOAL, id="json-overwrite"),
+        pytest.param(_KEYED_OVERWRITE_GOAL, id="reserved-key"),
+        pytest.param({"objective": "finish", "type": "__overwrite__"}, id="marker-without-value"),
+        pytest.param({"objective": "finish", "type": "__overwrite__", "value": None}, id="overwrite-clear"),
+    ],
+)
+def test_external_goal_rejects_reducer_control_markers(boundary, goal):
+    with pytest.raises(HTTPException) as rejected:
+        boundary({"goal": goal})
+    assert rejected.value.status_code == 400
+    assert "goal" in rejected.value.detail
+    assert "outer objective" not in rejected.value.detail
+    assert "many" not in rejected.value.detail
+
+
+@pytest.mark.parametrize("boundary", [services.normalize_input, services.strip_server_owned_state_metadata])
+def test_external_goal_keeps_ordinary_type_and_value_fields(boundary):
+    goal = {"objective": "finish", "continuation_count": 7, "max_continuations": 8, "type": "business", "value": {"continuation_count": "many"}}
+    assert boundary({"goal": goal})["goal"] == goal
+
+
+def test_trusted_internal_goal_input_preserves_typed_overwrite():
+    overwrite = Overwrite({"objective": "finish", "continuation_count": 7, "max_continuations": 8})
+    assert services.normalize_input({"goal": overwrite}, trusted_internal=True)["goal"] is overwrite
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["full", "delta"])
+@pytest.mark.parametrize("initial_goal", [None, {"objective": "previous", "status": "active", "continuation_count": 7, "max_continuations": 8}], ids=["cleared", "active"])
+async def test_run_input_rejects_overwrite_before_mutating_existing_goal(mode, initial_goal):
+    checkpointer = InMemorySaver()
+    builder = StateGraph(get_thread_state_schema(mode))
+    builder.add_node("finish", lambda _state: {})
+    builder.set_entry_point("finish")
+    builder.set_finish_point("finish")
+    graph = builder.compile(checkpointer=checkpointer)
+    config = {"configurable": {"thread_id": "goal-overwrite-input", "checkpoint_ns": ""}}
+    # An initialized goal channel is required to exercise LangGraph's sentinel
+    # unpacking; the first write into an unset channel keeps the outer mapping.
+    await graph.ainvoke({"goal": initial_goal}, config)
+    before = await checkpointer.aget_tuple(config)
+    assert before is not None
+
+    with pytest.raises(HTTPException) as rejected:
+        await graph.ainvoke(services.normalize_input({"goal": _JSON_OVERWRITE_GOAL}), config)
+    assert rejected.value.status_code == 400
+    after = await checkpointer.aget_tuple(config)
+    assert after is not None
+    assert after.config == before.config
+    assert after.checkpoint == before.checkpoint
+    assert (await graph.aget_state(config)).values["goal"] == initial_goal
 
 
 @pytest.mark.parametrize("boundary", [services.normalize_input, services.strip_server_owned_state_metadata])
@@ -124,6 +191,8 @@ class _StateRunManager:
         pytest.param({"objective": "finish", "max_continuations": True}, id="boolean-limit"),
         pytest.param({"objective": "finish", "no_progress_count": -1}, id="negative-count"),
         pytest.param({"objective": "finish", "max_no_progress_continuations": None}, id="null-limit"),
+        pytest.param(_JSON_OVERWRITE_GOAL, id="json-overwrite"),
+        pytest.param(_KEYED_OVERWRITE_GOAL, id="reserved-key"),
     ],
 )
 def test_state_route_rejects_invalid_goal_without_changing_checkpoint(monkeypatch, mode, invalid_goal):
@@ -181,6 +250,8 @@ def test_state_route_rejects_invalid_goal_without_changing_checkpoint(monkeypatc
     [
         pytest.param({"status": "active"}, id="missing-objective"),
         pytest.param({"objective": "finish", "continuation_count": "many"}, id="invalid-counter"),
+        pytest.param(_JSON_OVERWRITE_GOAL, id="json-overwrite"),
+        pytest.param(_KEYED_OVERWRITE_GOAL, id="reserved-key"),
     ],
 )
 def test_run_routes_reject_invalid_goal_before_admission(monkeypatch, path, invalid_goal):

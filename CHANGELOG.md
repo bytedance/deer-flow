@@ -852,7 +852,8 @@ This release closes that milestone with **439 merged pull requests**.
 ### Fixed
 
 - **goal:** External state and run-input writes reject missing or invalid goal
-  objectives and malformed counters before admission, while retaining valid sparse goal state. Historical
+  objectives, malformed counters and reducer control markers before admission,
+  while retaining valid sparse goal state. Historical
   checkpoint replay, including regenerate, keeps the current goal and its used
   continuation budget instead of restoring an older goal; it drops the old answer's
   completion record. No frontend changes or database migration are required.

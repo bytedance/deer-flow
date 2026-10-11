@@ -496,6 +496,8 @@ def _normalize_external_goal(value: Any, *, location: str) -> dict[str, Any] | N
         return None
     if not isinstance(value, Mapping) or not isinstance(value.get("objective"), str):
         raise HTTPException(status_code=400, detail=f"{location} must be an object with a string objective")
+    if "__overwrite__" in value or value.get("type") == "__overwrite__":
+        raise HTTPException(status_code=400, detail=f"{location} cannot contain an Overwrite marker")
     try:
         objective = normalize_goal_objective(value["objective"])
     except ValueError as exc:
