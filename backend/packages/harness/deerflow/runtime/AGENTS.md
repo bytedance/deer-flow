@@ -1,3 +1,10 @@
+### Checkpoint Cache Concurrency
+
+The memory history cache is shared by sync saver wrappers. Its threading lock
+serializes lookup/LRU promotion, population/eviction, thread purge, close, and
+statistics snapshots. Keep cache critical sections free of awaits and saver I/O;
+immutable histories do not make the mutable LRU registry thread-safe.
+
 ### Stream Bridge Heartbeats
 
 Memory/Redis bridges keep startup-only `stream_bridge.heartbeat_interval_seconds`; explicit `subscribe(..., heartbeat_interval=...)` overrides it. Provider contexts drain owned cache/bridge/checkpointer/Store teardown across cancellation. `close_agent_stream()` shields close to completion: preserve counts, defer host cancellation, balance repeats, keep active errors, log attached close failures at callers, map close cancellation to failure, never time out.
