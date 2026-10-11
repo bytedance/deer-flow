@@ -137,6 +137,7 @@ _SECRET_TOKEN_PATTERNS = tuple(
         r"\bAIza[0-9A-Za-z_-]{35}\b",
     )
 )
+_PRIVATE_KEY_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
 _SENSITIVE_PATH_RE = re.compile(r"(~/.ssh|/etc/passwd|/etc/shadow|/var/run/docker\.sock|docker\.sock|169\.254\.169\.254)")
 _EXTERNAL_HTTP_RE = re.compile(r"(?i:http)://(?:[^/?#\s)'\"<>]*@)?(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(?::\d+)?(?:/|\b|(?=$|[\s)'\"<>?#]))")
 _URL_RE = re.compile(r"(?i:https?)://[^\s)'\"<>]+")
@@ -154,12 +155,18 @@ _DESTRUCTIVE_RM_RE = (
 # of that shape, which the sandbox audit middleware already blocks. SkillScan
 # matched only the literal spelling, so a renamed or respaced variant
 # (`bomb(){ bomb|bomb& };bomb`) passed the blocking gate. Going beyond the
-# middleware shape, the variant matcher requires the function name as a
-# standalone shell word on both sides of a pipe whose command is backgrounded
-# (the first `;`/`&` after the pipe, where `|&` does not background), and
-# quotes or backslashes delimit words, so lookalikes like `f | ff` or
-# `build.log` do not hard-block while `f | "f" &` still does. The matcher runs for
-# shell files only (`_is_shell_path`): `<name>() {` is shell definition
+# middleware shape, the variant matcher requires the function name at the
+# command position of both sides of a pipe whose command is backgrounded:
+# the right name must be the first token after the pipe (the first `;`/`&`
+# after the pipe must be `&`, and the `&` of a `|&` operator does not
+# background), and the left name must be the first token of its segment in
+# the pipeline that feeds the pipe. Quotes and backslashes resolve inside the
+# word, so `f | "f" &` blocks while `"f"f` (the command `ff`), `f | ff`,
+# `build.log` or a name only in argument position (`run | grep 'run' &`) do
+# not. The variant pass is independent of the rm/dd literal alternatives, so
+# an unrelated destructive line cannot mask the CRITICAL block, and its
+# evidence is scrubbed of credential material. The matcher runs for shell
+# files only (`_is_shell_path`): `<name>() {` is shell definition
 # syntax, and scanning every text file for the shape would hard-block C/JS
 # bitwise lookalikes (`mask | mask & 255`) as CRITICAL. Work per header stays
 # bounded: the name is capped at _FORK_BOMB_NAME_MAX characters and the body
@@ -168,7 +175,13 @@ _DESTRUCTIVE_RM_RE = (
 # the file.
 _FORK_BOMB_NAME_MAX = 64
 _FORK_BOMB_BODY_WINDOW = 512
-_FORK_BOMB_NAME_EXCLUDED = frozenset(" \t\n\r\f\v(){}|;&\"'\\")
+_FORK_BOMB_TOKEN_BOUNDARY = frozenset(" \t\n\r\f\v(){}|;&")
+_FORK_BOMB_WORD_JOINERS = frozenset("\"'\\")
+_FORK_BOMB_NAME_EXCLUDED = _FORK_BOMB_TOKEN_BOUNDARY | _FORK_BOMB_WORD_JOINERS
+_FORK_BOMB_PADDING = frozenset(" \t\n\r\f\v") | _FORK_BOMB_WORD_JOINERS
+_DOUBLE_QUOTE_ESCAPES = '$`"\\\n'
+_FORK_BOMB_LITERAL = r":\(\)\{\s*:\|:&\s*\};:"
+_FORK_BOMB_LITERAL_RE = re.compile(_FORK_BOMB_LITERAL)
 _FORK_BOMB_HEADER_RE = re.compile(r"\(\)[ \t\n\r\f\v]*\{")
 # `env`, `printenv` and `export -p` count only at a real command position. The
 # text is first reduced to shell code by `_shell_code_only`, excluding comments
@@ -383,7 +396,7 @@ def _scan_text_file(rel_path: str, text: str) -> list[SecurityFinding]:
 
 def _scan_secrets(rel_path: str, text: str) -> list[SecurityFinding]:
     findings: list[SecurityFinding] = []
-    private_key = re.search(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----", text)
+    private_key = _PRIVATE_KEY_RE.search(text)
     if private_key:
         findings.append(_finding_from_match("secret-private-key", rel_path, text, private_key))
 
@@ -1138,22 +1151,109 @@ def _fork_bomb_words(text: str, start: int, end: int, name: str) -> list[int]:
     """Absolute offsets where ``name`` stands alone as a shell word in ``text[start:end]``.
 
     An occurrence glued to other word characters (`ff` for `f`, `build.log`
-    for `build`) is part of a longer word and does not count.
+    for `build`) is part of a longer word, and quoted or escaped fragments
+    concatenate into one word (`"f"f` is the command `ff`), so the dequoted
+    run between shell separators must equal the name.
     """
     words: list[int] = []
     length = len(name)
+    scanned_until = start
     index = text.find(name, start, end)
     while index != -1 and index + length <= end:
-        if (index == 0 or text[index - 1] in _FORK_BOMB_NAME_EXCLUDED) and (index + length == len(text) or text[index + length] in _FORK_BOMB_NAME_EXCLUDED):
-            words.append(index)
+        if index >= scanned_until:
+            right, matches = _fork_bomb_token(text, start, end, index, length, name)
+            scanned_until = right
+            if matches:
+                words.append(index)
         index = text.find(name, index + 1, end)
     return words
 
 
-def _fork_bomb_has_word(text: str, start: int, end: int, name: str) -> bool:
-    for word in _fork_bomb_words(text, start, end, name):
-        return True
-    return False
+def _fork_bomb_token(text: str, start: int, end: int, index: int, length: int, name: str) -> tuple[int, bool]:
+    """Return ``(right, matches)`` for the shell word containing the occurrence.
+
+    The run extends left and right to the surrounding shell separators (the
+    body window bounds it). A run that is exactly the occurrence is the name,
+    a longer run without quotes or escapes is a different word (`ff`), and
+    otherwise quotes and backslash escapes are resolved so `"f"` matches
+    while `"f"f` is `ff` and does not. Several occurrences inside one word
+    share one expansion, so the caller skips the rest of the run.
+    """
+    left = index
+    while left > start and text[left - 1] not in _FORK_BOMB_TOKEN_BOUNDARY:
+        left -= 1
+    right = index + length
+    while right < end and text[right] not in _FORK_BOMB_TOKEN_BOUNDARY:
+        right += 1
+    if left == index and right == index + length:
+        return right, True
+    if text.find('"', left, right) == -1 and text.find("'", left, right) == -1 and text.find("\\", left, right) == -1:
+        return right, False
+    return right, _fork_bomb_dequote(text[left:right]) == name
+
+
+def _fork_bomb_dequote(word: str) -> str:
+    """Approximate the shell value of ``word``: quotes are stripped, escapes resolved."""
+    value: list[str] = []
+    cursor = 0
+    size = len(word)
+    while cursor < size:
+        char = word[cursor]
+        if char == "'":
+            close = word.find("'", cursor + 1)
+            if close == -1:
+                value.append(word[cursor + 1 :])
+                break
+            value.append(word[cursor + 1 : close])
+            cursor = close + 1
+        elif char == '"':
+            cursor += 1
+            while cursor < size and word[cursor] != '"':
+                if word[cursor] == "\\" and cursor + 1 < size and word[cursor + 1] in _DOUBLE_QUOTE_ESCAPES:
+                    cursor += 1
+                value.append(word[cursor])
+                cursor += 1
+            cursor += 1
+        elif char == "\\":
+            if cursor + 1 == size:
+                break
+            value.append(word[cursor + 1])
+            cursor += 2
+        else:
+            value.append(char)
+            cursor += 1
+    return "".join(value)
+
+
+def _fork_bomb_first_token(text: str, start: int, end: int) -> int:
+    """Return the offset of the first token char in ``text[start:end]``, else ``end``.
+
+    Whitespace, quotes and backslashes separate a segment boundary (or a
+    pipe) from the command token that follows it.
+    """
+    while start < end and text[start] in _FORK_BOMB_PADDING:
+        start += 1
+    return start
+
+
+def _fork_bomb_command_pipe(text: str, floor: int, right: int) -> int:
+    """Return the offset of the pipe that ``right`` is the command of, else ``-1``.
+
+    The word at ``right`` must be the first token of a pipeline segment:
+    only whitespace, quotes or backslashes may separate it from the pipe,
+    and the `&` of a `|&` operator belongs to the pipe rather than
+    backgrounding it.
+    """
+    cursor = right - 1
+    while cursor >= floor and text[cursor] in _FORK_BOMB_PADDING:
+        cursor -= 1
+    if cursor < floor:
+        return -1
+    if text[cursor] == "|":
+        return cursor
+    if text[cursor] == "&" and cursor > floor and text[cursor - 1] == "|":
+        return cursor - 1
+    return -1
 
 
 def _fork_bomb_terminator(text: str, start: int, end: int) -> int:
@@ -1178,12 +1278,15 @@ def _fork_bomb_terminator(text: str, start: int, end: int) -> int:
 def _fork_bomb_span(text: str) -> tuple[int, int] | None:
     """Return the span of the first fork-bomb definition, matching any function name.
 
-    Finds `<name>() {` headers and requires the same name as a standalone
-    shell word on both sides of a pipe whose command is backgrounded: the
-    first `;`/`&` after the pipe (with `|&` skipped, it does not background)
-    must be `&`, and the left word must belong to the same pipeline (no
-    `;`/`&` between it and the pipe). Quotes and backslashes delimit words,
-    so `f | "f" &` and `f | \\f &` count like the unquoted spelling.
+    Finds `<name>() {` headers and requires the same name at the command
+    position of both sides of a pipe whose command is backgrounded: the
+    right name must be the first token after the pipe (the first `;`/`&`
+    after the pipe, with `|&` skipped, must be `&`), and the left name must
+    be the first token of its segment, in the pipeline that feeds the
+    pipe. Quotes and backslashes resolve inside one word, so `f | "f" &` and
+    `f | \\f &` count like the unquoted spelling, while a fragment of a
+    longer word (`"f"f` is `ff`) or a name only in argument position
+    (`run | grep 'run' &`) does not.
     Work per header is bounded by the name cap and body window; the closing
     brace ends the window when it comes first. A trailing `};name` invocation
     is not required -- the definition alone is the shape the middleware-level
@@ -1209,24 +1312,37 @@ def _fork_bomb_span(text: str) -> tuple[int, int] | None:
             continue
         name = text[name_start:paren]
         words = _fork_bomb_words(text, body_start, body_end, name)
-        # Two word occurrences can only straddle a pipe together, so the
-        # candidate pipes are the ones between consecutive occurrences; the
-        # pipe list itself may be arbitrarily dense and is never walked.
-        # Pipes advance, and the terminator only moves forward with them, so
-        # it is scanned once per header instead of once per candidate.
+        # The right word of a pair must be the command of a pipe that
+        # follows the left word, so only consecutive occurrences are
+        # candidates and the pipe list itself may be arbitrarily dense and
+        # is never walked. The cheap backgrounding gate runs first and only
+        # pairs that pass it pay for the command-position checks; the
+        # terminator only moves forward, so it is scanned once per header
+        # instead of once per candidate.
         terminator = -1
         for left, right in zip(words, words[1:]):
-            pipe = text.find("|", left, right)
-            if pipe == -1:
+            pipe = _fork_bomb_command_pipe(text, body_start, right)
+            if pipe == -1 or pipe <= left:
                 continue
             if terminator <= pipe:
                 terminator = _fork_bomb_terminator(text, pipe + 1, body_end)
-            if terminator < body_end and text[terminator] == "&" and right < terminator:
-                left_start = 1 + max(text.rfind(";", body_start, pipe), text.rfind("&", body_start, pipe))
-                if left_start < body_start:
-                    left_start = body_start
-                if _fork_bomb_has_word(text, left_start, pipe, name):
-                    return (name_start, close + 1 if close != -1 else terminator + 1)
+            if terminator >= body_end or text[terminator] != "&" or right >= terminator:
+                continue
+            left_start = 1 + max(text.rfind(";", body_start, pipe), text.rfind("&", body_start, pipe))
+            if left_start < body_start:
+                left_start = body_start
+            if left < left_start:
+                continue
+            command_start = 1 + max(
+                text.rfind(";", body_start, left),
+                text.rfind("&", body_start, left),
+                text.rfind("|", body_start, left),
+            )
+            if command_start < body_start:
+                command_start = body_start
+            if _fork_bomb_first_token(text, command_start, left) != left:
+                continue
+            return (name_start, close + 1 if close != -1 else terminator + 1)
 
 
 def _scan_shell(rel_path: str, text: str) -> list[SecurityFinding]:
@@ -1273,16 +1389,21 @@ def _scan_shell(rel_path: str, text: str) -> list[SecurityFinding]:
             if tokens and _env_launches_shell(tokens):
                 findings.append(_finding_from_match("shell-curl-pipe-shell", rel_path, code, pipe_match))
                 break
-    if match := re.search(_DESTRUCTIVE_RM_RE + r"|:\(\)\{\s*:\|:&\s*\};:|dd\s+[^#\n]*\bof=/dev/", text):
-        findings.append(_finding_from_match("shell-destructive-command", rel_path, text, match))
+    destructive = re.search(_DESTRUCTIVE_RM_RE + "|" + _FORK_BOMB_LITERAL + r"|dd\s+[^#\n]*\bof=/dev/", text)
+    if destructive:
+        findings.append(_finding_from_match("shell-destructive-command", rel_path, text, destructive))
     # The literal branch above pins the canonical spelling and its evidence;
     # the fallback catches renamed or respaced variants of the same payload.
-    # Both rules fire, exactly like the canonical spelling (whose
-    # shell-destructive-command comes from here and resource-fork-bomb from
-    # _scan_network_and_resource), so a variant stays a CRITICAL block.
-    elif fork_bomb := _fork_bomb_span(text):
-        findings.append(_fork_bomb_finding("shell-destructive-command", rel_path, text, fork_bomb))
-        findings.append(_fork_bomb_finding("resource-fork-bomb", rel_path, text, fork_bomb))
+    # It is independent of that branch: a file whose rm/dd text matches (even
+    # in a comment) must still report a variant, or the CRITICAL block is
+    # skipped. When the canonical spelling itself is present, the literal
+    # findings (here and in _scan_network_and_resource) already cover the
+    # file, so the fallback stays off and evidence ordering is unchanged.
+    if not _FORK_BOMB_LITERAL_RE.search(text):
+        fork_bomb = _fork_bomb_span(text)
+        if fork_bomb is not None:
+            findings.append(_fork_bomb_finding("shell-destructive-command", rel_path, text, fork_bomb))
+            findings.append(_fork_bomb_finding("resource-fork-bomb", rel_path, text, fork_bomb))
     # Only a command position counts, and only in shell code: see `_shell_code_only`.
     for match in _SHELL_ENV_COMMAND_RE.finditer(code):
         command = match.group("cmd")
@@ -1302,7 +1423,7 @@ def _scan_network_and_resource(rel_path: str, text: str) -> list[SecurityFinding
     findings: list[SecurityFinding] = []
     if match := re.search(r"(169\.254\.169\.254|metadata\.google\.internal)", text, re.IGNORECASE):
         findings.append(_finding_from_match("network-cloud-metadata", rel_path, text, match))
-    if match := re.search(r":\(\)\{\s*:\|:&\s*\};:", text):
+    if match := _FORK_BOMB_LITERAL_RE.search(text):
         findings.append(_finding_from_match("resource-fork-bomb", rel_path, text, match))
     # Renamed/respaced variants are matched by _fork_bomb_span() from
     # _scan_shell, which runs for shell files only: the `<name>() {` shape is
@@ -1347,7 +1468,11 @@ def _finding_for_text(rule_id: str, rel_path: str, text: str, evidence: str) -> 
 
 
 def _fork_bomb_finding(rule_id: str, rel_path: str, text: str, span: tuple[int, int]) -> SecurityFinding:
-    return _finding(rule_id, file=rel_path, line=_line_number(text, span[0]), evidence=text[span[0] : span[1]])
+    # The span copies the function body, which may embed credentials that the
+    # secret rules redact; scrub them here too before the finding reaches
+    # Gateway responses or LLM context.
+    evidence = _redact_evidence_secrets(text[span[0] : span[1]])
+    return _finding(rule_id, file=rel_path, line=_line_number(text, span[0]), evidence=evidence)
 
 
 def _finding_for_node(rule_id: str, rel_path: str, node: ast.AST | None, evidence: str) -> SecurityFinding:
@@ -1396,6 +1521,18 @@ def _redact_secret_evidence(value: str) -> str:
     # any retained prefix (e.g. value[:6]) leaks real token bytes into findings
     # that flow to Gateway responses and LLM context.
     return "[redacted]"
+
+
+def _redact_evidence_secrets(value: str) -> str:
+    """Redact credential material a broader finding's evidence may embed."""
+    value = _PRIVATE_KEY_RE.sub("[redacted]", value)
+    for pattern in _SECRET_TOKEN_PATTERNS:
+        value = pattern.sub("[redacted]", value)
+    return _SECRET_ASSIGNMENT_RE.sub(_redact_assignment_value, value)
+
+
+def _redact_assignment_value(match: re.Match[str]) -> str:
+    return match.group(0).replace(match.group(2), "[redacted]")
 
 
 def _scan_result(findings: list[SecurityFinding], scanner_errors: list[str]) -> ScanResult:

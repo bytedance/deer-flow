@@ -2175,6 +2175,9 @@ def test_cleartext_http_uses_host_after_userinfo_without_exposing_credentials(tm
         "f(){ f | 'f' & };f",
         "f(){ f | \\f & };f",
         "f(){ f |& f & };f",
+        # A name in command position after any pipe counts, even with an
+        # earlier stage in the pipeline.
+        "f(){ ls | f | f & };f",
     ],
 )
 def test_fork_bomb_variants_block(tmp_path: Path, snippet: str) -> None:
@@ -2204,6 +2207,27 @@ def test_fork_bomb_variant_is_also_a_destructive_command(tmp_path: Path) -> None
 
 
 @pytest.mark.parametrize(
+    "comment",
+    [
+        "# dd if=/dev/zero of=/dev/null\n",
+        "# rm -rf /\n",
+    ],
+)
+def test_fork_bomb_variant_blocks_after_unrelated_destructive_match(tmp_path: Path, comment: str) -> None:
+    skill_dir = tmp_path / "demo-skill"
+    _write_skill(skill_dir)
+    scripts_dir = skill_dir / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "run.sh").write_text(comment + "bomb(){ bomb|bomb& };bomb\n", encoding="utf-8", newline="")
+
+    result = scan_skill_dir(skill_dir)
+
+    finding = _finding_by_rule(result["findings"], "resource-fork-bomb")
+    assert (finding["file"], finding["severity"]) == ("scripts/run.sh", "CRITICAL")
+    assert result["blocked"] is True
+
+
+@pytest.mark.parametrize(
     "snippet",
     [
         "cleanup(){ tail -f app.log | logger & }\n",
@@ -2217,6 +2241,17 @@ def test_fork_bomb_variant_is_also_a_destructive_command(tmp_path: Path) -> None
         # A `;` puts the left-side word in a different command than the pipe.
         "a(){ a; echo x | a & }\n",
         "setup(){ setup_helpers; cat manifest.json | tar tz & }\n",
+        # A name in argument position is not the piped command: quoted or
+        # not, `grep 'run'`, `cat "f"`, `tee "build"` must not hard-block.
+        "run(){ run | grep 'run' & }\n",
+        "f(){ echo 'f' | f & }\n",
+        'f(){ f | cat "f" & }\n',
+        'build(){ make build | tee "build" & }\n',
+        "f(){ f | xargs \\f & }\n",
+        # Quotes concatenate fragments into one shell word, so `"f"f` is the
+        # command `ff`, not the function `f`, and must not hard-block.
+        'f(){ "f"f | "f"f & }\n',
+        'f(){ f"f" | f"f" & }\n',
     ],
 )
 def test_fork_bomb_lookalikes_stay_unflagged(tmp_path: Path, snippet: str) -> None:
@@ -2243,6 +2278,22 @@ def test_fork_bomb_variant_is_shell_only(tmp_path: Path) -> None:
 
     assert not [finding for finding in result["findings"] if finding["rule_id"] in {"resource-fork-bomb", "shell-destructive-command"}]
     assert result["blocked"] is False
+
+
+def test_fork_bomb_evidence_redacts_embedded_credentials(tmp_path: Path) -> None:
+    token = "ghp_a1B2c3D4e5F6g7H8i9J0k1L2m3N4"
+    skill_dir = tmp_path / "demo-skill"
+    _write_skill(skill_dir)
+    scripts_dir = skill_dir / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "run.sh").write_text(f"f(){{ token={token}; f|f& }};f\n", encoding="utf-8", newline="")
+
+    result = scan_skill_dir(skill_dir)
+
+    assert result["blocked"] is True
+    assert all(token not in (finding["evidence"] or "") for finding in result["findings"])
+    bomb = _finding_by_rule(result["findings"], "resource-fork-bomb")
+    assert bomb["evidence"] and token not in bomb["evidence"]
 
 
 def test_fork_bomb_matcher_finishes_on_repeated_lookalike_headers(tmp_path: Path) -> None:
