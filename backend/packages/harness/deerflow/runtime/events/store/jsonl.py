@@ -192,9 +192,22 @@ class JsonlRunEventStore(RunEventStore):
                 if not line.strip():
                     continue
                 try:
-                    yield json.loads(line.decode("utf-8"))
+                    record = json.loads(line.decode("utf-8"))
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     logger.debug("Skipping malformed JSONL line in %s", path)
+                    continue
+                # Valid JSON may still be unusable by sorting, cursor recovery,
+                # or event filters. Keep optional legacy fields optional.
+                if (
+                    not isinstance(record, dict)
+                    or type(record.get("seq")) is not int
+                    or record["seq"] < 0
+                    or (record.get("event_type") is not None and not isinstance(record["event_type"], str))
+                    or (record.get("metadata") is not None and not isinstance(record["metadata"], dict))
+                ):
+                    logger.debug("Skipping malformed JSONL event record in %s", path)
+                    continue
+                yield record
 
     def _read_thread_events(self, thread_id: str) -> list[dict]:
         """Read all events for a thread, sorted by seq (blocking I/O)."""

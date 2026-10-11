@@ -121,6 +121,13 @@ journal and emit no such event. Recorder failures are fail-open.
 run reads, and sequence recovery split on physical newlines. Do not use
 `str.splitlines()`: U+0085/U+2028/U+2029 inside valid JSON strings must remain
 part of the record. Preserve existing UTF-8 files and the writer format.
+`_iter_records` owns envelope validation for every reader and sequence scan:
+accept only objects with a nonnegative integer `seq` (excluding booleans),
+optional string/null `event_type`, and optional object/null `metadata`.
+Other legacy fields remain optional; do not normalize records or rewrite files
+on reads. Skip invalid records without losing valid neighbors or allowing an
+invalid record's sequence to raise the allocation floor. Disk-level recovery
+coverage lives in `tests/test_jsonl_event_store_invalid_records.py`.
 `tests/test_jsonl_event_store_unicode.py` covers Unicode values, reopening,
 idempotent writes, LF/CRLF, blank lines, and malformed records.
 Reads and deletes treat a run ID writes reject as an unknown run (routes pass

@@ -2598,6 +2598,10 @@ across run deletion and restarts, so clients using `after_seq` do not miss later
 messages. Keep `runs/.seq-watermark` with the run files when backing up this
 backend. New or replaced watermarks inherit the deleted run file's permission bits.
 Deleting the complete thread removes the watermark and resets allocation.
+JSONL history reads skip malformed event records, including valid JSON values
+with an invalid event envelope, and continue to show surrounding valid events.
+Recovery preserves existing file bytes and resumes sequence allocation from
+valid records and the saved watermark.
 
 Thread IDs may be supplied by callers and do not have to be UUIDs. Explicit
 IDs must contain 1–64 ASCII letters, digits, hyphens, or underscores
