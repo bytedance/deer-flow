@@ -40,6 +40,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 MAX_RESULTS = 5  # Max tools returned per search
+MAX_KEYWORD_QUERY_CHARS = 256
+MAX_KEYWORD_QUERY_TERMS = 16
 
 
 def _compile_catalog_regex(pattern: str) -> re.Pattern[str]:
@@ -89,6 +91,9 @@ class DeferredToolCatalog:
             wanted = {n.strip() for n in query[7:].split(",")}
             return [t for t in self.tools if t.name in wanted]
 
+        if query.startswith("keywords:"):
+            return _rank_catalog_keywords(query[len("keywords:") :], self.tools)
+
         if query.startswith("+"):
             parts = query[1:].split(None, 1)
             if not parts:
@@ -107,6 +112,28 @@ class DeferredToolCatalog:
                 scored.append((2 if regex.search(t.name) else 1, t))
         scored.sort(key=lambda x: x[0], reverse=True)
         return [t for _, t in scored][:MAX_RESULTS]
+
+
+def _rank_catalog_keywords(query: str, tools: tuple[BaseTool, ...]) -> list[BaseTool]:
+    """Rank literal terms by coverage, then name hits, preserving catalog ties.
+
+    Bound the query before case folding or splitting. Unlike skill intent
+    search, punctuation stays literal so tool names such as ``c++`` and dotted
+    namespaces remain searchable without interpreting model text as regex.
+    """
+    terms = tuple(dict.fromkeys(query[:MAX_KEYWORD_QUERY_CHARS].casefold().split()))[:MAX_KEYWORD_QUERY_TERMS]
+    if not terms:
+        return []
+    scored: list[tuple[tuple[int, int], BaseTool]] = []
+    for candidate in tools:
+        name = candidate.name.casefold()
+        description = (candidate.description or "").casefold()
+        name_hits = sum(term in name for term in terms)
+        coverage = sum(term in name or term in description for term in terms)
+        if coverage:
+            scored.append(((coverage, name_hits), candidate))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [candidate for _, candidate in scored[:MAX_RESULTS]]
 
 
 def _catalog_regex_score(pattern: str, t: BaseTool) -> int:
@@ -153,8 +180,13 @@ def build_tool_search_tool(catalog: DeferredToolCatalog) -> BaseTool:
 
         Query forms:
           - "select:Read,Edit" -- fetch these exact tools by name
-          - "notebook jupyter" -- keyword search, up to max_results best matches
-          - "+slack send" -- require "slack" in the name, rank by remaining terms
+          - "keywords:notebook jupyter" -- literal terms in any order; rank by
+            term coverage, then name hits; up to 5 matches. Uses the first 256
+            characters after the prefix and at most 16 unique whitespace-separated
+            terms, case-insensitively. Punctuation is literal; ties keep catalog order.
+          - "jupyter.*notebook" -- regex on name and description, name matches first
+          - "+slack send" -- require "slack" in the name, rank by the remaining regex
+        Queries without a prefix keep regex semantics (invalid regex is literal).
         """
         matched = catalog.search(query)
         if not matched:

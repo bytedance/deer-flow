@@ -30,6 +30,12 @@ which takes a whole message and uses different list/mapping semantics.
 Regression coverage lives in `tests/test_utils_messages.py`,
 `tests/test_subagent_executor.py`, and `tests/test_task_continuity.py`.
 
+`llm_text.py::extract_response_text` ignores content blocks with non-string
+`type` values, including lists and mappings, while retaining adjacent text and
+output-text blocks. Tests cover extraction and the one-shot input-polish path
+with real LangChain messages in `tests/test_utils_llm_text.py` and
+`tests/test_input_polish_router.py`.
+
 `llm_text.py::strip_think_blocks` scans opening and closing tags forward so
 repeated unclosed `<think>` prefixes in model output do not rescan the same
 suffix. Keep its case-insensitive tag handling, optional whitespace before
