@@ -212,6 +212,7 @@ async def test_send_reserves_busy_state_before_worker_starts(monkeypatch):
             app.query_one("#composer").value = "new question"
             await pilot.press("enter")
             assert any(row.kind == "system" and "Still working" in row.text for row in app.state.rows)
+            assert app.query_one("#composer").value == "new question"
             await pilot.press("ctrl+c")
             release.set()
             client.release_old.set()
@@ -249,6 +250,7 @@ async def test_worker_start_failure_restores_idle_state_and_allows_retry(monkeyp
         assert any(row.kind == "system" and row.tone == "error" for row in app.state.rows)
         assert "private worker startup detail" not in str(app.state.rows)
         assert client.calls == []
+        assert app.query_one("#composer").value == "old question"
 
         idle_state = app.state
         for action in [RunStarted(), AssistantDelta(id="failed-answer", text="stale"), ThreadTitle("Failed title"), RunEnded(usage={"total_tokens": 999})]:
@@ -265,6 +267,28 @@ async def test_worker_start_failure_restores_idle_state_and_allows_retry(monkeyp
         assert app.state.usage == {"total_tokens": 222}
         assert any(row.kind == "assistant" and row.text == "new-before new-tail" for row in app.state.rows)
         assert not any(row.kind == "system" and "Still working" in row.text for row in app.state.rows)
+
+
+@pytest.mark.asyncio
+async def test_launch_message_that_fails_to_start_stays_in_the_composer(monkeypatch):
+    client = _Client()
+    app = DeerFlowTUI(Session(client=client), LaunchPlan(mode="tui", thread_id="thread-a", message="launch question"))
+    original_start = app.run_worker
+
+    def fail_agent_worker(*args, **kwargs):
+        if kwargs.get("group") == "agent":
+            raise RuntimeError("Cannot start the launch worker")
+        return original_start(*args, **kwargs)
+
+    monkeypatch.setattr(app, "run_worker", fail_agent_worker)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert not app._streaming
+        assert any(row.kind == "system" and row.tone == "error" for row in app.state.rows)
+        composer = app.query_one("#composer")
+        assert composer.value == "launch question"
+        assert composer.cursor_position == len("launch question")
+        assert client.calls == []
 
 
 @pytest.mark.asyncio
