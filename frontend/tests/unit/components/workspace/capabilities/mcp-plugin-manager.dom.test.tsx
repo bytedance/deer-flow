@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MCPPluginManager } from "@/components/workspace/capabilities/mcp-plugin-manager";
 
 const mcpMockState = rs.hoisted(() => ({
+  locale: "en-US",
   isPending: false,
   isLoading: false,
   error: null as Error | null,
@@ -27,6 +28,7 @@ const DURABLE_TASK_SERVER = {
 
 rs.mock("@/core/i18n/hooks", () => ({
   useI18n: () => ({
+    locale: mcpMockState.locale,
     t: {
       capabilities: {
         icon: {
@@ -135,11 +137,15 @@ function lastMutation() {
 }
 
 function openAddDialog() {
-  fireEvent.click(screen.getByRole("button", { name: "Add server" }));
+  fireEvent.click(
+    screen.getByRole("button", { name: "Add server (My plugins)" }),
+  );
 }
 
 function openEditDialog(name: string) {
-  fireEvent.click(screen.getByRole("button", { name: `Edit ${name}` }));
+  fireEvent.click(
+    screen.getByRole("button", { name: `Edit ${name} (My plugins)` }),
+  );
 }
 
 function definitionTextbox(): HTMLTextAreaElement {
@@ -151,6 +157,7 @@ function definitionTextbox(): HTMLTextAreaElement {
 }
 
 afterEach(() => {
+  mcpMockState.locale = "en-US";
   mcpMockState.isPending = false;
   mcpMockState.isLoading = false;
   mcpMockState.error = null;
@@ -186,7 +193,9 @@ describe("MCPPluginManager MCP switches", () => {
         screen.getByRole("button", { name: "Configure Lark" }),
       ).toBeDefined();
       expect(screen.getByRole("button", { name: "All plugins" })).toBeDefined();
-      expect(screen.queryByRole("button", { name: "Add server" })).toBeNull();
+      expect(
+        screen.queryByRole("button", { name: "Add server (My plugins)" }),
+      ).toBeNull();
     },
   );
 
@@ -294,7 +303,7 @@ describe("MCPPluginManager add server", () => {
     expect(screen.getByText("No matches found")).toBeDefined();
     expect(
       screen
-        .getByRole("button", { name: "Add server" })
+        .getByRole("button", { name: "Add server (My plugins)" })
         .hasAttribute("disabled"),
     ).toBe(false);
   });
@@ -396,7 +405,9 @@ describe("MCPPluginManager remove server", () => {
     twoServers();
 
     render(<MCPPluginManager />);
-    fireEvent.click(screen.getByRole("button", { name: "Delete github" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Delete github (My plugins)" }),
+    );
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
 
     expect(lastMutation()).toEqual({
@@ -409,7 +420,9 @@ describe("MCPPluginManager remove server", () => {
     twoServers();
 
     render(<MCPPluginManager />);
-    fireEvent.click(screen.getByRole("button", { name: "Delete github" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Delete github (My plugins)" }),
+    );
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
 
     expect(mcpMockState.updateMutate).not.toHaveBeenCalled();
@@ -420,7 +433,7 @@ describe("MCPPluginManager remove server", () => {
 
     render(<MCPPluginManager />);
     fireEvent.click(
-      screen.getByRole("button", { name: "Delete (empty name)" }),
+      screen.getByRole("button", { name: "Delete (empty name) (My plugins)" }),
     );
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
 
@@ -429,4 +442,38 @@ describe("MCPPluginManager remove server", () => {
       serverName: "",
     });
   });
+});
+
+describe("MCP controls identify their ownership", () => {
+  it.each([
+    { locale: "en-US", platform: "Platform provided", personal: "My plugins" },
+    { locale: "zh-CN", platform: "平台提供", personal: "我的插件" },
+  ])(
+    "distinguishes same-named connections without region context in $locale",
+    ({ locale, platform, personal }) => {
+      mcpMockState.locale = locale;
+      setServers({ github: { enabled: true, description: "GitHub tools" } });
+      render(
+        <>
+          <MCPPluginManager scope="deployment" />
+          <MCPPluginManager />
+        </>,
+      );
+      for (const label of [platform, personal]) {
+        for (const [role, action] of [
+          ["button", "Add server"],
+          ["button", "View details github"],
+          ["button", "Edit github"],
+          ["button", "Delete github"],
+          ["switch", "Enabled github"],
+        ]) {
+          expect(
+            screen.getAllByRole(role!, {
+              name: `${action} (${label})`,
+            }),
+          ).toHaveLength(1);
+        }
+      }
+    },
+  );
 });

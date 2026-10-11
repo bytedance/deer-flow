@@ -386,6 +386,27 @@ def test_null_sandbox_timeout_uses_default(monkeypatch: pytest.MonkeyPatch) -> N
     provider.shutdown()
 
 
+@pytest.mark.parametrize(
+    ("config_key", "value", "message"),
+    [
+        ("request_timeout", float("nan"), "sandbox.request_timeout must be positive"),
+        ("request_timeout", float("inf"), "sandbox.request_timeout must be positive"),
+        ("ready_timeout", float("nan"), "sandbox.ready_timeout must be positive"),
+        ("ready_timeout", float("inf"), "sandbox.ready_timeout must be positive"),
+        ("sandbox_timeout", float("nan"), "sandbox.sandbox_timeout must be non-negative"),
+        ("sandbox_timeout", float("inf"), "sandbox.sandbox_timeout must be non-negative"),
+    ],
+)
+def test_provider_rejects_non_finite_timeouts(
+    monkeypatch: pytest.MonkeyPatch,
+    config_key: str,
+    value: float,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        _install(monkeypatch, config={config_key: value})
+
+
 @pytest.mark.parametrize("exit_code", [17, None])
 def test_bootstrap_failure_destroys_created_remote(monkeypatch: pytest.MonkeyPatch, exit_code: int | None) -> None:
     sdk = _FakeSandboxClass(lambda index: _FakeRemote(f"remote-{index}", bootstrap_exit_code=exit_code))

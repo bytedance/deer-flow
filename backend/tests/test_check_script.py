@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import importlib.util
 import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CHECK_SCRIPT_PATH = REPO_ROOT / "scripts" / "check.py"
@@ -162,3 +165,30 @@ def test_old_node_check_suggests_a_version_manager_command(monkeypatch, capsys):
 
     assert check_script.main() == 1
     assert "nvm install 22 && nvm use 22" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("host_encoding", ["ascii", "cp936"])
+def test_check_decodes_tool_output_as_utf8(monkeypatch, host_encoding):
+    script = _load_script(CHECK_SCRIPT_PATH, "check_utf8_tool")
+    monkeypatch.setattr(subprocess, "_text_encoding", lambda: host_encoding)
+    text = "✓ 检查完成"
+    code = f"import sys; sys.stdout.buffer.write({text.encode('utf-8')!r})"
+    assert script.run_command([sys.executable, "-c", code]) == text
+
+
+@pytest.mark.parametrize("host_encoding", ["ascii", "cp936"])
+def test_check_preserves_unicode_pnpm_error(tmp_path, monkeypatch, host_encoding):
+    script = _load_script(CHECK_SCRIPT_PATH, "check_utf8_pnpm")
+    runner = tmp_path / "pnpm.py"
+    diagnostic = "✗ 无法运行 pnpm"
+    runner.write_text(f"import sys\nprint({ascii(diagnostic)}, file=sys.stderr)\nsys.exit(7)\n", encoding="utf-8")
+    monkeypatch.setattr(script, "PNPM_SCRIPT_PATH", runner)
+    monkeypatch.setattr(script, "FRONTEND_DIR", tmp_path)
+    monkeypatch.setattr(subprocess, "_text_encoding", lambda: host_encoding)
+    monkeypatch.setenv("PYTHONIOENCODING", "ascii")
+    assert script.run_pnpm_version() == (None, False, diagnostic)
+
+
+def test_check_replaces_invalid_tool_output_bytes():
+    script = _load_script(CHECK_SCRIPT_PATH, "check_invalid_tool_bytes")
+    assert script.run_command([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'v22.0.0\\xff')"]) == "v22.0.0\ufffd"

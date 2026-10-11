@@ -10,7 +10,12 @@ import anyio
 import pytest
 from pydantic import ValidationError
 
-from deerflow.config.stream_bridge_config import MAX_HEARTBEAT_INTERVAL_SECONDS, StreamBridgeConfig, set_stream_bridge_config
+from deerflow.config.stream_bridge_config import (
+    MAX_HEARTBEAT_INTERVAL_SECONDS,
+    MAX_RECOVERED_STREAM_CLEANUP_DELAY_SECONDS,
+    StreamBridgeConfig,
+    set_stream_bridge_config,
+)
 from deerflow.runtime import END_SENTINEL, HEARTBEAT_SENTINEL, MemoryStreamBridge, StreamGap, make_stream_bridge
 
 # RedisStreamBridge is no longer re-exported from deerflow.runtime (redis is an
@@ -33,6 +38,14 @@ class _FakeRedis:
         self.deleted = []
         self.expirations = []
         self.closed = False
+        self.ping_calls = 0
+        self.ping_error: Exception | None = None
+
+    async def ping(self):
+        self.ping_calls += 1
+        if self.ping_error is not None:
+            raise self.ping_error
+        return True
 
     async def xadd(self, name, fields, maxlen=None, approximate=True):
         self.counters[name] += 1
@@ -530,6 +543,42 @@ def redis_bridge() -> RedisStreamBridge:
     return RedisStreamBridge(redis_url="redis://fake", queue_maxsize=2, client=_FakeRedis())
 
 
+# ---------------------------------------------------------------------------
+# Readiness ping
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_memory_bridge_ping_has_no_external_backend():
+    """The in-process bridge has nothing external to probe and never reports unreachable."""
+    bridge = MemoryStreamBridge()
+
+    assert bridge.supports_cross_process is False
+    assert await bridge.ping() is True
+
+
+@pytest.mark.anyio
+async def test_redis_bridge_ping_reports_reachable_backend():
+    fake = _FakeRedis()
+    bridge = RedisStreamBridge(redis_url="redis://fake", queue_maxsize=2, client=fake)
+
+    assert bridge.supports_cross_process is True
+    assert await bridge.ping() is True
+    assert fake.ping_calls == 1
+
+
+@pytest.mark.anyio
+async def test_redis_bridge_ping_reports_unreachable_backend_on_redis_error():
+    """A Redis-side failure is a readiness answer (False), not an exception for the probe to unpack."""
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    fake = _FakeRedis()
+    fake.ping_error = RedisConnectionError("connection refused")
+    bridge = RedisStreamBridge(redis_url="redis://fake", queue_maxsize=2, client=fake)
+
+    assert await bridge.ping() is False
+
+
 @pytest.mark.anyio
 async def test_redis_publish_subscribe(redis_bridge: RedisStreamBridge):
     """Redis bridge should deliver events in order and terminate on end."""
@@ -982,6 +1031,31 @@ def test_stream_bridge_config_accepts_numeric_heartbeat_string():
     config = StreamBridgeConfig(heartbeat_interval_seconds="2.5")
 
     assert config.heartbeat_interval_seconds == 2.5
+
+
+@pytest.mark.parametrize(
+    "cleanup_delay",
+    [
+        True,
+        False,
+        -1,
+        float("inf"),
+        float("-inf"),
+        float("nan"),
+        MAX_RECOVERED_STREAM_CLEANUP_DELAY_SECONDS + 1,
+    ],
+)
+def test_stream_bridge_config_rejects_invalid_recovered_stream_cleanup_delay(cleanup_delay):
+    with pytest.raises(ValidationError, match="recovered_stream_cleanup_delay_seconds"):
+        StreamBridgeConfig(recovered_stream_cleanup_delay_seconds=cleanup_delay)
+
+
+@pytest.mark.parametrize("cleanup_delay", [0, 60, MAX_RECOVERED_STREAM_CLEANUP_DELAY_SECONDS])
+def test_stream_bridge_config_accepts_valid_recovered_stream_cleanup_delay(cleanup_delay):
+    """A delay of 0 is a valid 'delete as soon as END is published' setting."""
+    config = StreamBridgeConfig(recovered_stream_cleanup_delay_seconds=cleanup_delay)
+
+    assert config.recovered_stream_cleanup_delay_seconds == float(cleanup_delay)
 
 
 @pytest.mark.parametrize("heartbeat_interval", [True, MAX_HEARTBEAT_INTERVAL_SECONDS + 1])

@@ -27,10 +27,12 @@ from deerflow.sandbox.exceptions import SandboxAuthorizationError, SandboxRuntim
 from deerflow.sandbox.lease import (
     ensure_sandbox_lease_owner,
     get_sandbox_lease_manager,
+    run_sync_lifecycle_operation,
     sandbox_lease_owner,
 )
 from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.sandbox_provider import get_initialized_sandbox_provider
+from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 
@@ -222,7 +224,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         if owner_id is not None:
             await get_sandbox_lease_manager(provider).release_async(owner_id)
             return
-        await asyncio.to_thread(provider.release, sandbox_id)
+        await await_drained(asyncio.to_thread(provider.release, sandbox_id))
 
     @override
     def before_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
@@ -352,7 +354,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         thread_id = (runtime.context or {}).get("thread_id")
         if thread_id is None:
             return await super().abefore_agent(state, runtime)
-        await asyncio.to_thread(self._apply_network_policy_response, state, runtime)
+        await run_sync_lifecycle_operation(self._apply_network_policy_response, state, runtime)
         user_id = resolve_runtime_user_id(runtime)
         projection = await asyncio.to_thread(
             self._prepare_agent_skill_projection,

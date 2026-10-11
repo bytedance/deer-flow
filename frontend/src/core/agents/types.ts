@@ -39,6 +39,17 @@ export interface CreateAgentRequest {
   soul?: string;
 }
 
+export interface PortableAgentDefinition extends CreateAgentRequest {
+  name: string;
+  memory_enabled?: boolean;
+}
+
+export interface AgentPackage {
+  format: "deerflow.custom-agent";
+  version: 1;
+  agent: PortableAgentDefinition;
+}
+
 export interface UpdateAgentRequest {
   display_name?: string | null;
   description?: string | null;

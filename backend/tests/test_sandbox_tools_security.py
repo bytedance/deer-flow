@@ -427,6 +427,21 @@ def test_reject_path_traversal_allows_normal_paths() -> None:
     _reject_path_traversal("/mnt/user-data/workspace/sub/dir/file.py")
 
 
+def test_reject_path_traversal_allows_windows_reserved_names() -> None:
+    """Reserved names are a portability concern, not directory traversal."""
+    for path in (
+        "/mnt/user-data/workspace/CON",
+        "/mnt/user-data/workspace/dir/COM1.txt",
+        "/mnt/user-data/workspace/file.txt.",
+        "/mnt/user-data/workspace/file.txt ",
+    ):
+        _reject_path_traversal(path)
+
+
+def test_reject_path_traversal_allows_names_that_only_look_reserved() -> None:
+    _reject_path_traversal("/mnt/user-data/workspace/contour.txt")
+
+
 # ---------- validate_local_tool_path ----------
 
 
@@ -470,6 +485,46 @@ def test_validate_local_tool_path_allows_user_data_paths() -> None:
 def test_validate_local_tool_path_allows_user_data_write() -> None:
     # read_only=False (default) should still work for user-data paths
     validate_local_tool_path(f"{VIRTUAL_PATH_PREFIX}/workspace/file.txt", _THREAD_DATA, read_only=False)
+
+
+def test_validate_local_tool_path_read_allows_nonportable_names() -> None:
+    """Reads must not fail solely because the name is not Windows-portable."""
+    validate_local_tool_path(f"{VIRTUAL_PATH_PREFIX}/uploads/aux.pdf", _THREAD_DATA, read_only=True)
+    validate_local_tool_path(f"{VIRTUAL_PATH_PREFIX}/uploads/notes.txt ", _THREAD_DATA, read_only=True)
+    validate_local_tool_path(f"{VIRTUAL_PATH_PREFIX}/uploads/contour.txt", _THREAD_DATA, read_only=True)
+
+
+def test_validate_local_tool_path_write_rejects_new_nonportable_names() -> None:
+    with pytest.raises(PermissionError, match="Access denied"):
+        validate_local_tool_path(f"{VIRTUAL_PATH_PREFIX}/uploads/aux.pdf", _THREAD_DATA, read_only=False)
+    with pytest.raises(PermissionError, match="Access denied"):
+        validate_local_tool_path(f"{VIRTUAL_PATH_PREFIX}/uploads/notes.txt ", _THREAD_DATA, read_only=False)
+    with pytest.raises(PermissionError, match="path traversal"):
+        validate_local_tool_path(f"{VIRTUAL_PATH_PREFIX}/uploads/../../etc/passwd", _THREAD_DATA, read_only=False)
+
+
+@pytest.mark.parametrize("name", ["COM¹", "com².txt", "COM³.log", "LPT¹", "lpt².md", "LPT³.pdf"])
+def test_validate_local_tool_path_rejects_new_superscript_device_names(name: str) -> None:
+    path = f"{VIRTUAL_PATH_PREFIX}/workspace/{name}"
+    with pytest.raises(PermissionError, match="Access denied"):
+        validate_local_tool_path(path, _THREAD_DATA, read_only=False)
+    validate_local_tool_path(path, _THREAD_DATA, read_only=True)
+
+
+@pytest.mark.parametrize("name", ["CONIN$", "conout$", "CONIN$.txt", "CONOUT$.log"])
+def test_validate_local_tool_path_rejects_new_console_device_names(name: str) -> None:
+    path = f"{VIRTUAL_PATH_PREFIX}/workspace/{name}"
+    with pytest.raises(PermissionError, match="Access denied"):
+        validate_local_tool_path(path, _THREAD_DATA, read_only=False)
+    validate_local_tool_path(path, _THREAD_DATA, read_only=True)
+
+
+@pytest.mark.parametrize("name", ["NUL .txt", "con  .log", "COM1 .txt", "lpt²  .md", "CONIN$ .txt", "conout$  .log"])
+def test_validate_local_tool_path_rejects_new_padded_device_names(name: str) -> None:
+    path = f"{VIRTUAL_PATH_PREFIX}/workspace/{name}"
+    with pytest.raises(PermissionError, match="Access denied"):
+        validate_local_tool_path(path, _THREAD_DATA, read_only=False)
+    validate_local_tool_path(path, _THREAD_DATA, read_only=True)
 
 
 def test_validate_local_tool_path_rejects_traversal_in_user_data() -> None:
@@ -858,6 +913,79 @@ def test_validate_local_bash_command_paths_still_blocks_ascii_host_path_in_code(
     code string, so the guard keeps nudging the model toward virtual paths."""
     with pytest.raises(PermissionError, match="Unsafe absolute paths"):
         validate_local_bash_command_paths("python3 -c \"open('/etc/passwd').read()\"", _THREAD_DATA)
+
+
+def test_validate_local_bash_command_paths_allows_quoted_paths_with_spaces() -> None:
+    """Spaces inside quotes belong to the filename; they must not truncate a segment."""
+    validate_local_bash_command_paths('cat "/mnt/user-data/uploads/report. final.txt"', _THREAD_DATA)
+    validate_local_bash_command_paths('cat "/mnt/user-data/uploads/CON notes.txt"', _THREAD_DATA)
+
+
+def _windows_extended(path: Path) -> str:
+    return (chr(92) * 2) + "?" + chr(92) + str(path)
+
+
+def _write_literal_host_file(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        fd = os.open(_windows_extended(path), os.O_CREAT | os.O_WRONLY | getattr(os, "O_BINARY", 0))
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+    else:
+        path.write_bytes(data)
+
+
+def _remove_literal_host_file(path: Path) -> None:
+    if os.name == "nt":
+        raw = _windows_extended(path)
+        if os.path.lexists(raw):
+            os.remove(raw)
+            return
+    if path.exists():
+        path.unlink()
+
+
+def test_validate_local_bash_command_paths_allows_stored_nonportable_names(tmp_path: Path) -> None:
+    """cat/mv of a host file that already exists is not blocked for its name."""
+    uploads = tmp_path / "uploads"
+    workspace = tmp_path / "workspace"
+    outputs = tmp_path / "outputs"
+    for directory in (uploads, workspace, outputs):
+        directory.mkdir()
+    reserved = uploads / "aux.pdf"
+    spaced = uploads / "notes.txt "
+    _write_literal_host_file(reserved, b"pdf")
+    _write_literal_host_file(spaced, b"sp")
+    thread = {
+        "workspace_path": str(workspace),
+        "uploads_path": str(uploads),
+        "outputs_path": str(outputs),
+    }
+    try:
+        validate_local_bash_command_paths('cat "/mnt/user-data/uploads/aux.pdf"', thread)
+        validate_local_bash_command_paths('mv "/mnt/user-data/uploads/aux.pdf" /mnt/user-data/workspace/renamed.pdf', thread)
+        validate_local_bash_command_paths('cat "/mnt/user-data/uploads/notes.txt "', thread)
+        validate_local_tool_path("/mnt/user-data/uploads/aux.pdf", thread, read_only=False)
+        validate_local_tool_path("/mnt/user-data/uploads/notes.txt ", thread, read_only=True)
+    finally:
+        _remove_literal_host_file(reserved)
+        _remove_literal_host_file(spaced)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'cat "/mnt/user-data/uploads/CON"',
+        'cat "/mnt/user-data/uploads/report."',
+        'cat "/mnt/user-data/uploads/foo bar/../../etc/passwd"',
+        "cat /mnt/user-data/uploads/report. final.txt",
+    ],
+)
+def test_validate_local_bash_command_paths_rejects_quoted_reserved_or_trailing_dot_paths(command: str) -> None:
+    with pytest.raises(PermissionError):
+        validate_local_bash_command_paths(command, _THREAD_DATA)
 
 
 @pytest.mark.parametrize(

@@ -31,6 +31,26 @@ from deerflow.extensions.manager import (
 from deerflow.tui.cli import main as deerflow_main
 
 
+@pytest.fixture(autouse=True)
+def _pin_official_package_index(monkeypatch) -> None:
+    """Keep host uv index configuration (e.g. a blocking mirror) out of this suite.
+
+    The source-build tests shell out to uv and resolve build backends such as
+    hatchling from the package index, so a host-configured mirror that blocks
+    those packages fails the suite even though the code under test is fine.
+    Pin the default index (which also wins over the legacy ``UV_INDEX_URL``)
+    and drop the extra-index env channels, whose entries take priority over
+    the default index. ``UV_NO_CONFIG=1`` would additionally drop the host
+    ``uv.toml`` ``[[index]]`` channel, but also the fixture's own ``[tool.uv]``
+    pyproject settings the assertions rely on, so file-based extra indexes
+    stay out of scope. Tests that install their own index (the local
+    simple-index servers) set their own env afterwards and keep precedence.
+    """
+    monkeypatch.setenv("UV_DEFAULT_INDEX", "https://pypi.org/simple")
+    monkeypatch.delenv("UV_INDEX", raising=False)
+    monkeypatch.delenv("UV_EXTRA_INDEX_URL", raising=False)
+
+
 def _write_local_extension(
     source: Path,
     *,
@@ -72,7 +92,7 @@ packages = ["demo_extension"]
     )
 
 
-def _write_host_project(root: Path) -> None:
+def _write_host_project(root: Path, *, no_index: bool = False) -> None:
     backend = root / "backend"
     backend.mkdir()
     (backend / "pyproject.toml").write_text(
@@ -91,6 +111,10 @@ default-groups = ["extensions"]
 """,
         encoding="utf-8",
     )
+    if no_index:
+        # Use uv's supported project setting; UV_NO_INDEX is not recognized.
+        with (backend / "pyproject.toml").open("a", encoding="utf-8") as project:
+            project.write("no-index = true\n")
     (root / "config.yaml").write_text("config_version: 1\n", encoding="utf-8")
 
 
@@ -800,10 +824,9 @@ def test_install_rejects_a_pypi_requirement_resolved_from_an_external_local_whee
     root = tmp_path / "deer-flow"
     wheels = tmp_path / "wheels"
     root.mkdir()
-    _write_host_project(root)
+    _write_host_project(root, no_index=True)
     _write_demo_wheel(wheels)
     monkeypatch.setenv("UV_FIND_LINKS", str(wheels))
-    monkeypatch.setenv("UV_NO_INDEX", "1")
     pyproject_path = root / "backend" / "pyproject.toml"
     config_path = root / "config.yaml"
     before = (pyproject_path.read_bytes(), config_path.read_bytes())
@@ -823,12 +846,11 @@ def test_install_rejects_a_local_wheel_directory_ignored_by_the_docker_context(
 ) -> None:
     root = tmp_path / "deer-flow"
     root.mkdir()
-    _write_host_project(root)
+    _write_host_project(root, no_index=True)
     wheels = root / "backend" / relative_wheels
     wheels.parent.mkdir(parents=True, exist_ok=True)
     _write_demo_wheel(wheels)
     monkeypatch.setenv("UV_FIND_LINKS", str(wheels))
-    monkeypatch.setenv("UV_NO_INDEX", "1")
     pyproject_path = root / "backend" / "pyproject.toml"
     config_path = root / "config.yaml"
     before = (pyproject_path.read_bytes(), config_path.read_bytes())
@@ -846,13 +868,12 @@ def test_install_rejects_a_relative_find_links_wheelhouse_outside_the_build_cont
 ) -> None:
     root = tmp_path / "deer-flow"
     root.mkdir()
-    _write_host_project(root)
+    _write_host_project(root, no_index=True)
     _write_demo_wheel(root / "backend" / "wheelhouse")
     # uv resolves a relative UV_FIND_LINKS against its working directory (the
     # backend project), so the lock records a relative registry that only
     # exists on this host.
     monkeypatch.setenv("UV_FIND_LINKS", "wheelhouse")
-    monkeypatch.setenv("UV_NO_INDEX", "1")
     pyproject_path = root / "backend" / "pyproject.toml"
     config_path = root / "config.yaml"
     before = (pyproject_path.read_bytes(), config_path.read_bytes())
@@ -1521,7 +1542,7 @@ def test_failed_entry_point_discovery_rolls_back_dependency_and_lock(tmp_path: P
     assert not (root / "backend" / "uv.lock").exists()
     absent = subprocess.run(
         [
-            str(root / "backend" / ".venv" / "bin" / "python"),
+            str(root / "backend" / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")),
             "-c",
             "from importlib.metadata import PackageNotFoundError, version; \ntry: version('deerflow-extension-demo')\nexcept PackageNotFoundError: raise SystemExit(0)\nraise SystemExit(1)",
         ],
@@ -2032,7 +2053,7 @@ def test_remove_rolls_back_package_lock_config_source_and_environment_when_confi
     assert managed_source.is_dir()
     present = subprocess.run(
         [
-            str(root / "backend" / ".venv" / "bin" / "python"),
+            str(root / "backend" / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")),
             "-c",
             "from importlib.metadata import version; assert version('deerflow-extension-demo') == '1.0.0'",
         ],
@@ -2402,7 +2423,10 @@ def test_install_uses_one_controlled_uv_project_and_deferred_sync(
     assert ["--project", backend] == add[add.index("--project") : add.index("--project") + 2]
     assert "--no-sync" in add
     assert "--no-workspace" in add
-    assert add[-2:] == ["--", "extensions/sources/deerflow-extension-demo"]
+    assert add[-2] == "--"
+    # The manager passes the snapshot's native relative path; compare as paths
+    # so the assertion is separator-neutral.
+    assert Path(add[-1]) == Path("extensions/sources/deerflow-extension-demo")
     assert ["--project", backend] == sync[sync.index("--project") : sync.index("--project") + 2]
     assert "--locked" in sync
     assert "--no-sync" not in sync

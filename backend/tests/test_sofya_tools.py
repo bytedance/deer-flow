@@ -591,3 +591,15 @@ class TestWebFetchTool:
             result = web_fetch_tool.invoke({"url": "https://example.com"})
 
         assert result == "Error: SOFYA_API_KEY is not configured"
+
+
+class TestCoerceInfFallsBackToDefault:
+    def test_coerce_max_results_inf_returns_default(self):
+        from deerflow.community.sofya.tools import _coerce_max_results
+
+        assert _coerce_max_results(float("inf")) == 5
+
+    def test_coerce_content_limit_inf_returns_default(self):
+        from deerflow.community.sofya.tools import _coerce_content_limit
+
+        assert _coerce_content_limit(float("inf")) == 2000

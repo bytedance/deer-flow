@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { mockLangGraphAPI } from "./utils/mock-api";
+import { setLocaleCookie } from "./utils/scheduled-fixtures";
 
 const channelProviders = [
   ["buzz", "Buzz", "binding_code"],
@@ -833,3 +834,73 @@ for (const entry of ["sidebar", "settings"] as const) {
     });
   }
 }
+
+test.describe("scheduled task updates per app", () => {
+  const COPY = {
+    en: {
+      supported: "Scheduled task updates: sent here",
+      unsupported: "Scheduled task updates: not available for this app yet",
+      dialog: "Settings",
+      wecom: "WeCom",
+      feishu: "Feishu",
+    },
+    zh: {
+      supported: "定时任务通知：会发送到这里",
+      unsupported: "定时任务通知：此应用暂不支持",
+      dialog: "设置",
+      wecom: "企业微信",
+      feishu: "飞书",
+    },
+  } as const;
+
+  for (const lang of ["en", "zh"] as const) {
+    test(`WeCom says updates are sent there, Feishu says not yet (${lang})`, async ({
+      page,
+    }) => {
+      const copy = COPY[lang];
+      await setLocaleCookie(page, lang);
+      mockLangGraphAPI(page);
+      mockChannelsAPI(
+        page,
+        defaultProviders()
+          .filter(({ provider }) => ["feishu", "wecom"].includes(provider))
+          .map((provider) => ({
+            ...provider,
+            // Only WeCom implements proactive push today.
+            proactive_notifications: provider.provider === "wecom",
+          })),
+      );
+
+      await page.goto("/workspace/chats/new?settings=channels");
+      const dialog = page.getByRole("dialog", { name: copy.dialog });
+      // Cards carry the provider's name in the UI language, the same label
+      // the thread origin markers use, not the backend's English name.
+      const card = (name: string) =>
+        dialog.locator("[data-slot='item']").filter({ hasText: name });
+      const wecomCard = card(copy.wecom);
+      const feishuCard = card(copy.feishu);
+      await expect(
+        wecomCard.getByTestId("channel-scheduled-updates"),
+      ).toHaveText(copy.supported);
+      await expect(
+        feishuCard.getByTestId("channel-scheduled-updates"),
+      ).toHaveText(copy.unsupported);
+      if (lang === "zh") {
+        await expect(wecomCard).not.toContainText("WeCom");
+        await expect(feishuCard).not.toContainText("Feishu");
+      }
+
+      // The sidebar's channel list says the same.
+      await page.keyboard.press("Escape");
+      const sidebar = page.locator("[data-sidebar='sidebar']");
+      const lines = sidebar.getByTestId("channel-scheduled-updates");
+      await expect(lines).toHaveCount(2);
+      await expect(
+        sidebar.locator("li").filter({ hasText: copy.wecom }),
+      ).toContainText(copy.supported);
+      await expect(
+        sidebar.locator("li").filter({ hasText: copy.feishu }),
+      ).toContainText(copy.unsupported);
+    });
+  }
+});

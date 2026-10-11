@@ -25,18 +25,70 @@ image:
 
 # -- Gateway (backend) deployment.
 gateway:
-  replicas: 1               # Safe default. Postgres + the Redis stream bridge are
-                            # wired, but multi-replica needs issue #3948's run-control
-                            # work (cancel/dedup/reconcile). Scheduler multi_instance
-                             # recovery is safe only when its config prerequisites are met;
-                             # max_concurrent_runs is shared across Pods in that mode.
+  # Replica count. 1 is the conservative default; >1 is supported for the web
+  # and API path once the prerequisites below hold, all of which this chart
+  # sets in `config` by default: Postgres (`database` + `checkpointer`),
+  # `run_events.backend: db`, `run_ownership.heartbeat_enabled: true` and the
+  # Redis stream bridge (sandbox ownership leases are inferred from it). The
+  # chart also exports DEER_FLOW_MULTI_INSTANCE=true when replicas > 1 so the
+  # Gateway's startup gate enforces those prerequisites instead of staying
+  # inert (its worker count only sees one Pod). Still single-instance: IM
+  # channels (every Pod connects to every platform -- keep replicas at 1
+  # while channels are enabled), the WeChat QR login, and browser tools.
+  # Multi-node clusters also need `persistence.home.accessMode: ReadWriteMany`,
+  # and `agent_storage.backend: db` keeps custom agents visible on every Pod.
+  # Memory stays on that shared volume, but DeerMem's SQLite retrieval index is
+  # Pod-local (`memory.backend_config.retrieval_index_path` in `config`, on an
+  # emptyDir at /var/lib/deerflow/memory-index); keep that line when you
+  # override `config`, or the Gateway warns at startup and every Pod shares one
+  # WAL database over the network filesystem.
+  # Scheduler multi_instance recovery is safe only when its config
+  # prerequisites are met; max_concurrent_runs is shared across Pods then.
+  replicas: 1
+  # Explicit multi-instance declaration (boolean). Leave unset (null) to derive
+  # it from `replicas` above. Set `true` before scaling the gateway with
+  # `kubectl scale` or an HPA: those change the replica count without a Helm
+  # upgrade, so the derived DEER_FLOW_MULTI_INSTANCE, the PodDisruptionBudget
+  # and the required shared AUTH_JWT_SECRET would otherwise keep their
+  # single-replica rendering. Note the PodDisruptionBudget (minAvailable: 1)
+  # is rendered as soon as this is true: until the scale-up actually happens
+  # it blocks voluntary evictions and node drains of the single Pod. Set
+  # podDisruptionBudget.enabled: false for that interim if you need to drain.
+  multiInstance: null
+  # Rollout strategy. Surge-then-drain keeps one Pod serving while a peer
+  # starts; with run-ownership heartbeats the new Pod leaves the old Pod's live
+  # runs alone (their leases keep renewing) while the old Pod drains them.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  # PodDisruptionBudget, rendered only for a multi-instance gateway (replicas
+  # > 1 or multiInstance: true; a budget of 1 on a single replica would block
+  # node drains). minAvailable is an integer or a percentage string such as
+  # "50%" (quoted; a plain `int` cast would turn it into 0) and falls back to
+  # 1 when unset. 0 and "0%" fail the render -- a zero budget protects
+  # nothing -- so disable the budget instead.
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  # uvicorn --timeout-graceful-shutdown (seconds): how long open HTTP
+  # connections (long SSE streams included) may hold up lifespan shutdown
+  # after SIGTERM before uvicorn closes them. Without a bound one idle SSE
+  # client can push the whole shutdown past the grace period into SIGKILL.
+  # 0 closes open connections immediately on SIGTERM.
+  uvicornGracefulShutdownSeconds: 10
   # Pod termination grace period (seconds). MUST exceed the Gateway's graceful
-  # shutdown work: channel stop (~5s) + memory queue drain
-  # (memory.shutdown_flush_timeout_seconds, default 30s) + buffer. K8s defaults
+  # shutdown work: preStopSleepSeconds + uvicornGracefulShutdownSeconds + the
+  # lifespan's worst case (five 5s-bounded hooks: trash sweep, notification
+  # worker, channel service, browser sessions, MCP session pool; the 1s
+  # retrieval-warm wait; the 5s run drain; the memory queue drain,
+  # memory.shutdown_flush_timeout_seconds, default 30s -- about 61s) + buffer.
+  # backend/tests/_gateway_shutdown_budget.py pins the arithmetic. K8s defaults
   # to 30s, which SIGKILLs the memory drain mid-flight and silently re-introduces
   # the memory loss that shutdown_flush is fixing. Raise this when you raise the
   # memory timeout. See gateway-deployment.yaml + README "Graceful shutdown".
-  terminationGracePeriodSeconds: 45
+  terminationGracePeriodSeconds: 90
   # preStop hook sleep (seconds) before SIGTERM, so the Service/ingress
   # deregisters the pod and in-flight HTTP requests drain before graceful
   # shutdown begins (which runs the memory queue drain). 0 disables the hook.
@@ -87,6 +139,45 @@ nginx:
 #    this namespace via a ServiceAccount + RBAC.
 provisioner:
   enabled: true
+  # The gateway authenticates to the provisioner with PROVISIONER_API_KEY,
+  # which the chart generates into the `<release>-app` Secret (see
+  # existingAppSecret) and injects into both Pods; `config.sandbox` below
+  # references it as `provisioner_api_key: $PROVISIONER_API_KEY`. The
+  # provisioner rejects every /api/* request without a matching key. With
+  # `enabled: false` the gateway takes PROVISIONER_API_KEY from `secrets` /
+  # `existingSecret` when you supply one (external provisioner); otherwise
+  # its start command defaults the variable to "", so the default `config`
+  # below still loads even when a user-managed Secret lacks the key.
+  # Replica count. 1 is the conservative default, matching the gateway; >1 is
+  # safe as the provisioner stands: it keeps no state of its own between
+  # requests -- the sandbox Pods and Services it labels (`app=deer-flow-sandbox`,
+  # `sandbox-id`) are the only registry, every handler reads them back from
+  # the API server, and create tolerates the 409 AlreadyExists a concurrent
+  # creator on another replica produces (the race several gateway Pods already
+  # run against one provisioner). NodePorts are allocated by the API server,
+  # never by the provisioner. The `provisioner` Service spreads requests over
+  # every replica, so with 1 replica this is the last single point of failure
+  # in a multi-replica gateway deployment: while its Pod restarts or its node
+  # drains no sandbox can be created or discovered. Scaling it changes nothing
+  # else in the chart, so there is no multiInstance switch here.
+  replicas: 1
+  # Rollout strategy. Surge-then-drain keeps one Pod answering sandbox calls
+  # while a peer starts; a replica has nothing to hand over beyond its
+  # in-flight requests, so the default termination grace period is enough.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  # PodDisruptionBudget, rendered only for replicas > 1 (a budget of 1 on a
+  # single replica would block node drains). minAvailable is an integer or a
+  # percentage string such as "50%" and falls back to 1 when unset; 0 and
+  # "0%" fail the render -- a zero budget protects nothing -- so disable the
+  # budget instead. Scaling with `kubectl scale` instead of `replicas` leaves
+  # the budget unrendered.
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
   resources:
     requests:
       cpu: 50m
@@ -111,6 +202,20 @@ provisioner:
   nodeHost: ""
   # -- Sandbox container port (must match the sandboxImage's listening port).
   sandboxPort: 8080
+  # -- Optional lark-cli init image (Pattern A). Empty (default) leaves the
+  #    sandbox without a lark-cli runtime, so an in-sandbox `lark-cli` call
+  #    fails with "command not found". When set (e.g.
+  #    `deer-flow/lark-cli-init:v1.0.65`), sandbox Pods requesting the runtime
+  #    get an init container + shared emptyDir instead of a hostPath/PVC mount.
+  #    Mirrors compose's `LARK_CLI_INIT_IMAGE`. See `docker/lark-cli-init/`.
+  larkCliInitImage: ""
+  # -- Optional lark-cli broker image (Pattern B, issue #4338). When set, the
+  #    sandbox gets a shim + a `lark-cli-broker` sidecar that holds the
+  #    credentials, so the plaintext config/data dirs are never mounted into
+  #    the sandbox. Supersedes `larkCliInitImage` when both are set. Empty
+  #    (default) ⇒ broker off. Mirrors compose's `LARK_CLI_BROKER_IMAGE`.
+  #    See `docker/lark-cli-broker/`.
+  larkCliBrokerImage: ""
 
 # -- PostgreSQL database. Bundled mode (default) deploys a single-instance
 #    postgres StatefulSet; set `enabled: false` to use an external managed DB.
@@ -228,6 +333,16 @@ skills:
 secrets: {}
 # -- Use an existing Secret instead of creating one from `secrets` above.
 existingSecret: ""
+# -- Use an existing Secret for the app secrets instead of generating
+#    `<release>-app`. It must hold BETTER_AUTH_SECRET (frontend),
+#    DEER_FLOW_INTERNAL_AUTH_TOKEN, PROVISIONER_API_KEY (the shared gateway ->
+#    sandbox-provisioner key, required while `provisioner.enabled`) and, for
+#    more than one gateway instance, AUTH_JWT_SECRET (the session-cookie
+#    signing key every Pod must share). It should also hold
+#    DEER_FLOW_CREDENTIALS_KEY (the at-rest key for stored credentials, a
+#    Fernet key); a multi-instance gateway with channel_connections enabled
+#    refuses to start without it.
+existingAppSecret: ""
 
 # -- Ingress in front of nginx (port 2026). nginx preserves all internal routing.
 ingress:
@@ -249,7 +364,7 @@ ingress:
 # -- DeerFlow config.yaml content. Secrets MUST stay as $VAR references — never
 #    inline literal secret values here. The default enables provisioner sandbox.
 config: |
-  config_version: 49
+  config_version: 58
   log_level: info
   recursion_limit: 100
   max_recursion_limit: 1000
@@ -261,6 +376,10 @@ config: |
     scope_selection_enabled: false
 
   models: []
+  # Both switches are required for conversation-created schedules. Restart pods.
+  scheduler:
+    enabled: false
+    tool_enabled: false
   # Example (uncomment & set the matching secret in `secrets`):
   #   - name: gpt-4
   #     display_name: GPT-4
@@ -272,6 +391,11 @@ config: |
   sandbox:
     use: deerflow.community.aio_sandbox:AioSandboxProvider
     provisioner_url: http://provisioner:8002
+    # Sent as X-API-Key on every provisioner request. The chart injects the
+    # generated `<release>-app` key into the gateway and provisioner Pods as
+    # PROVISIONER_API_KEY; without a matching value the provisioner answers
+    # 401 and no sandbox can be created.
+    provisioner_api_key: $PROVISIONER_API_KEY
     image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
     port: 8080
     replicas: 3
@@ -301,8 +425,37 @@ config: |
   stream_bridge:
     type: redis
 
+  # Multi-replica prerequisites (harmless at 1 replica). Heartbeats give each
+  # run a lease, so a starting Pod only reclaims runs whose owner is really
+  # gone instead of writing every peer's live run off as an orphan; db run
+  # events share message history and delivery receipts across Pods. Sandbox
+  # ownership leases (#4206) are inferred from the Redis stream bridge above.
+  # Both are startup-only: restart every Gateway Pod together after changing
+  # them.
+  run_ownership:
+    heartbeat_enabled: true
+  run_events:
+    backend: db
+
+  # Custom agents and managed subagents default to per-Pod files under the
+  # home volume. Switch to the shared database when running more than one
+  # replica. From the repository root, use the installed backend environment
+  # and the Gateway's runtime/configuration selectors to preview the import:
+  # `uv run --no-sync --project backend python backend/scripts/migrate_agents_to_db.py --dry-run`
+  # Remove --dry-run after reviewing the preview to perform the import:
+  # agent_storage:
+  #   backend: db
+
+  # Canonical memory (users/{uid}/memory.json plus fact Markdown) lives at the
+  # default root on the home volume. The derived SQLite FTS5 retrieval index is
+  # rebuildable and must not be shared between Pods: SQLite WAL is unsupported
+  # on network filesystems, every Pod start would rebuild the shared index
+  # under its peers, and one Pod's corruption recovery would delete files the
+  # others hold open. gateway-deployment.yaml mounts an emptyDir at this path;
+  # a Pod re-syncs a user's index on its next search after a peer writes.
   memory:
-    storage_path: memory.json
+    backend_config:
+      retrieval_index_path: /var/lib/deerflow/memory-index
 
   verification:
     receipts_enabled: true

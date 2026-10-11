@@ -13,7 +13,7 @@ from agent_sandbox.core.api_error import ApiError
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
-from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
+from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path_under_root, truncate_line
 
 from .backend import sandbox_http_trust_env
 
@@ -75,6 +75,7 @@ class AioSandbox(Sandbox):
         home_dir: str | None = None,
         request_headers: dict[str, str] | None = None,
         default_command_timeout: float | None = None,
+        lark_cli_broker: bool | None = None,
     ):
         """Initialize the AIO sandbox.
 
@@ -86,8 +87,14 @@ class AioSandbox(Sandbox):
                 relay. These are never injected into sandbox commands.
             default_command_timeout: Provider-configured command deadline used
                 when a command does not provide an explicit timeout.
+            lark_cli_broker: Pod-attested Lark broker mode. ``True``/``False``
+                are attested states; the ``None`` default keeps an unattested
+                sandbox fail-closed, so a construction site that forgets to
+                thread the attested value cannot silently authorize the
+                plaintext credential-mount overlay.
         """
         super().__init__(id)
+        self.lark_cli_broker = lark_cli_broker
         if default_command_timeout is None:
             self._default_command_timeout = self._DEFAULT_HARD_TIMEOUT
         else:
@@ -315,11 +322,24 @@ class AioSandbox(Sandbox):
             )
 
     @property
+    def has_pending_session_creates(self) -> bool:
+        """Whether a shell/bash create still needs its outcome reconciled."""
+        with self._session_creation_state_lock:
+            return bool(self._shell_session_creation_state.pending or self._bash_session_creation_state.pending)
+
+    @property
     def requires_container_recycle(self) -> bool:
         with self._session_creation_state_lock:
             shell = self._shell_session_creation_state
             bash = self._bash_session_creation_state
-            return bool(shell.pending or shell.ambiguous or bash.pending or bash.ambiguous)
+            # The implicit shell cannot be cleaned up by a known session id.
+            # Its fence must outlive this client, including release/reclaim.
+            # Pending creations are transient in-flight requests, not uncertain
+            # outcomes: an unresolved create becomes an ambiguous tombstone
+            # before its execution lease ends. Fencing on pending let a
+            # concurrent acquire recycle a healthy container that another run
+            # was actively using.
+            return bool(self._default_shell_corrupted or shell.ambiguous or bash.ambiguous)
 
     def _create_shell_session(self, client) -> str:
         session_id = str(uuid.uuid4())
@@ -399,6 +419,8 @@ class AioSandbox(Sandbox):
         timeout: float,
     ) -> tuple[str, int | None, str | None]:
         kwargs = {
+            # /v1/shell is a persistent PTY. Keep its command and terminal stdin
+            # intact; the broker shim already treats a TTY as non-payload input.
             "command": command,
             "no_change_timeout": self._effective_no_change_timeout(timeout),
             "hard_timeout": timeout,
@@ -916,7 +938,14 @@ class AioSandbox(Sandbox):
                 try:
                     session_id = self._create_bash_session(self._client)
                     result = self._client.bash.exec(
-                        command=command,
+                        # /v1/bash keeps a subprocess stdin pipe open for writes.
+                        # This fresh, released session is non-interactive, so close
+                        # its default input before running the original script.
+                        # Explicit pipes/heredocs/files still override fd0. A plain
+                        # prefix keeps top-level parsing (aliases/extglob) and never
+                        # appends a delimiter that a trailing backslash can consume.
+                        # Do not apply exec to the persistent PTY transport above.
+                        command=f"exec < /dev/null\n{command}",
                         session_id=session_id,
                         env=env,
                         hard_timeout=timeout,
@@ -1156,22 +1185,22 @@ class AioSandbox(Sandbox):
                 raise
 
     def glob(self, path: str, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
+        root_path = path.rstrip("/") or "/"
         if not include_dirs:
             result = self._client.file.find_files(path=path, glob=pattern)
             files = result.data.files if result.data and result.data.files else []
-            filtered = [file_path for file_path in files if not should_ignore_path(file_path)]
+            filtered = [file_path for file_path in files if not should_ignore_path_under_root(file_path, root_path)]
             truncated = len(filtered) > max_results
             return filtered[:max_results], truncated
 
         result = self._client.file.list_path(path=path, recursive=True, show_hidden=False)
         entries = result.data.files if result.data and result.data.files else []
         matches: list[str] = []
-        root_path = path.rstrip("/") or "/"
         root_prefix = root_path if root_path == "/" else f"{root_path}/"
         for entry in entries:
             if entry.path != root_path and not entry.path.startswith(root_prefix):
                 continue
-            if should_ignore_path(entry.path):
+            if should_ignore_path_under_root(entry.path, root_path):
                 continue
             rel_path = entry.path[len(root_path) :].lstrip("/")
             if path_matches(pattern, rel_path):
@@ -1223,7 +1252,7 @@ class AioSandbox(Sandbox):
         truncated = bool(data and data.truncated)
         for match in provider_matches:
             file_path = match.file
-            if should_ignore_path(file_path):
+            if should_ignore_path_under_root(file_path, root):
                 continue
             if file_path == root:
                 rel_path = file_path.rsplit("/", 1)[-1]

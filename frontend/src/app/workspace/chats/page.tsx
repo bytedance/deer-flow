@@ -10,7 +10,9 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   ThreadChannelBadge,
-  ThreadChannelIcon,
+  ThreadOriginIcon,
+  ThreadUnreadDot,
+  unreadLabelOfThread,
 } from "@/components/workspace/thread-channel-source";
 import { VirtualThreadList } from "@/components/workspace/thread-list-virtualizer";
 import { useThreadArchiveAction } from "@/components/workspace/use-thread-archive-action";
@@ -21,6 +23,7 @@ import {
 } from "@/components/workspace/workspace-container";
 import { useI18n } from "@/core/i18n/hooks";
 import { useInfiniteThreads } from "@/core/threads/hooks";
+import { threadOriginOf } from "@/core/threads/origin";
 import { buildThreadListModel } from "@/core/threads/thread-list-model";
 import {
   channelSourceOfThread,
@@ -59,9 +62,11 @@ export default function ChatsPage() {
 
   const filteredThreads = useMemo(() => {
     return threads.filter((thread) => {
-      return titleOfThread(thread).toLowerCase().includes(search.toLowerCase());
+      return titleOfThread(thread, t.pages.untitled)
+        .toLowerCase()
+        .includes(search.toLowerCase());
     });
-  }, [threads, search]);
+  }, [threads, search, t.pages.untitled]);
 
   // Sentinel-based auto load-more for the unfiltered list (issue #3482).
   // In search mode we deliberately do NOT auto-paginate, otherwise an empty
@@ -142,29 +147,50 @@ export default function ChatsPage() {
                     items={filteredThreads}
                     scrollParentSelector='[data-slot="scroll-area-viewport"]'
                     renderItem={(thread) => {
-                      const channelSource = channelSourceOfThread(thread);
+                      const channelSource = channelSourceOfThread(thread, t);
+                      const title = titleOfThread(thread, t.pages.untitled);
+                      const unread = thread.unread === true;
+                      const origin = threadOriginOf(thread);
+                      // The unread label replaces the row's name; the time
+                      // stays announced as its description.
+                      const timeId = `thread-time-${thread.thread_id}`;
                       return (
                         <div
                           key={thread.thread_id}
                           className="flex items-center gap-2 border-b"
                         >
                           <Link
+                            aria-label={
+                              unread
+                                ? unreadLabelOfThread(title, t, origin)
+                                : undefined
+                            }
+                            aria-describedby={
+                              unread && thread.updated_at ? timeId : undefined
+                            }
                             className="min-w-0 flex-1"
+                            data-unread={unread ? "true" : undefined}
                             href={pathOfThread(thread)}
                           >
                             <div className="flex flex-col gap-2 p-4">
                               <div className="flex min-w-0 items-center gap-2">
-                                <ThreadChannelIcon source={channelSource} />
-                                <div className="min-w-0 flex-1 truncate">
-                                  {titleOfThread(thread)}
-                                </div>
+                                <ThreadOriginIcon
+                                  origin={origin}
+                                  className="text-muted-foreground"
+                                />
+                                <div className="min-w-0 truncate">{title}</div>
+                                {unread && <ThreadUnreadDot />}
+                                <div className="flex-1" />
                                 <ThreadChannelBadge
                                   source={channelSource}
                                   className="hidden sm:inline-flex"
                                 />
                               </div>
                               {thread.updated_at && (
-                                <div className="text-muted-foreground text-sm">
+                                <div
+                                  id={timeId}
+                                  className="text-muted-foreground text-sm"
+                                >
                                   {formatTimeAgo(thread.updated_at)}
                                 </div>
                               )}

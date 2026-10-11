@@ -99,7 +99,7 @@ Application                    HTTP / SSE                    LangGraph Graph
 
 - **Graph 层**（`agent.stream` / `agent.astream`）：LangGraph Python 直接 API，mode 叫 **`"messages"`**。
 - **Platform SDK 层**（`langgraph-sdk` HTTP client）：跨进程 HTTP 契约，mode 叫 **`"messages-tuple"`**。
-- **Gateway worker** 显式做翻译：`if m == "messages-tuple": lg_modes.append("messages")`（`runtime/runs/worker.py:117-121`）。
+- **Gateway worker** 显式做翻译：`runtime/stream_modes.py::to_langgraph_stream_modes` 把 `"messages-tuple"` 映射成 `"messages"`，worker 在 `runtime/runs/worker.py::run_agent` 里调用它。
 
 **后果**：`DeerFlowClient.stream()` 直接调 `agent.stream()`（Graph 层），所以必须传 `"messages"`。`app/channels/manager.py` 通过 `langgraph-sdk` 走 HTTP SDK，所以传 `"messages-tuple"`。**这两个字符串不能互相替代**，也不能抽成"一个共享常量"——它们是不同协议层的 type alias，共享只会让某一层说不是它母语的话。
 
@@ -371,7 +371,7 @@ assert "messages" in agent.stream.call_args.kwargs["stream_mode"]
 | Gateway async 流 | `packages/harness/deerflow/runtime/runs/worker.py::run_agent` |
 | HTTP SSE 帧输出 | `app/gateway/services.py::sse_consumer` / `format_sse` |
 | 序列化到 wire 格式 | `packages/harness/deerflow/runtime/serialization.py` |
-| LangGraph mode 命名翻译 | `packages/harness/deerflow/runtime/runs/worker.py:117-121` |
+| LangGraph mode 命名翻译 | `packages/harness/deerflow/runtime/stream_modes.py::to_langgraph_stream_modes`（调用点 `packages/harness/deerflow/runtime/runs/worker.py::run_agent`） |
 | 飞书渠道的增量卡片更新 | `app/channels/manager.py::_handle_streaming_chat` |
 | Channels 自带的 delta/cumulative 防御性累加 | `app/channels/manager.py::_merge_stream_text` |
 | Frontend useStream 支持的 mode 集合 | `frontend/src/core/api/stream-mode.ts` |

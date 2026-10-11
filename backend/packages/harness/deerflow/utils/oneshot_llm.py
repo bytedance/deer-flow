@@ -16,8 +16,10 @@ helper stops at the extracted raw text.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
+from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from deerflow.config.app_config import AppConfig
 from deerflow.models import create_chat_model
@@ -26,11 +28,23 @@ from deerflow.tracing import inject_langfuse_metadata
 from deerflow.utils.llm_text import extract_response_text
 
 
+@dataclass(frozen=True)
+class OneshotLLMResult:
+    """Text plus the raw response message for callers that need metadata.
+
+    ``message`` preserves ``response_metadata``/``additional_kwargs`` (e.g.
+    provider termination signals) that the plain-text return path drops.
+    """
+
+    text: str
+    message: AIMessage
+
+
 def _resolve_environment() -> str | None:
     return os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT")
 
 
-async def run_oneshot_llm(
+async def run_oneshot_llm_detailed(
     *,
     system_instruction: str,
     user_content: str,
@@ -38,8 +52,9 @@ async def run_oneshot_llm(
     app_config: AppConfig,
     model_name: str | None = None,
     thread_id: str | None = None,
-) -> str:
-    """Run a single non-graph system+user LLM turn and return the raw text.
+    model_overrides: dict[str, Any] | None = None,
+) -> OneshotLLMResult:
+    """Run a single non-graph system+user LLM turn and return text + message.
 
     Args:
         system_instruction: System message content.
@@ -48,11 +63,15 @@ async def run_oneshot_llm(
         app_config: Application config used to build the model.
         model_name: Optional model override; ``None`` uses the default model.
         thread_id: Optional thread id, forwarded to Langfuse for tracing only.
+        model_overrides: Optional per-call sampling overrides forwarded to
+            ``create_chat_model`` (e.g. ``{"max_tokens": 128}``). Provider
+            transforms may still drop a key (Codex removes ``max_tokens``).
 
     Returns:
-        The extracted plain-text content of the model response (uncleaned).
+        The extracted plain text plus the raw :class:`AIMessage`.
     """
-    model = create_chat_model(name=model_name, thinking_enabled=False, app_config=app_config)
+    model_kwargs: dict[str, Any] = {"model_overrides": model_overrides} if model_overrides is not None else {}
+    model = create_chat_model(name=model_name, thinking_enabled=False, app_config=app_config, **model_kwargs)
     invoke_config: dict = {"run_name": run_name}
     inject_langfuse_metadata(
         invoke_config,
@@ -69,4 +88,41 @@ async def run_oneshot_llm(
         ],
         config=invoke_config,
     )
-    return extract_response_text(response.content)
+    return OneshotLLMResult(text=extract_response_text(response.content), message=response)
+
+
+async def run_oneshot_llm(
+    *,
+    system_instruction: str,
+    user_content: str,
+    run_name: str,
+    app_config: AppConfig,
+    model_name: str | None = None,
+    thread_id: str | None = None,
+    model_overrides: dict[str, Any] | None = None,
+) -> str:
+    """Run a single non-graph system+user LLM turn and return the raw text.
+
+    Args:
+        system_instruction: System message content.
+        user_content: Human message content.
+        run_name: LangChain ``run_name`` and Langfuse ``assistant_id`` for the call.
+        app_config: Application config used to build the model.
+        model_name: Optional model override; ``None`` uses the default model.
+        thread_id: Optional thread id, forwarded to Langfuse for tracing only.
+        model_overrides: Optional per-call sampling overrides (see
+            :func:`run_oneshot_llm_detailed`).
+
+    Returns:
+        The extracted plain-text content of the model response (uncleaned).
+    """
+    result = await run_oneshot_llm_detailed(
+        system_instruction=system_instruction,
+        user_content=user_content,
+        run_name=run_name,
+        app_config=app_config,
+        model_name=model_name,
+        thread_id=thread_id,
+        model_overrides=model_overrides,
+    )
+    return result.text

@@ -15,6 +15,7 @@ from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from deerflow.config.credentials_key import CredentialsCipher
 from deerflow.persistence.channel_connections.model import (
     ChannelConnectionRow,
     ChannelConversationRow,
@@ -32,27 +33,29 @@ logger = logging.getLogger(__name__)
 _UPSERT_MAX_ATTEMPTS = 3
 
 
-class ChannelCredentialCipher:
-    """Encrypts provider credentials before they are persisted."""
+class ChannelCredentialCipher(CredentialsCipher):
+    """Historical constructors for the channel-credentials cipher.
+
+    Production passes the deployment cipher from
+    ``deerflow.config.credentials_key`` (``DEER_FLOW_CREDENTIALS_KEY``); this
+    subclass only keeps the earlier API: a single ``Fernet`` and ``from_key``'s
+    SHA-256 passphrase derivation. New values carry ``fernet:v2:``; the
+    ``fernet:v1:`` values it wrote before remain readable under the same key.
+    """
 
     def __init__(self, fernet: Fernet) -> None:
-        self._fernet = fernet
+        super().__init__([fernet])
 
     @classmethod
     def from_key(cls, key: str) -> ChannelCredentialCipher:
         digest = hashlib.sha256(key.encode("utf-8")).digest()
         return cls(Fernet(base64.urlsafe_b64encode(digest)))
 
-    def encrypt_text(self, value: str | None) -> str | None:
-        if value is None:
-            return None
-        return "fernet:v1:" + self._fernet.encrypt(value.encode("utf-8")).decode("ascii")
+    def encrypt_text(self, value: str | None) -> str | None:  # type: ignore[override]  # historical None passthrough
+        return None if value is None else super().encrypt_text(value)
 
-    def decrypt_text(self, value: str | None) -> str | None:
-        if value is None:
-            return None
-        token = value.removeprefix("fernet:v1:")
-        return self._fernet.decrypt(token.encode("ascii")).decode("utf-8")
+    def decrypt_text(self, value: str | None) -> str | None:  # type: ignore[override]  # historical None passthrough
+        return None if value is None else super().decrypt_text(value)
 
 
 class ChannelConnectionRepository:
@@ -62,7 +65,7 @@ class ChannelConnectionRepository:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         *,
-        cipher: ChannelCredentialCipher | None = None,
+        cipher: CredentialsCipher | None = None,
     ) -> None:
         self.session_factory = session_factory
         self._cipher = cipher
@@ -92,6 +95,11 @@ class ChannelConnectionRepository:
         if self._cipher is None:
             raise RuntimeError("channel connection encryption key is required")
         return self._cipher.encrypt_text(value)
+
+    def _decrypt_optional_secret(self, value: str | None) -> str | None:
+        if value is None or self._cipher is None:
+            return None
+        return self._cipher.decrypt_text(value)
 
     @staticmethod
     def _connection_to_dict(row: ChannelConnectionRow) -> dict[str, Any]:
@@ -245,12 +253,12 @@ class ChannelConnectionRepository:
             if row is None:
                 row = ChannelCredentialRow(connection_id=connection_id)
                 session.add(row)
-            row.encrypted_access_token = self._cipher.encrypt_text(access_token)
-            row.encrypted_refresh_token = self._cipher.encrypt_text(refresh_token)
+            row.encrypted_access_token = self._encrypt_optional_secret(access_token)
+            row.encrypted_refresh_token = self._encrypt_optional_secret(refresh_token)
             row.token_type = token_type
             row.expires_at = expires_at
             row.refresh_expires_at = refresh_expires_at
-            row.encrypted_extra_json = self._cipher.encrypt_text(json.dumps(extra or {}, ensure_ascii=False))
+            row.encrypted_extra_json = self._encrypt_optional_secret(json.dumps(extra or {}, ensure_ascii=False))
             row.version = (row.version or 0) + 1
             await session.commit()
 
@@ -262,11 +270,11 @@ class ChannelConnectionRepository:
             if row is None:
                 return None
             try:
-                extra_raw = self._cipher.decrypt_text(row.encrypted_extra_json)
+                extra_raw = self._decrypt_optional_secret(row.encrypted_extra_json)
                 return {
                     "connection_id": row.connection_id,
-                    "access_token": self._cipher.decrypt_text(row.encrypted_access_token),
-                    "refresh_token": self._cipher.decrypt_text(row.encrypted_refresh_token),
+                    "access_token": self._decrypt_optional_secret(row.encrypted_access_token),
+                    "refresh_token": self._decrypt_optional_secret(row.encrypted_refresh_token),
                     "token_type": row.token_type,
                     "expires_at": self._coerce_datetime(row.expires_at),
                     "refresh_expires_at": self._coerce_datetime(row.refresh_expires_at),

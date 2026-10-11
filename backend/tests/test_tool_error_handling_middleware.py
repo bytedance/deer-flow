@@ -217,6 +217,10 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     # + 1 SubagentDateContextMiddleware
     # + 1 SystemMessageCoalescingMiddleware + 1 ToolReceiptMiddleware
     # (all enabled by default).
+    # + 1 ArtifactResolutionMiddleware + 1 ArtifactCaptureMiddleware
+    # (tool_artifacts enabled by default, #4676).
+    # + 1 ModelContentCompatibilityMiddleware (unconditional read-time
+    # sanitizer between DurableContext and the date/coalescer tail).
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
     from deerflow.agents.middlewares.dynamic_context_middleware import SubagentDateContextMiddleware
     from deerflow.agents.middlewares.knowledge_scope_middleware import KnowledgeScopeMiddleware
@@ -228,7 +232,7 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
     from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
 
-    assert len(middlewares) == 20
+    assert len(middlewares) == 23
     assert isinstance(middlewares[0], FakeMiddleware)  # InputSanitizationMiddleware stub
     assert isinstance(middlewares[1], KnowledgeScopeMiddleware)
     assert isinstance(middlewares[2], ToolOutputBudgetMiddleware)
@@ -300,6 +304,75 @@ def test_tool_progress_middleware_is_outer_relative_to_error_handling(monkeypatc
     progress_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ToolProgressMiddleware))
     error_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ToolErrorHandlingMiddleware))
     assert progress_idx < error_idx, f"ToolProgressMiddleware (index {progress_idx}) must be outer (lower index) than ToolErrorHandlingMiddleware (index {error_idx}); order: {[type(m).__name__ for m in middlewares]}"
+
+
+def test_artifact_middlewares_ordering_in_runtime_chain(monkeypatch: pytest.MonkeyPatch):
+    # Resolution precedes authorization, auditing and write/progress gates;
+    # all policy layers inspect the same concrete arguments as the tool.
+    # ArtifactCaptureMiddleware is position-independent in the wrap chain — it
+    # is a `before_model` hook reading state messages, not a tool wrapper — so
+    # the assertion below only pins its assembly slot, not a behavioral
+    # dependency. — issue #4676.
+    from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCaptureMiddleware
+    from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
+    from deerflow.config.tool_artifact_config import ToolArtifactConfig
+    from deerflow.config.tool_progress_config import ToolProgressConfig
+
+    app_config = AppConfig(
+        models=[
+            ModelConfig(
+                name="test-model",
+                display_name="test-model",
+                description=None,
+                use="langchain_openai:ChatOpenAI",
+                model="test-model",
+            )
+        ],
+        sandbox=SandboxConfig(use="test"),
+        guardrails=GuardrailsConfig(enabled=False),
+        circuit_breaker=CircuitBreakerConfig(failure_threshold=7, recovery_timeout_sec=11),
+        tool_progress=ToolProgressConfig(enabled=True),
+        tool_artifacts=ToolArtifactConfig(enabled=True, resolve_handles_in_args=True),
+    )
+
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, lazy_init=False)
+    names = [type(m).__name__ for m in middlewares]
+
+    resolution_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ArtifactResolutionMiddleware))
+    capture_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ArtifactCaptureMiddleware))
+    error_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ToolErrorHandlingMiddleware))
+    assert resolution_idx < error_idx < capture_idx, f"expected resolution < error < capture, got: {names}"
+    for name in ("FakeSandboxAuditMiddleware", "ReadBeforeWriteMiddleware", "ToolProgressMiddleware"):
+        gate_idx = next(i for i, m in enumerate(middlewares) if type(m).__name__ == name)
+        assert resolution_idx < gate_idx, names
+
+
+def test_artifact_capture_absent_when_disabled(monkeypatch: pytest.MonkeyPatch):
+    from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCaptureMiddleware
+    from deerflow.config.tool_artifact_config import ToolArtifactConfig
+
+    app_config = AppConfig(
+        models=[
+            ModelConfig(
+                name="test-model",
+                display_name="test-model",
+                description=None,
+                use="langchain_openai:ChatOpenAI",
+                model="test-model",
+            )
+        ],
+        sandbox=SandboxConfig(use="test"),
+        guardrails=GuardrailsConfig(enabled=False),
+        circuit_breaker=CircuitBreakerConfig(failure_threshold=7, recovery_timeout_sec=11),
+        tool_artifacts=ToolArtifactConfig(enabled=False),
+    )
+
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, lazy_init=False)
+    assert not any(isinstance(m, ArtifactCaptureMiddleware) for m in middlewares)
 
 
 def test_middleware_ordering_guard_moved_to_declarative_constraints(monkeypatch: pytest.MonkeyPatch):

@@ -7,6 +7,7 @@ import secrets
 from types import SimpleNamespace
 from typing import Any
 
+from app.gateway.utils import constant_time_equals
 from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime.user_context import DEFAULT_USER_ID
 
@@ -36,7 +37,7 @@ def create_internal_auth_headers(*, owner_user_id: str | None = None) -> dict[st
 
 def is_valid_internal_auth_token(token: str | None) -> bool:
     """Return True when *token* matches this Gateway worker's internal token."""
-    return bool(token) and secrets.compare_digest(token, _INTERNAL_AUTH_TOKEN)
+    return bool(token) and constant_time_equals(token, _INTERNAL_AUTH_TOKEN)
 
 
 def get_internal_user(owner_user_id: str | None = None):

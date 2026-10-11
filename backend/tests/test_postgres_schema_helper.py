@@ -71,6 +71,32 @@ class TestDsnWithSearchPath:
         assert query["sslmode"] == ["require"]
         assert query["options"] == ["-c search_path=deerflow"]
 
+    @staticmethod
+    def _raw_query(out: str) -> dict[str, str]:
+        # Read the pairs back undecoded: parse_qs applies the HTML-form rule that
+        # turns '+' into a space, which is exactly the rule libpq does NOT apply.
+        return dict(pair.split("=", 1) for pair in urlsplit(out).query.split("&") if pair)
+
+    def test_preserves_plus_in_existing_query_value(self):
+        # A '+' in a parameter value is a literal plus for libpq, so rewriting it
+        # into '%20' silently changes the value the server receives: 'web+app'
+        # would arrive as 'web app'.
+        dsn = "postgresql://u:p@h:5432/db?application_name=web+app"
+        out = dsn_with_search_path(dsn, "deerflow")
+        assert self._raw_query(out)["application_name"] == "web+app"
+        assert parse_qs(urlsplit(out).query)["options"] == ["-c search_path=deerflow"]
+
+    def test_preserves_plus_in_existing_options_value(self):
+        dsn = "postgresql://u:p@h:5432/db?options=-c%20timezone%3DUTC+8"
+        out = dsn_with_search_path(dsn, "deerflow")
+        assert self._raw_query(out)["options"] == "-c%20timezone%3DUTC%2B8%20-c%20search_path%3Ddeerflow"
+        assert parse_qs(urlsplit(out).query, keep_blank_values=True)["options"] == ["-c timezone=UTC+8 -c search_path=deerflow"]
+
+    def test_does_not_double_encode_an_existing_percent_escape(self):
+        dsn = "postgresql://u:p@h:5432/db?application_name=web%2Bapp"
+        out = dsn_with_search_path(dsn, "deerflow")
+        assert self._raw_query(out)["application_name"] == "web%2Bapp"
+
     def test_replaces_existing_options_query(self):
         dsn = "postgresql://u:p@h:5432/db?options=-c%20search_path%3Dpublic"
         out = dsn_with_search_path(dsn, "deerflow")

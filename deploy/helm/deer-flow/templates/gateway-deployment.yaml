@@ -8,6 +8,10 @@ metadata:
     app.kubernetes.io/component: gateway
 spec:
   replicas: {{ .Values.gateway.replicas }}
+  {{- with .Values.gateway.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "deer-flow.selectorLabels" . | nindent 6 }}
@@ -24,10 +28,14 @@ spec:
         checksum/extensions: {{ include "deer-flow.extensionsChecksum" . }}
     spec:
       {{- include "deer-flow.imagePullSecrets" . | nindent 6 }}
-      # MUST exceed channel stop (~5s) + memory shutdown_flush_timeout_seconds
-      # (default 30s) + buffer, or K8s SIGKILLs the memory drain mid-flight
-      # (values.yaml gateway.terminationGracePeriodSeconds). K8s defaults to 30s.
-      terminationGracePeriodSeconds: {{ .Values.gateway.terminationGracePeriodSeconds | default 45 }}
+      # MUST exceed preStop sleep + uvicorn --timeout-graceful-shutdown + the
+      # lifespan's worst case -- five hooks bounded at 5s each (trash sweep,
+      # notification worker, channel service, browser sessions, MCP session
+      # pool), the 1s retrieval-warm wait, the 5s run drain and the memory
+      # shutdown_flush_timeout_seconds (default 30s): ~61s -- plus buffer, or
+      # K8s SIGKILLs the memory drain mid-flight (values.yaml
+      # gateway.terminationGracePeriodSeconds). K8s defaults to 30s.
+      terminationGracePeriodSeconds: {{ .Values.gateway.terminationGracePeriodSeconds | default 90 }}
       securityContext:
         # Non-root: the gateway image has no USER directive and would otherwise
         # run as root. uid/gid 1000; fsGroup 1000 so the .deer-flow PVC is
@@ -83,7 +91,18 @@ spec:
           workingDir: /app
           command: ["sh", "-c"]
           args:
-            - cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 1
+            {{- /* With the bundled provisioner disabled, the default config still
+                  references $PROVISIONER_API_KEY; the harness refuses to start on
+                  an unset variable but resolves an empty one to "". The chart
+                  cannot see whether `secrets`/`existingSecret` carry the key (a
+                  user-managed provider Secret often holds only model keys), and an
+                  explicit env entry would override an envFrom value, so the shell
+                  defaults the variable to "" only when nothing else set it. An
+                  external provisioner's key is never touched and the gateway boots
+                  as it did before the key existed, failing sandbox calls at use
+                  time. With the bundled provisioner the key is injected below and
+                  required, so no default is needed. */}}
+            - {{ if not .Values.provisioner.enabled }}export PROVISIONER_API_KEY="${PROVISIONER_API_KEY:-}" && {{ end }}cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 1 --timeout-graceful-shutdown {{ .Values.gateway.uvicornGracefulShutdownSeconds | int }}
           env:
             - name: CI
               value: "true"
@@ -118,6 +137,56 @@ spec:
                 secretKeyRef:
                   name: {{ include "deer-flow.appSecret" . }}
                   key: DEER_FLOW_INTERNAL_AUTH_TOKEN
+            # Session-cookie signing key shared by every Pod. Without it each
+            # Pod runs _load_or_create_secret(), which read-then-writes
+            # .jwt_secret on the home volume: concurrently booting replicas race
+            # and sign sessions with different keys. The key is therefore
+            # required whenever more than one instance runs; only a single Pod
+            # with a user-managed existingAppSecret that lacks it may fall back
+            # to the file.
+            - name: AUTH_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "deer-flow.appSecret" . }}
+                  key: AUTH_JWT_SECRET
+                  optional: {{ ne (include "deer-flow.gatewayMultiInstance" .) "true" }}
+            # At-rest key for stored credentials, shared by every Pod so one
+            # Pod can decrypt what another stored. Optional so a user-managed
+            # existingAppSecret without it still boots: a single Pod then falls
+            # back to .credentials_key on the home volume, and the Gateway's own
+            # startup gate refuses a multi-instance deployment that stores
+            # credentials (channel_connections) without the key.
+            - name: DEER_FLOW_CREDENTIALS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "deer-flow.appSecret" . }}
+                  key: DEER_FLOW_CREDENTIALS_KEY
+                  optional: true
+            {{- if .Values.provisioner.enabled }}
+            # Shared gateway -> bundled-provisioner key. config.yaml references
+            # it as sandbox.provisioner_api_key: $PROVISIONER_API_KEY, and the
+            # harness refuses to start when a referenced variable is unset, so
+            # the key is required here (the provisioner rejects every /api/*
+            # request without it anyway) and a user-managed existingAppSecret
+            # must carry it. Rendered only for the bundled provisioner: an
+            # explicit env entry wins over envFrom, so emitting it with
+            # provisioner.enabled=false would override the PROVISIONER_API_KEY
+            # an operator supplies through `secrets`/`existingSecret` for an
+            # external provisioner. In that mode the start command above
+            # defaults the variable to "" when nothing else set it.
+            - name: PROVISIONER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "deer-flow.appSecret" . }}
+                  key: PROVISIONER_API_KEY
+            {{- end }}
+            # Tells the Gateway's startup gate that peers share the database;
+            # its GATEWAY_WORKERS count only sees this Pod. Derived from
+            # gateway.replicas unless gateway.multiInstance is set explicitly:
+            # kubectl scale and HPAs change the replica count without a Helm
+            # upgrade, so set multiInstance: true before scaling that way.
+            - name: DEER_FLOW_MULTI_INSTANCE
+              value: {{ include "deer-flow.gatewayMultiInstance" . | quote }}
             {{- /* PostgreSQL DSN — only mounted when postgres is configured
                   (bundled StatefulSet, external databaseUrl, or an existing
                   Secret). In sqlite/memory mode the env is omitted and
@@ -159,9 +228,12 @@ spec:
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
-            # /health/ready bounds both probes to a 3s endpoint deadline;
+            # /health/ready bounds all its probes (database, checkpointer,
+            # Redis stream bridge, provisioner) to a 3s endpoint deadline;
             # timeoutSeconds must stay above that bound or Kubernetes aborts
-            # slow-but-healthy responses at its 1s default.
+            # slow-but-healthy responses at its 1s default. An unreachable
+            # Redis makes the pod unready; the provisioner verdict is
+            # report-only.
             timeoutSeconds: 5
           livenessProbe:
             httpGet:
@@ -194,6 +266,13 @@ spec:
             - name: home
               mountPath: /app/backend/.deer-flow
               subPath: deer-flow
+            # Pod-local home for DeerMem's rebuildable SQLite retrieval index
+            # (config memory.backend_config.retrieval_index_path). SQLite WAL is
+            # unsupported on network filesystems and peers must not rebuild or
+            # delete each other's index, so it never lives on the shared home
+            # volume; fsGroup 1000 above makes the emptyDir writable by uid 1000.
+            - name: memory-index
+              mountPath: /var/lib/deerflow/memory-index
       volumes:
         - name: config
           configMap:
@@ -218,3 +297,5 @@ spec:
           {{- else }}
           emptyDir: {}
         {{- end }}
+        - name: memory-index
+          emptyDir: {}

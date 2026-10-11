@@ -401,7 +401,7 @@ def test_slash_activation_and_policy_compose_on_the_same_model_call(monkeypatch)
         editable=False,
     )
     activation_middleware = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
-    monkeypatch.setattr(activation_middleware, "_resolve_activation", lambda _: _ActivationResolution(activation=activation))
+    monkeypatch.setattr(activation_middleware, "_resolve_activation", lambda _, activation_decisions=None: _ActivationResolution(activation=activation))
     policy_middleware = _middleware([skill])
     request = ModelRequestStub(
         [NamedTool("task"), NamedTool("read_file"), NamedTool("review_skill_package")],
@@ -917,3 +917,30 @@ def test_active_policy_load_failure_fails_closed_to_framework_tools():
         "tool_search",
         "describe_skill",
     ]
+
+
+@pytest.mark.parametrize("async_call", [False, True])
+def test_explicit_multi_skill_policy_unions_paths_and_refreshes_cached_decision(async_call):
+    from deerflow.runtime.secret_context import write_slash_skill_source_paths
+
+    first = _skill("research", ["web_search"])
+    second = _skill("writer", ["write_file"])
+    context = {}
+    middleware = _middleware([first, second])
+    tools = [NamedTool(name) for name in ["read_file", "web_search", "write_file", "task"]]
+    request = ModelRequestStub(tools, context=context)
+
+    def invoke():
+        async def handler(value):
+            return value
+
+        return asyncio.run(middleware.awrap_model_call(request, handler)) if async_call else middleware.wrap_model_call(request, lambda value: value)
+
+    write_slash_skill_source_paths(context, (first.get_container_file_path(), second.get_container_file_path()), owner_token=_SLASH_SOURCE_OWNER_TOKEN)
+    assert _tool_names(invoke()) == ["read_file", "web_search", "write_file"]
+    signature = context[SKILL_TOOL_POLICY_DECISION_CONTEXT_KEY].copy()
+    write_slash_skill_source_paths(context, (first.get_container_file_path(),), owner_token=_SLASH_SOURCE_OWNER_TOKEN)
+    assert _tool_names(invoke()) == ["read_file", "web_search"]
+    assert context[SKILL_TOOL_POLICY_DECISION_CONTEXT_KEY] != signature
+    blocked = middleware.wrap_tool_call(ToolRequestStub("write_file", context=context), lambda _: pytest.fail("removed path must not authorize execution"))
+    assert "not allowed" in blocked.content.lower() or "blocked" in blocked.content.lower()

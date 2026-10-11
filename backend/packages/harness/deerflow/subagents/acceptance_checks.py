@@ -8,6 +8,9 @@ requirement.
 
 Leaf families:
 
+- ``file:<path> json-valid`` — explicit UTF-8 JSON syntax check, capped at 50,000 bytes.
+  Read up to the cap plus one byte and verify completeness; oversize, truncated reads
+  and parser resource limits remain UNVERIFIED. Reject NaN/Infinity; no schema or semantic validation.
 - ``file:<path> exists`` / ``file:<path> non-empty`` — read through
   ``read_current_file_content`` (the ``ReadBeforeWriteMiddleware``
   precedent), **scoped to the shared thread workspace**: the path must
@@ -55,6 +58,9 @@ the async caller offloads the whole check with ``asyncio.to_thread``.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 import ntpath
 import os
 import posixpath
@@ -86,6 +92,7 @@ _DETAIL_MAX_CHARS = 160
 _PROVIDER_ERROR_PREFIX = "Error:"
 
 _FILE_LEAF_RE = re.compile(r"^file:(?P<path>.+?)\s+(?P<mode>exists|non-empty)$", re.IGNORECASE)
+_JSON_FILE_LEAF_RE = re.compile(r"^file:(?P<path>.+?)\s+json-valid$", re.IGNORECASE)
 _FILE_WRITTEN_RE = re.compile(r"^file_written:(?P<path>.+)$", re.IGNORECASE)
 _TESTS_PASSED_RE = re.compile(r"^tests_passed:(?P<command>.+)$", re.IGNORECASE)
 
@@ -114,6 +121,8 @@ _TEST_PASS_SHAPE_RE = re.compile(
 #: cannot see: "0 passed", go's no-test markers, unittest "Ran 0 tests".
 _TEST_ZERO_SHAPE_RE = re.compile(r"\b0\s+passed\b|\[no test files\]|\[no tests to run\]|\bRan 0 tests\b", re.IGNORECASE)
 
+_GO_ZERO_TEST_LINE_RE = re.compile(r"^(?:ok|\?)[ \t]+\S+[^\r\n]*\[(?:no test files|no tests to run)\][ \t]*\r?$", re.MULTILINE)
+
 _TEST_FAIL_SHAPE_RE = re.compile(
     r"\b[1-9]\d*\s+failed\b"  # pytest / jest: "1 failed"
     r"|\b[1-9]\d*\s+errors?\b"  # pytest: "1 error" — an errored collection means part of the selection never ran
@@ -128,7 +137,7 @@ _TEST_FAIL_SHAPE_RE = re.compile(
 
 class AcceptanceLeaf(TypedDict):
     criterion: str  # original criterion text (bounded)
-    family: str  # file_exists | file_non_empty | file_written | tests_passed | undecidable
+    family: str  # file_exists | file_non_empty | file_json_valid | file_written | tests_passed | undecidable
     checked: bool  # a deterministic check ran
     holds: bool  # checked AND the condition holds; always False when unchecked
     detail: str  # short evidence note (bounded)
@@ -152,6 +161,9 @@ def parse_file_criterion(criterion: str) -> tuple[str, str] | None:
     if file_match is not None:
         family = "file_exists" if file_match.group("mode").lower() == "exists" else "file_non_empty"
         return family, file_match.group("path")
+    json_match = _JSON_FILE_LEAF_RE.match(criterion)
+    if json_match is not None:
+        return "file_json_valid", json_match.group("path")
     written_match = _FILE_WRITTEN_RE.match(criterion)
     if written_match is not None:
         return "file_written", written_match.group("path")
@@ -214,6 +226,24 @@ def _resolve_scoped_path(path: str, thread_data: Mapping[str, Any] | None, *, re
     return None
 
 
+# A failed existence test can mean EACCES. Prove a searchable ancestor and
+# canonical containment before reporting absence; broken symlinks stay uncertain.
+_REMOTE_ABSENCE_GUARD = (
+    'if [ ! -e "$1" ]; then '
+    '[ ! -L "$1" ] || { echo NONREGULAR; exit 0; }; '
+    'd=$(/usr/bin/dirname -- "$1") || { echo UNREADABLE; exit 0; }; '
+    'while [ ! -e "$d" ]; do '
+    '[ ! -L "$d" ] && [ "$d" != / ] || { echo UNREADABLE; exit 0; }; '
+    'd=${d%/*}; [ -n "$d" ] || d=/; '
+    "done; "
+    '[ -d "$d" ] && [ -x "$d" ] || { echo UNREADABLE; exit 0; }; '
+    'r=$(/usr/bin/realpath -- "$2") || { echo UNREADABLE; exit 0; }; '
+    'p=$(/usr/bin/realpath -m -- "$1") || { echo UNREADABLE; exit 0; }; '
+    'case $p in "$r"/*) echo NOFILE ;; *) echo ESCAPED ;; esac; exit 0; '
+    "fi; "
+)
+
+
 #: Remote size-probe script (POSIX sh, positional params: ``$1`` path,
 #: ``$2`` mount root). Answers a bare byte count for a regular file, or one
 #: of ``NOFILE`` / ``UNREADABLE`` / ``NONREGULAR`` / ``ESCAPED``. Everything
@@ -230,8 +260,7 @@ def _resolve_scoped_path(path: str, thread_data: Mapping[str, Any] | None, *, re
 #: lands outside the canonical root (ESCAPED). GNU stat labels zero-byte
 #: regular files as ``regular empty file``; both regular-file labels qualify.
 _SIZE_PROBE_INNER_SCRIPT = (
-    '[ -e "$1" ] || { echo NOFILE; exit 0; }; '
-    't=$(/usr/bin/stat -c %F -- "$1") || { echo UNREADABLE; exit 0; }; '
+    _REMOTE_ABSENCE_GUARD + 't=$(/usr/bin/stat -c %F -- "$1") || { echo UNREADABLE; exit 0; }; '
     'case "$t" in "regular file"|"regular empty file") ;; *) echo NONREGULAR; exit 0 ;; esac; '
     'r=$(/usr/bin/realpath -- "$2") || { echo UNREADABLE; exit 0; }; '
     'p=$(/usr/bin/realpath -- "$1") || { echo UNREADABLE; exit 0; }; '
@@ -320,8 +349,7 @@ def _probe_file_size(runtime: Any, resolved: str, thread_data: Mapping[str, Any]
 #: claim. The regular-file gate runs first, so no FIFO or device is ever
 #: opened.
 _READ_PROBE_INNER_SCRIPT = (
-    '[ -e "$1" ] || { echo NOFILE; exit 0; }; '
-    't=$(/usr/bin/stat -c %F -- "$1") || { echo UNREADABLE; exit 0; }; '
+    _REMOTE_ABSENCE_GUARD + 't=$(/usr/bin/stat -c %F -- "$1") || { echo UNREADABLE; exit 0; }; '
     'case "$t" in "regular file"|"regular empty file") ;; *) echo NONREGULAR; exit 0 ;; esac; '
     'r=$(/usr/bin/realpath -- "$2") || { echo UNREADABLE; exit 0; }; '
     'p=$(/usr/bin/realpath -- "$1") || { echo UNREADABLE; exit 0; }; '
@@ -379,6 +407,109 @@ def _probe_file_readable(runtime: Any, resolved: str, thread_data: Mapping[str, 
     return None
 
 
+# Encode content with the read exit code; the outer marker detects provider truncation, and file content cannot forge the exit code.
+_JSON_READ_INNER_SCRIPT = (
+    _REMOTE_ABSENCE_GUARD + 't=$(/usr/bin/stat -c %F -- "$1") || exit 1; '
+    'case "$t" in "regular file"|"regular empty file") ;; *) exit 1 ;; esac; '
+    'r=$(/usr/bin/realpath -- "$2") || exit 1; '
+    'p=$(/usr/bin/realpath -- "$1") || exit 1; '
+    'case $p in "$r"/*) ;; *) exit 1 ;; esac; '
+    'printf "JSON\\n"; '
+    '{ /usr/bin/timeout 5 /usr/bin/head -c "$3" -- "$p"; printf "\\n%03d" "$?"; } | /usr/bin/base64 -w 0; '
+    'printf "\\nEND\\n"'
+)
+
+
+def _read_bounded_json_content(runtime: Any, resolved: str, thread_data: Mapping[str, Any] | None) -> bytes | None:
+    """Read up to the cap plus one byte to detect growth; return None if completeness is uncertain."""
+    from deerflow.authz.sandbox_authz import authorize_sandbox_execution, safe_app_config
+    from deerflow.sandbox.tools import _resolve_local_read_path, ensure_sandbox_initialized, is_local_sandbox
+
+    if not is_local_sandbox(runtime):
+        sandbox = ensure_sandbox_initialized(runtime)
+        root = "/".join(resolved.split("/")[:4])
+        output = sandbox.execute_command(
+            f"/usr/bin/env -i /bin/sh -c {shlex.quote(_JSON_READ_INNER_SCRIPT)} json-read {shlex.quote(resolved)} {shlex.quote(root)} {_FILE_CONTENT_READ_CAP_BYTES + 1}",
+            env={"_DEERFLOW_SIZE_PROBE": "1"},
+            timeout=10,
+        )
+        if not isinstance(output, str):
+            return None
+        output = output.strip()
+        if output == "NOFILE":
+            raise FileNotFoundError(resolved)
+        if not output.startswith("JSON\n") or not output.endswith("\nEND"):
+            return None
+        encoded = output[5:-4]
+        if len(encoded) > 4 * ((_FILE_CONTENT_READ_CAP_BYTES + 5 + 2) // 3):
+            return None
+        try:
+            payload = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError):
+            return None
+        return payload[:-4] if payload.endswith(b"\n000") else None
+    # Reuse live sandbox authorization; persisted local sandbox IDs cannot bypass revoked permissions.
+    authorize_sandbox_execution(context=getattr(runtime, "context", None) or {}, app_config=safe_app_config())
+    host_path = _resolve_local_read_path(resolved, thread_data)
+    if host_path == resolved:
+        return None
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+    with os.fdopen(os.open(host_path, flags), "rb", buffering=0) as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            return None
+        content = bytearray()
+        # Disable buffered read-ahead; continue short reads to EOF or cap plus one to distinguish complete from truncated content.
+        while len(content) <= _FILE_CONTENT_READ_CAP_BYTES:
+            chunk = handle.read(_FILE_CONTENT_READ_CAP_BYTES + 1 - len(content))
+            if not chunk:
+                break
+            content.extend(chunk)
+        return bytes(content)
+
+
+class _NonStandardJSONConstant(ValueError):
+    """Distinguish nonstandard constants from parser resource limits."""
+
+
+def _reject_json_constant(value: str) -> None:
+    raise _NonStandardJSONConstant(value)
+
+
+def _check_json_file(base: AcceptanceLeaf, runtime: Any, resolved: str, thread_data: Mapping[str, Any] | None, probed_size: int) -> AcceptanceLeaf:
+    """Check JSON syntax only for complete UTF-8 documents within the read cap."""
+    from deerflow.sandbox.exceptions import SandboxError, SandboxFileNotFoundError
+
+    if probed_size > _FILE_CONTENT_READ_CAP_BYTES:
+        base["detail"] = f"JSON file exceeds {_FILE_CONTENT_READ_CAP_BYTES}-byte read cap; content not read"
+        return base
+    try:
+        content = _read_bounded_json_content(runtime, resolved, thread_data)
+    except (FileNotFoundError, SandboxFileNotFoundError):
+        base["checked"] = True
+        base["detail"] = "file does not exist"
+        return base
+    except (OSError, SandboxError):
+        base["detail"] = "bounded JSON read failed"
+        return base
+    if content is None or len(content) > _FILE_CONTENT_READ_CAP_BYTES or len(content) != probed_size:
+        base["detail"] = "complete JSON content unavailable within the read cap"
+        return base
+    try:
+        # Validate numeric syntax without converting large integers or overflowing floating-point values.
+        json.loads(content.decode("utf-8"), parse_constant=_reject_json_constant, parse_int=str, parse_float=str)
+    except (UnicodeDecodeError, json.JSONDecodeError, _NonStandardJSONConstant):
+        base["checked"] = True
+        base["detail"] = "invalid UTF-8 JSON syntax"
+        return base
+    except (RecursionError, ValueError, MemoryError):
+        base["detail"] = "JSON parser resource limit; syntax unverified"
+        return base
+    base["checked"] = True
+    base["holds"] = True
+    base["detail"] = f"valid JSON syntax, {len(content)} bytes; no schema validation"
+    return base
+
+
 def _check_file_leaf(
     family: str,
     path: str,
@@ -396,11 +527,21 @@ def _check_file_leaf(
     from deerflow.sandbox.exceptions import SandboxError, SandboxFileNotFoundError
     from deerflow.sandbox.tools import is_local_sandbox
 
+    base: AcceptanceLeaf = {"criterion": "", "family": family, "checked": False, "holds": False, "detail": ""}
+    if family == "file_json_valid" and is_local_sandbox(runtime):
+        from deerflow.authz.sandbox_authz import authorize_sandbox_execution, safe_app_config
+
+        # Authorize before canonicalization or metadata probes can disclose file existence.
+        try:
+            authorize_sandbox_execution(context=getattr(runtime, "context", None) or {}, app_config=safe_app_config())
+        except SandboxError:
+            base["detail"] = "sandbox access denied; JSON file unverified"
+            return base
+
     # Symlink escapes are a local-sandbox concern (host-visible links); remote
     # providers resolve paths inside the sandbox where the parent cannot
     # canonicalize, so the check stays lexical there.
     resolved = _resolve_scoped_path(criterion_path, thread_data, resolve_symlinks=is_local_sandbox(runtime))
-    base: AcceptanceLeaf = {"criterion": "", "family": family, "checked": False, "holds": False, "detail": ""}
     if resolved is None:
         base["detail"] = "path is outside the shared thread workspace" if thread_data else "shared thread workspace unavailable"
         return base
@@ -417,6 +558,8 @@ def _check_file_leaf(
         # worker — degrade to UNVERIFIED instead.
         base["detail"] = "file size could not be established by a bounded probe; content not read"
         return base
+    if family == "file_json_valid":
+        return _check_json_file(base, runtime, resolved, thread_data, probed_size)
     if probed_size > _FILE_CONTENT_READ_CAP_BYTES:
         # Large deliverable: the size probe proved the file exists, is
         # regular, and is non-empty (size > cap > 0) — answering the
@@ -1685,7 +1828,9 @@ def _check_tests_passed_leaf(command: str, bash_executions: list[dict[str, Any]]
         base["checked"] = True
         base["detail"] = "recorded output carries a failing test summary"
         return base
-    if _TEST_PASS_SHAPE_RE.search(output_tail) and not _TEST_ZERO_SHAPE_RE.search(output_tail):
+    # Go zero-test markers describe one package; exclude the whole line from pass evidence.
+    summary_tail = _GO_ZERO_TEST_LINE_RE.sub("", output_tail)
+    if _TEST_PASS_SHAPE_RE.search(summary_tail) and not _TEST_ZERO_SHAPE_RE.search(summary_tail):
         base["checked"] = True
         base["holds"] = True
         base["detail"] = "recorded output carries a passing test summary"

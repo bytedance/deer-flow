@@ -323,9 +323,9 @@ def test_sync_wrapped_builtin_tools_still_resolve_runtime():
         cancel_background_task,
         list_background_tasks,
     )
-    from deerflow.tools.builtins.batch_task_tool import batch_status, cancel_batch
+    from deerflow.tools.builtins.batch_task_tool import batch_status, cancel_batch, read_batch_result
 
-    for tool in (list_background_tasks, cancel_background_task, batch_status, cancel_batch):
+    for tool in (list_background_tasks, cancel_background_task, batch_status, cancel_batch, read_batch_result):
         patched = copy.copy(tool)
         # _ensure_sync_invocable_tool does exactly this to async-only tools.
         patched.func = make_sync_tool_wrapper(patched.coroutine, patched.name)

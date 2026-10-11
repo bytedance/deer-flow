@@ -188,6 +188,22 @@ class IsolatedMiddleware(AgentMiddleware):
         self.transformers = getattr(inner, "transformers", ())
         self.state_schema = getattr(inner, "state_schema", AgentMiddleware.state_schema)
 
+    def __copy__(self) -> IsolatedMiddleware:
+        """State-preserving shallow copy; never rebuilds from ``inner``.
+
+        ``normalize_middleware_state_schemas`` (delta mode) and the
+        authorization declaration view both copy middleware instances. A
+        rebuild-based copy would re-run ``__init__`` and re-mirror
+        ``inner.tools``, silently restoring declarations Layer 1 narrowed away
+        on this build; the default copy protocol would call the argument-
+        requiring ``__new__`` above and fail. Bypassing both keeps the
+        narrowed ``tools``, transformers, and adapted ``state_schema`` through
+        the whole copy chain.
+        """
+        clone = object.__new__(type(self))
+        clone.__dict__.update(self.__dict__)
+        return clone
+
     @property
     def name(self) -> str:
         """Stable graph and trace identity for this isolated contribution."""

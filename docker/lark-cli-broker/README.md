@@ -94,6 +94,27 @@ and pointing the provisioner at it:
 Bound to loopback only. In K8s the sandbox and sidecar share the Pod network
 namespace, so `127.0.0.1` reaches the sidecar and nothing outside the Pod can.
 
+### Stdin and execution logs
+
+AIO's fresh non-interactive Bash runs close inherited pipe stdin, so commands
+without input receive immediate EOF. Persistent Shell terminal commands remain
+unchanged; the shim ignores their TTY stdin. Explicit pipelines, heredocs, and
+file redirections supply input normally. The shim forwards pipe/file stdin only
+after EOF; a pipe that exceeds its idle budget exits `124` before contacting
+the broker, so incomplete input cannot execute a partial write.
+
+The sandbox process can override the first-byte budget with
+`DEERFLOW_LARK_BROKER_STDIN_GRACE_SECONDS` and the between-chunk idle budget with
+`DEERFLOW_LARK_BROKER_STDIN_TAIL_SECONDS`. Both default to 2 seconds and accept
+finite values in `(0, 600]`; invalid values fall back to the default. Increase the
+appropriate budget when an explicit input producer needs longer startup or pauses.
+These settings belong on the sandbox invocation, not the broker sidecar.
+
+Execution logs record argument count, exit code, elapsed time, and output
+truncation, but never argument values or stdin. Updating the Gateway alone does
+not update an installed shim: rebuild and publish this broker image with a new
+immutable tag or digest, update `LARK_CLI_BROKER_IMAGE`, and recreate sandbox Pods.
+
 ### No file I/O relative to the sandbox cwd
 
 The broker runs `lark-cli` in the **sidecar's** working directory and cannot see
@@ -108,10 +129,13 @@ paths still refer to the sidecar's filesystem, not the sandbox's.
 The broker removes the credential *files* from the sandbox, but the full
 `lark-cli` command surface stays reachable, so any subcommand that prints/exports
 tokens could still exfiltrate them. Set `DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS`
-on the sidecar to a comma-separated list of command prefixes the broker should
-refuse (matched against the leading non-flag tokens), e.g.
-`DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS="config show, auth token"`. Denied calls
-return exit `126` with a `subcommand ... is disabled` message and never spawn the
-binary. Empty by default (no behavior change); confirm the deployed `lark-cli`
+on the sidecar to a comma-separated list of command paths the broker should
+refuse, e.g. `DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS="config show, auth token"`.
+Denied calls return exit `126` with a `subcommand ... is disabled` message and
+never spawn the binary. The broker does not know which options take a value, so
+a rule matches when its tokens appear in order among the request's non-flag
+tokens, even with other tokens in between: `--profile work config show` and
+`config --profile work show` are both refused by `config show`. This fails closed — a
+call whose argument values spell a denied path in order is refused too. Empty by default (no behavior change); confirm the deployed `lark-cli`
 version's subcommand surface has no trivial secret-dump command before enabling
 broker mode in production.

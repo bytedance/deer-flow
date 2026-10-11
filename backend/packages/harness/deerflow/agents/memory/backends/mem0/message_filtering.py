@@ -84,7 +84,9 @@ def filter_messages_for_memory(messages: list[Any]) -> list[Any]:
                 filtered.append(msg)
                 skip_next_ai = False
         elif msg_type == "ai":
-            if getattr(msg, "tool_calls", None):
+            # Invalid/provider-raw calls are still tool turns, not final replies.
+            additional_kwargs = getattr(msg, "additional_kwargs", {}) or {}
+            if getattr(msg, "tool_calls", None) or getattr(msg, "invalid_tool_calls", None) or additional_kwargs.get("tool_calls") or additional_kwargs.get("function_call"):
                 continue
             if skip_next_ai:
                 skip_next_ai = False

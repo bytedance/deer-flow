@@ -115,3 +115,14 @@ describe("parsePreferences reasoning_effort", () => {
     expect(parsePreferences({ reasoning_effort: 42 })).toEqual({});
   });
 });
+
+describe("parsePreferences locale", () => {
+  it("keeps the two UI languages the Gateway accepts and drops others", async () => {
+    const { parsePreferences } =
+      await import("@/core/settings/preferences-sync");
+    expect(parsePreferences({ locale: "zh-CN" })).toEqual({ locale: "zh-CN" });
+    expect(parsePreferences({ locale: "en-US" })).toEqual({ locale: "en-US" });
+    expect(parsePreferences({ locale: null })).toEqual({ locale: null });
+    expect(parsePreferences({ locale: "fr-FR" })).toEqual({});
+  });
+});

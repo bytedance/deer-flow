@@ -48,10 +48,13 @@ rs.mock("@/core/auth/AuthProvider", () => ({
   useAuth: () => ({ user: null }),
 }));
 
-// The real editor pulls CodeMirror into the worker bundle; these tests only
-// exercise the browser-preview iframe branch, which never mounts it.
+// Inspect the source passed to the editor without bundling CodeMirror.
 rs.mock("@/components/workspace/code-editor", () => ({
-  CodeEditor: () => null,
+  CodeEditor: ({ value, language }: { value: string; language: string }) => (
+    <pre data-testid="artifact-source" data-language={language}>
+      {value}
+    </pre>
+  ),
 }));
 
 rs.mock("@/core/config", () => ({
@@ -88,6 +91,44 @@ function renderDetail(filepath: string) {
 
 beforeEach(() => {
   mocks.artifactContent.content = undefined;
+  mocks.artifactContent.sha256 = undefined;
+});
+
+describe("ArtifactFileDetail extensionless source files", () => {
+  it.each([
+    ["Dockerfile", "dockerfile", "FROM python:3.13\n"],
+    ["Makefile", "makefile", "all:\n\techo hello\n"],
+  ])("opens a stored %s as editable source", (filename, language, content) => {
+    mocks.artifactContent.content = content;
+    mocks.artifactContent.sha256 = "a".repeat(64);
+
+    const view = renderDetail(`/mnt/user-data/outputs/${filename}`);
+    const source = view.getByTestId("artifact-source");
+
+    expect(source.textContent).toBe(content);
+    expect(source.getAttribute("data-language")).toBe(language);
+    expect(view.getByRole("button", { name: "Edit" })).toBeTruthy();
+  });
+});
+
+describe("ArtifactFileDetail unknown file types", () => {
+  it.each(["constructor", "data.constructor", "__proto__", "data.__proto__"])(
+    "keeps %s on the download fallback instead of passing an invalid language to the editor",
+    (filename) => {
+      mocks.artifactContent.content = "file contents";
+      mocks.artifactContent.sha256 = "a".repeat(64);
+
+      const view = renderDetail(`/mnt/user-data/outputs/${filename}`);
+
+      expect(view.queryByTestId("artifact-source")).toBeNull();
+      expect(view.queryByRole("button", { name: "Edit" })).toBeNull();
+      expect(
+        view.getByRole("link", { name: "Download" }).getAttribute("href"),
+      ).toBe(
+        `/backend/api/threads/${THREAD_ID}/artifacts/mnt/user-data/outputs/${filename}?download=true`,
+      );
+    },
+  );
 });
 
 afterEach(() => {

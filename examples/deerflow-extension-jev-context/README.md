@@ -88,6 +88,17 @@ only from the named environment variable, never from plugin settings or messages
 - Declares effective non-secret options through `release_policy_parameters()` so
   the host's assembly fingerprint changes when pruning policy changes. Neither
   the API key nor its environment variable name participates in that identity.
+- **Not a production contract, and not sharing the host's transport.** This example
+  implements its own HTTP path: one request per evaluation, with `timeout_seconds`
+  as the only bound. It has **no retry** and **no whole-call deadline**, unlike the
+  host's shared TypeSafe client (`packages/harness/deerflow/typesafe/`, used by
+  `deerflow.guardrails.typesafe`), which owns retry/backoff, a deadline budget, one
+  error taxonomy and the two-layer response contract. The extension is a separately
+  distributed package and must not import host internals, so sharing that transport
+  needs a publishable client package — option A of the shared Jev/TypeSafe client
+  design, deferred to a later review. Until then, a hung Jev endpoint is bounded
+  only by `timeout_seconds`; treat this example as a demonstration rather than a
+  supported integration.
 
 Optional deployment fields (all validated; unknown fields rejected):
 

@@ -99,7 +99,7 @@ afterEach(() => {
   cleanup();
 });
 
-describe("InputBox skill suggestions with an empty (denied) catalog", () => {
+describe("InputBox command suggestions with an empty (denied) catalog", () => {
   it("offers the builtin commands when '/' is typed with zero visible skills", () => {
     const { container } = renderComposer();
 
@@ -108,7 +108,7 @@ describe("InputBox skill suggestions with an empty (denied) catalog", () => {
     // The dropdown survives the empty catalog and offers exactly the builtin
     // commands (/goal, /compact) — no phantom skill rows, no crash.
     const listbox = screen.getByRole("listbox", {
-      name: "Skill suggestions",
+      name: "Command suggestions",
     });
     const options = Array.from(listbox.querySelectorAll('[role="option"]'));
     const names = options.map((option) => option.textContent ?? "");
@@ -125,7 +125,7 @@ describe("InputBox skill suggestions with an empty (denied) catalog", () => {
     typeSlashQuery(container, "/nosuch");
 
     expect(
-      screen.queryByRole("listbox", { name: "Skill suggestions" }),
+      screen.queryByRole("listbox", { name: "Command suggestions" }),
     ).toBeNull();
   });
 });

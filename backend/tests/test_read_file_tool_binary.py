@@ -163,6 +163,8 @@ def test_read_file_tool_passes_open_ended_ranges_into_sandbox(monkeypatch) -> No
 
 
 def test_read_file_tool_validates_range_order(monkeypatch) -> None:
+    from deerflow.sandbox.read_file_contract import READ_FILE_EMPTY_RANGE
+
     runtime = SimpleNamespace(state={"sandbox": {"sandbox_id": "aio:test"}}, context={"thread_id": "t1"})
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: object())
 
@@ -174,4 +176,4 @@ def test_read_file_tool_validates_range_order(monkeypatch) -> None:
         end_line=10,
     )
 
-    assert "start_line > end_line" in result
+    assert result == READ_FILE_EMPTY_RANGE

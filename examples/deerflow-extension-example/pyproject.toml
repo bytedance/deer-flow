@@ -1,7 +1,7 @@
 [project]
 name = "deerflow-extension-example"
 version = "0.1.0"
-description = "A compact standalone example covering every DeerFlow extension contribution kind"
+description = "A compact standalone example covering five DeerFlow extension contribution kinds"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

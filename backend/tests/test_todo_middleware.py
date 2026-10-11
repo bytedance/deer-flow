@@ -1,9 +1,11 @@
 """Tests for TodoMiddleware context-loss detection."""
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
 from langchain.agents import create_agent
 from langchain.agents.middleware.types import ModelRequest
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
@@ -561,6 +563,50 @@ class TestWrapModelCall:
         assert len(seen) == 1
         assert seen[0].messages == state["messages"]
 
+    def test_pending_reminder_survives_a_failed_model_call(self):
+        """A call that raises is retried by LLMErrorHandlingMiddleware through this wrap; the reminder must still be sent."""
+        mw = TodoMiddleware()
+        runtime = _make_runtime()
+        state = {"messages": [_ai_no_tool_calls()], "todos": _incomplete_todos()}
+        mw.after_model(state, runtime)
+
+        request = _make_model_request(state["messages"], runtime=runtime)
+        sent: list[list[Any]] = []
+
+        def flaky_handler(model_request: ModelRequest):
+            sent.append(model_request.messages)
+            if len(sent) == 1:
+                raise RuntimeError("503 Service Unavailable")
+            return "response"
+
+        with pytest.raises(RuntimeError):
+            mw.wrap_model_call(request, flaky_handler)
+        assert mw.wrap_model_call(request, flaky_handler) == "response"
+
+        assert [len(_todo_completion_reminders(messages)) for messages in sent] == [1, 1]
+        # Restoring is not a new reminder: the retry must not spend the cap.
+        assert mw._completion_reminder_count_for_runtime(runtime) == 1
+        assert mw._drain_completion_reminders(runtime) == []
+
+    def test_failed_model_call_does_not_restore_a_reminder_for_a_cleared_run(self):
+        """If the run's reminder state was dropped while the call was in flight, the failure must not resurrect it."""
+        mw = TodoMiddleware()
+        runtime = _make_runtime()
+        state = {"messages": [_ai_no_tool_calls()], "todos": _incomplete_todos()}
+        mw.after_model(state, runtime)
+
+        request = _make_model_request(state["messages"], runtime=runtime)
+
+        def failing_handler(model_request: ModelRequest):
+            mw.after_agent({}, runtime)
+            raise RuntimeError("503 Service Unavailable")
+
+        with pytest.raises(RuntimeError):
+            mw.wrap_model_call(request, failing_handler)
+
+        assert mw._pending_completion_reminders == {}
+        assert mw._completion_reminder_counts == {}
+
 
 class TestTodoMiddlewareAgentGraphIntegration:
     def test_reuses_thread_state_todos_schema_in_real_agent_graph(self):
@@ -655,6 +701,66 @@ class TestTodoMiddlewareAgentGraphIntegration:
         ]
         assert mw._pending_completion_reminders == {}
         assert mw._completion_reminder_counts == {}
+
+    def test_completion_reminder_survives_a_retried_model_call_in_real_agent_graph(self):
+        """LLMErrorHandlingMiddleware retries a failed call by running the inner wraps again; the retry must still carry the reminder."""
+        from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
+        from deerflow.config.app_config import AppConfig, LlmCallConfig
+        from deerflow.config.sandbox_config import SandboxConfig
+
+        class ProviderUnavailable(Exception):
+            def __init__(self) -> None:
+                super().__init__("503 Service Unavailable")
+                self.status_code = 503
+                self.response = SimpleNamespace(status_code=503, headers={})
+
+        class FailsOnceOnReminder(_CapturingFakeMessagesListChatModel):
+            _failed: bool = PrivateAttr(default=False)
+
+            def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+                if not self._failed and _todo_completion_reminders(messages):
+                    self._failed = True
+                    self._seen_messages.append(list(messages))
+                    raise ProviderUnavailable()
+                return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+        model = FailsOnceOnReminder(
+            responses=[
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "write_todos",
+                            "id": "todos-1",
+                            "args": {"todos": [{"content": "Step 1", "status": "pending"}]},
+                        }
+                    ],
+                ),
+                AIMessage(content="premature final 1"),
+                AIMessage(content="premature final 2"),
+                AIMessage(content="premature final 3"),
+            ],
+        )
+        app_config = AppConfig(
+            sandbox=SandboxConfig(use="test"),
+            llm_call=LlmCallConfig(retry_max_attempts=3, retry_base_delay_ms=0, retry_cap_delay_ms=0),
+        )
+        graph = create_agent(
+            model=model,
+            tools=[],
+            middleware=[LLMErrorHandlingMiddleware(app_config=app_config), TodoMiddleware()],
+            state_schema=ThreadState,
+        )
+
+        result = graph.invoke(
+            {"messages": [("user", "finish all todos")]},
+            context={"thread_id": "retry-thread", "run_id": "retry-run"},
+        )
+
+        # write_todos, the premature exit, the failed attempt and its retry, then
+        # the second reminder: the retry did not spend the two-reminder cap.
+        assert [len(_todo_completion_reminders(messages)) for messages in model.seen_messages] == [0, 0, 1, 1, 1]
+        assert result["messages"][-1].content == "premature final 3"
 
     def test_length_capped_write_file_does_not_reengage_todos(self):
         """Reproduces the incident (thread b1723286): model emits a write_file
@@ -805,3 +911,25 @@ class TestAwrapModelCall:
         assert isinstance(injected, HumanMessage)
         assert injected.name == "todo_completion_reminder"
         assert injected.additional_kwargs["hide_from_ui"] is True
+
+    def test_async_pending_reminder_survives_a_failed_model_call(self):
+        mw = TodoMiddleware()
+        runtime = _make_runtime()
+        state = {"messages": [_ai_no_tool_calls()], "todos": _incomplete_todos()}
+        mw.after_model(state, runtime)
+
+        request = _make_model_request(state["messages"], runtime=runtime)
+        sent: list[list[Any]] = []
+
+        async def flaky_handler(model_request: ModelRequest):
+            sent.append(model_request.messages)
+            if len(sent) == 1:
+                raise RuntimeError("503 Service Unavailable")
+            return "response"
+
+        with pytest.raises(RuntimeError):
+            asyncio.run(mw.awrap_model_call(request, flaky_handler))
+        assert asyncio.run(mw.awrap_model_call(request, flaky_handler)) == "response"
+
+        assert [len(_todo_completion_reminders(messages)) for messages in sent] == [1, 1]
+        assert mw._completion_reminder_count_for_runtime(runtime) == 1

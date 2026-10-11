@@ -146,7 +146,10 @@ export function ThreadDeleteDialogProvider({
           <DialogHeader>
             <DialogTitle>{t.chats.deleteChat}</DialogTitle>
             <DialogDescription className="break-words">
-              {target && t.chats.deleteConfirm(titleOfThread(target.thread))}
+              {target &&
+                t.chats.deleteConfirm(
+                  titleOfThread(target.thread, t.pages.untitled),
+                )}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

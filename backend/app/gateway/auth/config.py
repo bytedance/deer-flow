@@ -33,29 +33,22 @@ _auth_config: AuthConfig | None = None
 
 
 def _load_or_create_secret() -> str:
-    """Load persisted JWT secret from ``{base_dir}/.jwt_secret``, or generate and persist a new one."""
+    """Load persisted JWT secret from ``{base_dir}/.jwt_secret``, or generate and persist a new one.
+
+    The file is created exclusively and read back, so processes that share the
+    runtime home and cold-start together (uvicorn workers, replicas on a shared
+    volume) converge on one secret instead of each keeping its own.
+    """
     from deerflow.config.paths import get_paths
+    from deerflow.config.secret_file import read_or_create_secret_file
 
     paths = get_paths()
     secret_file = paths.base_dir / _SECRET_FILE
 
     try:
-        if secret_file.exists():
-            secret = secret_file.read_text(encoding="utf-8").strip()
-            if secret:
-                return secret
+        return read_or_create_secret_file(secret_file, lambda: secrets.token_urlsafe(32))
     except OSError as exc:
-        raise RuntimeError(f"Failed to read JWT secret from {secret_file}. Set AUTH_JWT_SECRET explicitly or fix DEER_FLOW_HOME/base directory permissions so DeerFlow can read its persisted auth secret.") from exc
-
-    secret = secrets.token_urlsafe(32)
-    try:
-        secret_file.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(secret_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(secret)
-    except OSError as exc:
-        raise RuntimeError(f"Failed to persist JWT secret to {secret_file}. Set AUTH_JWT_SECRET explicitly or fix DEER_FLOW_HOME/base directory permissions so DeerFlow can store a stable auth secret.") from exc
-    return secret
+        raise RuntimeError(f"Failed to read or persist the JWT secret at {secret_file}. Set AUTH_JWT_SECRET explicitly or fix DEER_FLOW_HOME/base directory permissions so DeerFlow can keep a stable auth secret.") from exc
 
 
 def get_auth_config() -> AuthConfig:
@@ -64,7 +57,10 @@ def get_auth_config() -> AuthConfig:
     if _auth_config is None:
         from dotenv import load_dotenv
 
-        load_dotenv()
+        from deerflow.env import load_selected_env_file
+
+        if not load_selected_env_file():
+            load_dotenv()
         jwt_secret = os.environ.get("AUTH_JWT_SECRET")
         if not jwt_secret:
             jwt_secret = _load_or_create_secret()
@@ -72,7 +68,8 @@ def get_auth_config() -> AuthConfig:
             logger.warning(
                 "⚠ AUTH_JWT_SECRET is not set — using an auto-generated secret "
                 "persisted to .jwt_secret. Sessions will survive restarts. "
-                "For production, add AUTH_JWT_SECRET to your .env file: "
+                "For production, add AUTH_JWT_SECRET to your dotenv file "
+                "(the DEER_FLOW_ENV_FILE target, or .env by default): "
                 'python -c "import secrets; print(secrets.token_urlsafe(32))"'
             )
         _auth_config = AuthConfig(jwt_secret=jwt_secret)

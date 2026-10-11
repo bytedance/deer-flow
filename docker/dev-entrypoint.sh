@@ -162,8 +162,13 @@ fi
 
 # ── Hand off to uvicorn ─────────────────────────────────────────────────────
 
+# --timeout-graceful-shutdown bounds how long open SSE connections may delay
+# lifespan shutdown (memory flush, run drain) after SIGTERM; the compose
+# service's stop_grace_period (90s) covers this bound plus the lifespan's
+# worst-case drain work (~61s).
 PYTHONPATH=. exec uv run --no-sync uvicorn app.gateway.app:app \
     --host 0.0.0.0 --port 8001 \
+    --timeout-graceful-shutdown 10 \
     --reload \
     --reload-include='*.yaml' \
     --reload-include='.env' \

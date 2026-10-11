@@ -8,6 +8,7 @@ and the lazy retention sweep through the real HTTP stack.
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -129,6 +130,52 @@ def _original_path(app: FastAPI, row: dict, *, user_id: str = "user-a") -> Path:
     from deerflow.projects.documents import original_file_path
 
     return original_file_path(get_paths(), user_id=user_id, row=row)
+
+
+@pytest.mark.parametrize("filename", ["notes.txt", "a" * 251 + ".txt"])
+def test_long_workspace_document_lifecycle(tmp_path, monkeypatch, filename):
+    """Real router/file operations must work beyond Windows' legacy MAX_PATH."""
+    from deerflow.config.paths import get_paths
+    from deerflow.projects.trash import run_trash_retention_sweep
+
+    home = tmp_path / ("nested-" + "a" * 73) / ("nested-" + "b" * 73) / ("nested-" + "c" * 73)
+    assert len(str(home)) > 260
+    monkeypatch.setenv("DEER_FLOW_HOME", str(home))
+    app = _build_app(tmp_path)
+    with TestClient(app) as client:
+        origin = _create_project(client, name="Origin")
+        target = _create_project(client, name="Target")
+        doc = _upload(client, origin["id"], filename, b"long-path content")
+        row = _get_row(app, doc["id"])
+        original = _original_path(app, row)
+        assert original.read_bytes() == b"long-path content"
+        assert not row["stored_relpath"].startswith("\\\\")
+        listing = client.get(f"/api/projects/{origin['id']}/documents").json()
+        assert listing["documents"][0]["content_missing"] is False
+        download = client.get(f"/api/projects/{origin['id']}/documents/{doc['id']}/content", params={"download": "true"})
+        assert download.status_code == 200
+        assert download.content == b"long-path content"
+        staging = get_paths().project_documents_dir("user-a", origin["id"]) / ".staging" / "old-orphan"
+        staging.write_bytes(b"abandoned upload")
+        os.utime(staging, (0, 0))
+
+        async def startup_sweep():
+            return await run_trash_retention_sweep(app.state.project_document_repo, get_paths(), retention_days=30, user_id=None)
+
+        report = anyio.run(startup_sweep)
+        assert report.staging_removed == 1
+        assert not staging.exists()
+        assert original.read_bytes() == b"long-path content"
+        _trash(client, origin["id"], doc["id"])
+        restored = client.post(f"/api/trash/documents/{doc['id']}/restore", json={"project_id": target["id"]})
+        assert restored.status_code == 200
+        assert restored.json()["outcome"] == "restored"
+        assert _original_path(app, _get_row(app, doc["id"])) == original
+        assert client.get(f"/api/projects/{target['id']}/documents/{doc['id']}/content").content == b"long-path content"
+        _trash(client, target["id"], doc["id"])
+        assert client.post(f"/api/trash/documents/{doc['id']}/purge").status_code == 204
+        assert not original.exists()
+        assert _get_row(app, doc["id"]) is None
 
 
 class TestTrashListing:

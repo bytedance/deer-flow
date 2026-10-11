@@ -38,6 +38,7 @@ def test_process_queue_forwards_correction_flag_to_updater() -> None:
         user_id=None,
         trace_id=None,
         bypass_watermark=False,
+        judge=True,
     )
 
 
@@ -68,6 +69,7 @@ def test_process_queue_forwards_reinforcement_flag_to_updater() -> None:
         user_id=None,
         trace_id=None,
         bypass_watermark=False,
+        judge=True,
     )
 
 
@@ -224,8 +226,8 @@ def test_process_queue_updates_different_agents_in_same_thread_separately() -> N
     assert mock_updater.update_memory.call_count == 2
     mock_updater.update_memory.assert_has_calls(
         [
-            call(messages=["agent-a"], thread_id="thread-1", agent_name="agent-a", signals=frozenset(), user_id=None, trace_id=None, bypass_watermark=False),
-            call(messages=["agent-b"], thread_id="thread-1", agent_name="agent-b", signals=frozenset(), user_id=None, trace_id=None, bypass_watermark=False),
+            call(messages=["agent-a"], thread_id="thread-1", agent_name="agent-a", signals=frozenset(), user_id=None, trace_id=None, bypass_watermark=False, judge=True),
+            call(messages=["agent-b"], thread_id="thread-1", agent_name="agent-b", signals=frozenset(), user_id=None, trace_id=None, bypass_watermark=False, judge=True),
         ]
     )
 
@@ -246,6 +248,7 @@ def test_process_queue_forwards_trace_id_to_updater() -> None:
         user_id=None,
         trace_id="trace-memory-1",
         bypass_watermark=False,
+        judge=True,
     )
 
 
@@ -290,6 +293,7 @@ def test_flush_sync_drains_pending_queue_and_returns_true() -> None:
         user_id=None,
         trace_id=None,
         bypass_watermark=False,
+        judge=False,
     )
 
 
@@ -502,5 +506,6 @@ def test_cancel_by_agent_does_not_touch_in_flight_batch() -> None:
         user_id=in_flight[0].user_id,
         trace_id=None,
         bypass_watermark=False,
+        judge=True,
     )
     mock_updater.update_memory.assert_called_once()

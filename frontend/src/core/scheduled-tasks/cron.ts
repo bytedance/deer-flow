@@ -7,6 +7,14 @@
  * `custom` for anything else.
  */
 
+import {
+  displayTimeZone,
+  formatTaskDateTime,
+  formatTaskTime,
+  type TaskTimeLabels,
+} from "./format";
+import type { ScheduledTask } from "./types";
+
 export type CronPreset = "hourly" | "daily" | "weekly" | "monthly" | "custom";
 
 export type Weekday = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
@@ -84,20 +92,29 @@ export function maxIntervalAmount(unit: IntervalUnit): number {
   return MAX_INTERVAL_SECONDS;
 }
 
-export function minIntervalAmount(unit: IntervalUnit): number {
-  // Matches scheduler.min_once_delay_seconds default. Minutes/hours already
-  // start at 60s; seconds must not go below that or create/edit 422s.
-  if (unit === "seconds") {
-    return DEFAULT_INTERVAL_MIN_SECONDS;
-  }
-  return 1;
+/**
+ * Smallest amount of `unit` the server accepts. `minSeconds` is the server's
+ * `scheduler.min_once_delay_seconds` (`/api/features`), so a server with a
+ * larger floor never lets the form submit an interval it will refuse.
+ */
+export function minIntervalAmount(
+  unit: IntervalUnit,
+  minSeconds: number = DEFAULT_INTERVAL_MIN_SECONDS,
+): number {
+  const floor =
+    Number.isFinite(minSeconds) && minSeconds > 0
+      ? minSeconds
+      : DEFAULT_INTERVAL_MIN_SECONDS;
+  const unitSeconds = unit === "hours" ? 3600 : unit === "minutes" ? 60 : 1;
+  return Math.max(1, Math.ceil(floor / unitSeconds));
 }
 
 export function clampIntervalAmount(
   amount: number,
   unit: IntervalUnit,
+  minSeconds?: number,
 ): number {
-  const min = minIntervalAmount(unit);
+  const min = minIntervalAmount(unit, minSeconds);
   if (!Number.isFinite(amount)) {
     return min;
   }
@@ -304,13 +321,14 @@ export function describeSchedule(
     const amount = state.intervalAmount ?? 1;
     const unit = state.intervalUnit ?? "minutes";
     if (zh) {
+      // "每分钟" / "每小时", never "每 1 分钟".
       if (unit === "hours") {
-        return `每 ${amount} 小时`;
+        return amount === 1 ? "每小时" : `每 ${amount} 小时`;
       }
       if (unit === "seconds") {
-        return `每 ${amount} 秒`;
+        return amount === 1 ? "每秒" : `每 ${amount} 秒`;
       }
-      return `每 ${amount} 分钟`;
+      return amount === 1 ? "每分钟" : `每 ${amount} 分钟`;
     }
     if (unit === "hours") {
       return amount === 1 ? "Every hour" : `Every ${amount} hours`;
@@ -358,6 +376,168 @@ export function describeSchedule(
   }
   // Unreachable — switch is exhaustive over CronPreset.
   return zh ? `自定义 (${tz})` : `Custom (${tz})`;
+}
+
+const MON_TO_FRI: Weekday[] = ["mon", "tue", "wed", "thu", "fri"];
+
+/**
+ * `parseCron` plus day-of-week ranges ("0 9 * * 1-5"), which agents often
+ * write. Display only: the form keeps `parseCron`, so editing such a task
+ * still shows the expression as custom instead of rewriting it.
+ */
+function parseDisplayCron(cron: string): {
+  preset: CronPreset;
+  parts: CronParts;
+} {
+  const parsed = parseCron(cron);
+  if (parsed.preset !== "custom") {
+    return parsed;
+  }
+  const fields = cron.split(/\s+/);
+  const [m, h, dom, mon, dow] = fields;
+  if (
+    fields.length !== 5 ||
+    !m ||
+    !h ||
+    !dow ||
+    !/^\d+$/.test(m) ||
+    !/^\d+$/.test(h) ||
+    dom !== "*" ||
+    mon !== "*" ||
+    !/^[0-7](-[0-7])?(,[0-7](-[0-7])?)*$/.test(dow)
+  ) {
+    return parsed;
+  }
+  const days = new Set<Weekday>();
+  for (const token of dow.split(",")) {
+    const [start, end = start] = token.split("-").map(Number);
+    if (start === undefined || end === undefined || end < start) {
+      return parsed;
+    }
+    for (let day = start; day <= end; day++) {
+      const weekday = CRON_TO_WEEKDAY[String(day)];
+      if (weekday) days.add(weekday);
+    }
+  }
+  return {
+    preset: "weekly",
+    parts: {
+      minute: Number(m),
+      hour: Number(h),
+      weekdays: orderedWeekdays([...days]),
+    },
+  };
+}
+
+function isWeekdays(days: Weekday[] | undefined): boolean {
+  const ordered = orderedWeekdays(days);
+  return (
+    ordered.length === MON_TO_FRI.length &&
+    ordered.every((day, index) => day === MON_TO_FRI[index])
+  );
+}
+
+export type TaskScheduleDescription = {
+  /** Readable text for default views; never a cron string or the stored UTC of an interval. */
+  text: string;
+  /** The cron expression, for a tooltip only; null for other schedule types. */
+  raw: string | null;
+};
+
+/**
+ * Readable schedule of a saved task: "Weekdays at 09:00 (Asia/Shanghai)",
+ * "Every 30 minutes" (intervals carry no zone), "Once, Tomorrow 09:00 (…)".
+ * A cron that matches no preset reads "Custom schedule (tz)"; the expression
+ * itself is returned only in `raw`. Pass `time` (the `t.scheduledTasks.time`
+ * labels) to get relative days for one-time tasks; without them the time
+ * reads as a plain date ("Oct 7 09:00"), never an ISO value.
+ */
+export function describeTaskSchedule(
+  task: Pick<ScheduledTask, "schedule_type" | "schedule_spec" | "timezone">,
+  locale: string,
+  options: { time?: TaskTimeLabels; now?: Date } = {},
+): TaskScheduleDescription {
+  const lang: ScheduleLocale = locale.toLowerCase().startsWith("zh")
+    ? "zh"
+    : "en";
+  const zh = lang === "zh";
+  const spec = task.schedule_spec;
+  const timezone = displayTimeZone(task);
+
+  if (task.schedule_type === "interval") {
+    const seconds =
+      typeof spec.every_seconds === "number" ? spec.every_seconds : 0;
+    if (Number.isInteger(seconds) && seconds > 0 && seconds % 86400 === 0) {
+      // Whole days read as days ("每天", "Every 2 days"), not "每 24 小时".
+      const days = seconds / 86400;
+      let text = days === 1 ? "Every day" : `Every ${days} days`;
+      if (zh) {
+        text = days === 1 ? "每天" : `每 ${days} 天`;
+      }
+      return { text, raw: null };
+    }
+    const { amount, unit } = secondsToInterval(seconds);
+    return {
+      text: describeSchedule(
+        {
+          scheduleType: "interval",
+          intervalAmount: amount,
+          intervalUnit: unit,
+          timezone,
+        },
+        lang,
+      ),
+      raw: null,
+    };
+  }
+
+  if (task.schedule_type === "once") {
+    const runAt =
+      typeof spec.run_at === "string"
+        ? onceRunAtInstant(spec.run_at, timezone)
+        : "";
+    const when = options.time
+      ? formatTaskTime(runAt, {
+          timeZone: timezone,
+          locale,
+          labels: options.time,
+          now: options.now,
+        })
+      : formatTaskDateTime(runAt, {
+          timeZone: timezone,
+          locale,
+          now: options.now,
+        });
+    return {
+      text: zh ? `单次，${when} (${timezone})` : `Once, ${when} (${timezone})`,
+      raw: null,
+    };
+  }
+
+  const cron = typeof spec.cron === "string" ? spec.cron.trim() : "";
+  const { preset, parts } = parseDisplayCron(cron);
+  if (preset === "custom") {
+    return {
+      text: zh ? `自定义时间 (${timezone})` : `Custom schedule (${timezone})`,
+      raw: cron,
+    };
+  }
+  if (preset === "weekly" && isWeekdays(parts.weekdays)) {
+    const hhmm = `${pad2(parts.hour ?? 0)}:${pad2(parts.minute ?? 0)}`;
+    return {
+      text: zh
+        ? `工作日 ${hhmm} (${timezone})`
+        : `Weekdays at ${hhmm} (${timezone})`,
+      raw: cron,
+    };
+  }
+  return {
+    text: describeSchedule(
+      { scheduleType: "cron", preset, parts, timezone },
+      lang,
+    ),
+    raw: cron,
+  };
 }
 
 /**
@@ -410,6 +590,29 @@ export function utcToZonedLocalInput(iso: string, timezone: string): string {
   )}T${pad2(local.getUTCHours())}:${pad2(local.getUTCMinutes())}`;
 }
 
+/**
+ * The instant of a one-time task's stored `run_at`. A chat-created task keeps
+ * `run_at` as the agent sent it, usually a wall-clock time with no offset
+ * ("2026-10-07T09:00:00") meant in the task's zone, the same way the server
+ * reads it; reading it with `new Date()` would use the viewer's zone instead.
+ * A value with an offset is already an instant and is returned unchanged.
+ */
+export function onceRunAtInstant(runAt: string, timezone: string): string {
+  const value = runAt.trim();
+  if (!value || /(?:Z|[+-]\d{2}(?::?\d{2})?)$/i.test(value)) {
+    return value;
+  }
+  const local = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})/.exec(value);
+  if (!local) {
+    return value;
+  }
+  try {
+    return zonedLocalToUtcIso(`${local[1]}T${local[2]}`, timezone || "UTC");
+  } catch {
+    return value;
+  }
+}
+
 /** Validate minute-precision YYYY-MM-DDTHH:mm input; invalid or skipped wall times return null. */
 export function validZonedLocalToUtcIso(
   localValue: string,
@@ -421,6 +624,24 @@ export function validZonedLocalToUtcIso(
   } catch {
     return null;
   }
+}
+
+/**
+ * The instant of an edited wall value that started as `stored`. A
+ * minute-precision wall time cannot keep seconds or name the later instant
+ * of a repeated (DST fall-back) hour, so while it still shows `stored` in
+ * `timezone` the stored instant is kept; otherwise it reads as
+ * `validZonedLocalToUtcIso`.
+ */
+export function editedZonedLocalToUtcIso(
+  localValue: string,
+  timezone: string,
+  stored: string | null | undefined,
+): string | null {
+  if (stored && utcToZonedLocalInput(stored, timezone) === localValue) {
+    return stored;
+  }
+  return validZonedLocalToUtcIso(localValue, timezone);
 }
 
 function tzOffsetMs(timezone: string, date: Date): number {

@@ -72,7 +72,7 @@ async def test_receive_file_persist_does_not_block_event_loop(tmp_path, monkeypa
 
     monkeypatch.setattr(
         "app.channels.dingtalk.get_sandbox_provider",
-        lambda: SimpleNamespace(acquire_async=_acquire_async, get=lambda sid: None),
+        lambda: SimpleNamespace(uses_thread_data_mounts=True, acquire_async=_acquire_async, get=lambda sid: None),
     )
 
     channel = DingTalkChannel(MessageBus(), config={})

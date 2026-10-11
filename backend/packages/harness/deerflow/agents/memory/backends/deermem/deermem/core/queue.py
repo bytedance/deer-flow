@@ -267,6 +267,11 @@ class MemoryUpdateQueue:
                         user_id=context.user_id,
                         trace_id=context.trace_id,
                         bypass_watermark=context.bypass_watermark,
+                        # The shutdown drain never pre-screens (design L7): its
+                        # budget belongs to persistence, and a judge request would
+                        # spend part of a bounded shutdown window on a cost
+                        # optimization instead of on saving queued work.
+                        judge=not skip_inter_item_delay,
                     )
                     if success:
                         succeeded += 1

@@ -208,12 +208,21 @@ class _CapturingSubagent:
         yield {"messages": [AIMessage(content="done")]}
 
 
+def _create_agent_stub(seen: dict):
+    """Async stand-in for SubagentExecutor._create_agent (the real one is async)."""
+
+    async def _create(self, tools, **kwargs):
+        return _CapturingSubagent(seen)
+
+    return _create
+
+
 async def _run_subagent(monkeypatch, env, *, seen: dict, result_holder=None):
     async def _initial_state(self, task):
         return ({}, [], None)
 
     monkeypatch.setattr(env.SubagentExecutor, "_build_initial_state", _initial_state)
-    monkeypatch.setattr(env.SubagentExecutor, "_create_agent", lambda self, tools, **kwargs: _CapturingSubagent(seen))
+    monkeypatch.setattr(env.SubagentExecutor, "_create_agent", _create_agent_stub(seen))
     config = env.SubagentConfig(name="researcher", description="d", system_prompt="p", tools=[])
     executor = env.SubagentExecutor(config=config, tools=[], thread_id="thread-1", run_id=None)
     return await executor._aexecute("do the thing", result_holder=result_holder)
@@ -356,7 +365,7 @@ async def test_subagent_builder_receives_the_same_extension_snapshot_as_the_stor
         set_loaded_extensions(ExtensionRegistry().build())
         return ({}, [], None)
 
-    def _create_agent(self, tools, *, deferred_setup=None, extensions=None):
+    async def _create_agent(self, tools, *, deferred_setup=None, extensions=None):
         seen["extensions"] = extensions
         return _CapturingSubagent(seen)
 
@@ -388,7 +397,7 @@ async def test_subagent_prefers_the_parent_run_snapshot_over_the_singleton(monke
     async def _initial_state(self, task):
         return ({}, [], None)
 
-    def _create_agent(self, tools, *, deferred_setup=None, extensions=None):
+    async def _create_agent(self, tools, *, deferred_setup=None, extensions=None):
         seen["extensions"] = extensions
         return _CapturingSubagent(seen)
 

@@ -119,6 +119,11 @@ _MAX_MOUNT_PASS_FILES = 2000
 # Deadline checks stop preflight work and new writes. Active SDK writes finish.
 _MOUNT_PASS_DEADLINE_SECONDS = 120
 
+
+class _E2BMaintenanceShutdownTimeout(RuntimeError):
+    """A bounded maintenance-worker join did not prove worker termination."""
+
+
 # Recursive skill projection replacement must never target an operating-system
 # tree. The configured E2B home is handled separately: an isolated descendant
 # such as /home/user/skills is supported, while the home directory itself and
@@ -329,6 +334,9 @@ class E2BSandboxProvider(SandboxProvider):
         self._transitioning_slots = 0
         self._capacity_cond = threading.Condition(self._lock)
         self._shutdown_called = False
+        # Keep admission fenced if shutdown has to retry after a bounded
+        # maintenance-thread join times out.
+        self._shutdown_cleanup_pending = False
         self._owned_sandbox_ids: set[str] = set()
         self._acquire_inflight: set[str] = set()
         self._orphan_first_seen: dict[str, float] = {}
@@ -358,7 +366,7 @@ class E2BSandboxProvider(SandboxProvider):
         if not self._ownership.supports_cross_process:
             logger.warning("E2B sandbox ownership is process-local. Multi-worker gateways must configure sandbox.ownership.type: redis for safe reconciliation.")
 
-        atexit.register(self.shutdown)
+        atexit.register(self._shutdown_at_exit)
         self._register_signal_handlers()
         self._start_maintenance_threads()
 
@@ -528,6 +536,16 @@ class E2BSandboxProvider(SandboxProvider):
 
     # ── Signal / shutdown handling ───────────────────────────────────────
 
+    def _shutdown_at_exit(self) -> None:
+        """Best-effort process-exit cleanup without turning a retryable timeout into an atexit error."""
+        try:
+            self.shutdown()
+        except _E2BMaintenanceShutdownTimeout as exc:
+            logger.warning(
+                "E2B shutdown cleanup is still pending at interpreter exit: %s",
+                exc,
+            )
+
     def _register_signal_handlers(self) -> None:
         try:
             self._original_sigterm = signal.getsignal(signal.SIGTERM)
@@ -537,7 +555,14 @@ class E2BSandboxProvider(SandboxProvider):
             return
 
         def _handler(signum, frame):
-            self.shutdown()
+            try:
+                self.shutdown()
+            except _E2BMaintenanceShutdownTimeout:
+                logger.warning(
+                    "E2B shutdown cleanup is still pending while handling signal %s; forwarding the signal action",
+                    signum,
+                )
+
             if signum == signal.SIGTERM:
                 original = self._original_sigterm
             elif hasattr(signal, "SIGHUP") and signum == signal.SIGHUP:
@@ -562,7 +587,22 @@ class E2BSandboxProvider(SandboxProvider):
                     sig_name,
                 )
 
+    def _raise_if_shutting_down(self) -> None:
+        with self._lock:
+            if not self._shutdown_called:
+                return
+            raise SandboxCapacityExceededError(
+                "Sandbox provider is shutting down; cannot acquire sandbox",
+                active=len(self._sandboxes),
+                warm=len(self._warm_pool),
+                reserved=self._reserved_slots,
+                replicas=int(self._config["replicas"]),
+                retry_after_seconds=30.0,
+                reason="shutdown",
+            )
+
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
+        self._raise_if_shutting_down()
         effective_user_id = self._effective_acquire_user_id(user_id)
         if thread_id:
             with self._acquire_serializer.hold(self._thread_key(thread_id, effective_user_id)):
@@ -576,6 +616,9 @@ class E2BSandboxProvider(SandboxProvider):
         return await loop.run_in_executor(self._acquire_executor, acquire)
 
     def _acquire_internal(self, thread_id: str | None, *, user_id: str) -> str:
+        # The serializer may have queued this caller before shutdown started.
+        # Recheck admission after the wait and before any cache/reclaim path.
+        self._raise_if_shutting_down()
         if thread_id:
             cached = self._reuse_in_process_sandbox(thread_id, user_id=user_id)
             if cached is not None:
@@ -630,17 +673,30 @@ class E2BSandboxProvider(SandboxProvider):
             self._refresh_remote_timeout(sandbox.client)
         except Exception as e:  # pragma: no cover - defensive
             logger.debug("Failed to refresh timeout on reuse: %s", e)
+        # Shutdown may have started while the remote ping/timeout refresh was
+        # in flight. Do not publish or expose this cached client after admission
+        # closes.
+        self._raise_if_shutting_down()
         self._publish_ownership(sid)
         with self._lock:
             self._acquire_inflight.discard(sid)
-
-        logger.info(
-            "Reusing in-process e2b sandbox %s for user/thread %s/%s",
-            sid,
-            user_id,
-            thread_id,
-        )
-        return sid
+            if self._shutdown_called:
+                raise SandboxCapacityExceededError(
+                    "Sandbox provider shut down while reusing a cached sandbox",
+                    active=len(self._sandboxes),
+                    warm=len(self._warm_pool),
+                    reserved=self._reserved_slots,
+                    replicas=int(self._config["replicas"]),
+                    retry_after_seconds=30.0,
+                    reason="shutdown",
+                )
+            logger.info(
+                "Reusing in-process e2b sandbox %s for user/thread %s/%s",
+                sid,
+                user_id,
+                thread_id,
+            )
+            return sid
 
     def _reclaim_warm_pool_sandbox(self, thread_id: str, *, user_id: str) -> str | None:
         """Reclaim a warm-pool sandbox, holding a transitioning slot throughout.
@@ -934,6 +990,7 @@ class E2BSandboxProvider(SandboxProvider):
                 active=len(self._sandboxes),
                 warm=len(self._warm_pool),
                 reserved=self._reserved_slots,
+                transitioning=self._transitioning_slots,
                 replicas=int(self._config["replicas"]),
                 reason=reason,
             )
@@ -1110,6 +1167,7 @@ class E2BSandboxProvider(SandboxProvider):
                             active=len(self._sandboxes),
                             warm=len(self._warm_pool),
                             reserved=self._reserved_slots,
+                            transitioning=self._transitioning_slots,
                             replicas=int(self._config["replicas"]),
                         )
 
@@ -1119,16 +1177,19 @@ class E2BSandboxProvider(SandboxProvider):
                             active=len(self._sandboxes),
                             warm=len(self._warm_pool),
                             reserved=self._reserved_slots,
+                            transitioning=self._transitioning_slots,
                             replicas=int(self._config["replicas"]),
                         )
 
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
+                        counts = f"replicas={self._config['replicas']}, active={len(self._sandboxes)}, warm={len(self._warm_pool)}, reserved={self._reserved_slots}, transitioning={self._transitioning_slots}"
                         raise SandboxCapacityExceededError(
-                            f"Timed out after {timeout}s waiting for a sandbox capacity slot (replicas={self._config['replicas']}, active={len(self._sandboxes)}, warm={len(self._warm_pool)}, reserved={self._reserved_slots})",
+                            f"Timed out after {timeout}s waiting for a sandbox capacity slot ({counts})",
                             active=len(self._sandboxes),
                             warm=len(self._warm_pool),
                             reserved=self._reserved_slots,
+                            transitioning=self._transitioning_slots,
                             replicas=int(self._config["replicas"]),
                         )
                     self._capacity_cond.wait(timeout=min(remaining, 1.0))
@@ -1861,13 +1922,18 @@ class E2BSandboxProvider(SandboxProvider):
 
         ``Sandbox.connect`` may succeed even after the E2B control plane has
         reaped the VM. Closing that host-side client before returning ``None``
-        keeps both acquire paths from leaking a connection.
+        keeps both acquire paths from leaking a connection.  ``connect`` may
+        equally *fail* with a trusted "sandbox not found" error once the VM
+        is reaped; that confirmed-gone result also returns ``None`` so every
+        caller takes its already-gone cleanup path instead of retaining local
+        capacity for a kill that can never succeed.
         """
         try:
             client = self._reconnect_client(sandbox_cls, sandbox_id)
         except Exception as error:
             if _is_sandbox_gone_error(error):
                 self._release_deployment_sandbox(sandbox_id)
+                return None
             raise
         if self._client_alive(client):
             return client
@@ -2904,13 +2970,29 @@ class E2BSandboxProvider(SandboxProvider):
 
     def shutdown(self) -> None:
         with self._lock:
-            if self._shutdown_called:
+            if self._shutdown_called and not self._shutdown_cleanup_pending:
                 return
             self._shutdown_called = True
+            self._shutdown_cleanup_pending = False
+
         self._maintenance_stop.set()
-        for thread in (self._lease_thread, self._reconcile_thread):
-            if thread is not None and thread is not threading.current_thread():
-                thread.join(timeout=max(5.0, float(self._config["reconciliation_max_seconds"]) + 1.0))
+        join_timeout = max(5.0, float(self._config["reconciliation_max_seconds"]) + 1.0)
+        live_threads: list[str] = []
+        for name, thread in (
+            ("lease renewal", self._lease_thread),
+            ("reconciliation", self._reconcile_thread),
+        ):
+            if thread is None or thread is threading.current_thread():
+                continue
+            thread.join(timeout=join_timeout)
+            if thread.is_alive():
+                live_threads.append(name)
+
+        if live_threads:
+            with self._lock:
+                self._shutdown_cleanup_pending = True
+            raise _E2BMaintenanceShutdownTimeout("E2B maintenance thread shutdown timed out: " + ", ".join(live_threads))
+
         with self._lock:
             active = list(self._sandboxes.items())
             warm_ids = list(self._warm_pool.keys() | self._eviction_tombstones | self._remote_ops_in_progress)

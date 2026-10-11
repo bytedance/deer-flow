@@ -6,8 +6,9 @@ name: Verify Versions
 # images + chart), not just the chart.
 #
 # Sources verified: deploy/helm/deer-flow/Chart.yaml (version + appVersion),
-# backend/pyproject.toml, frontend/package.json. Logic lives in
-# scripts/verify_versions.sh so it can also be run locally.
+# backend/pyproject.toml, frontend/package.json, and backend/uv.lock (via
+# `uv lock --check`, which the backend image's `uv sync --locked` depends on).
+# Logic lives in scripts/verify_versions.sh so it can also be run locally.
 
 on:
   workflow_call:
@@ -20,6 +21,12 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 #v6.0.3
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          # Must match backend/Dockerfile's UV_IMAGE tag; pinned by backend/tests/test_ci_uv_version_pin.py
+          version: "0.11.1"
 
       - name: Verify all version sources match tag
         run: |

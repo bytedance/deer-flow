@@ -12,6 +12,7 @@ import {
 import { MessageGroup } from "@/components/workspace/messages/message-group";
 import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
+import type { ArtifactEntry } from "@/core/threads/types";
 
 rs.mock("@/components/workspace/artifacts", () => ({
   useArtifacts: () => ({ setOpen: () => undefined, select: () => undefined }),
@@ -41,12 +42,20 @@ function tool(
     status,
   };
 }
-function group(messages: Message[], debug = true) {
+function group(
+  messages: Message[],
+  debug = true,
+  toolArtifacts?: ArtifactEntry[],
+) {
   return (
     <I18nContext.Provider
       value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
     >
-      <MessageGroup messages={messages} showTokenDebugSummaries={debug} />
+      <MessageGroup
+        messages={messages}
+        showTokenDebugSummaries={debug}
+        toolArtifacts={toolArtifacts}
+      />
     </I18nContext.Provider>
   );
 }
@@ -57,6 +66,30 @@ function expand() {
 }
 
 describe("generic tool details", () => {
+  it("updates artifact badges with unchanged messages while retaining Debug details", () => {
+    const messages = [call, tool("report ready")];
+    const { rerender } = render(group(messages));
+    expect(screen.queryByText("art_12345678")).toBeNull();
+    const artifact: ArtifactEntry = {
+      handle: "art_12345678",
+      tool_name: "mcp_lookup",
+      tool_call_id: "call-1",
+      call_index: 0,
+      artifact_type: "file",
+      display_name: "report.csv",
+      real_ref: "/mnt/user-data/outputs/report.csv",
+    };
+    rerender(group(messages, true, [artifact]));
+    expect(screen.getByText("art_12345678")).toBeTruthy();
+    expect(screen.getByText("report.csv")).toBeTruthy();
+    expand();
+    expect(
+      screen.getByRole("region", { name: "Result" }).textContent,
+    ).toContain("report ready");
+    rerender(group(messages, true, []));
+    expect(screen.queryByText("art_12345678")).toBeNull();
+  });
+
   it("distinguishes multiple calls even when they use the same tool", () => {
     render(
       group([

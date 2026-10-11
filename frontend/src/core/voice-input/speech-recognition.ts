@@ -103,11 +103,49 @@ export function shouldRestartSpeechRecognition(
   return lastError === null || lastError === "no_speech";
 }
 
+// Scripts written without spaces between words and the punctuation that
+// surrounds them: Han (Chinese), kana (Japanese), CJK symbols/punctuation,
+// and their full-width/half-width compatibility forms. Korean Hangul is
+// deliberately absent — Korean uses eojeol spaces, so it is joined like any
+// space-delimited script. Boundaries compare single UTF-16 code units, so
+// supplementary-plane Han (CJK Ext B+) never matches; fine for ASR output.
+const NO_SPACE_SCRIPT_BOUNDARY =
+  /[\u3000-\u303f\u3040-\u30ff\u31f0-\u31ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uff9f]/;
+
+// These leading marks attach to the preceding text. Keep the rule directional:
+// a sentence-ending mark on the left still needs a space before the next word.
+const NO_SPACE_BEFORE_PUNCTUATION = /[,.;:!?%…)\]}]/;
+
+function joinTranscriptSegments(left: string, right: string): string {
+  if (!left) {
+    return right;
+  }
+  if (!right) {
+    return left;
+  }
+  const lastChar = left.trimEnd().slice(-1);
+  const firstChar = right.trimStart().slice(0, 1);
+  // Space-delimited scripts need an explicit separator when a provider does
+  // not pad its results (WebKit trims final transcripts), otherwise the last
+  // finalized word glues onto the next segment. No-space scripts (Chinese,
+  // Japanese) keep the plain concatenation they always had.
+  if (
+    !lastChar ||
+    !firstChar ||
+    NO_SPACE_SCRIPT_BOUNDARY.test(lastChar) ||
+    NO_SPACE_SCRIPT_BOUNDARY.test(firstChar) ||
+    NO_SPACE_BEFORE_PUNCTUATION.test(firstChar)
+  ) {
+    return `${left}${right}`;
+  }
+  return `${left} ${right}`;
+}
+
 export function readSpeechRecognitionTranscript(
   results: SpeechRecognitionResultListLike,
 ): { finalText: string; interimText: string; text: string } {
-  let finalText = "";
-  let interimText = "";
+  const finalParts: string[] = [];
+  const interimParts: string[] = [];
 
   for (const result of Array.from(
     { length: results.length },
@@ -115,16 +153,29 @@ export function readSpeechRecognitionTranscript(
   )) {
     const transcript = result?.[0]?.transcript ?? "";
     if (result?.isFinal) {
-      finalText += transcript;
+      finalParts.push(transcript);
     } else {
-      interimText += transcript;
+      interimParts.push(transcript);
     }
+  }
+
+  let finalText = "";
+  for (const part of finalParts) {
+    finalText = joinTranscriptSegments(finalText, part);
+  }
+  let interimText = "";
+  for (const part of interimParts) {
+    interimText = joinTranscriptSegments(interimText, part);
+  }
+  let text = "";
+  for (const part of [...finalParts, ...interimParts]) {
+    text = joinTranscriptSegments(text, part);
   }
 
   return {
     finalText: normalizeSpeechTranscript(finalText),
     interimText: normalizeSpeechTranscript(interimText),
-    text: normalizeSpeechTranscript(`${finalText}${interimText}`),
+    text: normalizeSpeechTranscript(text),
   };
 }
 

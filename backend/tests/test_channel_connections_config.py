@@ -1,5 +1,8 @@
 """Tests for user-facing IM channel connection configuration."""
 
+import pytest
+from pydantic import ValidationError
+
 from deerflow.config.channel_connections_config import ChannelConnectionsConfig
 
 
@@ -62,3 +65,24 @@ def test_provider_status_reports_disabled_and_unknown_providers():
     assert config.provider_status("wechat") == {"enabled": False, "configured": False}
     assert config.provider_status("wecom") == {"enabled": False, "configured": False}
     assert config.provider_status("unknown") == {"enabled": False, "configured": False}
+
+
+def test_qq_connection_configuration_is_opt_in():
+    assert ChannelConnectionsConfig().provider_status("qq") == {
+        "enabled": False,
+        "configured": False,
+    }
+    configured = ChannelConnectionsConfig.model_validate({"enabled": True, "qq": {"enabled": True}})
+    assert configured.provider_status("qq") == {"enabled": True, "configured": True}
+    assert configured.require_bound_identity is True
+
+
+def test_notification_locale_defaults_to_english():
+    assert ChannelConnectionsConfig().notification_locale == "en-US"
+    assert ChannelConnectionsConfig.model_validate({"notification_locale": "zh-CN"}).notification_locale == "zh-CN"
+
+
+@pytest.mark.parametrize("value", ["fr-FR", "zh", "en", "", None, 1])
+def test_notification_locale_accepts_only_the_ui_languages(value):
+    with pytest.raises(ValidationError):
+        ChannelConnectionsConfig.model_validate({"notification_locale": value})

@@ -25,7 +25,52 @@ SNAPSHOT_SYSTEM_NOTE = (
 # Keep media as input blocks so vision/audio-capable child models can still use
 # the retained conversation. Provider reasoning/signature and tool-use blocks
 # are deliberately excluded; tool calls are rendered separately as inert text.
-_MEDIA_BLOCK_TYPES = frozenset({"image", "image_url", "audio", "input_audio", "video", "file"})
+_MEDIA_BLOCK_TYPES = frozenset({"image", "image_url", "audio", "input_audio", "video", "file", "document"})
+
+
+def _neutralize_document_content_block(block: Any) -> Any:
+    """Neutralize text and citation prose without rewriting media or references."""
+    if not isinstance(block, dict) or block.get("type") != "text":
+        return block
+    block = dict(block)
+    if isinstance(block.get("text"), str):
+        block["text"] = neutralize_untrusted_tags(block["text"])
+    citations = block.get("citations")
+    if isinstance(citations, (list, tuple)):
+        block["citations"] = []
+        for citation in citations:
+            if isinstance(citation, dict):
+                citation = dict(citation)
+                for key in ("cited_text", "document_title", "title"):
+                    if isinstance(citation.get(key), str):
+                        citation[key] = neutralize_untrusted_tags(citation[key])
+            block["citations"].append(citation)
+    return block
+
+
+def _neutralize_document_text(document: dict[str, Any]) -> dict[str, Any]:
+    """Copy native document text as historical data, leaving opaque sources intact.
+
+    Hidden snapshots skip input sanitization, which only scans top-level text
+    blocks anyway. Sanitize the native text fields here without decoding media.
+    """
+    document = dict(document)
+    for key in ("title", "context"):
+        if isinstance(document.get(key), str):
+            document[key] = neutralize_untrusted_tags(document[key])
+    source = document.get("source")
+    if isinstance(source, dict):
+        source = dict(source)
+        if source.get("type") == "text" and isinstance(source.get("data"), str):
+            source["data"] = neutralize_untrusted_tags(source["data"])
+        elif source.get("type") == "content":
+            content = source.get("content")
+            if isinstance(content, str):
+                source["content"] = neutralize_untrusted_tags(content)
+            elif isinstance(content, (list, tuple)):
+                source["content"] = [_neutralize_document_content_block(block) for block in content]
+        document["source"] = source
+    return document
 
 
 def _is_conversation_message(message: Any) -> bool:
@@ -96,7 +141,7 @@ class ParentContextSnapshot:
                         # Omit this block without discarding the conversation.
                         history.append({"type": "text", "text": "[Historical media omitted: content could not be serialized. Do not assume its contents.]"})
                     else:
-                        history.append(media)
+                        history.append(_neutralize_document_text(media) if media["type"] == "document" else media)
             if isinstance(message, AIMessage):
                 # Every tool needs a retained result, including ordinary calls
                 # executing alongside the current delegation.

@@ -683,6 +683,39 @@ def test_task_tool_forwards_is_internal_true_to_executor(monkeypatch):
     assert captured["executor_kwargs"]["is_internal"] is True
 
 
+def test_task_tool_preserves_overwrite_sandbox_state_for_executor(monkeypatch):
+    """Fork-restored checkpoints wrap sandbox state in Overwrite; task_tool must preserve the wrapper so executor retains borrow semantics."""
+    from langgraph.types import Overwrite
+
+    runtime = _make_runtime()
+    runtime.state["sandbox"] = Overwrite({"sandbox_id": "sb-fork-123"})
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    _run_task_tool(runtime=runtime, description="test", prompt="p", subagent_type="general-purpose", tool_call_id="tc-1")
+    passed_sandbox = captured["executor_kwargs"]["sandbox_state"]
+    assert isinstance(passed_sandbox, Overwrite)
+    assert passed_sandbox.value == {"sandbox_id": "sb-fork-123"}
+
+
 def test_task_tool_forwards_is_internal_false_to_executor(monkeypatch):
     """is_internal=False must also propagate explicitly (not skipped)."""
     runtime = _make_runtime()

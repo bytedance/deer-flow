@@ -16,6 +16,7 @@ export const RESERVED_SLASH_SKILL_NAMES = new Set([
   "goal",
   "help",
   "memory",
+  "model",
   "models",
   "new",
   "status",

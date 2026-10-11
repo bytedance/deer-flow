@@ -39,6 +39,7 @@ from app.gateway.routers.mcp import (
     update_mcp_server_state,
 )
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
+from deerflow.mcp.tasks.runtime import set_mcp_task_config_snapshot
 
 # ---------------------------------------------------------------------------
 # _mask_server_config
@@ -716,6 +717,24 @@ def _request_with_role(system_role: str):
     )
 
 
+def _track_mcp_reconciliation_handoff(monkeypatch):
+    """Capture the committed-transition handoff without touching the real pool."""
+    prepared = []
+    finished = []
+    pending = object()
+
+    def fake_prepare(config, *, config_path):
+        prepared.append((config, config_path))
+        return pending
+
+    def fake_finish(value):
+        finished.append(value)
+
+    monkeypatch.setattr(mcp_router, "prepare_mcp_reconciliation", fake_prepare)
+    monkeypatch.setattr(mcp_router, "finish_mcp_reconciliation", fake_finish)
+    return prepared, finished, pending
+
+
 @pytest.mark.asyncio
 async def test_mcp_config_requires_admin_user():
     """MCP config is system-level executable configuration, not a normal user setting."""
@@ -731,16 +750,18 @@ async def test_mcp_config_requires_admin_user():
 async def test_reset_mcp_tools_cache_endpoint_requires_admin_user(monkeypatch):
     called = False
 
-    def fake_reset_mcp_tools_cache():
+    def fake_publish_mcp_tools_cache_reset():
         nonlocal called
         called = True
+        return "shared-generation"
 
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", fake_reset_mcp_tools_cache)
+    monkeypatch.setattr(mcp_router, "publish_mcp_tools_cache_reset", fake_publish_mcp_tools_cache_reset)
 
     response = await reset_mcp_tools_cache_endpoint(_request_with_role("admin"))
 
     assert called is True
     assert response.success is True
+    assert response.scope == "shared_config"
     assert "next use" in response.message
 
     with pytest.raises(HTTPException) as exc_info:
@@ -750,8 +771,19 @@ async def test_reset_mcp_tools_cache_endpoint_requires_admin_user(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_update_mcp_configuration_resets_tools_cache(monkeypatch, tmp_path):
-    reset_calls = 0
+async def test_reset_mcp_tools_cache_endpoint_reports_process_scope_without_shared_config(monkeypatch):
+    monkeypatch.setattr(mcp_router, "publish_mcp_tools_cache_reset", lambda: None)
+
+    response = await reset_mcp_tools_cache_endpoint(_request_with_role("admin"))
+
+    assert response.success is True
+    assert response.scope == "process"
+    assert "current Gateway process" in response.message
+
+
+@pytest.mark.asyncio
+async def test_update_mcp_configuration_installs_committed_reconciliation_handoff(monkeypatch, tmp_path):
+    prepared, finished, pending = _track_mcp_reconciliation_handoff(monkeypatch)
     config_path = tmp_path / "extensions_config.json"
     config_path.write_text('{"mcpServers": {}, "skills": {}}', encoding="utf-8")
 
@@ -766,14 +798,9 @@ async def test_update_mcp_configuration_resets_tools_cache(monkeypatch, tmp_path
         }
     )
 
-    def fake_reset_mcp_tools_cache():
-        nonlocal reset_calls
-        reset_calls += 1
-
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
     monkeypatch.setattr(mcp_router, "get_extensions_config", lambda: current_config)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", lambda: reloaded_config)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", fake_reset_mcp_tools_cache)
 
     response = await update_mcp_configuration(
         _request_with_role("admin"),
@@ -788,7 +815,8 @@ async def test_update_mcp_configuration_resets_tools_cache(monkeypatch, tmp_path
         ),
     )
 
-    assert reset_calls == 1
+    assert len(prepared) == 1
+    assert finished == [pending]
     assert list(response.mcp_servers) == ["github"]
 
 
@@ -931,18 +959,13 @@ async def test_create_mcp_servers_preserves_concurrent_siblings_and_rejects_dupl
         "customTopLevel": {"preserve": True},
     }
     config_path.write_text(json.dumps(original), encoding="utf-8")
-    reset_calls = 0
+    prepared, finished, pending = _track_mcp_reconciliation_handoff(monkeypatch)
 
     def fake_reload_extensions_config():
         return ExtensionsConfig.model_validate(json.loads(config_path.read_text(encoding="utf-8")))
 
-    def fake_reset_mcp_tools_cache():
-        nonlocal reset_calls
-        reset_calls += 1
-
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", fake_reset_mcp_tools_cache)
 
     response = await create_mcp_servers(
         _request_with_role("admin"),
@@ -960,7 +983,8 @@ async def test_create_mcp_servers_preserves_concurrent_siblings_and_rejects_dupl
     assert persisted["mcpServers"]["sibling"] == original["mcpServers"]["sibling"]
     assert persisted["customTopLevel"] == original["customTopLevel"]
     assert response.mcp_servers["added"].command == "npx"
-    assert reset_calls == 1
+    assert len(prepared) == 1
+    assert finished == [pending]
 
     before_duplicate = config_path.read_text(encoding="utf-8")
     with pytest.raises(HTTPException) as exc_info:
@@ -976,7 +1000,7 @@ async def test_create_mcp_servers_preserves_concurrent_siblings_and_rejects_dupl
 
     assert exc_info.value.status_code == 409
     assert config_path.read_text(encoding="utf-8") == before_duplicate
-    assert reset_calls == 1
+    assert len(prepared) == 1
 
 
 @pytest.mark.asyncio
@@ -1840,6 +1864,234 @@ async def test_mcp_create_without_existing_config_uses_resolvable_project_root(o
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["bulk", "disable", "delete"])
+async def test_frozen_task_server_mutation_rejected_before_persistence(operation, monkeypatch, tmp_path):
+    """Frozen durable-task server edits must fail before any file mutation."""
+    config_path = tmp_path / "extensions_config.json"
+    original = {
+        "mcpServers": {
+            "tasks": {
+                "enabled": True,
+                "type": "stdio",
+                "command": "npx",
+                "args": ["-y", "old-task-server"],
+                "task_toolsets": [
+                    {
+                        "name": "jobs",
+                        "submit_tool": "submit_job",
+                        "status_tool": "job_status",
+                        "cancel_tool": "cancel_job",
+                    }
+                ],
+            },
+            "regular": {
+                "enabled": True,
+                "type": "http",
+                "url": "https://regular.example/mcp",
+            },
+        },
+        "skills": {},
+    }
+    config_path.write_text(json.dumps(original), encoding="utf-8")
+    original_bytes = config_path.read_bytes()
+    set_mcp_task_config_snapshot(ExtensionsConfig.model_validate(original))
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda _config_path=None: config_path)
+    prepared = []
+    monkeypatch.setattr(
+        mcp_router,
+        "prepare_mcp_reconciliation",
+        lambda *_args, **_kwargs: prepared.append(1) or object(),
+    )
+
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            if operation == "bulk":
+                await update_mcp_configuration(
+                    _request_with_role("admin"),
+                    McpConfigUpdateRequest(
+                        mcp_servers={
+                            "tasks": McpServerConfigResponse(
+                                type="stdio",
+                                command="npx",
+                                args=["-y", "new-task-server"],
+                            )
+                        }
+                    ),
+                )
+            elif operation == "disable":
+                await update_mcp_server_state(
+                    _request_with_role("admin"),
+                    McpServerStateUpdateRequest(server_name="tasks", enabled=False),
+                )
+            else:
+                await delete_mcp_server(_request_with_role("admin"), "tasks")
+    finally:
+        set_mcp_task_config_snapshot(None)
+
+    assert exc_info.value.status_code == 409
+    assert "tasks" in exc_info.value.detail
+    assert config_path.read_bytes() == original_bytes
+    assert prepared == []
+
+
+@pytest.mark.asyncio
+async def test_frozen_task_server_unchanged_allows_regular_server_change(monkeypatch, tmp_path):
+    """A non-task sibling remains hot-editable while the task server is frozen."""
+    config_path = tmp_path / "extensions_config.json"
+    original = {
+        "mcpServers": {
+            "tasks": {
+                "enabled": True,
+                "type": "stdio",
+                "command": "npx",
+                "args": ["-y", "task-server"],
+                "task_toolsets": [
+                    {
+                        "name": "jobs",
+                        "submit_tool": "submit_job",
+                        "status_tool": "job_status",
+                        "cancel_tool": "cancel_job",
+                    }
+                ],
+            },
+            "regular": {
+                "enabled": False,
+                "type": "http",
+                "url": "https://regular.example/mcp",
+            },
+        },
+        "skills": {},
+    }
+    config_path.write_text(json.dumps(original), encoding="utf-8")
+    prepared, finished, pending = _track_mcp_reconciliation_handoff(monkeypatch)
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda _config_path=None: config_path)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", lambda: None)
+    set_mcp_task_config_snapshot(ExtensionsConfig.model_validate(original))
+
+    try:
+        response = await update_mcp_server_state(
+            _request_with_role("admin"),
+            McpServerStateUpdateRequest(server_name="regular", enabled=True),
+        )
+    finally:
+        set_mcp_task_config_snapshot(None)
+
+    assert response.mcp_servers["regular"].enabled is True
+    assert json.loads(config_path.read_text(encoding="utf-8"))["mcpServers"]["tasks"] == original["mcpServers"]["tasks"]
+    assert len(prepared) == 1
+    assert finished == [pending]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["create", "delete"])
+async def test_committed_write_failure_retry_has_explicit_conflict_or_missing_semantics(
+    operation,
+    monkeypatch,
+    tmp_path,
+):
+    """After a client sees 500 for a committed write, a retry is not a blind repeat."""
+    config_path = tmp_path / "extensions_config.json"
+    original = {
+        "mcpServers": {
+            "existing": {
+                "enabled": True,
+                "type": "http",
+                "url": "https://existing.example/mcp",
+            }
+        },
+        "skills": {},
+    }
+    if operation == "delete":
+        original["mcpServers"]["target"] = {
+            "enabled": True,
+            "type": "http",
+            "url": "https://target.example/mcp",
+        }
+    config_path.write_text(json.dumps(original), encoding="utf-8")
+    recovery_pending = object()
+
+    def fail_prepare(*_args, **_kwargs):
+        raise RuntimeError("prepare boom")
+
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda _config_path=None: config_path)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", lambda: None)
+    monkeypatch.setattr(mcp_router, "prepare_mcp_reconciliation", fail_prepare)
+    monkeypatch.setattr(mcp_router, "fail_mcp_reconciliation", lambda _exc: recovery_pending)
+    monkeypatch.setattr(mcp_router, "finish_mcp_reconciliation", lambda _pending: None)
+
+    with pytest.raises(HTTPException) as first:
+        if operation == "create":
+            await create_mcp_servers(
+                _request_with_role("admin"),
+                McpConfigUpdateRequest(mcp_servers={"target": McpServerConfigResponse(type="http", url="https://target.example/mcp")}),
+            )
+        else:
+            await delete_mcp_server(_request_with_role("admin"), "target")
+
+    assert first.value.status_code == 500
+    with pytest.raises(HTTPException) as retry:
+        if operation == "create":
+            await create_mcp_servers(
+                _request_with_role("admin"),
+                McpConfigUpdateRequest(mcp_servers={"target": McpServerConfigResponse(type="http", url="https://target.example/mcp")}),
+            )
+        else:
+            await delete_mcp_server(_request_with_role("admin"), "target")
+
+    if operation == "create":
+        assert retry.value.status_code == 409
+    else:
+        assert retry.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_committed_config_write_reports_reconciliation_failure_after_conservative_reset(
+    monkeypatch,
+    tmp_path,
+):
+    """A post-write handoff failure must recover conservatively and report uncertainty."""
+    config_path = tmp_path / "extensions_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "remote": {
+                        "enabled": False,
+                        "type": "http",
+                        "url": "https://example.test/mcp",
+                    }
+                },
+                "skills": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    recovery_pending = object()
+    finished = []
+
+    def fail_prepare(config, *, config_path):
+        raise RuntimeError("reconcile boom")
+
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda _config_path=None: config_path)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", lambda: None)
+    monkeypatch.setattr(mcp_router, "prepare_mcp_reconciliation", fail_prepare)
+    monkeypatch.setattr(mcp_router, "fail_mcp_reconciliation", lambda _exc: recovery_pending)
+    monkeypatch.setattr(mcp_router, "finish_mcp_reconciliation", lambda pending: finished.append(pending))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await update_mcp_server_state(
+            _request_with_role("admin"),
+            McpServerStateUpdateRequest(server_name="remote", enabled=True),
+        )
+
+    assert exc_info.value.status_code == 500
+    assert "saved" in exc_info.value.detail
+    assert "cache reconciliation" in exc_info.value.detail
+    assert json.loads(config_path.read_text(encoding="utf-8"))["mcpServers"]["remote"]["enabled"] is True
+    assert finished == [recovery_pending]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("endpoint", ["get", "bulk", "create", "update", "delete", "state"])
 @pytest.mark.parametrize(
     ("raw_config", "expected_detail"),
@@ -2139,18 +2391,13 @@ async def test_update_mcp_server_state_updates_valid_target_despite_unrelated_di
         "customTopLevel": {"preserve": True},
     }
     config_path.write_text(json.dumps(original), encoding="utf-8")
-    reset_calls = 0
+    prepared, finished, pending = _track_mcp_reconciliation_handoff(monkeypatch)
 
     def fake_reload_extensions_config():
         return ExtensionsConfig.model_validate(json.loads(config_path.read_text(encoding="utf-8")))
 
-    def fake_reset_mcp_tools_cache():
-        nonlocal reset_calls
-        reset_calls += 1
-
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", fake_reset_mcp_tools_cache)
     monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
 
     response = await update_mcp_server_state(
@@ -2166,7 +2413,8 @@ async def test_update_mcp_server_state_updates_valid_target_despite_unrelated_di
     assert persisted["customTopLevel"] == original["customTopLevel"]
     assert response.mcp_servers["github"].enabled is enabled
     assert response.mcp_servers["semantic-scholar"].env == {"S2_API_KEY": "***"}
-    assert reset_calls == 1
+    assert len(prepared) == 1
+    assert finished == [pending]
 
 
 @pytest.mark.asyncio
@@ -2187,18 +2435,13 @@ async def test_update_mcp_server_state_allows_disabling_but_rejects_enabling_dis
         ),
         encoding="utf-8",
     )
-    reset_calls = 0
+    prepared, finished, pending = _track_mcp_reconciliation_handoff(monkeypatch)
 
     def fake_reload_extensions_config():
         return ExtensionsConfig.model_validate(json.loads(config_path.read_text(encoding="utf-8")))
 
-    def fake_reset_mcp_tools_cache():
-        nonlocal reset_calls
-        reset_calls += 1
-
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", fake_reset_mcp_tools_cache)
     monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
 
     response = await update_mcp_server_state(
@@ -2217,7 +2460,7 @@ async def test_update_mcp_server_state_allows_disabling_but_rejects_enabling_dis
     assert "s2-mcp-server" in exc_info.value.detail
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
     assert persisted["mcpServers"]["semantic-scholar"]["enabled"] is False
-    assert reset_calls == 1
+    assert len(prepared) == 1
 
 
 @pytest.mark.asyncio
@@ -2288,18 +2531,13 @@ async def test_update_mcp_server_state_enables_raw_transport_alias(
         ),
         encoding="utf-8",
     )
-    reset_calls = 0
+    prepared, finished, pending = _track_mcp_reconciliation_handoff(monkeypatch)
 
     def fake_reload_extensions_config():
         return ExtensionsConfig.model_validate(json.loads(config_path.read_text(encoding="utf-8")))
 
-    def fake_reset_mcp_tools_cache():
-        nonlocal reset_calls
-        reset_calls += 1
-
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", fake_reset_mcp_tools_cache)
     monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
 
     response = await update_mcp_server_state(
@@ -2312,7 +2550,8 @@ async def test_update_mcp_server_state_enables_raw_transport_alias(
     assert "type" not in persisted_server
     assert response.mcp_servers["remote"].enabled is True
     assert response.mcp_servers["remote"].type == transport
-    assert reset_calls == 1
+    assert len(prepared) == 1
+    assert finished == [pending]
 
 
 @pytest.mark.asyncio
@@ -2320,14 +2559,9 @@ async def test_update_mcp_server_state_returns_404_without_writing_or_resetting_
     config_path = tmp_path / "extensions_config.json"
     original_text = '{"mcpServers": {}, "skills": {}}'
     config_path.write_text(original_text, encoding="utf-8")
-    reset_calls = 0
-
-    def fake_reset_mcp_tools_cache():
-        nonlocal reset_calls
-        reset_calls += 1
+    prepared, finished, _pending = _track_mcp_reconciliation_handoff(monkeypatch)
 
     monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", fake_reset_mcp_tools_cache)
 
     with pytest.raises(HTTPException) as exc_info:
         await update_mcp_server_state(
@@ -2337,7 +2571,8 @@ async def test_update_mcp_server_state_returns_404_without_writing_or_resetting_
 
     assert exc_info.value.status_code == 404
     assert config_path.read_text(encoding="utf-8") == original_text
-    assert reset_calls == 0
+    assert prepared == []
+    assert finished == []
 
 
 @pytest.mark.asyncio

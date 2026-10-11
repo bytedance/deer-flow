@@ -6,6 +6,7 @@ import {
   buildVisibleHistoryMessages,
   mergeRenderedMessageLedger,
   mergeMessages,
+  reconcileThreadHistoryRows,
   resolveThreadTransientHistoryBridge,
   resolveTransientHistoryBridge,
 } from "@/core/threads/hooks";
@@ -543,3 +544,117 @@ test.each(["before", "after"] as const)(
     expect(idsOf(mergeMessages(resolved, [], []))).toEqual(idsOf(previous));
   },
 );
+
+test("reconcile anchors a re-persisted message at its earliest seq", () => {
+  // Same run, same message id, re-persisted under a later journal seq while
+  // the older row only survives in the retained snapshot.
+  const previousRows = [row("r1", 95, msg("m1", "ai", "partial"))];
+  const currentRows = [row("r1", 130, msg("m1", "ai", "final"))];
+
+  const reconciled = reconcileThreadHistoryRows(
+    previousRows,
+    currentRows,
+    false,
+  );
+
+  expect(reconciled).toHaveLength(1);
+  // earliest-seq-wins: the re-persisted update must not push the message
+  // towards the tail of the thread.
+  expect(reconciled[0]!.seq).toBe(95);
+  // content converges to the newest copy.
+  expect(reconciled[0]!.content).toBe(currentRows[0]!.content);
+
+  const visible = buildVisibleHistoryMessages(reconciled, new Set());
+  expect(visible).toHaveLength(1);
+  expect(visible[0]!.additional_kwargs?.[MESSAGE_SEQ_KEY]).toBe(95);
+  expect(visible[0]!.content).toBe("final");
+});
+
+test("reconcile still converges content for same-seq refreshed copies", () => {
+  const previousRows = [row("r1", 95, msg("m1", "ai", "partial"))];
+  const currentRows = [row("r1", 95, msg("m1", "ai", "final"))];
+
+  const reconciled = reconcileThreadHistoryRows(
+    previousRows,
+    currentRows,
+    false,
+  );
+
+  expect(reconciled).toHaveLength(1);
+  expect(reconciled[0]!.seq).toBe(95);
+  expect(reconciled[0]!.content).toBe(currentRows[0]!.content);
+});
+
+test.each([false, true])(
+  "reconcile prefers the earliest visible row over a hidden control copy (complete=%s)",
+  (isAuthoritativeComplete) => {
+    const hidden = row(
+      "r1",
+      90,
+      withKwargs(msg("req-1", "system", "reminder"), {
+        hide_from_ui: true,
+      }),
+    );
+    const middle = row("r1", 95, msg("m1", "ai", "earlier answer"));
+    const visible = row("r1", 100, msg("req-1__user", "human", "question"));
+    const refreshed = row(
+      "r1",
+      130,
+      msg("req-1__user", "human", "updated question"),
+    );
+    const previousRows = [hidden, middle, visible];
+
+    const reconciled = reconcileThreadHistoryRows(
+      previousRows,
+      [...previousRows, refreshed],
+      isAuthoritativeComplete,
+    );
+
+    const human = reconciled.find((entry) => entry.content.type === "human")!;
+    expect(human.seq).toBe(100);
+    expect(human.content).toBe(refreshed.content);
+    const messages = buildVisibleHistoryMessages(reconciled, new Set());
+    expect(idsOf(messages)).toEqual(["m1", "req-1__user"]);
+    expect(seqsOf(messages)).toEqual([95, 100]);
+  },
+);
+
+test("reconcile falls back to the earliest hidden row when no visible copy exists", () => {
+  const hidden = (content: string) =>
+    withKwargs(msg("control", "system", content), { hide_from_ui: true });
+  const previous = row("r1", 90, hidden("original reminder"));
+  const refreshed = row("r1", 130, hidden("updated reminder"));
+
+  const reconciled = reconcileThreadHistoryRows([previous], [refreshed], false);
+
+  expect(reconciled).toHaveLength(1);
+  expect(reconciled[0]!.seq).toBe(90);
+  expect(reconciled[0]!.content).toBe(refreshed.content);
+  expect(reconciled[0]!.content.additional_kwargs?.hide_from_ui).toBe(true);
+});
+
+test("reconcile sorts re-anchored rows and preserves a stable retained snapshot", () => {
+  const original = row("r1", 95, msg("a1", "ai", "partial"));
+  const middle = row("r1", 100, msg("m1", "ai", "middle"));
+  const refreshed = row("r1", 130, msg("a1", "ai", "final"));
+  const currentRows = [middle, refreshed];
+
+  const reconciled = reconcileThreadHistoryRows(
+    [original, middle],
+    currentRows,
+    false,
+  );
+
+  expect(reconciled.map((entry) => entry.seq)).toEqual([95, 100]);
+  expect(reconciled[0]!.content).toBe(refreshed.content);
+  expect(reconciled[1]).toBe(middle);
+  expect(
+    buildVisibleHistoryMessages(reconciled, new Set()).map(
+      (entry) => entry.content,
+    ),
+  ).toEqual(["final", "middle"]);
+  // Compare the sorted rows before taking the stable-output shortcut.
+  expect(reconcileThreadHistoryRows(reconciled, currentRows, false)).toBe(
+    reconciled,
+  );
+});

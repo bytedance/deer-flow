@@ -44,11 +44,11 @@ cd "$REPO_ROOT"
 
 ENV_FILE="$REPO_ROOT/.env"
 DOCKER_DIR="$REPO_ROOT/docker"
+COMPOSE_ENV_FILE_ARGS=()
 if [ -f "$ENV_FILE" ]; then
-    COMPOSE_CMD=(docker compose --env-file "$ENV_FILE" -p deer-flow -f "$DOCKER_DIR/docker-compose.yaml")
-else
-    COMPOSE_CMD=(docker compose -p deer-flow -f "$DOCKER_DIR/docker-compose.yaml")
+    COMPOSE_ENV_FILE_ARGS=(--env-file "$ENV_FILE")
 fi
+COMPOSE_CMD=(docker compose "${COMPOSE_ENV_FILE_ARGS[@]}" -p deer-flow -f "$DOCKER_DIR/docker-compose.yaml")
 
 load_uv_extras_from_dotenv() {
     local line=""
@@ -120,6 +120,25 @@ fi
 echo -e "${BLUE}DEER_FLOW_HOME=$DEER_FLOW_HOME${NC}"
 mkdir -p "$DEER_FLOW_HOME"
 
+# ── DEER_FLOW_HOME writability preflight ─────────────────────────────────────
+
+# `make docker-start` bind-mounts the host `backend/` directory into the gateway
+# container, whose process runs as root, so state it creates under
+# backend/.deer-flow ends up owned by root on the host. A later `make up` runs
+# this script as the invoking user and only fails deep into the run with a bare
+# "Permission denied" while persisting generated secrets. Detect it up front and
+# print the exact recovery command instead.
+fail_home_permission() {
+    echo -e "${RED}✗ $1 is not $2 by '$(id -un)'.${NC}" >&2
+    echo -e "${RED}  This usually happens when the dev stack (make docker-start) created it as root.${NC}" >&2
+    echo -e "${YELLOW}  Recover with: sudo chown -R $(id -u):$(id -g) '$DEER_FLOW_HOME'${NC}" >&2
+    exit 1
+}
+
+if [ "$CMD" != "down" ] && [ ! -w "$DEER_FLOW_HOME" ]; then
+    fail_home_permission "$DEER_FLOW_HOME" writable
+fi
+
 # ── DEER_FLOW_REPO_ROOT (for skills host path in DooD) ───────────────────────
 
 export DEER_FLOW_REPO_ROOT="$REPO_ROOT"
@@ -167,13 +186,56 @@ else
 fi
 
 
+# Compose interpolates ${BETTER_AUTH_SECRET} and ${DEER_FLOW_INTERNAL_AUTH_TOKEN}
+# from the shell environment first and --env-file second. A secret the operator
+# wrote to $ENV_FILE therefore only reaches the stack while this script does not
+# export a competing value: generating or reloading one here would silently
+# replace it. Leave a dotenv-provided secret unexported so compose parses it
+# from $ENV_FILE itself, and only fall back to the persisted/generated one
+# when neither the shell nor $ENV_FILE provides it.
+#
+# "Provided" has to mean what Compose will see, not what a KEY=VALUE grep
+# finds: Compose also accepts `KEY: VALUE` lines and interpolates `${VAR}`
+# inside values, so `TOKEN: abc` is set and `TOKEN=${UNSET}` is empty. Ask
+# Compose itself: render a stub project whose only environment entry is
+# `${KEY}`, with the same --env-file and project directory as the real
+# command, and read the interpolated value back. This works on every Compose
+# v2 (unlike `config --environment`, which needs 2.28), needs no daemon, and
+# cannot fail on the real compose file before the secrets are decided. An
+# empty or unset variable renders as `""`.
+compose_interpolated_value() {
+    local key="$1"
+    local rendered=""
+    if ! rendered="$(printf 'services:\n  probe:\n    image: scratch\n    environment:\n      DEER_FLOW_PROBE_VALUE: ${%s}\n' "$key" \
+        | docker compose "${COMPOSE_ENV_FILE_ARGS[@]}" --project-directory "$DOCKER_DIR" -f - config 2>&1)"; then
+        echo -e "${RED}✗ docker compose could not resolve $key from the environment and $ENV_FILE:${NC}" >&2
+        printf '%s\n' "$rendered" >&2
+        exit 1
+    fi
+    printf '%s\n' "$rendered" | sed -n 's/^[[:space:]]*DEER_FLOW_PROBE_VALUE: //p' | head -n 1
+}
+
+dotenv_provides_secret() {
+    local value=""
+    # The probe runs in a subshell, so its exit 1 must be re-raised here.
+    value="$(compose_interpolated_value "$1")" || exit 1
+    [ -n "$value" ] && [ "$value" != '""' ]
+}
+
 # ── BETTER_AUTH_SECRET ───────────────────────────────────────────────────────
 # Required by Next.js in production. Generated once and persisted so auth
 # sessions survive container restarts.
 
 _secret_file="$DEER_FLOW_HOME/.better-auth-secret"
-if [ -z "$BETTER_AUTH_SECRET" ]; then
+if [ "$CMD" != "down" ] && [ -z "$BETTER_AUTH_SECRET" ] && dotenv_provides_secret BETTER_AUTH_SECRET; then
+    echo -e "${GREEN}✓ BETTER_AUTH_SECRET loaded from $ENV_FILE${NC}"
+elif [ "$CMD" != "down" ] && [ -z "$BETTER_AUTH_SECRET" ]; then
     if [ -f "$_secret_file" ]; then
+        # A writable directory can still contain a root-owned, unreadable file.
+        # Persisted secrets are only read; read-only files and overrides are valid.
+        if [ ! -r "$_secret_file" ]; then
+            fail_home_permission "$_secret_file" readable
+        fi
         export BETTER_AUTH_SECRET
         BETTER_AUTH_SECRET="$(cat "$_secret_file")"
         echo -e "${GREEN}✓ BETTER_AUTH_SECRET loaded from $_secret_file${NC}"
@@ -204,8 +266,13 @@ fi
 # APIs even when the request is handled by a different Uvicorn worker.
 
 _internal_auth_token_file="$DEER_FLOW_HOME/.internal-auth-token"
-if  [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_INTERNAL_AUTH_TOKEN" ]; then
+if [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_INTERNAL_AUTH_TOKEN" ] && dotenv_provides_secret DEER_FLOW_INTERNAL_AUTH_TOKEN; then
+    echo -e "${GREEN}✓ DEER_FLOW_INTERNAL_AUTH_TOKEN loaded from $ENV_FILE${NC}"
+elif [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_INTERNAL_AUTH_TOKEN" ]; then
     if [ -f "$_internal_auth_token_file" ]; then
+        if [ ! -r "$_internal_auth_token_file" ]; then
+            fail_home_permission "$_internal_auth_token_file" readable
+        fi
         export DEER_FLOW_INTERNAL_AUTH_TOKEN
         DEER_FLOW_INTERNAL_AUTH_TOKEN="$(cat "$_internal_auth_token_file")"
         echo -e "${GREEN}✓ DEER_FLOW_INTERNAL_AUTH_TOKEN loaded from $_internal_auth_token_file${NC}"
@@ -229,6 +296,53 @@ if  [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_INTERNAL_AUTH_TOKEN" ]; then
         chmod 600 "$_internal_auth_token_file"
         echo -e "${GREEN}✓ DEER_FLOW_INTERNAL_AUTH_TOKEN generated → $_internal_auth_token_file${NC}"
     fi
+fi
+
+# ── DEER_FLOW_CREDENTIALS_KEY ────────────────────────────────────────────────
+# At-rest Fernet key the Gateway encrypts stored credentials with. Losing it
+# makes those credentials unreadable, so back the file up. It is persisted
+# under the name the Gateway itself generates in its runtime home (the
+# $DEER_FLOW_HOME bind mount), so a key either side created first is the one
+# both keep. noclobber turns the redirection into an exclusive (O_EXCL)
+# create: when a concurrent run wins, its key is read back instead of ours.
+
+_credentials_key_file="$DEER_FLOW_HOME/.credentials_key"
+if [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_CREDENTIALS_KEY" ] && dotenv_provides_secret DEER_FLOW_CREDENTIALS_KEY; then
+    echo -e "${GREEN}✓ DEER_FLOW_CREDENTIALS_KEY loaded from $ENV_FILE${NC}"
+elif [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_CREDENTIALS_KEY" ]; then
+    _generated_credentials_key=""
+    if [ ! -f "$_credentials_key_file" ]; then
+        # urlsafe base64 of 32 random bytes, the Fernet key format.
+        if command -v python3 > /dev/null 2>&1 && \
+            _generated_credentials_key="$(python3 -c 'import sys; sys.version_info >= (3, 6) or sys.exit(1); import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())' 2>/dev/null)"; then
+            true
+        elif command -v python > /dev/null 2>&1 && \
+            _generated_credentials_key="$(python -c 'import sys; sys.version_info >= (3, 6) or sys.exit(1); import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())' 2>/dev/null)"; then
+            true
+        elif command -v openssl > /dev/null 2>&1 && \
+            _generated_credentials_key="$(openssl rand -base64 32 | tr '+/' '-_')"; then
+            true
+        else
+            echo -e "${RED}✗ Cannot generate DEER_FLOW_CREDENTIALS_KEY: python3, python, and openssl are all unavailable.${NC}" >&2
+            echo -e "${RED}  Set DEER_FLOW_CREDENTIALS_KEY manually before running make up.${NC}" >&2
+            exit 1
+        fi
+        if ! ( umask 077; set -o noclobber; printf '%s\n' "$_generated_credentials_key" > "$_credentials_key_file" ) 2>/dev/null; then
+            _generated_credentials_key=""
+        fi
+    fi
+    if [ -n "$_generated_credentials_key" ]; then
+        export DEER_FLOW_CREDENTIALS_KEY="$_generated_credentials_key"
+        echo -e "${GREEN}✓ DEER_FLOW_CREDENTIALS_KEY generated → $_credentials_key_file (back it up)${NC}"
+    else
+        if [ ! -r "$_credentials_key_file" ]; then
+            fail_home_permission "$_credentials_key_file" readable
+        fi
+        export DEER_FLOW_CREDENTIALS_KEY
+        DEER_FLOW_CREDENTIALS_KEY="$(cat "$_credentials_key_file")"
+        echo -e "${GREEN}✓ DEER_FLOW_CREDENTIALS_KEY loaded from $_credentials_key_file${NC}"
+    fi
+    unset _generated_credentials_key
 fi
 
 # ── UV_EXTRAS auto-detection ─────────────────────────────────────────────────
@@ -402,6 +516,7 @@ report_startup_failure() {
     echo -e "${RED}✗ DeerFlow services failed to become ready.${NC}" >&2
     echo '  If Docker Compose reports "unknown flag: --wait", upgrade to a version that' >&2
     echo '  supports `docker compose up --wait`.' >&2
+    echo '  If it reports "env_file.0 must be a string", upgrade to Docker Compose 2.24+.' >&2
     echo "  Container status:" >&2
     "${COMPOSE_CMD[@]}" ps >&2 || true
     echo "" >&2

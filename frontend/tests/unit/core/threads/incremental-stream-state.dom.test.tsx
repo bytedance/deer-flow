@@ -96,6 +96,17 @@ test("updates rendered thread state without receiving a values frame", async () 
     max_continuations: 8,
     no_progress_count: 0,
   } as GoalState;
+  const toolArtifacts = [
+    {
+      handle: "art_12345678",
+      tool_name: "make_report",
+      tool_call_id: "call-1",
+      call_index: 0,
+      artifact_type: "file",
+      display_name: "report.csv",
+      real_ref: "/mnt/user-data/outputs/report.csv",
+    },
+  ];
   const todos = [{ content: "Draft", status: "in_progress" as const }];
 
   act(() => {
@@ -114,6 +125,7 @@ test("updates rendered thread state without receiving a values frame", async () 
       {
         agent: {
           artifacts: ["report.md"],
+          tool_artifacts: toolArtifacts,
           goal,
           // The same message also arrives through messages-tuple. The update
           // path must not apply it a second time.
@@ -137,6 +149,7 @@ test("updates rendered thread state without receiving a values frame", async () 
 
   expect(result.current.thread.values).toMatchObject({
     artifacts: ["old.md", "report.md"],
+    tool_artifacts: toolArtifacts,
     goal,
     title: "After",
     todos,

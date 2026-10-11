@@ -328,7 +328,7 @@ def test_disabled_continuity_retention_does_not_change_assembly_identity():
     assert _middleware_fingerprint(omitted) == _middleware_fingerprint(disabled)
 
 
-@pytest.mark.parametrize("kwargs", [{"task_continuity_enabled": True}, {"skills_container_path": "/other-skills"}, {"skill_file_read_tool_names": ["custom_read"]}])
+@pytest.mark.parametrize("kwargs", [{"inject_tool_artifacts": False}, {"task_continuity_enabled": True}, {"skills_container_path": "/other-skills"}, {"skill_file_read_tool_names": ["custom_read"]}])
 def test_durable_context_behavior_changes_assembly_identity(kwargs):
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
 

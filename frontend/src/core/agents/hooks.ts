@@ -6,6 +6,7 @@ import {
   deleteAgent,
   fetchAgentsApiEnabled,
   getAgent,
+  importAgentPackage,
   listAgents,
   updateAgent,
 } from "./api";
@@ -76,6 +77,22 @@ export function useCreateAgent() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (request: CreateAgentRequest) => createAgent(request),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["agents"] });
+    },
+  });
+}
+
+export function useImportAgentPackage() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      agentPackage,
+      name,
+    }: {
+      agentPackage: unknown;
+      name?: string;
+    }) => importAgentPackage(agentPackage, name),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["agents"] });
     },

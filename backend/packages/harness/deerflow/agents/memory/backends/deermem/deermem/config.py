@@ -84,6 +84,15 @@ class DeerMemConfig(BaseModel):
             "Search bypasses this adapter when retrieval_relevance_enabled is true; indexing remains configured."
         ),
     )
+    retrieval_index_path: str = Field(
+        default="",
+        description=(
+            "Directory holding the derived SQLite FTS5 retrieval index. Empty (default) = ``{storage_path}/.retrieval``; "
+            "a relative path is resolved against storage_path; an absolute path is used as-is. The index is rebuildable, "
+            "so Gateway instances that share storage_path must each point this at instance-local disk: SQLite WAL is "
+            "unsupported on network filesystems, and peers would rebuild or delete each other's index."
+        ),
+    )
     fact_dedup_enabled: bool = Field(
         default=False,
         description=(
@@ -291,6 +300,17 @@ class DeerMemConfig(BaseModel):
             "filter, rejection rate, prompt version). The host injects a "
             "Langfuse-based callback to emit an extraction span; None = no "
             "post-invoke observability. Set programmatically (not from YAML)."
+        ),
+    )
+    # ── Memory judge (pre-screen + signal classification) ────────────────
+    judge: Any = Field(
+        default=None,
+        description=(
+            "Optional host-injected memory judge ``judge(context) -> MemoryBatchVerdict``: "
+            "decides whether this batch is worth an extraction call (pre-screening) and "
+            "supplies model hint labels (signal classification). None (default) = no judging, "
+            "leaving the extraction path byte-identical to a deployment without this feature. "
+            "Set programmatically by the host factory (not from YAML)."
         ),
     )
     # ── Watermark cache (in-memory, bounded LRU) ─────────────────────────

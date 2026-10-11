@@ -162,7 +162,22 @@
           "caller": {"type": "string"},
           "usage": {"type": "object"},
           "latency_ms": {"type": ["integer", "null"], "minimum": 0},
-          "llm_call_index": {"type": "integer", "minimum": 1}
+          "llm_call_index": {"type": "integer", "minimum": 1},
+          "langchain_run_id": {"type": "string"},
+          "langchain_parent_run_id": {"type": ["string", "null"]},
+          "caller_category": {"enum": ["lead_agent", "middleware", "subagent", "fallback", "other"]},
+          "provider": {"type": ["string", "null"]},
+          "model": {"type": ["string", "null"]},
+          "stop_reason": {"type": ["string", "null"]},
+          "status": {"enum": ["ok", "fallback"]},
+          "input_tokens": {"type": ["integer", "null"], "minimum": 0},
+          "output_tokens": {"type": ["integer", "null"], "minimum": 0},
+          "total_tokens": {"type": ["integer", "null"], "minimum": 0},
+          "request_chars": {"type": "integer", "minimum": 0},
+          "request_message_chars": {"type": "integer", "minimum": 0},
+          "request_tools_chars": {"type": ["integer", "null"], "minimum": 0},
+          "request_message_count": {"type": "integer", "minimum": 0},
+          "request_started_at": {"type": "string"}
         },
         "additionalProperties": true
       }
@@ -188,7 +203,26 @@
       "category": "trace",
       "producer": "RunJournal.on_llm_error()",
       "content_schema": {"type": "string"},
-      "metadata_schema": {"type": "object", "additionalProperties": true}
+      "metadata_schema": {
+        "type": "object",
+        "properties": {
+          "langchain_run_id": {"type": "string"},
+          "langchain_parent_run_id": {"type": ["string", "null"]},
+          "caller": {"type": "string"},
+          "caller_category": {"enum": ["lead_agent", "middleware", "subagent", "fallback", "other"]},
+          "provider": {"type": ["string", "null"]},
+          "model": {"type": ["string", "null"]},
+          "status": {"const": "error"},
+          "stop_reason": {"type": "null"},
+          "error_type": {"type": "string"},
+          "request_chars": {"type": "integer", "minimum": 0},
+          "request_message_chars": {"type": "integer", "minimum": 0},
+          "request_tools_chars": {"type": ["integer", "null"], "minimum": 0},
+          "request_message_count": {"type": "integer", "minimum": 0},
+          "request_started_at": {"type": "string"}
+        },
+        "additionalProperties": true
+      }
     },
     {
       "event_type": "context:memory",
@@ -399,7 +433,7 @@
       "pattern": "middleware:{tag}",
       "category": "middleware",
       "producer": "RunJournal.record_middleware(tag, ...)",
-      "known_tags": ["guardrail", "loop_detection", "safety_termination", "skill_activation", "skill_secrets", "tool_promotion", "tool_progress"],
+      "known_tags": ["guardrail", "loop_detection", "safety_termination", "skill_activation", "skill_secrets", "tool_promotion", "tool_progress", "summarize"],
       "event_type_schema": {
         "type": "string",
         "pattern": "^middleware:",

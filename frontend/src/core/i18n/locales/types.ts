@@ -23,6 +23,18 @@ export interface Translations {
     deploymentHint: string;
     moduleUnavailable: string;
     noResults: string;
+    catalogEntry: string;
+    catalogHint: string;
+    installationGuide: string;
+    catalog: Record<
+      | "agentTeams"
+      | "bookmarks"
+      | "context"
+      | "classify"
+      | "screening"
+      | "example",
+      { title: string; description: string }
+    >;
     pageUnavailable: string;
     pageUnavailableHint: string;
     viewAll: string;
@@ -301,6 +313,26 @@ export interface Translations {
 
   // Input Box
   inputBox: {
+    mentionPicker: string;
+    mentionSearch: string;
+    mentionSkills: string;
+    mentionFiles: string;
+    mentionExtensions: string;
+    mentionExtensionsLimit: string;
+    mentionConversations: string;
+    mentionUpload: string;
+    mentionEmpty: string;
+    mentionLoadMore: string;
+    mentionLoading: string;
+    mentionFailed: string;
+    mentionRetry: string;
+    mentionAttaching: string;
+    mentionAttachFailed: string;
+    mentionMultipleSkills: string;
+    mentionNoProject: string;
+    mentionUnavailable: string;
+    mentionClose: string;
+
     placeholder: string;
     disclaimer: string;
     createSkillPrompt: string;
@@ -372,6 +404,44 @@ export interface Translations {
     goalFailed: string;
     goalTooLong: string;
     goalLengthCounter: string;
+    goalBar: {
+      regionLabel: string;
+      inProgress: string;
+      stopped: string;
+      waitingForYou: string;
+      waiting: string;
+      paused: string;
+      autoContinuedOnce: string;
+      autoContinuedMany: string;
+      details: string;
+      hideDetails: string;
+      noteLabel: string;
+      codeLabel: string;
+      assumptionTooltip: string;
+      announce: string;
+      editLocked: string;
+      busy: string;
+      next: {
+        limit: string;
+        autoOff: string;
+        noProgress: string;
+        tokenCapped: string;
+        missingEvidence: string;
+        runFailed: string;
+        needsInputCard: string;
+        needsInputReply: string;
+        external: string;
+        unchecked: string;
+        unknown: string;
+        paused: string;
+      };
+      /** Why a check failed, without the "Couldn't check the goal" of its chip. */
+      uncheckedReasons: {
+        evaluatorFailed: string;
+        noDurableEndOfTurn: string;
+        threadChanged: string;
+      };
+    };
     compactSuccess: string;
     compactSkipped: string;
     compactFailed: string;
@@ -633,6 +703,7 @@ export interface Translations {
       invalidRunAt: string;
       timezone: string;
       intervalAmount: string;
+      intervalUnit: string;
       intervalUnitSeconds: string;
       intervalUnitMinutes: string;
       intervalUnitHours: string;
@@ -650,61 +721,180 @@ export interface Translations {
     preview: string;
     cronHelp: string;
     create: {
-      title: string;
-      taskTitle: string;
-      prompt: string;
       agent: string;
       leadAgent: string;
-      submit: string;
-      fillRequired: string;
     };
-    context: {
-      fresh: string;
-      reuse: string;
-      threadIdPlaceholder: string;
-      reuseNoticeTitle: string;
-      reuseNoticeDescription: string;
+    search: { clear: string; noResults: string };
+    page: {
+      description: string;
+      descriptionNoChat: string;
+      newTask: string;
+      tabs: { all: string; active: string; paused: string; finished: string };
+      tabsLabel: string;
+      search: string;
+      emptyTitle: string;
+      emptyBody: string;
+      emptyBodyNoChat: string;
+      threadFilter: string;
+      showAll: string;
+      schedulerOffTitle: string;
+      schedulerOffBody: string;
+      createBlocked: string;
+      unavailableTitle: string;
+      unavailableBody: string;
+      selectHint: string;
+      tabCount: string;
+      loading: string;
+      taskNotInChat: string;
     };
-    search: { placeholder: string; clear: string; noResults: string };
-    filters: {
-      allStatuses: string;
-      enabled: string;
-      paused: string;
-      completed: string;
-      failed: string;
-      allTypes: string;
-      cron: string;
-      once: string;
-      interval: string;
+    time: {
+      today: string;
+      tomorrow: string;
+      yesterday: string;
+      yourTime: string;
+    };
+    /** Same as `time`, for use mid-sentence (lowercase in English). */
+    timeInline: {
+      today: string;
+      tomorrow: string;
+      yesterday: string;
+      yourTime: string;
+    };
+    list: {
+      next: string;
+      pausedByAgentOn: string;
+      autoPausedLine: string;
+      finishedLimit: string;
+      finishedEnd: string;
+      runningNow: string;
     };
     detail: {
-      contextMode: string;
       agent: string;
-      thread: string;
-      lastThread: string;
-      schedule: string;
-      nextRun: string;
-      lastRun: string;
-      lastRunId: string;
-      lastError: string;
       runsCount: string;
       runsCountOne: string;
       noRuns: string;
-      noSelection: string;
-      filteredByThread: string;
       loadFailed: string;
+      runs: string;
+      stopsWhen: string;
+      does: string;
+      goal: string;
+      notes: string;
+      history: string;
+      next: string;
+      firstRun: string;
+      notWhilePaused: string;
+      ifResumed: string;
+      noMoreRuns: string;
+      showAll: string;
+      showLess: string;
+      createdInChat: string;
+      openChat: string;
+      contextFresh: string;
+      contextReuse: string;
+      copyTaskId: string;
+      copied: string;
+      moreActions: string;
+      agentLine: string;
+    };
+    stop: {
+      pausesItself: string;
+      reached: string;
+      noRule: string;
+      afterRuns: string;
+      atTime: string;
+      capRuns: string;
+      capRunsUsed: string;
+      capEnd: string;
+      capBoth: string;
+      trialsDontCount: string;
+      autoPauseRule: string;
+      goalTooltip: string;
+    };
+    notice: {
+      pausedByAgentTitle: string;
+      pausedByAgentBody: string;
+      seeThatRun: string;
+      autoPausedTitle: string;
+      autoPausedBody: string;
+      editGoal: string;
+      openLatestRun: string;
+      resumeAnyway: string;
+      limitTitle: string;
+      limitBodyRuns: string;
+      limitBodyEnd: string;
+      endTitle: string;
+      extendLimit: string;
+      onceFinished: string;
+      onceFailed: string;
+    };
+    renew: {
+      title: string;
+      bodyRuns: string;
+      bodyEnd: string;
+      removeCap: string;
+      removeCapBlocked: string;
+      submit: string;
+    };
+    form: {
+      createTitle: string;
+      editTitle: string;
+      title: string;
+      instructions: string;
+      instructionsHint: string;
+      stopCondition: string;
+      stopConditionHint: string;
+      goal: string;
+      goalHint: string;
+      goalNeedsFresh: string;
+      maxRuns: string;
+      maxRunsHint: string;
+      endAt: string;
+      invalidEndAt: string;
+      labelWithZone: string;
+      contextLabel: string;
+      clear: string;
+      frequentNeedsCap: string;
+      schedule: string;
+      agent: string;
+      advanced: string;
+      contextFresh: string;
+      contextReuse: string;
+      chatId: string;
+      reuseNoticeTitle: string;
+      reuseNoticeDescription: string;
+      create: string;
+      save: string;
+      required: string;
+      endAtPassed: string;
+      copySuffix: string;
     };
     actions: {
       edit: string;
-      cancelEdit: string;
       pause: string;
       resume: string;
-      trigger: string;
+      runNow: string;
       duplicate: string;
-      duplicateTitleSuffix: string;
       delete: string;
+      openTask: string;
+      openChat: string;
+      busyRunning: string;
+      busyQueued: string;
+      busyQueuedPaused: string;
+      alreadyQueued: string;
+      deleteTitle: string;
+      deleteBody: string;
     };
-    deleteConfirm: string;
+    feedback: {
+      created: string;
+      saved: string;
+      paused: string;
+      resumed: string;
+      resumedNoTime: string;
+      deleted: string;
+      trialStarted: string;
+      trialQueued: string;
+      alreadyQueued: string;
+    };
     errors: {
       create: string;
       update: string;
@@ -712,11 +902,7 @@ export interface Translations {
       resume: string;
       trigger: string;
       delete: string;
-    };
-    edit: {
-      titlePlaceholder: string;
-      promptPlaceholder: string;
-      submit: string;
+      withReason: string;
     };
     status: {
       enabled: string;
@@ -725,6 +911,9 @@ export interface Translations {
       completed: string;
       failed: string;
       cancelled: string;
+      pausedByAgent: string;
+      autoPaused: string;
+      deleted: string;
     };
     history: {
       navigation: string;
@@ -736,6 +925,13 @@ export interface Translations {
       loading: string;
       loadFailed: string;
       retry: string;
+      runNumber: string;
+      tokens: string;
+      continuations: string;
+      details: string;
+      listLabel: string;
+      /** A queued run waiting for an execution slot. */
+      waitingForSlot: string;
     };
     runTrigger: { scheduled: string; manual: string };
     runStatus: {
@@ -743,16 +939,133 @@ export interface Translations {
       launching: string;
       running: string;
       success: string;
+      unmet: string;
       failed: string;
       skipped: string;
       interrupted: string;
     };
+    goal: {
+      met: string;
+      stopRequested: string;
+      assumptionBadge: string;
+      assumptionTooltip: string;
+      unchecked: string;
+      reasons: {
+        missingEvidence: string;
+        needsUserInput: string;
+        externalWait: string;
+        runFailed: string;
+        goalNotMetYet: string;
+        maxContinuations: string;
+        noProgress: string;
+        tokenCapped: string;
+        evaluatorFailed: string;
+        noDurableEndOfTurn: string;
+        threadChanged: string;
+        noVerdict: string;
+      };
+    };
+    runErrors: {
+      restarted: string;
+      leaseLost: string;
+      queueTimeout: string;
+      pausedWhileQueued: string;
+      deletedWhileQueued: string;
+      endReached: string;
+      interrupted: string;
+      launchFailed: string;
+      failed: string;
+    };
+    apiErrors: {
+      generic: string;
+      invalidRequest: string;
+      invalidSchedule: string;
+      invalidScheduleType: string;
+      invalidTimezone: string;
+      intervalTooShort: string;
+      intervalTooLong: string;
+      onceInPast: string;
+      onceTooSoon: string;
+      onceTimePassed: string;
+      invalidContextMode: string;
+      reuseThreadRequiresThread: string;
+      threadNotFound: string;
+      invalidAssistant: string;
+      unknownAssistant: string;
+      invalidGoal: string;
+      goalRequiresFreshThread: string;
+      invalidStopCondition: string;
+      invalidMaxRuns: string;
+      endAtInPast: string;
+      endAtBeforeFirstRun: string;
+      frequentRequiresLimit: string;
+      maxRunsNotAboveUsed: string;
+      limitsExhaustedRuns: string;
+      limitsExhaustedEnd: string;
+      taskNotFound: string;
+      taskRunning: string;
+      runQueued: string;
+      taskChanged: string;
+      taskFinished: string;
+      taskQuotaExceeded: string;
+      schedulerNotRunning: string;
+      schedulerUnavailable: string;
+      triggerFailed: string;
+      permissionDenied: string;
+    };
+    /** One line in the originating chat per lifecycle event ("{title}" is rendered bold). */
+    events: {
+      stoppedWithCondition: string;
+      stopped: string;
+      autoPaused: string;
+      finishedRuns: string;
+      finishedOneRun: string;
+      finishedEnd: string;
+      /** A finish whose reason this client does not know. */
+      finished: string;
+      onceDone: string;
+      onceFailed: string;
+      /** `aria-label` of the line. */
+      label: string;
+      suffixLastFailed: string;
+      suffixLastUnmet: string;
+      suffixLastInterrupted: string;
+      /** Shown in place of a missing task title. */
+      untitledTask: string;
+    };
+    card: {
+      runs: string;
+      stopsWhen: string;
+      results: string;
+      resultsFresh: string;
+      resultsReuse: string;
+      footer: string;
+      deleted: string;
+      trialStarted: string;
+      schedulerOff: string;
+      refreshFailed: string;
+      label: string;
+    };
+    runThread: {
+      scheduledRun: string;
+      trialRun: string;
+      runNumber: string;
+      instructions: string;
+      stopsWhen: string;
+      notes: string;
+      openTask: string;
+    };
+    header: {
+      countLabel: string;
+      countLabelOne: string;
+      runTask: string;
+    };
     recipes: {
       label: string;
-      trending: { title: string; desc: string };
-      news: { title: string; desc: string };
-      issues: { title: string; desc: string };
-      weekly: { title: string; desc: string };
+      trending: { title: string; desc: string; prompt: string };
+      news: { title: string; desc: string; prompt: string };
+      issues: { title: string; desc: string; prompt: string };
+      weekly: { title: string; desc: string; prompt: string };
     };
   };
 
@@ -761,6 +1074,14 @@ export interface Translations {
     title: string;
     description: string;
     newAgent: string;
+    importAgent: string;
+    importTitle: string;
+    importDescription: string;
+    importName: string;
+    importInvalidFile: string;
+    importSuccess: string;
+    exportAgent: string;
+    exportSuccess: string;
     emptyTitle: string;
     emptyDescription: string;
     featureDisabledTitle: string;
@@ -881,6 +1202,39 @@ export interface Translations {
     pinChatFailed: string;
   };
 
+  // Thread origin and unread markers (sidebar and chats list)
+  threads: {
+    /** sr-only text and tooltip of the unread dot. */
+    unread: string;
+    /** Row `aria-label` of an unread thread: "{title}, unread". */
+    unreadLabel: string;
+    /**
+     * The same with the origin marker's label first, so the row name keeps
+     * it: "{origin}, {title}, unread".
+     */
+    unreadLabelWithOrigin: string;
+    origin: {
+      schedule: string;
+      /** "From {provider}" for an IM channel thread; `provider` is already localized. */
+      fromProvider: (provider: string) => string;
+      github: string;
+      extension: string;
+      /** Localized IM provider names, keyed by provider id. */
+      providers: {
+        buzz: string;
+        dingtalk: string;
+        discord: string;
+        feishu: string;
+        github: string;
+        qq: string;
+        slack: string;
+        telegram: string;
+        wechat: string;
+        wecom: string;
+      };
+    };
+  };
+
   // Sidecar
   sidecar: {
     title: string;
@@ -981,6 +1335,12 @@ export interface Translations {
     saveChanges: string;
     descriptions: Record<string, string>;
     connectedAs: (name: string) => string;
+    /** Whether scheduled-task updates reach this app (one muted line on the provider card). */
+    scheduledUpdates: {
+      supported: string;
+      supportedAfterConnect: string;
+      unsupported: string;
+    };
   };
 
   // Page titles (document title)
@@ -1029,6 +1389,17 @@ export interface Translations {
     browserBack: string;
     browserScreenshot: string;
     browserClose: string;
+    scheduleTaskCreate: string;
+    scheduleTaskUpdate: string;
+    scheduleTaskList: string;
+    scheduleTaskPause: string;
+    scheduleTaskResume: string;
+    scheduleTaskDelete: string;
+    scheduleTaskNote: string;
+    scheduleTaskTrial: string;
+    scheduleTaskGeneric: string;
+    scheduleTaskFailed: string;
+    stopScheduledTask: string;
   };
 
   humanInput: {

@@ -26,6 +26,16 @@ export function getDevBundler(_platform = process.platform, env = process.env) {
 }
 
 /**
+ * @param {string[]} nextArgs
+ */
+function hasHostnameOverride(nextArgs) {
+  return nextArgs.some(
+    (arg) =>
+      arg === "-H" || arg === "--hostname" || arg.startsWith("--hostname="),
+  );
+}
+
+/**
  * @param {string} platform
  * @param {string[]} extraArgs
  * @param {Record<string, string | undefined>} env
@@ -36,7 +46,15 @@ export function getNextDevArgs(
   env = process.env,
 ) {
   const nextArgs = extraArgs[0] === "--" ? extraArgs.slice(1) : extraArgs;
-  return ["dev", `--${getDevBundler(platform, env)}`, ...nextArgs];
+  const args = ["dev", `--${getDevBundler(platform, env)}`, ...nextArgs];
+  // Windows reserves dynamic TCP port ranges (Hyper-V / WSL2 / winnat) that can
+  // make Next's default 0.0.0.0 bind fail with EACCES while a loopback bind on
+  // the same port succeeds. Bind loopback by default; an explicit
+  // --hostname/-H passthrough still opts into a wider interface.
+  if (platform === "win32" && !hasHostnameOverride(nextArgs)) {
+    args.push("--hostname", "127.0.0.1");
+  }
+  return args;
 }
 
 function startDevServer() {

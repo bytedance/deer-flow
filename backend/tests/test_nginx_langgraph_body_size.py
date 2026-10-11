@@ -30,17 +30,12 @@ used by ``make dev``, and the Kubernetes/Helm ConfigMap template.
 
 from __future__ import annotations
 
-import re
-from pathlib import Path
-
 import pytest
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-NGINX_CONFIGS = (
-    "docker/nginx/nginx.conf",
-    "docker/nginx/nginx.local.conf",
-    "deploy/helm/deer-flow/templates/configmap-nginx.yaml",
-)
+from support.nginx_conf import NGINX_CONFIGS
+from support.nginx_conf import extract_location_block as _extract_location_block
+from support.nginx_conf import parse_body_size_bytes as _parse_body_size_bytes
+from support.nginx_conf import parse_read_timeout_seconds as _parse_read_timeout_seconds
+from support.nginx_conf import read_config as _read
 
 # Text prompts never carry binary file attachments (those go through the
 # dedicated uploads route), so the ceiling here is intentionally well below
@@ -50,55 +45,8 @@ NGINX_CONFIGS = (
 _MIN_EXPECTED_BODY_SIZE_BYTES = 5 * 1024 * 1024
 _MAX_EXPECTED_BODY_SIZE_BYTES = 100 * 1024 * 1024
 
-_SIZE_MULTIPLIERS = {"": 1, "k": 1024, "m": 1024**2, "g": 1024**3}
-
 # The read timeout /api/langgraph/ already allows for a model-bound request.
 _MIN_BLOCKING_READ_TIMEOUT_SECONDS = 600
-
-_DURATION_MULTIPLIERS = {"": 1, "s": 1, "m": 60, "h": 3600}
-
-
-def _read(path: str) -> str:
-    return (REPO_ROOT / path).read_text(encoding="utf-8")
-
-
-def _extract_location_block(content: str, location_selector: str) -> str:
-    """Extract a single nginx ``location <location_selector> { ... }`` block
-    by brace-depth matching, so assertions target only that location and
-    can't be satisfied by a directive that merely appears elsewhere in the
-    file (e.g. the neighboring uploads location, which already has both
-    settings and must not make the langgraph-route assertions pass by
-    accident)."""
-    marker = re.compile(r"location\s+" + re.escape(location_selector) + r"\s*\{")
-    match = marker.search(content)
-    assert match, f"could not find `location {location_selector}` block"
-
-    start = match.end() - 1  # index of the opening brace
-    depth = 0
-    for i, ch in enumerate(content[start:], start=start):
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return content[start : i + 1]
-
-    raise AssertionError(f"unbalanced braces in `location {location_selector}` block")
-
-
-def _parse_body_size_bytes(block: str) -> int:
-    match = re.search(r"client_max_body_size\s+(\d+)\s*([mMkKgG]?)\s*;", block)
-    assert match, "client_max_body_size value not found or not parseable"
-    value, unit = match.groups()
-    return int(value) * _SIZE_MULTIPLIERS[unit.lower()]
-
-
-def _parse_read_timeout_seconds(block: str) -> int:
-    # Anchored to the start of a line so a commented-out directive does not count.
-    match = re.search(r"^\s*proxy_read_timeout\s+(\d+)([smh]?)\s*;", block, re.M)
-    assert match, "no active proxy_read_timeout directive"
-    value, unit = match.groups()
-    return int(value) * _DURATION_MULTIPLIERS[unit]
 
 
 @pytest.mark.parametrize("path", NGINX_CONFIGS)

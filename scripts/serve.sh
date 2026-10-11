@@ -290,6 +290,13 @@ if [ "$ACTION" != "stop" ] && ! $DEV_MODE && $SKIP_FRONTEND_BUILD; then
     fi
 fi
 
+# Resolve the nginx config before any stop_all too: an invalid BIND_HOST must
+# not tear down a running stack. Gateway and frontend always bind loopback;
+# nginx is the only entry point, as in the Docker stack.
+if [ "$ACTION" != "stop" ]; then
+    NGINX_CONF="$(bash "$REPO_ROOT/scripts/nginx-local-conf.sh")" || exit 1
+fi
+
 # ── Action routing ───────────────────────────────────────────────────────────
 
 if [ "$ACTION" = "stop" ]; then
@@ -326,15 +333,15 @@ export DEERFLOW_PNPM_PYTHON DEERFLOW_PNPM_RUNNER
 
 # Frontend command
 if $DEV_MODE; then
-    FRONTEND_CMD='env PORT=3000 "$DEERFLOW_PNPM_PYTHON" "$DEERFLOW_PNPM_RUNNER" run dev'
+    FRONTEND_CMD='env PORT=3000 "$DEERFLOW_PNPM_PYTHON" "$DEERFLOW_PNPM_RUNNER" run dev --hostname 127.0.0.1'
     if $SKIP_FRONTEND_BUILD; then
         echo "  Note: --skip-frontend-build is ignored in dev mode (next dev does not build)."
     fi
 elif $SKIP_FRONTEND_BUILD; then
     # The BUILD_ID preflight above already guarantees a reusable build exists.
-    FRONTEND_CMD="env PORT=3000 BETTER_AUTH_SECRET=$($DEERFLOW_PNPM_PYTHON -c 'import secrets; print(secrets.token_hex(16))') \"\$DEERFLOW_PNPM_PYTHON\" \"\$DEERFLOW_PNPM_RUNNER\" run start"
+    FRONTEND_CMD="env PORT=3000 BETTER_AUTH_SECRET=$($DEERFLOW_PNPM_PYTHON -c 'import secrets; print(secrets.token_hex(16))') \"\$DEERFLOW_PNPM_PYTHON\" \"\$DEERFLOW_PNPM_RUNNER\" run start --hostname 127.0.0.1"
 else
-    FRONTEND_CMD="env PORT=3000 BETTER_AUTH_SECRET=$($DEERFLOW_PNPM_PYTHON -c 'import secrets; print(secrets.token_hex(16))') \"\$DEERFLOW_PNPM_PYTHON\" \"\$DEERFLOW_PNPM_RUNNER\" run preview"
+    FRONTEND_CMD="env PORT=3000 BETTER_AUTH_SECRET=$($DEERFLOW_PNPM_PYTHON -c 'import secrets; print(secrets.token_hex(16))') \"\$DEERFLOW_PNPM_PYTHON\" \"\$DEERFLOW_PNPM_RUNNER\" run preview --hostname 127.0.0.1"
 fi
 
 # Runtime path defaults. Local `make dev` launches Gateway from `backend/`,
@@ -495,7 +502,7 @@ mkdir -p temp/client_body_temp temp/proxy_temp temp/fastcgi_temp temp/uwsgi_temp
 
 # 1. Gateway API
 run_service "Gateway" \
-    "cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1" \
+    "cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 127.0.0.1 --port 8001 $GATEWAY_EXTRA_FLAGS > ../logs/gateway.log 2>&1" \
     8001 30
 
 # 2. Frontend
@@ -505,7 +512,7 @@ run_service "Frontend" \
 
 # 3. Nginx
 run_service "Nginx" \
-    "nginx -g 'daemon off;' -c '$REPO_ROOT/docker/nginx/nginx.local.conf' -p '$REPO_ROOT' > logs/nginx.log 2>&1" \
+    "nginx -g 'daemon off;' -c '$NGINX_CONF' -p '$REPO_ROOT' > logs/nginx.log 2>&1" \
     2026 10
 
 # ── Ready ────────────────────────────────────────────────────────────────────
@@ -516,6 +523,10 @@ echo "  ✓ DeerFlow is running!  [$MODE_LABEL]"
 echo "=========================================="
 echo ""
 echo "  🌐 http://localhost:2026"
+if [ "${BIND_HOST:-127.0.0.1}" != "127.0.0.1" ]; then
+    echo "  ⚠ Nginx also accepts connections on BIND_HOST=$BIND_HOST."
+    echo "    Complete first-run setup at /setup before other machines can reach it."
+fi
 echo ""
 echo "  Routing: Frontend → Nginx → Gateway"
 echo "  API:     /api/langgraph/*  →  Gateway agent runtime"

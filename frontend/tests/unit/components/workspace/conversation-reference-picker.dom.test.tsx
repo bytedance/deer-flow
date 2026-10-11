@@ -72,6 +72,7 @@ rs.mock("@/core/i18n/hooks", () => ({
         referencedConversations: "Referenced conversations",
       },
       common: { loading: "Loading...", untitled: "Untitled" },
+      pages: { untitled: "Untitled" },
     },
   }),
 }));

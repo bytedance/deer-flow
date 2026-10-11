@@ -89,13 +89,25 @@ async def test_repair_preserves_clock_and_downgrade_keeps_ancestor_schema(tmp_pa
     cfg = _get_alembic_config(engine)
     try:
         await asyncio.to_thread(command.upgrade, cfg, PREVIOUS)
-        repo = RunRepository(async_sessionmaker(engine, expire_on_commit=False))
-        await repo.put("existing", thread_id="existing-thread", user_id="user-1", status="pending")
         async with engine.begin() as connection:
+            # Seed the published schema through columns that existed then;
+            # the current mapper includes newer nullable run verdict fields.
+            await connection.execute(
+                sa.text(
+                    "INSERT INTO runs (run_id, thread_id, user_id, status, operation_kind, metadata_json, kwargs_json, "
+                    "multitask_strategy, message_count, total_input_tokens, total_output_tokens, total_tokens, llm_call_count, "
+                    "lead_agent_tokens, subagent_tokens, middleware_tokens, created_at, updated_at) "
+                    "VALUES ('existing', 'existing-thread', 'user-1', 'pending', 'run', '{}', '{}', 'reject', "
+                    "0, 0, 0, 0, 0, 0, 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                )
+            )
             await connection.execute(sa.text("UPDATE runs SET change_seq = 37"))
-            await connection.execute(sa.text("UPDATE run_change_clock SET value = 100 WHERE id = 1"))
+            # The old repository's first write used to create this singleton;
+            # direct historical fixture seeding must include that persisted fact.
+            await connection.execute(sa.text("INSERT INTO run_change_clock (id, value) VALUES (1, 100) ON CONFLICT (id) DO UPDATE SET value = 100"))
         await bootstrap_schema(engine, backend="sqlite")
         await bootstrap_schema(engine, backend="sqlite")
+        repo = RunRepository(async_sessionmaker(engine, expire_on_commit=False))
         async with engine.connect() as connection:
             assert await connection.scalar(sa.text("SELECT value FROM run_change_clock WHERE id = 1")) == 100
             assert await connection.scalar(sa.text("SELECT change_seq FROM runs WHERE run_id = 'existing'")) == 37

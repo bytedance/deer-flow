@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from io import BytesIO
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 import pytest
 from _router_auth_helpers import call_unwrapped
-from fastapi import UploadFile
+from fastapi import HTTPException, UploadFile
 
 from app.gateway.routers import uploads
 from deerflow.runtime.user_context import get_effective_user_id
@@ -90,6 +90,36 @@ async def test_upload_endpoint_mounted_provider_does_not_block_event_loop(tmp_pa
     assert result.success is True
     assert result.files[0].filename == "notes.txt"
     assert await asyncio.to_thread(target.read_bytes) == b"hello uploads"
+
+
+@pytest.mark.parametrize(
+    "filename", [".upload-notes.part", r"folder\.upload-notes.part", r"C:\users\.upload-notes.part", ".upload-notes.part.", ".upload-notes.part ", r"folder\.upload-notes.part. ", ".UPLOAD-NOTES.PART", r"folder\.Upload-NoTeS.Part ."]
+)
+async def test_reserved_name_rejects_batch_without_blocking_or_writing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, filename: str) -> None:
+    # Emulate Linux parsing of the multipart name while keeping disk paths native.
+    monkeypatch.setattr(uploads, "Path", lambda value: PurePosixPath(value) if value == filename else Path(value))
+    _reset_paths(tmp_path, monkeypatch)
+    uploads_dir = await _thread_uploads_dir("t-reserved")
+    existing = uploads_dir / "existing.txt"
+    await asyncio.to_thread(existing.write_bytes, b"existing document")
+    monkeypatch.setattr(uploads, "get_sandbox_provider", lambda: _MountedProvider())
+
+    with pytest.raises(HTTPException) as exc_info:
+        await call_unwrapped(
+            uploads.upload_files,
+            "t-reserved",
+            request=None,
+            files=[
+                UploadFile(filename="normal.txt", file=BytesIO(b"normal document")),
+                UploadFile(filename=filename, file=BytesIO(b"reserved document")),
+            ],
+            config=SimpleNamespace(),
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "reserved upload staging" in exc_info.value.detail
+    assert await asyncio.to_thread(lambda: sorted(path.name for path in uploads_dir.iterdir())) == ["existing.txt"]
+    assert await asyncio.to_thread(existing.read_bytes) == b"existing document"
 
 
 async def test_upload_endpoint_remote_provider_syncs_without_blocking_event_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

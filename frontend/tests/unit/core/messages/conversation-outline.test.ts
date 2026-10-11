@@ -8,6 +8,11 @@ import {
 } from "@/core/messages/conversation-outline";
 import { getMessageGroups } from "@/core/messages/utils";
 
+import {
+  loadScheduledThread,
+  withOrdinaryHumanTurn,
+} from "../../helpers/scheduled-fixtures";
+
 function message(
   type: Message["type"],
   id: string | undefined,
@@ -102,5 +107,38 @@ describe("conversation outline model", () => {
 
   it("exposes the approved long-conversation threshold", () => {
     expect(CONVERSATION_OUTLINE_MIN_TURNS).toBe(5);
+  });
+});
+
+describe("conversation outline for scheduled runs", () => {
+  it("titles a scheduled launch by its task, at the same turn as an ordinary message", () => {
+    const { messages } = loadScheduledThread("minute-run");
+    const scheduled = buildConversationChapters(
+      getMessageGroups(messages),
+      "Attachment",
+    );
+    const ordinary = buildConversationChapters(
+      getMessageGroups(withOrdinaryHumanTurn(messages)),
+      "Attachment",
+    );
+    expect(scheduled.map(({ id, groupIndex }) => ({ id, groupIndex }))).toEqual(
+      ordinary.map(({ id, groupIndex }) => ({ id, groupIndex })),
+    );
+    expect(scheduled[0]?.title).toBe("发布清单未完成项提醒");
+    expect(scheduled[0]?.title).not.toContain("stop_scheduled_task");
+  });
+
+  it("does not open a chapter for a schedule card", () => {
+    // Live: five turns (create, trial, edit, pause, resume), five cards.
+    const { messages } = loadScheduledThread("weekday-chat");
+    expect(
+      buildConversationChapters(getMessageGroups(messages), "Attachment").map(
+        (chapter) => chapter.id,
+      ),
+    ).toEqual(
+      messages
+        .filter((message) => message.type === "human")
+        .map((message) => message.id),
+    );
   });
 });

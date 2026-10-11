@@ -49,6 +49,14 @@ def sandbox_http_trust_env(sandbox_url: str) -> bool:
 SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT = 60
 
 
+class SandboxCreationError(RuntimeError):
+    """Preserve a rejected creation result for ownership-fenced cleanup."""
+
+    def __init__(self, message: str, *, info: SandboxInfo):
+        super().__init__(message)
+        self.info = info
+
+
 def wait_for_sandbox_ready(
     sandbox_url: str,
     timeout: int = 30,
@@ -201,6 +209,34 @@ class SandboxBackend(ABC):
             resources; the provider owns replacement fencing. None otherwise.
         """
         ...
+
+    def is_absent(self, sandbox_id: str) -> bool:
+        """Prove that no runtime exists under this logical ID, even if stopped.
+
+        Unknown/unavailable runtimes must never return True. Backends without
+        an authoritative absence check retain their quarantine fences.
+        """
+        return False
+
+    def complete_absent_teardown(self, sandbox_id: str) -> None:
+        """Finish cleanup bookkeeping after authoritative runtime absence.
+
+        The provider must confirm ``is_absent(sandbox_id) is True`` and hold
+        both its local teardown reservation and cross-worker teardown lease
+        throughout this call. Implementations may release pending resources
+        scoped to this absent logical ID. Failure must raise so quarantine is
+        retained and cleanup can be retried before creating a replacement.
+        Backends without pending cleanup require no completion work.
+        """
+
+    def inspect_runtime(self, sandbox_id: str) -> SandboxInfo | None:
+        """Inspect the runtime generation independently of endpoint readiness.
+
+        Return None only after confirming no resource has this logical ID,
+        including stopped or terminating resources. Unavailable or unsupported
+        inspections must raise rather than imply absence.
+        """
+        raise RuntimeError(f"Runtime inspection is unavailable for sandbox {sandbox_id}")
 
     def list_running(self) -> list[SandboxInfo]:
         """Enumerate all running sandboxes managed by this backend.

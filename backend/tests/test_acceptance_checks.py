@@ -2281,6 +2281,60 @@ class TestTestsPassedLeaf:
         assert leaf["holds"] is False, output
         assert leaf["checked"] is False, output
 
+    @pytest.mark.parametrize("passed", ["ok example/a 0.01s", "ok\texample/a\t(cached)"])
+    @pytest.mark.parametrize("empty", ["? example/b [no test files]", "ok example/b 0.01s [no tests to run]"])
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_go_package_without_tests_does_not_veto_tested_package(self, passed, empty, reverse):
+        lines = [passed, empty]
+        if reverse:
+            lines.reverse()
+        verdict = check_acceptance_criteria(
+            ["tests_passed:go test ./..."],
+            bash_executions=[_bash_execution("go test ./...", output_tail="\r\n".join(lines))],
+        )
+        assert verdict["leaves"][0]["checked"] is True
+        assert verdict["leaves"][0]["holds"] is True
+
+    @pytest.mark.parametrize(
+        "output",
+        [
+            "? example/a [no test files]\n? example/b [no test files]",
+            "ok example/a 0.01s [no tests to run]\n? example/b [no test files]",
+            "ok example/a (cached) [no tests to run]",
+            "? example/b [no test files]",
+            "ok example/a 0.01s\n0 passed",
+            "ok example/a 0.01s\nRan 0 tests\nOK",
+            "ok example/a 0.01s\n[no tests to run]",
+        ],
+    )
+    def test_go_zero_tests_still_need_positive_evidence(self, output):
+        verdict = check_acceptance_criteria(["tests_passed:go test ./..."], bash_executions=[_bash_execution("go test ./...", output_tail=output)])
+        assert verdict["leaves"][0]["checked"] is False
+        assert verdict["leaves"][0]["holds"] is False
+
+    @pytest.mark.parametrize("failure", ["FAIL example/c 0.01s", "FAIL example/c [no test files]", "1 failed"])
+    def test_go_mixed_package_failure_wins(self, failure):
+        output = "ok example/a 0.01s\n? example/b [no test files]\n" + failure
+        verdict = check_acceptance_criteria(["tests_passed:go test ./..."], bash_executions=[_bash_execution("go test ./...", output_tail=output)])
+        assert verdict["leaves"][0]["checked"] is True
+        assert verdict["leaves"][0]["holds"] is False
+
+    @pytest.mark.parametrize(
+        "command,status,shell_persistent",
+        [
+            ("go test ./...", "error", False),
+            ("go test ./...", "success", True),
+            ("go test ./...", "success", None),
+            ("go test ./other", "success", False),
+            ("echo 'ok example/a 0.01s'; go test ./...", "success", False),
+            ("go test ./... > result.log", "success", False),
+        ],
+    )
+    def test_go_mixed_packages_preserve_evidence_boundaries(self, command, status, shell_persistent):
+        execution = _bash_execution(command, status=status, shell_persistent=shell_persistent, output_tail="ok example/a 0.01s\n? example/b [no test files]")
+        verdict = check_acceptance_criteria(["tests_passed:go test ./..."], bash_executions=[execution])
+        assert verdict["leaves"][0]["holds"] is False
+
     def test_negated_option_value_is_not_execution_evidence(self):
         """PR review: ``pytest --ignore tests/security tests`` never ran the
         security tests — the criterion must not match the negated token."""

@@ -13,6 +13,7 @@ from app.gateway.deps import _validate_agent_storage
 from deerflow.config.agent_storage_config import AgentStorageConfig
 from deerflow.config.app_config import reset_app_config
 from deerflow.config.database_config import DatabaseConfig
+from deerflow.config.extensions_config import reset_extensions_config
 from deerflow.persistence.agents import get_agent_store, make_agent_store
 from deerflow.persistence.agents.file import FileAgentStore
 from deerflow.persistence.agents.model import AgentRow
@@ -338,7 +339,12 @@ def test_get_agent_store_does_not_fallback_when_extensions_config_is_missing(tmp
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(tmp_path / "missing-extensions.json"))
     try:
         reset_app_config()
+        # Startup scenario: an already-loaded extensions singleton would keep
+        # its last-known-good copy when the file disappears, so clear it to
+        # exercise the first load, which must still fail loudly.
+        reset_extensions_config()
         with pytest.raises(FileNotFoundError, match="Extensions config"):
             get_agent_store()
     finally:
         reset_app_config()
+        reset_extensions_config()

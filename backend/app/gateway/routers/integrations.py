@@ -30,6 +30,7 @@ from deerflow.integrations.lark_cli import (
     start_lark_config,
 )
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,7 @@ class LarkIntegrationStatusResponse(BaseModel):
     cli: LarkCliProbeResponse
     auth: LarkAuthProbeResponse
     sandbox_runtime_mode: str = Field("none", description="How lark-cli is provisioned into the sandbox: none, gateway-download, init-container, or broker")
+    sandbox_runtime_probed: bool = Field(False, description="Whether sandbox runtime readiness was evaluated rather than conservatively defaulted")
     sandbox_runtime_ready: bool = Field(False, description="Whether the sandbox lark-cli runtime is provisioned and usable at chat time")
     sandbox_runtime_detail: str | None = Field(None, description="Human-readable reason when the sandbox runtime is not ready")
 
@@ -202,6 +204,7 @@ def _status_to_response(status: LarkIntegrationStatus, *, include_host_paths: bo
         cli=cli,
         auth=_auth_probe_to_response(status.auth),
         sandbox_runtime_mode=status.sandbox_runtime_mode,
+        sandbox_runtime_probed=status.sandbox_runtime_probed,
         sandbox_runtime_ready=status.sandbox_runtime_ready,
         sandbox_runtime_detail=status.sandbox_runtime_detail,
     )
@@ -269,9 +272,25 @@ async def get_lark_status(request: Request, config: AppConfig = Depends(get_conf
 @router.post("/lark/install", response_model=LarkInstallResponse, summary="Install Lark/Feishu Skill Pack")
 async def install_lark(request: Request, config: AppConfig = Depends(get_config)) -> LarkInstallResponse:
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+
+    async def _install_and_refresh() -> LarkInstallResult:
+        try:
+            result = await asyncio.to_thread(
+                install_lark_integration,
+                get_effective_user_id(),
+                config,
+            )
+            await refresh_skills_system_prompt_cache_async()
+            return result
+        except Exception as exc:
+            logger.error(
+                "Lark integration install finalization failed (%s)",
+                type(exc).__name__,
+            )
+            raise
+
     try:
-        result = await asyncio.to_thread(install_lark_integration, get_effective_user_id(), config)
-        await refresh_skills_system_prompt_cache_async()
+        result = await await_drained(_install_and_refresh())
         return _install_to_response(result)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))

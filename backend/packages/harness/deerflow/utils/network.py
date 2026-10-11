@@ -63,7 +63,7 @@ class PortAllocator:
 
         Args:
             start_port: The port number to start searching from.
-            max_range: Maximum number of ports to search.
+            max_range: Maximum number of ports to search, stopping at port 65535.
 
         Returns:
             An available port number.
@@ -72,12 +72,13 @@ class PortAllocator:
             RuntimeError: If no available port is found in the specified range.
         """
         with self._lock:
-            for port in range(start_port, start_port + max_range):
+            end_port = min(start_port + max_range, 65536)
+            for port in range(start_port, end_port):
                 if self._is_port_available(port):
                     self._reserved_ports.add(port)
                     return port
 
-            raise RuntimeError(f"No available port found in range {start_port}-{start_port + max_range}")
+            raise RuntimeError(f"No available port found in range {start_port}-{end_port}")
 
     def release(self, port: int) -> None:
         """Release a previously allocated port.

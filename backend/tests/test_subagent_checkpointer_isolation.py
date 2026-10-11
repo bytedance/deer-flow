@@ -11,6 +11,7 @@ once, and extracts the last AIMessage. It never resumes, so persistence
 is unnecessary and inheriting the parent checkpointer is harmful.
 """
 
+import asyncio
 import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock
@@ -133,7 +134,7 @@ class TestSubagentCheckpointerIsolation:
         monkeypatch.setattr(executor_module, "create_chat_model", fake_create_chat_model)
         monkeypatch.setattr(executor_module, "resolve_subagent_model_name", lambda config, parent, app_config=None: "test-model")
 
-        result = executor._create_agent()
+        result = asyncio.run(executor._create_agent())
 
         assert captured_kwargs.get("checkpointer") is False, f"Expected checkpointer=False in create_agent() kwargs, got: {captured_kwargs.get('checkpointer')!r}"
         assert result.checkpointer is False

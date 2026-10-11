@@ -316,3 +316,10 @@ class TestWebSearchTool:
 
         assert result["total_results"] == 1
         assert mock_get.call_args.kwargs["headers"]["X-Api-Key"] == "env-key"
+
+
+def test_coerce_max_results_inf_falls_back_to_default():
+    """A YAML `.inf` max_results must fall back to the default, not crash."""
+    import deerflow.community.serply.tools as serply_mod
+
+    assert serply_mod._coerce_max_results(float("inf")) == serply_mod._DEFAULT_MAX_RESULTS

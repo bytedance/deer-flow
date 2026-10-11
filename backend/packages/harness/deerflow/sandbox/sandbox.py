@@ -63,6 +63,20 @@ class Sandbox(ABC):
     #: ``False``).
     persistent_shell_sessions: bool | None = None
 
+    #: Whether sandbox ``lark-cli`` runs through a credential-owning broker
+    #: sidecar (Pattern B, issue #4338): ``True`` once the provider has
+    #: attested broker mode for this sandbox, ``False`` for the plaintext
+    #: config/data overlay. Tri-state, failing closed: ``None`` means the
+    #: mode is unverified and ``lark-cli`` execution must refuse to run until
+    #: the mode is attested. The default is ``False`` rather than ``None``
+    #: because most providers have no broker sidecar, no credential mounts,
+    #: and no provisioner to attest a mode — the non-broker overlay is the
+    #: only mode that exists for them. Only the AIO sandbox overrides the
+    #: default with ``None``: its mode is attested per Pod by the
+    #: provisioner, and an unattested Pod must fail closed instead of
+    #: silently mounting credentials.
+    lark_cli_broker: bool | None = False
+
     def __init__(self, id: str):
         self._id = id
 

@@ -23,6 +23,7 @@ from deerflow.agents.middlewares.input_sanitization_middleware import neutralize
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.tools.types import Runtime
+from deerflow.uploads.companions import companion_names
 from deerflow.uploads.manager import is_upload_staging_file
 from deerflow.utils.file_outline import extract_outline_for_file
 
@@ -191,14 +192,14 @@ def _list_uploaded_files_impl(
         outline_filenames = set(include_outline)
 
     # Collect historical files (sorted by mtime descending).
-    # Skip .md files that are conversion artifacts (have a same-stem non-.md sibling).
+    # Hide only Markdown with an explicit server-owned conversion record.
     candidates: list[tuple[int, Path, int]] = []
     listing_metadata: list[tuple[str, int, int, int]] = []
     try:
-        # Collect file entries once to build the name set and iterate.
+        # Collect file entries once, then exclude only registered companions.
         with os.scandir(uploads_dir) as scan:
             entries = [e for e in scan if e.is_file(follow_symlinks=False) and not is_upload_staging_file(e.name)]
-        all_names: set[str] = {e.name for e in entries}
+        derived_names = companion_names(uploads_dir)
 
         for entry in entries:
             stat = entry.stat(follow_symlinks=False)
@@ -207,16 +208,8 @@ def _list_uploaded_files_impl(
             listing_metadata.append((entry.name, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size))
             if entry.name in current_run_filenames:
                 continue
-            # Skip .md files that are conversion artifacts of another file.
-            # Known limitation: if a user manually uploads both report.pdf and
-            # report.md, the .md is hidden as a "conversion artifact".  This is
-            # acceptable for the MVP — triggering this requires uploading files
-            # whose stems collide with converted documents, which is rare.
-            if entry.name.endswith(".md"):
-                stem = entry.name[:-3]  # remove ".md"
-                non_md_siblings = {n for n in all_names if n != entry.name and Path(n).stem == stem}
-                if non_md_siblings:
-                    continue
+            if entry.name in derived_names:
+                continue
             candidates.append((stat.st_mtime_ns, Path(entry.path), stat.st_size))
     except OSError:
         if cursor is not None:
@@ -228,7 +221,7 @@ def _list_uploaded_files_impl(
     # 绑定原始文件名和元数据，不把标识或路径编码到模型可见的游标中。
     revision = hashlib.sha256(
         json.dumps(
-            [str(uploads_dir), user_id, thread_id, query_filter.casefold() if query_filter else None, sorted(extension_filter or ()), sorted(current_run_filenames), sorted(listing_metadata)],
+            [str(uploads_dir), user_id, thread_id, query_filter.casefold() if query_filter else None, sorted(extension_filter or ()), sorted(current_run_filenames), sorted(derived_names), sorted(listing_metadata)],
             ensure_ascii=True,
             separators=(",", ":"),
         ).encode("ascii")

@@ -309,6 +309,78 @@ test("keeps early streamed steps behind a local user message after finish", asyn
   ]);
 });
 
+test.each([false, true])(
+  "keeps a new chat's first turn ordered when the server thread is confirmed: %s",
+  async (confirmed) => {
+    rs.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { useThreadStream } = await import("@/core/threads/hooks");
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const { rerender, result } = renderHook(
+      ({ created }: { created: boolean }) =>
+        useThreadStream({
+          context: DEFAULT_LOCAL_SETTINGS.context,
+          isMock: true,
+          threadId: created ? "thread-1" : undefined,
+          displayThreadId: "thread-1",
+        }),
+      {
+        initialProps: { created: false },
+        wrapper: createWrapper(queryClient),
+      },
+    );
+    const submittedId = await submitVisibleTurn(result);
+    if (confirmed) {
+      // ChatPage's onStart confirms the existing draft conversation without
+      // remounting the hook or changing displayThreadId.
+      rerender({ created: true });
+    }
+    streamMockState.messages = [aiMessage("first-step", "Searching the web")];
+    streamMockState.isLoading = true;
+    rerender({ created: confirmed });
+    expect(visibleMessageIds(result.current.thread.messages)).toEqual([
+      submittedId,
+      "first-step",
+    ]);
+    const serverHuman = humanMessage(
+      `${submittedId}__user`,
+      "Continue the work",
+    );
+    streamMockState.messages = [
+      ...streamMockState.messages,
+      {
+        type: "tool",
+        id: "search-result",
+        tool_call_id: "search",
+        content: "Found news",
+      } as Message,
+      serverHuman,
+    ];
+    rerender({ created: confirmed });
+    await act(async () => {
+      await rs.advanceTimersByTimeAsync(100);
+    });
+    expect(visibleMessageIds(result.current.thread.messages)).toEqual([
+      serverHuman.id,
+      "first-step",
+      "search-result",
+    ]);
+    act(() => {
+      streamMockState.onFinish?.({
+        values: { messages: streamMockState.messages },
+      });
+      streamMockState.isLoading = false;
+      rerender({ created: confirmed });
+    });
+    expect(visibleMessageIds(result.current.thread.messages)).toEqual([
+      serverHuman.id,
+      "first-step",
+      "search-result",
+    ]);
+  },
+);
+
 test("keeps established history order while the submitted human is outside the render snapshot", async () => {
   rs.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   let rows = seededHistoryRows();

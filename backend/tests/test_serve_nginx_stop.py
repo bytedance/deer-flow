@@ -81,6 +81,18 @@ def test_repo_nginx_pid_accepts_macos_rewritten_master_command(tmp_path):
     )
 
 
+def test_repo_nginx_pid_accepts_bind_host_rendered_config(tmp_path):
+    # With BIND_HOST set, nginx-local-conf.sh starts nginx on temp/nginx.local.conf.
+    repo_root = (tmp_path / "deer-flow").as_posix()
+    nginx_conf = f"{repo_root}/temp/nginx.local.conf"
+
+    assert _is_repo_nginx_pid(
+        command="nginx",
+        args=f"nginx: master process nginx -g daemon off; -c {nginx_conf} -p {repo_root}",
+        repo_root=repo_root,
+    )
+
+
 def test_repo_nginx_pid_accepts_macos_rewritten_worker_after_repo_check(tmp_path):
     repo_root = tmp_path / "deer-flow"
 

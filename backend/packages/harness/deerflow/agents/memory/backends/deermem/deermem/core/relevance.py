@@ -52,6 +52,8 @@ def warm_tokenizer() -> None:
 def tokenize(text: str) -> list[str]:
     """Tokenize at most 4096 characters into at most 128 relevance tokens.
 
+    Jieba tokens without a letter or digit are dropped and do not use the 128-token budget.
+
     Space-free CJK text without jieba falls back to character bigrams so
     Chinese queries still produce deterministic token overlap.
     """
@@ -59,7 +61,10 @@ def tokenize(text: str) -> list[str]:
         return []
     lowered = text[:_TEXT_CHAR_BUDGET].strip().lower()
     if _jieba_available:
-        return list(islice((token for token in jieba.cut(lowered) if token.strip()), _SIMILARITY_TOKEN_BUDGET))
+        # jieba emits punctuation as standalone tokens; drop them like the
+        # fallback does so they neither count as matches nor eat the budget.
+        tokens = (token for token in jieba.cut(lowered) if any(char.isalnum() for char in token))
+        return list(islice(tokens, _SIMILARITY_TOKEN_BUDGET))
 
     def fallback_tokens() -> Iterator[str]:
         for match in _WORD_RE.finditer(lowered):

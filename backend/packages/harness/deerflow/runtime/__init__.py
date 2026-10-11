@@ -7,7 +7,21 @@ directly from ``deerflow.runtime``.
 
 from .checkpoint_state import CheckpointStateAccessor, build_state_mutation_graph
 from .checkpointer import checkpointer_context, get_checkpointer, make_checkpointer, reset_checkpointer
-from .runs import ORPHAN_RECOVERY_STOP_REASON, STARTUP_ORPHAN_RECOVERY_ERROR, CancelOutcome, ConflictError, DisconnectMode, RunContext, RunManager, RunRecord, RunStatus, ThreadOperationKind, UnsupportedStrategyError, run_agent
+from .runs import (
+    ORPHAN_RECOVERY_STOP_REASON,
+    STARTUP_ORPHAN_RECOVERY_ERROR,
+    CancelOutcome,
+    ConflictError,
+    DisconnectMode,
+    RunContext,
+    RunIdempotencyUnsupported,
+    RunManager,
+    RunRecord,
+    RunStatus,
+    ThreadOperationKind,
+    UnsupportedStrategyError,
+    run_agent,
+)
 from .serialization import serialize, serialize_channel_values, serialize_channel_values_for_api, serialize_lc_object, serialize_messages_tuple, strip_data_url_image_blocks
 from .store import get_store, make_store, reset_store, store_context
 
@@ -31,6 +45,7 @@ __all__ = [
     "DisconnectMode",
     "ORPHAN_RECOVERY_STOP_REASON",
     "RunContext",
+    "RunIdempotencyUnsupported",
     "RunManager",
     "RunRecord",
     "RunStatus",

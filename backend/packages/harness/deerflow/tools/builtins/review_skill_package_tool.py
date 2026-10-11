@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Literal
 
@@ -9,6 +10,7 @@ from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langgraph.types import Command
 
+from deerflow.config.paths import get_paths, make_safe_user_id
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.skills.review.analyzer import analyze_skill_package
 from deerflow.skills.review.models import stable_json_dumps
@@ -16,6 +18,8 @@ from deerflow.skills.review.readers import ArchivePackageReader, InstalledSkillR
 from deerflow.skills.review.renderer import build_static_report, render_report_markdown
 from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
 from deerflow.tools.types import Runtime
+
+logger = logging.getLogger(__name__)
 
 Profile = Literal["deerflow", "agentskills"]
 IncludeContent = Literal["none", "facts-only", "semantic-review"]
@@ -103,26 +107,36 @@ def _snapshot_for_target(target: str, *, runtime: Runtime, inline_content: str |
             raise ValueError("inline_content is required for inline:// targets")
         return build_inline_snapshot(inline_content, name_hint=target)
 
+    user_id = resolve_runtime_user_id(runtime)
     if target.startswith("skill://"):
-        user_id = resolve_runtime_user_id(runtime)
         storage = get_or_new_user_skill_storage(user_id)
         return InstalledSkillReader.from_target(target, storage=storage).read()
 
     path = Path(target).expanduser()
-    _ensure_local_target_allowed(path)
+    _ensure_local_target_allowed(path, user_id=user_id)
     if path.suffix == ".skill":
         return ArchivePackageReader(path).read()
     return LocalDirectoryReader(path).read()
 
 
-def _ensure_local_target_allowed(path: Path) -> None:
+def _ensure_local_target_allowed(path: Path, *, user_id: str) -> None:
     resolved = path.resolve()
-    allowed_roots: list[Path] = [Path.cwd().resolve(), Path("/tmp").resolve()]
+    # Never allow the Gateway cwd or /tmp: DEER_FLOW_HOME sits under the cwd in
+    # every documented deployment, so those roots expose other users' data.
+    paths = get_paths()
+    allowed_roots: list[Path] = [paths.user_dir(make_safe_user_id(user_id)).resolve()]
     try:
         storage = get_or_new_skill_storage()
-        allowed_roots.append(storage.get_skills_root_path().resolve())
+        skills_root = storage.get_skills_root_path().resolve()
     except Exception:
-        pass
+        skills_root = None
+    if skills_root is not None:
+        # The same applies to a skills root configured at or above DEER_FLOW_HOME.
+        users_root = (paths.base_dir / "users").resolve()
+        if users_root.is_relative_to(skills_root):
+            logger.warning("Ignoring skills root %s as a review target root: it contains per-user directories", skills_root)
+        else:
+            allowed_roots.append(skills_root)
 
     for root in allowed_roots:
         try:
@@ -131,7 +145,7 @@ def _ensure_local_target_allowed(path: Path) -> None:
             continue
         _ensure_local_target_is_package_or_archive(resolved)
         return
-    raise ValueError("Local review targets must be under the current workspace, /tmp, or the configured skills root")
+    raise ValueError("Local review targets must be under the caller's user directory or the configured skills root")
 
 
 def _ensure_local_target_is_package_or_archive(path: Path) -> None:

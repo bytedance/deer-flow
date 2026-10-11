@@ -297,11 +297,8 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         else:
             updated_content = original_content
 
-        updated_message = HumanMessage(
-            content=updated_content,
-            id=last_message.id,
-            name=last_message.name,
-            additional_kwargs=additional_kwargs,
+        updated_message = last_message.model_copy(
+            update={"content": updated_content, "additional_kwargs": additional_kwargs},
         )
 
         messages[last_message_index] = updated_message

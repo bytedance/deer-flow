@@ -38,10 +38,13 @@ class GuardrailAuthorizationAdapter:
             ``AuthorizationConfig.default_role``.
         resource_type: Resource type for all ``AuthzRequest`` instances.
         action: Action for all ``AuthzRequest`` instances.
-        infrastructure_tool_names: Framework tools created from an already
-            authorized capability set. These may execute without a second
-            provider decision; callers must derive the names from the current
-            build's concrete deferred setup rather than from static config.
+        infrastructure_tools: Framework tool *objects* created by this build
+            from an already authorized capability set. The exemption binds to
+            object identity — never to a name or a provenance label — so a
+            same-named foreign tool, or one self-declaring
+            ``deerflow_tool_source: "builtin"``, is not exempt. Callers pass
+            the current build's concrete tool objects (e.g. the deferred
+            setup's generated ``tool_search``), not static config.
     """
 
     name = "authorization"
@@ -53,17 +56,23 @@ class GuardrailAuthorizationAdapter:
         default_role: str = "user",
         resource_type: str = "tool",
         action: str = "call",
-        infrastructure_tool_names: Iterable[str] = (),
+        infrastructure_tools: Iterable[object] = (),
     ) -> None:
         self._provider = provider
         self._default_role = default_role
         self._resource_type = resource_type
         self._action = action
-        self._infrastructure_tool_names = frozenset(infrastructure_tool_names)
+        self._infrastructure_tools = tuple(infrastructure_tools)
 
     def _infrastructure_decision(self, request: GuardrailRequest) -> GuardrailDecision | None:
-        """Allow framework tools created from an already-filtered capability set."""
-        if request.tool_name not in self._infrastructure_tool_names:
+        """Allow this build's host-created framework tools without a second decision.
+
+        The exemption binds to the concrete tool *object* the host created for
+        this build, not to a name or a provenance label: a request that enters
+        the guardrail with ``tool=None`` (an unregistered/dynamic name) is not
+        exempt and goes to the provider.
+        """
+        if request.tool_identity is None or not any(request.tool_identity is tool for tool in self._infrastructure_tools):
             return None
         return GuardrailDecision(
             allow=True,
@@ -98,6 +107,7 @@ class GuardrailAuthorizationAdapter:
                 "is_subagent": gr.is_subagent,
                 "agent_id": gr.agent_id,
                 "timestamp": gr.timestamp,
+                "tool_provenance": gr.tool_provenance,
             },
         )
 

@@ -38,6 +38,15 @@ class BrowserlessClient:
         self.token = token
         self.timeout_s = timeout_s
 
+    def _auth_params(self) -> dict[str, str] | None:
+        """Query parameters that authenticate a request to Browserless.
+
+        Browserless reads the token from the ``token`` query parameter or the
+        ``Authorization`` header only, and its request-body schemas reject
+        unknown keys, so the token must never be sent in the JSON body.
+        """
+        return {"token": self.token} if self.token else None
+
     async def fetch_html(
         self,
         url: str,
@@ -117,8 +126,6 @@ class BrowserlessClient:
             "url": url,
         }
 
-        if self.token:
-            payload["token"] = self.token
         if wait_for_event:
             payload["waitForEvent"] = wait_for_event
         if wait_for_timeout_ms > 0:
@@ -139,6 +146,7 @@ class BrowserlessClient:
                 resp = await client.post(
                     f"{self.base_url}/content",
                     json=payload,
+                    params=self._auth_params(),
                     headers={
                         "Content-Type": "application/json",
                         "Cache-Control": "no-cache",
@@ -222,15 +230,13 @@ class BrowserlessClient:
         if best_attempt:
             payload["bestAttempt"] = True
 
-        params = {"token": self.token} if self.token else None
-
         logger.debug(f"Capturing URL screenshot via Browserless: {url}")
         try:
             async with httpx.AsyncClient(timeout=self.timeout_s) as client:
                 resp = await client.post(
                     f"{self.base_url}/screenshot",
                     json=payload,
-                    params=params,
+                    params=self._auth_params(),
                     headers={
                         "Content-Type": "application/json",
                         "Cache-Control": "no-cache",

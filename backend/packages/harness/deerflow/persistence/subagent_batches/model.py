@@ -56,6 +56,7 @@ class SubagentBatchItemRow(Base):
     cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     model_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_artifact: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     result_preview: Mapped[str | None] = mapped_column(Text, nullable=True)
     result_truncated: Mapped[bool] = mapped_column(default=False)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)

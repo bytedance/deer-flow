@@ -16,6 +16,7 @@ KNOWN_CHANNEL_COMMANDS: frozenset[str] = frozenset(
         "/new",
         "/status",
         "/models",
+        "/model",
         "/memory",
         "/help",
     }

@@ -1,6 +1,6 @@
 # 🦌 DeerFlow - 2.0
 
-[English](./README.md) | [中文](./README_zh.md) | [日本語](./README_ja.md) | Français | [Русский](./README_ru.md)
+[English](./README.md) | [中文](./README_zh.md) | [日本語](./README_ja.md) | Français | [Русский](./README_ru.md) | [Português](./README_pt.md)
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./Makefile)
@@ -75,6 +75,7 @@ DeerFlow intègre désormais le toolkit de recherche et de crawling intelligent 
     - [Mémoire à long terme](#mémoire-à-long-terme)
   - [Modèles recommandés](#modèles-recommandés)
   - [Client Python intégré](#client-python-intégré)
+  - [Projets](#projets)
   - [Tâches planifiées (Scheduled Tasks)](#tâches-planifiées-scheduled-tasks)
   - [Atelier terminal (TUI)](#atelier-terminal-tui)
   - [Documentation](#documentation)
@@ -147,6 +148,13 @@ Ce prompt est destiné aux coding agents. Il leur demande de cloner le dépôt s
        model: google/gemini-2.5-flash-preview
        api_key: $OPENROUTER_API_KEY
        base_url: https://openrouter.ai/api/v1
+
+     - name: opper-claude-sonnet-4-6
+       display_name: Claude Sonnet 4.6 (Opper)
+       use: langchain_openai:ChatOpenAI
+       model: claude-sonnet-4-6
+       api_key: $OPPER_API_KEY
+       base_url: https://api.opper.ai/v3/compat
 
      - name: gpt-5-responses
        display_name: GPT-5 (Responses API)
@@ -295,7 +303,7 @@ Voir le [Guide MCP Server](backend/docs/MCP_SERVER.md) pour les instructions dé
 
 DeerFlow peut recevoir des tâches depuis des applications de messagerie. Les canaux démarrent automatiquement une fois configurés — aucune IP publique n'est requise.
 
-DeerFlow peut aussi exposer des connexions de canaux IM appartenant à l'utilisateur dans l'UI du workspace. Quand `channel_connections` est activé, les utilisateurs connectés peuvent lier Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat ou WeCom depuis la barre latérale / Settings > Channels. Cela réutilise les transports sortants `channels.*` existants, donc aucune IP publique ni URL de callback provider n'est requise. Les messages IM entrants s'exécutent ensuite sous le compte utilisateur DeerFlow connecté. Voir [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md) pour la configuration et les notes de sécurité.
+DeerFlow peut aussi exposer des connexions de canaux IM appartenant à l'utilisateur dans l'UI du workspace. Quand `channel_connections` est activé, les utilisateurs connectés peuvent lier Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat, WeCom, QQ ou Buzz depuis la barre latérale / Settings > Channels. Cela réutilise les transports sortants `channels.*` existants, donc aucune IP publique ni URL de callback provider n'est requise. Les messages IM entrants s'exécutent ensuite sous le compte utilisateur DeerFlow connecté. Voir [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md) pour la configuration et les notes de sécurité.
 
 | Canal | Transport | Difficulté |
 |---------|-----------|------------|
@@ -305,6 +313,8 @@ DeerFlow peut aussi exposer des connexions de canaux IM appartenant à l'utilisa
 | WeChat | Tencent iLink (long-polling) | Modérée |
 | WeCom | WebSocket | Modérée |
 | DingTalk | Stream Push (WebSocket) | Modérée |
+| QQ | WebSocket (texte : messages privés et mentions de groupe) | Modérée |
+| Buzz | Relais Nostr (WebSocket, NIP-42) | Modérée |
 
 **Configuration dans `config.yaml` :**
 
@@ -346,7 +356,7 @@ channels:
   telegram:
     enabled: true
     bot_token: $TELEGRAM_BOT_TOKEN
-    allowed_users: []               # empty = allow all
+    allowed_users: []               # identifiants numériques, pas de @pseudo ; vide = tout le monde autorisé
 
     # Optional: per-channel / per-user session settings
     session:
@@ -595,7 +605,7 @@ Commandes prises en charge :
 /goal clear        # le supprimer
 ```
 
-Après chaque exécution menée par la Gateway, DeerFlow évalue la conversation visible par rapport au goal actif à l'aide d'un modèle évaluateur non-thinking. L'évaluateur doit renvoyer un blocker typé (`missing_evidence`, `needs_user_input`, `run_failed`, `external_wait` ou `goal_not_met_yet`) accompagné de preuves visibles. DeerFlow n'injecte une hidden continuation que si le dernier tour assistant est durablement checkpointé, que le blocker est `goal_not_met_yet`, que le thread n'a pas changé durant l'évaluation et que le disjoncteur de non-progression n'a pas déclenché. Le plafond de sécurité est de 8 hidden continuations par défaut, et les évaluations identiques de non-progression s'arrêtent après 2 tentatives répétées. `/goal clear` ainsi que toute nouvelle saisie utilisateur ont priorité sur les continuations en file d'attente. Lorsque le goal est satisfait, DeerFlow le supprime automatiquement et publie l'état mis à jour du thread.
+Après chaque exécution menée par la Gateway, DeerFlow évalue la conversation visible, y compris les appels d'outils de l'assistant et leurs résultats abrégés, par rapport au goal actif à l'aide d'un modèle évaluateur non-thinking. Un résultat d'outil réussi ne suffit pas à satisfaire un goal, et lorsque l'assistant a dû deviner une information manquante ou ambiguë, l'évaluateur renvoie `needs_user_input`. L'évaluateur doit renvoyer un blocker typé (`missing_evidence`, `needs_user_input`, `run_failed`, `external_wait` ou `goal_not_met_yet`) accompagné de preuves visibles. DeerFlow n'injecte une hidden continuation que si le dernier tour assistant est durablement checkpointé, que le blocker est `goal_not_met_yet`, que le thread n'a pas changé durant l'évaluation et que le disjoncteur de non-progression n'a pas déclenché. Le plafond de sécurité est de 8 hidden continuations par défaut, et les évaluations identiques de non-progression s'arrêtent après 2 tentatives répétées. `/goal clear` ainsi que toute nouvelle saisie utilisateur ont priorité sur les continuations en file d'attente. Lorsque le goal est satisfait, DeerFlow le supprime automatiquement et publie l'état mis à jour du thread.
 
 Le Web UI affiche le goal actif au-dessus de la zone de saisie. La même commande est disponible depuis le TUI et les canaux IM pris en charge. Dans le Web UI et les canaux IM pris en charge, définir `/goal <condition de complétion>` lance aussi une exécution avec la condition comme tâche ; les commandes de statut et de suppression ne gèrent que l'état du goal lui-même.
 
@@ -675,6 +685,39 @@ client.clear_goal("thread-1")
 
 Toutes les méthodes retournant des dicts sont validées en CI contre les modèles de réponse Pydantic du Gateway (`TestGatewayConformance`), garantissant que le client intégré reste synchronisé avec les schémas de l'API HTTP. Voir `backend/packages/harness/deerflow/client.py` pour la documentation API complète.
 
+## Projets
+
+Les projets regroupent des conversations liées sous un nom partagé, des instructions et une étagère de documents.
+
+Une conversation rejoint un projet au moment de sa création (lorsqu'un projet est sélectionné) ou plus tard via le menu de déplacement. Les exécutions ne modifient jamais l'appartenance : l'envoi d'un message ne peut pas affecter ou réaffecter une conversation. Déplacer une conversation hors d'un projet la laisse non affectée jusqu'à ce qu'elle soit à nouveau explicitement déplacée.
+
+Le déplacement d'une conversation actualise son rattachement dans l'en-tête ainsi que les listes de projets, y compris lorsqu'une requête de métadonnées plus ancienne est encore en cours.
+
+Les projets exigent les tables et colonnes de base de données actuelles. Une base de données estampillée `0019_thread_incarnations` issue de l'ancien déploiement basé sur 0018 est rejetée au démarrage si le schéma des projets est absent. Suivez la [procédure de récupération hors ligne de la base de données](docs/database-forward-revision-recovery.md) avant de démarrer ce build sur cette base.
+
+### Instructions de projet
+
+Chaque projet stocke des instructions en forme libre — contexte, conventions et contraintes s'appliquant à toutes les conversations du projet — modifiables dans l'onglet Instructions de la page du projet, avec un compteur d'octets en direct. Lorsqu'une exécution démarre sur un thread membre, le Gateway fige une seule fois l'état actuel du projet et rend les instructions sous forme d'un bloc `<project>` borné, propre à cette requête et réservé à cette exécution : le bloc n'entre jamais dans le prompt système ni dans l'historique persisté, et chaque nouvelle exécution voit les dernières instructions enregistrées. Les instructions sont plafonnées à `projects.instructions_max_bytes` octets UTF-8 (par défaut 8192, plage 256–262144) ; les caractères multioctets comptent pour leur longueur en octets UTF-8. Les instructions trop longues sont rejetées avec un `422` à l'écriture et ne sont jamais tronquées silencieusement.
+
+### Étagère de documents
+
+Chaque projet dispose d'une étagère de documents pour les fichiers partagés par l'ensemble du projet, gérée depuis la section Documents de la page du projet :
+
+- **Téléverser** un fichier (bouton ou glisser-déposer, un fichier par requête). Les limites de taille de l'étagère réutilisent `uploads.max_file_size` (par défaut 50 Mio) ; re-téléverser un contenu identique renvoie l'entrée existante au lieu de créer un doublon.
+- **Lister** les entrées avec leur nom, taille, date de modification et provenance (téléversées vs. enregistrées depuis une conversation), et prévisualiser ou télécharger n'importe quelle entrée.
+- **Enregistrer dans le projet** depuis un fichier de thread : le navigateur en lecture seule des fichiers de conversation sous l'étagère liste les téléversements et sorties des threads membres, chacun avec une action « Enregistrer dans le projet ».
+- **Joindre à un thread** : copier un fichier de l'étagère vers les téléversements d'un thread via le pipeline d'ingestion normal, pour que la conversation puisse l'utiliser directement.
+
+Les exécutions sur les threads membres reçoivent également un index `<documents>` borné, rendu à chaque exécution à partir de l'instantané figé (limité par `projects.shelf_index_max_entries` et `projects.shelf_index_max_bytes`), et l'agent peut parcourir l'étagère et lire les documents avec les outils `list_project_documents` et `read_project_document`.
+
+### Sémantique de lecture des projets archivés
+
+Archiver un projet gèle les écritures mais conserve les lectures. Les threads d'un projet archivé s'exécutent toujours et reçoivent toujours les instructions du projet et l'index de l'étagère, et l'étagère reste entièrement lisible : listage, prévisualisation/téléchargement, navigateur de fichiers de conversation et jonction à un thread continuent de fonctionner. Les téléversements, l'enregistrement dans le projet et le déplacement de fichiers individuels de l'étagère vers la corbeille exigent un projet actif, et un document mis à la corbeille ne peut pas être restauré dans un projet archivé. La suppression d'un projet archivé reste possible et déplace toute son étagère vers la corbeille.
+
+### Corbeille
+
+Supprimer un document de l'étagère le déplace vers la corbeille au lieu de l'effacer : l'entrée conserve ses octets et un instantané de son projet d'origine pendant `projects.trash_retention_days` (par défaut 30) avant que le balayage de rétention puisse la purger définitivement. La page `/workspace/trash` — accessible depuis la section Documents de la page du projet et l'en-tête Projets de la barre latérale — liste les documents mis à la corbeille avec leur projet d'origine et la rétention restante, avec des actions Restaurer et Supprimer définitivement par entrée, plus une action Vider la corbeille qui supprime définitivement tous les documents de la corbeille — immédiatement, et non après la fenêtre de rétention ; la fenêtre ne fait que borner la durée pendant laquelle une entrée peut y rester avant que le balayage de rétention ne la récupère. La restauration renvoie le document à son projet d'origine, ou à un projet de votre choix lorsque l'origine a disparu ou est archivée ; si la cible contient déjà un fichier actif identique, les entrées fusionnent. La suppression d'un projet déplace toute son étagère vers la corbeille en une seule étape.
+
 ## Tâches planifiées (Scheduled Tasks)
 
 DeerFlow inclut désormais un MVP de tâches planifiées (scheduled-task) de premier niveau dans le workspace.
@@ -691,11 +734,34 @@ Capacités actuelles du MVP :
 
 Limites actuelles du MVP :
 
-- Pas encore d'outil `schedule_task` créable depuis la conversation
 - Pas de tâches de notification en texte seul
 - Pas de cibles de dispatch canal ou GitHub
 
 Activez le polling en arrière-plan avec `config.yaml -> scheduler.enabled`. Le déclenchement manuel utilise la même ressource scheduled-task et le même chemin d'exécution.
+
+### Cycle de vie, plafonds de sécurité et conditions d'arrêt
+
+- La page des tâches et l'API REST (`POST` / `PATCH /api/scheduled-tasks`) acceptent un objectif par exécution (`goal_objective`), un plafond de sécurité (`max_runs`, `end_at`) et une condition d'arrêt (`stop_condition`). Envoyer `null` dans un PATCH efface l'un de ces quatre champs ; un `end_at` sans décalage UTC est une heure locale dans le fuseau de la tâche.
+- La condition d'arrêt est la règle « arrête-toi quand … » de l'utilisateur. Elle est stockée dans un champ dédié (migration `0031`), jamais dans les instructions de la tâche. DeerFlow ne l'ajoute au message d'une exécution qu'au moment où celle-ci démarre, en lui demandant d'appeler `stop_scheduled_task` lorsque la règle est remplie. Lorsque `scheduler.tool_enabled` est activé, chaque exécution planifiée peut mettre en pause sa propre planification, que la tâche ait été créée dans une conversation ou sur la page des tâches ; sinon, l'exécution signale simplement que la règle est remplie.
+- Les tâches avec objectif créées sur la page des tâches sont désormais évaluées comme celles créées dans une conversation, et leurs exécutions reçoivent aussi les notes enregistrées et la référence à l'exécution précédente.
+- La reprise calcule la prochaine exécution à partir de maintenant : une longue pause ne déclenche jamais d'exécution de rattrapage. Une tâche ponctuelle dont l'heure est passée renvoie `422 once_time_passed` et demande une nouvelle heure. Reprendre une tâche active ne change rien ; mettre en pause une tâche terminée renvoie `409 task_finished`.
+- `max_runs` compte les exécutions automatiques sur toute la vie de la tâche ; les exécutions d'essai ne comptent jamais. Réactiver une tâche dont le plafond est atteint (reprise, ou PATCH qui réarme la planification d'une tâche terminée) renvoie `409 limits_exhausted`, sauf si la même requête renouvelle la limite épuisée : un nombre d'exécutions épuisé demande un `max_runs` plus élevé ou `null`, une heure de fin dépassée demande un `end_at` plus tardif ou `null` (repousser `end_at` seul ne relance pas une tâche dont `max_runs` est épuisé). `POST /api/scheduled-tasks/{task_id}/resume` accepte pour cela un corps facultatif `{"max_runs": …, "end_at": …}` (`null` supprime un plafond). Un PATCH qui ne change que le plafond d'une tâche terminée l'enregistre et la laisse terminée.
+- Les échecs de vérification de l'objectif (évaluateur en échec, ou conversation modifiée pendant la vérification) ne comptent pas pour la pause automatique après trois échecs et ne remettent pas le compteur à zéro. Modifier l'objectif, les instructions ou la condition d'arrêt, ou ajouter une note, repart d'un nouveau compte ; la reprise le conserve.
+- Tant que le planificateur de ce processus Gateway ne tourne pas, la création d'une tâche (y compris la duplication) renvoie `409 scheduler_not_running`. `GET /api/features` expose `scheduled_tasks.available`, `running`, `tool_enabled` et `min_interval_seconds`.
+- Les erreurs de `/api/scheduled-tasks*` ont la forme `{"detail": {"code", "message", "params"}}` ; voir [`backend/docs/API.md`](backend/docs/API.md#scheduled-tasks) et `contracts/scheduled_task_errors_contract.json`.
+- Les créneaux d'exécution sont partagés équitablement entre les propriétaires des tâches : un même propriétaire peut avoir au plus `scheduler.max_concurrent_runs_per_user` exécutions planifiées en démarrage ou en cours à la fois (2 par défaut, jamais plus que `max_concurrent_runs` ; `0` désactive ce plafond par propriétaire), et la file d'attente est vidée propriétaire par propriétaire, si bien que l'arriéré de l'un ne retarde jamais l'exécution d'un autre. Une exécution qui attend plus longtemps que `scheduler.queue_timeout_seconds` est ignorée, et l'historique indique qu'elle a attendu trop longtemps un créneau libre.
+- Avec `channel_connections.enabled: true`, les mises à jour des tâches planifiées sont envoyées aux identités IM connectées du propriétaire, uniquement sur les applications qui gèrent l'envoi proactif (WeCom aujourd'hui) ; les paramètres indiquent pour chaque application si les mises à jour y sont envoyées. Chaque occurrence envoie au plus un message (exécution terminée, en échec ou objectif non atteint, pause automatique, pause par l'agent, fin de la tâche), mis en file dans la même transaction que le résultat, donc une seule fois même après une reprise sur panne. Le message se lit seul, dans la langue de votre interface web (sinon `channel_connections.notification_locale`), sans identifiants ni liens. Les essais manuels simples et les exécutions interrompues ne notifient pas.
+
+### Créer des planifications dans une conversation
+
+Activez `scheduler.enabled: true` et `scheduler.tool_enabled: true`, puis redémarrez le Gateway. Un tour interactif autorisé peut alors utiliser `schedule_task` pour créer, modifier, lister, mettre en pause, reprendre ou supprimer des tâches, lancer une exécution d'essai ou enregistrer une note. Par exemple : « Chaque jour ouvré à 9 h, vérifie release-checklist.md et dis-moi ce qui n'est pas coché ; arrête-toi quand tout est coché. » Dans l'application web, le résultat s'affiche sous forme de carte mise à jour en direct (planification, condition d'arrêt, boutons) et l'agent répond en une ou deux phrases ; dans les messageries (IM) et les autres tours hors web, il décrit en texte la planification, la prochaine exécution et la condition d'arrêt.
+
+- **Tâches gérées par une conversation.** Celles qui y ont été créées et, dans une conversation d'exécution (le chat où une exécution planifiée a publié son résultat), la tâche de cette exécution : « mets-la en pause » ou « passe-la à 10 h » y fonctionnent aussi. Cela ne vaut que pour les messages que vous envoyez ; une exécution planifiée ne peut que mettre en pause sa propre planification avec `stop_scheduled_task`.
+- **Une modification garde la tâche.** Changer l'horaire, les instructions, l'objectif, la condition d'arrêt ou le plafond de sécurité est un `update` de la même tâche : son identifiant et son historique sont conservés. `resume` relance une tâche en pause ou terminée, sans exécution de rattrapage. Si le plafond est atteint, l'agent demande comment renouveler la limite épuisée (relever `max_runs` ou le supprimer ; repousser `end_at` ou le supprimer), puis l'envoie avec la reprise.
+- **Fuseau horaire.** Un fuseau que vous nommez l'emporte. Sinon, une nouvelle tâche utilise le fuseau du navigateur que l'application web envoie avec chaque message (`context.client_timezone`, lu uniquement pour cela), et le résultat indique le fuseau retenu. Les intervalles et les heures ponctuelles avec décalage UTC n'en ont pas besoin ; pour un cron ou une heure locale ponctuelle sans fuseau connu (par exemple depuis une messagerie), l'agent pose la question. Une modification garde le fuseau enregistré ; le fuseau du navigateur ne change jamais une tâche existante.
+- **Où apparaissent les résultats.** Chaque exécution publie son résultat dans un nouveau chat intitulé « {tâche} · {heure locale} », ou dans le chat d'origine lorsque la tâche s'y exécute. Quand le planning est mis en pause par l'agent, mis en pause automatiquement ou se termine, le chat d'origine affiche une ligne à l'endroit où en était la conversation, avec un lien vers cette exécution ou vers la tâche ; rien d'autre n'y est renvoyé. La ligne reste après la suppression de la tâche. Le chat d'exécution affiche les instructions de la tâche dans un bloc replié « Instructions de la tâche » sous l'en-tête de l'exécution.
+- **Langue.** L'agent rédige le titre, les instructions et la condition d'arrêt dans votre langue, et les exécutions planifiées répondent dans la langue des instructions.
+- **Essai.** Demandez-le directement, par exemple « Run it now » ou « 先跑一次吧 » ; le bouton **Run once now** de la carte fait de même. Un simple « yes », une mention de la tâche ou une demande citée ou conditionnelle ne lance pas d'exécution payante. Un essai ne compte pas dans `max_runs`.
 
 ## Atelier terminal (TUI)
 

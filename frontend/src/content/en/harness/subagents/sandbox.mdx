@@ -51,6 +51,12 @@ Delegating to `bash` under the local sandbox returns an explicit failure explain
 
 Conversations triggered through an IM channel carry the sender identity in the runtime context as `channel_user_id`. The `task` tool forwards it to the subagent, and every bash command the subagent runs is prefixed with `export DEERFLOW_CHANNEL_USER_ID=<value>;` (or `unset DEERFLOW_CHANNEL_USER_ID;` when the IM id is present but empty or invalid; runs without an IM identity get no prefix). The value is at most 256 characters and shell-quoted, so delegated scripts still know who is acting.
 
+Every bash command also carries the authenticated DeerFlow user id as `DEERFLOW_USER_ID`, emitted as the **outermost** prefix — `export DEERFLOW_USER_ID=<value>; `, or `unset DEERFLOW_USER_ID; ` when the resolved id is empty, not a string, or longer than 256 characters. It precedes the channel prefix and the `cd` into the workspace, so reading left to right tells you which user the command runs as, then which IM sender it came from. Unlike the channel id this prefix is never skipped for a non-IM run: `resolve_runtime_user_id` falls back to `default`, so every command is attributable, and restating the value per call keeps a reused AIO shell session from resolving a stale one.
+
+On the **Windows local sandbox** neither prefix is emitted — `export`/`unset` are not valid syntax under its PowerShell/cmd.exe fallback. The user id is published through the subprocess environment instead, which `LocalSandbox` layers into the per-process environment (it has no persistent session to keep honest), while the channel id is simply absent.
+
+Treat both shell variables as **informational, not authenticated identity**. Any bash command can overwrite its own environment, so a skill that needs user-scoped authorization must resolve the identity server-side (`resolve_runtime_user_id`) rather than trusting `DEERFLOW_USER_ID`.
+
 ## The subagent middleware chain
 
 `build_subagent_runtime_middlewares` assembles the chain. It shares a base with the Lead Agent and then appends subagent-specific middlewares. Roughly, from outermost to innermost:

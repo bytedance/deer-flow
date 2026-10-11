@@ -79,6 +79,16 @@ def _strip_leading_slack_bot_mention(text: str, bot_user_id: str | None) -> str:
     return text[end + 1 :].lstrip()
 
 
+def _unescape_slack_text(text: str) -> str:
+    """Decode the three entities Slack escapes in message text.
+
+    Slack sends a user-typed ``&``, ``<`` and ``>`` as ``&amp;``, ``&lt;`` and
+    ``&gt;`` so that raw ``<...>`` always marks a control sequence (mention,
+    link). ``&amp;`` is decoded last so an escaped entity is decoded only once.
+    """
+    return text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+
+
 class SlackChannel(Channel):
     """Slack IM channel using Socket Mode (WebSocket, no public IP).
 
@@ -93,6 +103,7 @@ class SlackChannel(Channel):
     def __init__(self, bus: MessageBus, config: dict[str, Any]) -> None:
         super().__init__(name="slack", bus=bus, config=config)
         self._socket_client = None
+        self._socket_close_task: asyncio.Task[None] | None = None
         self._web_client = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._allowed_users = _normalize_allowed_users(config.get("allowed_users", []))
@@ -166,9 +177,22 @@ class SlackChannel(Channel):
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
         await self._close_and_drain_threadsafe_futures()
-        if self._socket_client:
-            self._socket_client.close()
-            self._socket_client = None
+        # ``SocketModeClient.close()`` joins the SDK's message-processor thread
+        # (up to ~1s) and waits for in-flight listeners, whose blocking Web API
+        # calls run up to the WebClient timeout, so it runs off the event loop.
+        # The client is detached first so a still-queued connect skips it. The
+        # close task is shielded and tracked: a cancelled stop() leaves it
+        # running, and a retried stop() awaits it instead of closing twice.
+        socket_client, self._socket_client = self._socket_client, None
+        if socket_client is not None:
+            self._socket_close_task = asyncio.create_task(asyncio.to_thread(socket_client.close))
+        close_task = self._socket_close_task
+        if close_task is not None:
+            try:
+                await asyncio.shield(close_task)
+            finally:
+                if close_task.done():
+                    self._socket_close_task = None
         logger.info("Slack channel stopped")
 
     async def send(self, msg: OutboundMessage, *, _max_retries: int = 3) -> None:
@@ -349,6 +373,9 @@ class SlackChannel(Channel):
         text = event.get("text", "").strip()
         if event.get("type") == "app_mention":
             text = _strip_leading_slack_bot_mention(text, self._bot_user_id)
+        # Decode after mention stripping: a real mention is a raw <@...>, while
+        # a user-typed "<@...>" arrives as &lt;@...&gt; and must stay text.
+        text = _unescape_slack_text(text)
         if not text:
             return
 
