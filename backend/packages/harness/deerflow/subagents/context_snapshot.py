@@ -25,7 +25,10 @@ SNAPSHOT_SYSTEM_NOTE = (
 # Keep media as input blocks so vision/audio-capable child models can still use
 # the retained conversation. Provider reasoning/signature and tool-use blocks
 # are deliberately excluded; tool calls are rendered separately as inert text.
-_MEDIA_BLOCK_TYPES = frozenset({"image", "image_url", "audio", "input_audio", "video", "file", "document"})
+# A tuple, not a frozenset: block types are probed by equality because
+# `type: []` / `type: {}` are legal JSON from a provider, and hashing an
+# unhashable value would raise TypeError instead of skipping the block.
+_MEDIA_BLOCK_TYPES = ("image", "image_url", "audio", "input_audio", "video", "file", "document")
 
 
 def _neutralize_document_content_block(block: Any) -> Any:
@@ -130,7 +133,7 @@ class ParentContextSnapshot:
                 if isinstance(block, str):
                     if block:
                         history.append({"type": "text", "text": neutralize_untrusted_tags(block)})
-                elif block.get("type") in {"text", "output_text"} and isinstance(block.get("text"), str):
+                elif block.get("type") in ("text", "output_text") and isinstance(block.get("text"), str):
                     history.append({"type": "text", "text": neutralize_untrusted_tags(block["text"])})
                 elif block.get("type") in _MEDIA_BLOCK_TYPES:
                     media = {key: value for key, value in block.items() if key != "cache_control"}

@@ -23,7 +23,7 @@ deduplicate at each forwarding boundary before publishing the durable count.
 
 **Remote empty files**: GNU stat's `regular file`/`regular empty file` are regular files. Empty files pass exists/file_written, fail non-empty; reject symlinks, directories, FIFOs.
 
-**Context**: Capture after validation, before setup. Keep genuine replies, even hidden clarifications; exclude framework state and unpaired calls. Mark unserializable media as omitted.
+**Context**: Capture after validation, before setup. Keep genuine replies, even hidden clarifications; exclude framework state and unpaired calls. Mark unserializable media as omitted. Content blocks are classified by equality probes on `type` (never set membership): a provider-emitted block whose type is not a string — including unhashable JSON such as `type: []` — is skipped with its surrounding history intact, never a TypeError out of the snapshot the child is built from.
 
 Native `document` snapshots neutralize reserved tags and input markers in textual
 `title`, `context`, text-source `data`, content-source text, and citation prose at
