@@ -9,6 +9,7 @@ from langchain_core.tools import StructuredTool
 
 from deerflow.tools.builtins import tool_search as search_module
 from deerflow.tools.builtins.tool_search import MAX_REGEX_FIELD_CHARS, MAX_REGEX_PATTERN_CHARS, DeferredToolCatalog, ToolSearchLimitError, build_tool_search_tool
+from deerflow.tools.mcp_metadata import tag_mcp_tool
 
 
 def make_tool(name="aaa_tool", description="ordinary"):
@@ -17,7 +18,8 @@ def make_tool(name="aaa_tool", description="ordinary"):
 
 @pytest.mark.parametrize("mode", ["name", "valid_name", "description", "required"])
 def test_pathological_regex_finishes_in_isolated_process(mode):
-    # A process deadline protects pytest itself if the regex engine regresses.
+    # Allow cold imports on shared runners; the regex work still has a 100 ms
+    # budget. A process deadline protects pytest if the engine regresses.
     script = """
 import sys
 from langchain_core.tools import StructuredTool
@@ -34,7 +36,7 @@ except ValueError as exc:
     assert 'budget' in str(exc).lower(), str(exc)
 print('finished')
 """
-    result = subprocess.run([sys.executable, "-c", script, mode], capture_output=True, text=True, timeout=8, check=False)
+    result = subprocess.run([sys.executable, "-c", script, mode], capture_output=True, text=True, timeout=30, check=False)
     assert result.returncode == 0, result.stderr
     assert "finished" in result.stdout
 
@@ -46,11 +48,19 @@ def test_oversized_pattern_rejected_without_truncation(query):
 
 
 @pytest.mark.parametrize("field", ["name", "description"])
-def test_oversized_field_rejected_but_exact_selection_still_works(field):
+@pytest.mark.parametrize("query", ["a", "+aaa a"])
+def test_oversized_field_rejected_but_exact_selection_still_works(field, query, caplog):
     tool = make_tool(**{field: "a" * (MAX_REGEX_FIELD_CHARS + 1)})
     catalog = DeferredToolCatalog((tool,))
-    with pytest.raises(ToolSearchLimitError, match="regex search budget"):
-        catalog.search("a")
+    with pytest.raises(ToolSearchLimitError, match="regex search budget") as caught:
+        catalog.search(query)
+    assert repr(tool.name[:128]) in str(caught.value)
+    assert field in str(caught.value)
+    assert str(MAX_REGEX_FIELD_CHARS + 1) in str(caught.value)
+    assert len(str(caught.value)) < 512
+    assert len(caplog.text) < 1024
+    assert tool.name[:128] in caplog.text
+    assert field in caplog.text
     assert catalog.search("select:" + tool.name) == [tool]
 
 
@@ -83,6 +93,38 @@ def test_tool_reports_limit_without_promoting_partial_matches():
     assert "Tool search stopped:" in message.content
     assert "select:" in message.content
     assert message.tool_call_id == "tc-limit"
+
+
+def test_oversized_description_reports_source_and_actionable_retry(caplog):
+    oversized = make_tool("mcp_catalog_lookup", "a" * (MAX_REGEX_FIELD_CHARS + 1))
+    tag_mcp_tool(oversized, server_name="catalog-server", transport="stdio")
+    catalog = DeferredToolCatalog((make_tool(), oversized))
+    tool = build_tool_search_tool(catalog)
+    result = tool.invoke({"type": "tool_call", "name": "tool_search", "args": {"query": "aaa"}, "id": "tc-field-limit"})
+    assert result.update["promoted"]["names"] == []
+    content = result.update["messages"][0].content
+    assert "mcp_catalog_lookup" in content
+    assert "description" in content
+    assert "keywords:" in content
+    assert "select:" in content
+    assert "simpler" not in content
+    assert "catalog-server" in caplog.text
+    assert "mcp_catalog_lookup" in caplog.text
+    assert "description" in caplog.text
+    assert str(MAX_REGEX_FIELD_CHARS + 1) in caplog.text
+    assert str(MAX_REGEX_FIELD_CHARS) in caplog.text
+    assert "a" * 1000 not in caplog.text
+    assert catalog.search("keywords:lookup") == [oversized]
+    assert catalog.search("select:mcp_catalog_lookup") == [oversized]
+
+
+def test_tool_description_exposes_regex_limits_and_alternatives():
+    description = build_tool_search_tool(DeferredToolCatalog((make_tool(),))).description
+    assert "256" in description
+    assert "100 ms" in description
+    assert "65,536" in description
+    assert "keywords:" in description
+    assert "select:" in description
 
 
 @pytest.mark.parametrize("pattern", [r"^aaa", r"ordinary$", r"aaa|bbb", r"(?<=aaa)_", r"(a)\1", r"(?i:AAA)", r"[A-Z]+", r"(?=a)", "sum(", "(?R)"])

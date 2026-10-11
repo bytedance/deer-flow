@@ -15,6 +15,12 @@ bound each searchable field before concatenation and count matches with an
 iterator. Budget failure raises `ToolSearchLimitError`; the tool returns a retry
 hint and no promotions, never a partial ranking. `select:` and the literal
 `keywords:` path bypass these regex limits.
+Field-limit errors identify the tool (name preview capped at 128 characters),
+field and length, and direct the model to `keywords:` or `select:` rather than
+query simplification. Log the same bounded identity with the logical MCP server
+name when available; never log the oversized description. Keep the model-visible
+tool description aligned with these limits. Pathological-regex subprocess tests
+allow 30 seconds for cold startup while matching retains its 100 ms budget.
 
 `task` and `batch_task` opt into JSON checks with `file:<path> json-valid`.
 See [subagents/AGENTS.md](../subagents/AGENTS.md) for read limits and UNVERIFIED semantics.

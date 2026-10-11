@@ -34,7 +34,7 @@ from langchain_core.tools import InjectedToolCallId, tool
 from langchain_core.utils.function_calling import convert_to_openai_function
 from langgraph.types import Command
 
-from deerflow.tools.mcp_metadata import get_mcp_routing, is_mcp_tool
+from deerflow.tools.mcp_metadata import get_mcp_routing, get_mcp_source, is_mcp_tool
 
 if TYPE_CHECKING:
     from langchain.agents.middleware import AgentMiddleware
@@ -51,6 +51,10 @@ MAX_KEYWORD_QUERY_TERMS = 16
 
 class ToolSearchLimitError(ValueError):
     """The query exceeded the discovery budget; no partial ranking is valid."""
+
+    def __init__(self, message: str, *, retry_hint: str = "Use a simpler query, keywords: for literal search, or select: with exact tool names."):
+        super().__init__(message)
+        self.retry_hint = retry_hint
 
 
 def _compile_catalog_regex(pattern: str) -> regex.Pattern[str]:
@@ -84,8 +88,18 @@ def _remaining_regex_time(deadline: float) -> float:
 
 def _catalog_searchable(t: BaseTool) -> str:
     description = t.description or ""
-    if len(t.name) > MAX_REGEX_FIELD_CHARS or len(description) > MAX_REGEX_FIELD_CHARS:
-        raise ToolSearchLimitError(f"A tool name or description exceeds the {MAX_REGEX_FIELD_CHARS}-character regex search budget.")
+    for field, value in (("name", t.name), ("description", description)):
+        if len(value) > MAX_REGEX_FIELD_CHARS:
+            # Names and source labels are external data; keep diagnostics bounded
+            # even when the name itself is the oversized field.
+            tool_label = repr(t.name[:128]) + (" (truncated)" if len(t.name) > 128 else "")
+            source = get_mcp_source(t)
+            server_name = source["server_name"][:128] if source else None
+            logger.warning("Deferred tool regex field limit: tool=%s field=%s length=%d limit=%d server=%r", tool_label, field, len(value), MAX_REGEX_FIELD_CHARS, server_name)
+            raise ToolSearchLimitError(
+                f"Tool {tool_label} {field} has {len(value)} characters, exceeding the {MAX_REGEX_FIELD_CHARS}-character regex search budget.",
+                retry_hint="Use keywords: for literal search or select: with exact tool names from <available-deferred-tools>.",
+            )
     return f"{t.name} {description}"
 
 
@@ -237,11 +251,14 @@ def build_tool_search_tool(catalog: DeferredToolCatalog) -> BaseTool:
           - "jupyter.*notebook" -- regex on name and description, name matches first
           - "+slack send" -- require "slack" in the name, rank by the remaining regex
         Queries without a prefix keep regex semantics (invalid regex is literal).
+        Regex patterns are capped at 256 characters; each name or description
+        at 65,536 characters. Regex searches share a 100 ms budget across candidates
+        and ranking. Prefer keywords: or select: for broad catalogs.
         """
         try:
             matched = catalog.search(query)
         except ToolSearchLimitError as exc:
-            content, names = f"Tool search stopped: {exc} Use a simpler query or select: with exact tool names.", []
+            content, names = f"Tool search stopped: {exc} {exc.retry_hint}", []
         else:
             if matched:
                 content = json.dumps([convert_to_openai_function(t) for t in matched], indent=2, ensure_ascii=False)
