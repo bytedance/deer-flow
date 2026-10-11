@@ -212,6 +212,7 @@ async def test_send_reserves_busy_state_before_worker_starts(monkeypatch):
             app.query_one("#composer").value = "new question"
             await pilot.press("enter")
             assert any(row.kind == "system" and "Still working" in row.text for row in app.state.rows)
+            assert app.query_one("#composer").value == "new question"
             await pilot.press("ctrl+c")
             release.set()
             client.release_old.set()
@@ -249,6 +250,7 @@ async def test_worker_start_failure_restores_idle_state_and_allows_retry(monkeyp
         assert any(row.kind == "system" and row.tone == "error" for row in app.state.rows)
         assert "private worker startup detail" not in str(app.state.rows)
         assert client.calls == []
+        assert app.query_one("#composer").value == "old question"
 
         idle_state = app.state
         for action in [RunStarted(), AssistantDelta(id="failed-answer", text="stale"), ThreadTitle("Failed title"), RunEnded(usage={"total_tokens": 999})]:

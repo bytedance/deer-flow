@@ -276,7 +276,11 @@ class DeerFlowTUI(App):
         if not stripped:
             return
         self._history.add(text)
-        self._handle_submit(text)
+        if not self._handle_submit(text):
+            # A refused message is still the user's draft: put it back so they can
+            # resend it once the app is ready, instead of digging it out of history.
+            event.input.value = event.value
+            event.input.cursor_position = len(event.value)
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         if not isinstance(event.text_area, ComposerInput):
@@ -423,19 +427,20 @@ class DeerFlowTUI(App):
         composer.cursor_position = len(composer.value)
         self._close_palette()
 
-    def _handle_submit(self, text: str) -> None:
+    def _handle_submit(self, text: str) -> bool:
+        """Route a submission; return False when a message for the agent did not start."""
         from .command_registry import resolve
 
         res = resolve(text, skills=self._skill_names)
         if res.kind == "builtin":
             self._handle_builtin(res.name, res.args)
-            return
+            return True
         if res.kind == "unknown":
             self._dispatch(SystemMessage(f"Unknown command /{res.name}. Try /help.", tone="error"))
-            return
+            return True
         # plain message or skill activation (/skill task) both go to the agent,
         # which applies skill-activation semantics on the raw text.
-        self._send_to_agent(text)
+        return self._send_to_agent(text)
 
     def _dispatch_still_working(self) -> None:
         self._dispatch(SystemMessage("Still working — wait for the current run to finish.", tone="info"))
@@ -658,10 +663,11 @@ class DeerFlowTUI(App):
 
     # ----- agent run ----------------------------------------------------- #
 
-    def _send_to_agent(self, text: str) -> None:
+    def _send_to_agent(self, text: str) -> bool:
+        """Start a run for ``text``; return False when it was refused or failed to start."""
         if self._streaming:
             self._dispatch_still_working()
-            return
+            return False
         # An interrupted worker cannot be killed: it stops at its next stream
         # event, so a long tool call keeps running and then checkpoints. A new
         # run on the same thread would race it, and whichever checkpoint lands
@@ -669,7 +675,7 @@ class DeerFlowTUI(App):
         self._interrupted_runs = [run for run in self._interrupted_runs if run.worker_running()]
         if any(run.thread_id == self._conv_thread_id for run in self._interrupted_runs):
             self._dispatch(SystemMessage("The interrupted run is still stopping on this thread. Send again once it finishes, or use /new or /resume to continue elsewhere.", tone="info"))
-            return
+            return False
         if self._conv_thread_id is None:
             self._conv_thread_id = str(uuid.uuid4())
         run = _Run(self._conv_thread_id)
@@ -688,6 +694,8 @@ class DeerFlowTUI(App):
             self._run = None
             self._streaming = False
             self._dispatch(SystemMessage("Could not start the run. Please try again.", tone="error"))
+            return False
+        return True
 
     def _stream_worker(self, text: str, run: _Run) -> None:
         # Mark the start before checking cancellation: an interrupt either
