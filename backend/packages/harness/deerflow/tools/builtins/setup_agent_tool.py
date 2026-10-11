@@ -1,4 +1,6 @@
 import logging
+import os
+import stat
 import tempfile
 from pathlib import Path
 
@@ -25,14 +27,28 @@ def _publish_text(target: Path, text: str) -> None:
     custom-agent store already publishes the same file through a staged
     temporary plus ``os.replace``; the default agent's copy must not be the
     one that can tear.
+
+    The temporary carries the target's mode (0644 for a first publish) before
+    the replace, so a re-publish keeps the mode an operator set on the file,
+    and one try/finally spans staging and publishing so a failure in either
+    phase cannot orphan the temporary in ``base_dir``.
     """
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=target.parent, suffix=".tmp", delete=False) as handle:
-        handle.write(text)
-        temporary = Path(handle.name)
     try:
+        mode = stat.S_IMODE(os.stat(target).st_mode)
+    except OSError:
+        mode = 0o644
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=target.parent, suffix=".tmp", delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(text)
+            handle.flush()
+            os.chmod(temporary, mode)
+            os.fsync(handle.fileno())
         temporary.replace(target)
     finally:
-        temporary.unlink(missing_ok=True)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 @tool(parse_docstring=True)
