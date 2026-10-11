@@ -29,6 +29,7 @@ import threading
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.download import download_limit, read_download_stream
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
@@ -333,7 +334,8 @@ class TenkiSandbox(Sandbox):
                     raise
             self._fs_op(lambda fs: fs.write_stream(resolved, _frames(data)))
 
-    def download_file(self, path: str) -> bytes:
+    def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
+        limit = download_limit(max_bytes, _MAX_DOWNLOAD_SIZE)
         normalized = self._guard_traversal(path)
         stripped = normalized.lstrip("/")
         allowed = VIRTUAL_PATH_PREFIX.lstrip("/")
@@ -357,14 +359,8 @@ class TenkiSandbox(Sandbox):
         #
         # The cap is enforced on bytes actually received, so a file that grows
         # mid-transfer still can't exceed it (a stat-then-read check could).
-        chunks: list[bytes] = []
-        total = 0
         try:
-            for chunk in fs.read_stream(resolved):
-                total += len(chunk)
-                if total > _MAX_DOWNLOAD_SIZE:
-                    raise OSError(errno.EFBIG, f"File exceeds maximum download size of {_MAX_DOWNLOAD_SIZE} bytes", path)
-                chunks.append(chunk)
+            return read_download_stream(fs.read_stream(resolved), limit, path)
         except OSError as e:
             # Our own EFBIG size-cap is not a session death — let it pass through
             # without evicting. Every other OSError is a real transport failure:
@@ -380,7 +376,6 @@ class TenkiSandbox(Sandbox):
         except Exception as e:
             self._note_failure(e)
             raise OSError(f"cannot read '{path}' from sandbox: {e}") from e
-        return b"".join(chunks)
 
     def list_dir(self, path: str, max_depth: int = 2) -> list[str]:
         resolved = self._resolve_path(path)

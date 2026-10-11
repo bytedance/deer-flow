@@ -183,7 +183,7 @@ def _view_image_authorized(runtime: Runtime, image_path: str, tool_call_id: str)
 
     if sandbox is not None:
         try:
-            image_data = sandbox.download_file(image_path)
+            image_data = sandbox.download_file(image_path, max_bytes=_MAX_IMAGE_BYTES)
             read_source_sandbox_id = sandbox_id
         except IsADirectoryError:
             return Command(

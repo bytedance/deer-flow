@@ -1,5 +1,4 @@
 import base64
-import errno
 import logging
 import math
 import threading
@@ -11,6 +10,7 @@ from agent_sandbox import Sandbox as AioSandboxClient
 from agent_sandbox.core.api_error import ApiError
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.download import download_limit, read_download_stream
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
@@ -1005,7 +1005,7 @@ class AioSandbox(Sandbox):
             logger.error(f"Failed to read file in sandbox: {e}")
             return f"Error: {e}"
 
-    def download_file(self, path: str) -> bytes:
+    def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
         """Download file bytes from the sandbox.
 
         Raises:
@@ -1013,6 +1013,7 @@ class AioSandbox(Sandbox):
                 outside ``VIRTUAL_PATH_PREFIX``.
             OSError: If the file cannot be retrieved from the sandbox.
         """
+        limit = download_limit(max_bytes, _MAX_DOWNLOAD_SIZE)
         # Reject path traversal before sending to the container API.
         # LocalSandbox gets this implicitly via _resolve_path;
         # here the path is forwarded verbatim so we must check explicitly.
@@ -1030,18 +1031,8 @@ class AioSandbox(Sandbox):
 
         with self._lock:
             try:
-                chunks: list[bytes] = []
-                total = 0
-                for chunk in self._client.file.download_file(path=path):
-                    total += len(chunk)
-                    if total > _MAX_DOWNLOAD_SIZE:
-                        raise OSError(
-                            errno.EFBIG,
-                            f"File exceeds maximum download size of {_MAX_DOWNLOAD_SIZE} bytes",
-                            path,
-                        )
-                    chunks.append(chunk)
-                return b"".join(chunks)
+                stream = self._client.file.download_file(path=path)
+                return read_download_stream(stream, limit, path)
             except OSError:
                 raise
             except Exception as e:

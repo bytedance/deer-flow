@@ -216,7 +216,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                     if host_data_url is not None:
                         return host_data_url
                 try:
-                    image_bytes = sandbox.download_file(image_path)
+                    image_bytes = sandbox.download_file(image_path, max_bytes=_MAX_IMAGE_BYTES)
                 except Exception:
                     logger.warning(
                         "Failed to recover viewed image %s from replacement sandbox %s",
@@ -239,7 +239,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                 return None
 
             try:
-                image_bytes = sandbox.download_file(image_path)
+                image_bytes = sandbox.download_file(image_path, max_bytes=_MAX_IMAGE_BYTES)
             except Exception:
                 logger.warning("Failed to read viewed image %s from sandbox %s", image_path, sandbox_id, exc_info=True)
                 return None

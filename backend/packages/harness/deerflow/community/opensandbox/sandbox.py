@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import errno
 import logging
 import posixpath
 import re
@@ -12,6 +11,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.download import download_limit, read_download_stream
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
@@ -297,24 +297,12 @@ class OpenSandboxSandbox(Sandbox):
         resolved = self._resolve_path(path)
         self._file_op(lambda files: files.write_file(resolved, content, mode=644))
 
-    def download_file(self, path: str) -> bytes:
+    def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
+        limit = download_limit(max_bytes, _MAX_DOWNLOAD_SIZE)
         resolved = self._resolve_download_path(path)
 
         def read_bounded(files) -> bytes:
-            chunks: list[bytes] = []
-            total = 0
-            stream = files.read_bytes_stream(resolved)
-            try:
-                for chunk in stream:
-                    total += len(chunk)
-                    if total > _MAX_DOWNLOAD_SIZE:
-                        raise OSError(errno.EFBIG, f"File exceeds maximum download size of {_MAX_DOWNLOAD_SIZE} bytes", path)
-                    chunks.append(chunk)
-            finally:
-                close = getattr(stream, "close", None)
-                if callable(close):
-                    close()
-            return b"".join(chunks)
+            return read_download_stream(files.read_bytes_stream(resolved), limit, path)
 
         try:
             return self._file_op(read_bounded)
