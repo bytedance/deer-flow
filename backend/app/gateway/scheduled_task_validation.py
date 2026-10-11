@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 from app.gateway.scheduled_task_errors import scheduler_error
 from deerflow.persistence.scheduled_task_runs.finalization import is_host_pause_marker
-from deerflow.scheduler.schedules import MAX_INTERVAL_SECONDS, next_run_at, normalize_cron_expression, parse_interval_seconds, validate_timezone
+from deerflow.scheduler.schedules import MAX_INTERVAL_SECONDS, next_run_at, normalize_cron_expression, parse_interval_seconds, validate_max_runs, validate_timezone
 from deerflow.scheduler.stop_rule import MAX_STOP_CONDITION_CHARS, normalize_stop_condition
 from deerflow.utils.goal_objective import MAX_GOAL_OBJECTIVE_CHARS, normalize_goal_objective
 
@@ -115,8 +115,10 @@ def validate_task_bounds(
         if context_mode != "fresh_thread_per_run":
             raise scheduler_error(422, "goal_requires_fresh_thread", "goal-backed schedules require fresh_thread_per_run")
     if max_runs is not None and checks("max_runs"):
-        if isinstance(max_runs, bool) or not isinstance(max_runs, int) or max_runs < 1:
-            raise scheduler_error(422, "invalid_max_runs", "max_runs must be a positive integer")
+        try:
+            validate_max_runs(max_runs)
+        except ValueError as exc:
+            raise scheduler_error(422, "invalid_max_runs", str(exc)) from exc
         if used > 0 and max_runs <= used:
             raise scheduler_error(422, "max_runs_not_above_used", f"max_runs must be greater than the {used} automatic runs already used", used=used)
     if end_at is not None and (checks("end_at") or checks("next_run_at")):

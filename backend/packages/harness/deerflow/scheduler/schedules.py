@@ -6,6 +6,14 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from croniter import croniter
 
 MAX_INTERVAL_SECONDS = 30 * 24 * 60 * 60
+# PostgreSQL INTEGER is signed 32-bit; SQLite accepts larger stored values.
+MAX_TASK_RUNS = 2**31 - 1
+
+
+def validate_max_runs(value: object) -> None:
+    """Keep optional schedule safety caps within both SQL backends' range."""
+    if value is not None and (isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_TASK_RUNS):
+        raise ValueError(f"max_runs must be an integer between 1 and {MAX_TASK_RUNS}")
 
 
 def validate_timezone(timezone_name: str) -> str:

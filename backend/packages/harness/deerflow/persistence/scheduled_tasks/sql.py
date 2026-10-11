@@ -16,6 +16,7 @@ from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project
 from deerflow.persistence.scheduled_tasks.model import ACTIVE_RUN_STATUSES, LIVE_TASK_STATUSES, ONCE_TASK_STATUS_BY_RUN_STATUS, TERMINAL_RUN_STATUSES, TERMINAL_TASK_STATUSES, ScheduledTaskRow
 from deerflow.scheduler.host_notes import RUN_ERROR_END_REACHED
+from deerflow.scheduler.schedules import validate_max_runs
 from deerflow.utils.goal_objective import normalize_goal_objective
 from deerflow.utils.time import coerce_iso
 
@@ -154,8 +155,7 @@ class ScheduledTaskRepository:
             normalize_goal_objective(goal_objective)
         if goal_objective is not None and context_mode != "fresh_thread_per_run":
             raise ValueError("goal-backed schedules require fresh_thread_per_run")
-        if max_runs is not None and (not isinstance(max_runs, int) or isinstance(max_runs, bool) or max_runs < 1):
-            raise ValueError("max_runs must be a positive integer")
+        validate_max_runs(max_runs)
         if standing_notes is not None and (len(standing_notes) > 10 or any(not isinstance(note, str) or not note.strip() or len(note) > 500 for note in standing_notes)):
             raise ValueError("standing notes allow at most 10 nonempty notes of 500 characters")
         now = datetime.now(UTC)
@@ -369,6 +369,8 @@ class ScheduledTaskRepository:
             if row is None or row.user_id != user_id:
                 return None
             reactivating = reactivation_requested and row.status != "enabled"
+            if "max_runs" in updates:
+                validate_max_runs(updates["max_runs"])
             # A goal, instruction or stop-rule change starts a new unmet count:
             # every occurrence so far was judged against the old definition
             # (edits require no active occurrence). Resume does not move it.
