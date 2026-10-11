@@ -35,6 +35,7 @@ export type AuthResult =
   | { tag: "needs_setup"; user: User }
   | { tag: "system_setup_required" }
   | { tag: "unauthenticated" }
+  | { tag: "account_disabled" }
   | { tag: "gateway_unavailable" }
   | { tag: "config_error"; message: string };
 
@@ -46,6 +47,13 @@ export function buildLoginUrl(returnPath: string): string {
   return `/login?next=${encodeURIComponent(returnPath)}`;
 }
 
+/**
+ * Login-page URL that surfaces the account-disabled reason (#4063 gap 3).
+ * A disabled account cannot sign back in, so unlike buildLoginUrl there is
+ * no `next` target to preserve.
+ */
+export const ACCOUNT_DISABLED_LOGIN_URL = "/login?error=account_disabled";
+
 // ── Backend error response parsing ────────────────────────────────
 
 const AUTH_ERROR_CODES = [
@@ -53,6 +61,7 @@ const AUTH_ERROR_CODES = [
   "token_expired",
   "token_invalid",
   "user_not_found",
+  "account_disabled",
   "email_already_exists",
   "provider_not_found",
   "not_authenticated",

@@ -4156,6 +4156,27 @@ This release closes that milestone with **439 merged pull requests**.
   missing; `verify-versions.yml` installs the uv version the backend image pins.
   ([#6588])
 
+- **tui:** A message the TUI refuses to send now stays in the composer. Submitting
+  cleared the composer before the send was checked, so a prompt typed during an
+  active run, while an interrupted run was still stopping, or when the run could
+  not start was replaced by a notice and survived only in input history; a
+  command-line launch message whose run could not start was lost entirely. The
+  composer now gets the text back as input history recorded it, with the cursor
+  at its end and the command palette closed, so `Enter` resends it; accepted
+  messages and local slash commands clear it as before.
+  ([#6666])
+
+- **tui:** `deerflow --print` and `--json` no longer drop words of an unquoted
+  message. Each flag took a single value and never read the positional words,
+  so `deerflow --print summarize this repo` sent only `summarize`,
+  `deerflow summarize this repo --print` exited 2 asking for a message on a
+  terminal, and with piped stdin the typed words were silently ignored. Both flags now take every word
+  that follows them and fall back to words given before them, as `--cli` does;
+  a typed message wins over piped stdin. A message split around the flag
+  (`deerflow hello --print there`) exits 2 with a hint to quote it, since its
+  word order cannot be recovered. Passing both `--print` and `--json` now exits
+  2 instead of running `--print` and dropping the `--json` message. ([#6636])
+
 ### Security
 
 - **authz:** Enforce permission checks on routes that only had authentication, and
@@ -4387,6 +4408,17 @@ This release closes that milestone with **439 merged pull requests**.
   **Behavior change:** a local stack opened from another device needs
   `BIND_HOST` (e.g. `BIND_HOST=0.0.0.0` in `.env`) and the `2026` entry; the
   Gateway and frontend ports are no longer reachable from other machines.
+
+- **scripts:** Reject local `BIND_HOST` values that nginx would misread. The
+  local nginx helper checked only for address and hostname characters, so
+  `BIND_HOST=0` rendered `listen 0:2026;`, which nginx resolves to `0.0.0.0`
+  and binds on every IPv4 interface, and `1.2.3` bound `1.2.0.3`. Values nginx
+  rejects outright, such as `[[fd00::1]]` or `-foo`, passed the `serve.sh`
+  preflight and failed only after the running stack had been stopped. The
+  helper now accepts exactly a dotted-quad IPv4 address, an IPv6 address
+  (bracketed or not), or an RFC 1123 hostname. Returning to the loopback
+  default also removes the `temp/nginx.local.conf` rendered for an earlier
+  value. ([#6635])
 
 - **skills:** Stop `review_skill_package` from reading other users' skills.
   Local path targets were allowed anywhere under the Gateway cwd or `/tmp`,
@@ -9553,3 +9585,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6595]: https://github.com/bytedance/deer-flow/pull/6595
 [#6611]: https://github.com/bytedance/deer-flow/pull/6611
 [#6613]: https://github.com/bytedance/deer-flow/pull/6613
+[#6635]: https://github.com/bytedance/deer-flow/pull/6635
+[#6636]: https://github.com/bytedance/deer-flow/pull/6636
+[#6666]: https://github.com/bytedance/deer-flow/pull/6666
