@@ -231,6 +231,22 @@ def test_redact_egress_text_scrubs_entire_pem_block():
     assert "[redacted]" in redacted
 
 
+@pytest.mark.parametrize(
+    "secret",
+    [
+        # GitHub fine-grained PAT: `github_pat_` + 22 chars + `_` + 59 chars.
+        "github_pat_11ABCDEFG0123456789012_" + "A" * 59,
+        # Google API key: `AIza` + exactly 35 more characters.
+        "AIza" + "SyA1234567890abcdefghijklmnopqrstuv",
+    ],
+)
+def test_redact_egress_text_scrubs_canonical_token_families(secret: str):
+    redacted = redact_egress_text(f"answer used {secret} here")
+
+    assert secret not in redacted
+    assert "[redacted]" in redacted
+
+
 def test_multiline_pem_block_never_reaches_the_text():
     pem_body = "ABCDEFSECRETKEYBODY"
     pem = "-----BEGIN PRIVATE KEY-----\n" + pem_body + "\n-----END PRIVATE KEY-----"

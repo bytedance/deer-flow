@@ -24,16 +24,19 @@ def _stub_app_config():
     reset_app_config()
 
 
-def _make_start_run_request(run_manager, *, thread_store=None, auth_source=None):
+def _make_start_run_request(run_manager, *, thread_store=None, auth_source=None, state_user=None, headers=None):
     from langgraph.checkpoint.memory import InMemorySaver
     from langgraph.store.memory import InMemoryStore
 
     from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
 
     store = InMemoryStore()
+    state = SimpleNamespace(auth_source=auth_source)
+    if state_user is not None:
+        state.user = state_user
     return SimpleNamespace(
-        headers={},
-        state=SimpleNamespace(auth_source=auth_source),
+        headers=dict(headers or {}),
+        state=state,
         app=SimpleNamespace(
             state=SimpleNamespace(
                 stream_bridge=SimpleNamespace(),
@@ -223,6 +226,59 @@ def test_external_image_runtime_state_is_rejected(boundary, channel):
         transform({channel: {"synthetic": "untrusted"}})
 
     assert error.value.status_code == 400
+
+
+@pytest.mark.parametrize("boundary", ["run", "state"])
+def test_external_goal_outcome_is_rejected(boundary):
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input, strip_server_owned_state_metadata
+
+    transform = normalize_input if boundary == "run" else strip_server_owned_state_metadata
+    with pytest.raises(HTTPException) as error:
+        transform({"goal_outcome": {"status": "achieved", "objective": "forged"}})
+
+    assert error.value.status_code == 400
+    assert error.value.detail == "External goal_outcome state is not allowed"
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_external_run_goal_clears_the_previous_goal_outcome(mode):
+    """A caller goal replaces the goal, so the record of the earlier met goal must go."""
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import END, START, StateGraph
+
+    from app.gateway.services import normalize_input
+    from deerflow.agents.thread_state import get_thread_state_schema
+    from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
+    from deerflow.runtime.goal import build_goal_outcome, build_goal_state, write_thread_goal
+
+    checkpointer = InMemorySaver()
+    builder = StateGraph(get_thread_state_schema(mode))
+    builder.add_node("agent", lambda state: {})
+    builder.add_edge(START, "agent")
+    builder.add_edge("agent", END)
+    graph = builder.compile(checkpointer=checkpointer)
+    accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode=mode)
+    config = {"configurable": {"thread_id": "run-goal-thread"}}
+    record = build_goal_outcome(build_goal_state("Ship it"), {"satisfied": True, "blocker": "none", "reason": "Shipped."}, reply_message_id=None)
+    next_goal = build_goal_state("Ship the follow-up")
+
+    async def scenario():
+        await graph.ainvoke({"messages": [{"role": "user", "content": "Ship it"}]}, config)
+        await write_thread_goal(checkpointer, "run-goal-thread", None, outcome=record)
+        before = (await accessor.aget(config)).values
+        await graph.ainvoke(normalize_input({"messages": [{"role": "user", "content": "Now the follow-up"}], "goal": next_goal}), config)
+        return before, (await accessor.aget(config)).values
+
+    before, after = asyncio.run(scenario())
+
+    assert before["goal_outcome"] == record
+    assert after["goal"] == next_goal
+    assert after["goal_outcome"] is None
+    # merge_goal keeps the goal on None; trusted internal input is not rewritten.
+    assert "goal_outcome" not in normalize_input({"goal": None})
+    assert "goal_outcome" not in normalize_input({"goal": next_goal}, trusted_internal=True)
 
 
 def test_trusted_internal_run_preserves_image_runtime_state():
@@ -857,6 +913,68 @@ async def test_system_role_rejected_before_run_admission(_stub_app_config, auth_
     assert error.value.status_code == 400
     assert await manager.list_by_thread("synthetic-rejected-thread", user_id=None) == []
     assert await request.app.state.checkpointer.aget_tuple({"configurable": {"thread_id": "synthetic-rejected-thread"}}) is None
+
+
+@pytest.mark.asyncio
+async def test_start_run_rejects_suspended_internal_owner(_stub_app_config, tmp_path):
+    """(#3462 gap 3) Scheduler launches fabricate internal requests that skip
+    AuthMiddleware (where the internal-auth suspension gate lives), so run
+    admission re-asserts it: a suspended owner's occurrence fails before any
+    run record exists, and re-enabling the owner admits the run again."""
+    from unittest.mock import AsyncMock, patch
+
+    from fastapi import HTTPException
+
+    import app.gateway.deps as deps_module
+    from app.gateway.auth.models import User
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, get_internal_user
+    from app.gateway.run_models import RunCreateRequest
+    from app.gateway.services import start_run
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path}/users.db", sqlite_dir=str(tmp_path))
+    repo = SQLiteUserRepository(get_session_factory())
+    owner = await repo.create_user(User(email="sched-owner@example.com", system_role="user"))
+    await repo.set_disabled(str(owner.id), True)
+
+    saved_repo, saved_provider = deps_module._cached_repo, deps_module._cached_local_provider
+    deps_module._cached_repo = repo
+    deps_module._cached_local_provider = None
+
+    manager = RunManager(store=MemoryRunStore())
+
+    def _request():
+        return _make_start_run_request(
+            manager,
+            auth_source=AUTH_SOURCE_INTERNAL,
+            state_user=get_internal_user(),
+            headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: str(owner.id)},
+        )
+
+    try:
+        with patch("app.gateway.services.resolve_agent_factory", return_value=object()), patch("app.gateway.services.run_agent", new_callable=AsyncMock) as worker:
+            with pytest.raises(HTTPException) as error:
+                await start_run(RunCreateRequest(input={"messages": [{"role": "user", "content": "scheduled tick"}]}), "suspended-owner-thread", _request())
+            worker.assert_not_awaited()
+        assert error.value.status_code == 401
+        assert error.value.detail["code"] == "account_disabled"
+        assert await manager.list_by_thread("suspended-owner-thread", user_id=None) == []
+
+        # Re-enabling the owner re-admits internal launches (exact-restore
+        # semantics of the lifecycle: suspension is not destructive). The
+        # agent worker is scheduled as a task, so admission is proven by the
+        # created run record rather than a synchronous await.
+        await repo.set_disabled(str(owner.id), False)
+        with patch("app.gateway.services.resolve_agent_factory", return_value=object()), patch("app.gateway.services.run_agent", new_callable=AsyncMock):
+            record = await start_run(RunCreateRequest(input={"messages": [{"role": "user", "content": "scheduled tick"}]}), "suspended-owner-thread", _request())
+        assert record.run_id
+    finally:
+        await close_engine()
+        deps_module._cached_repo = saved_repo
+        deps_module._cached_local_provider = saved_provider
 
 
 @pytest.mark.asyncio

@@ -19,70 +19,43 @@ The backend runs a LangGraph-based super agent with sandbox execution, persisten
 - Run-history `status` filters are occurrence states, not task states. `ScheduledTaskRunStatus` in `persistence/scheduled_tasks/model.py` is the shared API/repository vocabulary and must match the active and terminal occurrence-status sets. Keep owner lookup before reading history, and apply SQL task/status predicates before pagination; omitted status preserves the existing response.
 - The background scheduler is single-instance by default. `scheduler.multi_instance=true` opts into lease-aware recovery across Gateway instances and requires shared Postgres, `run_ownership.heartbeat_enabled=true`, and `run_events.backend=db`; otherwise startup rejects the configuration. Live scheduled runs are preserved when a peer starts; expired launch claims return to the durable queue, expired run leases are atomically taken over, stale launch writes are fenced by lease ownership, and the Postgres advisory-locked budget makes `max_concurrent_runs` a shared global cap for `launching`/`running` rows.
 - The multi-process startup gate also fires on `deployment.multi_instance: true`; contract in `docs/CONFIGURATION.md`.
-- Long-running MCP work uses a separate durable task runtime (`McpTaskService` + `mcp_tasks`, lease-based recovery) rather than keeping remote task IDs or status polling inside the Agent loop; only submit remains Agent-visible, the database is the source of truth, and `ThreadState` receives only a bounded current-thread projection. Full contract (leases, cancellation fencing, delivery idempotency, management-tool exposure): [packages/harness/deerflow/mcp/AGENTS.md](packages/harness/deerflow/mcp/AGENTS.md).
-- MCP task notification retries, dead-lettering, and the cancel endpoint's worker-stopped 503 are part of that same contract — see [packages/harness/deerflow/mcp/AGENTS.md](packages/harness/deerflow/mcp/AGENTS.md).
+- Long-running MCP work uses a separate durable task runtime (`McpTaskService` + `mcp_tasks`, lease-based recovery) rather than keeping remote task IDs or status polling inside the Agent loop; only submit remains Agent-visible, the database is the source of truth, and `ThreadState` receives only a bounded current-thread projection. Full contract — including notification retries, dead-lettering, and the cancel endpoint's worker-stopped 503 (leases, cancellation fencing, delivery idempotency, management-tool exposure): [packages/harness/deerflow/mcp/AGENTS.md](packages/harness/deerflow/mcp/AGENTS.md).
 - Scheduled-task dispatch permits one active occurrence per task via `uq_scheduled_task_run_active` (`task_id WHERE status IN ('queued','launching','running')`). Durable `queued` rows survive restarts; only lease-fenced `launching` may call Gateway launch; `running` references the durable run. Stable admission idempotency keys reuse that run after recovery. Reused-thread `ConflictError` returns `launching` to `queued`; other launch errors become `failed`. Atomic queue claims enforce `max_concurrent_runs` and the per-owner cap, excluding waiting rows; the budget count and its UPDATE are separate statements, so writers must serialize before the count (Postgres advisory lock; SQLite `BEGIN IMMEDIATE`, whose deferred transaction otherwise reserves the writer only at the UPDATE) or claims on distinct rows overshoot the cap. Repeated triggers coalesce; same-thread FIFO blocks behind older active rows. Queue admission, PATCH/resume, pause and delete lock the parent before the occurrence, freezing active task definitions. Pause/delete atomically cancel `queued` work but reject `launching`/`running`; PATCH/resume reject all active states. Only queued conflicts offer pause cancellation. Manual triggers may queue/run while paused.
 - Scheduled-task lifecycle, recovery and queue timeout: [persistence guide](packages/harness/deerflow/persistence/AGENTS.md#scheduled-task-lifecycle).
 - `POST /api/scheduled-tasks/preview-cron` requires authenticated `threads:read`. Bounded cron previews call the shared scheduler calculator in `asyncio.to_thread`, preserving its DST semantics. Capture the optional aware reference once; return UTC and offset-bearing local occurrences without acquiring task/thread/run stores or dispatching work. This advisory API does not reserve execution.
 - Gateway MCP/skill updates write `extensions_config.json` at runtime. Production Compose mounts it read-write (`config.yaml` stays `:ro`); Helm seeds a writable home-volume copy. Hold both `extensions_config_write_lock` and the sidecar advisory `extensions_config_file_lock` during read-modify-write to prevent lost updates across workers. `atomic_write_extensions_config` uses temp-file replacement; only mount-point `EBUSY` permits a non-atomic in-place overwrite (crashes can truncate). Warn about this fallback once per target; propagate other errors. `get_extensions_config()` revalidates reads by file signature; see [config caching](packages/harness/deerflow/config/AGENTS.md). Tests: `tests/test_compose_extensions_config_writable.py`, `tests/test_extensions_config_atomic_write.py`, `tests/test_helm_extensions_config_writable.py`.
 - MCP cache reset scope and discovery fencing: [MCP guide](packages/harness/deerflow/mcp/AGENTS.md).
 
-**Project Structure**:
+**Project Structure** (backend/ subtree; the root guide maps the full repo):
 ```
-deer-flow/
-├── Makefile                    # Root commands (check, install, dev, stop)
-├── config.yaml                 # Main application configuration
-├── extensions_config.json      # MCP servers and skills configuration
-├── backend/                    # Backend application (this directory)
-│   ├── Makefile               # Backend-only commands (dev, gateway, lint)
-│   ├── langgraph.json         # LangGraph Studio graph configuration
-│   ├── packages/
-│   │   ├── extension-api/     # public, host-independent extension contracts (import: deerflow_extension_api.*)
-│   │   └── harness/           # deerflow-harness package (import: deerflow.*)
-│   │       ├── pyproject.toml
-│   │       └── deerflow/
-│   │           ├── agents/            # LangGraph agent system
-│   │           │   ├── lead_agent/    # Main agent (factory + system prompt)
-│   │           │   ├── middlewares/   # middleware components (see Middleware Chain section)
-│   │           │   ├── memory/        # Memory extraction, queue, prompts
-│   │           │   └── thread_state.py # ThreadState schema
-│   │           ├── sandbox/           # Sandbox execution system
-│   │           │   ├── local/         # Local filesystem provider
-│   │           │   ├── sandbox.py     # Abstract Sandbox interface
-│   │           │   ├── tools.py       # bash, ls, read/write/str_replace
-│   │           │   └── middleware.py  # Sandbox lifecycle management
-│   │           ├── subagents/         # Subagent delegation system
-│   │           │   ├── builtins/      # general-purpose, bash agents
-│   │           │   ├── executor.py    # Background execution engine
-│   │           │   └── registry.py    # Agent registry
-│   │           ├── tools/builtins/    # Built-in tools (present_files, ask_clarification, view_image, review_skill_package)
-│   │           ├── mcp/               # MCP integration (tools, cache, client)
-│   │           ├── integrations/      # Managed first-party integration installers (e.g. Lark CLI skill pack)
-│   │           ├── extensions/        # Python plugin loader, registry, placement, and isolation
-│   │           ├── models/            # Model factory with thinking/vision support
-│   │           ├── skills/            # Skills discovery, loading, parsing
-│   │           ├── config/            # Configuration system (app, model, sandbox, tool, etc.)
-│   │           ├── community/         # Community tools (search/fetch/scrape, image search, AIO sandbox)
-│   │           ├── reflection/        # Dynamic module loading (resolve_variable, resolve_class)
-│   │           ├── utils/             # Utilities (network, readability)
-│   │           └── client.py          # Embedded Python client (DeerFlowClient)
-│   ├── app/                   # Application layer (import: app.*)
-│   │   ├── gateway/           # FastAPI Gateway API
-│   │   │   ├── app.py         # FastAPI application
-│   │   │   └── routers/       # FastAPI route modules (models, mcp, memory, skills, uploads, threads, artifacts, agents, suggestions, channels)
-│   │   └── channels/          # IM platform integrations
-│   ├── scripts/benchmark/       # Standalone reproducible backend benchmarks
-│   ├── tests/                 # Test suite
-│   └── docs/                  # Documentation
-├── frontend/                   # Next.js frontend application
-└── skills/                     # Agent skills directory
-    ├── public/                # Public skills (committed)
-    └── custom/                # Custom skills (gitignored)
+backend/
+├── Makefile                    # Backend-only commands (dev, gateway, lint)
+├── langgraph.json              # LangGraph Studio graph configuration
+├── packages/
+│   ├── extension-api/          # public, host-independent extension contracts (import: deerflow_extension_api.*)
+│   └── harness/                # deerflow-harness package (import: deerflow.*)
+│       └── deerflow/
+│           ├── agents/         # LangGraph agent system (lead_agent/, middlewares/ — see Middleware Chain, memory/, thread_state.py)
+│           ├── sandbox/        # Sandbox execution system
+│           ├── subagents/      # Subagent delegation (builtins/, executor.py, registry.py)
+│           ├── tools/builtins/ # Built-in tools (present_files, ask_clarification, view_image, review_skill_package)
+│           ├── mcp/            # MCP integration (tools, cache, client)
+│           ├── integrations/   # Managed first-party integration installers (e.g. Lark CLI skill pack)
+│           ├── extensions/     # Python plugin loader, registry, placement, and isolation
+│           ├── models/         # Model factory with thinking/vision support
+│           ├── skills/         # Skills discovery, loading, parsing
+│           ├── config/         # Configuration system
+│           ├── community/      # Community tools (search/fetch/scrape, image search, AIO sandbox)
+│           ├── reflection/     # Dynamic module loading (resolve_variable, resolve_class)
+│           ├── utils/          # Utilities (network, readability)
+│           └── client.py       # Embedded Python client (DeerFlowClient)
+├── app/                        # Application layer (import: app.*)
+│   ├── gateway/                # FastAPI Gateway API (app.py, routers/)
+│   └── channels/               # IM platform integrations
+├── scripts/benchmark/          # Standalone reproducible backend benchmarks
+├── tests/                      # Test suite
+└── docs/                       # Documentation
 ```
-
-ATX outline closing markers use a linear suffix scan; do not use unanchored
-whitespace regex searches on unbounded uploaded headings. The long-heading
-regression exercises the production extractor under a generous process deadline.
 
 ## Important Development Guidelines
 
@@ -188,6 +161,11 @@ watcher. Do not replace it with a bare `uvicorn --reload`: agent tasks write
 Python and other runtime files below `DEER_FLOW_HOME`, which would otherwise
 restart the Gateway during an active run.
 
+Configuration checks and operator migration scripts reuse the installed backend
+environment with `uv run --no-sync --project backend` from the repository root.
+`--project` preserves the caller's working directory and relative runtime/config
+selectors; `--no-sync` retains installed extras such as PostgreSQL drivers.
+
 More specific `AGENTS.md` files in backend code directories contain the subsystem sections split from this file. Follow the nearest file in the directory tree.
 
 ## Architecture
@@ -270,9 +248,7 @@ PYTHONPATH=. uv run pytest tests/test_<feature>.py -v
 Keep live tests opt-in via `DEER_FLOW_RUN_LIVE_TESTS=1`; guard POSIX-only
 markers with `os.name` for Windows collection.
 
-Jina logging tests use dummy keys (`tests/test_jina_client.py`).
-Jina/Browserless/InfoQuest resolve URLs without rebuilding HTML.
-InfoQuest connect/read timeout is 30s, separate from crawl timeouts (`tests/test_infoquest_http_timeout.py`).
+Jina logging tests use dummy keys; the Jina redirect regression runs offline via `httpx.MockTransport` and keeps POST across temporary redirects; InfoQuest connect/read timeout is 30s, separate from crawl timeouts (`tests/test_jina_client.py`, `tests/test_infoquest_http_timeout.py`).
 
 ### Running the Full Application
 
@@ -289,11 +265,6 @@ Run `make dev` from the repo root to start all services at `http://localhost:202
 |---|---|---|---|
 | **Stop** | `./scripts/serve.sh --stop`<br/>`make stop` | `./scripts/docker.sh stop`<br/>`make docker-stop` | `./scripts/deploy.sh down`<br/>`make down` |
 | **Restart** | `./scripts/serve.sh --restart [flags]` | `./scripts/docker.sh restart` | — |
-
-**Nginx routing**:
-- `/api/langgraph/*` → Gateway embedded runtime (8001), rewritten to `/api/*`
-- `/api/*` (other) → Gateway API (8001)
-- `/` (non-API) → Frontend (3000)
 
 ### Running Backend Services Separately
 
@@ -333,18 +304,12 @@ Title fallback: result URL, then request URL.
 
 ### File Upload
 
-Outlines use ATX syntax (1–6 hashes, space/tab separator, ≤3 leading spaces), strip closing hashes and skip fenced code.
-- Endpoint: `POST /api/threads/{thread_id}/uploads`
-- Supports: PDF, PPT, Excel, Word documents (converted via `markitdown`)
-- Rejects directories before copying to keep uploads all-or-nothing
-- One conversion worker per request when called from an active event loop
-- Files stored in thread-isolated directories under the resolving user's bucket (`users/{user_id}/threads/{thread_id}/user-data/uploads`). For IM channels the owner is threaded explicitly via the `user_id=` kwarg (see IM Channels → Owner-scoped file storage); HTTP/embedded callers resolve it from `get_effective_user_id()`
-- Per-thread `upload-companions/`: source mtime/ctime.
-- Duplicate filenames within one request get `_N` suffixes to prevent overwrites.
-- Gateway HTTP uploads stage `.upload-*.part` files, hidden from upload listings, agent context, and sandbox listings/searches. After size validation, publication is atomic; staged-name cleanup logs errors and leaves leftovers for startup sweep.
-- Gateway HTTP upload/list/delete handlers offload filesystem work through `deerflow.utils.file_io.run_file_io`, a dedicated ContextVar-preserving file IO executor. Non-mounted sandbox uploads acquire sandboxes with `SandboxProvider.acquire_async()` and offload `read_bytes()` plus `sandbox.update_file()` together.
-- Mounted uploads skip sandbox acquire/sync. AIO remote/provisioner requires accurate `sandbox.thread_data_mounts: true`; omission keeps backend auto-detection.
-- `UploadsMiddleware` caps outline titles at 200 characters and previews at 2000 including markers. Titles use `original_user_content`, not upload-prefixed content; attachment-only titles use a sanitized, bounded filename or count.
+Outlines use ATX syntax (1–6 hashes, space/tab separator, ≤3 leading spaces), strip closing hashes and skip fenced code; closing markers use a linear suffix scan — never unanchored whitespace regex on unbounded headings.
+- Endpoint: `POST /api/threads/{thread_id}/uploads`; PDF/PPT/Excel/Word via `markitdown`, one conversion worker per request; directories rejected, keeping uploads all-or-nothing; duplicate filenames in one request get `_N` suffixes.
+- Files live in thread-isolated `users/{user_id}/threads/{thread_id}/user-data/uploads` (IM channels thread the owner via the `user_id=` kwarg — see IM Channels → Owner-scoped file storage; HTTP/embedded callers resolve `get_effective_user_id()`); per-thread `upload-companions/` holds source mtime/ctime.
+- Gateway HTTP uploads stage `.upload-*.part` files hidden from upload listings, agent context, and sandbox listings/searches; publication is atomic after size validation. Startup sweep keeps lone `.part` files under 24h (possibly in flight on another replica); `st_nlink > 1` means a published alias, removed at any age so the multi-link check can still replace the file.
+- Upload/list/delete handlers offload filesystem work through `deerflow.utils.file_io.run_file_io` (ContextVar-preserving); non-mounted sandbox uploads use `SandboxProvider.acquire_async()` and offload `read_bytes()` + `sandbox.update_file()` together. Mounted uploads skip acquire/sync; AIO remote/provisioner requires accurate `sandbox.thread_data_mounts: true`, omission keeps backend auto-detection.
+- `UploadsMiddleware` caps outline titles at 200 characters and previews at 2000 including markers. Titles use `original_user_content`; attachment-only titles use a sanitized, bounded filename or count.
 
 See [docs/FILE_UPLOAD.md](docs/FILE_UPLOAD.md) for details.
 
@@ -360,27 +325,17 @@ Interaction-sensitive changes must follow [policy](docs/RUN_INTERACTION_POLICY.m
 
 ### Context Summarization
 
-Automatic conversation summarization when approaching token limits:
-- Configured in `config.yaml` under `summarization` key
-- Trigger types: tokens, messages, or fraction of max input
-- Keeps recent messages while summarizing older ones
-- Manual compaction uses `POST /api/threads/{id}/compact`, reuses the same
-  `DeerFlowSummarizationMiddleware`, writes a new checkpoint with updated
-  `messages` and `summary_text`, and bumps only those channel versions.
-  The route uses the shared `reserve_checkpoint_write()` boundary (also used by
-  manual state updates). Its short-lived `checkpoint_write` thread operation
-  shares the durable active-thread uniqueness constraint with run admission,
-  preventing either worker-local or cross-worker checkpoint-write races.
+Automatic conversation summarization when approaching token limits, configured
+under the `summarization` key in `config.yaml` (triggers: tokens, messages, or
+fraction of max input); recent messages are kept while older ones are summarized.
+- Manual compaction uses `POST /api/threads/{id}/compact`, reuses the same `DeerFlowSummarizationMiddleware`, writes a new checkpoint with updated `messages`/`summary_text`, and bumps only those channel versions. The route uses the shared `reserve_checkpoint_write()` boundary (also used by manual state updates); its short-lived `checkpoint_write` operation shares the durable active-thread uniqueness constraint with run admission, preventing worker-local and cross-worker checkpoint-write races.
 - Cache only first-candidate no-ops; never suppress primary retries with fallback results. See [reuse and telemetry](docs/summarization.md#reuse-and-telemetry) for cache and counter contracts.
 
 See [docs/summarization.md](docs/summarization.md) for details.
 
 ### Vision Support
 
-For models with `supports_vision: true`:
-- `ViewImageMiddleware` processes images in conversation
-- `view_image_tool` added to agent's toolset
-- Images are converted to base64 and appended to the model request as a hidden message carrying both a reserved ID prefix and a server-owned metadata marker; Gateway strips that marker from untrusted input, and the middleware requires both identifiers to recognize its own message. The middleware injects inside `wrap_model_call`, so the payload never enters graph state: checkpoints retain only lightweight `viewed_images` metadata, while client-chosen IDs survive. It also sweeps its own message out of every request before rebuilding it, so a payload stranded in an older checkpoint by an interrupted run stops being resent
+For models with `supports_vision: true`: `ViewImageMiddleware` processes images and adds `view_image_tool`. Images reach the model as base64 in a hidden message carrying a reserved ID prefix plus a server-owned metadata marker (Gateway strips the marker from untrusted input; the middleware requires both to recognize its own message). The injection happens inside `wrap_model_call`, so payloads never enter graph state — checkpoints keep only lightweight `viewed_images` metadata, and client-chosen IDs survive; the middleware also sweeps its own message out of every request before rebuilding it, so a payload stranded in an older checkpoint by an interrupted run stops being resent.
 
 ## Code Style
 

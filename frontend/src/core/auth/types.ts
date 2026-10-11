@@ -12,6 +12,10 @@ export const userSchema = z.object({
   // other value is simply non-admin.
   system_role: z.string().min(1),
   needs_setup: z.boolean().optional().default(false),
+  // Account lifecycle (RFC #4063 gap 3): true when the account is
+  // operator-suspended. Optional so pre-gap-3 backends (and test literals)
+  // parse unchanged — absent means not disabled.
+  disabled: z.boolean().optional(),
   oauth_provider: z.string().nullable().optional().default(null),
   // Effective route permissions (RFC #4063 Phase 4). Optional + nullable:
   // absent = pre-Phase-4 backend, null = credential-creation response that
@@ -31,6 +35,7 @@ export type AuthResult =
   | { tag: "needs_setup"; user: User }
   | { tag: "system_setup_required" }
   | { tag: "unauthenticated" }
+  | { tag: "account_disabled" }
   | { tag: "gateway_unavailable" }
   | { tag: "config_error"; message: string };
 
@@ -42,6 +47,28 @@ export function buildLoginUrl(returnPath: string): string {
   return `/login?next=${encodeURIComponent(returnPath)}`;
 }
 
+/**
+ * The page the browser is on, query string and fragment included, as a
+ * `next` target.
+ *
+ * Every client-side bounce for an expired session uses this, so they agree:
+ * pages that carry their target in the query (a `?task_id=` deep link, the
+ * artifact viewer) are otherwise unrecoverable after login, which lands on the
+ * default workspace instead. Browser-only; the server cannot see the URL from
+ * a layout, and never sees the fragment at all.
+ */
+export function currentReturnPath(): string {
+  const { pathname, search, hash } = window.location;
+  return `${pathname}${search}${hash}`;
+}
+
+/**
+ * Login-page URL that surfaces the account-disabled reason (#4063 gap 3).
+ * A disabled account cannot sign back in, so unlike buildLoginUrl there is
+ * no `next` target to preserve.
+ */
+export const ACCOUNT_DISABLED_LOGIN_URL = "/login?error=account_disabled";
+
 // ── Backend error response parsing ────────────────────────────────
 
 const AUTH_ERROR_CODES = [
@@ -49,6 +76,7 @@ const AUTH_ERROR_CODES = [
   "token_expired",
   "token_invalid",
   "user_not_found",
+  "account_disabled",
   "email_already_exists",
   "provider_not_found",
   "not_authenticated",

@@ -51,13 +51,16 @@ rs.mock("@/components/workspace/messages/message-list-item", () => ({
   MessageListItem: ({
     message,
     canEdit,
+    editLockedByGoal,
   }: {
     message: Message;
     canEdit?: boolean;
+    editLockedByGoal?: boolean;
   }) => (
     <div
       data-testid={`item-${message.type}`}
       data-can-edit={canEdit ? "true" : "false"}
+      data-edit-locked={editLockedByGoal ? "true" : "false"}
     />
   ),
 }));
@@ -84,6 +87,7 @@ function view(
   messages: Message[],
   isLoading: boolean,
   scheduledTaskEvents?: ScheduledTaskEvent[],
+  { goalSet = false }: { goalSet?: boolean } = {},
 ) {
   return (
     <I18nContext.Provider
@@ -92,7 +96,8 @@ function view(
       <MessageList
         threadId="scheduled-run"
         scheduledTaskEvents={scheduledTaskEvents}
-        canEdit
+        canEdit={!goalSet}
+        editLockedByGoal={goalSet}
         onEditAndRegenerateMessage={async () => true}
         thread={
           {
@@ -137,6 +142,18 @@ describe("MessageList with scheduled runs", () => {
     expect(screen.getByTestId("item-human").getAttribute("data-can-edit")).toBe(
       "true",
     );
+  });
+
+  it("locks only the latest editable human turn while a goal is set", () => {
+    render(view(chatThreadWithRuns(), false, undefined, { goalSet: true }));
+    const humans = screen.getAllByTestId("item-human");
+    expect(humans.length).toBeGreaterThan(1);
+    expect(humans.map((item) => item.getAttribute("data-edit-locked"))).toEqual(
+      [...humans.slice(0, -1).map(() => "false"), "true"],
+    );
+    expect(
+      humans.every((item) => item.getAttribute("data-can-edit") === "false"),
+    ).toBe(true);
   });
 
   it("turn duration and the active-answer indicator match an ordinary turn", () => {

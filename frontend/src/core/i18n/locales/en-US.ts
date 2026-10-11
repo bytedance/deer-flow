@@ -494,6 +494,53 @@ export const enUS: Translations = {
     goalFailed: "Goal command failed.",
     goalTooLong: "Goal is too long. Keep it under {max} characters.",
     goalLengthCounter: "Goal length: {length}/{max} characters",
+    goalBar: {
+      regionLabel: "Goal status",
+      inProgress: "In progress",
+      stopped: "Stopped",
+      waitingForYou: "Waiting for you",
+      waiting: "Waiting",
+      paused: "Paused",
+      autoContinuedOnce: "Auto-continued once",
+      autoContinuedMany: "Auto-continued {count} times",
+      details: "Details",
+      hideDetails: "Hide details",
+      noteLabel: "Goal check note (from the checker)",
+      codeLabel: "Stop code",
+      assumptionTooltip:
+        "The agent filled in something the goal didn't specify and said so in its reply. Check the reply above.",
+      announce: "{status}: {detail}",
+      editLocked:
+        "Editing is off while a goal is set. Run /goal clear to edit.",
+      busy: "A run is still going in this chat. Try again when it finishes.",
+      next: {
+        limit:
+          "Continuation limit reached · {count}/{max}. It won't auto-continue again. Reply to keep going, or set the goal again with /goal <condition> to start a fresh count (this also starts a new run).",
+        autoOff:
+          "Goal check: not met yet. Auto-continue is off for this goal. Reply to keep going.",
+        noProgress:
+          "No progress between turns. Reply with what's missing, or rephrase the goal with /goal.",
+        tokenCapped:
+          "Token budget reached. Send a message to continue; a new run starts with a fresh budget.",
+        missingEvidence:
+          "Goal check: evidence missing. Ask it to show the result or explain what's missing; if the goal no longer applies, run /goal clear.",
+        runFailed:
+          "Goal check: the run did not finish the work. Check the reply for errors, then send a message to retry.",
+        needsInputCard: "Answer the question above to continue.",
+        needsInputReply: "Reply with the missing details to continue.",
+        external:
+          "Goal check: waiting on something external. Send a message when it's ready.",
+        unchecked: "{reason}. It's checked again after your next message.",
+        unknown: "Send a message to keep going.",
+        paused:
+          "Auto-continued {count}/{max}. The run ended before the goal was confirmed. Send a message to check again.",
+      },
+      uncheckedReasons: {
+        evaluatorFailed: "The run itself may be fine",
+        noDurableEndOfTurn: "No final reply was saved",
+        threadChanged: "The chat changed during the check",
+      },
+    },
     compactSuccess:
       "Earlier context compacted. The full chat remains visible; future model calls will use the summary and recent messages.",
     compactSkipped: "The current context does not need compaction yet.",
@@ -1761,8 +1808,27 @@ export const enUS: Translations = {
       connection_failed:
         "Connection test failed. Check the endpoint, credentials, model ID and streaming/tool support.",
     },
+    users: {
+      title: "User management",
+      description:
+        "Suspend or restore sign-in for accounts on this deployment. A disabled account is rejected by every authentication surface; its active sessions end immediately.",
+      adminOnly: "Only administrators can manage users.",
+      loading: "Loading users…",
+      failed: "Failed to load users.",
+      reload: "Reload",
+      empty: "No users yet.",
+      email: "Email",
+      role: "Role",
+      status: "Status",
+      active: "Active",
+      disabled: "Disabled",
+      disable: "Disable",
+      enable: "Enable",
+      updateFailed: "Failed to update the account.",
+    },
     sections: {
       models: "Models",
+      users: "Users",
       account: "Account",
       appearance: "Appearance",
       channels: "Channels",
@@ -2165,6 +2231,16 @@ export const enUS: Translations = {
       },
     },
     skills: {
+      diagnosticsTitle: "Could not load",
+      diagnosticsScope:
+        "Only YAML syntax errors in your own custom skills are shown. After correcting a SKILL.md file, reload skills. Missing frontmatter, metadata validation errors, and unreadable or non-UTF-8 files are not reported. Shared and externally linked packages are excluded.",
+      diagnosticsInvalid: "Invalid YAML frontmatter.",
+      diagnosticsQuote: "Quote values containing a colon followed by a space.",
+      diagnosticsRefresh: "Reload skills",
+      diagnosticsRefreshing: "Reloading skills…",
+      diagnosticsFailed:
+        "Could not check custom skills for YAML errors. Reload to try again.",
+      diagnosticsReloadFailed: "Could not reload skills. Try again.",
       exportPrevious: "Previous 50 files",
       exportNotices: {
         skill_export_yaml_alias:
@@ -2314,6 +2390,8 @@ export const enUS: Translations = {
         "An account with this email already exists. Please sign in with your password or contact your administrator.",
       sso_not_allowed:
         "SSO login is not allowed for your account. Contact your administrator.",
+      account_disabled:
+        "This account has been disabled. Contact your administrator.",
     },
   },
 };

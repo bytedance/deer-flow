@@ -672,22 +672,19 @@ class DingTalkChannel(Channel):
 
         def _persist() -> Path:
             # Directory prep, the uniqueness claim, and the write are blocking
-            # filesystem IO — the whole sequence stays off the event loop. The
-            # claim and the write share one lock because generated names repeat
-            # across messages ("image.png" for every picture message): without a
-            # claim a later attachment silently overwrites an earlier one whose
-            # path was already handed to the agent, and letting the claim and
-            # write interleave would resolve two attachments to the same free name.
+            # filesystem IO — the whole sequence stays off the event loop.
+            # Exclusive creation also protects against publishers outside this
+            # channel instance's lock.
             paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
             uploads_dir = paths.sandbox_uploads_dir(thread_id, user_id=effective_user_id).resolve()
             with self._file_write_lock:
                 seen = {entry.name for entry in uploads_dir.iterdir()}
-                unique_name = claim_unique_filename(safe_filename, seen)
-                # write_upload_file_no_symlink refuses a symlinked destination:
-                # uploads dirs can be mounted into local sandboxes, so a sandbox
-                # process could otherwise redirect this privileged write outside
-                # the bucket.
-                return write_upload_file_no_symlink(uploads_dir, unique_name, content)
+                while True:
+                    unique_name = claim_unique_filename(safe_filename, seen)
+                    try:
+                        return write_upload_file_no_symlink(uploads_dir, unique_name, content, exclusive=True)
+                    except FileExistsError:
+                        continue
 
         try:
             resolved_target = await asyncio.to_thread(_persist)

@@ -241,6 +241,32 @@ def test_grep_glob_filter_is_root_relative(provider, tree):
     assert truncated is False
 
 
+@pytest.mark.parametrize(
+    ("filename", "glob"),
+    [
+        ("release notes.txt", "release *.txt"),
+        ("author's-notes.txt", "author's-*.txt"),
+        ('release"notes.txt', 'release"*.txt'),
+        ("price$USD.txt", "price$USD.txt"),
+        ("report1.txt", "report[0-9].txt"),
+        ("plain.txt", "*.txt"),
+    ],
+    ids=["space", "single-quote", "double-quote", "dollar", "character-range", "wildcard"],
+)
+def test_grep_glob_preserves_filename_characters(provider, tmp_path, filename, glob):
+    root = tmp_path / "workspace"
+    for directory in (root / "docs", root / "other", root / "docs" / "nested"):
+        directory.mkdir(parents=True)
+        (directory / filename).write_text("header\nneedle\n", encoding="utf-8")
+    (root / "docs" / "excluded.md").write_text("needle\n", encoding="utf-8")
+    provider.transport.env["USD"] = "expanded"
+
+    matches, truncated = provider.sandbox.grep(str(root), "needle", glob=f"docs/{glob}")
+
+    assert [(match.path, match.line_number, match.line) for match in matches] == [(str(root / "docs" / filename), 2, "needle")]
+    assert truncated is False
+
+
 def test_no_match_is_empty_and_complete(provider, tree):
     assert provider.sandbox.glob(str(tree), "**/*.missing") == ([], False)
     assert provider.sandbox.grep(str(tree), "absentneedle") == ([], False)

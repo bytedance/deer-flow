@@ -71,7 +71,8 @@ imagePullSecrets:
 {{- end -}}
 
 {{/* Name of the Secret holding the app secrets (BETTER_AUTH_SECRET,
-     DEER_FLOW_INTERNAL_AUTH_TOKEN, AUTH_JWT_SECRET, PROVISIONER_API_KEY).
+     DEER_FLOW_INTERNAL_AUTH_TOKEN, AUTH_JWT_SECRET, PROVISIONER_API_KEY,
+     DEER_FLOW_CREDENTIALS_KEY).
      `existingAppSecret` points every consumer (gateway, frontend,
      provisioner) at a user-managed Secret instead and skips generating one;
      it must carry PROVISIONER_API_KEY while the provisioner is enabled and
@@ -90,6 +91,40 @@ imagePullSecrets:
 {{- gt (int .Values.gateway.replicas) 1 -}}
 {{- else -}}
 {{- eq (toString .Values.gateway.multiInstance | lower) "true" -}}
+{{- end -}}
+{{- end -}}
+
+{{/* PodDisruptionBudget minAvailable as Kubernetes accepts it: a positive
+     integer or a percentage string such as "50%". Takes a dict with `value`
+     (the raw values entry; unset falls back to 1) and `key` (the values path,
+     named in the error). `int` on "50%" is 0 -- a budget that protects
+     nothing -- so a YAML number renders as an integer, a digit string from
+     --set-string becomes that integer, a percentage is preserved quoted, and
+     0, "0%", more than 100% or anything else fails the render. Anything that
+     is not a plain Go number is normalized with toString before the string
+     branches: Helm 3.18.0 loads YAML numbers as json.Number, whose kind is
+     "string" but which regexMatch and friends reject at argument validation,
+     so the unoverridden default would otherwise fail every multi-replica
+     render on that release. */}}
+{{- define "deer-flow.pdbMinAvailable" -}}
+{{- $raw := .value -}}
+{{- if kindIs "invalid" $raw -}}{{- $raw = 1 -}}{{- end -}}
+{{- $hint := printf "%s must be a positive integer or a percentage such as \"50%%\" (got %v); a budget of 0 protects nothing, so set %s to false instead" .key $raw (replace ".minAvailable" ".enabled" .key) -}}
+{{- if or (kindIs "float64" $raw) (kindIs "int64" $raw) (kindIs "int" $raw) -}}
+{{- if or (lt (int $raw) 1) (ne (float64 (int $raw)) (float64 $raw)) -}}{{- fail $hint -}}{{- end -}}
+{{- int $raw -}}
+{{- else -}}
+{{- $text := toString $raw -}}
+{{- if regexMatch "^[0-9]+$" $text -}}
+{{- if lt (atoi $text) 1 -}}{{- fail $hint -}}{{- end -}}
+{{- atoi $text -}}
+{{- else if regexMatch "^[0-9]+%$" $text -}}
+{{- $percent := atoi (trimSuffix "%" $text) -}}
+{{- if or (lt $percent 1) (gt $percent 100) -}}{{- fail $hint -}}{{- end -}}
+{{- $text | quote -}}
+{{- else -}}
+{{- fail $hint -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 

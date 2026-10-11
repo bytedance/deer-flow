@@ -39,6 +39,7 @@ from deerflow.projects.documents import (
     stage_document_copy_for_attach,
     validate_shelf_filename,
 )
+from deerflow.projects.summaries import enqueue_summary
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.uploads.manager import normalize_filename
 from deerflow.utils.file_io import run_file_io
@@ -63,6 +64,9 @@ class ProjectDocumentResponse(BaseModel):
     source_name: str | None = None
     created_at: str
     updated_at: str
+    #: Best-effort LLM-generated one-line description; NULL when
+    #: generation is disabled, pending, failed, or the source is ineligible.
+    summary: str | None = None
     #: Read-time truth (never a persisted column): the immutable original is
     #: missing or size-mismatched — external interference, §8.3/§11. The
     #: derived companion is not the integrity anchor; the original is.
@@ -96,6 +100,7 @@ def _to_response(row: dict, *, content_missing: bool = False) -> ProjectDocument
         source_name=row.get("source_name"),
         created_at=row.get("created_at", ""),
         updated_at=row.get("updated_at", ""),
+        summary=row.get("summary") or None,
         content_missing=content_missing,
     )
 
@@ -215,6 +220,9 @@ async def upload_project_document(
         # Dedup hit: same body, 200 instead of 201 — the first writer's name
         # and provenance win (§10.9).
         response.status_code = 200
+    else:
+        # Best-effort: off by default; no-op when unwired/disabled (§6.1).
+        enqueue_summary(document_id=row["id"], project_id=project_id, user_id=user_id)
     return ProjectDocumentUploadResponse(document=_to_response(row), deduplicated=not created)
 
 
@@ -329,6 +337,9 @@ async def promote_thread_file_to_shelf(
         # Dedup hit: same body, 200 instead of 201 — the first writer's name
         # and provenance win (§10.9).
         response.status_code = 200
+    else:
+        # Best-effort: off by default; no-op when unwired/disabled (§6.1).
+        enqueue_summary(document_id=row["id"], project_id=project_id, user_id=user_id)
     return ProjectDocumentUploadResponse(document=_to_response(row), deduplicated=not created)
 
 

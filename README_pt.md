@@ -200,6 +200,13 @@ Para o endpoint oficial do Gemini compatível com OpenAI, do Google, use o [perf
        api_key: $OPENROUTER_API_KEY
        base_url: https://openrouter.ai/api/v1
 
+     - name: opper-claude-sonnet-4-6
+       display_name: Claude Sonnet 4.6 (Opper)
+       use: langchain_openai:ChatOpenAI
+       model: claude-sonnet-4-6
+       api_key: $OPPER_API_KEY
+       base_url: https://api.opper.ai/v3/compat
+
      - name: gpt-5-responses
        display_name: GPT-5 (Responses API)
        use: langchain_openai:ChatOpenAI
@@ -1646,7 +1653,7 @@ O PoC não faz limpeza automática. Concluída a verificação, exclua o chat de
 
 ### Padrões de implantação
 
-A stack Docker publica a porta de entrada apenas em `127.0.0.1`, de acordo com o modelo de ambiente local confiável descrito acima. Para acessá-la de outra máquina, defina `BIND_HOST` no `.env` (por exemplo `BIND_HOST=0.0.0.0`), e só depois de adotar as medidas de segurança abaixo.
+A stack Docker publica a porta de entrada apenas em `127.0.0.1`, e o `make dev` / `make start` local vinculam o nginx, o Gateway e o frontend ao loopback, de acordo com o modelo de ambiente local confiável descrito acima. Para acessá-la de outra máquina, defina `BIND_HOST` no `.env` (por exemplo `BIND_HOST=0.0.0.0`), e só depois de adotar as medidas de segurança abaixo. Na execução local, `BIND_HOST` vale apenas para o nginx na porta `2026`; o Gateway e o frontend continuam no loopback, atrás dele.
 
 **Conclua a configuração de primeiro uso antes que o host fique acessível.** Uma instância nova ainda não tem contas, então crie a conta de admin por `/setup` logo depois de iniciar qualquer implantação que não seja só de loopback.
 

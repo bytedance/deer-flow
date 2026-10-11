@@ -15,9 +15,12 @@ Design (mirrors ``scripts/migrate_user_isolation.py``):
 - Non-destructive: the on-disk files are left untouched, so unsetting
   ``agent_storage.backend`` (back to ``file``) is a clean rollback.
 
-Usage::
+Usage (from the repository root)::
 
-    python scripts/migrate_agents_to_db.py [--dry-run]
+    uv run --no-sync --project backend python backend/scripts/migrate_agents_to_db.py [--dry-run]
+
+Use the installed backend environment and the Gateway's exported configuration
+and runtime selectors; relative paths remain anchored to the caller's directory.
 
 Requires ``database.backend`` to be ``sqlite`` or ``postgres`` in config.yaml.
 """

@@ -8,8 +8,9 @@ import os
 import stat
 import threading
 from types import SimpleNamespace
-from unittest.mock import ANY, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from _windows_acl_helpers import _windows_acl_owner_sid, _windows_acl_sids
 from pydantic import ValidationError
@@ -121,6 +122,7 @@ def test_register_created_sandbox_forwards_configured_command_timeout(tmp_path):
         base_url="http://sandbox",
         request_headers=info.request_headers,
         default_command_timeout=42,
+        lark_cli_broker=False,
     )
 
 
@@ -282,16 +284,20 @@ def _make_provider(tmp_path):
     ``test_sandbox_ownership_store.py`` (store contract).
     """
     from deerflow.community.aio_sandbox.ownership.memory import MemoryOwnershipStore
+    from deerflow.community.aio_sandbox.quarantine import SandboxQuarantine
     from deerflow.config.sandbox_config import SandboxOwnershipConfig
 
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     with patch.object(aio_mod.AioSandboxProvider, "_start_idle_checker"):
         provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
         provider._config = {"command_timeout": 600.0, "idle_timeout": 600, "replicas": 3}
+        provider._backend = SimpleNamespace()
+        provider._quarantine = SandboxQuarantine(tmp_path / "quarantine", "test")
         provider._sandboxes = {}
         provider._active_sandbox_identity = {}
         provider._warm_pool_identity = {}
         provider._local_teardown = set()
+        provider._unowned_since = {}
         provider._acquire_epoch = {}
         provider._acquire_epoch_counter = 0
         provider._acquire_inflight = {}
@@ -586,31 +592,42 @@ def test_shared_sandbox_identity_changes_when_custom_skills_root_changes(
     assert second_root_id != first_root_id
 
 
+@pytest.mark.parametrize("active_holder", [False, True], ids=["idle", "in-use"])
 def test_cached_sandbox_is_replaced_when_expected_identity_changes(
     tmp_path,
     monkeypatch,
+    active_holder,
 ):
-    provider = _make_provider(tmp_path)
+    from deerflow.sandbox.lease import get_sandbox_lease_manager
+
+    provider, sandbox, aio_mod = _make_provider_with_active_sandbox(tmp_path, "stale-root-id")
     provider._config["skills_container_path"] = "/custom-skills"
     provider._thread_sandboxes = {("alice", "thread-shared"): "stale-root-id"}
-    provider._sandboxes = {"stale-root-id": object()}
-    provider._sandbox_infos = {}
     monkeypatch.setattr(
         provider,
         "_sandbox_id_for_thread",
         lambda *_args, **_kwargs: "new-root-id",
     )
-    destroy = MagicMock()
-    monkeypatch.setattr(provider, "destroy", destroy)
-
-    assert (
-        provider._reuse_in_process_sandbox(
-            "thread-shared",
-            user_id="alice",
-        )
-        is None
-    )
-    destroy.assert_called_once_with("stale-root-id")
+    manager = get_sandbox_lease_manager(provider)
+    try:
+        if active_holder:
+            manager.retain("live-run", "stale-root-id", thread_id="thread-shared", user_id="alice")
+            with pytest.raises(aio_mod.SandboxPolicyReplacementDeferredError, match="outdated skills identity"):
+                provider._reuse_in_process_sandbox("thread-shared", user_id="alice")
+            assert provider.get("stale-root-id") is sandbox
+            sandbox.close.assert_not_called()
+            provider._backend.destroy.assert_not_called()
+            manager.release("live-run")
+        else:
+            info = provider._sandbox_infos["stale-root-id"]
+            assert provider._reuse_in_process_sandbox("thread-shared", user_id="alice") is None
+            sandbox.close.assert_called_once_with()
+            provider._backend.destroy.assert_called_once_with(info)
+            assert "stale-root-id" not in provider._sandboxes
+            assert ("alice", "thread-shared") not in provider._thread_sandboxes
+    finally:
+        provider.reset()
+        provider._ownership.close()
 
 
 def test_policy_scoped_create_excludes_local_config_mounts_below_skills_root(
@@ -867,10 +884,10 @@ def test_discover_or_create_only_unlocks_when_lock_succeeds(tmp_path, monkeypatc
 
 
 @pytest.mark.anyio
-async def test_acquire_async_uses_async_readiness_polling(monkeypatch):
+async def test_acquire_async_uses_async_readiness_polling(tmp_path, monkeypatch):
     """AioSandboxProvider async creation must not use sync readiness polling."""
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
-    provider = _make_provider(None)
+    provider = _make_provider(tmp_path)
     provider._config = {"command_timeout": 600.0, "replicas": 3}
     provider._warm_pool = {}
     provider._sandbox_infos = {}
@@ -1819,6 +1836,26 @@ def test_create_sandbox_skips_runtime_when_lark_absent(tmp_path, monkeypatch):
     assert captured["provision_lark_cli_broker"] is False
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_create", [False, True])
+async def test_unknown_broker_probe_stops_creation_before_mounts(tmp_path, monkeypatch, async_create):
+    from deerflow.integrations import lark_cli
+
+    provider, _, provider_mod = _make_provider_with_active_sandbox(tmp_path, "sandbox-probe")
+    monkeypatch.setattr(provider, "_get_extra_mounts", lambda *_args, **_kwargs: [("credentials", "/mnt/integrations/lark-cli/config", True)])
+    monkeypatch.setattr(provider_mod.AioSandboxProvider, "_lark_integration_active", staticmethod(lambda *_args: True))
+    monkeypatch.setattr(lark_cli, "sandbox_lark_broker_active", MagicMock(side_effect=RuntimeError("Provisioner capability is unknown")))
+    provider._backend.create = MagicMock()
+
+    with pytest.raises(RuntimeError, match="capability is unknown"):
+        if async_create:
+            await provider._create_sandbox_async("thread", "sandbox", user_id="alice")
+        else:
+            await asyncio.to_thread(provider._create_sandbox, "thread", "sandbox", user_id="alice")
+    provider._backend.create.assert_not_called()
+    provider.reset()
+
+
 # ── Sandbox client teardown (#2872) ──────────────────────────────────────────
 
 
@@ -1847,6 +1884,1068 @@ def _make_provider_with_active_sandbox(tmp_path, sandbox_id: str):
     sandbox.requires_container_recycle = False
     provider._sandboxes = {sandbox_id: sandbox}
     return provider, sandbox, aio_mod
+
+
+@pytest.fixture()
+def failure_recovery_lifecycle(tmp_path, monkeypatch):
+    """Keep server-side shell state while release/reclaim replaces SDK clients."""
+    from deerflow.community.aio_sandbox import aio_sandbox as sandbox_mod
+
+    provider, _, provider_mod = _make_provider_with_active_sandbox(tmp_path, "sandbox-failure-recovery")
+    provider._backend.complete_absent_teardown = MagicMock()
+    info = provider._sandbox_infos["sandbox-failure-recovery"]
+    info.sandbox_url = "https://sandbox.example.test"
+    info.container_id = "container-generation-1"
+    shell = MagicMock(spec=["exec_command", "create_session", "cleanup_session"])
+    shell.exec_command.return_value = SimpleNamespace(data=SimpleNamespace(output="next-turn", exit_code=0, status="completed"))
+    shell.create_session.side_effect = lambda id, **_kwargs: SimpleNamespace(data=SimpleNamespace(session_id=id))
+    monkeypatch.setattr(sandbox_mod, "AioSandboxClient", lambda **_kwargs: SimpleNamespace(shell=shell, close=MagicMock()))
+    sandbox = sandbox_mod.AioSandbox(id=info.sandbox_id, base_url=info.sandbox_url)
+    sandbox.lark_cli_broker = info.lark_cli_broker
+    provider._sandboxes[info.sandbox_id] = sandbox
+    provider._thread_sandboxes[("alice", "thread-failure-recovery")] = info.sandbox_id
+    provider._active_sandbox_identity[info.sandbox_id] = ("alice", "thread-failure-recovery")
+    monkeypatch.setattr(provider, "_check_tracked_sandbox_alive", lambda *_args: True)
+    monkeypatch.setattr(provider, "_ensure_skills_projection", lambda *_args: None)
+    monkeypatch.setattr(provider, "_thread_skill_projection_active", lambda *_args: False)
+    monkeypatch.setattr(provider, "_sandbox_id_for_thread", lambda *_args: info.sandbox_id)
+    monkeypatch.setattr(provider_mod, "get_paths", lambda: Paths(base_dir=tmp_path / "state"))
+
+    try:
+        yield provider, sandbox, shell, info
+    finally:
+        for active_sandbox in list(provider._sandboxes.values()):
+            active_sandbox.close()
+        sandbox.close()
+        provider.reset()
+        provider._ownership.close()
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        pytest.param(
+            "read_timeout",
+            id="transport-timeout",
+        ),
+        pytest.param(
+            "no_change_timeout",
+            id="no-change-timeout",
+        ),
+        pytest.param("hard_timeout", id="confirmed-termination-stays-warm"),
+        pytest.param("completed", id="completed-command-stays-warm"),
+    ],
+)
+def test_default_shell_outcome_release_reclaim_preserves_isolation(failure_recovery_lifecycle, outcome):
+    """A new client must not revive a fenced implicit session in the same container."""
+    provider, sandbox, shell, info = failure_recovery_lifecycle
+    ambiguous = outcome in ("read_timeout", "no_change_timeout")
+    if outcome == "read_timeout":
+        first_response = httpx.ReadTimeout("command response timed out")
+    else:
+        first_exit_code = {"no_change_timeout": None, "hard_timeout": 124, "completed": 0}[outcome]
+        first_response = SimpleNamespace(data=SimpleNamespace(output="first-turn", exit_code=first_exit_code, status=outcome))
+    shell.exec_command.side_effect = [first_response, shell.exec_command.return_value]
+
+    first_output = sandbox.execute_command("first-command")
+    assert shell.exec_command.call_count == 1, "an ambiguous command must not be replayed"
+    assert shell.exec_command.call_args.kwargs.get("id") is None
+    if ambiguous:
+        assert "outcome is unknown" in first_output.lower()
+    elif outcome == "hard_timeout":
+        assert "Exit Code: 124" in first_output
+
+    provider.release(info.sandbox_id)
+    reclaimed_id = provider._reclaim_warm_pool_sandbox("thread-failure-recovery", info.sandbox_id, user_id="alice")
+    if reclaimed_id is not None:
+        next_sandbox = provider.get(reclaimed_id)
+        assert next_sandbox is not sandbox
+        assert next_sandbox.execute_command("next-command") == "next-turn"
+
+    implicit_commands = [call.kwargs["command"] for call in shell.exec_command.call_args_list if call.kwargs.get("id") is None]
+    if ambiguous:
+        # Either recycle the container or preserve the fence and use a new
+        # explicit session. Re-entering the old implicit shell is unsafe.
+        assert implicit_commands == ["first-command"], "release/reclaim must not erase the implicit-session fence"
+    else:
+        assert reclaimed_id == info.sandbox_id
+        assert implicit_commands == ["first-command", "next-command"]
+        provider._backend.destroy.assert_not_called()
+
+
+def test_failed_dirty_release_cannot_readopt_same_container(failure_recovery_lifecycle):
+    """A failed stop must not make the same server generation safe to acquire."""
+    provider, sandbox, shell, info = failure_recovery_lifecycle
+    shell.exec_command.side_effect = httpx.ReadTimeout("command response timed out")
+    assert "outcome is unknown" in sandbox.execute_command("first-command").lower()
+    shell.create_session.side_effect = httpx.ReadTimeout("recovery create response timed out")
+    assert "session creation outcome is unknown" in sandbox.execute_command("recovery-command")
+    assert sandbox.requires_container_recycle is True
+    provider._backend.destroy.side_effect = RuntimeError("container stop failed")
+    provider._backend.discover = MagicMock(return_value=info)
+    provider._backend.create = MagicMock(side_effect=AssertionError("the quarantined generation is still running"))
+
+    provider.release(info.sandbox_id)
+    provider._backend.destroy.assert_called_once_with(info)
+    assert info.sandbox_id not in provider._warm_pool
+
+    try:
+        acquired_id = provider.acquire("thread-failure-recovery", user_id="alice")
+    except RuntimeError as error:
+        # Unrelated acquire failures must not masquerade as a quarantine fix.
+        message = str(error).lower()
+        assert any(reason in message for reason in ("quarantin", "recycl", "incompatible provisioning policy"))
+        return
+
+    assert acquired_id != info.sandbox_id, "a failed destroy must not permit discovery to clear the same container's quarantine"
+
+
+def test_quarantined_generation_stays_fenced_after_provider_restart(failure_recovery_lifecycle, tmp_path):
+    provider, sandbox, shell, info = failure_recovery_lifecycle
+    shell.exec_command.side_effect = httpx.ReadTimeout("command response timed out")
+    sandbox.execute_command("uncertain-command")
+    provider._backend.destroy.side_effect = RuntimeError("stop failed")
+    provider.release(info.sandbox_id)
+
+    restarted, old_client, _ = _make_provider_with_active_sandbox(tmp_path, info.sandbox_id)
+    restarted._sandboxes.clear()
+    restarted._sandbox_infos.clear()
+    old_client.close()
+    restarted._ensure_skills_projection = lambda *_args: None
+    restarted._thread_skill_projection_active = lambda *_args: False
+    restarted._sandbox_id_for_thread = lambda *_args: info.sandbox_id
+    # Fresh metadata intentionally drops all in-memory flags, as discovery does.
+    restarted._backend.discover = MagicMock(return_value=type(info).from_dict(info.to_dict()))
+    restarted._backend.destroy.side_effect = RuntimeError("stop still failing")
+    restarted._backend.create = MagicMock(side_effect=AssertionError("old generation is still running"))
+    try:
+        with pytest.raises(RuntimeError, match="incompatible provisioning policy"):
+            restarted.acquire("thread-failure-recovery", user_id="alice")
+
+        restarted._backend.discover.return_value = type(info)(info.sandbox_id, info.sandbox_url, container_id="container-generation-2")
+        assert restarted.acquire("thread-failure-recovery", user_id="alice") == info.sandbox_id
+        assert restarted._sandbox_infos[info.sandbox_id].container_id == "container-generation-2"
+        restarted._backend.create.assert_not_called()
+    finally:
+        for active in restarted._sandboxes.values():
+            active.close()
+        restarted.reset()
+
+
+def test_failed_quarantine_write_keeps_dirty_container_tracked(failure_recovery_lifecycle, monkeypatch):
+    from pathlib import Path
+
+    provider, sandbox, shell, info = failure_recovery_lifecycle
+    shell.exec_command.side_effect = httpx.ReadTimeout("command response timed out")
+    sandbox.execute_command("uncertain-command")
+    original_open = Path.open
+    with monkeypatch.context() as patcher:
+        patcher.setattr(Path, "open", MagicMock(side_effect=PermissionError("quarantine unavailable")))
+        provider.release(info.sandbox_id)
+        provider._backend.destroy.assert_not_called()
+        assert provider.get(info.sandbox_id) is sandbox
+        with pytest.raises(PermissionError):
+            provider.destroy(info.sandbox_id)
+        assert provider.get(info.sandbox_id) is sandbox
+    assert Path.open is original_open
+    provider._backend.destroy.side_effect = RuntimeError("stop failed")
+    with pytest.raises(RuntimeError, match="stop failed"):
+        provider.destroy(info.sandbox_id)
+    assert provider._quarantine_store().contains(info)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_acquire", [False, True])
+@pytest.mark.parametrize("new_generation", [None, "replacement-generation"])
+async def test_unknown_generation_can_be_replaced_after_confirmed_absence(failure_recovery_lifecycle, monkeypatch, async_acquire, new_generation):
+    provider, sandbox, shell, info = failure_recovery_lifecycle
+    info.container_id = None  # Apple Container discovery / older provisioner.
+    shell.exec_command.side_effect = httpx.ReadTimeout("command response timed out")
+    sandbox.execute_command("uncertain-command")
+    provider.release(info.sandbox_id)
+    assert provider._quarantine_store().contains(info)
+    fresh = type(info)(info.sandbox_id, info.sandbox_url, container_id=new_generation)
+    provider._backend.discover = MagicMock(return_value=None)
+    provider._backend.create = MagicMock(return_value=fresh)
+
+    def confirm_absence(_sandbox_id):
+        assert provider._ownership.owner(info.sandbox_id) == provider._owner_id
+        assert info.sandbox_id in provider._local_teardown
+        return True
+
+    provider._backend.is_absent = MagicMock(side_effect=confirm_absence)
+    monkeypatch.setattr(provider, "_get_extra_mounts", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(type(provider), "_lark_integration_active", staticmethod(lambda *_args: False))
+    monkeypatch.setattr(importlib.import_module(type(provider).__module__), "wait_for_sandbox_ready", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(importlib.import_module(type(provider).__module__), "wait_for_sandbox_ready_async", AsyncMock(return_value=True))
+
+    if async_acquire:
+        acquired = await provider.acquire_async("thread-failure-recovery", user_id="alice")
+    else:
+        acquired = provider.acquire("thread-failure-recovery", user_id="alice")
+
+    assert acquired == info.sandbox_id
+    assert provider._sandbox_infos[acquired] is fresh
+    assert not provider._quarantine_store().contains(fresh)
+    provider._backend.is_absent.assert_called_once_with(info.sandbox_id)
+
+
+@pytest.mark.parametrize("blocked_by", ["existing-runtime", "probe-error", "peer"])
+def test_quarantine_retirement_cannot_bypass_absence_or_ownership(failure_recovery_lifecycle, monkeypatch, blocked_by):
+    provider, sandbox, shell, info = failure_recovery_lifecycle
+    info.container_id = None
+    shell.exec_command.side_effect = httpx.ReadTimeout("command response timed out")
+    sandbox.execute_command("uncertain-command")
+    provider.release(info.sandbox_id)
+    provider._backend.create = MagicMock(side_effect=AssertionError("quarantine must be checked before creation"))
+    provider._backend.is_absent = MagicMock(return_value=blocked_by == "peer")
+    if blocked_by == "probe-error":
+        provider._backend.is_absent.side_effect = RuntimeError("runtime unavailable")
+    if blocked_by == "peer":
+        monkeypatch.setattr(provider, "_claim_ownership", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(provider, "_get_extra_mounts", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(type(provider), "_lark_integration_active", staticmethod(lambda *_args: False))
+
+    with pytest.raises(RuntimeError):
+        provider._create_sandbox("thread-failure-recovery", info.sandbox_id, user_id="alice")
+
+    provider._backend.create.assert_not_called()
+    assert provider._quarantine_store().contains(info)
+    assert info.sandbox_id not in provider._local_teardown
+    if blocked_by == "peer":
+        provider._backend.is_absent.assert_not_called()
+
+
+def _prepare_quarantined_runtime_retry(lifecycle, monkeypatch, current):
+    provider, sandbox, shell, old = lifecycle
+    shell.exec_command.side_effect = httpx.ReadTimeout("uncertain command")
+    sandbox.execute_command("uncertain-command")
+    provider._backend.destroy.side_effect = RuntimeError("temporary stop failure")
+    provider.release(old.sandbox_id)
+    provider._backend.destroy.reset_mock()
+    provider._backend.destroy.side_effect = None
+    provider._backend.discover = MagicMock(return_value=None)
+    provider._backend.inspect_runtime = MagicMock(return_value=current)
+    provider._backend.create = MagicMock(return_value=current)
+    provider._backend.is_absent = MagicMock(return_value=False)
+    monkeypatch.setattr(provider, "_get_extra_mounts", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(type(provider), "_lark_integration_active", staticmethod(lambda *_args: False))
+    provider_mod = importlib.import_module(type(provider).__module__)
+    monkeypatch.setattr(provider_mod, "wait_for_sandbox_ready", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(provider_mod, "wait_for_sandbox_ready_async", AsyncMock(return_value=True))
+    return provider, old
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_acquire", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("initially_absent", [False, True], ids=["after-delete", "already-absent"])
+@pytest.mark.parametrize("cleanup_failure", [False, True], ids=["complete", "cleanup-failed"])
+async def test_absent_teardown_completion_precedes_quarantine_retirement_under_fences(failure_recovery_lifecycle, monkeypatch, async_acquire, initially_absent, cleanup_failure):
+    old = failure_recovery_lifecycle[3]
+    current = type(old)(old.sandbox_id, "", container_id=old.container_id)
+    provider, old = _prepare_quarantined_runtime_retry(failure_recovery_lifecycle, monkeypatch, current)
+    fresh = type(old)(old.sandbox_id, old.sandbox_url, container_id="new-generation")
+    provider._backend.create.return_value = fresh
+    provider._backend.is_absent.side_effect = [True] if initially_absent else [False, True]
+    completed = []
+
+    def complete_absent_teardown(sandbox_id):
+        assert sandbox_id == old.sandbox_id
+        assert provider._backend.is_absent.call_count == (1 if initially_absent else 2)
+        lease = provider._ownership._leases[sandbox_id]
+        assert lease.owner_id == provider._owner_id and lease.destroying is True
+        assert sandbox_id in provider._local_teardown
+        assert provider._quarantine_store().contains(old)
+        provider._backend.create.assert_not_called()
+        completed.append(sandbox_id)
+        if cleanup_failure:
+            raise RuntimeError("absent runtime cleanup incomplete")
+
+    provider._backend.complete_absent_teardown.side_effect = complete_absent_teardown
+
+    async def acquire():
+        if async_acquire:
+            return await provider.acquire_async("thread-failure-recovery", user_id="alice")
+        return await asyncio.to_thread(provider.acquire, "thread-failure-recovery", user_id="alice")
+
+    if cleanup_failure:
+        with pytest.raises(RuntimeError, match="absent runtime cleanup incomplete"):
+            await acquire()
+        assert provider._quarantine_store().contains(old)
+        provider._backend.create.assert_not_called()
+    else:
+        assert await acquire() == old.sandbox_id
+        assert provider._sandbox_infos[old.sandbox_id] is fresh
+        assert not provider._quarantine_store().contains(old)
+    assert completed == [old.sandbox_id]
+    provider._backend.complete_absent_teardown.assert_called_once_with(old.sandbox_id)
+    assert old.sandbox_id not in provider._local_teardown
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_acquire", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("generation", ["container-generation-1", None], ids=["known-generation", "unknown-generation"])
+async def test_quarantined_runtime_without_endpoint_is_deleted_before_replacement(failure_recovery_lifecycle, monkeypatch, async_acquire, generation):
+    old = failure_recovery_lifecycle[3]
+    current = type(old)(old.sandbox_id, "", container_id=generation)
+    provider, old = _prepare_quarantined_runtime_retry(failure_recovery_lifecycle, monkeypatch, current)
+    fresh = type(old)(old.sandbox_id, old.sandbox_url, container_id="new-generation")
+    provider._backend.create.return_value = fresh
+    operations = []
+
+    def confirm_absence(sandbox_id):
+        assert sandbox_id == old.sandbox_id
+        assert provider._ownership.owner(sandbox_id) == provider._owner_id
+        assert sandbox_id in provider._local_teardown
+        operations.append("absence")
+        return operations.count("absence") == 2
+
+    def inspect_runtime(sandbox_id):
+        assert provider._ownership.owner(sandbox_id) == provider._owner_id
+        assert sandbox_id in provider._local_teardown
+        operations.append("inspect")
+        return current
+
+    def destroy(info):
+        assert info is current
+        # Runtime inspection restores identity, not the original cleanup intent.
+        # Force full replacement cleanup even after the deployment switches open.
+        assert info.requires_replacement is True
+        assert provider._ownership.owner(info.sandbox_id) == provider._owner_id
+        assert info.sandbox_id in provider._local_teardown
+        operations.append("destroy")
+
+    provider._backend.is_absent.side_effect = confirm_absence
+    provider._backend.inspect_runtime.side_effect = inspect_runtime
+    provider._backend.destroy.side_effect = destroy
+
+    if async_acquire:
+        acquired = await provider.acquire_async("thread-failure-recovery", user_id="alice")
+    else:
+        acquired = await asyncio.to_thread(provider.acquire, "thread-failure-recovery", user_id="alice")
+
+    assert acquired == old.sandbox_id
+    assert operations == ["absence", "inspect", "destroy", "absence"]
+    assert provider._sandbox_infos[acquired] is fresh
+    assert not provider._quarantine_store().contains(old)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blocked_step", ["destroy", "absent-completion"])
+async def test_cancelled_quarantine_retry_drains_cleanup_before_releasing_fences(failure_recovery_lifecycle, monkeypatch, blocked_step):
+    old = failure_recovery_lifecycle[3]
+    current = type(old)(old.sandbox_id, "", container_id=old.container_id)
+    provider, old = _prepare_quarantined_runtime_retry(failure_recovery_lifecycle, monkeypatch, current)
+    fresh = type(old)(old.sandbox_id, old.sandbox_url, container_id="new-generation")
+    provider._backend.create.return_value = fresh
+    cleanup_started = threading.Event()
+    finish_cleanup = threading.Event()
+    cleanup_finished = threading.Event()
+    unlocked = threading.Event()
+    provider._backend.is_absent.side_effect = [False, True]
+    provider_mod = importlib.import_module(type(provider).__module__)
+    original_unlock = provider_mod._unlock_file
+
+    def wait_cleanup():
+        lease = provider._ownership._leases[old.sandbox_id]
+        assert lease.owner_id == provider._owner_id and lease.destroying is True
+        assert old.sandbox_id in provider._local_teardown
+        assert provider._quarantine_store().contains(old)
+        cleanup_started.set()
+        assert finish_cleanup.wait(5)
+        cleanup_finished.set()
+
+    def destroy(info):
+        assert info is current
+        assert info.requires_replacement is True
+        if blocked_step == "destroy":
+            wait_cleanup()
+
+    def complete_absent_teardown(sandbox_id):
+        assert sandbox_id == old.sandbox_id
+        assert provider._backend.is_absent.call_count == 2
+        if blocked_step == "absent-completion":
+            wait_cleanup()
+
+    def unlock(lock_file):
+        assert cleanup_finished.is_set()
+        assert not provider._quarantine_store().contains(old)
+        original_unlock(lock_file)
+        unlocked.set()
+
+    provider._backend.destroy.side_effect = destroy
+    provider._backend.complete_absent_teardown.side_effect = complete_absent_teardown
+    monkeypatch.setattr(provider_mod, "_unlock_file", unlock)
+    task = asyncio.create_task(provider.acquire_async("thread-failure-recovery", user_id="alice"))
+    try:
+        assert await asyncio.to_thread(cleanup_started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert not unlocked.is_set()
+        assert old.sandbox_id in provider._local_teardown
+        assert provider._quarantine_store().contains(old)
+        finish_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert cleanup_finished.is_set() and unlocked.is_set()
+        assert old.sandbox_id not in provider._local_teardown
+        assert provider._sandbox_infos[old.sandbox_id] is fresh
+    finally:
+        finish_cleanup.set()
+        if not task.done():
+            task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, RuntimeError):
+            await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_acquire", [False, True], ids=["sync", "async"])
+async def test_old_quarantine_does_not_destroy_replacement_when_endpoint_is_missing(failure_recovery_lifecycle, monkeypatch, async_acquire):
+    old = failure_recovery_lifecycle[3]
+    replacement = type(old)(old.sandbox_id, old.sandbox_url, container_id="new-generation")
+    provider, old = _prepare_quarantined_runtime_retry(failure_recovery_lifecycle, monkeypatch, replacement)
+
+    if async_acquire:
+        acquired = await provider.acquire_async("thread-failure-recovery", user_id="alice")
+    else:
+        acquired = await asyncio.to_thread(provider.acquire, "thread-failure-recovery", user_id="alice")
+
+    assert acquired == old.sandbox_id
+    provider._backend.destroy.assert_not_called()
+    assert provider._sandbox_infos[acquired] is replacement
+    # The live replacement proves the fenced old generation is absent, so its
+    # stale record is pruned instead of stranding every future create on the
+    # inspect-and-defer path. The replacement itself stays unfenced.
+    assert not provider._quarantine_store().contains(old)
+    assert not provider._quarantine_store().contains(replacement)
+    provider._backend.complete_absent_teardown.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_acquire", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("final_probe", ["still-present", "unavailable"])
+async def test_accepted_delete_keeps_quarantine_until_runtime_disappears(failure_recovery_lifecycle, monkeypatch, async_acquire, final_probe):
+    from deerflow.community.aio_sandbox.aio_sandbox_provider import SandboxPolicyReplacementDeferredError
+
+    old = failure_recovery_lifecycle[3]
+    current = type(old)(old.sandbox_id, "", container_id=old.container_id)
+    provider, old = _prepare_quarantined_runtime_retry(failure_recovery_lifecycle, monkeypatch, current)
+    provider._backend.is_absent.return_value = False
+    expected_error = SandboxPolicyReplacementDeferredError
+    if final_probe == "unavailable":
+        expected_error = RuntimeError
+        provider._backend.is_absent.side_effect = [False, RuntimeError("final presence probe unavailable")]
+
+    with pytest.raises(expected_error):
+        if async_acquire:
+            await provider.acquire_async("thread-failure-recovery", user_id="alice")
+        else:
+            await asyncio.to_thread(provider.acquire, "thread-failure-recovery", user_id="alice")
+
+    provider._backend.destroy.assert_called_once_with(current)
+    provider._backend.create.assert_not_called()
+    assert provider._quarantine_store().contains(old)
+    assert old.sandbox_id not in provider._local_teardown
+
+    fresh = type(old)(old.sandbox_id, old.sandbox_url, container_id="new-generation")
+    provider._backend.is_absent.side_effect = None
+    provider._backend.is_absent.return_value = True
+    provider._backend.create.return_value = fresh
+    if async_acquire:
+        acquired = await provider.acquire_async("thread-failure-recovery", user_id="alice")
+    else:
+        acquired = await asyncio.to_thread(provider.acquire, "thread-failure-recovery", user_id="alice")
+
+    assert provider._sandbox_infos[acquired] is fresh
+    assert not provider._quarantine_store().contains(old)
+
+
+@pytest.mark.parametrize("blocked_by", ["presence", "inspection", "storage", "peer", "local-reservation", "mismatched-identity"])
+def test_quarantined_runtime_retry_fails_closed_before_destroy(failure_recovery_lifecycle, monkeypatch, blocked_by):
+    old = failure_recovery_lifecycle[3]
+    current = type(old)(old.sandbox_id, "", container_id=old.container_id)
+    provider, old = _prepare_quarantined_runtime_retry(failure_recovery_lifecycle, monkeypatch, current)
+    expected_error = RuntimeError
+    if blocked_by == "presence":
+        provider._backend.is_absent.side_effect = RuntimeError("presence unavailable")
+    elif blocked_by == "inspection":
+        provider._backend.inspect_runtime.side_effect = RuntimeError("runtime inspection unavailable")
+    elif blocked_by == "storage":
+        expected_error = PermissionError
+        store = provider._quarantine_store()
+        original_contains = store.contains
+
+        def contains(info):
+            if info is current:
+                raise PermissionError("quarantine unavailable")
+            return original_contains(info)
+
+        monkeypatch.setattr(store, "contains", contains)
+    elif blocked_by == "peer":
+        monkeypatch.setattr(provider, "_claim_ownership", lambda *_args, **_kwargs: False)
+    elif blocked_by == "local-reservation":
+        provider._local_teardown.add(old.sandbox_id)
+    elif blocked_by == "mismatched-identity":
+        provider._backend.inspect_runtime.return_value = type(old)("another-sandbox", "", container_id=old.container_id)
+
+    with pytest.raises(expected_error):
+        provider.acquire("thread-failure-recovery", user_id="alice")
+
+    provider._backend.destroy.assert_not_called()
+    provider._backend.create.assert_not_called()
+    assert provider._quarantine_store().contains(old)
+    provider._backend.complete_absent_teardown.assert_not_called()
+    if blocked_by in {"peer", "local-reservation"}:
+        provider._backend.is_absent.assert_not_called()
+        provider._backend.inspect_runtime.assert_not_called()
+    if blocked_by == "local-reservation":
+        provider._local_teardown.discard(old.sandbox_id)
+    else:
+        assert old.sandbox_id not in provider._local_teardown
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_acquire", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("blocked_by", ["unowned", "peer-owned", "local-reservation"])
+@pytest.mark.parametrize("rejection", ["broker-mode", "missing-capacity", "insufficient-capacity"])
+async def test_remote_creation_metadata_rejection_uses_fenced_cleanup(failure_recovery_lifecycle, monkeypatch, async_acquire, blocked_by, rejection):
+    import json
+
+    import requests
+
+    from deerflow.community.aio_sandbox import remote_backend as remote_mod
+
+    provider, _, _, old = failure_recovery_lifecycle
+    sid = "new-sandbox"
+    provider._backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002", max_shell_sessions=None if rejection == "broker-mode" else 13)
+    monkeypatch.setattr(provider, "_sandbox_id_for_thread", lambda *_args: sid)
+    monkeypatch.setattr(provider, "_get_extra_mounts", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(provider, "_lark_integration_active", lambda *_args: rejection == "broker-mode")
+    monkeypatch.setattr(provider, "_lark_broker_active", lambda *_args: rejection == "broker-mode")
+    monkeypatch.setattr(remote_mod, "user_should_see_legacy_skills", lambda _uid: False)
+    if blocked_by == "peer-owned":
+        monkeypatch.setattr(provider, "_claim_ownership", lambda *_args, **_kwargs: False)
+
+    def response(status, payload):
+        result = requests.Response()
+        result.status_code = status
+        result._content = json.dumps(payload).encode()
+        return result
+
+    monkeypatch.setattr(requests, "get", lambda *_args, **_kwargs: response(404, {}))
+    payload = {"sandbox_url": "http://sandbox", "container_id": "created-pod", "lark_cli_broker": False}
+    if rejection == "insufficient-capacity":
+        payload["max_shell_sessions"] = 10
+
+    def post(*_args, **_kwargs):
+        if blocked_by == "local-reservation":
+            provider._local_teardown.add(sid)
+        return response(200, payload)
+
+    monkeypatch.setattr(requests, "post", post)
+    deleted_under_fence = []
+
+    def delete(*_args, **_kwargs):
+        deleted_under_fence.append((provider._ownership.owner(sid), sid in provider._local_teardown))
+        return response(200, {})
+
+    monkeypatch.setattr(requests, "delete", delete)
+
+    message = {"broker-mode": "broker mode", "missing-capacity": "version skew", "insufficient-capacity": "insufficient shell-session capacity"}[rejection]
+    with pytest.raises(RuntimeError, match=message):
+        if async_acquire:
+            await provider.acquire_async("new-thread", user_id="alice")
+        else:
+            await asyncio.to_thread(provider.acquire, "new-thread", user_id="alice")
+
+    assert deleted_under_fence == ([(provider._owner_id, True)] if blocked_by == "unowned" else [])
+    assert sid not in provider._sandboxes
+    assert old.sandbox_id in provider._sandboxes
+    provider._local_teardown.discard(sid)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_remote_creation_drains_metadata_rejection_cleanup(failure_recovery_lifecycle, monkeypatch):
+    import json
+
+    import requests
+
+    from deerflow.community.aio_sandbox import remote_backend as remote_mod
+
+    provider = failure_recovery_lifecycle[0]
+    sid = "new-sandbox"
+    provider._backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+    monkeypatch.setattr(provider, "_sandbox_id_for_thread", lambda *_args: sid)
+    monkeypatch.setattr(provider, "_get_extra_mounts", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(provider, "_lark_integration_active", lambda *_args: True)
+    monkeypatch.setattr(provider, "_lark_broker_active", lambda *_args: True)
+    monkeypatch.setattr(remote_mod, "user_should_see_legacy_skills", lambda _uid: False)
+    post_started = threading.Event()
+    finish_post = threading.Event()
+    cleanup_started = threading.Event()
+    finish_cleanup = threading.Event()
+    cleanup_finished = threading.Event()
+
+    def response(status, payload):
+        result = requests.Response()
+        result.status_code = status
+        result._content = json.dumps(payload).encode()
+        return result
+
+    def post(*_args, **_kwargs):
+        post_started.set()
+        assert finish_post.wait(5)
+        return response(200, {"sandbox_url": "http://sandbox", "container_id": "created-pod", "lark_cli_broker": False})
+
+    def delete(*_args, **_kwargs):
+        assert provider._ownership.owner(sid) == provider._owner_id
+        assert sid in provider._local_teardown
+        cleanup_started.set()
+        assert finish_cleanup.wait(5)
+        cleanup_finished.set()
+        return response(200, {})
+
+    monkeypatch.setattr(requests, "get", lambda *_args, **_kwargs: response(404, {}))
+    monkeypatch.setattr(requests, "post", post)
+    monkeypatch.setattr(requests, "delete", delete)
+    task = asyncio.create_task(provider.acquire_async("new-thread", user_id="alice"))
+    try:
+        assert await asyncio.to_thread(post_started.wait, 5)
+        task.cancel()
+        finish_post.set()
+        assert await asyncio.to_thread(cleanup_started.wait, 5)
+        assert not task.done()
+        finish_cleanup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert cleanup_finished.is_set()
+        assert sid not in provider._local_teardown
+        assert sid not in provider._sandboxes
+    finally:
+        finish_post.set()
+        finish_cleanup.set()
+        if not task.done():
+            task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, RuntimeError):
+            await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_acquire", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("error_type", [PermissionError, RuntimeError], ids=["storage-error", "policy-error"])
+async def test_discovery_policy_failure_after_publish_closes_client_without_destroy(failure_recovery_lifecycle, monkeypatch, async_acquire, error_type):
+    provider, _, _, old = failure_recovery_lifecycle
+    discovered = type(old)("discovered-sandbox", "http://sandbox", container_id="discovered-generation")
+    provider._backend.discover = MagicMock(return_value=discovered)
+    provider._backend.create = MagicMock(side_effect=AssertionError("discovered Pod must not be recreated"))
+    monkeypatch.setattr(provider, "_sandbox_id_for_thread", lambda *_args: discovered.sandbox_id)
+    monkeypatch.setattr(provider, "_lark_integration_active", lambda *_args: False)
+    provider_mod = importlib.import_module(type(provider).__module__)
+    client = MagicMock()
+    monkeypatch.setattr(provider_mod, "AioSandbox", MagicMock(return_value=client))
+    published = False
+    original_publish = provider._publish_ownership
+
+    def publish(sandbox_id):
+        nonlocal published
+        original_publish(sandbox_id)
+        published = True
+
+    store = provider._quarantine_store()
+    original_contains = store.contains
+
+    def contains(info):
+        if published:
+            raise error_type("policy check failed after ownership publish")
+        return original_contains(info)
+
+    monkeypatch.setattr(provider, "_publish_ownership", publish)
+    monkeypatch.setattr(store, "contains", contains)
+
+    with pytest.raises(error_type, match="policy check failed after ownership publish"):
+        if async_acquire:
+            await provider.acquire_async("new-thread", user_id="alice")
+        else:
+            await asyncio.to_thread(provider.acquire, "new-thread", user_id="alice")
+
+    client.close.assert_called_once_with()
+    provider._backend.destroy.assert_not_called()
+    assert discovered.sandbox_id not in provider._sandboxes
+    assert old.sandbox_id in provider._sandboxes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_create", [False, True])
+@pytest.mark.parametrize("failure", ["probe", "storage", "policy"])
+@pytest.mark.parametrize("peer_owned", [False, True])
+async def test_post_creation_policy_failure_uses_fenced_rollback(failure_recovery_lifecycle, monkeypatch, async_create, failure, peer_owned):
+    provider, _, _, old = failure_recovery_lifecycle
+    fresh = type(old)("new-sandbox", "http://fresh", container_id="fresh-generation")
+    provider._backend.create = MagicMock(return_value=fresh)
+    monkeypatch.setattr(provider, "_get_extra_mounts", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(type(provider), "_lark_integration_active", staticmethod(lambda *_args: False))
+    monkeypatch.setattr(importlib.import_module(type(provider).__module__), "wait_for_sandbox_ready", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(importlib.import_module(type(provider).__module__), "wait_for_sandbox_ready_async", AsyncMock(return_value=True))
+
+    def check_policy(info, _user):
+        if failure == "policy":
+            info.requires_replacement = True
+        elif failure == "storage":
+            raise PermissionError("quarantine unavailable")
+        else:
+            raise RuntimeError("capability unknown")
+
+    monkeypatch.setattr(provider, "_check_sandbox_reuse_policy", check_policy)
+    if peer_owned:
+        monkeypatch.setattr(provider, "_claim_ownership", lambda *_args, **_kwargs: False)
+
+    with pytest.raises((RuntimeError, PermissionError)):
+        if async_create:
+            await provider._create_sandbox_async("new-thread", fresh.sandbox_id, user_id="alice")
+        else:
+            provider._create_sandbox("new-thread", fresh.sandbox_id, user_id="alice")
+
+    assert fresh.sandbox_id not in provider._sandbox_infos
+    assert fresh.sandbox_id not in provider._local_teardown
+    if peer_owned:
+        provider._backend.destroy.assert_not_called()
+    else:
+        provider._backend.destroy.assert_called_once_with(fresh)
+
+
+@pytest.mark.parametrize("source", ["active", "warm", "discovered"])
+@pytest.mark.parametrize("actual_broker", [False, True])
+def test_mode_mismatch_refreshes_capabilities_before_replacing_pod(failure_recovery_lifecycle, monkeypatch, source, actual_broker):
+    from deerflow.community.aio_sandbox.remote_backend import RemoteSandboxBackend
+    from deerflow.config import app_config
+    from deerflow.integrations import lark_cli
+
+    provider, sandbox, _, info = failure_recovery_lifecycle
+    info.lark_cli_broker = sandbox.lark_cli_broker = actual_broker
+    provider._backend = RemoteSandboxBackend("http://provisioner:8002")
+    provider._backend.destroy = MagicMock()
+    provider._backend.create = MagicMock()
+    provider._backend.discover = MagicMock(return_value=info)
+    monkeypatch.setattr(type(provider), "_lark_integration_active", staticmethod(lambda *_args: True))
+    monkeypatch.setattr(provider, "_check_tracked_sandbox_alive", lambda *_args: True)
+    config = SimpleNamespace(sandbox=SimpleNamespace(use="deerflow.community.aio_sandbox:AioSandboxProvider", provisioner_url="http://provisioner:8002"))
+    monkeypatch.setattr(app_config, "get_app_config", lambda: config)
+    monkeypatch.setattr(lark_cli.sandbox_lark_broker_active, "_cache", {}, raising=False)
+    probe = MagicMock(side_effect=[{"lark_cli_broker_image": not actual_broker}, {"lark_cli_broker_image": actual_broker}])
+    monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", probe)
+    assert lark_cli.sandbox_lark_broker_active(config) is not actual_broker
+    if source != "active":
+        provider.release(info.sandbox_id)
+        if source == "discovered":
+            provider._warm_pool.clear()
+
+    assert provider.acquire("thread-failure-recovery", user_id="alice") == info.sandbox_id
+
+    assert provider.get(info.sandbox_id).lark_cli_broker is actual_broker
+    assert info.requires_replacement is False
+    assert probe.call_count == 2
+    provider._backend.destroy.assert_not_called()
+    provider._backend.create.assert_not_called()
+
+
+@pytest.mark.parametrize("source", ["active", "warm", "discovered"])
+def test_probe_recovery_cannot_readmit_non_broker_generation(failure_recovery_lifecycle, monkeypatch, source):
+    """Capability recovery must validate every reuse path before executing."""
+    import json
+
+    from deerflow.community.aio_sandbox import aio_sandbox_provider as provider_mod
+    from deerflow.community.aio_sandbox import remote_backend as remote_mod
+    from deerflow.config import app_config
+    from deerflow.integrations import lark_cli
+
+    provider, _, shell, info = failure_recovery_lifecycle
+    provider._backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+    monkeypatch.setattr(provider_mod.AioSandboxProvider, "_lark_integration_active", staticmethod(lambda *_args: True))
+    monkeypatch.setattr(provider, "_get_extra_mounts", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(provider_mod, "wait_for_sandbox_ready", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(remote_mod, "user_should_see_legacy_skills", lambda *_args: False)
+    config = SimpleNamespace(sandbox=SimpleNamespace(use="deerflow.community.aio_sandbox:AioSandboxProvider", provisioner_url="http://provisioner:8002"))
+    monkeypatch.setattr(app_config, "get_app_config", lambda: config)
+    capability = MagicMock()
+    capability.__enter__.return_value = capability
+    capability.read.return_value = json.dumps({"lark_cli_init_image": True, "lark_cli_broker_image": True}).encode()
+    probe = MagicMock(side_effect=[TimeoutError("capability timeout"), capability])
+    monkeypatch.setattr(lark_cli.urllib.request, "urlopen", probe)
+    monkeypatch.setattr(lark_cli.sandbox_lark_broker_active, "_cache", {}, raising=False)
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(lark_cli, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    old_exists = [True]
+
+    def response(payload, status=200):
+        return SimpleNamespace(status_code=status, ok=status == 200, json=lambda: payload, raise_for_status=lambda: None)
+
+    def get(*_args, **_kwargs):
+        return response({**info.to_dict(), "status": "Running"}, 200 if old_exists[0] else 404)
+
+    def delete(*_args, **_kwargs):
+        assert provider._ownership.owner(info.sandbox_id) == provider._owner_id
+        old_exists[0] = False
+        return response({})
+
+    def post(*_args, **kwargs):
+        assert kwargs["json"]["provision_lark_cli_broker"] is True
+        return response({"sandbox_url": info.sandbox_url, "lark_cli_broker": True, "container_id": "broker-generation"})
+
+    monkeypatch.setattr(remote_mod.requests, "get", get)
+    monkeypatch.setattr(remote_mod.requests, "delete", delete)
+    monkeypatch.setattr(remote_mod.requests, "post", post)
+    if source != "active":
+        provider.release(info.sandbox_id)
+        if source == "discovered":
+            provider._warm_pool.clear()
+    # Probe outage: the attested non-broker generation keeps serving. Its own
+    # attestation outranks the unreachable deployment-level probe; execution
+    # never ran, so nothing here weakens the credential-placement guarantee.
+    assert provider.acquire("thread-failure-recovery", user_id="alice") == info.sandbox_id
+    assert provider.get(info.sandbox_id).lark_cli_broker is False
+    shell.exec_command.assert_not_called()
+    clock.now += lark_cli.LARK_BROKER_MODE_PROBE_RETRY_SECONDS + 1
+    # Probe recovered and now requires broker: every reuse path must replace the
+    # stale generation instead of readmitting it.
+    assert provider.acquire("thread-failure-recovery", user_id="alice") == info.sandbox_id
+    assert provider.get(info.sandbox_id).lark_cli_broker is True
+    assert provider._sandbox_infos[info.sandbox_id].container_id == "broker-generation"
+    shell.exec_command.assert_not_called()
+    assert probe.call_count == 2
+
+
+def test_acquire_recycles_quarantined_cached_sandbox_inline(tmp_path, monkeypatch):
+    """A failed release recycle must not wedge the thread: the next acquire destroys the fenced residue."""
+    provider, sandbox, aio_mod = _make_provider_with_active_sandbox(tmp_path, "sandbox-q-residue")
+    info = provider._sandbox_infos["sandbox-q-residue"]
+    info.container_id = "generation-dirty"
+    sandbox.requires_container_recycle = True
+    provider._thread_sandboxes[("alice", "thread-q")] = "sandbox-q-residue"
+    provider._quarantine_store().mark(info)
+    provider._backend.discover = MagicMock(return_value=None)
+    monkeypatch.setattr(provider, "_sandbox_id_for_thread", lambda *_args: "sandbox-q-residue")
+    monkeypatch.setattr(provider, "_ensure_skills_projection", lambda *_args: None)
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path / "state"))
+    monkeypatch.setattr(provider, "_create_sandbox", lambda *_args, **_kwargs: "sandbox-q-residue")
+
+    assert provider.acquire("thread-q", user_id="alice") == "sandbox-q-residue"
+
+    provider._backend.destroy.assert_called_once_with(info)
+    assert "sandbox-q-residue" not in provider._sandboxes
+
+
+def test_pending_create_allows_upload_acquire_without_recycling_live_run(failure_recovery_lifecycle, monkeypatch):
+    from deerflow.sandbox.lease import discard_sandbox_lease_manager, get_sandbox_lease_manager
+
+    provider, sandbox, shell, info = failure_recovery_lifecycle
+    manager = get_sandbox_lease_manager(provider)
+    manager.retain("running-agent", info.sandbox_id, thread_id="thread-failure-recovery", user_id="alice")
+    entered, complete = threading.Event(), threading.Event()
+    results: list[str] = []
+
+    def create_session(id, **_kwargs):
+        entered.set()
+        assert complete.wait(timeout=5)
+        return SimpleNamespace(data=SimpleNamespace(session_id=id))
+
+    shell.create_session.side_effect = create_session
+    runner = threading.Thread(target=lambda: results.append(sandbox.execute_command_in_scope("first", scope_id="running-agent")))
+    try:
+        runner.start()
+        assert entered.wait(timeout=5)
+        assert manager.acquire("upload", "thread-failure-recovery", user_id="alice") == info.sandbox_id
+        assert provider.get(info.sandbox_id) is sandbox
+        provider._backend.destroy.assert_not_called()
+        assert not provider._quarantine_store().contains(info)
+        complete.set()
+        runner.join(timeout=5)
+        assert not runner.is_alive()
+        assert results == ["next-turn"]
+        assert sandbox.execute_command_in_scope("second", scope_id="running-agent") == "next-turn"
+        manager.release("upload")
+        assert provider.get(info.sandbox_id) is sandbox
+        manager.release("running-agent")
+        provider._backend.destroy.assert_not_called()
+    finally:
+        complete.set()
+        if runner.ident is not None:
+            runner.join(timeout=5)
+        discard_sandbox_lease_manager(provider)
+
+
+def test_uncertain_runtime_preserves_live_holders_until_final_release(failure_recovery_lifecycle):
+    from deerflow.sandbox.lease import discard_sandbox_lease_manager, get_sandbox_lease_manager
+
+    provider, sandbox, _, info = failure_recovery_lifecycle
+    manager = get_sandbox_lease_manager(provider)
+    manager.retain("parent", info.sandbox_id, thread_id="thread-failure-recovery", user_id="alice")
+    manager.retain("fork", info.sandbox_id, thread_id="fork-thread", user_id="alice", release_on_last=False)
+    sandbox._default_shell_corrupted = True
+    try:
+        provider.release(info.sandbox_id)
+        provider.destroy(info.sandbox_id)
+        assert provider.get(info.sandbox_id) is sandbox
+        provider._backend.destroy.assert_not_called()
+        with pytest.raises(RuntimeError, match="deferred|recycle did not complete"):
+            manager.acquire("upload", "thread-failure-recovery", user_id="alice")
+        assert manager.binding_for("upload") is None
+        provider._backend.destroy.assert_not_called()
+        manager.release("parent")
+        assert provider.get(info.sandbox_id) is sandbox
+        provider._backend.destroy.assert_not_called()
+        manager.release("fork")
+        provider._backend.destroy.assert_called_once_with(info)
+        assert provider.get(info.sandbox_id) is None
+        assert provider._quarantine_store().contains(info)
+    finally:
+        discard_sandbox_lease_manager(provider)
+
+
+@pytest.mark.parametrize("plane", ["shell", "bash"])
+def test_idle_release_quarantines_abandoned_pending_create(failure_recovery_lifecycle, plane):
+    provider, sandbox, _, info = failure_recovery_lifecycle
+    sandbox._begin_session_creation(plane, "abandoned-session")
+    assert sandbox.has_pending_session_creates is True
+    assert sandbox.requires_container_recycle is False
+
+    provider.release(info.sandbox_id)
+
+    provider._backend.destroy.assert_called_once_with(info)
+    assert provider.get(info.sandbox_id) is None
+    assert info.sandbox_id not in provider._warm_pool
+    assert provider._quarantine_store().contains(info)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_acquire", [False, True], ids=["sync", "async"])
+async def test_lease_acquire_can_replace_its_own_fenced_generation(failure_recovery_lifecycle, async_acquire):
+    from deerflow.sandbox.lease import get_sandbox_lease_manager
+
+    provider, sandbox, _, info = failure_recovery_lifecycle
+    sandbox._default_shell_corrupted = True
+    fresh = type(info)(info.sandbox_id, info.sandbox_url, container_id="container-generation-2", lark_cli_broker=False)
+    provider._backend.discover = MagicMock(return_value=fresh)
+    manager = get_sandbox_lease_manager(provider)
+
+    if async_acquire:
+        acquired = await manager.acquire_async("next-run", "thread-failure-recovery", user_id="alice")
+    else:
+        acquired = await asyncio.to_thread(manager.acquire, "next-run", "thread-failure-recovery", user_id="alice")
+
+    assert acquired == info.sandbox_id
+    assert manager.binding_for("next-run") == info.sandbox_id
+    assert provider.get(acquired) is not sandbox
+    assert provider._sandbox_infos[acquired].container_id == fresh.container_id
+    provider._backend.destroy.assert_called_once_with(info)
+    await manager.release_async("next-run")
+
+
+@pytest.mark.parametrize("blocked_by", ["local", "ownership"])
+def test_inline_recycle_reports_a_refused_teardown_as_deferred(failure_recovery_lifecycle, blocked_by, monkeypatch):
+    provider, sandbox, _, info = failure_recovery_lifecycle
+    sandbox._default_shell_corrupted = True
+    if blocked_by == "local":
+        provider._local_teardown.add(info.sandbox_id)
+    else:
+        monkeypatch.setattr(provider, "_claim_ownership", lambda *_args, **_kwargs: False)
+    assert provider._recycle_fenced_tracked_sandbox(info.sandbox_id) is False
+    assert provider.get(info.sandbox_id) is sandbox
+    provider._backend.destroy.assert_not_called()
+
+
+def test_acquire_recycle_failure_defers_with_quarantine_reason(tmp_path, monkeypatch):
+    """When the inline recycle cannot destroy the residue, acquire defers with an accurate reason."""
+    provider, sandbox, aio_mod = _make_provider_with_active_sandbox(tmp_path, "sandbox-q-stuck")
+    info = provider._sandbox_infos["sandbox-q-stuck"]
+    info.container_id = "generation-stuck"
+    sandbox.requires_container_recycle = True
+    provider._thread_sandboxes[("alice", "thread-stuck")] = "sandbox-q-stuck"
+    provider._quarantine_store().mark(info)
+    provider._backend.destroy = MagicMock(side_effect=RuntimeError("docker daemon down"))
+    monkeypatch.setattr(provider, "_sandbox_id_for_thread", lambda *_args: "sandbox-q-stuck")
+    monkeypatch.setattr(provider, "_ensure_skills_projection", lambda *_args: None)
+
+    with pytest.raises(aio_mod.SandboxPolicyReplacementDeferredError, match="quarantined"):
+        provider.acquire("thread-stuck", user_id="alice")
+
+    provider._backend.destroy.assert_called_once_with(info)
+    assert provider._quarantine_store().contains(info)
+
+
+@pytest.mark.parametrize("attested", [False, True])
+def test_reuse_policy_defers_to_attested_mode_when_probe_unavailable(tmp_path, monkeypatch, attested):
+    """A Pod-attested mode outranks an unavailable deployment-level capabilities probe."""
+    from deerflow.community.aio_sandbox.remote_backend import RemoteSandboxBackend
+    from deerflow.integrations import lark_cli
+
+    provider, _, aio_mod = _make_provider_with_active_sandbox(tmp_path, "sandbox-attested")
+    provider._backend = RemoteSandboxBackend("http://provisioner:8002")
+    monkeypatch.setattr(aio_mod.AioSandboxProvider, "_lark_integration_active", staticmethod(lambda *_args: True))
+
+    def _probe_unknown(*_args, **_kwargs):
+        raise lark_cli.LarkBrokerCapabilityUnknownError("capability is unknown")
+
+    monkeypatch.setattr(aio_mod.AioSandboxProvider, "_lark_broker_active", staticmethod(_probe_unknown))
+    info = provider._sandbox_infos["sandbox-attested"]
+    info.lark_cli_broker = attested
+
+    provider._check_sandbox_reuse_policy(info, "alice")
+
+    assert info.requires_replacement is False
+
+
+@pytest.mark.parametrize("source", ["active", "warm", "discovered"])
+@pytest.mark.parametrize("required_broker", [False, True])
+def test_unattested_broker_mode_refuses_acquire_without_deleting_pod(failure_recovery_lifecycle, monkeypatch, source, required_broker):
+    """Version skew must refuse admission while preserving the existing Pod."""
+    from deerflow.community.aio_sandbox import remote_backend as remote_mod
+
+    provider, sandbox, _, info = failure_recovery_lifecycle
+    info.lark_cli_broker = sandbox.lark_cli_broker = None
+    if source != "active":
+        provider.release(info.sandbox_id)
+        if source == "discovered":
+            provider._warm_pool.clear()
+            provider._warm_pool_identity.clear()
+    backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002")
+    backend.discover = MagicMock(return_value=info)
+    backend.destroy = MagicMock()
+    backend.create = MagicMock(side_effect=AssertionError("must preserve the existing Pod"))
+    provider._backend = backend
+    monkeypatch.setattr(provider, "_lark_integration_active", lambda *_args: True)
+    probe = MagicMock(return_value=required_broker)
+    monkeypatch.setattr(provider, "_lark_broker_active", probe)
+
+    with pytest.raises(RuntimeError, match="broker mode is unverified"):
+        provider.acquire("thread-failure-recovery", user_id="alice")
+
+    assert info.requires_replacement is False
+    backend.destroy.assert_not_called()
+    backend.create.assert_not_called()
+    probe.assert_not_called()
+
+
+def test_reuse_policy_stays_fail_closed_for_unattested_mode_when_probe_unavailable(tmp_path, monkeypatch):
+    """Without a Pod attestation there is no stronger evidence: probe failure keeps refusing reuse."""
+    from deerflow.community.aio_sandbox.remote_backend import RemoteSandboxBackend
+    from deerflow.integrations import lark_cli
+
+    provider, _, aio_mod = _make_provider_with_active_sandbox(tmp_path, "sandbox-unattested")
+    provider._backend = RemoteSandboxBackend("http://provisioner:8002")
+    monkeypatch.setattr(aio_mod.AioSandboxProvider, "_lark_integration_active", staticmethod(lambda *_args: True))
+
+    def _probe_unknown(*_args, **_kwargs):
+        raise lark_cli.LarkBrokerCapabilityUnknownError("capability is unknown")
+
+    monkeypatch.setattr(aio_mod.AioSandboxProvider, "_lark_broker_active", staticmethod(_probe_unknown))
+    info = provider._sandbox_infos["sandbox-unattested"]
+    info.lark_cli_broker = None
+
+    with pytest.raises(aio_mod.SandboxBrokerModeUnverifiedError, match="broker mode is unverified"):
+        provider._check_sandbox_reuse_policy(info, "alice")
 
 
 def test_reused_active_sandbox_requires_matching_releases(tmp_path):
@@ -1895,6 +2994,42 @@ def test_destroy_closes_cached_sandbox_client(tmp_path):
     backend_destroy.assert_called_once()
     assert "sandbox-destroy" not in provider._sandboxes
     assert "sandbox-destroy" not in provider._sandbox_infos
+
+
+def test_destroy_reports_false_when_teardown_is_deferred(tmp_path):
+    """An explicit destroy under an active execution lease must surface the
+    deferral instead of letting the caller assume the container is gone."""
+    import threading
+
+    from deerflow.sandbox.lease import get_sandbox_lease_manager
+
+    provider, sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "sandbox-destroy-defer")
+    manager = get_sandbox_lease_manager(provider)
+    # reserve_idle_teardown is re-entrant per worker, so the competing
+    # reservation must come from another thread to force the deferral.
+    hold = threading.Event()
+    release = threading.Event()
+
+    def hold_teardown():
+        with manager.reserve_idle_teardown("sandbox-destroy-defer") as reserved:
+            assert reserved
+            hold.set()
+            release.wait(5)
+
+    worker = threading.Thread(target=hold_teardown, daemon=True)
+    worker.start()
+    assert hold.wait(5)
+    try:
+        assert provider.destroy("sandbox-destroy-defer") is False
+    finally:
+        release.set()
+        worker.join(5)
+
+    provider._backend.destroy.assert_not_called()
+    sandbox.close.assert_not_called()
+    assert "sandbox-destroy-defer" in provider._sandboxes
+    assert provider.destroy("sandbox-destroy-defer") is True
+    provider._backend.destroy.assert_called_once()
 
 
 def test_shutdown_closes_all_active_sandbox_clients(tmp_path):
@@ -1994,7 +3129,7 @@ def test_release_dirty_sandbox_destroy_failure_is_logged_without_warming(
     assert "sandbox-dirty-fail" not in provider._warm_pool
     assert "sandbox-dirty-fail" not in provider._sandboxes
     assert "sandbox-dirty-fail" not in provider._sandbox_infos
-    assert "Failed to recycle sandbox sandbox-dirty-fail" in caplog.text
+    assert "Failed to recycle quarantined sandbox sandbox-dirty-fail" in caplog.text
     provider._backend.destroy.assert_called_once()
     sandbox.close.assert_called_once_with()
 

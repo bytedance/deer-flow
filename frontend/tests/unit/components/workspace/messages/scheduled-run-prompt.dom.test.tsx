@@ -1,4 +1,11 @@
-import { afterEach, describe, expect, rs, test } from "@rstest/core";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  rs,
+  test,
+} from "@rstest/core";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 
@@ -135,7 +142,13 @@ describe("ScheduledRunPrompt", () => {
   });
 
   describe("run time zone follows the tasks page", () => {
+    beforeEach(() => {
+      rs.useFakeTimers({ toFake: ["Date"] });
+      rs.setSystemTime(new Date("2026-10-07T12:00:00Z"));
+    });
+
     afterEach(() => {
+      rs.useRealTimers();
       rs.restoreAllMocks();
     });
 
@@ -170,21 +183,39 @@ describe("ScheduledRunPrompt", () => {
         "en-US",
       );
       const block = screen.getByTestId("scheduled-run-prompt");
-      expect(block.textContent).toContain("09:00");
+      expect(block.textContent).toContain("Today 09:00");
       expect(block.textContent).not.toContain("your time");
     });
 
-    test("a cron task saved in UTC reads in UTC, with the viewer's time beside it", () => {
-      viewerIn("Asia/Shanghai");
-      const { origin } = launch();
-      renderPrompt(
-        at({ ...origin, schedule_type: "cron", timezone: "UTC" }),
-        "en-US",
-      );
-      const block = screen.getByTestId("scheduled-run-prompt");
-      // Between 16:00 and 24:00 UTC the two zones are on different days, so
-      // the viewer's time carries its own day ("Today 09:00 your time").
-      expect(block.textContent).toMatch(/01:00 · (?:\S+ )?09:00 your time/);
-    });
+    test.each([
+      {
+        label: "both zones have the same relative day",
+        now: "2026-10-07T12:00:00Z",
+        expected: "Today 01:00 · 09:00 your time",
+      },
+      {
+        label: "the viewer is on the next day",
+        now: "2026-10-07T20:00:00Z",
+        expected: "Today 01:00 · Yesterday 09:00 your time",
+      },
+      {
+        label: "the viewer needs an absolute date",
+        now: "2026-10-08T23:00:00Z",
+        expected: "Yesterday 01:00 · Oct 7 09:00 your time",
+      },
+    ])(
+      "a cron task saved in UTC shows the viewer's time when $label",
+      ({ now, expected }) => {
+        rs.setSystemTime(new Date(now));
+        viewerIn("Asia/Shanghai");
+        const { origin } = launch();
+        renderPrompt(
+          at({ ...origin, schedule_type: "cron", timezone: "UTC" }),
+          "en-US",
+        );
+        const block = screen.getByTestId("scheduled-run-prompt");
+        expect(block.textContent).toContain(expected);
+      },
+    );
   });
 });

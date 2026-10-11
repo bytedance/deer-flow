@@ -117,15 +117,26 @@ async def _notify_each(
     """Invoke contributors in order, fail-open, within one shared budget."""
     loop = asyncio.get_running_loop()
     deadline = None if timeout is None else loop.time() + timeout
+    # ``budget_spent`` latches once the shared budget runs out, so the skip
+    # decision never depends on a second clock read. The loop runs a scheduled
+    # timeout up to one ``clock_resolution`` *early* (``BaseEventLoop._run_once``
+    # compares each handle's ``_when`` against ``now + clock_resolution``), so on
+    # a coarse clock — Windows' ~15.6 ms against budgets as small as 20 ms —
+    # ``loop.time()`` can still sit strictly before ``deadline`` at the moment
+    # the budget has in fact expired. That raced both the log classification and
+    # the skip of later contributors (#6453).
+    budget_spent = False
     for source, contributor in contributors:
+        timeout_scope: asyncio.Timeout | None = None
         try:
             call = invoke(contributor)
             if deadline is None:
                 await call
                 continue
 
-            remaining = deadline - loop.time()
+            remaining = 0.0 if budget_spent else deadline - loop.time()
             if remaining <= 0:
+                budget_spent = True
                 close = getattr(call, "close", None)
                 if callable(close):
                     close()
@@ -137,9 +148,15 @@ async def _notify_each(
                     timeout,
                 )
                 continue
-            await asyncio.wait_for(call, remaining)
+            # ``asyncio.timeout`` records whether *it* expired, so the handler
+            # below never re-reads the clock to tell a spent budget from a
+            # ``TimeoutError`` the contributor raised on its own.
+            timeout_scope = asyncio.timeout(remaining)
+            async with timeout_scope:
+                await call
         except TimeoutError:
-            if deadline is not None and loop.time() >= deadline:
+            if timeout_scope is not None and timeout_scope.expired():
+                budget_spent = True
                 # Budget exhaustion mid-hook is the same expected operational
                 # condition as the skip above, so it stays a warning rather
                 # than a hook failure with an asyncio-internal traceback.

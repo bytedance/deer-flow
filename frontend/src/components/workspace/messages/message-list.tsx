@@ -329,6 +329,7 @@ export function MessageList({
   onBranchTurn,
   canRegenerate = false,
   canEdit = false,
+  editLockedByGoal = false,
   canBranch = false,
   enableSidecarActions = true,
   enableConversationOutline = false,
@@ -365,6 +366,8 @@ export function MessageList({
   ) => void | Promise<void>;
   canRegenerate?: boolean;
   canEdit?: boolean;
+  /** Edit would be allowed but for an active goal: show the pencil locked. */
+  editLockedByGoal?: boolean;
   canBranch?: boolean;
   enableSidecarActions?: boolean;
   enableConversationOutline?: boolean;
@@ -1259,6 +1262,13 @@ export function MessageList({
                     )}
                   >
                     {group.messages.map((msg) => {
+                      const isLatestEditableHumanMessage =
+                        group.type === "human" &&
+                        !group.scheduledOrigin &&
+                        Boolean(msg.id) &&
+                        msg.id === latestEditableHumanMessageId &&
+                        !replayActionBusy &&
+                        Boolean(onEditAndRegenerateMessage);
                       const item = (
                         <MessageListItem
                           message={msg}
@@ -1280,14 +1290,9 @@ export function MessageList({
                           showWorkspaceChanges={workspaceChangeAnchorGroupIndices.has(
                             groupIndex,
                           )}
-                          canEdit={
-                            group.type === "human" &&
-                            !group.scheduledOrigin &&
-                            Boolean(msg.id) &&
-                            msg.id === latestEditableHumanMessageId &&
-                            canEdit &&
-                            !replayActionBusy &&
-                            Boolean(onEditAndRegenerateMessage)
+                          canEdit={isLatestEditableHumanMessage && canEdit}
+                          editLockedByGoal={
+                            isLatestEditableHumanMessage && editLockedByGoal
                           }
                           isEditPending={editingMessageId === msg.id}
                           onEditAndRegenerate={

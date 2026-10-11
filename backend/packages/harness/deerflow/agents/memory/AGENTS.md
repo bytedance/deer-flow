@@ -13,7 +13,7 @@ This directory owns memory capture, storage, retrieval, prompt injection, and mo
 - `manager.py` defines the backend-neutral `MemoryManager` contract.
 - `agents/middlewares/memory_middleware.py` queues filtered conversations for passive capture.
 - `summarization_hook.py` connects memory work to the summarization lifecycle.
-- `tools.py` provides `memory_search`, `memory_add`, `memory_update`, and `memory_delete`.
+- `tools.py` provides `memory_search`, `memory_get`, `memory_add`, `memory_update`, and `memory_delete`.
 - `backends/deermem/` contains the default local backend.
 - `backends/mem0/`, `backends/openviking/`, and `backends/honcho/` contain optional adapters.
 
@@ -87,6 +87,18 @@ fact-only import payload supplies empty summary defaults.
 It captures `user_id` when it enqueues work.
 This identity survives the background timer boundary.
 
+DeerMem debounces each `(thread_id, user_id, agent_name)` independently using
+monotonic deadlines. Same-key coalescing preserves the first pending arrival;
+`backend_config.max_wait_seconds` (default 300) caps debounce deferral even
+under continuous updates. One timer wakes for the earliest deadline and one
+consumer processes eligible items serially. Other conversations cannot reset
+that deadline. Consumer backlog and LLM latency can still delay completion.
+Early wakeups rearm with a 50 ms minimum; arrivals during extraction wait for
+the finishing worker to rearm. Emergency snapshots are immediately eligible;
+`flush`, `flush_nowait`, and `flush_sync` make all pending items eligible.
+Tests in `tests/test_memory_queue_deadlines.py` use a fake monotonic clock and
+timer to exercise scheduling without timing-sensitive sleeps.
+
 DeerMem and mem0 exclude assistant tool-call intent in every representation:
 `tool_calls`, `invalid_tool_calls`, and provider-raw `tool_calls`/`function_call`.
 An empty parsed call list does not make an attempted call a final response.
@@ -97,13 +109,17 @@ Memory enqueue redaction also covers `invalid_tool_calls` arguments/error text
 and legacy `function_call` payloads. Keep sync, async and compaction admission
 aligned; preserve original messages and detector policy.
 
-`memory.mode: tool` registers the four memory tools.
+`memory.mode: tool` registers the five memory tools.
 The model chooses when to search or change facts.
 Tool mode still uses `MemoryMiddleware` for passive writes on supported remote backends.
 
 Middleware injection includes shared summaries and the selected agent's facts.
 Tool-mode injection includes only shared summaries.
-Tool mode leaves agent facts behind `memory_search`.
+Tool mode leaves agent facts behind `memory_search` and `memory_get`.
+`memory_get` matches an exact fact ID inside `MemoryManager.get_memory()` for
+the runtime user and agent. Named-agent reads require
+`supports_agent_scoped_management`; unsupported reads return JSON errors.
+Missing and out-of-scope IDs share the same not-found response.
 `memory.injection_enabled: false` disables the complete injected block.
 
 Per-user lead-agent Custom Agents may set `memory_enabled: false` in their own
@@ -188,8 +204,8 @@ The older isolation migration remains available:
 PYTHONPATH=. python scripts/migrate_user_isolation.py --dry-run
 ```
 
-It assigns legacy `memory.json`, `threads/`, `agents/`, `skills/`, and the global
-`USER.md` to `--user-id` (default `default`).
+It assigns legacy `memory.json`, `agents/`, `skills/`, and the global `USER.md`
+to `--user-id` (default `default`); `threads/` go to their `threads_meta` owner.
 
 #### Retrieval
 
@@ -197,15 +213,38 @@ It assigns legacy `memory.json`, `threads/`, `agents/`, `skills/`, and the globa
 DeerMem selects persistent SQLite FTS5 by default.
 An empty value selects the substring fallback.
 
-SQLite index data lives below `.retrieval/` and remains rebuildable.
+The SQLite index is rebuildable derived data below `retrieval_index_path`
+(empty = `{storage_path}/.retrieval`; relative resolves against `storage_path`;
+`paths.retrieval_index_directory` is the one resolver). Instances sharing
+`storage_path` keep it instance-local: SQLite WAL is unsupported on network
+filesystems, and the full rebuild and one-shot corruption recovery touch only
+that local index. `deps._validate_memory_retrieval_index` warns when a declared
+multi-instance deployment leaves it inside `storage_path`.
 Chinese tokenization uses `jieba` only with the `memory-zh` extra.
 Malformed facts are logged and skipped during rebuild.
 A fatal rebuild failure keeps lazy retry active.
-A corrupt persistent database is deleted and recreated once.
 
 Storage sends adapter updates after it releases durable locks.
 Adapter failures mark the scope dirty.
 Search then uses canonical substring matching until rebuild succeeds.
+
+Cross-process freshness: `rebuild_index` records each agent scope's manifest
+signature `(mtime_ns, size, revision)` before reading that scope's complete
+fact list (never a `list_facts` page); `search_facts` rebuilds a scope whose
+live signature differs (a peer wrote the user's memory), and a manifest read
+failure during that compare logs and serves the local index. A commit that produced
+a new revision advances the recorded signatures of that user's scopes that were
+in sync at the pre-commit revision read under the user lock; a no-op commit
+advances nothing. Own writes therefore never rebuild while an interleaved peer
+write still does. Promotion is generation-fenced: `rebuild_index` bumps a
+per-scope (full rebuild: storage-wide) generation under `_cache_lock` when it
+publishes or forgets rows, the dispatcher snapshots them before its first
+adapter call, and a scope whose generation moved keeps the rebuild's own
+signature for the next search to compare; an own delta that cannot be proved
+compatible with the published snapshot forgets the mutated scope's signature
+instead of merely skipping promotion. A rebuild's row replacement and its
+publication run as one unit under `_retrieval_publish_lock` (fact reads stay
+outside), so overlapping refreshes of a scope publish in install order.
 
 Gateway startup schedules `DeerMem.warm_retrieval()` without delaying readiness.
 The first search can rebuild its exact scope.

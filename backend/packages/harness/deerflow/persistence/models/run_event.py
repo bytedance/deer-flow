@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, DateTime, Index, String, Text, UniqueConstraint
+from sqlalchemy import JSON, BigInteger, DateTime, Index, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.constants import RUN_EVENT_CATEGORY_MAX_LENGTH, RUN_EVENT_TYPE_MAX_LENGTH
@@ -34,3 +34,12 @@ class RunEventRow(Base):
         Index("ix_events_thread_cat_seq", "thread_id", "category", "seq"),
         Index("ix_events_run", "thread_id", "run_id", "seq"),
     )
+
+
+class RunEventThreadSeqRow(Base):
+    """Durable per-thread high-water mark for run-event sequence allocation."""
+
+    __tablename__ = "run_event_thread_seq"
+
+    thread_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    seq: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))

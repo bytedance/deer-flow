@@ -114,6 +114,8 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             logger.warning("OpenSandboxProvider: no api_key or domain configured (set sandbox.api_key/sandbox.domain in config.yaml or OPEN_SANDBOX_API_KEY/OPEN_SANDBOX_DOMAIN). The SDK will default to unauthenticated localhost:8080.")
         if _uses_insecure_remote_http(effective_domain, protocol):
             logger.warning("OpenSandboxProvider: remote OpenSandbox domain uses HTTP; use HTTPS to protect credentials and sandbox traffic.")
+        # $VARS in config.yaml are already resolved by AppConfig.resolve_env_variables;
+        # resolving again would rewrite a secret that itself starts with $.
         environment = dict(option("environment") or {})
         _validate_extra_env(environment)
         replicas = option("replicas")
@@ -135,20 +137,10 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             "ready_timeout": self._positive_float("ready_timeout", option("ready_timeout"), DEFAULT_READY_TIMEOUT),
             "sandbox_timeout": None if sandbox_timeout == 0 else sandbox_timeout,
             "command_timeout": self._positive_float("bash_command_timeout", option("bash_command_timeout"), DEFAULT_COMMAND_TIMEOUT),
-            "environment": self._resolve_env_vars(environment),
+            "environment": environment,
             "replicas": replicas if replicas is not None else self.DEFAULT_REPLICAS,
             "idle_timeout": idle_timeout if idle_timeout is not None else self.DEFAULT_IDLE_TIMEOUT,
         }
-
-    @staticmethod
-    def _resolve_env_vars(env_config: dict[str, str]) -> dict[str, str]:
-        resolved: dict[str, str] = {}
-        for key, value in env_config.items():
-            if isinstance(value, str) and value.startswith("$"):
-                resolved[key] = os.environ.get(value[1:], "")
-            else:
-                resolved[key] = "" if value is None else str(value)
-        return resolved
 
     def _get_sdk(self) -> tuple[type[SandboxSync], type[ConnectionConfigSync], type[RunCommandOpts]]:
         with self._lock:
