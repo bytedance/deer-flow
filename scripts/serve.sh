@@ -432,6 +432,14 @@ else
     echo "⏩ Skipping dependency install (--skip-install)"
 fi
 
+# The pre-install config upgrade skips itself when the backend environment is
+# not installed yet (fresh clone). The Gateway requires the *upgraded* config —
+# some migrations are schema-required (e.g. pii_redaction.token_secret) — so
+# run the upgrade again now that the sync has created the environment. It is
+# idempotent, and it cannot move before the extras detection above:
+# detect_uv_extras.py resolves extras from the pre-upgrade config.yaml.
+bash "$REPO_ROOT/scripts/config-upgrade.sh"
+
 # ── Banner ───────────────────────────────────────────────────────────────────
 
 echo ""

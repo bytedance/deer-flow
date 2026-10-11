@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -157,7 +159,6 @@ def test_version_26_config_upgrades_to_checkpoint_channel_mode(tmp_path, caplog)
     the user's existing database backend settings. Uses the repository's real
     config.example.yaml and the real config-upgrade script.
     """
-    import subprocess
 
     repo_root = Path(__file__).resolve().parents[2]
     example_src = repo_root / "config.example.yaml"
@@ -203,7 +204,6 @@ def test_version_26_config_upgrades_to_checkpoint_channel_mode(tmp_path, caplog)
 @pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
 def test_version_41_config_moves_legacy_ragflow_settings_to_tool(tmp_path):
     """The v46 migration keeps provider settings on the RAGFlow tool entry."""
-    import subprocess
 
     repo_root = Path(__file__).resolve().parents[2]
     example_src = repo_root / "config.example.yaml"
@@ -258,7 +258,6 @@ def test_version_41_config_moves_legacy_ragflow_settings_to_tool(tmp_path):
 @pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
 def test_version_41_tools_only_ragflow_config_enables_knowledge_capability(tmp_path):
     """Tools-only legacy configs must not be disabled by the new capability gate."""
-    import subprocess
 
     repo_root = Path(__file__).resolve().parents[2]
     example_src = repo_root / "config.example.yaml"
@@ -304,7 +303,6 @@ def test_version_41_tools_only_ragflow_config_enables_knowledge_capability(tmp_p
 
 def test_version_45_tools_only_ragflow_config_runs_knowledge_migration(tmp_path):
     """The knowledge migration must run for configs at the former base version."""
-    import subprocess
 
     repo_root = Path(__file__).resolve().parents[2]
     example_src = repo_root / "config.example.yaml"
@@ -353,7 +351,6 @@ def test_version_45_tools_only_ragflow_config_runs_knowledge_migration(tmp_path)
 
 def test_version_45_tools_only_lightrag_config_keeps_knowledge_tool_available(tmp_path):
     """Upgrading a configured LightRAG provider must enable the new knowledge gate."""
-    import subprocess
 
     repo_root = Path(__file__).resolve().parents[2]
     example_src = repo_root / "config.example.yaml"
@@ -410,7 +407,6 @@ def test_version_45_tools_only_lightrag_config_keeps_knowledge_tool_available(tm
 
 def test_version_45_lightrag_config_preserves_explicit_disabled_gate(tmp_path):
     """Migration must not override an operator's explicit knowledge gate value."""
-    import subprocess
 
     repo_root = Path(__file__).resolve().parents[2]
     config_path = tmp_path / "config.yaml"
@@ -546,7 +542,6 @@ def test_version_46_pii_enabled_config_upgrade_generates_token_secret(tmp_path):
     """Upgrading a v46 config with redaction enabled persists a generated
     token_secret, leaving the deployment startable under the v47 mandatory
     validation instead of failing startup after the version bump."""
-    import subprocess
 
     repo_root = Path(__file__).resolve().parents[2]
     example_src = repo_root / "config.example.yaml"
@@ -591,7 +586,6 @@ def test_version_46_pii_enabled_config_upgrade_generates_token_secret(tmp_path):
 @pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
 def test_version_46_pii_disabled_config_upgrade_skips_token_secret(tmp_path):
     """The migration must not invent a secret when redaction is off."""
-    import subprocess
 
     repo_root = Path(__file__).resolve().parents[2]
     example_src = repo_root / "config.example.yaml"
@@ -627,6 +621,88 @@ def test_version_46_pii_disabled_config_upgrade_skips_token_secret(tmp_path):
     AppConfig.model_validate(upgraded)
 
 
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+def test_config_upgrade_runs_without_consulting_the_package_index(tmp_path):
+    """The upgrade must not re-resolve dependencies: hostile index config stays irrelevant.
+
+    The backend environment is a prerequisite of every caller, so the script's
+    ``uv run`` passes ``--no-sync`` and never contacts any index. Exporting an
+    unroutable index across every channel would otherwise fail the
+    re-resolution with a connection error — the mirror-host failure from
+    #6264, reproduced here deterministically.
+    """
+    checkout = tmp_path / "checkout"
+    _write_outdated_config(checkout / "config.yaml")
+
+    result = _run_config_upgrade_in_checkout(
+        checkout,
+        UV_DEFAULT_INDEX="http://127.0.0.1:9/simple",
+        UV_INDEX="http://127.0.0.1:9/simple",
+        UV_EXTRA_INDEX_URL="http://127.0.0.1:9/simple",
+        UV_INDEX_URL="http://127.0.0.1:9/simple",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    expected_version = yaml.safe_load((checkout / "config.example.yaml").read_text(encoding="utf-8"))["config_version"]
+    upgraded = yaml.safe_load((checkout / "config.yaml").read_text(encoding="utf-8"))
+    assert upgraded["config_version"] == expected_version
+
+
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+def test_config_upgrade_skips_with_a_warning_when_the_environment_is_absent(tmp_path):
+    """serve.sh supports un-installed checkouts: degrade to a warning, never abort.
+
+    `--no-sync` never bootstraps an environment, so a checkout without one
+    cannot run the upgrade. Skipping (exit 0, config untouched) lets the
+    caller's own install step proceed; the next start upgrades normally.
+    """
+    checkout = tmp_path / "checkout"
+    original_config = _write_outdated_config(checkout / "config.yaml")
+
+    result = _run_config_upgrade_in_checkout(checkout, UV_PROJECT_ENVIRONMENT=str(tmp_path / "absent-venv"))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "skipping the config upgrade" in result.stdout
+    assert (checkout / "config.yaml").read_text(encoding="utf-8") == original_config
+
+
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+def test_fresh_checkout_startup_ends_with_the_config_upgraded_and_startable(tmp_path):
+    """serve.sh runs the upgrade pre-install (skipped without an environment) and
+    again after the sync — one startup must leave even a fresh checkout with an
+    upgraded, startable config (Huixin615's v46 pii_redaction scenario)."""
+    checkout = tmp_path / "checkout"
+    original_config = _write_outdated_config(checkout / "config.yaml")
+
+    # Phase 1 — before serve.sh's dependency install: no environment yet.
+    skipped = _run_config_upgrade_in_checkout(checkout, UV_PROJECT_ENVIRONMENT=str(tmp_path / "absent-venv"))
+    assert skipped.returncode == 0, skipped.stdout + skipped.stderr
+    assert "skipping the config upgrade" in skipped.stdout
+    assert (checkout / "config.yaml").read_text(encoding="utf-8") == original_config
+
+    # Phase 2 — serve.sh has synced the environment; the re-run must land.
+    upgraded = _run_config_upgrade_in_checkout(checkout)
+    assert upgraded.returncode == 0, upgraded.stdout + upgraded.stderr
+
+    expected_version = yaml.safe_load((checkout / "config.example.yaml").read_text(encoding="utf-8"))["config_version"]
+    upgraded_config = yaml.safe_load((checkout / "config.yaml").read_text(encoding="utf-8"))
+    assert upgraded_config["config_version"] == expected_version
+    AppConfig.model_validate(upgraded_config)
+
+
+def test_serve_reruns_the_config_upgrade_after_dependency_install() -> None:
+    """Textual pin for the serve.sh wiring: one upgrade call before the sync
+    (extras detection needs the pre-upgrade config) and exactly one after it
+    (the Gateway needs the upgraded config), never after the Gateway starts.
+    """
+    serve_lines = (Path(__file__).resolve().parents[2] / "scripts" / "serve.sh").read_text(encoding="utf-8").splitlines()
+    upgrade_calls = [i for i, line in enumerate(serve_lines) if "config-upgrade.sh" in line]
+    sync_line = next(i for i, line in enumerate(serve_lines) if "uv sync --locked" in line)
+    gateway_start = next(i for i, line in enumerate(serve_lines) if "Starting DeerFlow" in line)
+    assert len(upgrade_calls) == 2
+    assert upgrade_calls[0] < sync_line < upgrade_calls[1] < gateway_start
+
+
 def _run_config_upgrade_in_checkout(checkout: Path, **env_overrides: str):
     """Run a copy of scripts/config-upgrade.sh from a throwaway checkout.
 
@@ -640,7 +716,6 @@ def _run_config_upgrade_in_checkout(checkout: Path, **env_overrides: str):
     candidate exists: otherwise the script would upgrade the developer's own
     ``config.yaml``.
     """
-    import shutil
     import subprocess
 
     project_root = Path(env_overrides.get("DEER_FLOW_PROJECT_ROOT", checkout))
