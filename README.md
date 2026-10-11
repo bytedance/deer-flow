@@ -909,6 +909,19 @@ Use it as-is. Or tear it apart and make it yours.
 
 ### Skills & Tools
 
+#### Read-only knowledge sources
+
+Configure `knowledge_search` with either
+`deerflow.community.ragflow.tools:knowledge_search_tool` or
+`deerflow.community.lightrag.tools:knowledge_search_tool` in `config.yaml`.
+Both return the same DeerFlow source contract. Knowledge citations show the
+provider, document title, and retrieved excerpt in chat, including after reload
+and when a subagent performed the retrieval. Missing page numbers and public
+URLs remain absent; sources without a URL are readable as local evidence.
+Existing web citations and the text-only Python `knowledge_search(query)` APIs
+remain supported. No knowledge management service or page is required.
+See [the knowledge contract guide](backend/docs/KNOWLEDGE.md).
+
 Skills are what make DeerFlow do *almost anything*.
 
 A standard Agent Skill is a structured capability module — a Markdown file that defines a workflow, best practices, and references to supporting resources. DeerFlow ships with built-in skills for research, report generation, slide creation, web pages, image and video generation, and more. But the real power is extensibility: add your own skills, replace the built-in ones, or combine them into compound workflows.

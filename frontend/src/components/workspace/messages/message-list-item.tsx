@@ -40,7 +40,10 @@ import {
   resolveArtifactURL,
   resolveMessageImageURL,
 } from "@/core/artifacts/utils";
-import { extractCitationSources } from "@/core/citations/sources";
+import {
+  type KnowledgeSource,
+  extractCitationSources,
+} from "@/core/citations/sources";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   extractContentFromMessage,
@@ -144,6 +147,7 @@ export function MessageListItem({
   runId,
   threadId,
   artifactPaths = [],
+  knowledgeSources = [],
   showCopyButton = true,
   showWorkspaceChanges = false,
   canEdit = false,
@@ -155,6 +159,7 @@ export function MessageListItem({
   isLoading?: boolean;
   threadId: string;
   artifactPaths?: readonly string[];
+  knowledgeSources?: readonly KnowledgeSource[];
   feedback?: FeedbackData | null;
   runId?: string;
   showCopyButton?: boolean;
@@ -223,6 +228,7 @@ export function MessageListItem({
         isLoading={isLoading}
         threadId={threadId}
         artifactPaths={artifactPaths}
+        knowledgeSources={knowledgeSources}
         runId={runId}
         showWorkspaceChanges={showWorkspaceChanges}
         editState={
@@ -373,6 +379,7 @@ function MessageContent_({
   isLoading = false,
   threadId,
   artifactPaths,
+  knowledgeSources = [],
   runId,
   showWorkspaceChanges = false,
   editState,
@@ -382,6 +389,7 @@ function MessageContent_({
   isLoading?: boolean;
   threadId: string;
   artifactPaths: readonly string[];
+  knowledgeSources?: readonly KnowledgeSource[];
   runId?: string;
   showWorkspaceChanges?: boolean;
   editState?: {
@@ -414,9 +422,9 @@ function MessageContent_({
           maxWidth="90%"
         />
       ),
-      a: createMarkdownLinkComponent(threadId),
+      a: createMarkdownLinkComponent(threadId, knowledgeSources),
     }),
-    [artifactPaths, threadId],
+    [artifactPaths, threadId, knowledgeSources],
   );
 
   const rawContent = extractContentFromMessage(message);
@@ -459,8 +467,9 @@ function MessageContent_({
     return rawContent ?? "";
   }, [rawContent, isHuman]);
   const citationSources = useMemo(
-    () => (isHuman ? [] : extractCitationSources(contentToDisplay)),
-    [contentToDisplay, isHuman],
+    () =>
+      isHuman ? [] : extractCitationSources(contentToDisplay, knowledgeSources),
+    [contentToDisplay, isHuman, knowledgeSources],
   );
 
   const filesList =

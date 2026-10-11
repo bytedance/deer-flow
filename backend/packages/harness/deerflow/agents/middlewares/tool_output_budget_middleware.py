@@ -466,7 +466,11 @@ def _patch_tool_message(
         return msg
     replacement, transform_kind = budgeted
 
-    update: dict[str, Any] = {"content": replacement}
+    from deerflow.knowledge.sources import prune_sources
+
+    replacement, artifact = prune_sources(replacement, msg.artifact)
+
+    update: dict[str, Any] = {"content": replacement, "artifact": artifact}
     if getattr(msg, "response_metadata", None):
         update["response_metadata"] = dict(msg.response_metadata)
     new_kwargs = dict(getattr(msg, "additional_kwargs", None) or {})

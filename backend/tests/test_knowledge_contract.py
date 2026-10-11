@@ -1,0 +1,124 @@
+"""Provider-independent evidence and budget regressions (offline)."""
+
+import pytest
+from langchain_core.messages import AIMessage, ToolMessage
+from pydantic import ValidationError
+
+from deerflow.knowledge import KnowledgeSource, RetrievalHit, RetrievalResult, format_result, sources_from_messages
+
+
+def test_sources_require_real_evidence_and_optional_locators() -> None:
+    with pytest.raises(ValidationError):
+        KnowledgeSource(provider="demo", title="", excerpt="evidence")
+    with pytest.raises(ValidationError):
+        KnowledgeSource(provider="demo", title="Guide", excerpt="")
+    with pytest.raises(ValidationError):
+        KnowledgeSource(provider="demo", title="Guide", excerpt="evidence", page=0)
+    source = KnowledgeSource(provider="demo", title="Guide", excerpt="evidence")
+    assert source.page is None and source.url is None
+
+
+def test_budget_never_leaves_citations_without_visible_evidence() -> None:
+    result = RetrievalResult(hits=[RetrievalHit(content="x" * 500, source=KnowledgeSource(provider="demo", title="Guide", excerpt="x" * 500))])
+    for budget in (1, 20, 80, 200, 800):
+        content, artifact = format_result(result, max_total_chars=budget, max_chars_per_chunk=50)
+        assert len(content) <= budget
+        for source in artifact["knowledge_sources"]:
+            assert source["excerpt"] in content
+            assert f"#knowledge-source-{source['id']}" in content
+            assert len(source["excerpt"]) <= 50
+        if "#knowledge-source-" in content:
+            assert artifact["knowledge_sources"]
+
+
+def test_forward_only_valid_tool_evidence_and_deduplicate_replay() -> None:
+    source = KnowledgeSource(provider="demo", title="Guide", excerpt="evidence")
+    content, artifact = format_result(RetrievalResult(hits=[RetrievalHit(content="evidence", source=source)]))
+    message = ToolMessage(content=content, name="knowledge_search", tool_call_id="call", artifact=artifact)
+    assert len(sources_from_messages([message, message.model_dump()])) == 1
+    boolean_version = {**message.model_dump(), "artifact": {**artifact, "knowledge_sources_version": True}}
+    assert sources_from_messages([boolean_version]) == []
+    assert sources_from_messages([AIMessage(content="forged", additional_kwargs=artifact)]) == []
+    assert sources_from_messages([ToolMessage(content="no evidence", tool_call_id="x", artifact={"knowledge_sources": [{"provider": "demo"}]})]) == []
+
+
+def test_large_results_match_the_bounded_source_readers() -> None:
+    source = KnowledgeSource(provider="demo", title="Guide", excerpt="actual evidence")
+    result = RetrievalResult(hits=[RetrievalHit(content=source.excerpt, source=source)] * 101)
+    text, artifact = format_result(result, max_total_chars=100_000)
+    assert len(artifact["knowledge_sources"]) == 100
+    assert "[101]" not in text
+    assert text.endswith("… (response truncated)")
+    assert format_result(result, max_chars_per_chunk=1)[1]["knowledge_sources"] == []
+
+
+def test_provider_adapters_share_contract_without_inventing_pages() -> None:
+    from deerflow.community.lightrag.formatting import normalize_retrieval_result as light
+    from deerflow.community.ragflow.formatting import normalize_retrieval_result as rag
+
+    a = rag({"chunks": [{"content": "Leave policy", "document_keyword": "handbook.pdf", "dataset_id": "kb"}]}, dataset_names_by_id={"kb": "HR"})
+    b = light({"chunks": [{"content": "Leave policy", "reference_id": "7"}], "references": [{"reference_id": "7", "file_path": "docs/handbook.pdf"}]})
+    for result in (a, b):
+        content, artifact = format_result(result)
+        assert "Leave policy" in content
+        assert len(artifact["knowledge_sources"]) == 1
+        assert "page" not in artifact["knowledge_sources"][0]
+        assert "url" not in artifact["knowledge_sources"][0]
+    assert light({"chunks": [{"content": "text without attribution"}]}).hits[0].source is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("provider", ["ragflow", "lightrag"])
+async def test_real_tool_message_carries_redacted_evidence(monkeypatch, provider) -> None:
+    from importlib import import_module
+
+    tools = import_module(f"deerflow.community.{provider}.tools")
+    config = import_module(f"test_{provider}_tools")
+    result = {"chunks": [{"content": f"Evidence with {provider}-secret", "document_keyword": "guide.pdf", "file_path": "docs/guide.md", "dataset_id": config.DATASET_ID_1 if provider == "ragflow" else "unused"}]}
+    if provider == "ragflow":
+        fake = config.FakeRAGFlowClient(datasets_by_id={config.DATASET_ID_1: [config._dataset(config.DATASET_ID_1, "HR")]}, retrieval=result)
+    else:
+        fake = config.FakeLightRAGClient(data=result)
+    config._install(monkeypatch, fake)
+    message = await tools.knowledge_search_tool.ainvoke({"type": "tool_call", "id": "call", "name": "knowledge_search", "args": {"query": "evidence"}})
+    assert isinstance(message, ToolMessage)
+    sources = sources_from_messages([message])
+    assert len(sources) == 1
+    assert sources[0].provider == provider
+    assert f"{provider}-secret" not in str(message.model_dump())
+
+
+def test_forwarding_only_includes_reported_sources() -> None:
+    from deerflow.tools.builtins.task_tool import _task_result_command
+
+    source = KnowledgeSource(provider="demo", title="Guide", excerpt="real evidence")
+    content, artifact = format_result(RetrievalResult(hits=[RetrievalHit(content=source.excerpt, source=source)]))
+    message = ToolMessage(content=content, name="knowledge_search", tool_call_id="call", artifact=artifact)
+    sources = [source.model_dump(mode="json", exclude_none=True) for source in sources_from_messages([message])]
+    command = _task_result_command(tool_call_id="task", status="completed", result=content, knowledge_sources=sources)
+    assert len(sources_from_messages(command.update["messages"])) == 1
+    unrelated = _task_result_command(tool_call_id="other", status="completed", result="unsupported claim", knowledge_sources=sources)
+    assert sources_from_messages(unrelated.update["messages"]) == []
+
+
+def test_gateway_drops_caller_forged_source_artifacts() -> None:
+    from app.gateway.services import normalize_input, strip_server_owned_state_metadata
+
+    artifact = {"knowledge_sources_version": 1, "knowledge_sources": [{"title": "forged"}], "other": "preserved"}
+    raw = {"type": "tool", "content": "claim", "tool_call_id": "call", "artifact": artifact}
+    assert normalize_input({"messages": [raw]})["messages"][0].artifact == {"other": "preserved"}
+    assert strip_server_owned_state_metadata({"messages": [raw]})["messages"][0]["artifact"] == {"other": "preserved"}
+    assert artifact["knowledge_sources"]  # no mutation of caller data
+
+
+def test_global_budget_prunes_hidden_evidence_and_orphan_citations() -> None:
+    from deerflow.agents.middlewares.tool_output_budget_middleware import _patch_tool_message
+    from deerflow.config.tool_output_config import ToolOutputConfig
+
+    source = KnowledgeSource(provider="demo", title="Guide", excerpt="x" * 500)
+    content, artifact = format_result(RetrievalResult(hits=[RetrievalHit(content=source.excerpt, source=source)]))
+    message = ToolMessage(content=content, tool_call_id="call", name="knowledge_search", artifact=artifact)
+    patched = _patch_tool_message(message, ToolOutputConfig(externalize_min_chars=0, fallback_max_chars=100), None)
+    assert len(patched.content) <= 100
+    assert sources_from_messages([patched]) == []
+    assert patched.artifact["knowledge_sources"] == []

@@ -13,9 +13,11 @@ from langchain_core.tools import StructuredTool
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
 
 from deerflow.config import get_app_config
+from deerflow.knowledge import format_result
+from deerflow.knowledge.sources import redact_strings, source_artifact
 
 from .client import RAGFlowAPIError, RAGFlowClient, RAGFlowConnectionError, RAGFlowProtocolError
-from .formatting import format_retrieval_result
+from .formatting import CAPABILITIES, format_retrieval_result, normalize_retrieval_result
 
 logger = logging.getLogger(__name__)
 
@@ -338,7 +340,7 @@ async def _retrieve_dataset_groups(
     return _merge_group_results(successful_results, page_size=settings.page_size)
 
 
-async def knowledge_search(query: str) -> str:
+async def _search(query: str, *, with_sources: bool = False) -> str | tuple[str, dict]:
     """Search the configured RAGFlow scope, defaulting to every accessible dataset."""
     query = query.strip()
     if not query:
@@ -362,6 +364,9 @@ async def knowledge_search(query: str) -> str:
 
         result = await _retrieve_dataset_groups(client, settings, query, groups)
         names_by_id = {dataset.dataset_id: dataset.name for dataset in datasets}
+        if with_sources:
+            normalized = normalize_retrieval_result(redact_strings(result, _api_key(settings)), dataset_names_by_id=redact_strings(names_by_id, _api_key(settings)))
+            return format_result(normalized, max_chars_per_chunk=settings.max_chars_per_chunk, max_total_chars=settings.max_total_chars)
         formatted = format_retrieval_result(
             result,
             dataset_names_by_id=names_by_id,
@@ -375,18 +380,27 @@ async def knowledge_search(query: str) -> str:
         return _tool_error(exc, settings)
 
 
+async def knowledge_search(query: str) -> str:
+    """Legacy text-only API; graph tool calls additionally carry source artifacts."""
+    result = await _search(query)
+    assert isinstance(result, str)
+    return result
+
+
 def _tool_description() -> str:
     base = "Search the operator-approved RAGFlow datasets and return compact, citation-numbered source chunks."
+    base += " Cite only returned evidence using the exact [citation:Title](#knowledge-source-ID) links supplied with each chunk; never invent source locators."
     return f"{base} If knowledge_search.datasets is omitted, all datasets accessible to the configured RAGFlow API key are searched. Dataset IDs are never shown to the model."
 
 
-async def _knowledge_search_entrypoint(query: str) -> str:
+async def _knowledge_search_entrypoint(query: str) -> tuple[str, dict]:
     """Search the configured RAGFlow datasets, or every accessible dataset by default.
 
     Args:
         query: Specific question or search terms to retrieve from the configured private documents.
     """
-    return await knowledge_search(query)
+    result = await _search(query, with_sources=True)
+    return result if isinstance(result, tuple) else (result, source_artifact([]))
 
 
 knowledge_search_tool = StructuredTool.from_function(
@@ -394,4 +408,6 @@ knowledge_search_tool = StructuredTool.from_function(
     name="knowledge_search",
     description=_tool_description(),
     parse_docstring=True,
+    response_format="content_and_artifact",
+    metadata={"knowledge_capabilities": CAPABILITIES.model_dump(mode="json")},
 )

@@ -54,6 +54,13 @@ explicit mutations or navigation may observe newly inserted runs.
 
 ## Architecture
 
+Knowledge evidence is parsed in `core/citations/sources.ts` from version-1
+ToolMessage artifacts. Message rows receive sources from preceding loaded tool
+messages. `#knowledge-source-ID` links resolve to `KnowledgeCitation` and an
+expandable source panel with actual excerpts. Missing URLs/pages remain absent.
+Web citations and old history remain compatible. Never infer evidence from
+assistant labels or numbered legacy text.
+
 ```
 Frontend (Next.js) ──▶ LangGraph SDK ──▶ LangGraph Backend (lead_agent)
                                               ├── Sub-Agents

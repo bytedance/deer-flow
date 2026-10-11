@@ -1,9 +1,11 @@
 import type { AnchorHTMLAttributes } from "react";
 
 import { resolveMarkdownArtifactURL } from "@/core/artifacts/utils";
+import type { KnowledgeSource } from "@/core/citations/sources";
 import { cn } from "@/lib/utils";
 
 import { CitationLink, extractReactNodeText } from "../citations/citation-link";
+import { KnowledgeCitation } from "../citations/knowledge-citation";
 
 /**
  * Schemes we are willing to render as a navigable ``<a href=...>``.
@@ -61,11 +63,24 @@ function isExternalUrl(href: string | undefined): boolean {
  * Passing a `threadId` also resolves `/mnt/` artifact links; without it those
  * links fall through to the default external-link handling.
  */
-export function createMarkdownLinkComponent(threadId?: string) {
+export function createMarkdownLinkComponent(
+  threadId?: string,
+  knowledgeSources: readonly KnowledgeSource[] = [],
+) {
   return function MarkdownLink({
     href,
     ...props
   }: AnchorHTMLAttributes<HTMLAnchorElement>) {
+    if (href?.startsWith("#knowledge-source-")) {
+      const source = knowledgeSources.find(
+        (item) => href === `#knowledge-source-${item.id}`,
+      );
+      return source ? (
+        <KnowledgeCitation source={source} />
+      ) : (
+        <span>{props.children}</span>
+      );
+    }
     // Reject unsafe schemes up front so a prompt-injected / pasted href can
     // never reach the rendered anchor — including through the citation
     // branch (which renders <a href={href}> directly). Check before the

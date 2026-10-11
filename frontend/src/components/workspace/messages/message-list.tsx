@@ -26,6 +26,10 @@ import {
 } from "@/components/ai-elements/conversation";
 import { Button } from "@/components/ui/button";
 import { extractArtifactsFromThread } from "@/core/artifacts/utils";
+import {
+  readKnowledgeSources,
+  type KnowledgeSource,
+} from "@/core/citations/sources";
 import { useI18n } from "@/core/i18n/hooks";
 import { getArtifactArchiveCandidatesByGroupIndex } from "@/core/messages/artifact-archive";
 import {
@@ -343,6 +347,32 @@ export function MessageList({
   const [selectionToolbar, setSelectionToolbar] =
     useState<SelectionToolbarState | null>(null);
   const messages = thread.messages;
+  const previousKnowledgeSnapshotsRef = useRef(
+    new Map<string | Message, KnowledgeSource[]>(),
+  );
+  const knowledgeSourcesByMessage = useMemo(() => {
+    const byMessage = new Map<Message, KnowledgeSource[]>();
+    const nextSnapshots = new Map<string | Message, KnowledgeSource[]>();
+    const evidence = new Map<string, KnowledgeSource>();
+    for (const message of messages) {
+      for (const source of readKnowledgeSources([message]))
+        evidence.set(source.id, source);
+      if (message.type === "ai") {
+        const key = message.id ?? message;
+        const next = [...evidence.values()];
+        const previous = previousKnowledgeSnapshotsRef.current.get(key);
+        const snapshot =
+          previous?.length === next.length &&
+          previous.every((source, index) => source.id === next[index]?.id)
+            ? previous
+            : next;
+        byMessage.set(message, snapshot);
+        nextSnapshots.set(key, snapshot);
+      }
+    }
+    previousKnowledgeSnapshotsRef.current = nextSnapshots;
+    return byMessage;
+  }, [messages]);
   const groupedMessages = useStableMessageGroups(messages, thread.isLoading);
   const chapters = useMemo(
     () =>
@@ -1121,6 +1151,7 @@ export function MessageList({
                       const item = (
                         <MessageListItem
                           message={msg}
+                          knowledgeSources={knowledgeSourcesByMessage.get(msg)}
                           isLoading={
                             thread.isLoading &&
                             groupIndex === groupedMessages.length - 1

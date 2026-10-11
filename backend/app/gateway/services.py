@@ -273,9 +273,16 @@ def _strip_external_message_metadata(message: Any) -> Any:
     additional_kwargs.pop(ORIGINAL_USER_CONTENT_KEY, None)
     for key in _SERVER_OWNED_MESSAGE_METADATA_KEYS:
         additional_kwargs.pop(key, None)
-    if additional_kwargs == message.additional_kwargs:
+    from deerflow.knowledge.sources import strip_source_artifact
+
+    artifact = getattr(message, "artifact", None)
+    clean_artifact = strip_source_artifact(artifact)
+    if additional_kwargs == message.additional_kwargs and clean_artifact is artifact:
         return message
-    return message.model_copy(update={"additional_kwargs": additional_kwargs})
+    update = {"additional_kwargs": additional_kwargs}
+    if clean_artifact is not artifact:
+        update["artifact"] = clean_artifact
+    return message.model_copy(update=update)
 
 
 def _strip_external_metadata_from_message_like(item: Any) -> Any:
@@ -288,6 +295,13 @@ def _strip_external_metadata_from_message_like(item: Any) -> Any:
     """
     if isinstance(item, BaseMessage):
         return _strip_external_message_metadata(item)
+    if isinstance(item, dict):
+        from deerflow.knowledge.sources import strip_source_artifact
+
+        artifact = item.get("artifact")
+        clean_artifact = strip_source_artifact(artifact)
+        if clean_artifact is not artifact:
+            item = {**item, "artifact": clean_artifact}
     if isinstance(item, dict) and isinstance(item.get("additional_kwargs"), dict):
         additional_kwargs = {key: value for key, value in item["additional_kwargs"].items() if key not in _SERVER_OWNED_MESSAGE_METADATA_KEYS and key != ORIGINAL_USER_CONTENT_KEY}
         if additional_kwargs == item["additional_kwargs"]:

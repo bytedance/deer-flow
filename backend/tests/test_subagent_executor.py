@@ -51,6 +51,23 @@ _MOCKED_MODULE_NAMES = [
 _LANGGRAPH_HAS_ROOT_LINEAGE_STREAM_REGRESSION = Version(package_version("langgraph")) >= Version("1.2.6")
 
 
+def test_knowledge_sources_survive_compaction_and_terminal_publication(_setup_executor_classes):
+    from langchain_core.messages import AIMessage, ToolMessage
+
+    from deerflow.knowledge import KnowledgeSource, RetrievalHit, RetrievalResult, format_result
+
+    classes = _setup_executor_classes
+    source = KnowledgeSource(provider="demo", title="Guide", excerpt="real evidence")
+    content, artifact = format_result(RetrievalResult(hits=[RetrievalHit(content=source.excerpt, source=source)]))
+    result = classes["SubagentResult"](task_id="task", trace_id="trace", status=classes["SubagentStatus"].RUNNING)
+    result.update_knowledge_sources([ToolMessage(content=content, tool_call_id="call", artifact=artifact)])
+    result.update_knowledge_sources([AIMessage(content="compacted")])
+    assert len(result.knowledge_sources) == 1
+    result.try_set_terminal(classes["SubagentStatus"].COMPLETED, result=content)
+    result.update_knowledge_sources([])
+    assert len(result.knowledge_sources) == 1
+
+
 def _default_app_config():
     return SimpleNamespace(
         tool_search=SimpleNamespace(enabled=False),

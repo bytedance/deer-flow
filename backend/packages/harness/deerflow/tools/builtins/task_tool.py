@@ -614,12 +614,18 @@ def _task_result_command(
     tool_receipts: list[dict] | None = None,
     receipt_verdict: dict | None = None,
     acceptance_verdict: dict | None = None,
+    knowledge_sources: list[dict] | None = None,
 ) -> Command:
     content, metadata_error = format_subagent_result_message(status, result=result, error=error, stop_reason=stop_reason)
     if acceptance_verdict is not None:
         # RFC #4651 PR4: the rendered checklist rides the model-visible result
         # text; metadata carries the structured verdict for the ledger/judge.
         content = f"{content}\n\n{render_acceptance_section(acceptance_verdict)}"
+    artifact = None
+    if knowledge_sources:
+        from deerflow.knowledge.sources import forward_sources
+
+        content, artifact = forward_sources(content, knowledge_sources)
     return Command(
         update={
             "messages": [
@@ -627,6 +633,7 @@ def _task_result_command(
                     content=content,
                     tool_call_id=tool_call_id,
                     name="task",
+                    artifact=artifact,
                     additional_kwargs=make_subagent_additional_kwargs(
                         status,
                         result=result,
@@ -1082,6 +1089,7 @@ async def task_tool(
                     tool_receipts=receipts,
                     receipt_verdict=receipt_verdict,
                     acceptance_verdict=acceptance_verdict,
+                    knowledge_sources=getattr(result, "knowledge_sources", None),
                 )
             elif result.status == SubagentStatus.FAILED:
                 _report_subagent_usage(runtime, result)

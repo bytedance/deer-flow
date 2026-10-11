@@ -1,5 +1,10 @@
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
+Validated ToolMessage knowledge evidence accumulates across values frames in
+`SubagentResult.knowledge_sources` (100 sources, deduplicated by evidence ID).
+Publication precedes terminal state and survives compaction. Ordinary `task`
+forwards reported handles with a bounded evidence appendix and source artifact.
+
 **Context**: Capture after validation, before setup. Keep genuine replies, even hidden clarifications; exclude framework state and unpaired calls. Mark unserializable media as omitted.
 
 **Durable batch acceptance**: `batch_task` normalizes optional per-item criteria

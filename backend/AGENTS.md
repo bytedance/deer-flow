@@ -194,6 +194,16 @@ More specific `AGENTS.md` files in backend code directories contain the subsyste
 
 ## Architecture
 
+### Read-only Knowledge Contract
+
+`packages/harness/deerflow/knowledge/` owns provider-neutral retrieval results,
+operation capabilities, source validation, budget pruning, and ordinary subagent
+source forwarding. RAGFlow and LightRAG tools emit a versioned source envelope
+on `ToolMessage.artifact`; direct text APIs retain legacy output. Gateway strips
+source artifacts from external writes. See [docs/KNOWLEDGE.md](docs/KNOWLEDGE.md)
+for field mappings and the opt-in live LightRAG evidence test. Scope and
+management remain independent of this contract.
+
 ### Harness / App Split
 
 The backend is split into two layers with a strict dependency direction:
