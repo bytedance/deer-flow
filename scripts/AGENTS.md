@@ -63,6 +63,10 @@ because it runs before dependency synchronization. Read UTF-8 config files
 with or without a leading BOM so the first section remains detectable.
 `setup-sandbox.sh` also strips the leading BOM and normalizes CRLF before selecting the image;
 keep its shell filter compatible with GNU and BSD sed.
+Remove a matching pair of single or double YAML quotes from the image scalar before
+passing it to a container engine, preserving plain scalars and trailing comments.
+Keep selection dependency-free because the helper can run before installation;
+offline engine-argument coverage lives in `backend/tests/test_setup_sandbox.py`.
 An Apple Container pull that succeeds on macOS must not fail the setup step
 just because Docker is absent. Keep the Docker pull when Docker is available,
 including after an Apple Container failure, and retain the final image-config
