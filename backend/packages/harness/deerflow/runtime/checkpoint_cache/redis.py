@@ -112,10 +112,14 @@ class RedisCheckpointHistoryCache:
         TTL-bounded residual retention; the source-of-truth delete already
         happened, so this never raises."""
         stem = thread_key_stem(key_prefix, thread_id)
+        # The configured namespace is a literal key prefix, not a Redis glob.
+        pattern = "".join("\\" + char if char in "\\*?[]" else char for char in stem) + "*"
+        encoded_stem = stem.encode("utf-8")
         try:
             cursor = 0
             while True:
-                cursor, keys = await self._client.scan(cursor=cursor, match=stem + "*", count=500)
+                cursor, keys = await self._client.scan(cursor=cursor, match=pattern, count=500)
+                keys = [key for key in keys if key.startswith(encoded_stem if isinstance(key, bytes) else stem)]
                 if keys:
                     await self._client.unlink(*keys)
                 if cursor == 0:
