@@ -10,6 +10,7 @@ import {
 import { useState, type PropsWithChildren } from "react";
 
 const mocks = rs.hoisted(() => ({
+  pathname: "/workspace/chats/artifact-editing-test",
   artifactContent: {
     content: undefined as string | undefined,
     url: undefined as string | undefined,
@@ -35,7 +36,7 @@ rs.mock("@/components/ui/sidebar", () => ({
   useSidebar: () => ({ setOpen: mocks.setSidebarOpen }),
 }));
 rs.mock("next/navigation", () => ({
-  usePathname: () => "/workspace/chats/artifact-editing-test",
+  usePathname: () => mocks.pathname,
 }));
 rs.mock("@/core/auth/AuthProvider", () => ({
   useAuth: () => ({ user: null }),
@@ -76,6 +77,7 @@ rs.mock("@/components/workspace/code-editor", () => ({
 import { ArtifactFileDetail } from "@/components/workspace/artifacts/artifact-file-detail";
 import { ArtifactsProvider } from "@/components/workspace/artifacts/context";
 import { fetch as apiFetch } from "@/core/api/fetcher";
+import { ArtifactDraftsProvider } from "@/core/artifacts/draft-context";
 import { I18nProvider } from "@/core/i18n/context";
 
 const filepath = "/mnt/user-data/outputs/large.txt";
@@ -92,7 +94,9 @@ function Wrapper({ children }: PropsWithChildren) {
   return (
     <QueryClientProvider client={queryClient}>
       <I18nProvider initialLocale="en-US">
-        <ArtifactsProvider>{children}</ArtifactsProvider>
+        <ArtifactDraftsProvider>
+          <ArtifactsProvider key={mocks.pathname}>{children}</ArtifactsProvider>
+        </ArtifactDraftsProvider>
       </I18nProvider>
     </QueryClientProvider>
   );
@@ -129,6 +133,7 @@ function save() {
 }
 
 beforeEach(() => {
+  mocks.pathname = "/workspace/chats/artifact-editing-test";
   window.sessionStorage.clear();
   Object.assign(mocks.artifactContent, {
     content: prefix,
@@ -159,6 +164,62 @@ afterEach(() => {
 });
 
 describe("ArtifactFileDetail complete editing baseline", () => {
+  it("restores an actual editor draft after the chat provider is replaced", () => {
+    loadFull();
+    const { rerender } = renderDetail();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(source(), {
+      target: { value: "retained after navigation" },
+    });
+    mocks.pathname = "/workspace/chats/other";
+    rerender(<div />);
+    mocks.pathname = "/workspace/chats/artifact-editing-test";
+    rerender(detail());
+    expect(source().value).toBe("retained after navigation");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(save().disabled).toBe(false);
+  });
+
+  it("does not resurrect discarded changes after navigating away and back", () => {
+    loadFull();
+    const { rerender } = renderDetail();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(source(), { target: { value: "discarded edit" } });
+    rs.spyOn(window, "confirm").mockReturnValue(true);
+    fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
+    mocks.pathname = "/workspace/chats/other";
+    rerender(<div />);
+    mocks.pathname = "/workspace/chats/artifact-editing-test";
+    rerender(detail());
+    expect(source().value).toBe(fullContent);
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(save().disabled).toBe(true);
+  });
+
+  it("keeps a successful save clean after navigating away and back", async () => {
+    loadFull();
+    const { rerender } = renderDetail();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(source(), { target: { value: "saved edit" } });
+    fireEvent.click(save());
+    await waitFor(() => expect(save().disabled).toBe(true));
+    Object.assign(mocks.artifactContent, {
+      content: "saved edit",
+      sha256: "b".repeat(64),
+    });
+    mocks.pathname = "/workspace/chats/other";
+    rerender(<div />);
+    mocks.pathname = "/workspace/chats/artifact-editing-test";
+    rerender(detail());
+    expect(source().value).toBe("saved edit");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(save().disabled).toBe(true);
+    expect(screen.queryByText("Unsaved")).toBeNull();
+    const event = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+  });
+
   it.each([
     ["truncated preview", { content: prefix, truncated: true }],
     ["failed refetch", { error: new Error("Artifact refetch failed") }],

@@ -10,6 +10,8 @@ import React, {
   type ReactNode,
 } from "react";
 
+import { useArtifactDraftOwner } from "@/core/artifacts/draft-context";
+
 import { isStaticWebsiteOnly } from "../static-mode";
 
 import {
@@ -61,6 +63,7 @@ interface AuthProviderProps {
  */
 export function AuthProvider({ children, initialUser }: AuthProviderProps) {
   const [user, setUser] = useState<User | null>(initialUser);
+  useArtifactDraftOwner(user?.id ?? null);
   const [isLoading, setIsLoading] = useState(false);
   const router = useRouter();
   const pathname = usePathname();
