@@ -2447,6 +2447,12 @@ become available in the next batch, when rejected additions can be retried.
 
 ### Long-Term Memory
 
+DeerMem debounces pending updates independently per conversation, user, and agent.
+`memory.backend_config.debounce_seconds` sets the quiet period (default 30 seconds),
+and `max_wait_seconds` caps debounce deferral from the first pending update
+(default 300 seconds). Activity in another conversation cannot extend that wait.
+Extraction remains serial, so backlog and LLM latency can still delay completion.
+
 The opt-in [DeerMem scope-isolation benchmark](backend/scripts/benchmark/deermem_scope_isolation/README.md)
 checks semantic safety across facts and summaries, and fact routing across users
 and agents. Failed extraction attempts are retryable execution errors, not safety passes.
