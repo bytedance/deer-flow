@@ -23,7 +23,7 @@ from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
 
 REVISION = "0029_scheduler_agent_tasks"
-CURRENT_HEAD = "0036_run_idempotency_request"
+CURRENT_HEAD = "0039_user_disabled"
 NEXT = "0030_notification_claim_tokens"
 PREVIOUS = "0028_parked_attempts"
 TASK_FIELDS = {"origin_thread_id", "goal_objective", "max_runs", "end_at", "standing_notes"}

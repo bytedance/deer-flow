@@ -268,7 +268,8 @@ class LocalSkillStorage(SkillStorage):
         if not history_path.exists():
             return []
         records: list[dict] = []
-        for line in history_path.read_text(encoding="utf-8").splitlines():
+        # JSONL boundaries are newlines, not Unicode separators inside JSON strings.
+        for line in history_path.read_text(encoding="utf-8").split("\n"):
             if not line.strip():
                 continue
             records.append(json.loads(line))

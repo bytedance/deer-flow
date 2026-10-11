@@ -12,7 +12,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
 from deerflow.community.url_safety import resolve_host_addresses as _resolve_host_addresses
-from deerflow.community.url_safety import validate_public_http_url
+from deerflow.community.url_safety import validate_delegated_backend_url, validate_public_http_url
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.tools.types import Runtime
@@ -33,6 +33,8 @@ _OUTPUT_FORMAT_TO_EXTENSION = {
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 # Cap collision-suffix probing so a saturated outputs directory cannot spin forever.
 _MAX_FILENAME_COLLISION_PROBES = 1000
+DEFAULT_BASE_URL = "http://localhost:3032"
+_UNSET = object()
 
 
 def _get_tool_config(tool_name: str) -> dict | None:
@@ -79,9 +81,10 @@ def _resolve_timeout(cfg: dict, default: float) -> float:
     return default
 
 
-def _get_browserless_client(tool_name: str = "web_fetch") -> BrowserlessClient:
-    cfg = _get_tool_config(tool_name)
-    base_url = "http://localhost:3032"
+def _get_browserless_client(tool_name: str = "web_fetch", cfg: dict | None = _UNSET) -> BrowserlessClient:
+    if cfg is _UNSET:
+        cfg = _get_tool_config(tool_name)
+    base_url = DEFAULT_BASE_URL
     token = os.getenv("BROWSERLESS_TOKEN", "")
     timeout_s = 30.0
     if cfg is not None:
@@ -101,6 +104,27 @@ def _as_bool(value: object, default: bool) -> bool:
         if lowered in {"0", "false", "no", "off"}:
             return False
     return default
+
+
+def _validate_backend_base_url(cfg: dict | None) -> str | None:
+    """Refuse delegation to a self-hosted backend unless its egress is isolated.
+
+    Browserless resolves the target URL, follows redirects, and loads subresources
+    in the Browserless service's own network namespace, so the target-URL screen
+    cannot be enforced end-to-end. Delegation is only safe when the backend's
+    outbound network is isolated from private and metadata networks, which the
+    operator confirms via ``network_isolation_confirmed``. A public backend
+    (Browserless Cloud) needs no confirmation. Blocking; call via
+    ``asyncio.to_thread``.
+    """
+    cfg = cfg or {}
+    base_url = cfg.get("base_url", DEFAULT_BASE_URL)
+    network_isolation_confirmed = _as_bool(cfg.get("network_isolation_confirmed"), False)
+    return validate_delegated_backend_url(
+        base_url,
+        network_isolation_confirmed=network_isolation_confirmed,
+        resolver=_resolve_host_addresses,
+    )
 
 
 def _as_int(value: object, default: int) -> int:
@@ -266,6 +290,10 @@ async def web_fetch_tool(url: str) -> str:
         if url_error:
             return url_error
 
+        backend_error = await asyncio.to_thread(_validate_backend_base_url, cfg)
+        if backend_error:
+            return backend_error
+
         wait_for_event = ""
         wait_for_timeout_ms = 0
         wait_for_selector = ""
@@ -278,7 +306,7 @@ async def web_fetch_tool(url: str) -> str:
         wait_for_selector = cfg.get("wait_for_selector", wait_for_selector)
         wait_for_selector_timeout_ms = _as_int(cfg.get("wait_for_selector_timeout_ms"), wait_for_selector_timeout_ms)
 
-        client = _get_browserless_client("web_fetch")
+        client = _get_browserless_client("web_fetch", cfg)
         result = await client.fetch_html_with_status(
             url=url,
             wait_for_event=wait_for_event,
@@ -333,6 +361,10 @@ async def web_capture_tool(
         if url_error:
             return _tool_message(url_error, tool_call_id)
 
+        backend_error = await asyncio.to_thread(_validate_backend_base_url, cfg)
+        if backend_error:
+            return _tool_message(backend_error, tool_call_id)
+
         outputs_path = _thread_outputs_path(runtime)
         if isinstance(outputs_path, str):
             return _tool_message(outputs_path, tool_call_id)
@@ -349,7 +381,7 @@ async def web_capture_tool(
 
         output_name = _safe_capture_filename(filename, url, final_format)
 
-        client = _get_browserless_client("web_capture")
+        client = _get_browserless_client("web_capture", cfg)
         result = await client.capture_screenshot(
             url=url,
             full_page=final_full_page,

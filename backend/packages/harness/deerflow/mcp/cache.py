@@ -7,6 +7,7 @@ import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from langchain_core.tools import BaseTool
 
@@ -14,6 +15,9 @@ from deerflow.config.file_signature import ConfigSignature as _ConfigSignature
 from deerflow.config.file_signature import get_config_signature as _get_config_signature
 from deerflow.config.shared_reset_marker import SharedResetMarker
 from deerflow.mcp.config_normalization import normalize_mcp_interceptor_paths, normalize_mcp_server_config
+
+if TYPE_CHECKING:
+    from deerflow.mcp.session_pool import MCPSessionPool
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +70,14 @@ class _McpReconciliation:
     revision: _AppliedMcpRevision | None = None
     path: Path | None = None
     signature: _ConfigSignature | None = None
+    retire_unlisted: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class McpReconciliationPending:
+    """State a committed transition retired outside the cache critical section."""
+
+    retired_pool: "MCPSessionPool | None" = None
 
 
 _mcp_tools_cache: list[BaseTool] | None = None
@@ -562,7 +574,7 @@ def _apply_mcp_reconciliation_locked(plan: _McpReconciliation):
         assert revision is not None
         pool = get_session_pool()
         active, removed = _deployment_binding_delta(_applied_mcp_revision, revision)
-        previous_connections = _applied_mcp_revision.stdio_connections
+        previous_connections = _applied_mcp_revision.stdio_connections if _applied_mcp_revision is not None else {}
         re_epoching = sorted(name for name, fingerprint in active.items() if previous_connections.get(name) != fingerprint)
         logger.info(
             "MCP selective reconciliation: %d active stdio server(s), re-epoching %s, retiring %s",
@@ -570,7 +582,10 @@ def _apply_mcp_reconciliation_locked(plan: _McpReconciliation):
             re_epoching or "none",
             sorted(removed) or "none",
         )
-        pool.reconcile_bindings(active, removed, domain="deployment")
+        if plan.retire_unlisted:
+            pool.reconcile_bindings(active, removed, domain="deployment", retire_unlisted=True)
+        else:
+            pool.reconcile_bindings(active, removed, domain="deployment")
 
         _applied_mcp_revision = revision
         _config_path, _config_signature = plan.path, plan.signature
@@ -581,6 +596,108 @@ def _apply_mcp_reconciliation_locked(plan: _McpReconciliation):
     assert plan.kind == _RECONCILE_FULL
     logger.info("MCP conservative reconciliation: retiring the whole session pool and tool cache")
     return _reset_mcp_tools_cache_state_and_retire_pool_locked()
+
+
+def _plan_committed_mcp_reconciliation_locked(
+    config,
+    revision: _AppliedMcpRevision,
+    *,
+    path: Path,
+    signature: _ConfigSignature | None,
+) -> _McpReconciliation | None:
+    """Classify the exact revision a Gateway writer has already committed.
+
+    Caller must hold ``_init_condition``. Unlike the read-side planner, this
+    entry point never re-reads the file: the caller supplies the parsed config
+    and the post-write path/signature. That distinction is what lets two
+    sequential writers (delete A, then re-add identical A) each install their
+    own binding transition instead of coalescing to the final file state.
+    """
+    global _applied_mcp_revision, _config_path, _config_signature, _initialized_without_config
+
+    from deerflow.mcp.session_pool import get_session_pool
+
+    pool = get_session_pool()
+    has_local_state = _cache_initialized or _applied_mcp_revision is not None or _initializing_generation is not None or bool(pool.retained_server_names(domain="deployment"))
+    if not has_local_state:
+        _applied_mcp_revision = revision
+        _config_path, _config_signature = path, signature
+        _initialized_without_config = path is None
+        return None
+
+    applied = _applied_mcp_revision
+    if applied is not None and revision.effective_snapshot == applied.effective_snapshot:
+        _config_path, _config_signature = path, signature
+        _initialized_without_config = path is None
+        return None
+
+    if applied is not None and revision.interceptors != applied.interceptors:
+        return _McpReconciliation(_RECONCILE_FULL)
+
+    return _McpReconciliation(
+        _RECONCILE_SELECTIVE,
+        revision=revision,
+        path=path,
+        signature=signature,
+        retire_unlisted=applied is None,
+    )
+
+
+def prepare_mcp_reconciliation(
+    config,
+    *,
+    config_path: Path,
+    config_signature: _ConfigSignature | None = None,
+) -> McpReconciliationPending:
+    """Install the local fence for a config transition already committed to disk.
+
+    The caller must keep the extensions-config write lock held until this
+    function returns. The returned pending state is deliberately small: the
+    actual blocking teardown happens in :func:`finish_mcp_reconciliation` after
+    the caller releases the config locks.
+    """
+    revision = _derived_applied_revision(config)
+    signature = config_signature if config_signature is not None else _get_config_signature(config_path)
+    rejection = _frozen_task_snapshot_rejects(config)
+    with _init_condition:
+        if revision is None or rejection is not None:
+            if rejection is not None:
+                logger.info(
+                    "Committed MCP configuration is rejected by the frozen durable-task snapshot (%s); resetting instead of installing binding epochs",
+                    type(rejection).__name__,
+                )
+            plan = _McpReconciliation(_RECONCILE_FULL)
+        else:
+            plan = _plan_committed_mcp_reconciliation_locked(
+                config,
+                revision,
+                path=config_path,
+                signature=signature,
+            )
+        retired_pool = None if plan is None else _apply_mcp_reconciliation_locked(plan)
+    return McpReconciliationPending(retired_pool=retired_pool)
+
+
+def finish_mcp_reconciliation(pending: McpReconciliationPending) -> None:
+    """Complete teardown that must run after the caller releases config locks."""
+    if pending.retired_pool is not None:
+        pending.retired_pool.close_all_sync()
+
+
+def fail_mcp_reconciliation(error: Exception) -> McpReconciliationPending:
+    """Conservatively retire local MCP state after a committed handoff failure.
+
+    The file is already committed, so the caller must report an uncertain
+    outcome rather than success. This function only detaches local state; the
+    caller finishes the blocking teardown after releasing config locks.
+    """
+    logger.warning(
+        "MCP committed transition could not be reconciled (%s); retiring local cache state conservatively",
+        type(error).__name__,
+    )
+    with _init_condition:
+        retired_pool = _reset_mcp_tools_cache_state_and_retire_pool_locked()
+    return McpReconciliationPending(retired_pool=retired_pool)
 
 
 def _is_cache_stale() -> bool:

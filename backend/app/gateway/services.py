@@ -484,11 +484,15 @@ def _normalize_input_messages(
     return converted
 
 
+#: State channels only the server writes. ``goal_outcome`` is the "goal met"
+#: record that clearing a satisfied goal writes; a caller copy would forge one.
+SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome"})
+
+
 def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, Any]:
     """Validate and sanitize caller-supplied state values before checkpointing.
 
-    The server-owned ``sandbox``, ``thread_data``, and ``viewed_images`` channels
-    are rejected. The ``messages`` channel
+    The ``SERVER_OWNED_STATE_CHANNELS`` are rejected. The ``messages`` channel
     is canonicalized to a list of ``BaseMessage``
     objects, rejects external system/developer roles with HTTP 400, and strips
     server-owned metadata. Other channels keep their existing shapes while
@@ -500,8 +504,7 @@ def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, An
     transform trails, or privileged message roles. Every channel is walked
     because middleware-contributed channels can also carry message-like values.
     """
-    server_owned_channels = {"sandbox", "thread_data", "viewed_images"}
-    rejected = server_owned_channels.intersection(values)
+    rejected = SERVER_OWNED_STATE_CHANNELS.intersection(values)
     if rejected:
         raise HTTPException(
             status_code=400,
@@ -537,10 +540,10 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
     of bubbling up as a 500.  The gateway is a system boundary, so per-entry
     validation errors are the right shape for clients to retry against.
 
-    The ``sandbox``, ``thread_data``, and ``viewed_images`` channels are also
-    server-owned. External callers cannot select a provider resource by id or
-    supply host image paths; trusted internal run admission may carry restored
-    values.
+    The ``SERVER_OWNED_STATE_CHANNELS`` are also rejected. External callers
+    cannot select a provider resource by id, supply host image paths, or forge a
+    met goal; trusted internal run admission may carry restored values. A caller
+    ``goal`` replaces the goal, so it also clears the previous ``goal_outcome``.
 
     ``original_user_content``, dynamic-context reminder markers, the transient
     view-image context marker, the execution-only knowledge-scope marker, tool
@@ -565,8 +568,7 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
     if raw_input is None:
         return {}
     if not trusted_internal:
-        server_owned_channels = {"sandbox", "thread_data", "viewed_images"}
-        rejected = server_owned_channels.intersection(raw_input)
+        rejected = SERVER_OWNED_STATE_CHANNELS.intersection(raw_input)
         if rejected:
             raise HTTPException(
                 status_code=400,
@@ -583,6 +585,9 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
             cleaned = [_strip_external_delegation_verdict(entry) for entry in delegations]
             if cleaned != delegations:
                 result = {**result, "delegations": cleaned}
+        # merge_goal ignores None, so only a goal value replaces the goal.
+        if result.get("goal") is not None:
+            result = {**result, "goal_outcome": None}
     return result
 
 
@@ -1296,7 +1301,7 @@ class _RawCheckpointSnapshot:
     metadata, config ancestry, created_at) comes straight from the tuple.
     """
 
-    __slots__ = ("checkpoint_exists", "config", "values", "metadata", "parent_config", "created_at", "tasks", "tasks_known", "next")
+    __slots__ = ("checkpoint_exists", "config", "values", "metadata", "parent_config", "created_at", "tasks", "tasks_known", "next", "channel_versions")
 
     def __init__(self, config: dict[str, Any], tup: Any | None) -> None:
         self.checkpoint_exists = tup is not None
@@ -1309,6 +1314,8 @@ class _RawCheckpointSnapshot:
         self.tasks: tuple = ()
         self.tasks_known = False
         self.next: tuple = ()
+        versions = checkpoint.get("channel_versions")
+        self.channel_versions = dict(versions) if isinstance(versions, dict) else None
 
 
 class _RawCheckpointReadAccessor:
@@ -2041,6 +2048,19 @@ async def start_run(
         internal_owner_user = await resolve_trusted_internal_owner_for_attribution(request, owner_user_id)
         if internal_owner_user is None and owner_user_id == AUTH_DISABLED_USER_ID and is_auth_disabled():
             internal_owner_user = get_auth_disabled_user()
+        if getattr(internal_owner_user, "disabled", False):
+            # The scheduler's in-process launches (and MCP task-event
+            # delivery) fabricate requests that skip AuthMiddleware, where
+            # the internal-auth suspension gate lives. Re-assert it at run
+            # admission (#3462 gap 3): a disabled owner's occurrence fails
+            # here instead of driving the agent. The scheduler records the
+            # rejection as the occurrence's launch error.
+            from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
+
+            raise HTTPException(
+                status_code=401,
+                detail=AuthErrorResponse(code=AuthErrorCode.ACCOUNT_DISABLED, message="Account disabled").model_dump(),
+            )
         inject_authenticated_user_context(
             config,
             request,

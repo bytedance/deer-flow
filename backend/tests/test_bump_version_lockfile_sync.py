@@ -55,8 +55,9 @@ UV_LOCK = 'version = 1\n\n[[package]]\nname = "deer-flow"\nversion = "2.1.0rc0"\
 
 # Emulates the uv behavior the release flow depends on: `uv lock` records the
 # pyproject version in the root lock entry, in uv's PEP 440 form (for these
-# inputs that only means dropping the `-`). The invocation is logged so the test
-# can tell whether the script called uv at all.
+# inputs that only means dropping the `-`), and `uv lock --check` (run by the
+# verify_versions.sh self-check) fails while the entry lags. The invocation is
+# logged so the test can tell whether the script called uv at all.
 FAKE_UV = """#!/usr/bin/env python3
 import re
 import sys
@@ -67,7 +68,7 @@ with log.open("a", encoding="utf-8") as handle:
     handle.write("uv " + " ".join(sys.argv[1:]) + "\\n")
 
 args = sys.argv[1:]
-if args != ["lock"]:
+if args not in (["lock"], ["lock", "--check"]):
     sys.exit(f"fake uv: unsupported invocation {args}")
 
 root = Path.cwd()
@@ -78,6 +79,8 @@ declared = re.search(r'(?m)^version\\s*=\\s*"([^"]+)"', pyproject).group(1)
 normalized = declared.replace("-", "")
 recorded = re.search(r'(?m)^name = "deer-flow"\\nversion = "([^"]+)"', lock_text).group(1)
 
+if args == ["lock", "--check"]:
+    sys.exit(0 if recorded == normalized else "The lockfile at `uv.lock` needs to be updated, but `--check` was provided.")
 lock_path.write_text(lock_text.replace(f'version = "{recorded}"', f'version = "{normalized}"', 1), encoding="utf-8")
 """
 

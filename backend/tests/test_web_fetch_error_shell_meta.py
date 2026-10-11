@@ -231,6 +231,7 @@ def _render(html: str, code: str, status: str) -> str:
         patch.object(browserless_tools, "_get_browserless_client", return_value=client),
         patch.object(browserless_tools, "_get_tool_config", return_value=None),
         patch.object(browserless_tools, "validate_public_http_url", return_value=None),
+        patch.object(browserless_tools, "_validate_backend_base_url", return_value=None),
     ):
         return asyncio.run(browserless_tools.web_fetch_tool.ainvoke("https://example.org/x"))
 
@@ -333,6 +334,7 @@ def _render_crawl4ai(markdown: str) -> str:
         patch.object(crawl4ai_tools, "_build_client", return_value=client),
         patch.object(crawl4ai_tools, "_get_tool_config", return_value=None),
         patch.object(crawl4ai_tools, "validate_public_http_url", return_value=None),
+        patch.object(crawl4ai_tools, "_validate_backend_base_url", return_value=None),
     ):
         return asyncio.run(crawl4ai_tools.web_fetch_tool.ainvoke("https://example.org/x"))
 

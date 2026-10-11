@@ -338,7 +338,10 @@ existingSecret: ""
 #    DEER_FLOW_INTERNAL_AUTH_TOKEN, PROVISIONER_API_KEY (the shared gateway ->
 #    sandbox-provisioner key, required while `provisioner.enabled`) and, for
 #    more than one gateway instance, AUTH_JWT_SECRET (the session-cookie
-#    signing key every Pod must share).
+#    signing key every Pod must share). It should also hold
+#    DEER_FLOW_CREDENTIALS_KEY (the at-rest key for stored credentials, a
+#    Fernet key); a multi-instance gateway with channel_connections enabled
+#    refuses to start without it.
 existingAppSecret: ""
 
 # -- Ingress in front of nginx (port 2026). nginx preserves all internal routing.
@@ -361,7 +364,7 @@ ingress:
 # -- DeerFlow config.yaml content. Secrets MUST stay as $VAR references — never
 #    inline literal secret values here. The default enables provisioner sandbox.
 config: |
-  config_version: 57
+  config_version: 58
   log_level: info
   recursion_limit: 100
   max_recursion_limit: 1000
