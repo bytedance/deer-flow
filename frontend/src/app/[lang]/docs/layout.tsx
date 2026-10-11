@@ -4,6 +4,7 @@ import { Search } from "nextra/components";
 import { getPageMap } from "nextra/page-map";
 import { Layout } from "nextra-theme-docs";
 
+import { DocsHtmlLang } from "@/components/docs/docs-html-lang";
 import { DocsLanguageProvider } from "@/components/docs/docs-language-context";
 import { buildLocalizedDocsPageMap } from "@/components/docs/docs-page-map";
 import { Footer } from "@/components/landing/footer";
@@ -23,8 +24,8 @@ export default async function DocLayout({ children, params }) {
   const pages = await getPageMap(`/${lang}`);
   const pageMap = buildLocalizedDocsPageMap(`/${lang}/docs`, pages);
   const { t } = await getI18n(locale);
-  // The root <html lang> is fixed, so Pagefind cannot split the index by
-  // language; tag each page with a lang filter and scope queries to it.
+  // Pagefind keeps one index per language (see scripts/build-search-index.mjs);
+  // the lang filter also scopes queries if <html lang> has not synced yet.
   const search = (
     <Search
       className="[&_input]:border-border [&_input]:bg-secondary/60 [&_input]:border"
@@ -49,12 +50,15 @@ export default async function DocLayout({ children, params }) {
           />
         }
         pageMap={pageMap}
-        search={search}
+        // Search lives in the custom Header; Nextra's own mobile menu is never
+        // shown, and a second instance would steal the Cmd/Ctrl+K shortcut.
+        search={null}
         docsRepositoryBase="https://github.com/bytedance/deer-flow/tree/main/frontend"
         footer={<Footer className="mt-0" />}
         i18n={i18n}
         // ... Your additional layout options
       >
+        <DocsHtmlLang lang={lang} />
         <span hidden data-pagefind-filter={`lang:${lang}`} />
         {children}
       </Layout>

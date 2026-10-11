@@ -15,7 +15,7 @@
     "lint:fix": "eslint . --ext .ts,.tsx --fix",
     "perf:check": "node scripts/measure-route-assets.mjs --check",
     "preview": "pnpm run build && next start",
-    "search:index": "pagefind --site .next/server/app --output-path public/_pagefind",
+    "search:index": "node scripts/build-search-index.mjs",
     "start": "next start",
     "test": "rstest",
     "test:e2e": "playwright test",

@@ -184,11 +184,11 @@ When adding features:
 4. Run `pnpm check` before committing
 5. Update this `AGENTS.md` when architecture, commands, or conventions change
 
-Docs search: `pnpm build` runs `search:index` to write the Pagefind index
-(`public/_pagefind/`, gitignored), so it works only on a build. The docs layout
-passes `<Search>` through `Header`'s `search` slot with a per-page `lang` filter;
-`globals.css` restyles it because Nextra's `<Head>` variables are unset. See
-`tests/unit/app/docs-search.test.ts`.
+Docs search: `pnpm build` runs `scripts/build-search-index.mjs`, which sets each
+page's `<html lang>` from its route so Pagefind writes one index per language
+(`public/_pagefind/`, gitignored); it works only on a build. `DocsHtmlLang` syncs
+`<html lang>` at runtime. Search renders only via `Header`'s `search` slot
+(`Layout search={null}`). See `tests/unit/app/docs-search.test.ts`.
 
 Route asset budgets are enforced with `pnpm perf:check`. The command measures
 `/login` from a normal production build, then builds in static-demo mode for the

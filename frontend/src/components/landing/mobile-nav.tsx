@@ -35,24 +35,26 @@ export function MobileNav({
   search?: ReactNode;
 }) {
   const pathname = usePathname();
-  // Track the path the sheet was opened on so navigating (e.g. picking a
-  // search result) closes it without a state-syncing effect.
-  const [openPath, setOpenPath] = useState<string | null>(null);
-  const open = openPath === pathname;
+  const [open, setOpen] = useState(false);
+  // Close on navigation (e.g. picking a search result). The docs layout keeps
+  // this component mounted across pages, so reset during render rather than
+  // only hiding the sheet while the path differs.
+  const [openedPath, setOpenedPath] = useState(pathname);
+  if (pathname !== openedPath) {
+    setOpenedPath(pathname);
+    setOpen(false);
+  }
 
   useEffect(() => {
     if (!open) return;
     // Same-page search results only change the hash.
-    const close = () => setOpenPath(null);
+    const close = () => setOpen(false);
     window.addEventListener("hashchange", close);
     return () => window.removeEventListener("hashchange", close);
   }, [open]);
 
   return (
-    <Sheet
-      open={open}
-      onOpenChange={(next) => setOpenPath(next ? pathname : null)}
-    >
+    <Sheet open={open} onOpenChange={setOpen}>
       <SheetTrigger asChild className="sm:hidden">
         <Button variant="ghost" size="icon" aria-label="Open menu">
           <MenuIcon className="size-5" />
@@ -74,7 +76,7 @@ export function MobileNav({
             <Link
               key={link.href}
               href={link.href}
-              onClick={() => setOpenPath(null)}
+              onClick={() => setOpen(false)}
               className="text-secondary-foreground hover:text-foreground rounded-md py-2 transition-colors"
             >
               {link.label}
