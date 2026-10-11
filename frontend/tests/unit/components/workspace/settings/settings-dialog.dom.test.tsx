@@ -71,3 +71,13 @@ test("an admin `?settings=users` deep link lands on user management", async () =
   await screen.findByText("admin@example.com");
   expect(screen.queryByText(enUS.settings.models.adminOnly)).toBeNull();
 });
+
+test("a static-website admin deep link keeps the Users entry but loads nothing", async () => {
+  // The nav splice keys on the role only, so the demo's nominal admin still
+  // sees the Users entry; the page-level mode gate is what stops the query.
+  rs.mocked(isStaticWebsiteOnly).mockReturnValue(true);
+  mountDialog("users");
+  expect(screen.getByRole("button", { name: "Users" })).toBeTruthy();
+  await screen.findByText(enUS.settings.users.adminOnly);
+  expect(loadAdminUsers).not.toHaveBeenCalled();
+});
