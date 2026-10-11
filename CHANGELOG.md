@@ -851,6 +851,13 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **goal:** External state and run-input writes reject missing or invalid goal
+  objectives, malformed counters and reducer control markers before admission,
+  while retaining valid sparse goal state. Historical
+  checkpoint replay, including regenerate, keeps the current goal and its used
+  continuation budget instead of restoring an older goal; it drops the old answer's
+  completion record. No frontend changes or database migration are required.
+
 - **channels:** IM conversations now keep their DeerFlow thread across Gateway
   replicas. The `ChannelManager` kept its chat-to-thread bindings
   (`channel_name:chat_id[:topic_id]` → `thread_id`) in a per-process JSON file,
@@ -4176,6 +4183,25 @@ This release closes that milestone with **439 merged pull requests**.
   (`deerflow hello --print there`) exits 2 with a hint to quote it, since its
   word order cannot be recovered. Passing both `--print` and `--json` now exits
   2 instead of running `--print` and dropping the `--json` message. ([#6636])
+
+- **frontend:** Signing in after a workspace session ends now returns to the
+  page that was open, query string and fragment included. Opening a workspace
+  page without a valid session (for example a scheduled-task notification link,
+  `/workspace/scheduled-tasks?task_id=...`, after the session expired) sent the
+  user to a bare `/login`, so signing in landed on the default workspace; the
+  workspace layout cannot read the request URL, so it now hands the redirect to
+  the browser, which keeps the full address in `next`. The client-side session
+  checks (`AuthProvider.refreshUser`, `useRequireAuth`) kept the path but
+  dropped the query string, and the shared fetcher dropped the fragment; all of
+  them now keep the full address. ([#6681])
+- **sandbox:** The AIO, E2B and OpenSandbox providers and ACP agents no longer
+  resolve `sandbox.environment` / `acp_agents.<name>.env` values a second time.
+  `config.yaml` loading already replaces each `$VAR`, so a resolved secret that
+  itself starts with `$` (a bcrypt hash such as `$2b$12$...`, a generated
+  password) was looked up again as a variable name and reached the sandbox or
+  agent as an empty string, or as an unrelated host variable's value when that
+  name existed. Values are now passed through as loaded, as BoxLite and the
+  local provider already did. ([#6673])
 
 ### Security
 
@@ -9588,3 +9614,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6635]: https://github.com/bytedance/deer-flow/pull/6635
 [#6636]: https://github.com/bytedance/deer-flow/pull/6636
 [#6666]: https://github.com/bytedance/deer-flow/pull/6666
+[#6673]: https://github.com/bytedance/deer-flow/pull/6673
+[#6681]: https://github.com/bytedance/deer-flow/pull/6681
