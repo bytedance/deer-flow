@@ -902,12 +902,18 @@ test("recovers a join stream gap from durable state and resumes after the retain
   expect(sessionStorage.getItem("lg:stream:thread-1")).toBe("run-1");
 });
 
-test.each(["initial", "join"])(
-  "preserves another run's reconnect pointer during %s stream gap recovery",
-  async (kind) => {
+test.each([
+  ["initial", "another run"],
+  ["join", "another run"],
+  ["initial", "the same run"],
+  ["join", "the same run"],
+])(
+  "handles %s stream gap recovery when %s claims the reconnect pointer",
+  async (kind, claimant) => {
     const sessionStorage = makeSessionStorage();
     const threadId = "thread-gap-pointer";
     const runId = "run-gap-pointer";
+    const claimedRunId = claimant === "the same run" ? runId : "run-newer";
     const key = "lg:stream:" + threadId;
     sessionStorage.setItem(key, runId);
     const gap = {
@@ -973,7 +979,7 @@ test.each(["initial", "join"])(
 
     const snapshot = stream.next();
     await stateReadStarted;
-    sessionStorage.setItem(key, "run-newer");
+    sessionStorage.setItem(key, claimedRunId);
     sessionStorage.setItem.mockClear();
     sessionStorage.removeItem.mockClear();
     finishStateRead(new Response(JSON.stringify({ values: { messages: [] } })));
@@ -988,8 +994,13 @@ test.each(["initial", "join"])(
     });
     expect(recoveryHeaders).toHaveLength(1);
     expect(recoveryHeaders[0]?.get("Last-Event-ID")).toBe("3-0");
-    expect(sessionStorage.getItem(key)).toBe("run-newer");
-    expect(sessionStorage.setItem).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(key)).toBe(claimedRunId);
+    if (claimedRunId === runId) {
+      expect(sessionStorage.setItem).toHaveBeenCalledTimes(1);
+      expect(sessionStorage.setItem).toHaveBeenCalledWith(key, runId);
+    } else {
+      expect(sessionStorage.setItem).not.toHaveBeenCalled();
+    }
     expect(sessionStorage.removeItem).not.toHaveBeenCalled();
     await expect(stream.next()).resolves.toEqual({
       done: true,
