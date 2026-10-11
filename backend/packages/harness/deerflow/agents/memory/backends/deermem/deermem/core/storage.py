@@ -1951,8 +1951,11 @@ class FileMemoryStorage(MemoryStorage):
             return []
         results: list[dict[str, Any]] = []
         for scope in scopes:
-            facts = self.list_facts(filters=filters, **self._scope_kwargs(scope))
-            for fact in facts:
+            # The ranking covers the whole scope, so read the complete scope
+            # rather than a list_facts page.
+            for fact in self.load(**self._scope_kwargs(scope)).get("facts", []):
+                if filters and not all(key in fact and fact.get(key) == value for key, value in filters.items()):
+                    continue
                 content = fact.get("content")
                 if isinstance(content, str) and query_lower in content.lower():
                     # 0.0 is a persisted confidence _normalize_fact accepts; only unset/null defaults.
