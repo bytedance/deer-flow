@@ -1782,9 +1782,23 @@ class DeerFlowClient:
                 with work_dir_manager as work_dir:
                     upload_source = src_path
                     if convertible:
-                        _reject_same_file(uploads_dir, dest_name, src_path, os.stat(src_path))
-                        upload_source = Path(work_dir) / dest_name
-                        shutil.copy2(src_path, upload_source)
+                        # Open the source once and pin both the same-file
+                        # rejection and the snapshot copy to that descriptor:
+                        # a name swapped in between two path resolutions would
+                        # otherwise split identity from content (#5611 shape).
+                        # copyfileobj (not copy2) reads through the held fd, so
+                        # a source readable only via ACL keeps working; mode
+                        # bits do not survive onto the snapshot, which is fine
+                        # since the snapshot is private to this process. The
+                        # mtime is restored from the same fstat so the upload
+                        # copy keeps the source's timestamps.
+                        with open(src_path, "rb") as src_fh:
+                            src_stat = os.fstat(src_fh.fileno())
+                            _reject_same_file(uploads_dir, dest_name, src_path, src_stat)
+                            upload_source = Path(work_dir) / dest_name
+                            with open(upload_source, "wb") as snap_fh:
+                                shutil.copyfileobj(src_fh, snap_fh)
+                        os.utime(upload_source, ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns))
                     try:
                         dest = copy_upload_file_no_symlink(uploads_dir, dest_name, upload_source)
                     except UnsafeUploadPathError:
