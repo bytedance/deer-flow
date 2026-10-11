@@ -3062,6 +3062,11 @@ run_ownership:
 #     app_secret: $FEISHU_APP_SECRET
 #     # domain: https://open.feishu.cn       # China (default)
 #     # domain: https://open.larksuite.com   # International
+#     # card_interaction_enabled: false      # render option clarifications as clickable button
+#                                            # cards; requires subscribing card.action.trigger
+#                                            # under the console's callback-configuration tab
+#                                            # (separate from event subscriptions) and
+#                                            # publishing a new app version
 #
 #   slack:
 #     enabled: false
