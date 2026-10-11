@@ -4,6 +4,7 @@ import asyncio
 import threading
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
+from queue import Queue
 
 import pytest
 
@@ -21,6 +22,13 @@ def test_lookup_survives_concurrent_removal(mutation):
     release_reader = threading.Event()
     writer_started = threading.Event()
     writer_finished = threading.Event()
+    coordination = Queue()
+    removal_reported = threading.Event()
+
+    def report_removal():
+        if not removal_reported.is_set():
+            removal_reported.set()
+            coordination.put("removed")
 
     class PausedLookup(OrderedDict):
         def get(self, lookup_key, default=None):
@@ -30,8 +38,41 @@ def test_lookup_survives_concurrent_removal(mutation):
                 assert release_reader.wait(5), "reader was not released"
             return value
 
+        def __delitem__(self, deleted_key):
+            super().__delitem__(deleted_key)
+            if deleted_key == key:
+                report_removal()
+
+        def popitem(self, last=True):
+            removed_key, value = super().popitem(last=last)
+            if removed_key == key:
+                report_removal()
+            return removed_key, value
+
+        def clear(self):
+            contained_target = key in self
+            super().clear()
+            if contained_target:
+                report_removal()
+
+    class ObservedLock:
+        """Report a contender before it blocks behind the paused reader."""
+
+        def __init__(self):
+            self._lock = threading.Lock()
+
+        def __enter__(self):
+            if self._lock.locked():
+                coordination.put("writer_waiting")
+            self._lock.acquire()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            self._lock.release()
+
     # Pause at the actual lookup -> LRU promotion window, not before get_many.
     cache._data = PausedLookup(cache._data)
+    cache._lock = ObservedLock()
 
     def remove():
         writer_started.set()
@@ -51,9 +92,10 @@ def test_lookup_survives_concurrent_removal(mutation):
             assert looked_up.wait(5)
             writer = pool.submit(remove)
             assert writer_started.wait(5)
-            # On main the writer removes the key inside the paused lookup;
-            # with serialization it waits until the reader has copied its hit.
-            writer_finished.wait(0.2)
+            # A serialized writer reports that it is waiting on the reader's
+            # lock. On unfixed main it instead removes the key and reports that,
+            # deterministically reproducing the get -> move_to_end race.
+            assert coordination.get(timeout=5) == "writer_waiting"
         finally:
             release_reader.set()
         assert reader.result(timeout=5) == {key: entry}
