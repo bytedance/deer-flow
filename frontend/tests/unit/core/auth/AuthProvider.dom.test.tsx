@@ -1,8 +1,12 @@
 import { afterEach, beforeEach, expect, test, rs } from "@rstest/core";
-import { act, cleanup, render } from "@testing-library/react";
+import { act, cleanup, render, renderHook } from "@testing-library/react";
 import type React from "react";
 
-import { AuthProvider, useAuth } from "@/core/auth/AuthProvider";
+import {
+  AuthProvider,
+  useAuth,
+  useRequireAuth,
+} from "@/core/auth/AuthProvider";
 import type { User } from "@/core/auth/types";
 
 // refreshUser's 401 handling runs through next/navigation; capture the push
@@ -10,7 +14,7 @@ import type { User } from "@/core/auth/types";
 const push = rs.fn();
 rs.mock("next/navigation", () => ({
   useRouter: () => ({ push }),
-  usePathname: () => "/workspace",
+  usePathname: () => window.location.pathname,
 }));
 
 const initialUser: User = {
@@ -86,4 +90,37 @@ test("every other 401 keeps the return-to-workspace redirect", async () => {
 
   expect(ctx!.user).toBeNull();
   expect(push).toHaveBeenCalledWith("/login?next=%2Fworkspace");
+});
+
+test("a 401 returns to the page it happened on, query string included", async () => {
+  window.history.replaceState({}, "", "/workspace/scheduled-tasks?task_id=t-1");
+  mount();
+  globalThis.fetch = rs.fn(async () =>
+    jsonResponse(
+      { detail: { code: "token_expired", message: "Token expired" } },
+      401,
+    ),
+  ) as unknown as typeof globalThis.fetch;
+
+  await act(async () => {
+    await ctx!.refreshUser();
+  });
+
+  expect(push).toHaveBeenCalledWith(
+    "/login?next=%2Fworkspace%2Fscheduled-tasks%3Ftask_id%3Dt-1",
+  );
+});
+
+test("useRequireAuth returns to the page it guards, query string included", () => {
+  window.history.replaceState({}, "", "/workspace/scheduled-tasks?task_id=t-1");
+
+  renderHook(() => useRequireAuth(), {
+    wrapper: ({ children }: { children: React.ReactNode }) => (
+      <AuthProvider initialUser={null}>{children}</AuthProvider>
+    ),
+  });
+
+  expect(push).toHaveBeenCalledWith(
+    "/login?next=%2Fworkspace%2Fscheduled-tasks%3Ftask_id%3Dt-1",
+  );
 });
