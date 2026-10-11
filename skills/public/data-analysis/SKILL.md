@@ -245,4 +245,5 @@ This is especially useful when running multiple queries against the same data fi
 - DuckDB supports full SQL including window functions, CTEs, subqueries, and advanced aggregations
 - Excel date columns are automatically parsed; use DuckDB date functions (`DATE_TRUNC`, `EXTRACT`, etc.)
 - For very large files (100MB+), DuckDB handles them efficiently without loading everything into memory
-- Column names with spaces are accessible using double quotes: `"Column Name"`
+- Inspection and summaries preserve column names, including spaces and embedded double quotes.
+- In SQL queries, quote column names with spaces as `"Column Name"`; double any embedded double quote, e.g. the column `gross "USD"` is written as `"gross ""USD"""`.

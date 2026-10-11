@@ -185,6 +185,11 @@ def _load_csv(
         logger.warning(f"  Failed to load CSV '{base_name}': {e}")
 
 
+def _quote_identifier(name: str) -> str:
+    """Quote a SQL identifier, preserving embedded double quotes."""
+    return '"' + name.replace('"', '""') + '"'
+
+
 def action_inspect(con: duckdb.DuckDBPyConnection, table_map: dict[str, str]) -> str:
     """Inspect the schema of all loaded tables."""
     output_parts = []
@@ -211,7 +216,8 @@ def action_inspect(con: duckdb.DuckDBPyConnection, table_map: dict[str, str]) ->
         col_names = [col[0] for col in columns]
         non_null_parts = []
         for c in col_names:
-            non_null_parts.append(f'COUNT("{c}") as "{c}"')
+            quoted_col = _quote_identifier(c)
+            non_null_parts.append(f"COUNT({quoted_col}) as {quoted_col}")
         non_null_sql = f'SELECT {", ".join(non_null_parts)} FROM "{table_name}"'
         try:
             non_null_counts = con.execute(non_null_sql).fetchone()
@@ -402,6 +408,7 @@ def action_summary(
 
     for col in columns:
         col_name, col_type = col[0], col[1].upper()
+        quoted_col = _quote_identifier(col_name)
         output_parts.append(f"\n--- {col_name} ({col[1]}) ---")
 
         # Check base type (strip parameterized parts)
@@ -411,15 +418,15 @@ def action_summary(
             try:
                 stats = con.execute(f"""
                     SELECT
-                        COUNT("{col_name}") as count,
-                        AVG("{col_name}")::DOUBLE as mean,
-                        STDDEV("{col_name}")::DOUBLE as std,
-                        MIN("{col_name}") as min,
-                        QUANTILE_CONT("{col_name}", 0.25) as q25,
-                        MEDIAN("{col_name}") as median,
-                        QUANTILE_CONT("{col_name}", 0.75) as q75,
-                        MAX("{col_name}") as max,
-                        COUNT(*) - COUNT("{col_name}") as null_count
+                        COUNT({quoted_col}) as count,
+                        AVG({quoted_col})::DOUBLE as mean,
+                        STDDEV({quoted_col})::DOUBLE as std,
+                        MIN({quoted_col}) as min,
+                        QUANTILE_CONT({quoted_col}, 0.25) as q25,
+                        MEDIAN({quoted_col}) as median,
+                        QUANTILE_CONT({quoted_col}, 0.75) as q75,
+                        MAX({quoted_col}) as max,
+                        COUNT(*) - COUNT({quoted_col}) as null_count
                     FROM "{resolved}"
                 """).fetchone()
                 labels = [
@@ -444,10 +451,10 @@ def action_summary(
             try:
                 stats = con.execute(f"""
                     SELECT
-                        COUNT("{col_name}") as count,
-                        COUNT(DISTINCT "{col_name}") as unique_count,
-                        MODE("{col_name}") as mode_val,
-                        COUNT(*) - COUNT("{col_name}") as null_count
+                        COUNT({quoted_col}) as count,
+                        COUNT(DISTINCT {quoted_col}) as unique_count,
+                        MODE({quoted_col}) as mode_val,
+                        COUNT(*) - COUNT({quoted_col}) as null_count
                     FROM "{resolved}"
                 """).fetchone()
                 output_parts.append(f"  count   : {stats[0]}")
@@ -457,10 +464,10 @@ def action_summary(
 
                 # Show top 5 values
                 top_vals = con.execute(f"""
-                    SELECT "{col_name}", COUNT(*) as freq
+                    SELECT {quoted_col}, COUNT(*) as freq
                     FROM "{resolved}"
-                    WHERE "{col_name}" IS NOT NULL
-                    GROUP BY "{col_name}"
+                    WHERE {quoted_col} IS NOT NULL
+                    GROUP BY {quoted_col}
                     ORDER BY freq DESC
                     LIMIT 5
                 """).fetchall()
