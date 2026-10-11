@@ -12,6 +12,7 @@ import {
 } from "@/core/auth/admin-users";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 
 import { SettingsSection } from "./settings-section";
 
@@ -25,11 +26,13 @@ export function UserSettingsPage() {
   const { t } = useI18n();
   const text = t.settings.users;
   const client = useQueryClient();
-  const isAdmin = user?.system_role === "admin";
+  // The static-website demo user is nominally an admin with no Gateway behind
+  // it, so the demo shows the admin-only note instead of a doomed query.
+  const canManage = user?.system_role === "admin" && !isStaticWebsiteOnly();
   const users = useQuery({
     queryKey: ["admin-users", user?.id],
     queryFn: ({ signal }) => loadAdminUsers(signal),
-    enabled: isAdmin,
+    enabled: canManage,
   });
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -57,7 +60,7 @@ export function UserSettingsPage() {
 
   return (
     <SettingsSection title={text.title} description={text.description}>
-      {!isAdmin ? (
+      {!canManage ? (
         <p>{text.adminOnly}</p>
       ) : (
         <div className="space-y-4">

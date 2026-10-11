@@ -1706,7 +1706,7 @@ export const zhCN: Translations = {
       title: "用户管理",
       description:
         "停用或恢复本部署中的账号登录。被停用的账号在所有认证入口都会被拒绝，其现有会话立即失效。",
-      adminOnly: "只有管理员可以管理用户。",
+      adminOnly: "只有管理员可以管理用户，演示模式不支持此功能。",
       loading: "正在加载用户…",
       failed: "用户列表加载失败。",
       reload: "重新加载",
