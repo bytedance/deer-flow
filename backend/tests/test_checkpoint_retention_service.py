@@ -41,6 +41,7 @@ from app.gateway.checkpoint_retention import (
 from deerflow.agents.thread_state import merge_message_writes
 from deerflow.runtime.checkpoint_cache.base import make_history_key
 from deerflow.runtime.checkpoint_cache.memory import MemoryCheckpointHistoryCache
+from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.checkpointer.cached_saver import CachedHistorySaver
 from deerflow.runtime.runs.worker import _new_checkpoint_marker, persist_run_durations, persist_run_history_metadata
 
@@ -700,6 +701,67 @@ async def test_completed_run_retention_supports_cached_history_saver_and_invalid
     assert report.deleted_checkpoint_ids == [duration_head_id]
     assert cache.stats().entries == 0
     assert await saver_env.saver.aget_tuple(_config_thread(thread_id, duration_head_id)) is None
+
+
+@pytest.mark.anyio
+async def test_sqlite_delta_state_read_retries_when_retention_deletes_resolved_leaf(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A latest-state read must not lose history when retention removes the
+    duration leaf after LangGraph resolves it but before delta hydration."""
+    async with _open_sqlite(tmp_path / "retention-read-race.sqlite") as inner:
+        wrapped = CachedHistorySaver(
+            inner,
+            MemoryCheckpointHistoryCache(max_entries=16),
+            key_prefix="retention-read-race",
+        )
+        graph = _build_graph(DeltaState, wrapped)
+        accessor = CheckpointStateAccessor.bind(graph, wrapped, mode="delta")
+        thread_id = _thread_id()
+        expected = [HumanMessage(content="history survives", id="message-1")]
+        await graph.ainvoke({"messages": expected}, _config(thread_id))
+        assert await persist_run_history_metadata(
+            checkpointer=wrapped,
+            thread_id=thread_id,
+            durations={"run-1": 3},
+            message_run_ids={"message-1": "run-1"},
+        )
+        duration_head = await inner.aget_tuple(_config(thread_id))
+        assert duration_head is not None
+        duration_head_id = duration_head.checkpoint["id"]
+
+        target_resolved = asyncio.Event()
+        allow_hydration = asyncio.Event()
+        original_aget_tuple = inner.aget_tuple
+        paused = False
+
+        async def pause_before_hydrating_target(config: dict[str, Any]) -> Any:
+            nonlocal paused
+            checkpoint_id = config.get("configurable", {}).get("checkpoint_id")
+            if checkpoint_id == duration_head_id and not paused:
+                paused = True
+                target_resolved.set()
+                await allow_hydration.wait()
+            return await original_aget_tuple(config)
+
+        monkeypatch.setattr(inner, "aget_tuple", pause_before_hydrating_target)
+        read_task = asyncio.create_task(accessor.aget(_config(thread_id)))
+        await asyncio.wait_for(target_resolved.wait(), timeout=2)
+
+        report = await enforce_completed_run_retention(
+            checkpointer=wrapped,
+            thread_id=thread_id,
+        )
+        assert report.deleted_checkpoint_ids == [duration_head_id]
+        allow_hydration.set()
+
+        snapshot = await asyncio.wait_for(read_task, timeout=2)
+        messages = snapshot.values["messages"]
+        assert [(message.id, message.content) for message in messages] == [
+            ("message-1", "history survives"),
+        ]
+        assert snapshot.config["configurable"]["checkpoint_id"] != duration_head_id
 
 
 @pytest.mark.anyio
