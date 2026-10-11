@@ -141,11 +141,18 @@ _SENSITIVE_PATH_RE = re.compile(r"(~/.ssh|/etc/passwd|/etc/shadow|/var/run/docke
 _EXTERNAL_HTTP_RE = re.compile(r"(?i:http)://(?:[^/?#\s)'\"<>]*@)?(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(?::\d+)?(?:/|\b|(?=$|[\s)'\"<>?#]))")
 _URL_RE = re.compile(r"(?i:https?)://[^\s)'\"<>]+")
 _LOCAL_HTTP_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
-# A fork bomb is matched by shape, not spelling: any shell function whose body
-# recurses through a pipe into a background job. Kept aligned with the runtime
-# gate in agents/middlewares/sandbox_audit_middleware.py so the pre-LLM static
-# scan never passes a payload (renamed or respaced included) the sandbox blocks.
-_FORK_BOMB_PATTERN = r"\S+\(\)\s*\{[^}]*\|\s*\S+\s*&"
+# A fork bomb is matched by shape, not spelling: a shell function whose body
+# pipes into a background job that names the function itself, e.g.
+# `bomb(){ bomb|bomb& };bomb` as well as `:(){ :|:& };:`. The name must recur
+# after the pipe, so a benign pipeline such as
+# `backup() { rsync -a src/ | logger & }` stays clean. Every quantifier is
+# bounded so a whitespace-free blob costs O(n), not O(n^2); pipe-less
+# self-backgrounding recursion (`f(){ f & };f`, `f(){ f & f & };f`) and the
+# spaced `|&` spelling are out of scope for this pattern. Kept byte-identical
+# to the runtime gate in agents/middlewares/sandbox_audit_middleware.py so the
+# pre-LLM static scan never passes a payload (renamed or respaced included)
+# the sandbox blocks.
+_FORK_BOMB_PATTERN = r"(?P<fn>[^\s(){};|&]{1,64})\(\)\s*\{[^{}]{0,2048}\|\s*[^{}\s&]{0,64}(?P=fn)\s*&"
 # `rm` with a recursive flag (any order/combination, optional --no-preserve-root)
 # targeting the filesystem root, a wildcard, or a complete system-root directory.
 # Subpaths like ``/tmp/scratch`` or ``/home/user/project`` stay unflagged.
