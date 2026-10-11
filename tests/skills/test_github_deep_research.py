@@ -6,7 +6,7 @@ import runpy
 import sys
 import urllib.request
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 
@@ -28,7 +28,12 @@ def fallback_client(monkeypatch):
             connection.putrequest("GET", request.selector)
         finally:
             connection.close()
-        captured.update(url=request.full_url, timeout=timeout, headers=request.headers)
+        captured.update(
+            url=request.full_url,
+            target=request.selector,
+            timeout=timeout,
+            headers=request.headers,
+        )
         response = io.BytesIO(b'{"ok": true}')
         response.status = 200
         return response
@@ -82,3 +87,49 @@ def test_fallback_without_parameters(fallback_client):
     assert client.get_repo_info("owner", "repo") == {"ok": True}
 
     assert captured["url"] == "https://api.github.com/repos/owner/repo"
+
+
+@pytest.fixture(params=["requests", "urllib"])
+def file_client(request, monkeypatch):
+    if request.param == "urllib":
+        return request.getfixturevalue("fallback_client")
+
+    requests = pytest.importorskip("requests")
+    script = (
+        Path(__file__).resolve().parents[2]
+        / "skills/public/github-deep-research/scripts/github_api.py"
+    )
+    module = runpy.run_path(str(script))
+    captured = {}
+
+    def fake_send(self, prepared, **kwargs):
+        captured.update(url=prepared.url, target=prepared.path_url)
+        response = requests.Response()
+        response.status_code = 200
+        response._content = b'{"ok": true}'
+        response.encoding = "utf-8"
+        return response
+
+    monkeypatch.setattr(requests.Session, "send", fake_send)
+    return module["GitHubAPI"](), captured
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "docs/topic#intro.md",
+        "docs/query?draft.md",
+        "docs/literal%20name.md",
+        "docs/笔记 draft.md",
+        "docs/nested/readme.md",
+    ],
+)
+def test_file_content_preserves_repository_path(file_client, path):
+    client, captured = file_client
+
+    assert client.get_file_content("owner", "repo", path) == '{"ok": true}'
+
+    target = urlsplit(captured["target"])
+    assert unquote(target.path) == f"/repos/owner/repo/contents/{path}"
+    assert target.query == ""
+    assert target.fragment == ""
