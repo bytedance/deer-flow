@@ -407,7 +407,9 @@ configuration error instead: no MCP tools load until the names match.
 
 For deployment-level HTTP/SSE servers with `task_toolsets`, discovery, ordinary
 tool calls, and background submit/status/cancel calls share the cached access
-token, rotated refresh token, and refresh lock for one Gateway process lifetime.
+token, rotated refresh token, and loop-independent refresh-completion signal for
+one Gateway process lifetime. A thread lock protects only short state transitions;
+callers waiting for refresh completion suspend on their own event loops.
 Tool-cache resets and rediscovery keep that state. Token rotation does not
 modify the parsed configuration or trigger the startup-snapshot drift guard;
 real operator configuration changes still require a restart.
