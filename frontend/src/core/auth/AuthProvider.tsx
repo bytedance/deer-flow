@@ -16,6 +16,7 @@ import {
   ACCOUNT_DISABLED_LOGIN_URL,
   type User,
   buildLoginUrl,
+  currentReturnPath,
   parseAuthError,
 } from "./types";
 
@@ -106,7 +107,7 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
           router.push(ACCOUNT_DISABLED_LOGIN_URL);
         } else if (pathname?.startsWith("/workspace")) {
           // Session expired or invalid — redirect on protected routes
-          router.push(buildLoginUrl(pathname));
+          router.push(buildLoginUrl(currentReturnPath()));
         }
       }
     } catch (err) {
@@ -221,7 +222,7 @@ export function useRequireAuth(): AuthContextType {
 
     // Only redirect if we're sure user is not authenticated (not just loading)
     if (!auth.isLoading && !auth.isAuthenticated) {
-      router.push(buildLoginUrl(pathname || "/workspace"));
+      router.push(buildLoginUrl(currentReturnPath()));
     }
   }, [auth.isAuthenticated, auth.isLoading, router, pathname]);
 

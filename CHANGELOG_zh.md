@@ -3213,6 +3213,12 @@
   由于词序无法还原，会以退出码 2 退出并提示加引号。同时传入 `--print` 和 `--json`
   现在会以退出码 2 退出，而不是运行 `--print` 并丢弃 `--json` 的消息。([#6636])
 
+- **前端：** 工作区会话失效后重新登录，现在会回到原来打开的页面，并保留查询参数和锚点。
+  此前在没有有效会话时打开工作区页面（例如会话过期后点开定时任务通知链接
+  `/workspace/scheduled-tasks?task_id=...`）会跳到不带参数的 `/login`，登录后只能
+  回到默认工作区；工作区布局无法读取请求 URL，因此现在改由浏览器发起跳转，在
+  `next` 中保留完整地址。客户端会话检查（`AuthProvider.refreshUser`、
+  `useRequireAuth`）此前保留了路径但丢掉了查询参数，共享 fetcher 则丢掉了锚点；现在都保留完整地址。([#6681])
 - **沙箱：** AIO、E2B、OpenSandbox 提供者和 ACP agent 不再对
   `sandbox.environment` / `acp_agents.<name>.env` 的值做第二次解析。加载
   `config.yaml` 时已替换每个 `$VAR`，因此本身以 `$` 开头的已解析密钥（如
@@ -7720,3 +7726,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6636]: https://github.com/bytedance/deer-flow/pull/6636
 [#6666]: https://github.com/bytedance/deer-flow/pull/6666
 [#6673]: https://github.com/bytedance/deer-flow/pull/6673
+[#6681]: https://github.com/bytedance/deer-flow/pull/6681
