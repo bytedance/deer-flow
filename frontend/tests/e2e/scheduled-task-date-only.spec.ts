@@ -43,6 +43,9 @@ test("a date-only run_at shows and edits as midnight in the task's zone", async 
     ],
   });
 
+  // The schedule line drops the year inside the current year and turns
+  // relative ("Tomorrow") in the final week, so pin "now" well before the run.
+  await page.clock.setFixedTime(new Date("2026-10-01T00:00:00Z"));
   await page.goto("/workspace/scheduled-tasks");
   const detail = page.getByTestId("scheduled-task-detail");
   // The schedule line itself, read from run_at. The separate next-run line
