@@ -4186,7 +4186,7 @@ This release closes that milestone with **439 merged pull requests**.
   the browser, which keeps the full address in `next`. The client-side session
   checks (`AuthProvider.refreshUser`, `useRequireAuth`) kept the path but
   dropped the query string; they now keep both, as the shared fetcher already
-  did.
+  did. ([#6681])
 
 ### Security
 
@@ -9599,3 +9599,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6635]: https://github.com/bytedance/deer-flow/pull/6635
 [#6636]: https://github.com/bytedance/deer-flow/pull/6636
 [#6666]: https://github.com/bytedance/deer-flow/pull/6666
+[#6681]: https://github.com/bytedance/deer-flow/pull/6681

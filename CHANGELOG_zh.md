@@ -3214,7 +3214,7 @@
   `/workspace/scheduled-tasks?task_id=...`）会跳到不带参数的 `/login`，登录后只能
   回到默认工作区；工作区布局无法读取请求 URL，因此现在改由浏览器发起跳转，在
   `next` 中保留完整地址。客户端会话检查（`AuthProvider.refreshUser`、
-  `useRequireAuth`）此前保留了路径但丢掉了查询参数，现在与共享 fetcher 一样两者都保留。
+  `useRequireAuth`）此前保留了路径但丢掉了查询参数，现在与共享 fetcher 一样两者都保留。([#6681])
 
 ### 安全
 
@@ -7715,3 +7715,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6635]: https://github.com/bytedance/deer-flow/pull/6635
 [#6636]: https://github.com/bytedance/deer-flow/pull/6636
 [#6666]: https://github.com/bytedance/deer-flow/pull/6666
+[#6681]: https://github.com/bytedance/deer-flow/pull/6681
