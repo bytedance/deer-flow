@@ -187,6 +187,40 @@ def test_reverse_resolve_path_matches_windows_backslash_containment(monkeypatch)
     assert result == "/mnt/user-data/workspace/sub/f.txt"
 
 
+def test_reverse_resolve_path_matches_windows_case_variant(monkeypatch):
+    """Windows host paths are case-insensitive — reverse resolution must match a
+    differently-cased spelling of the mount root and still output the virtual
+    path, instead of leaking the raw host root.
+
+    The forward direction already compares via ``normcase``; the reverse
+    containment check must do the same so a command that echoes a path in a
+    different case (e.g. ``C:\\USERS\\TEST\\...`` from a Python/batch child)
+    does not fall through to the raw-host-path fallback.
+    """
+    sb = LocalSandbox(
+        id="windows-case-test",
+        path_mappings=[
+            PathMapping(container_path="/mnt/user-data/workspace", local_path="C:\\Users\\test\\workspace"),
+        ],
+    )
+    mapping = sb.path_mappings[0]
+
+    monkeypatch.setattr(local_sandbox_module.os, "sep", "\\")
+    # Pin the resolved root to the mapping as realpath would render it on Windows.
+    sb._resolved_local_paths = {mapping: "C:\\Users\\test\\workspace"}
+    monkeypatch.setattr(local_sandbox_module.os.path, "realpath", lambda raw: raw.replace("/", "\\"))
+    # Windows paths compare case-insensitively; CI runs on POSIX where
+    # ``normcase`` is an identity, so stub it to reproduce that semantics.
+    monkeypatch.setattr(local_sandbox_module.os.path, "normcase", str.lower)
+
+    # Lower-cased drive + uppercase user/workspace spelling.
+    result = sb._reverse_resolve_path("c:\\users\\TEST\\WORKSPACE\\sub\\f.txt")
+
+    assert result == "/mnt/user-data/workspace/sub/f.txt", (
+        "case variant must map to the virtual container path, not leak the host root"
+    )
+
+
 def test_resolved_paths_and_sorted_views_are_cached(tmp_path):
     sb = _make_sandbox(tmp_path)
     # Resolved-local map and sorted views are computed once and reused.

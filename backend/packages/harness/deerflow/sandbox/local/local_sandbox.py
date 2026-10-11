@@ -318,7 +318,12 @@ class LocalSandbox(Sandbox):
 
         for mapping in self.path_mappings:
             local_resolved = self._resolved_local_paths[mapping]
-            if resolved == local_resolved or resolved.startswith(local_resolved + os.sep):
+            # Case-insensitive on Windows (``normcase`` is a no-op on POSIX),
+            # matching ``_resolve_path_with_mapping`` so a read-only mount is
+            # recognised regardless of path case.
+            norm_resolved = os.path.normcase(local_resolved)
+            norm_path = os.path.normcase(resolved)
+            if norm_path == norm_resolved or norm_path.startswith(norm_resolved + os.sep):
                 prefix_len = len(local_resolved)
                 if prefix_len > best_prefix_len:
                     best_prefix_len = prefix_len
@@ -418,7 +423,14 @@ class LocalSandbox(Sandbox):
             # backslash-joined nested path on Windows, so every nested path
             # silently fell through to the "no mapping found" fallback and
             # leaked the raw host path (real username, full directory tree).
-            if local_path == local_path_resolved or local_path.startswith(local_path_resolved + os.sep):
+            # Paths are case-insensitive on Windows, so compare through
+            # ``normcase`` (``os.sep``-insensitive on POSIX) -- mirroring the
+            # forward-direction containment check in ``_resolve_path_with_mapping``.
+            # The relative portion below is still sliced from the *original*
+            # ``local_path`` so the output spelling survives.
+            norm_local = os.path.normcase(local_path)
+            norm_resolved = os.path.normcase(local_path_resolved)
+            if norm_local == norm_resolved or norm_local.startswith(norm_resolved + os.sep):
                 # Replace the local path prefix with container path. Container
                 # paths are always POSIX-style, so the extracted relative
                 # portion (native-separated on Windows) is normalized to

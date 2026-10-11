@@ -138,6 +138,30 @@ class TestReadOnlyPath:
         )
         assert sandbox._is_read_only_path("/home/user/skills") is True
 
+    def test_is_read_only_true_for_case_variant_on_windows(self, monkeypatch):
+        """Windows read-only mount checks must ignore path case like forward resolution."""
+        import deerflow.sandbox.local.local_sandbox as local_sandbox_module
+
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(
+                    container_path="/mnt/skills",
+                    local_path=r"C:\Users\test\skills",
+                    read_only=True,
+                ),
+            ],
+        )
+        mapping = sandbox.path_mappings[0]
+        sandbox._resolved_local_paths = {mapping: r"C:\Users\test\skills"}
+        monkeypatch.setattr(local_sandbox_module.os, "sep", "\\")
+        monkeypatch.setattr(local_sandbox_module.os.path, "realpath", lambda raw: raw)
+        # Windows paths compare case-insensitively; CI runs on POSIX where
+        # ``normcase`` is an identity, so stub it to reproduce that semantics.
+        monkeypatch.setattr(local_sandbox_module.os.path, "normcase", str.lower)
+
+        assert sandbox._is_read_only_path(r"c:\users\TEST\SKILLS\file.txt") is True
+
     def test_write_file_blocked_on_read_only(self, tmp_path):
         skills_dir = tmp_path / "skills"
         skills_dir.mkdir()

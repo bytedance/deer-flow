@@ -25,6 +25,7 @@ reverse direction has to accept both spellings of the same host path — see
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Callable
 
@@ -111,12 +112,27 @@ def replace_output_path_matches(
 
     searchable_output = output.replace("\\", "/") if separator_agnostic and "\\" in output else output
     searchable_base = base.replace("\\", "/") if separator_agnostic and "\\" in base else base
+    # Case-insensitive on Windows and a no-op on POSIX, matching the
+    # ``normcase`` comparisons used by LocalSandbox containment checks. The
+    # normalized strings remain length-preserving, so the match index stays
+    # valid on the original ``searchable_output``.
+    #
+    # Only fold when a Windows separator is present in the *original* input:
+    # ``normcase`` would otherwise normalize an already-posix-spelled path, and
+    # callers that avoid normalization when no backslash is present
+    # (``replace_output_path_matches`` zero-replace contract) stay intact.
+    if "\\" in output or "\\" in base:
+        folded_output = os.path.normcase(searchable_output)
+        folded_base = os.path.normcase(searchable_base)
+    else:
+        folded_output = searchable_output
+        folded_base = searchable_base
     chunks: list[str] = []
     copied_until = 0
     search_from = 0
 
     while True:
-        match_start = searchable_output.find(searchable_base, search_from)
+        match_start = folded_output.find(folded_base, search_from)
         if match_start < 0:
             break
 

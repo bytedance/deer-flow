@@ -125,6 +125,34 @@ def test_direct_replacer_matches_the_shared_boundary_and_tail_contract() -> None
     assert replacer("root /host/skills, done", "/host/skills", "/mnt/skills", separator_agnostic=True) == "root /mnt/skills, done"
 
 
+def test_direct_replacer_matches_a_windows_case_variant_without_rewriting_case(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On Windows the host path is case-insensitive; the scanner must match a
+    differently-cased spelling (e.g. ``c:\\users\\TEST\\...`` from a native
+    child) and mask it back to the virtual path, keeping the surrounding text's
+    original case intact.
+
+    CI runs on POSIX where ``os.path.normcase`` is an identity, so the test
+    stubs it to lower-case to reproduce the Windows semantics.
+    """
+    monkeypatch.setattr(path_patterns_module.os.path, "normcase", str.lower)
+
+    replacer = getattr(path_patterns_module, "replace_output_path_matches", None)
+    assert replacer is not None
+
+    result = replacer(
+        "found c:\\users\\TEST\\WORKSPACE\\a.md",
+        "C:\\Users\\test\\workspace",
+        "/mnt/user-data/workspace",
+        separator_agnostic=True,
+    )
+
+    assert result == "found /mnt/user-data/workspace/a.md", (
+        "case variant must mask to the virtual path, not leak the raw host root"
+    )
+
+
 def test_direct_replacer_normalizes_nested_tail_to_virtual_posix_style() -> None:
     # The tail is sliced from the original output, so a Windows-spelled nested
     # path kept its backslashes and was spliced into the POSIX-style virtual
