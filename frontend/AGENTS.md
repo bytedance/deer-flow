@@ -46,6 +46,11 @@ Rstest runs them as two projects (`rstest.config.ts`). `*.test.ts` / `*.test.tsx
 
 E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`. The real-backend auth contract in `tests/e2e-real-backend/auth-disabled-contract.spec.ts` and `backend/tests/test_auth_me_permissions.py` pin the complete route-permission list; update both when adding registered permissions (including `projects:read/write/delete`).
 
+Streaming/history refetches can temporarily replace virtual message rows. DOM
+ordering checks must read both nodes atomically, wait only for missing nodes,
+and assert the first complete ordering result; a reversed order must fail rather
+than be retried until correct. `thread-ordering.spec.ts` covers live compaction.
+
 The dedicated `run-history.ts` hook replaces the unpaged runs hook. Show counts
 only after a successful history read, never during initial loading or errors.
 Scheduled run history uses task/page query keys and the existing live offset API.
@@ -203,6 +208,16 @@ Pin/archive responses must not merge unrelated metadata flags: out-of-order
 organization requests can otherwise roll back each other's confirmed state.
 Run-created optimistic snapshots have no archive flag: refresh archive-filtered
 lists from the server instead of inserting those snapshots into either view.
+
+Desktop right panels pin their final content width before paint and retain it
+until the panel's own CSS transition finishes. Invalidate pending completion on
+toggle/unmount; do not await child animations. Mobile Sheet exits retain their
+separate content lifetime. Mobile browser tests must await the committed mobile
+layout before clicking controls rendered by the desktop SSR snapshot.
+
+The dynamically loaded extension gallery disables its client-only actions in
+SSR until its own hydration connects navigation handlers. Parent hydration
+does not establish readiness for that child; documentation anchors stay usable.
 
 ### Delimited artifact preview
 
