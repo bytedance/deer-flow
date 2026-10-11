@@ -1506,6 +1506,12 @@ class RunManager:
                     run_id,
                     grace_seconds=grace_seconds,
                     error=take_over_msg,
+                    # The owner is presumed dead, so a cross-worker consumer's
+                    # only liveness edge is the durable row. Mark the takeover
+                    # like periodic orphan recovery; without this stop reason
+                    # SSE/`wait` subscribers that outlive the crashed owner
+                    # loop on heartbeats forever (their fallback requires it).
+                    stop_reason=ORPHAN_RECOVERY_STOP_REASON,
                 ),
             )
         except Exception:
