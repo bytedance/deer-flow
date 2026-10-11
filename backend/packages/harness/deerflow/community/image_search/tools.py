@@ -44,9 +44,9 @@ def _search_images(
     """
     try:
         from ddgs import DDGS
-    except ImportError:
-        logger.error("ddgs library not installed. Run: pip install ddgs")
-        return []
+        from ddgs.exceptions import DDGSException
+    except ImportError as exc:
+        raise RuntimeError("ddgs library not installed. Run: pip install ddgs") from exc
 
     ddgs = DDGS(timeout=30)
 
@@ -71,9 +71,12 @@ def _search_images(
         results = ddgs.images(query, **kwargs)
         return list(results) if results else []
 
-    except Exception as e:
-        logger.error(f"Failed to search images: {e}")
-        return []
+    except DDGSException as exc:
+        # DDGS uses this exact exception for a successful search with no hits.
+        # Timeouts, rate limits, and other failures must reach the tool caller.
+        if type(exc) is DDGSException and str(exc) == "No results found.":
+            return []
+        raise
 
 
 @tool("image_search", parse_docstring=True)
@@ -95,6 +98,7 @@ async def image_search_tool(
     - Before generating fashion/clothing: search for style and detail references
 
     The returned image URLs can be used as reference images in image generation to significantly improve quality.
+    An error other than "No images found" means the search failed, not that the query has no matching images.
 
     Args:
         query: Search keywords describing the images you want to find. Be specific for better results (e.g., "Japanese woman street photography 1990s" instead of just "woman").
@@ -127,7 +131,11 @@ async def image_search_tool(
             license_image=license_image,
         )
 
-    results = await asyncio.to_thread(search_with_config)
+    try:
+        results = await asyncio.to_thread(search_with_config)
+    except Exception as exc:
+        logger.exception("Failed to search images")
+        return json.dumps({"error": f"DuckDuckGo image search failed: {type(exc).__name__}: {exc}", "query": query}, ensure_ascii=False)
 
     if not results:
         return json.dumps({"error": "No images found", "query": query}, ensure_ascii=False)
