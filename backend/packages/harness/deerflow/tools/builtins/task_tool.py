@@ -498,8 +498,8 @@ def _schedule_deferred_subagent_cleanup(
     try:
         cleanup_handle = run_on_isolated_subagent_loop(coro)
     except Exception:
-        # Unreachable in practice — the persistent loop backs the subagent
-        # execution itself, so it exists by the time a poller needs cleanup.
+        # The persistent loop can be temporarily fenced while retained
+        # shutdown ownership is still exiting; keep cleanup on the caller loop.
         logger.warning(
             f"[trace={trace_id}] Persistent subagent loop unavailable for deferred cleanup of {execution_id}; falling back to the caller loop",
             exc_info=True,
@@ -648,7 +648,7 @@ def _task_result_command(
                     content=content,
                     tool_call_id=tool_call_id,
                     name="task",
-                    artifact=cited_source_artifact(source_messages or [], content),
+                    artifact=cited_source_artifact(source_messages or [], content, include_omissions=True),
                     additional_kwargs=make_subagent_additional_kwargs(
                         status,
                         result=result,

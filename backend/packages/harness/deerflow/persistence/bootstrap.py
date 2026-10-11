@@ -50,10 +50,12 @@ Layered, with different guarantees per backend. Postgres has true
 cross-process serialisation. SQLite is single-process safe and cross-process
 best-effort; multi-instance deployments should use Postgres.
 
-* **Postgres -- true cross-process serialisation.** ``pg_advisory_lock`` runs
-  the whole reflect-and-act sequence under an exclusive lock that survives
-  cross-process. Concurrent Gateway instances queue cleanly and the second
-  one observes head as a no-op.
+* **Postgres -- true cross-process serialisation.** A session-level advisory
+  lock runs the whole reflect-and-act sequence under an exclusive lock that
+  survives cross-process. Concurrent Gateway instances wait for it however
+  long the holder's migration takes (polling, so the engine's
+  ``command_timeout`` never cuts the wait short) and the second one observes
+  head as a no-op.
 
 * **SQLite -- single-process serialisation, best-effort cross-process.**
   SQLite is single-node by deployment, so the realistic concurrency case is
@@ -97,7 +99,7 @@ from alembic.script import ScriptDirectory
 from alembic.util.exc import CommandError
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from deerflow.utils.file_io import await_drained
 
@@ -183,6 +185,11 @@ _BASELINE_REVISION = "0001_baseline"
 # change without coordinating a one-time migration (a key change effectively
 # releases the prior lock).
 _PG_LOCK_KEY = 0x0DEE_12F1_0BEE_3682
+
+# Delay between ``pg_try_advisory_lock`` attempts while another instance holds
+# the bootstrap lock. Waiting is a loop of short statements, so the engine's
+# ``command_timeout`` bounds each attempt instead of the whole wait.
+_PG_LOCK_POLL_INTERVAL_SECONDS = 1.0
 
 
 # Tables created by ``0001_baseline.upgrade()``. The legacy branch restricts
@@ -521,6 +528,26 @@ def _upgrade(cfg: AlembicConfig, revision: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _acquire_postgres_lock(conn: AsyncConnection) -> None:
+    """Take the session-level bootstrap advisory lock on *conn*, waiting as
+    long as another instance holds it.
+
+    Polls ``pg_try_advisory_lock`` instead of blocking in
+    ``pg_advisory_lock``. The app engine sets asyncpg's ``command_timeout``
+    (30s by default), which applies to every statement without an explicit
+    timeout -- a blocking acquire would raise ``TimeoutError`` and fail
+    startup whenever a peer's migration outlasts it. Each poll returns
+    immediately, so ``command_timeout`` still bounds a stalled round trip
+    while the wait itself stays unbounded, like the holder's migration.
+    """
+    logged_wait = False
+    while not (await conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": _PG_LOCK_KEY})).scalar_one():
+        if not logged_wait:
+            logger.info("bootstrap: postgres advisory lock key=0x%x is held by another instance; waiting", _PG_LOCK_KEY)
+            logged_wait = True
+        await asyncio.sleep(_PG_LOCK_POLL_INTERVAL_SECONDS)
+
+
 @asynccontextmanager
 async def _postgres_lock(engine: AsyncEngine):
     """Hold a Postgres session-level advisory lock for the body of the block.
@@ -547,12 +574,14 @@ async def _postgres_lock(engine: AsyncEngine):
     the kill **for this transaction only** (no global / role-level effect).
     Self-hosted Postgres usually ships with the timeout off, so this is a
     no-op there; on managed PG it is what keeps the lock alive while DDL
-    runs. Must execute *before* ``pg_advisory_lock`` so a slow lock acquire
-    on a heavily-contended cluster is itself protected.
+    runs. Must execute *before* the lock is acquired so a slow acquire on a
+    heavily-contended cluster is itself protected.
+
+    Acquisition polls rather than blocks -- see ``_acquire_postgres_lock``.
     """
     async with engine.connect() as conn:
         await conn.execute(text("SET LOCAL idle_in_transaction_session_timeout = 0"))
-        await conn.execute(text("SELECT pg_advisory_lock(:k)"), {"k": _PG_LOCK_KEY})
+        await _acquire_postgres_lock(conn)
         try:
             logger.info("bootstrap: acquired postgres advisory lock key=0x%x", _PG_LOCK_KEY)
             yield

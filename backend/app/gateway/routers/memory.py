@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.gateway.authz import require_permission
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
+from app.gateway.persistent_writes import run_drained_write
 from deerflow.agents.memory import MemoryConflictError, MemoryCorruptionError, MemoryManager, get_memory_manager
 from deerflow.config.agents_config import AGENT_NAME_PATTERN
 from deerflow.config.memory_config import get_memory_config
@@ -363,8 +364,10 @@ async def clear_memory(request: Request, agent_name: str | None = None) -> Memor
     selected_agent = _management_agent_name_or_501(manager, agent_name)
     scope_kwargs = _agent_scope_kwargs(selected_agent)
     try:
-        memory_data = await asyncio.to_thread(
+        memory_data = await run_drained_write(
+            "Clear memory data",
             manager.clear_memory,
+            (NotImplementedError, MemoryConflictError, MemoryCorruptionError, OSError),
             user_id=_resolve_memory_user_id(request),
             **scope_kwargs,
         )
@@ -392,8 +395,10 @@ async def create_memory_fact_endpoint(body: FactCreateRequest, request: Request,
     selected_agent = _management_agent_name_or_501(manager, agent_name)
     scope_kwargs = _agent_scope_kwargs(selected_agent)
     try:
-        memory_data, fact_id = await asyncio.to_thread(
+        memory_data, fact_id = await run_drained_write(
+            "Create memory fact",
             manager.create_fact,
+            (NotImplementedError, ValueError, MemoryConflictError, MemoryCorruptionError, OSError),
             content=body.content,
             category=body.category,
             confidence=body.confidence,
@@ -429,8 +434,10 @@ async def delete_memory_fact_endpoint(fact_id: str, request: Request, agent_name
     selected_agent = _management_agent_name_or_501(manager, agent_name)
     scope_kwargs = _agent_scope_kwargs(selected_agent)
     try:
-        memory_data = await asyncio.to_thread(
+        memory_data = await run_drained_write(
+            "Delete memory fact",
             manager.delete_fact,
+            (NotImplementedError, KeyError, MemoryConflictError, MemoryCorruptionError, OSError),
             fact_id,
             user_id=_resolve_memory_user_id(request),
             **scope_kwargs,
@@ -461,8 +468,10 @@ async def update_memory_fact_endpoint(fact_id: str, body: FactPatchRequest, requ
     selected_agent = _management_agent_name_or_501(manager, agent_name)
     scope_kwargs = _agent_scope_kwargs(selected_agent)
     try:
-        memory_data = await asyncio.to_thread(
+        memory_data = await run_drained_write(
+            "Update memory fact",
             manager.update_fact,
+            (NotImplementedError, ValueError, KeyError, MemoryConflictError, MemoryCorruptionError, OSError),
             fact_id=fact_id,
             content=body.content,
             category=body.category,
@@ -519,8 +528,10 @@ async def import_memory(body: MemoryResponse, request: Request, agent_name: str 
     selected_agent = _management_agent_name_or_501(manager, agent_name)
     scope_kwargs = _agent_scope_kwargs(selected_agent)
     try:
-        memory_data = await asyncio.to_thread(
+        memory_data = await run_drained_write(
+            "Import memory data",
             manager.import_memory,
+            (NotImplementedError, ValueError, MemoryConflictError, MemoryCorruptionError, OSError),
             body.model_dump(exclude_none=True),
             user_id=_resolve_memory_user_id(request),
             **scope_kwargs,

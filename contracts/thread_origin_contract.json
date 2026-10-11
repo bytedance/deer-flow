@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "description": "Cross-language contract fixture for the server-owned run and thread origin. The Gateway stamps metadata[key] = {\"kind\": <one of kinds>, \"provider\"?: ..., \"namespace\"?: ...} on runs started by a server-side launcher, and on the thread when it creates one (backend/packages/harness/deerflow/runtime/run_origin.py); runs.origin_kind holds the kind. The frontend reads the same key to pick a thread's origin marker. Not to be confused with scheduled_origin_key in scheduled_goal_notes_contract.json, which marks the scheduled prompt message inside a run.",
+  "key": "deerflow_origin",
+  "kinds": [
+    "extension",
+    "github",
+    "im_channel",
+    "mcp_notification",
+    "schedule"
+  ]
+}

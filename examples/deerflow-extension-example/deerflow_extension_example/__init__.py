@@ -1,4 +1,4 @@
-"""A compact, standalone DeerFlow extension exercising every contribution kind."""
+"""A compact, standalone DeerFlow extension exercising five contribution kinds."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ __all__ = ["install"]
 
 @extension(api="0.2.0", name="example")
 def install(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
-    """Register one example of each supported contribution kind."""
+    """Register one middleware, task lifecycle, system-model observer, service, and router."""
     if config.get("enabled", True) is False:
         return
 

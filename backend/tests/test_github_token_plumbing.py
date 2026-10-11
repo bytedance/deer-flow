@@ -29,7 +29,7 @@ from langgraph_sdk.errors import ConflictError
 
 from app.channels.manager import ChannelManager
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus
-from app.channels.store import ChannelStore
+from app.channels.store import JsonChannelStore
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
 from deerflow.sandbox.tools import _github_env_from_runtime, bash_tool
 
@@ -144,7 +144,8 @@ def test_aio_sandbox_env_routes_through_bash_exec() -> None:
     out = sbx.execute_command("gh pr create", env={"GH_TOKEN": "tok-123"})
 
     assert out == "ok"
-    assert captured["command"] == "gh pr create"
+    assert captured["command"] == "exec < /dev/null\ngh pr create"
+    assert "tok-123" not in captured["command"]
     assert captured["env"] == {"GH_TOKEN": "tok-123"}
     assert captured["created_session"] == captured["exec_session"] == captured["closed_session"]
     assert captured["create_options"] == {
@@ -175,7 +176,7 @@ def test_aio_sandbox_no_env_leaves_command_unchanged() -> None:
     sbx._recovery_session_id = None
     sbx._default_shell_corrupted = False
 
-    sbx.execute_command("echo hello")
+    assert sbx.execute_command("echo hello") == "ok"
 
     assert captured["command"] == "echo hello"
 
@@ -503,7 +504,7 @@ def _github_msg(installation_id: int | None = 140594274) -> InboundMessage:
 
 def _new_manager() -> ChannelManager:
     bus = MessageBus()
-    store = ChannelStore(path=Path("/tmp/nonexistent-store-test.json"))
+    store = JsonChannelStore(path=Path("/tmp/nonexistent-store-test.json"))
     return ChannelManager(bus=bus, store=store)
 
 

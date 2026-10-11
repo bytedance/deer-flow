@@ -170,7 +170,7 @@ The project includes a unified cleanup script that handles both runtimes:
 All cleanup commands in `Makefile` automatically handle both runtimes:
 ```bash
 make stop   # Stops all services and cleans up containers
-make clean  # Full cleanup including logs
+make clean  # Also deletes local runtime data (backend/.deer-flow) and logs
 ```
 
 ## Testing

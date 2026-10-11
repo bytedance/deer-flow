@@ -166,7 +166,9 @@ async def convert_file_to_markdown(file_path: Path, output_path: Path | None = N
         file_size = (await run_file_io(file_path.stat)).st_size
 
         if file_size > _ASYNC_THRESHOLD_BYTES:
-            text = await asyncio.to_thread(_do_convert, file_path, pdf_converter)
+            # Cancellation must not release the caller's source-file ownership
+            # while the converter is still reading it in the worker thread.
+            text = await await_drained(asyncio.to_thread(_do_convert, file_path, pdf_converter))
         else:
             text = _do_convert(file_path, pdf_converter)
 

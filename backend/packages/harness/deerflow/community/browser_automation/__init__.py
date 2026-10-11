@@ -21,6 +21,7 @@ from .tools import (
     browser_snapshot_tool,
     browser_type_tool,
     navigate_and_capture,
+    resolve_browser_egress,
     validate_browser_url,
 )
 
@@ -45,5 +46,6 @@ __all__ = [
     "navigate_and_capture",
     "redact_browser_url",
     "reset_browser_session_manager",
+    "resolve_browser_egress",
     "validate_browser_url",
 ]

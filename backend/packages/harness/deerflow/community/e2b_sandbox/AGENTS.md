@@ -26,3 +26,33 @@ Release only needs the VM lock while leaving active state; do not hold it
 during output sync, which must not prevent ownership heartbeats.
 Track that release in `_remote_ops_in_progress` until it completes so
 reconciliation cannot probe or re-adopt a VM between active and warm states.
+
+Shutdown owns both maintenance workers as well as sandbox registries. After
+signalling the lease-renewal and reconciliation threads, a bounded join is only
+a wait budget: verify each worker actually exited before clearing registries or
+tearing down resources. If either worker is still alive, keep admission fenced
+and preserve all tracked state so a later `shutdown()` can retry cleanup.
+That fence covers cached sync/async acquisition too: recheck after serializer
+waits and immediately before exposing a reused client. Signal-triggered shutdown
+may report deferred cleanup, but it must still forward the process's original
+SIGTERM/SIGINT/SIGHUP action while retaining the pending E2B state.
+
+## File search
+
+Quote the complete `grep --include=<pattern>` argument with `shlex.quote` before
+passing it to the shell. The shell must not split or expand filename patterns;
+grep owns basename globbing and `path_matches` owns root-relative directory
+scoping. `tests/test_sandbox_search_contract.py` pins this across providers using
+real temporary files and offline shell transports.
+
+Use `grep --null` to separate the filename from `line:text`, then parse the
+line number only after that NUL delimiter. Colons are valid path characters,
+so never split the whole record on them. Real-shell regressions in
+`tests/test_e2b_sandbox_provider.py` cover colon-containing files and directories.
+
+Split `grep` and `glob` output records only on `"\n"`, matching
+`parse_remote_search_output`. Do not use `splitlines()`: its other boundaries
+(carriage returns, vertical tabs, form feeds, and control/Unicode separators)
+can occur inside filenames or matched text. The real-shell tests cover these
+characters in filenames, parent directories, and grep content; their transport
+decodes captured bytes without universal-newline conversion.

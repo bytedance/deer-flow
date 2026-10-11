@@ -102,7 +102,7 @@ afterEach(() => {
 });
 
 describe("InputBox agent skill draft hydration", () => {
-  it("waits for the agent scope before restoring a saved skill chip", async () => {
+  it("waits for the agent scope before restoring a legacy selection as an inline reference", async () => {
     window.sessionStorage.setItem(
       draftKey,
       JSON.stringify({ version: 1, text: "topic", skillName: "research" }),
@@ -158,9 +158,9 @@ describe("InputBox agent skill draft hydration", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Remove skill" })).toBeTruthy();
+      expect(screen.getByTestId("inline-skill-reference")).toBeTruthy();
     });
-    expect(screen.getByRole("textbox").textContent).toBe("topic");
+    expect(screen.getByRole("textbox").textContent).toBe("✦research topic");
   });
 
   it("preserves inherit semantics when an agent fetch fails", async () => {
@@ -175,7 +175,7 @@ describe("InputBox agent skill draft hydration", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Remove skill" })).toBeTruthy();
+      expect(screen.getByTestId("inline-skill-reference")).toBeTruthy();
     });
   });
 });

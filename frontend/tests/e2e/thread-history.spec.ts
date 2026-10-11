@@ -371,6 +371,17 @@ test.describe("Thread history", () => {
     await expect
       .poll(() => latestPageRequestCount, { timeout: 15_000 })
       .toBeGreaterThan(latestPageRequestsBeforeSubmit);
+    // The refreshed page extends the virtualized list after submission. Keep
+    // positioning its measured tail until the follow-up enters the DOM.
+    await expect
+      .poll(async () => {
+        await scroller.evaluate((element) => {
+          element.scrollTop = element.scrollHeight;
+          element.dispatchEvent(new Event("scroll"));
+        });
+        return page.getByText(followUpPrompt).isVisible();
+      })
+      .toBe(true);
     await expect(page.getByText(followUpPrompt)).toBeVisible();
 
     let preservedDurationFound = false;
@@ -895,7 +906,9 @@ test.describe("Thread history", () => {
       `a[href='/workspace/chats/${MOCK_THREAD_ID}']`,
     );
     await expect(sidebarThread).toBeVisible({ timeout: 15_000 });
-    await expect(sidebarThread.getByLabel("Feishu channel")).toBeVisible();
+    await expect(
+      sidebarThread.getByRole("img", { name: "From Feishu" }),
+    ).toBeVisible();
 
     await page.goto("/workspace/chats");
 
@@ -906,5 +919,8 @@ test.describe("Thread history", () => {
       timeout: 15_000,
     });
     await expect(mainThread.getByText("Feishu", { exact: true })).toBeVisible();
+    await expect(
+      mainThread.getByRole("img", { name: "From Feishu" }),
+    ).toBeVisible();
   });
 });

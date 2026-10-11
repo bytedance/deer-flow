@@ -85,7 +85,7 @@ async def test_batch_keeps_its_construction_snapshot(monkeypatch, _subagent_env,
     async def initial(self, task):
         return ({}, self.tools, None)
 
-    def create(self, tools, *, deferred_setup=None, extensions=None):
+    async def create(self, tools, *, deferred_setup=None, extensions=None):
         seen["extensions"] = extensions
         return _CapturingSubagent(seen)
 

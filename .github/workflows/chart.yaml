@@ -76,8 +76,9 @@ jobs:
 
   verify-versions:
     # Gate the release: every version source must match the v* tag. A forgotten
-    # bump in Chart.yaml, pyproject.toml, or package.json fails here and skips
-    # the publish. See scripts/verify_versions.sh.
+    # bump in Chart.yaml, pyproject.toml, or package.json, or a stale
+    # backend/uv.lock, fails here and skips the publish. See
+    # scripts/verify_versions.sh.
     if: startsWith(github.ref, 'refs/tags/v')
     uses: ./.github/workflows/verify-versions.yml
 

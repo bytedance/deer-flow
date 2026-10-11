@@ -168,6 +168,28 @@ def test_import_memory_route_preserves_source_error() -> None:
     assert response.json()["facts"][0]["sourceError"] == "The agent previously suggested npm start."
 
 
+def test_clear_memory_routes_persistent_write_through_mutation_drain() -> None:
+    manager = MagicMock()
+    manager.clear_memory.return_value = _sample_memory()
+    calls: list[tuple] = []
+
+    async def drained(action, func, expected_errors=(), /, *args, **kwargs):
+        calls.append((func, expected_errors, args, kwargs))
+        assert isinstance(expected_errors, tuple)
+        return func(*args, **kwargs)
+
+    request = SimpleNamespace()
+    with (
+        patch("app.gateway.routers.memory.get_memory_manager", return_value=manager),
+        patch("app.gateway.routers.memory._resolve_memory_user_id", return_value="user-1"),
+        patch("app.gateway.routers.memory.run_drained_write", side_effect=drained),
+    ):
+        asyncio.run(call_unwrapped(memory.clear_memory, request))
+
+    expected_errors = (NotImplementedError, MemoryConflictError, MemoryCorruptionError, OSError)
+    assert calls == [(manager.clear_memory, expected_errors, (), {"user_id": "user-1"})]
+
+
 # ── clear ──────────────────────────────────────────────────────────────────
 
 

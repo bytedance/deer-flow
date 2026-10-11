@@ -171,6 +171,7 @@ class TestAuthorizationGuardrailWiring:
             "args": {"query": "mcp_allowed"},
             "id": "call-search",
         }
+        request.tool = deferred_setup.tool_search_tool
         request.runtime = SimpleNamespace(context={"user_role": "guest"})
         expected = MagicMock()
         handler = MagicMock(return_value=expected)
@@ -196,6 +197,7 @@ class TestAuthorizationGuardrailWiring:
         authorization_middleware = next(middleware for middleware in middlewares if isinstance(middleware, GuardrailMiddleware) and isinstance(middleware.provider, GuardrailAuthorizationAdapter))
         request = MagicMock()
         request.tool_call = {"name": "tool_search", "args": {}, "id": "call-search"}
+        request.tool = None
         request.runtime = SimpleNamespace(context={"user_role": "guest"})
         handler = MagicMock()
 
@@ -232,6 +234,7 @@ class TestAuthorizationGuardrailWiring:
             "args": {"query": "mcp_allowed"},
             "id": "call-search",
         }
+        request.tool = deferred_setup.tool_search_tool
         request.runtime = SimpleNamespace(context={"user_role": "guest"})
         expected = MagicMock()
         handler = AsyncMock(return_value=expected)

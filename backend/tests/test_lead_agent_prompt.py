@@ -738,6 +738,22 @@ def test_system_prompt_template_requires_virtual_paths_for_output_images():
     assert "Call `present_files` for the image before referencing it" in template
 
 
+def test_system_prompt_language_rule_covers_scheduled_runs_and_stored_text():
+    template = prompt_module.SYSTEM_PROMPT_TEMPLATE
+    lines = template.splitlines()
+    start = next(index for index, line in enumerate(lines) if "Language Consistency" in line)
+    end = next(index for index in range(start + 1, len(lines)) if lines[index].startswith("- "))
+    line = " ".join(part.strip() for part in lines[start:end])
+
+    assert "the user's latest message" in line
+    assert "short notes before tool calls" in line
+    assert "task titles, scheduled instructions and notes" in line
+    assert "scheduled run" in line
+    assert "the language the user wrote the task instructions in" in line
+    assert "host-added English lines" in line
+    assert "Keep code, commands, file paths and quoted source text unchanged" in line
+
+
 def test_system_prompt_template_preserves_placeholders():
     """Ensure the chunking-rule edit didn't drop any f-string placeholder
     consumed by apply_prompt_template(). A missing placeholder would

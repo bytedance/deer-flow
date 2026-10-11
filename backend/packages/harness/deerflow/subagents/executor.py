@@ -268,10 +268,29 @@ class SubagentResult:
             return True
 
 
-def _extract_final_result(final_state: Any, *, trace_id: str, name: str) -> str:
+def _terminal_direct_results(final_state: Any, return_direct_tools: set[str]) -> list[ToolMessage] | None:
+    """Match a complete terminal direct-tool batch in call order."""
+    if not final_state or not return_direct_tools:
+        return None
+    messages = final_state.get("messages", [])
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if not isinstance(message, AIMessage):
+            continue
+        calls = message.tool_calls
+        if calls and all(call["name"] in return_direct_tools for call in calls):
+            results = {item.tool_call_id: item for item in messages[index + 1 :] if isinstance(item, ToolMessage)}
+            if all(call["id"] in results for call in calls):
+                return [results[call["id"]] for call in calls]
+        return None
+    return None
+
+
+def _extract_final_result(final_state: Any, *, trace_id: str, name: str, return_direct_tools: set[str] | None = None) -> str:
     """Extract a human-readable result string from the streamed subagent state.
 
-    Finds the last ``AIMessage`` in the conversation and stringifies its
+    Uses the matched tool results when the last assistant turn consists only
+    of direct-return tools. Otherwise finds the last ``AIMessage`` and stringifies its
     content via the shared :func:`message_content_to_text` helper; falls back
     to the last message of any type when no AIMessage is present. Returns a
     sentinel string (``"No response generated"``) when there is nothing to
@@ -290,12 +309,12 @@ def _extract_final_result(final_state: Any, *, trace_id: str, name: str) -> str:
     messages = final_state.get("messages", [])
     logger.info(f"[trace={trace_id}] Subagent {name} final messages count: {len(messages)}")
 
-    last_ai_message = None
-    for msg in reversed(messages):
-        if isinstance(msg, AIMessage):
-            last_ai_message = msg
-            break
+    direct_results = _terminal_direct_results(final_state, return_direct_tools or set())
+    if direct_results is not None:
+        texts = [message_content_to_text(message.content) for message in direct_results]
+        return "\n\n".join(text for text in texts if text) or "No response generated"
 
+    last_ai_message = next((message for message in reversed(messages) if isinstance(message, AIMessage)), None)
     if last_ai_message is not None:
         text = message_content_to_text(last_ai_message.content)
         return text if text else "No response generated"
@@ -578,7 +597,9 @@ def _harvest_bash_executions(
 _isolated_subagent_loop: asyncio.AbstractEventLoop | None = None
 _isolated_subagent_loop_thread: threading.Thread | None = None
 _isolated_subagent_loop_started: threading.Event | None = None
+_isolated_subagent_loop_shutdown_pending = False
 _isolated_subagent_loop_lock = threading.Lock()
+_isolated_subagent_loop_shutdown_lock = threading.Lock()
 
 
 def _run_isolated_subagent_loop(
@@ -594,38 +615,56 @@ def _run_isolated_subagent_loop(
         started_event.clear()
 
 
-def _shutdown_isolated_subagent_loop() -> None:
+def _shutdown_isolated_subagent_loop(*, only_if_pending: bool = False) -> None:
     """Stop and close the persistent isolated subagent loop."""
-    global _isolated_subagent_loop, _isolated_subagent_loop_thread, _isolated_subagent_loop_started
+    global _isolated_subagent_loop, _isolated_subagent_loop_thread, _isolated_subagent_loop_started, _isolated_subagent_loop_shutdown_pending
 
-    with _isolated_subagent_loop_lock:
-        loop = _isolated_subagent_loop
-        thread = _isolated_subagent_loop_thread
-        _isolated_subagent_loop = None
-        _isolated_subagent_loop_thread = None
-        _isolated_subagent_loop_started = None
+    with _isolated_subagent_loop_shutdown_lock:
+        with _isolated_subagent_loop_lock:
+            # Dispatch recovery can become stale while waiting for this lock.
+            # Recheck the fence before touching the current loop generation.
+            if only_if_pending and not _isolated_subagent_loop_shutdown_pending:
+                return
+            loop = _isolated_subagent_loop
+            thread = _isolated_subagent_loop_thread
+            if loop is None:
+                _isolated_subagent_loop_shutdown_pending = False
+                return
+            _isolated_subagent_loop_shutdown_pending = True
 
-    if loop is None:
-        return
+            # A previous bounded shutdown/startup attempt already requested
+            # loop.stop. Dispatch-side recovery should only probe whether the
+            # retained worker has exited; repeatedly joining here would stall
+            # every caller for up to one second while the worker remains live.
+            if only_if_pending and thread is not None and thread.is_alive():
+                return
 
-    if loop.is_running():
-        loop.call_soon_threadsafe(loop.stop)
+        if loop.is_running():
+            loop.call_soon_threadsafe(loop.stop)
 
-    if thread is not None and thread.is_alive() and thread is not threading.current_thread():
-        thread.join(timeout=1)
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=1)
 
-    thread_stopped = thread is None or not thread.is_alive()
-    loop_stopped = not loop.is_running()
+        thread_stopped = thread is None or not thread.is_alive()
+        loop_stopped = not loop.is_running()
 
-    if not loop.is_closed():
-        if thread_stopped and loop_stopped:
-            loop.close()
-        else:
+        if not thread_stopped or not loop_stopped:
             logger.warning(
-                "Skipping close of isolated subagent loop because shutdown did not complete within timeout (thread_alive=%s, loop_running=%s)",
+                "Retaining isolated subagent loop ownership because shutdown did not complete within timeout (thread_alive=%s, loop_running=%s)",
                 thread is not None and thread.is_alive(),
                 loop.is_running(),
             )
+            return
+
+        if not loop.is_closed():
+            loop.close()
+
+        with _isolated_subagent_loop_lock:
+            if _isolated_subagent_loop is loop and _isolated_subagent_loop_thread is thread:
+                _isolated_subagent_loop = None
+                _isolated_subagent_loop_thread = None
+                _isolated_subagent_loop_started = None
+                _isolated_subagent_loop_shutdown_pending = False
 
 
 atexit.register(_shutdown_isolated_subagent_loop)
@@ -633,8 +672,19 @@ atexit.register(_shutdown_isolated_subagent_loop)
 
 def _get_isolated_subagent_loop() -> asyncio.AbstractEventLoop:
     """Return the persistent event loop used by isolated subagent executions."""
-    global _isolated_subagent_loop, _isolated_subagent_loop_thread, _isolated_subagent_loop_started
+    global _isolated_subagent_loop, _isolated_subagent_loop_thread, _isolated_subagent_loop_started, _isolated_subagent_loop_shutdown_pending
+
+    # A startup/shutdown timeout retains ownership while the worker is alive.
+    # Ordinary dispatch is also the retry path once that worker has actually
+    # exited: reap the retained loop under the shutdown lifecycle lock before
+    # deciding whether replacement is still fenced.
+    if _isolated_subagent_loop_shutdown_pending:
+        _shutdown_isolated_subagent_loop(only_if_pending=True)
+
     with _isolated_subagent_loop_lock:
+        if _isolated_subagent_loop_shutdown_pending:
+            raise RuntimeError("Isolated subagent event loop shutdown is still pending; retained worker is still exiting")
+
         thread_is_alive = _isolated_subagent_loop_thread is not None and _isolated_subagent_loop_thread.is_alive()
         loop_is_usable = _isolated_subagent_loop is not None and not _isolated_subagent_loop.is_closed() and _isolated_subagent_loop.is_running() and thread_is_alive
 
@@ -651,7 +701,18 @@ def _get_isolated_subagent_loop() -> asyncio.AbstractEventLoop:
             if not started_event.wait(timeout=5):
                 loop.call_soon_threadsafe(loop.stop)
                 thread.join(timeout=1)
-                loop.close()
+                if thread.is_alive() or loop.is_running():
+                    _isolated_subagent_loop = loop
+                    _isolated_subagent_loop_thread = thread
+                    _isolated_subagent_loop_started = started_event
+                    _isolated_subagent_loop_shutdown_pending = True
+                    logger.warning(
+                        "Retaining isolated subagent loop ownership after startup timeout (thread_alive=%s, loop_running=%s)",
+                        thread.is_alive(),
+                        loop.is_running(),
+                    )
+                elif not loop.is_closed():
+                    loop.close()
                 raise RuntimeError("Timed out starting isolated subagent event loop")
             _isolated_subagent_loop = loop
             _isolated_subagent_loop_thread = thread
@@ -941,6 +1002,7 @@ class SubagentExecutor:
         # not just the first — because the v2 contract advertises more than one
         # cap reason.
         self._stop_reason_middlewares: list[Any] = []
+        self._return_direct_tools: set[str] = set()
         # The one skill-authorization context for this execution, resolved
         # lazily by ``_resolve_skill_authorization`` and shared by the Layer 1
         # filter and every runtime ``skill:activate`` check (activation
@@ -968,7 +1030,7 @@ class SubagentExecutor:
             self._resolved_app_config = get_app_config()
         return self._resolved_app_config
 
-    def _create_agent(
+    async def _create_agent(
         self,
         tools: list[BaseTool] | None = None,
         *,
@@ -980,6 +1042,12 @@ class SubagentExecutor:
         ``deferred_setup`` (assembled in ``_build_initial_state``) carries the
         deferred MCP tool names + catalog hash so the subagent gets the same
         DeferredToolFilterMiddleware the lead agent has. ``None`` is a no-op.
+
+        Async because the middleware-declared-tool decision below calls the
+        authorization provider's ``filter_resources`` — potentially external
+        policy-service I/O — and this method runs on the shared event loop
+        (``_aexecute`` awaits it), so the decision is offloaded to a worker
+        thread with the same provider instance and context.
         """
         app_config = self._get_resolved_app_config()
         if self.model_name is None:
@@ -1027,6 +1095,52 @@ class SubagentExecutor:
         if mcp_routing_middleware is not None:
             middleware_kwargs["mcp_routing_middleware"] = mcp_routing_middleware
         middlewares = build_subagent_runtime_middlewares(**middleware_kwargs)
+        # Authorization Layer 1 for middleware-declared tools (e.g. extension
+        # contributions): collect from the built stack, decide with the same
+        # provider/principal as the ordinary pass (offloaded off the event
+        # loop — a custom provider's filter_resources may do policy-service
+        # I/O), then narrow the view build-locally. The verification before
+        # create_agent is the backstop for third-party __copy__ behavior.
+        declared_authorized = None
+        layer_one = getattr(self, "_layer_one_outcome", None)
+        authz_context = getattr(self, "_authz_context", None)
+        # Production sets provider, context, and outcome together in
+        # ``_build_initial_state``; a missing piece means no ordinary pass ran
+        # on this executor (direct ``_create_agent`` calls in tests), so there
+        # is no verdict set to seed the decision with and the pass is skipped.
+        if authz_provider is not None and layer_one is not None and authz_context is not None:
+            from deerflow.agents.middlewares.tool_declarations import (
+                apply_declared_tool_view,
+                collect_declared_tools,
+                decide_declared_tools,
+                verify_declared_tool_view,
+            )
+
+            declared = collect_declared_tools(middlewares)
+            declared_authorized = await asyncio.to_thread(
+                decide_declared_tools,
+                declared,
+                outcome=layer_one,
+                context=authz_context,
+                app_config=app_config,
+                authorization_provider=authz_provider,
+            )
+            middlewares = apply_declared_tool_view(middlewares, authorized_names=declared_authorized)
+            verify_declared_tool_view(middlewares, authorized_names=declared_authorized)
+        elif authz_provider is not None:
+            # Defense in depth: the provider is configured but the seeded
+            # decision state is missing, so the declaration pass is skipped.
+            # Layer 2 still enforces at call time, but middleware-declared
+            # tools bypass Layer 1 in this build — log so a future refactor
+            # that breaks the ``_build_initial_state`` invariant is visible
+            # instead of silently reopening the channel.
+            missing = [name for name, value in (("_layer_one_outcome", layer_one), ("_authz_context", authz_context)) if value is None]
+            logger.warning(
+                "Authorization provider is configured but %s %s not set for subagent %r; skipping the middleware-declared tool pass (Layer 2 still enforces at call time)",
+                " and ".join(missing),
+                "is" if len(missing) == 1 else "are",
+                self.config.name,
+            )
         # Collect every guard middleware that exposes ``consume_stop_reason``
         # (TokenBudgetMiddleware, LoopDetectionMiddleware) so _aexecute can read
         # each after the run and surface whichever cap fired. Duck-typed
@@ -1047,6 +1161,13 @@ class SubagentExecutor:
             state_schema=ThreadState,
             checkpointer=False,
         )
+        # Use the compiled registry: it includes middleware tools, normalized
+        # callables, and LangChain's last-definition-wins name precedence.
+        from langgraph.prebuilt import ToolNode
+
+        tool_graph_node = agent.get_graph().nodes.get("tools")
+        tool_node = tool_graph_node.data if tool_graph_node is not None else None
+        self._return_direct_tools = {tool.name for tool in tool_node.tools_by_name.values() if tool.return_direct} if isinstance(tool_node, ToolNode) else set()
         self._describe_assembly(
             app_config=app_config,
             tools=bound_tools,
@@ -1320,6 +1441,7 @@ class SubagentExecutor:
 
         # Apply authorization Layer 1: filter tools before deferred assembly
         # so denied tools can never enter the DeferredToolCatalog.
+        from deerflow.agents.middlewares.tool_declarations import layer_one_outcome
         from deerflow.authz.tool_filter import apply_tool_authorization
 
         authz_context = {
@@ -1340,6 +1462,10 @@ class SubagentExecutor:
             context=authz_context,
             app_config=resolved_app_config,
         )
+        # The declaration pass in ``_create_agent`` reuses this run's provider,
+        # context, and verdicts — one principal and one verdict set per run.
+        self._authz_context = authz_context
+        self._layer_one_outcome = layer_one_outcome(authorization_candidates, authorized_tools)
         configured_tools = [tool for tool in authorized_tools if id(tool) in configured_tool_ids]
         late_tools = [tool for tool in authorized_tools if id(tool) not in configured_tool_ids]
 
@@ -1580,7 +1706,7 @@ class SubagentExecutor:
                 return result
 
             state, final_tools, deferred_setup = await self._build_initial_state(task)
-            agent = self._create_agent(
+            agent = await self._create_agent(
                 final_tools,
                 deferred_setup=deferred_setup,
                 extensions=loaded_extensions,
@@ -1784,7 +1910,22 @@ class SubagentExecutor:
                     tool_receipts=terminal_receipts(),
                 )
             else:
-                final_result = _extract_final_result(final_state, trace_id=self.trace_id, name=self.config.name)
+                final_result = _extract_final_result(
+                    final_state,
+                    trace_id=self.trace_id,
+                    name=self.config.name,
+                    return_direct_tools=self._return_direct_tools,
+                )
+                direct_results = _terminal_direct_results(final_state, self._return_direct_tools)
+                if direct_results is not None and any(message.status == "error" for message in direct_results):
+                    result.try_set_terminal(
+                        SubagentStatus.FAILED,
+                        result=final_result,
+                        error=f"Direct-return tool failure:\n{final_result}",
+                        token_usage_records=token_usage_records,
+                        tool_receipts=terminal_receipts(),
+                    )
+                    return result
                 # A guard hard-stop (token budget or loop detection) does not raise
                 # — it strips tool_calls so the run completes with a final answer.
                 # ``consume_stop_reason`` on each guard tells us whether that

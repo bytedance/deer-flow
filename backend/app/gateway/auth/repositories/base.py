@@ -5,6 +5,25 @@ from abc import ABC, abstractmethod
 from app.gateway.auth.models import User
 
 
+class LastAdminRemainsError(RuntimeError):
+    """Raised when a role write would demote the last remaining admin.
+
+    Bootstrap lockout protection: raised inside the same serialized
+    transaction that would perform the write, so the check-then-act window
+    that two concurrent demotions could race through is closed.
+    """
+
+
+class LastActiveAdminError(RuntimeError):
+    """Raised when an account write would disable the last active admin.
+
+    "Active" = an enabled admin row: disabled admins cannot authenticate, so
+    they cannot restore the deployment's management access. Raised inside the
+    same serialized transaction that would perform the write (see
+    ``LastAdminRemainsError`` for the race this closes).
+    """
+
+
 class UserNotFoundError(LookupError):
     """Raised when a user repository operation targets a non-existent row.
 
@@ -81,6 +100,34 @@ class UserRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def set_disabled(self, user_id: str, disabled: bool) -> User:
+        """Enable/disable an account as a single-column, serialized write.
+
+        Origin: admin user-management surface (RFC #4063 / #3462 gap 3).
+        Field-scoped like :meth:`update_system_role` — account-lifecycle
+        state has exactly one writer, and credential/role writers never
+        touch it. Disabling the last remaining ACTIVE admin raises
+        :class:`LastActiveAdminError` (re-enabling is always allowed).
+        """
+        raise NotImplementedError
+
+    async def update_system_role(self, user_id: str, system_role: str) -> User:
+        """Assign a user's system role as a single-column, serialized write.
+
+        Origin: admin role-assignment API (RFC #4063 / #3462 gap 2). Distinct
+        from :meth:`update_user` on purpose — role mutations and credential
+        writes are field-scoped against each other, so a password change
+        holding a stale account snapshot can never restore a revoked role,
+        and a role change can never overwrite credentials.
+
+        Raises:
+            UserNotFoundError: the target row does not exist.
+            LastAdminRemainsError: the write would demote the only remaining
+                admin (the count and the write share one serialized
+                transaction — two concurrent demotions cannot both pass).
+        """
+        raise NotImplementedError
+
     async def update_user(self, user: User) -> User:
         """Update an existing user.
 
@@ -110,6 +157,15 @@ class UserRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def list_users(self) -> list[User]:
+        """Return all users ordered by creation (oldest first).
+
+        Origin: admin user-list surface (RFC #4063 / #3462 gap 2). Volume is
+        bounded by the deployment's user base; pagination can be added when a
+        real deployment needs it.
+        """
+        raise NotImplementedError
+
     async def count_admin_users(self) -> int:
         """Return number of users with system_role == 'admin'."""
         raise NotImplementedError

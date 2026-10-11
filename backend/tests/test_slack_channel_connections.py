@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
 from datetime import UTC, datetime, timedelta
 from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from app.channels.message_bus import MessageBus, OutboundMessage
 
@@ -242,7 +245,13 @@ def test_slack_socket_mode_queued_connect_does_not_target_replacement_client(mon
         queued_callbacks = []
         loop = asyncio.get_running_loop()
 
+        real_run_in_executor = loop.run_in_executor
+
         def queue_run_in_executor(executor, func, *args):
+            # Hold back only the connect; stop() offloads close() through the
+            # same executor path and must still run.
+            if func != channel._connect_socket_mode:
+                return real_run_in_executor(executor, func, *args)
             queued_callbacks.append((func, args))
             return loop.create_future()
 
@@ -266,5 +275,86 @@ def test_slack_socket_mode_queued_connect_does_not_target_replacement_client(mon
         assert clients[1].connect_calls == 1
 
         await channel.stop()
+
+    anyio.run(go)
+
+
+class _BlockingSocketModeClient:
+    """Socket Mode stand-in whose ``close()`` blocks like the SDK's thread joins."""
+
+    def __init__(self):
+        self.close_started = threading.Event()
+        self.release = threading.Event()
+        self.close_calls = 0
+        self.connect_calls = 0
+
+    def connect(self):
+        self.connect_calls += 1
+
+    def close(self):
+        self.close_calls += 1
+        self.close_started.set()
+        # Bounded so a close() run on the event loop fails the test's
+        # assertions instead of deadlocking it.
+        self.release.wait(timeout=2)
+
+
+def test_slack_stop_closes_socket_client_off_the_event_loop():
+    import anyio
+
+    from app.channels.slack import SlackChannel
+
+    async def go():
+        channel = SlackChannel(bus=MessageBus(), config={})
+        socket_client = _BlockingSocketModeClient()
+        channel._socket_client = socket_client
+        channel._running = True
+
+        stop_task = asyncio.create_task(channel.stop())
+        assert await asyncio.to_thread(socket_client.close_started.wait, 2)
+        # close() is blocked in a worker thread, so the loop keeps running and
+        # stop() is still waiting for it.
+        assert not stop_task.done()
+        # A connect still queued in the executor must not reopen the client
+        # that is being closed.
+        channel._connect_socket_mode(socket_client)
+        assert socket_client.connect_calls == 0
+
+        socket_client.release.set()
+        await stop_task
+        assert socket_client.close_calls == 1
+        assert channel._socket_client is None
+
+    anyio.run(go)
+
+
+def test_slack_stop_retried_after_cancellation_awaits_the_same_close():
+    import anyio
+
+    from app.channels.slack import SlackChannel
+
+    async def go():
+        channel = SlackChannel(bus=MessageBus(), config={})
+        socket_client = _BlockingSocketModeClient()
+        channel._socket_client = socket_client
+        channel._running = True
+
+        first_stop = asyncio.create_task(channel.stop())
+        assert await asyncio.to_thread(socket_client.close_started.wait, 2)
+        first_stop.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first_stop
+
+        # The Gateway retries a cancelled shutdown on the same channel. The
+        # retry must wait for the close still running in the worker rather
+        # than return early or start a second close.
+        retry = asyncio.create_task(channel.stop())
+        await asyncio.sleep(0.05)
+        assert not retry.done()
+
+        socket_client.release.set()
+        await retry
+        assert socket_client.close_calls == 1
+        assert channel._socket_client is None
 
     anyio.run(go)

@@ -111,5 +111,17 @@ class StreamBridge(abc.ABC):
         giving late subscribers a chance to drain remaining events.
         """
 
+    async def ping(self) -> bool:
+        """Return whether the bridge's external backend is reachable right now.
+
+        Used by the gateway readiness probe. The default is for bridges with
+        no external backend: the in-process memory bridge has nothing to
+        probe and is always reachable. A bridge that sets
+        :attr:`supports_cross_process` talks to a shared backend and should
+        override this with a bounded round trip, answering ``False`` (not
+        raising) when the backend is down.
+        """
+        return True
+
     async def close(self) -> None:
         """Release backend resources.  Default is a no-op."""

@@ -78,14 +78,14 @@ async def test_preferences_api_partial_patch_reset_and_owner_isolation(api):
     path = "/api/v1/auth/preferences"
     assert (await client.patch(path, json={"notification_enabled": False, "mode": "pro"})).status_code == 204
     assert (await client.patch(path, json={"model_name": "model-a"})).status_code == 204
-    assert (await client.get(path)).json() == {"notification_enabled": False, "model_name": "model-a", "mode": "pro", "reasoning_effort": None}
+    assert (await client.get(path)).json() == {"notification_enabled": False, "model_name": "model-a", "mode": "pro", "reasoning_effort": None, "locale": None}
     assert (await client.patch(path, json={"mode": None})).status_code == 204
     identity.id = "bob"
     # A stale tab with Alice's expected identity must not write using Bob's cookie.
     assert (await client.patch(path, json={"mode": "ultra"})).status_code == 409
     assert (await client.get(path)).status_code == 409
     client.headers["X-Expected-User-Id"] = "bob"
-    assert (await client.get(path)).json() == {"notification_enabled": None, "model_name": None, "mode": None, "reasoning_effort": None}
+    assert (await client.get(path)).json() == {"notification_enabled": None, "model_name": None, "mode": None, "reasoning_effort": None, "locale": None}
     identity.id = "alice"
     client.headers["X-Expected-User-Id"] = "alice"
     assert (await client.get(path)).json()["notification_enabled"] is False
@@ -93,7 +93,20 @@ async def test_preferences_api_partial_patch_reset_and_owner_isolation(api):
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("body", [{"notification_enabled": "false"}, {"mode": "invalid"}, {"reasoning_effort": "Not Valid!"}, {"model_name": "a" * 201}, {"context": {"github_token": "not-a-real-token"}}, {"user_id": "bob"}])
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"notification_enabled": "false"},
+        {"mode": "invalid"},
+        {"locale": "fr-FR"},
+        {"locale": "zh"},
+        {"locale": 1},
+        {"reasoning_effort": "Not Valid!"},
+        {"model_name": "a" * 201},
+        {"context": {"github_token": "not-a-real-token"}},
+        {"user_id": "bob"},
+    ],
+)
 async def test_preferences_api_rejects_invalid_and_unrelated_fields(api, body):
     client, _ = api
     assert (await client.patch("/api/v1/auth/preferences", json=body)).status_code == 422
@@ -119,10 +132,23 @@ async def test_preferences_requires_authentication_and_expected_identity(api):
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("locale", ["en-US", "zh-CN"])
+async def test_preferences_api_stores_the_ui_locale(api, preference_repo, locale):
+    # The web app syncs its UI language here; scheduled-task IM notices use it.
+    client, _ = api
+    path = "/api/v1/auth/preferences"
+    assert (await client.patch(path, json={"locale": locale})).status_code == 204
+    assert (await client.get(path)).json()["locale"] == locale
+    assert (await preference_repo.get("alice"))["locale"] == locale
+    assert (await client.patch(path, json={"locale": None})).status_code == 204
+    assert (await client.get(path)).json()["locale"] is None
+
+
+@pytest.mark.anyio
 async def test_preferences_read_discards_only_malformed_fields(api, preference_repo):
     client, _ = api
-    await preference_repo.patch("alice", {"notification_enabled": False, "mode": "invalid", "unknown": "ignored"})
-    assert (await client.get("/api/v1/auth/preferences")).json() == {"notification_enabled": False, "model_name": None, "mode": None, "reasoning_effort": None}
+    await preference_repo.patch("alice", {"notification_enabled": False, "mode": "invalid", "locale": "fr-FR", "unknown": "ignored"})
+    assert (await client.get("/api/v1/auth/preferences")).json() == {"notification_enabled": False, "model_name": None, "mode": None, "reasoning_effort": None, "locale": None}
 
 
 def test_preferences_migration_preserves_existing_users_and_downgrades(tmp_path):

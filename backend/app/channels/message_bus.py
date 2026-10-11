@@ -340,19 +340,27 @@ class MessageBus:
         self._outbound_listeners.append(callback)
 
     def unsubscribe_outbound(self, callback: OutboundCallback) -> None:
-        """Remove a previously registered outbound callback."""
+        """Remove a callback from subsequent outbound dispatches.
+
+        This does not cancel or wait for callbacks in an in-flight dispatch.
+        """
         self._outbound_listeners = [cb for cb in self._outbound_listeners if cb != callback]
 
     async def publish_outbound(self, msg: OutboundMessage) -> None:
-        """Dispatch an outbound message to all registered listeners."""
+        """Dispatch to listeners registered when dispatch begins.
+
+        Subscribing or unsubscribing during an in-flight dispatch affects
+        subsequent messages, not callbacks captured for the current message.
+        """
+        listeners = tuple(self._outbound_listeners)
         logger.info(
             "[Bus] outbound dispatching: channel=%s, chat_id=%s, listeners=%d, text_len=%d",
             msg.channel_name,
             msg.chat_id,
-            len(self._outbound_listeners),
+            len(listeners),
             len(msg.text),
         )
-        for callback in self._outbound_listeners:
+        for callback in listeners:
             try:
                 await callback(msg)
             except Exception:

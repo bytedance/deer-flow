@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -107,6 +108,7 @@ async def test_disconnect_runtime_channel_does_not_block_event_loop(tmp_path) ->
     }
 
 
+@pytest.mark.skipif(os.name == "nt", reason="chmod cannot express owner-only modes on Windows")
 async def test_runtime_config_store_file_is_owner_only(tmp_path) -> None:
     path = tmp_path / "channels" / "runtime-config.json"
     store = await asyncio.to_thread(ChannelRuntimeConfigStore, path)
@@ -121,6 +123,7 @@ async def test_runtime_config_store_file_is_owner_only(tmp_path) -> None:
     assert mode == 0o600
 
 
+@pytest.mark.skipif(os.name == "nt", reason="chmod cannot express owner-only modes on Windows")
 async def test_runtime_config_store_overwrites_loose_existing_file(tmp_path) -> None:
     """A pre-existing world-readable file is tightened to 0o600 after a save.
 
@@ -170,6 +173,7 @@ async def test_runtime_config_store_chmod_failure_is_logged_not_fatal(tmp_path, 
     await asyncio.to_thread(_save_with_failing_temp_chmod)
 
     assert any("Unable to chmod temporary channel runtime config store" in record.getMessage() for record in caplog.records)
-    mode = await asyncio.to_thread(lambda: path.stat().st_mode & 0o777)
-    assert mode == 0o600
+    if os.name != "nt":  # chmod cannot express owner-only modes on Windows
+        mode = await asyncio.to_thread(lambda: path.stat().st_mode & 0o777)
+        assert mode == 0o600
     assert await asyncio.to_thread(store.get_provider_config, "slack") == {"enabled": True, "bot_token": "xoxb-ui"}

@@ -262,7 +262,120 @@ _R2_COST = 200 * 8e-6 + 100 * 32e-6  # 0.0048 (no cache hits recorded)
 _R4_COST = 600 * 8e-6 + 399 * 32e-6  # 0.017568
 
 
+def _mark_missing_usage(session_factory, run_id: str, *, model: str = "minimax-m2", keep_known_tokens: bool = True) -> None:
+    async def mutate():
+        async with session_factory() as session:
+            row = await session.get(RunRow, run_id)
+            usage_map = dict(row.token_usage_by_model or {})
+            usage = dict(usage_map.get(model) or {}) if keep_known_tokens else {}
+            usage["missing_usage_calls"] = 1
+            usage_map[model] = usage
+            row.token_usage_by_model = usage_map
+            await session.commit()
+
+    asyncio.run(mutate())
+
+
+@pytest.mark.parametrize(
+    "usage_map",
+    [
+        {"minimax-m2": {"input_tokens": 800, "output_tokens": 400, "missing_usage_calls": 1}},
+        {"minimax-m2": {"missing_usage_calls": 1}},
+        {"minimax-m2": {"input_tokens": 800, "output_tokens": 400}, "unpriced-evaluator": {"missing_usage_calls": 1}},
+    ],
+)
+def test_explicit_missing_usage_rejects_full_run_quote_and_fallback(usage_map):
+    price = console._ModelPricing(8, 32, "CNY", 0.8)
+    assert console._run_cost({"minimax-m2": price}, model_name="minimax-m2", total_input_tokens=800, total_output_tokens=400, token_usage_by_model=usage_map) is None
+
+
+def test_zero_missing_usage_marker_keeps_legacy_and_cache_pricing():
+    price = console._ModelPricing(8, 32, "CNY", 0.8)
+    pricing = {"minimax-m2": price}
+    assert console._run_cost(pricing, model_name="minimax-m2", total_input_tokens=800, total_output_tokens=400, token_usage_by_model={}) == pytest.approx(_R1_COST_UNCACHED)
+    assert console._run_cost(
+        pricing,
+        model_name="minimax-m2",
+        total_input_tokens=800,
+        total_output_tokens=400,
+        token_usage_by_model={"minimax-m2": {"input_tokens": 800, "output_tokens": 400, "cache_read_tokens": 500, "missing_usage_calls": 0}},
+    ) == pytest.approx(_R1_COST_CACHED)
+
+
 class TestPricing:
+    @pytest.mark.parametrize("run_id", ["r1", "r2"])
+    def test_missing_usage_keeps_same_day_model_and_totals_unpriced_in_any_row_order(self, client, session_factory, monkeypatch, run_id):
+        monkeypatch.setattr(console, "get_app_config", lambda: _priced_config())
+        _mark_missing_usage(session_factory, run_id)
+        stats = client.get("/api/console/stats").json()
+        assert stats["total_cost"] is None
+        assert stats["total_tokens"] == 2619
+        runs = client.get("/api/console/runs", params={"limit": 50}).json()
+        by_id = {row["run_id"]: row for row in runs["runs"]}
+        assert by_id[run_id]["cost"] is None
+        assert by_id["r4"]["cost"] == pytest.approx(_R4_COST)
+        usage = client.get("/api/console/usage").json()
+        assert usage["total_cost"] is None
+        assert usage["by_model"]["minimax-m2"]["cost"] is None
+        today = next(day for day in usage["days"] if day["date"] == NOW.date().isoformat())
+        assert today["cost"] is None
+        assert today["total_tokens"] == 1570
+        assert all(day["cost"] == 0 for day in usage["days"] if day["runs"] == 0)
+
+    def test_unpriced_missing_model_invalidates_run_total_but_not_complete_other_model_bucket(self, client, session_factory, monkeypatch):
+        monkeypatch.setattr(console, "get_app_config", lambda: _priced_config())
+        _mark_missing_usage(session_factory, "r1", model="unpriced-evaluator", keep_known_tokens=False)
+        runs = client.get("/api/console/runs", params={"limit": 50}).json()
+        assert next(row for row in runs["runs"] if row["run_id"] == "r1")["cost"] is None
+        assert client.get("/api/console/stats").json()["total_cost"] is None
+        usage = client.get("/api/console/usage").json()
+        assert usage["total_cost"] is None
+        assert usage["by_model"]["unpriced-evaluator"]["cost"] is None
+        assert usage["by_model"]["minimax-m2"]["cost"] == pytest.approx(_R1_COST_CACHED + _R2_COST)
+
+    def test_missing_usage_outside_window_does_not_taint_window_cost(self, client, session_factory, monkeypatch):
+        monkeypatch.setattr(console, "get_app_config", lambda: _priced_config())
+        _mark_missing_usage(session_factory, "r4")
+        assert client.get("/api/console/stats").json()["total_cost"] is None
+        usage = client.get("/api/console/usage").json()
+        assert usage["total_cost"] == pytest.approx(_R1_COST_CACHED + _R2_COST)
+
+    def test_other_users_missing_usage_does_not_taint_scoped_cost(self, client, session_factory, monkeypatch):
+        monkeypatch.setattr(console, "get_app_config", lambda: _priced_config())
+        monkeypatch.setattr(console, "get_current_user", AsyncMock(return_value="user-a"))
+        _mark_missing_usage(session_factory, "r5", model="qwen")
+        assert client.get("/api/console/stats").json()["total_cost"] == pytest.approx(_R1_COST_CACHED + _R2_COST + _R4_COST)
+        assert client.get("/api/console/usage").json()["total_cost"] == pytest.approx(_R1_COST_CACHED + _R2_COST)
+
+    def test_unknown_window_total_preserves_complete_other_day_and_model_cost(self, client, session_factory, monkeypatch):
+        config = _priced_config(cache_hit_price=None)
+        config.models[1].pricing = {"currency": "CNY", "input_per_million": 8, "output_per_million": 32}
+        monkeypatch.setattr(console, "get_app_config", lambda: config)
+        _mark_missing_usage(session_factory, "r1")
+        usage = client.get("/api/console/usage").json()
+        assert usage["total_cost"] is None
+        yesterday = next(day for day in usage["days"] if day["date"] == (NOW - timedelta(days=1)).date().isoformat())
+        assert yesterday["cost"] == pytest.approx(50 * 8e-6)
+        assert usage["by_model"]["gpt-x"]["cost"] == pytest.approx(50 * 8e-6)
+
+    def test_missing_provider_bucket_keeps_its_legacy_profile_alias_unpriced(self, client, session_factory, monkeypatch):
+        config = _priced_config()
+        config.models[0].name = "profile-alias"
+        monkeypatch.setattr(console, "get_app_config", lambda: config)
+        _mark_missing_usage(session_factory, "r1")
+
+        async def make_legacy_alias():
+            async with session_factory() as session:
+                row = await session.get(RunRow, "r2")
+                row.model_name = "profile-alias"
+                row.token_usage_by_model = {}
+                await session.commit()
+
+        asyncio.run(make_legacy_alias())
+        usage = client.get("/api/console/usage").json()
+        assert usage["by_model"]["minimax-m2"]["cost"] is None
+        assert usage["by_model"]["profile-alias"]["cost"] is None
+
     def test_mixed_currencies_disable_cost_reporting(self, client, monkeypatch, caplog):
         monkeypatch.setattr(
             console,

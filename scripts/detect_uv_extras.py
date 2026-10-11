@@ -13,6 +13,7 @@ Order of resolution:
    - stream_bridge.type == redis         -> redis
    - tools[].name == browser_navigate    -> browser
    - sandbox.ownership.type == redis     -> redis
+   - channels.discord.enabled == true    -> discord
    - channels.buzz.enabled == true       -> buzz
    - models[].use == langchain_ollama:*  -> ollama
 3. Runtime environment toggles that enable optional backends:
