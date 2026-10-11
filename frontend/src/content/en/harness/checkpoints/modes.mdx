@@ -1,0 +1,90 @@
+---
+title: Channel Modes
+description: What full and delta checkpoints look like on disk, how each read path materializes state, the mode marker contract, the fail-closed gate, the 409/503 error mapping, the cross-process invariant, and the state-schema symbols each mode compiles.
+---
+
+import { Callout } from "nextra/components";
+
+# Channel Modes
+
+`database.checkpoint_channel_mode` has two values. The mode decides how the message channel is written and how a read materializes it. It is frozen per process, so the value a thread was written with and the value a reading process froze on startup must agree.
+
+## Storage shape and read path
+
+| | `full` | `delta` |
+| --- | --- | --- |
+| Where the message list lives | In every checkpoint's `channel_values` | In the per-step writes. A non-snapshot step leaves the channel out of `channel_values`; a `_DeltaSnapshot` blob is stored every `snapshot_frequency` writes |
+| What one step costs | Re-serializing the whole list into one more retained checkpoint | Appending that step's writes; every K writes also stores a full-list `_DeltaSnapshot` (total retained after N turns: O(N²) vs O(N²/K + N)) |
+| Snapshot trigger | n/a — every step is a full payload | The update count reaches `snapshot_frequency`, or the supersteps count reaches LangGraph's `DELTA_MAX_SUPERSTEPS_SINCE_SNAPSHOT` bound (5000) |
+| Read path | Stored values are used directly | Hydrate channels; delta channels absent from `channel_values` are batched into a single saver call; then `from_checkpoint(seed)` plus `replay_writes` |
+| Raw checkpointer read | Returns the stored value | Returns a sentinel, not the message list |
+
+<Callout type="warning">
+  Delta checkpoints store no full `channel_values` — raw saver reads see sentinels — so consumers must go
+  through `CheckpointStateAccessor` instead of calling the checkpointer directly. The accessor also
+  re-injects the mode marker on every prepared config, on a copy of `configurable` and `metadata`, so a
+  caller's dicts are not mutated.
+</Callout>
+
+The supersteps bound is what keeps replay depth bounded even for a channel that stops receiving writes; the cadence is the knob you tune. See [Snapshot Cadence](/docs/harness/checkpoints/cadence) for the trade-off and [History Cache](/docs/harness/checkpoints/history-cache) for what materialization costs.
+
+## Marker contract
+
+| Constant | Key and location | Written when | Meaning |
+| --- | --- | --- | --- |
+| `CHECKPOINT_MODE_METADATA_KEY` | `deerflow_checkpoint_channel_mode` in `config["metadata"]` | `delta` only, value `"delta"` | The persisted mode marker. Full mode removes the key, so **absence means full** and pre-feature checkpoints need no migration |
+| `counters_since_delta_snapshot` | LangGraph's own checkpoint metadata key, a dict containing `"messages"` | Written by LangGraph | Fallback detection: its presence is treated as delta even when the DeerFlow marker is absent |
+| `INTERNAL_CHECKPOINT_MODE_KEY` | `__deerflow_checkpoint_channel_mode` in `config["configurable"]` | Every request, both modes | Internal routing only, set by `inject_checkpoint_mode`. It is never a stored metadata key and never reaches the wire; a caller-supplied value is discarded by the Gateway's run-config builder, ignored on first freeze, and rejected once the process is frozen |
+
+The snapshot cadence is deliberately **not** stamped into checkpoint metadata, which is why the marker contract is unaffected by the cadence value:
+
+> It is deliberately NOT stamped into checkpoint metadata: the mode marker contract (absence = full) and the full -> delta migration semantics are unchanged by the frequency value.
+
+## The fail-closed gate
+
+The gate runs on both sides of an access, and it is asymmetric: a delta-mode process reads legacy full checkpoints transparently, while a full-mode process refuses a delta thread instead of silently materializing empty state.
+
+| Gate | Runs on | Behaviour |
+| --- | --- | --- |
+| `raise_if_snapshot_incompatible(snapshot, mode)` | Materialized reads (`get_state`, `get_state_history`) | Raises on the materialized `StateSnapshot`; one checkpoint fetch, no extra round-trip |
+| `raise_if_checkpoint_tuple_incompatible(tuple, mode)` | Metadata-only reads (`get_metadata`, `aget_metadata`) | Keeps the gate without materializing anything |
+| `ensure_checkpoint_mode_compatible(checkpointer, config, mode)` / `aensure_checkpoint_mode_compatible(...)` | Before a write | Fails closed before the write is persisted — a write cannot be un-applied. Both return immediately when the process mode is `delta` |
+
+A rejected access raises `CheckpointModeMismatchError` with the message `Thread requires delta mode; materialize and convert its checkpoints before using full mode.` The same string is duplicated in the degraded full-mode read accessor, so the message survives a broken agent factory.
+
+## HTTP error mapping
+
+| Error | Status | `detail` | Meaning |
+| --- | --- | --- | --- |
+| `CheckpointModeMismatchError` | 409 | `Thread <thread_id>: Thread requires delta mode; materialize and convert its checkpoints before using full mode.` | The thread's persisted checkpoints conflict with the process's frozen mode |
+| `CheckpointModeReconfigurationError` | 503 | `checkpoint_channel_mode is restart-required and cannot change in a running process` (or the `checkpoint_delta.snapshot_frequency` twin) | The process itself is mid mode-flip, so the request is transiently unserviceable |
+
+The router records the rationale for the split:
+
+> A mismatch means the thread's persisted checkpoints conflict with the process's frozen mode (operator-actionable, 409); a reconfiguration means the process itself is mid mode-flip (transient, 503).
+
+Only the threads router maps these two errors; run-creation routes surface the same mismatch text asynchronously in the run record or the SSE `error` frame — except when the thread's run-event feed is empty and its checkpoint head has to be materialized before admission, where the seeding read turns the mismatch into a plain `500`. The `503` half of the mapping is defensive: reconfiguration errors are raised when a graph is built (Gateway startup, `make_lead_agent`, `DeerFlowClient.__init__`) and no state, history, or thread route builds an agent, so an operator who edited `config.yaml` without restarting sees a failed run rather than a `503`. See [Observability](/docs/harness/checkpoints/observability) and [Troubleshooting](/docs/harness/checkpoints/troubleshooting).
+
+## Cross-process invariant
+
+- The mode is compiled into each graph's channel table, not stored per checkpoint, so it must match in **every** process sharing one checkpoint database.
+- The cadence must match as well, but it is not stamped, so a per-checkpoint mismatch is undetectable: there is no runtime cadence comparison at all. Enforcement is fail-closed at the mode level only, by marker presence or absence. Treat identical `config.yaml` files as a deployment requirement, not a suggestion.
+- The freeze is module-global per OS process. Each process freezes independently from its own startup config, so nothing in the runtime reconciles a divergent process for you.
+
+## State schemas
+
+The mode picks the compiled state schema and adapts middleware-contributed channels to it.
+
+| Symbol | Module | Role |
+| --- | --- | --- |
+| `ThreadState` | `deerflow.agents.thread_state` | The full-mode state schema |
+| `DeltaThreadState` | `deerflow.agents.thread_state` | The delta schema at the default cadence; the name is preserved only when the cadence is the default |
+| `delta_messages_field(snapshot_frequency=…)` | `deerflow.agents.thread_state` | Builds `Annotated[list[AnyMessage], DeltaChannel(merge_message_writes, snapshot_frequency=…)]` |
+| `DELTA_MESSAGES_FIELD` | `deerflow.agents.thread_state` | The module-level delta field at the default cadence |
+| `merge_message_writes(state, writes)` | `deerflow.agents.thread_state` | The linear-time `add_messages`-equivalent delta reducer |
+| `get_thread_state_schema(mode, snapshot_frequency=None)` | `deerflow.agents.thread_state` | Returns `ThreadState` for non-delta modes and a cached delta schema otherwise; non-default cadences get a cached, cadence-specific schema |
+| `adapt_state_schema_for_mode(schema, mode, snapshot_frequency=None)` | `deerflow.agents.thread_state` | Adapts a state schema for the mode, so middleware channels compile against the right channel types |
+| `normalize_middleware_state_schemas(middleware, mode, snapshot_frequency=None)` | `deerflow.agents.thread_state` | Returns the middleware list with adapted `state_schema` copies |
+| `THREAD_STATE_REDUCER_FIELDS` | `deerflow.agents.thread_state` | The reducer channels, including `messages`; used to decide which channels need `Overwrite` wrapping for a replace-style write |
+
+The full key table, the remaining constants, and the load-bearing test anchors are in [Reference](/docs/harness/checkpoints/reference).

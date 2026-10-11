@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import os
 import stat
@@ -47,6 +48,23 @@ def _decode_text(data: bytes, path: str) -> str | None:
         return data.decode("utf-8")
     except UnicodeDecodeError:
         return None
+
+
+def _file_entry(rel_path: str, data: bytes) -> dict[str, Any]:
+    text = _decode_text(data, rel_path)
+    entry: dict[str, Any] = {
+        "path": rel_path,
+        "kind": "text" if text is not None else "binary",
+        "size": len(data),
+        "sha256": _sha256(data),
+    }
+    if text is not None:
+        entry["content"] = text
+    else:
+        # SkillScan's package rules (executable magic, nested archives, scripts
+        # that fail strict decoding) need the original bytes.
+        entry["content_base64"] = base64.b64encode(data).decode("ascii")
+    return entry
 
 
 def _truncate_utf8_bytes(content: str, max_bytes: int) -> tuple[str, bytes]:
@@ -199,16 +217,7 @@ class LocalDirectoryReader:
                     snapshot["reader_errors"].append({"code": "read_failed", "path": rel_path, "message": str(exc)})
                     continue
 
-                text = _decode_text(data, rel_path)
-                entry: dict[str, Any] = {
-                    "path": rel_path,
-                    "kind": "text" if text is not None else "binary",
-                    "size": len(data),
-                    "sha256": _sha256(data),
-                }
-                if text is not None:
-                    entry["content"] = text
-                snapshot["files"].append(entry)
+                snapshot["files"].append(_file_entry(rel_path, data))
 
         return self._sort_snapshot(snapshot)
 
@@ -318,16 +327,7 @@ class ArchivePackageReader:
                         target = data.decode("utf-8", errors="replace")
                         snapshot["files"].append({"path": rel_path, "kind": "symlink", "size": 0, "sha256": _sha256(data), "target": target})
                         continue
-                    text = _decode_text(data, rel_path)
-                    entry: dict[str, Any] = {
-                        "path": rel_path,
-                        "kind": "text" if text is not None else "binary",
-                        "size": actual_size,
-                        "sha256": _sha256(data),
-                    }
-                    if text is not None:
-                        entry["content"] = text
-                    snapshot["files"].append(entry)
+                    snapshot["files"].append(_file_entry(rel_path, data))
         except (OSError, zipfile.BadZipFile) as exc:
             snapshot["reader_errors"].append({"code": "archive_read_failed", "path": None, "message": str(exc)})
 

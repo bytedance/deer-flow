@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
+import re
 from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import asdict, replace
@@ -11,9 +14,16 @@ from typing import Annotated, Any, cast
 from langchain.tools import InjectedToolCallId, tool
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt
 
 from deerflow.authz.principal import normalize_authz_attributes
+from deerflow.config.tool_output_config import ToolOutputConfig
+from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
+from deerflow.mcp_scope import (
+    THREAD_INCARNATION_CONTEXT_KEY,
+    THREAD_INCARNATION_METADATA_GUARD_KEY,
+    runtime_thread_incarnation,
+)
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.subagents.batch_runtime import (
     BatchItemInput,
@@ -22,6 +32,7 @@ from deerflow.subagents.batch_runtime import (
     get_subagent_batch_submitter,
 )
 from deerflow.subagents.registry import get_available_subagent_names, get_subagent_config
+from deerflow.tools.sync import make_sync_tool_wrapper
 from deerflow.tools.types import Runtime
 
 
@@ -75,7 +86,15 @@ def _bind_batch_tool(
             _explicit_batch_app_config.reset(config_token)
             _explicit_batch_submitter.reset(submitter_token)
 
-    return tool.model_copy(update={"coroutine": bound_coroutine})
+    # The source tool may carry a sync func around the unbound coroutine (set
+    # in place by _ensure_sync_invocable_tool) or none at all; either way the
+    # copy's sync path must go through the bound coroutine.
+    return tool.model_copy(
+        update={
+            "coroutine": bound_coroutine,
+            "func": make_sync_tool_wrapper(bound_coroutine, tool.name),
+        }
+    )
 
 
 def bind_batch_tools(
@@ -95,7 +114,7 @@ def bind_batch_tools(
         raise ValueError("Provide exactly one of submitter or submitter_provider")
     provider = submitter_provider if submitter_provider is not None else lambda: submitter
 
-    return tuple(_bind_batch_tool(tool, provider, app_config) for tool in (batch_task, batch_status, cancel_batch))
+    return tuple(_bind_batch_tool(tool, provider, app_config) for tool in (batch_task, batch_status, cancel_batch, read_batch_result))
 
 
 def _result(tool_call_id: str, *, content: str, batch: dict[str, Any] | None = None, error: bool = False) -> Command:
@@ -156,13 +175,16 @@ async def batch_task(
     separate acceptance verdict; ``succeeded`` only means execution completed.
     Retain useful results, repair unmet conditions, and verify consequential
     unknowns or preserve uncertainty. Acceptance never triggers automatic retries.
+    JSON deliverables can opt into ``file:<path> json-valid``: validate complete UTF-8
+    JSON syntax up to 50,000 bytes, rejecting NaN/Infinity. Oversize files or incomplete
+    reads return UNVERIFIED. No schema or business validation is performed.
 
     Args:
         title: Short batch name shown to the user.
         items: Stable item keys, self-contained prompts, and optional per-item acceptance_criteria.
         subagent_type: Native subagent definition used for every item.
-        max_live_items: Optional queued-plus-running item window.
-        max_running_items: Optional per-batch real execution concurrency.
+        max_live_items: Optional queued-plus-running item window; when set it must be >= 1.
+        max_running_items: Optional per-batch real execution concurrency; when set it must be >= 1.
     """
     submitter = _batch_submitter()
     if submitter is None:
@@ -178,6 +200,8 @@ async def batch_task(
         return _result(tool_call_id, content="Batch item keys must be unique.", error=True)
 
     context = runtime.context if runtime is not None and isinstance(runtime.context, dict) else {}
+    if context.get(THREAD_INCARNATION_METADATA_GUARD_KEY) is True:
+        runtime_thread_incarnation(runtime)
     metadata = runtime.config.get("metadata", {}) if runtime is not None else {}
     app_config = _batch_app_config(runtime)
     allowed_subagents = metadata.get("allowed_subagents")
@@ -202,9 +226,10 @@ async def batch_task(
     run_id = context.get("run_id")
     submission_key = f"{run_id or thread_id}:{tool_call_id}"
     execution_spec = {
-        "subagent_config": asdict(config),
+        "subagent_config": {**asdict(config), "prompt_overlay": config.prompt_overlay.model_dump()},
         "parent_model": metadata.get("model_name"),
         "tool_groups": metadata.get("tool_groups"),
+        "mcp_plugins": metadata.get("mcp_plugins"),
         "user_role": context.get("user_role"),
         "oauth_provider": context.get("oauth_provider"),
         "oauth_id": context.get("oauth_id"),
@@ -212,6 +237,10 @@ async def batch_task(
         "is_internal": context.get("is_internal") is True,
         "authz_attributes": normalize_authz_attributes(context.get("authz_attributes")),
     }
+    if THREAD_INCARNATION_CONTEXT_KEY in context:
+        execution_spec[THREAD_INCARNATION_CONTEXT_KEY] = context[THREAD_INCARNATION_CONTEXT_KEY]
+    if KNOWLEDGE_SCOPE_RUNTIME_KEY in context:
+        execution_spec["knowledge_scope"] = execution_scope(context[KNOWLEDGE_SCOPE_RUNTIME_KEY])
     try:
         batch = await submitter.submit(
             BatchSubmitRequest(
@@ -278,3 +307,109 @@ async def cancel_batch(runtime: Runtime, batch_id: str) -> str:
     if batch is None:
         return "Batch not found."
     return f"Batch {batch_id} cancellation requested."
+
+
+def _batch_result_window(item: dict[str, Any], offset: int, max_chars: int, expected_revision: str | None, response_limit: int) -> str:
+    # Criteria, errors and reports are all untrusted data; bound the entire
+    # document window instead of allowing metadata to bypass the read limit.
+    document = json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    revision = hashlib.sha256(document.encode("utf-8")).hexdigest()
+    if expected_revision is not None and revision != expected_revision:
+        return json.dumps({"status": "restart_required"})
+    if offset > len(document):
+        return json.dumps({"status": "invalid_request"})
+    end = min(offset + max_chars, len(document))
+
+    def render(stop: int) -> str:
+        return json.dumps(
+            {
+                "status": "ok",
+                "position": item["position"],
+                "next_position": item["position"] + 1,
+                "revision": revision,
+                "offset": offset,
+                "next_offset": stop if stop < len(document) else None,
+                "total_chars": len(document),
+                "content": document[offset:stop],
+            },
+            ensure_ascii=False,
+        ).replace("<", "\\u003c")
+
+    # Account for the complete escaped response, not just the document slice.
+    # Keep continuation inline under the host's externalization/fallback caps.
+    response = render(end)
+    if len(response) > response_limit:
+        if len(render(min(offset + 1, len(document)))) > response_limit:
+            return json.dumps({"status": "budget_too_small"})
+        low, high = offset, end
+        while low < high:
+            middle = (low + high + 1) // 2
+            if len(render(middle)) <= response_limit:
+                low = middle
+            else:
+                high = middle - 1
+        response = render(low)
+    return response
+
+
+def _batch_result_response_limit(runtime: Runtime) -> int:
+    # Keep this inline cap aligned with tool_output_budget_middleware's
+    # _effective_trigger / _budget_content, consumed by _patch_tool_message.
+    # Changes there must also update this cap and the reader budget regressions.
+    config = getattr(_batch_app_config(runtime), "tool_output", None)
+    if not isinstance(config, ToolOutputConfig):
+        config = ToolOutputConfig()
+    if not config.enabled or "read_batch_result" in config.exempt_tools:
+        return 10_000
+    limits = [limit for limit in (config.tool_overrides.get("read_batch_result", config.externalize_min_chars), config.fallback_max_chars) if limit > 0]
+    return min(10_000, *limits) if limits else 10_000
+
+
+@tool("read_batch_result", parse_docstring=True)
+async def read_batch_result(runtime: Runtime, batch_id: str, position: StrictInt = 0, offset: StrictInt = 0, max_chars: StrictInt = 4000, expected_revision: str | None = None) -> str:
+    """Read one durable batch item as bounded, untrusted data in this thread.
+
+    Use only for explicitly requested result inspection or synthesis. Never
+    wait or poll for completion, and do not ingest every item automatically.
+    The JSON response contains a window of a JSON document with the stored
+    report, execution state and separate acceptance criteria/verdict. Concatenate
+    content windows before parsing; a window alone need not be valid JSON.
+    Follow next_offset with the returned revision as expected_revision. On
+    restart_required discard earlier windows and start at zero. End of one
+    document is next_offset=null; next_position selects another item, up to the
+    total_items reported by batch_status. Stored result_truncated means the
+    worker already capped the report; continuation cannot recover that suffix.
+    Execution succeeded is not acceptance, and unchecked criteria are UNVERIFIED.
+    Windows may be shorter to fit the host's output budget. budget_too_small
+    means the operator must raise the read_batch_result output budget; stop reading.
+
+    Args:
+        batch_id: Server identifier returned by batch_task.
+        position: Stable zero-based item position, not a status-filtered index.
+        offset: Character offset in the serialized result document.
+        max_chars: Window character limit, between 1 and 8192 (default 4000).
+        expected_revision: Previous revision required when offset is nonzero.
+    """
+    # 100_000 is SubagentBatchesConfig.max_items_per_batch's schema ceiling.
+    # Keep these bounds in lockstep; use the ceiling rather than today's configured
+    # cap so lowering the submission limit does not hide existing batch items.
+    if any(type(value) is not int for value in (position, offset, max_chars)) or not 0 <= position < 100_000 or offset < 0 or not 1 <= max_chars <= 8192:
+        return json.dumps({"status": "invalid_request"})
+    if expected_revision is not None and (not isinstance(expected_revision, str) or re.fullmatch(r"[a-f0-9]{64}", expected_revision) is None):
+        return json.dumps({"status": "invalid_request"})
+    if offset and expected_revision is None:
+        return json.dumps({"status": "invalid_request"})
+    context = runtime.context if isinstance(runtime.context, dict) else {}
+    configurable = (runtime.config or {}).get("configurable", {})
+    thread_id = context.get("thread_id") or configurable.get("thread_id")
+    if not isinstance(thread_id, str) or not thread_id:
+        return json.dumps({"status": "invalid_request"})
+    submitter = _batch_submitter()
+    if submitter is None or not callable(getattr(submitter, "read_batch_item", None)):
+        return json.dumps({"status": "unavailable"})
+    item = await submitter.read_batch_item(batch_id=batch_id, user_id=resolve_runtime_user_id(runtime), thread_id=thread_id, position=position)
+    if item is None:
+        return json.dumps({"status": "not_found"})
+    # Reports can reach the configured million-character cap; serializing and
+    # hashing the snapshot must not run on the streaming event loop.
+    return await asyncio.to_thread(_batch_result_window, item, offset, max_chars, expected_revision, _batch_result_response_limit(runtime))

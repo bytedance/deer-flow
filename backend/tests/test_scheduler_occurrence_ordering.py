@@ -22,7 +22,7 @@ from sqlalchemy.schema import CreateSchema, DropSchema
 from app.scheduler.service import ScheduledTaskService
 from deerflow.persistence.base import Base
 from deerflow.persistence.run import RunRepository
-from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.run.model import RunChangeClockRow, RunRow
 from deerflow.persistence.scheduled_task_runs import ScheduledTaskRunRepository
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
@@ -72,7 +72,17 @@ async def occurrence_databases(request, tmp_path):
                 engine = create_async_engine(postgres_uri, connect_args={"server_settings": {"search_path": schema}})
             engines.append(engine)
         async with engines[0].begin() as connection:
-            await connection.run_sync(lambda sync: Base.metadata.create_all(sync, tables=[ScheduledTaskRow.__table__, ScheduledTaskRunRow.__table__, RunRow.__table__]))
+            await connection.run_sync(
+                lambda sync: Base.metadata.create_all(
+                    sync,
+                    tables=[
+                        ScheduledTaskRow.__table__,
+                        ScheduledTaskRunRow.__table__,
+                        RunRow.__table__,
+                        RunChangeClockRow.__table__,
+                    ],
+                )
+            )
         yield [async_sessionmaker(engine, expire_on_commit=False) for engine in engines], backend == "postgres-multi"
     finally:
         for engine in engines:
@@ -172,6 +182,10 @@ async def test_late_launch_preserves_newer_result_and_counts_once(occurrence_dat
     service_b = _service(tasks_b, occurrences_b, launch_b, multi) if multi else service_a
     peer = _service(tasks_recovery, occurrences_recovery, unexpected_launch, multi) if multi else service_a
     scheduled_at = now - timedelta(seconds=1) if multi else now + timedelta(days=1)
+    # SQLite drives manual trials ahead of the run time so its poller cannot
+    # claim the task; such trials leave the once task enabled. Postgres
+    # launches the due run itself, so its outcome finalizes the task.
+    success_status, failure_status = ("completed", "failed") if multi else ("enabled", "enabled")
     await tasks_a.create(
         task_id=task_id,
         user_id="user-order",
@@ -209,7 +223,7 @@ async def test_late_launch_preserves_newer_result_and_counts_once(occurrence_dat
             await durable_b.update_status(run_b, "error", error="newer run failed")
             await service_b.handle_run_completion(_completion(run_b, launches["b"], RunStatus.error, "newer run failed"))
             expected = await _parent_projection(factories[1], task_id)
-            assert expected["status"] == "failed"
+            assert expected["status"] == failure_status
             assert expected["last_run_id"] == run_b
             assert expected["run_count"] == 1
             expected["run_count"] = 2
@@ -235,7 +249,7 @@ async def test_late_launch_preserves_newer_result_and_counts_once(occurrence_dat
         if newer_occurrence:
             assert after == expected
         else:
-            assert after["status"] == "completed"
+            assert after["status"] == success_status
             assert after["last_run_id"] == run_a
             assert after["run_count"] == 1
         async with factories[1]() as session:

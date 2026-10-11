@@ -23,12 +23,15 @@ import pytest
 from app.gateway.routers.agents import (
     AgentCreateRequest,
     AgentUpdateRequest,
+    UserProfileUpdateRequest,
     check_agent_name,
     create_agent_endpoint,
     delete_agent,
     get_agent,
+    get_user_profile,
     list_agents,
     update_agent,
+    update_user_profile,
 )
 from deerflow.config.agents_api_config import load_agents_api_config_from_dict
 from deerflow.config.paths import get_paths
@@ -112,5 +115,28 @@ async def test_update_agent_does_not_block_event_loop(tmp_path: Path, monkeypatc
         response = await update_agent("loop-update-agent", AgentUpdateRequest(description="Updated description"))
 
         assert response.description == "Updated description"
+    finally:
+        load_agents_api_config_from_dict({})
+
+
+async def test_user_profile_endpoints_do_not_block_event_loop(tmp_path: Path, monkeypatch) -> None:
+    # GET stats and reads USER.md, PUT creates the user bucket and writes it.
+    # Every other handler in this router offloads its filesystem work; these
+    # two ran it on the loop, so the strict gate raises BlockingError here.
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    load_agents_api_config_from_dict({"enabled": True})
+    try:
+        # Missing profile: the existence check must not block either.
+        assert (await get_user_profile()).content is None
+
+        saved = await update_user_profile(UserProfileUpdateRequest(content="I prefer terse answers.\n"))
+        assert saved.content == "I prefer terse answers.\n"
+
+        assert (await get_user_profile()).content == "I prefer terse answers."
+
+        # test-side check (resolution offloaded; not exercised on the loop)
+        user_md = await asyncio.to_thread(get_paths().user_md_file, get_effective_user_id())
+        assert await asyncio.to_thread(user_md.read_text, encoding="utf-8") == "I prefer terse answers.\n"
     finally:
         load_agents_api_config_from_dict({})

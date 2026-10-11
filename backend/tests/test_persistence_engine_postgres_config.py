@@ -9,6 +9,8 @@ from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
+import yaml
+from pydantic import ValidationError
 
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence import engine as engine_mod
@@ -54,8 +56,64 @@ def test_postgres_engine_kwargs_allow_command_timeout_opt_out() -> None:
     assert kwargs["connect_args"] == {}
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, None),
+        (30, 30.0),
+        (0.5, 0.5),
+        ("60", 60.0),
+    ],
+)
+def test_database_command_timeout_accepts_finite_positive_seconds(raw, expected: float | None) -> None:
+    assert DatabaseConfig(command_timeout=raw).command_timeout == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        True,
+        False,
+        yaml.safe_load("on"),
+        yaml.safe_load("off"),
+        yaml.safe_load("yes"),
+        yaml.safe_load("no"),
+        0,
+        -1,
+        -0.5,
+        float("inf"),
+        float("-inf"),
+        float("nan"),
+        yaml.safe_load(".inf"),
+        yaml.safe_load(".nan"),
+        "1e999",
+    ],
+)
+def test_database_command_timeout_rejects_boolean_and_non_finite_values(raw) -> None:
+    with pytest.raises(ValidationError, match="command_timeout"):
+        DatabaseConfig(command_timeout=raw)
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    [
+        ("pool_size", True),
+        ("pool_size", False),
+        ("pool_size", 0),
+        ("pool_size", -1),
+        ("pool_recycle", True),
+        ("pool_recycle", False),
+        ("pool_recycle", 0),
+        ("pool_recycle", -1),
+    ],
+)
+def test_database_pool_settings_reject_booleans_and_non_positive_integers(field: str, invalid_value) -> None:
+    with pytest.raises(ValidationError):
+        DatabaseConfig(**{field: invalid_value})
+
+
 @pytest.mark.asyncio
-async def test_configured_command_timeout_ends_stalled_command() -> None:
+async def test_configured_command_timeout_ends_stalled_command(monkeypatch) -> None:
     config = DatabaseConfig(
         backend="postgres",
         postgres_url="postgresql://user:password@localhost/deerflow",
@@ -79,8 +137,9 @@ async def test_configured_command_timeout_ends_stalled_command() -> None:
 
     bootstrap_schema = AsyncMock()
 
+    # Patch one key: patch.dict restores all of sys.modules and races with background imports.
+    monkeypatch.setitem(sys.modules, "asyncpg", ModuleType("asyncpg"))
     with (
-        patch.dict(sys.modules, {"asyncpg": ModuleType("asyncpg")}),
         patch.object(engine_mod, "create_async_engine", side_effect=_create_engine),
         patch.object(engine_mod, "async_sessionmaker", return_value=MagicMock()),
         patch("deerflow.persistence.bootstrap.bootstrap_schema", new=bootstrap_schema),
@@ -101,7 +160,7 @@ async def test_configured_command_timeout_ends_stalled_command() -> None:
 
 
 @pytest.mark.asyncio
-async def test_init_engine_from_config_preserves_longer_command_timeout_override() -> None:
+async def test_init_engine_from_config_preserves_longer_command_timeout_override(monkeypatch) -> None:
     config = DatabaseConfig(
         backend="postgres",
         postgres_url="postgresql://user:password@localhost/deerflow",
@@ -112,8 +171,8 @@ async def test_init_engine_from_config_preserves_longer_command_timeout_override
     mock_engine.dispose = AsyncMock()
     bootstrap_schema = AsyncMock()
 
+    monkeypatch.setitem(sys.modules, "asyncpg", ModuleType("asyncpg"))
     with (
-        patch.dict(sys.modules, {"asyncpg": ModuleType("asyncpg")}),
         patch.object(engine_mod, "create_async_engine", return_value=mock_engine) as create_engine,
         patch.object(engine_mod, "async_sessionmaker", return_value=MagicMock()),
         patch("deerflow.persistence.bootstrap.bootstrap_schema", new=bootstrap_schema),
@@ -129,14 +188,14 @@ async def test_init_engine_from_config_preserves_longer_command_timeout_override
 
 
 @pytest.mark.asyncio
-async def test_init_engine_postgres_uses_hardened_kwargs() -> None:
+async def test_init_engine_postgres_uses_hardened_kwargs(monkeypatch) -> None:
     url = "postgresql+asyncpg://user:password@localhost/deerflow"
     mock_engine = MagicMock()
     mock_engine.dispose = AsyncMock()
     bootstrap_schema = AsyncMock()
 
+    monkeypatch.setitem(sys.modules, "asyncpg", ModuleType("asyncpg"))
     with (
-        patch.dict(sys.modules, {"asyncpg": ModuleType("asyncpg")}),
         patch.object(engine_mod, "create_async_engine", return_value=mock_engine) as create_engine,
         patch.object(engine_mod, "async_sessionmaker", return_value=MagicMock()),
         patch("deerflow.persistence.bootstrap.bootstrap_schema", new=bootstrap_schema),
@@ -151,7 +210,7 @@ async def test_init_engine_postgres_uses_hardened_kwargs() -> None:
 
 
 @pytest.mark.asyncio
-async def test_init_engine_postgres_retry_uses_hardened_kwargs() -> None:
+async def test_init_engine_postgres_retry_uses_hardened_kwargs(monkeypatch) -> None:
     url = "postgresql+asyncpg://user:password@localhost/deerflow"
     initial_engine = MagicMock()
     initial_engine.dispose = AsyncMock()
@@ -160,8 +219,8 @@ async def test_init_engine_postgres_retry_uses_hardened_kwargs() -> None:
     bootstrap_schema = AsyncMock(side_effect=[Exception("database does not exist"), None])
     auto_create = AsyncMock()
 
+    monkeypatch.setitem(sys.modules, "asyncpg", ModuleType("asyncpg"))
     with (
-        patch.dict(sys.modules, {"asyncpg": ModuleType("asyncpg")}),
         patch.object(engine_mod, "create_async_engine", side_effect=[initial_engine, retry_engine]) as create_engine,
         patch.object(engine_mod, "async_sessionmaker", return_value=MagicMock()),
         patch.object(engine_mod, "_auto_create_postgres_db", new=auto_create),

@@ -74,6 +74,39 @@ def test_records_only_new_names_from_the_final_current_catalog_command():
     assert "h1" not in persisted
 
 
+def test_narrow_recorder_identifies_subagent_without_caller_flag():
+    recorder = _Recorder()
+    request = _ToolRequest(
+        context={
+            "__run_tool_promotion_recorder": recorder,
+            "agent_id": "general-purpose",
+        }
+    )
+    result = Command(update={"promoted": {"catalog_hash": "h1", "names": ["mcp_a"]}})
+
+    assert _middleware().wrap_tool_call(request, lambda _: result) is result
+
+    assert recorder.calls[0]["changes"]["is_subagent"] is True
+    assert recorder.calls[0]["changes"]["agent_id"] == "general-purpose"
+
+
+def test_lead_attribution_ignores_caller_supplied_subagent_fields():
+    recorder = _Recorder()
+    request = _ToolRequest(
+        context={
+            "__run_journal": recorder,
+            "is_subagent": True,
+            "agent_id": "forged-agent",
+        }
+    )
+    result = Command(update={"promoted": {"catalog_hash": "h1", "names": ["mcp_a"]}})
+
+    assert _middleware().wrap_tool_call(request, lambda _: result) is result
+
+    assert recorder.calls[0]["changes"]["is_subagent"] is False
+    assert recorder.calls[0]["changes"]["agent_id"] is None
+
+
 @pytest.mark.asyncio
 async def test_async_records_promotion_but_repeated_stale_and_non_search_results_do_not():
     recorder = _Recorder()

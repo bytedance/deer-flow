@@ -1,0 +1,337 @@
+---
+title: 生命周期与观察者
+description: 四种通知类贡献：每次 Lead 运行和子 Agent 的任务生命周期、DeerFlow 自己发起的系统模型调用、每个组装完成的 Agent 的描述与指纹，以及每次上下文压缩的事件。涵盖各自的时机、载荷、存储和失败行为。
+---
+
+import { Callout } from "nextra/components";
+
+# 生命周期与观察者
+
+中间件看到的是 Agent 内部的每次模型调用和工具调用。本章的四种贡献看到的是这些调用周围和旁边的事件：任务开始与结束、DeerFlow 自己的模型调用、Agent 被组装、上下文被压缩。它们都无法改变宿主的行为，并且都按[运行时模型](/docs/harness/extensions/runtime)中的规则故障放行。
+
+| 贡献                         | 注册方法                                 | 调用时机                           | 同步还是异步       | 收到的存储          |
+| ---------------------------- | ---------------------------------------- | ---------------------------------- | ------------------ | ------------------- |
+| `TaskLifecycleContributor`   | `registry.task_lifecycle()`              | 每次 Lead 运行和子 Agent 的开始与结束 | 异步，被等待     | 任务存储            |
+| `SystemModelCallObserver`    | `registry.system_model_observer()`       | 每次 DeerFlow 自有模型调用之后     | 异步               | 任务存储，或分离存储 |
+| `AgentAssemblyObserver`      | `registry.agent_assembly_observer()`     | 每次 Agent 构建结束时              | **同步**           | 仅应用存储          |
+| `ContextCompactionObserver`  | `registry.context_compaction_observer()` | 每次摘要压缩之后                   | 异步，即发即弃     | 分离存储            |
+
+本页所有示例都来自同一个注册了全部四种贡献的扩展：
+
+```python
+@extension(api="0.2.0", name="observers")
+def install(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
+    registry.task_lifecycle(TaskTimer())
+    registry.system_model_observer(SystemCallLogger())
+    registry.agent_assembly_observer(AssemblyDriftWatcher())
+    registry.context_compaction_observer(CompactionLogger())
+```
+
+## 任务生命周期
+
+```python
+class TaskLifecycleContributor(Protocol):
+    async def on_task_start(self, app_store: ExtensionData, task_store: ExtensionData, info: TaskInfo) -> None: ...
+    async def on_task_stop(self, app_store: ExtensionData, task_store: ExtensionData, info: TaskInfo, outcome: TaskOutcome) -> None: ...
+```
+
+一个**任务**就是一次 Lead 运行或一次子 Agent 执行。`task_store` 在 `on_task_start` 之前为该任务创建，与传给它的 `on_task_stop` 以及其中每次中间件调用的是同一个对象。所以这一对钩子天然适合建立和收拢单个任务的状态。
+
+### 时机
+
+**Lead 运行**：
+
+1. 运行被接纳并标记为已开始。在此之前就被取消的运行两个钩子都不会收到。
+2. 等待 `on_task_start`，此时 Agent 图尚未构建。
+3. Agent 运行，包括所有目标续跑。
+4. 宿主持久化运行状态和 token 用量，同步线程标题和状态，并执行它自己的完成钩子。
+5. 等待 `on_task_stop`。此时运行的 finalizing 屏障仍然持有，所以同一线程上的后续运行要等你的钩子返回后才能开始它的生命周期。
+6. 释放屏障，并向客户端发布流结束。
+
+**子 Agent**：`on_task_start` 在子 Agent 第一步之前被等待；`on_task_stop` 在其清理路径中、释放沙箱租约之后被等待，无论结果如何。
+
+两个钩子都受[运行时模型](/docs/harness/extensions/runtime)中所述的 3 秒通知预算约束。因为 `on_task_stop` 在流结束之前执行，慢的停止钩子会推迟客户端看到运行结束的时间。
+
+### TaskInfo
+
+| 字段             | Lead 运行                  | 子 Agent                                   |
+| ---------------- | -------------------------- | ------------------------------------------ |
+| `task_id`        | 运行 id                    | 子 Agent 执行 id                           |
+| `run_id`         | 运行 id                    | 父运行的 id                                |
+| `thread_id`      | 线程 id                    | 父线程 id                                  |
+| `kind`           | `"lead"`                   | `"subagent"`                               |
+| `parent_task_id` | `None`                     | 父运行 id，也就是 Lead 任务的 `task_id`     |
+| `agent_name`     | assistant 或自定义 Agent id | 子 Agent 名称，例如 `general-purpose`      |
+| `resumed`        | `False`                    | `False`                                    |
+
+<Callout type="info">
+  `resumed` 属于契约的一部分，但当前宿主从不把它设为 `True`。暂时不要依赖它来识别续跑。
+</Callout>
+
+对子 Agent 来说，`task_store.scope_id` 在有发起委派的 tool-call id 时就是它，不一定等于 `info.task_id`。请用 `info.task_id` 作为任务标识。
+
+执行器没有 `run_id` 的子 Agent（独立 LangGraph Server 或直接调用工厂时会出现）会跳过两个钩子，并记录一条 debug 日志。
+
+### TaskOutcome
+
+| 结果        | Lead 运行                                  | 子 Agent                       |
+| ----------- | ------------------------------------------ | ------------------------------ |
+| `completed` | 状态为 `success`                           | 状态为 `completed`             |
+| `aborted`   | 运行被停止，或状态为 `interrupted`          | 状态为 `cancelled`             |
+| `failed`    | 其他情况，例如 `error`                     | 其他情况，包括超时             |
+
+这个映射刻意偏保守。触达 token 或轮次预算的子 Agent 仍可能是 `completed`。
+
+### 示例
+
+```python
+@dataclass
+class RunClock:
+    started: float
+
+
+@dataclass
+class OutcomeTally:
+    counts: dict[str, int] = field(default_factory=dict)
+    _lock: Lock = field(default_factory=Lock, repr=False)
+
+    def add(self, kind: str, outcome: TaskOutcome) -> None:
+        with self._lock:
+            key = f"{kind}:{outcome.value}"
+            self.counts[key] = self.counts.get(key, 0) + 1
+
+
+class TaskTimer:
+    async def on_task_start(self, app_store: ExtensionData, task_store: ExtensionData, info: TaskInfo) -> None:
+        import time
+
+        task_store.set(RunClock(time.monotonic()))
+
+    async def on_task_stop(
+        self,
+        app_store: ExtensionData,
+        task_store: ExtensionData,
+        info: TaskInfo,
+        outcome: TaskOutcome,
+    ) -> None:
+        import time
+
+        clock = task_store.get(RunClock)
+        elapsed = time.monotonic() - clock.started if clock is not None else float("nan")
+        app_store.get_or_init(OutcomeTally, OutcomeTally).add(info.kind, outcome)
+        logger.info("%s %s in thread %s ended %s after %.2fs", info.kind, info.task_id, info.thread_id, outcome.value, elapsed)
+```
+
+单个任务的状态放进 `task_store`，随任务消失；汇总放进 `app_store`。`on_task_stop` 里一定要处理值缺失的情况：如果别的贡献者耗尽了预算，你的 `on_task_start` 可能被跳过了。
+
+## 系统模型调用
+
+```python
+class SystemModelCallObserver(Protocol):
+    async def on_system_model_call(
+        self,
+        app_store: ExtensionData,
+        task_store: ExtensionData,
+        kind: SystemOperationKind,
+        request: SystemModelRequest,
+        result: SystemModelResult,
+    ) -> None: ...
+```
+
+DeerFlow 会为自己发起一些模型调用，这些调用不经过 Agent 的模型调用链，所以中间件看不到。这个观察者报告它们：
+
+| `kind`          | 调用                                   | 报告方式                         | 存储              |
+| --------------- | -------------------------------------- | -------------------------------- | ----------------- |
+| `goal`          | Agent 一轮结束后的目标完成度评估       | 内联等待                         | Lead 任务存储     |
+| `title`         | 线程标题生成                           | 内联等待                         | 当前任务存储      |
+| `summarization` | 每一次摘要模型尝试，包括回退模型       | 内联等待                         | 当前任务存储      |
+| `memory`        | 记忆工作线程执行的记忆抽取             | 提交到通知循环，不等待           | 通常为分离存储    |
+
+只有摘要压缩的异步路径会被观察。同步的 `compact_state` 路径在 Gateway 运行时里走不到，不会报告任何东西。
+
+### 载荷
+
+`SystemModelRequest` 在调用之前采集：
+
+| 字段            | 含义                                                                             |
+| --------------- | -------------------------------------------------------------------------------- |
+| `messages`      | 总是 tuple。目标评估和记忆传入消息列表；标题和摘要传入一个提示词字符串，会变成只有一项的 tuple |
+| `model_name`    | 调用所用的模型（如果已知）                                                        |
+| `invoke_config` | 调用的 runnable config（是 mapping 时），否则为 `None`                             |
+
+`SystemModelResult` 在调用之后采集：
+
+| 字段          | 含义                                     |
+| ------------- | ---------------------------------------- |
+| `response`    | 成功时为提供商响应，否则为 `None`        |
+| `error`       | 失败或取消时为该异常，否则为 `None`      |
+| `duration_ms` | 调用的墙钟耗时                           |
+
+对 `messages` 的规范化很重要：否则遍历一个提示词字符串会逐字符遍历。
+
+### 终止路径
+
+每条终止路径都会报告，而宿主看到的仍是调用本身的结果或异常，不受影响：
+
+- **成功**和**失败**在调用返回或抛出之后内联通知观察者。
+- **取消**很常见。停止运行，或发送打断它的后续消息，都会在提供商 token 已经花掉之后取消进行中的目标评估和摘要调用。此时等待观察者会被再次取消打断，所以宿主把通知提交到通知循环而不等待，然后重新抛出取消。`result.error` 就是那个 `CancelledError`。没有注册循环或正在关闭的宿主会丢弃这类观察。
+
+<Callout type="warning">
+  `goal`、`title` 和 `summarization` 的内联通知是在运行路径上等待的，而且没有时间预算。
+  慢的观察者会推迟它所观察的标题、摘要或目标判定。这个观察者只做计数和日志，更慢的工作交给服务。
+</Callout>
+
+### 示例
+
+```python
+class SystemCallLogger:
+    async def on_system_model_call(
+        self,
+        app_store: ExtensionData,
+        task_store: ExtensionData,
+        kind: SystemOperationKind,
+        request: SystemModelRequest,
+        result: SystemModelResult,
+    ) -> None:
+        status = "failed" if result.error is not None else "ok"
+        logger.info(
+            "system %s call on %s: %s in %.0f ms (%d message(s), scope %s)",
+            kind.value,
+            request.model_name,
+            status,
+            result.duration_ms or 0.0,
+            len(request.messages),
+            task_store.scope_id,
+        )
+```
+
+```text
+system title call on gpt-4o-mini: ok in 612 ms (1 message(s), scope 7f3c...)
+system goal call on gpt-4o-mini: ok in 890 ms (2 message(s), scope 7f3c...)
+```
+
+## Agent 组装
+
+```python
+class AgentAssemblyObserver(Protocol):
+    def on_agent_assembled(self, app_store: ExtensionData, descriptor: AgentAssemblyDescriptor) -> None: ...
+```
+
+宿主构建 Agent 时，会在一次同步调用里确定实际模型、渲染系统提示词、按授权过滤工具、组合中间件栈。这些信息事后都无法还原。所以宿主在每次构建结束时发出一个 `AgentAssemblyDescriptor`，通常是每次 Lead 运行一次、每次子 Agent 执行一次。
+
+这是唯一的**同步**贡献：Agent 构建本身是同步的，没有事件循环可以等待。观察者必须轻量且不能阻塞。它只收到应用存储。没有注册组装观察者时，宿主完全不构建描述。
+
+### 描述
+
+| 字段                  | 含义                                                                           | 计入指纹 |
+| --------------------- | ------------------------------------------------------------------------------ | -------- |
+| `namespace`           | `"deerflow"`                                                                   | 是       |
+| `agent_name`          | `lead-agent`、自定义 Agent 名、`bootstrap` 或子 Agent 名                        | 是       |
+| `requested_model`     | 调用方请求的模型（如果有）                                                     | **否**   |
+| `effective_model`     | 实际发给提供商的模型                                                           | 是       |
+| `model_parameters`    | 影响行为的模型设置；不含身份和展示类字段                                       | 是       |
+| `thinking_enabled`、`reasoning_effort` | 解析后的推理设置                                              | 是       |
+| `base_prompt_hash`    | 渲染后系统提示词的 `canonical_hash`                                            | 是       |
+| `tools`               | 每个绑定工具一个 `ToolDescriptor`：`name`、`description_hash`、`schema_hash`、`source`、`mcp_server`、`mcp_transport` | 是，按名称排序 |
+| `middlewares`         | 栈中每项一个 `MiddlewareDescriptor`：`name`、`module`、`policy_parameters`、`extension` | 是，**保持栈顺序** |
+| `deferred_tool_names` | 藏在工具搜索后面的工具                                                         | 是，排序 |
+| `enabled_skills`      | 启用的技能名                                                                   | 是，排序 |
+| `effective_policies`  | 递归上限、提示词模板 id、技能目录哈希等限制                                    | 是       |
+| `build`               | 宿主的 `package_version`、`image_digest`、`git_commit`                         | **否**   |
+
+`descriptor.fingerprint` 是对标为"是"的字段计算的 SHA-256，回答的是"这个 Agent 的行为方式有没有变？"：
+
+- 工具和技能要排序，因为它们的组装顺序是偶然的。中间件保持栈顺序，因为顺序决定谁包裹谁。
+- 排除 `build`，这样配置不变的重新部署不会改变任何指纹。需要知道宿主是否变化时，直接比较 `build`。
+- 排除 `requested_model`，因为只有 `effective_model` 会到达提供商。
+- 贡献的中间件按它包裹的类来描述，`extension` 字段写明贡献它的入口点，所以两个扩展的中间件不会合并成一项。
+
+`image_digest` 和 `git_commit` 来自环境变量 `DEER_FLOW_IMAGE_DIGEST` 和 `DEER_FLOW_GIT_COMMIT`，未设置时为 `unknown`。
+
+### 声明中间件的策略
+
+默认情况下，宿主通过探测一组固定的公开属性来描述中间件。更好的做法是声明真正影响中间件行为的参数，这样它们一变，指纹就变：
+
+```python
+class ToolTimer(AgentMiddleware):
+    def __init__(self, slow_ms: float) -> None:
+        super().__init__()
+        self.slow_ms = slow_ms
+
+    def release_policy_parameters(self) -> dict[str, object]:
+        return {"slow_ms": self.slow_ms}
+```
+
+描述里就会记录 `MiddlewareDescriptor(name="ToolTimer", ..., policy_parameters={"slow_ms": 200}, extension="deerflow_extension_hello:install")`。值必须可 JSON 序列化：长文本请先哈希，而不是直接嵌入。契约包也导出了宿主使用的辅助函数，让扩展能算出完全相同的哈希：
+
+- `canonical_json(value)`：键排序、无多余空白的 JSON。遇到无法序列化的值会抛出 `TypeError`，而不是退回 `repr`。
+- `canonical_hash(value)`：`canonical_json(value)` 的 SHA-256 十六进制摘要。
+- `collect_release_policies(middlewares)`：栈中所有声明，以类名为键。重复的类得到 `Name#2` 等键；抛出异常的声明记为 `{"error": "<Type>"}` 而不是被丢弃。
+
+### 示例
+
+```python
+@dataclass
+class Fingerprints:
+    by_agent: dict[str, str] = field(default_factory=dict)
+    _lock: Lock = field(default_factory=Lock, repr=False)
+
+    def swap(self, agent: str, fingerprint: str) -> str | None:
+        with self._lock:
+            previous = self.by_agent.get(agent)
+            self.by_agent[agent] = fingerprint
+            return previous
+
+
+class AssemblyDriftWatcher:
+    def on_agent_assembled(self, app_store: ExtensionData, descriptor: AgentAssemblyDescriptor) -> None:
+        previous = app_store.get_or_init(Fingerprints, Fingerprints).swap(descriptor.agent_name, descriptor.fingerprint)
+        if previous is not None and previous != descriptor.fingerprint:
+            logger.warning("agent %s changed: %s -> %s", descriptor.agent_name, previous[:12], descriptor.fingerprint[:12])
+```
+
+观察者抛出的异常会被记入日志，Agent 照常构建。
+
+## 上下文压缩
+
+```python
+class ContextCompactionObserver(Protocol):
+    async def on_context_compacted(self, app_store: ExtensionData, task_store: ExtensionData, event: CompactionEvent) -> None: ...
+```
+
+摘要压缩把许多消息替换成一条摘要。之后，状态里再也没有记录哪些消息变成了这条摘要。宿主在这个映射还存在的唯一时刻把它记下来：在摘要调用之前对每条将被移除的消息做哈希，在摘要产出之后发出一个 `CompactionEvent`。
+
+| 字段                      | 含义                                                   |
+| ------------------------- | ------------------------------------------------------ |
+| `transform_kind`          | `"summarization"`                                      |
+| `transform_version`       | `"1"`                                                  |
+| `source_content_hashes`   | 每条被移除消息的 `canonical_hash(message.content)`，按顺序 |
+| `output_content_hash`     | 摘要文本的 `canonical_hash`                            |
+| `compacted_message_count` | 移除了多少条消息                                       |
+| `kept_message_count`      | 保留了多少条消息                                       |
+
+要把事件和你手里的消息对应起来，必须用完全相同的方式哈希：`canonical_hash(message.content)`，直接传入 content 本身。绝不要先转成字符串，因为多模态 content 是 dict 列表，`str()` 的结果取决于键顺序。也不要试图事后通过对模型看到的内容做哈希来找回摘要：提示词里带的是摘要经过截断和转义的渲染版本，它的哈希不会等于 `output_content_hash`。
+
+这个通知是即发即弃的。它被分派到通知循环，不会阻塞模型这一轮；观察者收到的是**分离**存储，因为在这个调用点没有活跃任务。没有注册压缩观察者时，宿主连哈希这一步也会跳过。
+
+### 示例
+
+```python
+class CompactionLogger:
+    async def on_context_compacted(self, app_store: ExtensionData, task_store: ExtensionData, event: CompactionEvent) -> None:
+        logger.info(
+            "%s v%s folded %d message(s) into summary %s, kept %d",
+            event.transform_kind,
+            event.transform_version,
+            event.compacted_message_count,
+            event.output_content_hash[:12],
+            event.kept_message_count,
+        )
+```
+
+## 常见误区
+
+- **在钩子里做 I/O。** 生命周期钩子共享 3 秒预算；内联的系统模型通知没有预算，而且在运行路径上；组装观察者会阻塞构建。先缓冲到存储里，再由[服务](/docs/harness/extensions/services-and-routes)刷出。
+- **把状态放在分离存储上。** 通知结束后它就被丢弃。需要留存的东西请用应用存储。
+- **以为有开始就一定有结束。** 开始被跳过（预算耗尽）或运行在开始之前就被取消，都会产生不对称的序列。让 `on_task_stop` 能容忍状态缺失。
+- **把指纹当作部署 id。** 它刻意忽略了 `build`。要识别宿主二进制，请读 `descriptor.build`。

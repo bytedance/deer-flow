@@ -11,6 +11,7 @@ import type { ReactNode } from "react";
 
 import { SidebarProvider } from "@/components/ui/sidebar";
 import { ThreadSidebarItem } from "@/components/workspace/recent-chat-list";
+import { ThreadDeleteDialogProvider } from "@/components/workspace/thread-delete-dialog";
 import { AuthProvider } from "@/core/auth/AuthProvider";
 import type { User } from "@/core/auth/types";
 import { DEFAULT_LOCALE } from "@/core/i18n";
@@ -49,7 +50,9 @@ function renderItem(user: User): ReturnType<typeof render> {
       <QueryClientProvider client={queryClient}>
         <AuthProvider initialUser={user}>
           <SidebarProvider>
-            <ThreadSidebarItem thread={makeThread()} isActive={false} />
+            <ThreadDeleteDialogProvider>
+              <ThreadSidebarItem thread={makeThread()} isActive={false} />
+            </ThreadDeleteDialogProvider>
           </SidebarProvider>
         </AuthProvider>
       </QueryClientProvider>

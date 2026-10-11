@@ -31,6 +31,7 @@ def _make_memory(facts: list[dict[str, object]] | None = None) -> dict[str, obje
             "workContext": {"summary": "", "updatedAt": ""},
             "personalContext": {"summary": "", "updatedAt": ""},
             "topOfMind": {"summary": "", "updatedAt": ""},
+            "cognitiveStyle": {"summary": "", "updatedAt": ""},
         },
         "history": {
             "recentMonths": {"summary": "", "updatedAt": ""},

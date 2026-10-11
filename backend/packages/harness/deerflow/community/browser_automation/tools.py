@@ -8,7 +8,9 @@ addressed by a stable ``[ref]`` index, so the model acts on what it just
 observed instead of guessing selectors.
 
 All URLs are SSRF-screened with the shared :func:`validate_public_http_url`
-helper (opt-out only for intentional internal targets).
+helper (opt-out only for intentional internal targets), and a launched browser
+connects only through its pinned egress proxy (:mod:`.egress`), which applies
+the same policy to the addresses it actually connects to.
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
 from deerflow.community.url_safety import resolve_host_addresses as _resolve_host_addresses
-from deerflow.community.url_safety import validate_public_http_url
+from deerflow.community.url_safety import resolve_public_addresses, validate_public_http_url
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.constants import BROWSER_FRAMES_DIRNAME
@@ -139,6 +141,7 @@ def _resolve_session(runtime: Runtime, tool_name: str) -> _SessionLease:
         cdp_url=cdp_url,
         allow_unguarded_cdp=_as_bool(cfg.get("allow_unguarded_cdp"), False),
         url_guard=validate_browser_url,
+        egress_resolver=resolve_browser_egress,
         pin=True,
     )
     return _SessionLease(manager, thread_id, session)
@@ -160,6 +163,24 @@ def validate_browser_url(url: str, *, tool_name: str = "browser_navigate") -> st
         action="browse",
         resolver=_resolve_host_addresses,
     )
+
+
+def resolve_browser_egress(host: str, *, tool_name: str = "browser_navigate") -> list[str]:
+    """Return the addresses the browser may connect to for *host*.
+
+    The session's egress proxy calls this for every connection Chromium opens,
+    so the same ``allow_private_addresses`` policy as :func:`validate_browser_url`
+    decides it, and the browser connects to exactly the addresses vetted here.
+    Raises ``ValueError`` when the host must be refused. Blocking (DNS).
+    """
+    cfg = _get_tool_config(tool_name)
+    if _as_bool(cfg.get("allow_private_addresses"), False):
+        addresses = _resolve_host_addresses(host)
+        if not addresses:
+            raise ValueError("Error: URL host could not be resolved")
+    else:
+        addresses = resolve_public_addresses(host, action="browse", resolver=_resolve_host_addresses)
+    return list(dict.fromkeys(str(address) for address in addresses))
 
 
 def _validate_url(tool_name: str, url: str) -> str | None:
@@ -242,7 +263,7 @@ async def navigate_and_capture(*, thread_id: str | None, url: str, outputs_path:
     Returns ``{"screenshot": virtual_path|None, "url": str, "title": str}``.
     Raises :class:`ValueError` when the URL fails SSRF validation.
     """
-    url_error = _validate_url("browser_navigate", url)
+    url_error = await asyncio.to_thread(_validate_url, "browser_navigate", url)
     if url_error:
         raise ValueError(url_error)
     cfg = _get_tool_config("browser_navigate")
@@ -255,6 +276,7 @@ async def navigate_and_capture(*, thread_id: str | None, url: str, outputs_path:
         cdp_url=_as_str(cfg.get("cdp_url")),
         allow_unguarded_cdp=_as_bool(cfg.get("allow_unguarded_cdp"), False),
         url_guard=validate_browser_url,
+        egress_resolver=resolve_browser_egress,
     ) as session:
         snapshot = await session.navigate(url)
         screenshot_path: str | None = None
@@ -290,7 +312,7 @@ async def browser_navigate_tool(runtime: Runtime, url: str, tool_call_id: Annota
         url: The http(s) URL to open.
     """
     try:
-        url_error = _validate_url("browser_navigate", url)
+        url_error = await asyncio.to_thread(_validate_url, "browser_navigate", url)
         if url_error:
             return _tool_message(url_error, tool_call_id)
         with _resolve_session(runtime, "browser_navigate") as session:

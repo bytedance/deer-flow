@@ -422,6 +422,27 @@ class TestMessageRewrite:
         assert patched.content[-1]["type"] == "text"
         assert "safety-related signal" in patched.content[-1]["text"]
 
+    def test_drops_suppressed_calls_provider_tool_use_blocks(self):
+        mw = SafetyFinishReasonMiddleware()
+        call = _write_call()
+        state = {
+            "messages": [
+                _ai(
+                    content=[
+                        {"type": "text", "text": "partial answer"},
+                        {"type": "tool_use", "id": call["id"], "name": call["name"], "input": call["args"]},
+                    ],
+                    tool_calls=[call],
+                    response_metadata={"stop_reason": "refusal"},
+                )
+            ]
+        }
+
+        patched = mw.after_model(state, _runtime())["messages"][0]
+
+        assert [block["type"] for block in patched.content] == ["text", "text"]
+        assert "safety-related signal" in patched.content[-1]["text"]
+
     def test_idempotent_on_already_cleared_message(self):
         # Re-running the middleware on a message we already cleared must not
         # re-trigger (tool_calls is now empty → fast passthrough).

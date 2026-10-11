@@ -15,7 +15,10 @@ import os
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from deerflow.client import StreamEvent
 
 _UNSET = object()
 
@@ -52,21 +55,21 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="Extension management: deerflow extensions --help",
         add_help=True,
     )
-    parser.add_argument("message", nargs="*", help="initial prompt for the TUI, or message in --cli mode")
-    parser.add_argument(
+    parser.add_argument("message", nargs="*", help="initial prompt for the TUI, or the message for --print, --json or --cli")
+    # One headless mode runs per invocation; refuse both so neither message is dropped.
+    headless = parser.add_mutually_exclusive_group()
+    headless.add_argument(
         "--print",
         dest="print",
-        nargs="?",
-        const=None,
+        nargs="*",
         default=_UNSET,
         metavar="MESSAGE",
         help="headless one-shot: print the final answer and exit (reads stdin if no MESSAGE)",
     )
-    parser.add_argument(
+    headless.add_argument(
         "--json",
         dest="json",
-        nargs="?",
-        const=None,
+        nargs="*",
         default=_UNSET,
         metavar="MESSAGE",
         help="headless streaming: emit newline-delimited JSON StreamEvents and exit",
@@ -97,6 +100,18 @@ def _strip_chat(argv: Sequence[str]) -> list[str]:
     return argv
 
 
+def _headless_message(parser: argparse.ArgumentParser, flag: str, values: list[str], positional: str | None) -> str | None:
+    """Return the words after a ``--print``/``--json`` flag, or else the positional words.
+
+    argparse loses the order between the flag's words and positional words, so a
+    message split around the flag is refused instead of reassembled by guess.
+    """
+    message = " ".join(values).strip() or None
+    if message and positional:
+        parser.error(f'{flag}: pass the message in one place, e.g. deerflow {flag} "your question"')
+    return message or positional
+
+
 def _truthy(value: object) -> bool:
     return isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "on"}
 
@@ -119,7 +134,7 @@ def plan_launch(
         parser.error("--recursion-limit requires --print, --json, or --cli")
 
     if args.print is not _UNSET:
-        message = args.print if isinstance(args.print, str) else None
+        message = _headless_message(parser, "--print", args.print, positional)
         if message is None and stdin_isatty:
             return LaunchPlan(mode="headless-help", reason="--print needs a MESSAGE argument or piped stdin.")
         return LaunchPlan(
@@ -132,7 +147,7 @@ def plan_launch(
         )
 
     if args.json is not _UNSET:
-        message = args.json if isinstance(args.json, str) else None
+        message = _headless_message(parser, "--json", args.json, positional)
         if message is None and stdin_isatty:
             return LaunchPlan(mode="headless-help", reason="--json needs a MESSAGE argument or piped stdin.")
         return LaunchPlan(
@@ -207,6 +222,8 @@ deerflow — DeerFlow terminal workbench
                               set the headless agent-loop super-step limit
   deerflow extensions --help  install and manage trusted Python extensions
   echo "question" | deerflow --print
+
+  --print and --json exit 1 when the run fails, including an LLM error.
 """
 
 
@@ -259,15 +276,95 @@ def _make_session():
     return open_session(persistence=False)
 
 
+def _error_text(exc: Exception) -> str:
+    """One-line user-facing error, matching the TUI's AssistantError convention."""
+    return str(exc) or type(exc).__name__
+
+
+def _silence_closed_stdout() -> None:
+    """Prevent the interpreter's shutdown flush from raising on a closed pipe.
+
+    A consumer that closes the pipe early (``deerflow --print ... | head``)
+    makes the final stdout write raise BrokenPipeError; Python then re-raises
+    the same error from the interpreter's shutdown flush of sys.stdout unless
+    the descriptor is pointed somewhere harmless first.
+    """
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+    except (OSError, ValueError):
+        pass
+
+
+class _RunOutcome:
+    """Track the final AI message of a headless run and whether it failed.
+
+    Provider failures do not raise out of the stream: the LLM error middleware
+    turns them into an AI message flagged ``deerflow_error_fallback``. That text
+    is still the run's output, but a script calling ``deerflow --print`` needs a
+    non-zero exit status to tell it apart from a real answer.
+    """
+
+    def __init__(self) -> None:
+        from deerflow.client import _AIMessageAccumulator
+
+        self._messages = _AIMessageAccumulator()
+        self._errors: dict[str, dict] = {}
+
+    def observe(self, event: StreamEvent) -> None:
+        self._messages.observe(event)
+        if event.type != "messages-tuple" or event.data.get("type") != "ai":
+            return
+        msg_id = event.data.get("id") or ""
+        additional_kwargs = event.data.get("additional_kwargs") or {}
+        if additional_kwargs.get("deerflow_error_fallback"):
+            self._errors[msg_id] = additional_kwargs
+
+    def answer(self) -> str:
+        return self._messages.answer()
+
+    def error_text(self) -> str | None:
+        """One-line description when the final AI message is an error fallback."""
+        # Error fallbacks carry text, or follow up on an id whose text was already sent.
+        error = self._errors.get(self._messages.last_id)
+        if error is None:
+            return None
+        details = ", ".join(f"{key}={error[key]}" for key in ("error_type", "error_reason") if error.get(key))
+        return f"LLM request failed ({details})" if details else "LLM request failed"
+
+
+def _report_json_error(error_text: str) -> int:
+    print(f"Error: {error_text}", file=sys.stderr)
+    try:
+        sys.stdout.write(json.dumps({"type": "error", "data": {"message": error_text}}, ensure_ascii=False, default=str) + "\n")
+        sys.stdout.flush()
+    except BrokenPipeError:
+        _silence_closed_stdout()
+    return 1
+
+
 def _run_print(plan: LaunchPlan) -> int:
     message = _resolve_message(plan)
     if not message:
         print("No message provided.", file=sys.stderr)
         return 2
-    session = _make_session()
-    thread_id = session.resolve_thread(plan)
-    answer = session.client.chat(message, thread_id=thread_id, **_run_overrides(plan))
-    print(answer)
+    try:
+        session = _make_session()
+        thread_id = session.resolve_thread(plan)
+        outcome = _RunOutcome()
+        for event in session.client.stream(message, thread_id=thread_id, **_run_overrides(plan)):
+            outcome.observe(event)
+    except Exception as exc:  # noqa: BLE001 - headless boundary: report, never traceback
+        print(f"Error: {_error_text(exc)}", file=sys.stderr)
+        return 1
+    try:
+        print(outcome.answer())
+    except BrokenPipeError:
+        _silence_closed_stdout()
+        return 1
+    if (error_text := outcome.error_text()) is not None:
+        print(f"Error: {error_text}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -276,12 +373,19 @@ def _run_json(plan: LaunchPlan) -> int:
     if not message:
         print("No message provided.", file=sys.stderr)
         return 2
-    session = _make_session()
-    thread_id = session.resolve_thread(plan)
-    for event in session.client.stream(message, thread_id=thread_id, **_run_overrides(plan)):
-        payload = {"type": event.type, "data": event.data}
-        sys.stdout.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
-        sys.stdout.flush()
+    try:
+        session = _make_session()
+        thread_id = session.resolve_thread(plan)
+        outcome = _RunOutcome()
+        for event in session.client.stream(message, thread_id=thread_id, **_run_overrides(plan)):
+            outcome.observe(event)
+            payload = {"type": event.type, "data": event.data}
+            sys.stdout.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+            sys.stdout.flush()
+    except Exception as exc:  # noqa: BLE001 - headless boundary: report, never traceback
+        return _report_json_error(_error_text(exc))
+    if (error_text := outcome.error_text()) is not None:
+        return _report_json_error(error_text)
     return 0
 
 

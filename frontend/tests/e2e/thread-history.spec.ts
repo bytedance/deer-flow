@@ -361,7 +361,7 @@ test.describe("Thread history", () => {
       element.scrollTop = element.scrollHeight;
       element.dispatchEvent(new Event("scroll"));
     });
-    await expect(page.getByText("Completed in 11m 44s")).toBeVisible();
+    await expect(page.getByText("Took 11m 44s")).toBeVisible();
 
     const latestPageRequestsBeforeSubmit = latestPageRequestCount;
     const textarea = page.locator("textarea[name='message']");
@@ -371,6 +371,17 @@ test.describe("Thread history", () => {
     await expect
       .poll(() => latestPageRequestCount, { timeout: 15_000 })
       .toBeGreaterThan(latestPageRequestsBeforeSubmit);
+    // The refreshed page extends the virtualized list after submission. Keep
+    // positioning its measured tail until the follow-up enters the DOM.
+    await expect
+      .poll(async () => {
+        await scroller.evaluate((element) => {
+          element.scrollTop = element.scrollHeight;
+          element.dispatchEvent(new Event("scroll"));
+        });
+        return page.getByText(followUpPrompt).isVisible();
+      })
+      .toBe(true);
     await expect(page.getByText(followUpPrompt)).toBeVisible();
 
     let preservedDurationFound = false;
@@ -380,7 +391,7 @@ test.describe("Thread history", () => {
           (element.scrollHeight - element.clientHeight) * ratio;
         element.dispatchEvent(new Event("scroll"));
       }, step / 12);
-      if (await page.getByText("Completed in 11m 44s").isVisible()) {
+      if (await page.getByText("Took 11m 44s").isVisible()) {
         preservedDurationFound = true;
         break;
       }
@@ -399,7 +410,7 @@ test.describe("Thread history", () => {
     await expect(page.getByText(followUpPrompt)).toBeVisible();
   });
 
-  test("shows a completed run duration once after multi-step history", async ({
+  test("shows a completed run duration once in the final reasoning header", async ({
     page,
   }) => {
     mockLangGraphAPI(page, {
@@ -440,11 +451,25 @@ test.describe("Thread history", () => {
     });
 
     await expect(page.getByTestId("run-duration")).toHaveCount(1);
-    await expect(page.getByText("Completed in 1m 54s")).toBeVisible();
+    await expect(page.getByText("Took 1m 54s")).toBeVisible();
+    const disclosure = page.getByRole("button", {
+      name: "Took 1m 54s Reasoning",
+      exact: true,
+    });
+    await expect(disclosure).toBeVisible();
+    await expect(disclosure).toHaveAttribute("aria-expanded", "false");
+    await disclosure.click();
+    await expect(page.getByText("Final synthesis reasoning")).toBeVisible();
+    await disclosure.press("Enter");
+    await expect(page.getByText("Final synthesis reasoning")).not.toBeVisible();
+    const headerBox = await disclosure.boundingBox();
+    const answerBox = await page
+      .getByText("Final result", { exact: true })
+      .boundingBox();
+    expect(headerBox!.y + headerBox!.height).toBeLessThan(answerBox!.y);
     await expect(
       page.getByRole("button", { name: "Reasoning", exact: true }),
-    ).toBeVisible();
-    await expect(page.getByText("Thought for 114 seconds")).toHaveCount(0);
+    ).toHaveCount(0);
   });
 
   test("input box recalls previous prompts with arrow keys", async ({
@@ -533,6 +558,10 @@ test.describe("Thread history", () => {
     await inactiveThreadItem.hover();
     await inactiveThreadItem.getByRole("button", { name: /more/i }).click();
     await page.getByRole("menuitem", { name: /delete/i }).click();
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Delete", exact: true })
+      .click();
 
     await expect(page).toHaveURL(new RegExp(MOCK_THREAD_ID));
     await expect(
@@ -685,12 +714,13 @@ test.describe("Thread history", () => {
     await expect(textarea).toBeVisible();
   });
 
-  test("deleting the active newly created chat returns to the new chat screen", async ({
+  test("retrying deletion of the active newly created chat returns to the new chat screen", async ({
     page,
   }) => {
     mockLangGraphAPI(page);
+    let cleanupAttempts = 0;
     await page.route(/\/api\/threads\/[^/]+$/, (route) => {
-      if (route.request().method() === "DELETE") {
+      if (route.request().method() === "DELETE" && ++cleanupAttempts === 1) {
         return route.fulfill({
           status: 500,
           contentType: "application/json",
@@ -722,6 +752,25 @@ test.describe("Thread history", () => {
     await recentThreadItem.hover();
     await recentThreadItem.getByRole("button", { name: /more/i }).click();
     await page.getByRole("menuitem", { name: /delete/i }).click();
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Delete", exact: true })
+      .click();
+
+    // Remote deletion succeeded, but local cleanup failed. Keep the dialog
+    // and streamed content until the user retries the remaining cleanup.
+    await expect(
+      page.getByText("Local cleanup failed", {
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(page.getByText("Hello from DeerFlow!")).toBeVisible();
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Delete", exact: true })
+      .click();
+    await expect(page.getByRole("dialog")).toBeHidden();
+    expect(cleanupAttempts).toBe(2);
 
     await expect(page).toHaveURL(/\/workspace\/chats\/new$/);
     await expect(page.getByText("Previous question")).toHaveCount(0);
@@ -857,7 +906,9 @@ test.describe("Thread history", () => {
       `a[href='/workspace/chats/${MOCK_THREAD_ID}']`,
     );
     await expect(sidebarThread).toBeVisible({ timeout: 15_000 });
-    await expect(sidebarThread.getByLabel("Feishu channel")).toBeVisible();
+    await expect(
+      sidebarThread.getByRole("img", { name: "From Feishu" }),
+    ).toBeVisible();
 
     await page.goto("/workspace/chats");
 
@@ -868,5 +919,8 @@ test.describe("Thread history", () => {
       timeout: 15_000,
     });
     await expect(mainThread.getByText("Feishu", { exact: true })).toBeVisible();
+    await expect(
+      mainThread.getByRole("img", { name: "From Feishu" }),
+    ).toBeVisible();
   });
 });

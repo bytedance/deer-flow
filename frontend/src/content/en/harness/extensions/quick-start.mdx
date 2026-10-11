@@ -1,0 +1,272 @@
+---
+title: Quick Start
+description: Build, test, install, and remove a working extension in fifteen minutes. The example logs how long every tool call takes, for the Lead Agent and every subagent.
+---
+
+import { Callout, Steps } from "nextra/components";
+
+# Quick Start
+
+This chapter walks through a complete extension named `hello`. It contributes one middleware that times every tool call and logs a warning when a call is slower than a configured threshold. By the end you will have packaged it, unit-tested it without DeerFlow, installed it into a checkout, and seen it run.
+
+## Prerequisites
+
+- A DeerFlow checkout that runs with `make dev`. See [Quick Start](/docs/application/quick-start).
+- Python 3.12 or newer and [uv](https://docs.astral.sh/uv/) 0.8.0 or newer. The extension manager refuses older uv.
+- Shell access to the machine running the Gateway. Installing an extension is an operator action, not something the web UI does.
+
+<Steps>
+
+### Create the package
+
+An extension is a normal Python package. Create it **outside** the DeerFlow checkout, for example in `~/src/deerflow-extension-hello`:
+
+```text
+deerflow-extension-hello/
+├── pyproject.toml
+├── deerflow_extension_hello/
+│   └── __init__.py
+└── tests/
+    └── test_hello.py
+```
+
+`pyproject.toml` declares the contract range, every framework the code imports, and exactly one entry point in the `deerflow.extensions` group:
+
+```toml filename="pyproject.toml"
+[project]
+name = "deerflow-extension-hello"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "deerflow-extension-api>=0.2,<0.3",
+    "langchain>=1.3,<2",
+]
+
+[project.entry-points."deerflow.extensions"]
+hello = "deerflow_extension_hello:install"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["deerflow_extension_hello"]
+```
+
+The entry-point name, `hello`, becomes the operator-facing name used by `enable`, `disable`, and `remove`.
+
+<Callout type="warning">
+  `deerflow-extension-api` deliberately has no dependencies. If your code imports
+  LangChain, LangGraph, or FastAPI, declare them yourself, as `langchain` is
+  declared here. Never import `deerflow.*` or `app.*`: those are host internals
+  with no compatibility promise.
+</Callout>
+
+### Write install()
+
+```python filename="deerflow_extension_hello/__init__.py"
+"""Log how long each tool call takes, as the model sees it."""
+
+from __future__ import annotations
+
+import logging
+import time
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+from deerflow_extension_api import (
+    AgentBuildContext,
+    AgentScope,
+    ExtensionData,
+    ExtensionRegistry,
+    MiddlewarePlacement,
+    Placement,
+    extension,
+)
+from langchain.agents.middleware import AgentMiddleware
+
+logger = logging.getLogger(__name__)
+
+
+class ToolTimer(AgentMiddleware):
+    def __init__(self, slow_ms: float) -> None:
+        super().__init__()
+        self.slow_ms = slow_ms
+
+    def _report(self, request: Any, started: float) -> None:
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        level = logging.WARNING if elapsed_ms >= self.slow_ms else logging.INFO
+        logger.log(level, "tool %s took %.1f ms", request.tool_call.get("name"), elapsed_ms)
+
+    def wrap_tool_call(self, request, handler):
+        started = time.perf_counter()
+        try:
+            return handler(request)
+        finally:
+            self._report(request, started)
+
+    async def awrap_tool_call(self, request, handler):
+        started = time.perf_counter()
+        try:
+            return await handler(request)
+        finally:
+            self._report(request, started)
+
+
+class ToolTimerContributor:
+    def __init__(self, slow_ms: float) -> None:
+        self.slow_ms = slow_ms
+
+    def contribute_middlewares(
+        self,
+        app_store: ExtensionData,
+        ctx: AgentBuildContext,
+    ) -> Sequence[MiddlewarePlacement]:
+        return (MiddlewarePlacement(ToolTimer(self.slow_ms), Placement.TOOL_VISIBLE, AgentScope.BOTH),)
+
+
+@extension(api="0.2.0", name="hello")
+def install(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
+    registry.middlewares(ToolTimerContributor(float(config.get("slow_ms", 1000))))
+```
+
+Three things to notice:
+
+- `install()` only **registers**. It runs once at Gateway startup, before any agent exists. The host calls `contribute_middlewares()` later, each time it assembles an agent.
+- `Placement.TOOL_VISIBLE` asks for the outer end of the tool chain, so the timing includes output truncation and error wrapping: what the model finally waits for. `AgentScope.BOTH` installs the middleware into the Lead Agent and into every subagent. Both are explained in [Middleware Contributions](/docs/harness/extensions/middleware).
+- The middleware implements both `wrap_tool_call` and `awrap_tool_call`. If you implement only one side, the other execution path passes through without observing anything.
+
+### Test it without DeerFlow
+
+The contract is plain Python, so a stand-in registry is enough to test registration, and the middleware can be called directly:
+
+```python filename="tests/test_hello.py"
+import asyncio
+import logging
+from types import SimpleNamespace
+
+from deerflow_extension_api import AgentBuildContext, AgentScope, ExtensionData, Placement
+
+from deerflow_extension_hello import ToolTimer, install
+
+
+class RecordingRegistry:
+    def __init__(self):
+        self.contributors = []
+
+    def middlewares(self, contributor):
+        self.contributors.append(contributor)
+
+
+def test_install_registers_one_tool_visible_middleware():
+    registry = RecordingRegistry()
+    install(registry, {"slow_ms": 50})
+
+    (contributor,) = registry.contributors
+    ctx = AgentBuildContext(scope=AgentScope.LEAD)
+    (placement,) = contributor.contribute_middlewares(ExtensionData("app"), ctx)
+    assert placement.placement is Placement.TOOL_VISIBLE
+    assert placement.middleware.slow_ms == 50
+
+
+def test_slow_tool_calls_log_a_warning(caplog):
+    timer = ToolTimer(slow_ms=0)
+    request = SimpleNamespace(tool_call={"name": "web_search"})
+
+    async def handler(req):
+        return "result"
+
+    with caplog.at_level(logging.INFO):
+        assert asyncio.run(timer.awrap_tool_call(request, handler)) == "result"
+    assert "tool web_search took" in caplog.text
+    assert caplog.records[-1].levelno == logging.WARNING
+```
+
+The contract package is currently sourced from the DeerFlow checkout, so install it from there in editable mode:
+
+```bash
+cd ~/src/deerflow-extension-hello
+uv venv --python 3.12
+uv pip install -e /path/to/deer-flow/backend/packages/extension-api -e . pytest
+uv run --no-project pytest -q
+```
+
+### Install it into DeerFlow
+
+From the root of the DeerFlow checkout, pass the package directory as an **absolute** path. The Make wrapper runs the manager from `backend/`, so a relative path would resolve against the wrong directory:
+
+```bash
+make extension-install SOURCE="$HOME/src/deerflow-extension-hello"
+```
+
+The manager warns that the extension will execute with Gateway privileges and asks `Install this trusted source? [y/N]`. After you confirm, it:
+
+1. copies a snapshot of the directory to `backend/extensions/sources/deerflow-extension-hello/`. Later edits to your working copy are not picked up until you run `make extension-upgrade`;
+2. adds the snapshot to the `extensions` dependency group in `backend/pyproject.toml` and updates `backend/uv.lock`;
+3. syncs the locked environment;
+4. appends an enabled `plugins:` record to `config.yaml`.
+
+It then prints `Installed and enabled hello (deerflow-extension-hello). Restart DeerFlow to load it.` Check the record:
+
+```bash
+make extension-list
+```
+
+```text
+NAME	STATE	PACKAGE	ENTRY POINT
+hello	enabled	deerflow-extension-hello	deerflow_extension_hello:install
+```
+
+### Configure and restart
+
+The manager writes an empty private `config: {}`. To lower the slow-call threshold, edit the record in `config.yaml`. The manager preserves this block across enable, disable, and upgrade:
+
+```yaml filename="config.yaml"
+plugins:
+  - name: hello
+    package: deerflow-extension-hello
+    use: deerflow_extension_hello:install
+    enabled: true
+    required: false
+    config:
+      slow_ms: 200
+```
+
+Extensions load only while the Gateway starts, so restart it:
+
+```bash
+make dev
+```
+
+The Gateway log confirms the load:
+
+```text
+Extensions loaded: 1/1 (deerflow_extension_hello:install)
+```
+
+If the entry point cannot be imported, is incompatible, or `install()` raises, the count reads `0/1` and an error line starting with `Extension deerflow_extension_hello:install:` explains why. The Gateway still starts, because the record has `required: false`.
+
+### See it run
+
+Send a message that makes the agent use a tool, such as a web search. The Gateway log shows one line per tool call, from the Lead Agent and from any subagent it delegates to. The exact prefix depends on your logging format:
+
+```text
+WARNING deerflow_extension_hello: tool web_search took 1432.7 ms
+```
+
+### Disable or remove it
+
+```bash
+make extension-disable NAME=hello   # keep the package and config, stop loading it
+make extension-enable NAME=hello
+make extension-remove NAME=hello    # uninstall, delete the record and the snapshot
+```
+
+Every command takes effect after the next restart. If you deploy with Docker, rebuild the Gateway image after changing the installed set; a built production container never installs extensions at startup.
+
+</Steps>
+
+## Next steps
+
+- [Middleware Contributions](/docs/harness/extensions/middleware): the five placements, scope and ordering, and what an extension middleware may and may not change.
+- The [bundled example](https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-example) combines middleware with task-lifecycle state, a system-model observer, a service, and an HTTP route.

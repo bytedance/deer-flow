@@ -422,3 +422,19 @@ def test_lead_build_context_projects_the_effective_delegation_override():
 
     assert capture.ctx is not None
     assert capture.ctx.policy.max_subagents_per_run == 3
+
+
+@pytest.mark.parametrize(("requested", "projected"), [(None, 7), (99, 50)])
+def test_lead_build_context_projects_the_enforced_delegation_cap(requested, projected):
+    capture = _CtxCapture()
+    _lead_stack(
+        extensions=_extensions_with_contributor(capture),
+        app_config=_policy_config(),
+        configurable={
+            "subagent_enabled": True,
+            "max_total_subagents": requested,
+        },
+    )
+
+    assert capture.ctx is not None
+    assert capture.ctx.policy.max_subagents_per_run == projected

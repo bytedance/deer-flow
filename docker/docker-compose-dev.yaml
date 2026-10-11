@@ -194,6 +194,12 @@ services:
     # this file readable and lets the script be linted (shellcheck-clean).
     # See PR #2767 / Issue #2754.
     command: ["sh", "/usr/local/bin/dev-entrypoint.sh"]
+    # Docker's 10s default SIGKILLed the 30s memory queue flush
+    # (memory.shutdown_flush_timeout_seconds) on every `make docker-restart`;
+    # dev-entrypoint.sh bounds uvicorn's graceful shutdown to 10s inside this.
+    # Must cover that bound plus the lifespan's worst case (~61s, see the
+    # gateway comment in docker-compose.yaml) with slack.
+    stop_grace_period: 90s
     volumes:
       # Mount the dev entrypoint as a read-only file so edits to the script
       # take effect on `make docker-restart` without requiring an image rebuild.
@@ -233,8 +239,18 @@ services:
       - DEER_FLOW_CHANNELS_LANGGRAPH_URL=${DEER_FLOW_CHANNELS_LANGGRAPH_URL:-http://gateway:8001/api}
       - DEER_FLOW_CHANNELS_GATEWAY_URL=${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://gateway:8001}
       - DEER_FLOW_INTERNAL_AUTH_TOKEN=${DEER_FLOW_INTERNAL_AUTH_TOKEN:-}
+      # At-rest key for stored credentials; empty falls back to .credentials_key in DEER_FLOW_HOME.
+      - DEER_FLOW_CREDENTIALS_KEY=${DEER_FLOW_CREDENTIALS_KEY:-}
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
+      # The login lockout counts failures per client IP, but every browser
+      # request reaches the Gateway from nginx. Trust nginx's X-Real-IP (it
+      # overwrites the header on every Gateway route) so one client's wrong
+      # passwords cannot lock everyone out. Hostname, re-resolved every 10s.
+      # `:-` on purpose: an empty value also means nginx, because every browser
+      # request arrives through it, so direct mode would only bring back the
+      # shared lockout. Set another list in .env to change whom to trust.
+      - AUTH_TRUSTED_PROXIES=${AUTH_TRUSTED_PROXIES:-nginx}
       # Pass PROVISIONER_API_KEY into the gateway container so config.yaml can reference it
       # as sandbox.provisioner_api_key: $PROVISIONER_API_KEY
       - PROVISIONER_API_KEY=${PROVISIONER_API_KEY:-}

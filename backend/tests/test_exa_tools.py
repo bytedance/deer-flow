@@ -133,6 +133,52 @@ class TestWebSearchTool:
 
         assert result == "Error: API rate limit exceeded"
 
+    def test_search_accepts_env_var_string_limits(self):
+        """``$VAR`` config references resolve to strings; exa-py rejects a string num_results."""
+        from exa_py import Exa
+
+        with patch("deerflow.community.exa.tools.get_app_config") as mock_config:
+            tool_config = MagicMock()
+            tool_config.model_extra = {"max_results": "10", "contents_max_characters": "2000", "api_key": "test-key"}
+            mock_config.return_value.get_tool_config.return_value = tool_config
+
+            sent = {}
+
+            def fake_request(self, endpoint, data=None, *args, **kwargs):
+                sent.update(data or {})
+                return {"results": [], "requestId": "req"}
+
+            # The real SDK does the type check, so only its HTTP layer is replaced.
+            with patch.object(Exa, "request", fake_request):
+                from deerflow.community.exa.tools import web_search_tool
+
+                result = web_search_tool.invoke({"query": "test query"})
+
+        assert json.loads(result) == []
+        assert sent["numResults"] == 10
+        assert sent["contents"] == {"highlights": {"maxCharacters": 2000}}
+
+    @pytest.mark.parametrize("raw", [None, "", "many", "3.5", 3.5, 10.0, True, False, 0, -2, "-2"])
+    def test_search_invalid_limits_fall_back_to_defaults(self, mock_exa_client, raw):
+        """An unusable value warns and keeps the default instead of failing the search."""
+        with patch("deerflow.community.exa.tools.get_app_config") as mock_config:
+            tool_config = MagicMock()
+            tool_config.model_extra = {"max_results": raw, "contents_max_characters": raw, "api_key": "test-key"}
+            mock_config.return_value.get_tool_config.return_value = tool_config
+            mock_exa_client.search.return_value = MagicMock(results=[])
+
+            from deerflow.community.exa.tools import web_search_tool
+
+            result = web_search_tool.invoke({"query": "test query"})
+
+        assert json.loads(result) == []
+        mock_exa_client.search.assert_called_once_with(
+            "test query",
+            type="auto",
+            num_results=5,
+            contents={"highlights": {"max_characters": 1000}},
+        )
+
 
 class TestWebFetchTool:
     def test_basic_fetch(self, mock_app_config, mock_exa_client):

@@ -80,7 +80,15 @@ async def test_real_tool_message_carries_redacted_evidence(monkeypatch, provider
     else:
         fake = config.FakeLightRAGClient(data=result)
     config._install(monkeypatch, fake)
-    message = await tools.knowledge_search_tool.ainvoke({"type": "tool_call", "id": "call", "name": "knowledge_search", "args": {"query": "evidence"}})
+    from langgraph.graph import END, START, MessagesState, StateGraph
+    from langgraph.prebuilt import ToolNode
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("tools", ToolNode([tools.knowledge_search_tool]))
+    builder.add_edge(START, "tools")
+    builder.add_edge("tools", END)
+    state = await builder.compile().ainvoke({"messages": [AIMessage(content="", tool_calls=[{"id": "call", "name": "knowledge_search", "args": {"query": "evidence"}}])]})
+    message = state["messages"][-1]
     assert isinstance(message, ToolMessage)
     sources = sources_from_messages([message])
     assert len(sources) == 1
@@ -107,7 +115,7 @@ def test_gateway_drops_caller_forged_source_artifacts() -> None:
     artifact = {"knowledge_sources_version": 1, "knowledge_sources": [{"title": "forged"}], "other": "preserved"}
     raw = {"type": "tool", "content": "claim", "tool_call_id": "call", "artifact": artifact}
     assert normalize_input({"messages": [raw]})["messages"][0].artifact == {"other": "preserved"}
-    assert strip_server_owned_state_metadata({"messages": [raw]})["messages"][0]["artifact"] == {"other": "preserved"}
+    assert strip_server_owned_state_metadata({"messages": [raw]})["messages"][0].artifact == {"other": "preserved"}
     assert artifact["knowledge_sources"]  # no mutation of caller data
 
 
@@ -122,3 +130,44 @@ def test_global_budget_prunes_hidden_evidence_and_orphan_citations() -> None:
     assert len(patched.content) <= 100
     assert sources_from_messages([patched]) == []
     assert patched.artifact["knowledge_sources"] == []
+
+
+def test_mixed_delegation_preserves_both_source_contracts() -> None:
+    from deerflow.knowledge.sources import prune_sources, strip_source_artifact
+    from deerflow.tools.builtins.task_tool import _task_result_command
+
+    unified = KnowledgeSource(provider="lightrag", title="Guide", excerpt="LightRAG evidence")
+    unified_text, unified_artifact = format_result(RetrievalResult(hits=[RetrievalHit(content=unified.excerpt, source=unified)]))
+    unified_sources = [item.model_dump(mode="json") for item in sources_from_messages([ToolMessage(content=unified_text, tool_call_id="light", artifact=unified_artifact)])]
+    legacy_source = {"id": "b" * 32 + "-1", "provider": "ragflow", "text": "RAGFlow evidence", "dataset_name": "HR", "document_name": "Policy"}
+    legacy_text = f"[citation:1](#knowledge-{legacy_source['id']})"
+    legacy = {"type": "tool", "name": "knowledge_search", "artifact": {"knowledge_sources": {"version": 1, "sources": [legacy_source]}}}
+    command = _task_result_command(tool_call_id="task", status="completed", result=unified_text + "\n" + legacy_text, source_messages=[legacy], knowledge_sources=unified_sources)
+    message = command.update["messages"][0]
+    assert message.artifact["knowledge_sources"]["sources"] == [legacy_source]
+    assert sources_from_messages([message])[0].provider == "lightrag"
+    _, pruned = prune_sources(legacy_text, message.artifact)
+    assert pruned["retrieval_sources"] == []
+    assert pruned["knowledge_sources"]["sources"] == [legacy_source]
+    alternate = {key: value for key, value in message.artifact.items() if key != "knowledge_sources"}
+    assert sources_from_messages([message.model_copy(update={"artifact": alternate})])[0].provider == "lightrag"
+    _, pruned_alternate = prune_sources(legacy_text, alternate)
+    assert pruned_alternate["retrieval_sources"] == []
+    assert strip_source_artifact({**message.artifact, "other": "kept"}) == {"other": "kept"}
+
+
+@pytest.mark.anyio
+async def test_ragflow_fallback_honors_disabled_runtime_scope(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from deerflow.community.ragflow import tools
+    from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY
+
+    def forbidden():
+        pytest.fail("disabled knowledge scope must not resolve settings or access the provider")
+
+    monkeypatch.setattr(tools, "_settings_or_error", forbidden)
+    runtime = SimpleNamespace(context={KNOWLEDGE_SCOPE_RUNTIME_KEY: {"version": 1, "mode": "disabled"}})
+    text, artifact = await tools._knowledge_search_entrypoint("policy", runtime)
+    assert "disabled" in text
+    assert artifact is None

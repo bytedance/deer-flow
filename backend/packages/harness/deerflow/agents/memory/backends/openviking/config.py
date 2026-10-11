@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from math import isfinite
 from typing import Any, Literal
@@ -74,10 +75,10 @@ class OpenVikingConfig:
             api_key=os.environ.get(api_key_env, "").strip(),
             api_key_env=api_key_env,
             default_peer_id=str(cfg.pop("default_peer_id", "deerflow")).strip(),
-            timeout_seconds=float(cfg.pop("timeout_seconds", 30.0)),
-            search_top_k=int(retrieval.pop("top_k", 8)),
-            score_threshold=_optional_float(retrieval.pop("score_threshold", None)),
-            max_injection_chars=int(retrieval.pop("max_injection_chars", 12_000)),
+            timeout_seconds=_number(cfg, "timeout_seconds", 30.0, float),
+            search_top_k=_number(retrieval, "top_k", 8, int),
+            score_threshold=_optional_float(retrieval.pop("score_threshold", None), "score_threshold"),
+            max_injection_chars=_number(retrieval, "max_injection_chars", 12_000, int),
             content_mode=str(retrieval.pop("content_mode", "overview")).lower(),  # type: ignore[arg-type]
             injection_query=str(
                 retrieval.pop(
@@ -92,7 +93,7 @@ class OpenVikingConfig:
                 cfg.pop("allow_insecure_http", False),
                 "allow_insecure_http",
             ),
-            max_seen_message_ids=int(cfg.pop("max_seen_message_ids", 512)),
+            max_seen_message_ids=_number(cfg, "max_seen_message_ids", 512, int),
         )
 
         unknown = sorted(
@@ -157,8 +158,35 @@ def _mapping(value: Any, name: str) -> dict[str, Any]:
     return dict(value)
 
 
-def _optional_float(value: Any) -> float | None:
-    return None if value is None else float(value)
+def _number[T](cfg: dict[str, Any], key: str, default: T, cast: Callable[[Any], T]) -> T:
+    """Read a numeric knob, treating a value-less key as unset.
+
+    ``timeout_seconds:`` with nothing after it in YAML arrives as ``None``, and
+    ``float(None)`` raises ``TypeError`` from inside backend construction without
+    naming the knob or the file. A key carrying no value keeps its default -- the
+    line ``_mapping`` and ``_boolean`` already draw -- and a value that cannot be
+    cast is reported as the config mistake it is. Numeric strings keep working,
+    because that is what ``int``/``float`` already accept.
+    """
+    value = cfg.pop(key, default)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return default
+    try:
+        return cast(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"OpenViking {key} must be a number, got {type(value).__name__}") from None
+
+
+def _optional_float(value: Any, name: str) -> float | None:
+    """Read a numeric knob where ``None`` is a meaningful value of its own: an
+    unset score threshold means "apply none", so it stays ``None`` rather than
+    falling back to a default."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"OpenViking {name} must be a number, got {type(value).__name__}") from None
 
 
 def _boolean(value: Any, name: str) -> bool:

@@ -116,6 +116,9 @@ class RunEventStore(abc.ABC):
         - after_seq: return the first ``limit`` records with seq > after_seq (ascending)
         - neither: return the latest ``limit`` records (ascending)
 
+        When both cursors are supplied, return the first ``limit`` records in
+        the exclusive window ``after_seq < seq < before_seq`` (ascending).
+
         ``user_id`` may be passed explicitly by request-independent callers;
         user-scoped backends must apply it according to their isolation model.
         """
@@ -194,6 +197,7 @@ class RunEventStore(abc.ABC):
         task_id: str | None = None,
         limit: int = 500,
         after_seq: int | None = None,
+        user_id: str | None | _AutoSentinel = AUTO,
     ) -> list[dict]:
         """Return the full event stream for a run, ordered by seq ascending.
 
@@ -201,7 +205,8 @@ class RunEventStore(abc.ABC):
         ``metadata["task_id"]``). ``after_seq`` is a forward cursor returning the
         first ``limit`` records with seq > after_seq, so callers can page through
         a single subagent task's events without the run-wide ``limit`` truncating
-        the tail (#3779).
+        the tail (#3779). ``user_id`` follows the same explicit-caller semantics
+        as :meth:`list_messages`.
         """
 
     @abc.abstractmethod
@@ -213,6 +218,7 @@ class RunEventStore(abc.ABC):
         limit: int = 50,
         before_seq: int | None = None,
         after_seq: int | None = None,
+        user_id: str | None | _AutoSentinel = AUTO,
     ) -> list[dict]:
         """Return displayable messages (category=message) for a specific run, ordered by seq ascending.
 
@@ -220,6 +226,11 @@ class RunEventStore(abc.ABC):
         - after_seq: return the first ``limit`` records with seq > after_seq (ascending)
         - before_seq: return the last ``limit`` records with seq < before_seq (ascending)
         - neither: return the latest ``limit`` records (ascending)
+
+        When both cursors are supplied, return the first ``limit`` records in
+        the exclusive window ``after_seq < seq < before_seq`` (ascending).
+        ``user_id`` follows the same explicit-caller semantics as
+        :meth:`list_messages`.
         """
 
     @abc.abstractmethod
@@ -267,9 +278,30 @@ class RunEventStore(abc.ABC):
         """
 
     @abc.abstractmethod
-    async def delete_by_thread(self, thread_id: str) -> int:
-        """Delete all events for a thread. Return the number of deleted events."""
+    async def delete_by_thread(
+        self,
+        thread_id: str,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> int:
+        """Delete all events for a thread. Return the number of deleted events.
+
+        ``user_id`` follows the same three-state convention as the read methods:
+        ``AUTO`` resolves the caller's context, an explicit id scopes the delete
+        to that owner, and ``None`` removes every owner's rows. Backends whose
+        storage is not user-scoped (memory, JSONL) accept the parameter for
+        interface parity and ignore it, so callers can delete uniformly.
+        """
 
     @abc.abstractmethod
-    async def delete_by_run(self, thread_id: str, run_id: str) -> int:
-        """Delete all events for a specific run. Return the number of deleted events."""
+    async def delete_by_run(
+        self,
+        thread_id: str,
+        run_id: str,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> int:
+        """Delete all events for a specific run. Return the number of deleted events.
+
+        ``user_id`` follows the same convention as :meth:`delete_by_thread`.
+        """

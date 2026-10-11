@@ -1,4 +1,5 @@
 import logging
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -6,15 +7,52 @@ from pydantic import BaseModel, Field
 from app.gateway.authz import (
     _AuthorizationUnavailable,
     _is_internal_caller,
+    authorize_model_use,
     resolve_model_authorization,
 )
 from app.gateway.deps import get_config, get_optional_user_from_request
-from deerflow.authz.provider import AuthzDecision, AuthzRequest
+from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from deerflow.config.app_config import AppConfig
+from deerflow.config.model_config import ModelConfig
+from deerflow.models.reasoning import reasoning_capabilities_payload, resolve_reasoning_contract
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["models"])
+
+
+async def _resolve_bound_owner_for_model_list(request: Request) -> object | None:
+    """Resolve the trusted bound owner behind an internal channel call.
+
+    Internal callers (IM channel workers, the scheduler) authenticate as a
+    synthetic user whose role is popped to ``default_role`` when the
+    authorization principal is built, so the filtered list reflects the
+    default role — not the account the conversation actually belongs to.
+    When the call carries a trusted ``X-DeerFlow-Owner-User-Id`` header, the
+    channel acts on behalf of that owner (same identity run admission
+    stamps), and the list must be filtered with the owner's role so commands
+    like ``/model`` gate on the same principal the run would.
+    """
+    from app.gateway.services import resolve_trusted_internal_owner_for_attribution
+
+    return await resolve_trusted_internal_owner_for_attribution(request, get_trusted_internal_owner_user_id(request))
+
+
+class ReasoningEffortCapabilitiesResponse(BaseModel):
+    """Effort values a model accepts, in display order."""
+
+    values: list[str] = Field(..., description="Accepted effort values (provider vocabulary)")
+    default: str | None = Field(default=None, description="Effort applied when the caller does not choose one")
+    aliases: dict[str, str] = Field(default_factory=dict, description="Generic DeerFlow value -> provider value")
+
+
+class ReasoningCapabilitiesResponse(BaseModel):
+    """Normalized reasoning contract (issue #5073), derived for legacy profiles."""
+
+    thinking: Literal["unsupported", "optional", "required"] = Field(..., description="Whether thinking can be toggled, is always on, or is unavailable")
+    effort: ReasoningEffortCapabilitiesResponse | None = Field(default=None, description="Effort control; null when the model exposes none")
+    history: Literal["preserve", "clear"] | None = Field(default=None, description="Reasoning-history requirement, when declared")
+    source: Literal["legacy", "contract"] = Field(..., description="Whether the profile declared a contract or the booleans were projected")
 
 
 class ModelResponse(BaseModel):
@@ -24,8 +62,21 @@ class ModelResponse(BaseModel):
     model: str = Field(..., description="Actual provider model identifier")
     display_name: str | None = Field(None, description="Human-readable name")
     description: str | None = Field(None, description="Model description")
-    supports_thinking: bool = Field(default=False, description="Whether model supports thinking mode")
-    supports_reasoning_effort: bool = Field(default=False, description="Whether model supports reasoning effort")
+    supports_thinking: bool = Field(default=False, description="Whether model supports thinking mode (deprecated: derived from `reasoning`)")
+    supports_reasoning_effort: bool = Field(default=False, description="Whether model supports reasoning effort (deprecated: derived from `reasoning`)")
+    reasoning: ReasoningCapabilitiesResponse = Field(..., description="Normalized reasoning capability contract")
+
+
+def _model_response(model: ModelConfig) -> ModelResponse:
+    return ModelResponse(
+        name=model.name,
+        model=model.model,
+        display_name=model.display_name,
+        description=model.description,
+        supports_thinking=model.supports_thinking,
+        supports_reasoning_effort=model.supports_reasoning_effort,
+        reasoning=ReasoningCapabilitiesResponse(**reasoning_capabilities_payload(resolve_reasoning_contract(model))),
+    )
 
 
 class TokenUsageResponse(BaseModel):
@@ -73,7 +124,8 @@ async def list_models(
                     "display_name": "GPT-4",
                     "description": "OpenAI GPT-4 model",
                     "supports_thinking": false,
-                    "supports_reasoning_effort": false
+                    "supports_reasoning_effort": false,
+                    "reasoning": {"thinking": "unsupported", "effort": null, "history": null, "source": "legacy"}
                 },
                 {
                     "name": "claude-3-opus",
@@ -81,7 +133,8 @@ async def list_models(
                     "display_name": "Claude 3 Opus",
                     "description": "Anthropic Claude 3 Opus model",
                     "supports_thinking": true,
-                    "supports_reasoning_effort": false
+                    "supports_reasoning_effort": false,
+                    "reasoning": {"thinking": "optional", "effort": null, "history": null, "source": "legacy"}
                 }
             ],
             "token_usage": {
@@ -95,8 +148,14 @@ async def list_models(
 
     user = await get_optional_user_from_request(request)
     if user is not None:
+        # Internal channel calls authenticate as a synthetic principal that
+        # falls under default_role; when they carry a trusted bound owner,
+        # filter with the owner's role so the list matches what run admission
+        # would admit for that account.
+        owner = await _resolve_bound_owner_for_model_list(request)
+        principal_user = owner if owner is not None else user
         try:
-            provider, principal = resolve_model_authorization(user, is_internal=_is_internal_caller(request, user))
+            provider, principal = resolve_model_authorization(principal_user, is_internal=_is_internal_caller(request, user))
         except _AuthorizationUnavailable as exc:
             if exc.fail_closed:
                 visible_models = []
@@ -112,17 +171,7 @@ async def list_models(
                     logger.warning("Authorization provider failed while filtering models", exc_info=True)
                     visible_models = [] if fail_closed else config.models
 
-    models = [
-        ModelResponse(
-            name=model.name,
-            model=model.model,
-            display_name=model.display_name,
-            description=model.description,
-            supports_thinking=model.supports_thinking,
-            supports_reasoning_effort=model.supports_reasoning_effort,
-        )
-        for model in visible_models
-    ]
+    models = [_model_response(model) for model in visible_models]
     return ModelsListResponse(
         models=models,
         token_usage=TokenUsageResponse(enabled=config.token_usage.enabled),
@@ -170,36 +219,8 @@ async def get_model(
 
     # Phase 3: enforce model:use authorization (deny → 403, not 404, since the
     # model exists but the role lacks permission to use it).
-    fail_closed = config.authorization.fail_closed
     user = await get_optional_user_from_request(request)
     if user is not None:
-        try:
-            provider, principal = resolve_model_authorization(user, is_internal=_is_internal_caller(request, user))
-        except _AuthorizationUnavailable:
-            if fail_closed:
-                raise HTTPException(status_code=403, detail=f"Model '{model_name}' is not available for your role")
-        else:
-            if provider is not None and principal is not None:
-                try:
-                    decision = provider.authorize(AuthzRequest(principal=principal, resource="model", action="use", target=model_name))
-                    if not isinstance(decision, AuthzDecision):
-                        raise TypeError("AuthorizationProvider.authorize must return AuthzDecision")
-                    allowed = decision.allow
-                except Exception:
-                    logger.warning(
-                        "Authorization provider failed while checking model:use for %s",
-                        model_name,
-                        exc_info=True,
-                    )
-                    allowed = not fail_closed
-                if not allowed:
-                    raise HTTPException(status_code=403, detail=f"Model '{model_name}' is not available for your role")
+        authorize_model_use(user, model_name, is_internal=_is_internal_caller(request, user), app_config=config)
 
-    return ModelResponse(
-        name=model.name,
-        model=model.model,
-        display_name=model.display_name,
-        description=model.description,
-        supports_thinking=model.supports_thinking,
-        supports_reasoning_effort=model.supports_reasoning_effort,
-    )
+    return _model_response(model)

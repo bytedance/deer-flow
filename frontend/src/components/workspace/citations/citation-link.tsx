@@ -9,6 +9,8 @@ import {
 } from "@/components/ui/hover-card";
 import { cn } from "@/lib/utils";
 
+import { KnowledgeCitationLink } from "./knowledge-source";
+
 /** Extract visible text from renderer-provided ReactNode children. */
 export function extractReactNodeText(node: ReactNode): string | null {
   if (typeof node === "string" || typeof node === "number") {
@@ -40,6 +42,12 @@ export function CitationLink({
     extractReactNodeText(children)?.replace(/^citation:\s*/i, "") ?? null;
   const isGenericText = childrenText === "Source" || childrenText === "来源";
   const displayText = (!isGenericText && childrenText) ?? domain;
+
+  if (href && /^#(?:user-content-)?knowledge-/.test(href)) {
+    return (
+      <KnowledgeCitationLink href={href}>{displayText}</KnowledgeCitationLink>
+    );
+  }
 
   return (
     <HoverCard closeDelay={0} openDelay={0}>

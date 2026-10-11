@@ -190,6 +190,20 @@ class RedisStreamBridge(StreamBridge):
         """Return whether Redis still has retained stream data for *run_id*."""
         return bool(await self._redis.exists(self._stream_key(run_id)))
 
+    async def ping(self) -> bool:
+        """Round-trip ``PING`` to the Redis backend for the readiness probe.
+
+        The client connects lazily, so until something publishes nothing has
+        verified that Redis is reachable; this is the only call that does.
+        Redis-side failures answer ``False`` so the probe gets a verdict rather
+        than a stack of client internals. Callers bound the wait themselves.
+        """
+        try:
+            return bool(await self._redis.ping())
+        except RedisError:
+            logger.warning("Redis stream bridge ping failed", exc_info=True)
+            return False
+
     async def _resolve_start_stream_id(self, key: str, last_event_id: str | None) -> str:
         if last_event_id is None:
             return "0-0"
@@ -299,6 +313,26 @@ class RedisStreamBridge(StreamBridge):
                     )
                     yield StreamGap(
                         requested_event_id=None if pending_initial_tail_id is not None else stream_id,
+                        earliest_available_event_id=earliest_id,
+                        latest_available_event_id=latest_id,
+                    )
+                    return
+
+            # A syntactically valid but future Last-Event-ID cannot replay from
+            # this retained stream. In particular, an already-ended run would
+            # otherwise heartbeat forever because XREAD never sees its end marker.
+            if latest_entries and gap_detection_enabled:
+                latest_id = self._decode(latest_entries[0][0])
+                if self._stream_id_lt(latest_id, stream_id):
+                    earliest_id = self._decode(earliest_entries[0][0])
+                    logger.warning(
+                        "subscriber for Redis stream %s requested future cursor %s (latest %s)",
+                        key,
+                        stream_id,
+                        latest_id,
+                    )
+                    yield StreamGap(
+                        requested_event_id=stream_id,
                         earliest_available_event_id=earliest_id,
                         latest_available_event_id=latest_id,
                     )

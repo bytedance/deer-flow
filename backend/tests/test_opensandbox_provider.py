@@ -157,7 +157,7 @@ class _FakeCommands:
         matches = sorted(path for path in set(paths) if path == root or path.startswith(f"{root}/"))
         if "__DF_FIND_STATUS__:" in command:
             status = 0 if matches else 1
-            marker = f"__DF_FIND_STATUS__:{status}"
+            marker = "__DF_FIND_STATUS__:0" if matches else "__DF_FIND_STATUS__:missing"
             stdout = (*matches, "", marker) if matches else ("", marker)
             return _execution(stdout=stdout, exit_code=status)
         return _execution(stdout=tuple(matches))
@@ -311,8 +311,6 @@ def test_provider_defers_sdk_import_until_acquire(monkeypatch: pytest.MonkeyPatc
 
 
 def test_create_passes_connection_lifetime_scope_and_environment(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
-    monkeypatch.setenv("OPEN_SANDBOX_TEST_VALUE", "resolved")
-    monkeypatch.delenv("OPEN_SANDBOX_ABSENT_VALUE", raising=False)
     provider, sdk = _install(
         monkeypatch,
         config={
@@ -324,11 +322,9 @@ def test_create_passes_connection_lifetime_scope_and_environment(monkeypatch: py
             "ready_timeout": 18,
             "sandbox_timeout": 7200,
             "use_server_proxy": True,
-            "environment": {
-                "BASE": "1",
-                "FROM_ENV": "$OPEN_SANDBOX_TEST_VALUE",
-                "MISSING_ENV": "$OPEN_SANDBOX_ABSENT_VALUE",
-            },
+            # Already resolved by AppConfig at load time; a value that starts
+            # with $ is the secret itself, not another reference.
+            "environment": {"BASE": "1", "TOKEN": "$2b$12$resolved-secret"},
         },
     )
     provider.acquire("thread-1", user_id="user-1")
@@ -336,7 +332,7 @@ def test_create_passes_connection_lifetime_scope_and_environment(monkeypatch: py
     assert call["image"] == "python:3.12"
     assert call["timeout"] == timedelta(seconds=7200)
     assert call["ready_timeout"] == timedelta(seconds=18)
-    assert call["env"] == {"BASE": "1", "FROM_ENV": "resolved", "MISSING_ENV": ""}
+    assert call["env"] == {"BASE": "1", "TOKEN": "$2b$12$resolved-secret"}
     assert call["metadata"] == {
         "deer_flow_provider": "opensandbox",
         "deer_flow_thread": "thread-1",
@@ -384,6 +380,27 @@ def test_null_sandbox_timeout_uses_default(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert sdk.create_calls[0]["timeout"] == timedelta(hours=4)
     provider.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("config_key", "value", "message"),
+    [
+        ("request_timeout", float("nan"), "sandbox.request_timeout must be positive"),
+        ("request_timeout", float("inf"), "sandbox.request_timeout must be positive"),
+        ("ready_timeout", float("nan"), "sandbox.ready_timeout must be positive"),
+        ("ready_timeout", float("inf"), "sandbox.ready_timeout must be positive"),
+        ("sandbox_timeout", float("nan"), "sandbox.sandbox_timeout must be non-negative"),
+        ("sandbox_timeout", float("inf"), "sandbox.sandbox_timeout must be non-negative"),
+    ],
+)
+def test_provider_rejects_non_finite_timeouts(
+    monkeypatch: pytest.MonkeyPatch,
+    config_key: str,
+    value: float,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        _install(monkeypatch, config={config_key: value})
 
 
 @pytest.mark.parametrize("exit_code", [17, None])
@@ -599,6 +616,11 @@ def test_text_binary_append_and_line_ranges() -> None:
     assert box.read_file(path, 2, 3) == "two\nthree"
     box.write_file(path, "\nfour", append=True)
     assert box.read_file(path) == "one\ntwo\nthree\nfour"
+    # A start past EOF comes back empty rather than raising, and a negative
+    # start reads from the first line instead of wrapping around.
+    assert box.read_file(path, 99) == ""
+    assert box.read_file(path, -1) == "one\ntwo\nthree\nfour"
+    assert box.read_file(path, end_line=-1) == ""
     binary_path = "/mnt/user-data/outputs/blob.bin"
     box.update_file(binary_path, b"\x00\xffpayload")
     assert box.download_file(binary_path) == b"\x00\xffpayload"
@@ -639,7 +661,7 @@ def test_list_glob_and_grep_return_virtual_paths() -> None:
     assert truncated is False
     grep_tokens = shlex.split(remote.commands.calls[-1][0])
     assert "--include=*.py" in grep_tokens
-    assert "-m100" in grep_tokens
+    assert "-m101" in grep_tokens
 
     box.grep("/mnt/user-data/workspace", "needle", glob="src/*.py; echo injected", literal=True)
     unsafe_glob_tokens = shlex.split(remote.commands.calls[-1][0])
@@ -880,3 +902,59 @@ def test_remote_search_keeps_real_matches_and_genuine_no_match(tmp_path, monkeyp
     found, _ = box.glob(str(tmp_path), "**/*.py")
     assert [os.path.basename(path) for path in found] == ["app.py"]
     assert box.glob(str(tmp_path), "*.md") == ([], False)
+
+
+@_RS_POSIX
+@pytest.mark.parametrize(("op", "entries", "truncated"), [("grep", 51, False), ("grep", 52, True), ("glob", 51, False), ("glob", 52, True)])
+def test_remote_search_reports_truncation_when_the_cap_hides_filtered_results(tmp_path, monkeypatch, op, entries, truncated) -> None:
+    # max_results=1 caps the raw stream at 51 lines, and every line falls outside
+    # the glob, so nothing survives the Python-side filter. Only the cap decides
+    # whether that empty result is complete; reporting it as such reads as "no
+    # matches" while an in-scope file may sit past the cap.
+    (tmp_path / "other").mkdir()
+    for index in range(entries):
+        (tmp_path / "other" / f"f{index}.js").write_text("needle\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    if op == "grep":
+        result = box.grep(str(tmp_path), "needle", glob="src/*.js", max_results=1)
+    else:
+        result = box.glob(str(tmp_path), "src/*.js", max_results=1)
+
+    assert result == ([], truncated)
+
+
+@_RS_POSIX
+@pytest.mark.parametrize(("op", "entries", "truncated"), [("grep", 1, False), ("grep", 2, True), ("glob", 1, False), ("glob", 2, True)])
+def test_remote_search_exactly_full_is_not_truncated(tmp_path, monkeypatch, op, entries, truncated) -> None:
+    # max_results=1 over a tree holding one in-scope match is a complete result:
+    # the Python-side loop used to return on the max-th match without looking for
+    # one more, so an exhausted search over a one-match tree read as cut off. A
+    # second match keeps that report honest.
+    (tmp_path / "src").mkdir()
+    for index in range(entries):
+        (tmp_path / "src" / f"f{index}.js").write_text("needle\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    if op == "grep":
+        matches, reported = box.grep(str(tmp_path), "needle", glob="src/*.js", max_results=1)
+    else:
+        matches, reported = box.glob(str(tmp_path), "src/*.js", max_results=1)
+
+    assert len(matches) == 1
+    assert reported is truncated
+
+
+@_RS_POSIX
+@pytest.mark.parametrize(("entries", "truncated"), [(50, False), (51, True)])
+def test_remote_grep_reports_single_file_overflow(tmp_path, monkeypatch, entries, truncated) -> None:
+    # The shell command must retain one more match per file than the caller's
+    # cap. Otherwise 51 matches in this single file look complete at a cap of
+    # 50 because the raw-output cap is not reached.
+    source = tmp_path / "src.py"
+    source.write_text("needle\n" * entries, encoding="utf-8")
+
+    matches, reported = _rs_box(tmp_path, monkeypatch).grep(str(tmp_path), "needle", max_results=50)
+
+    assert len(matches) == 50
+    assert reported is truncated

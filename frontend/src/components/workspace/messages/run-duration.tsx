@@ -39,7 +39,11 @@ export function RunActivity({ startTime }: { startTime: number | null }) {
   );
 }
 
-export function RunDuration({ durationSeconds }: { durationSeconds: number }) {
+export function RunDurationLabel({
+  durationSeconds,
+}: {
+  durationSeconds: number;
+}) {
   const { t } = useI18n();
   const formatted = formatRunDuration(durationSeconds, t.runDuration);
   if (!formatted) {
@@ -47,13 +51,16 @@ export function RunDuration({ durationSeconds }: { durationSeconds: number }) {
   }
 
   return (
-    <div
-      className="text-muted-foreground flex items-center gap-2 text-sm"
-      data-testid="run-duration"
-      title={t.runDuration.description}
-    >
-      <Clock3Icon className="size-4" />
-      <span>{t.runDuration.completedIn(formatted)}</span>
+    <span data-testid="run-duration" title={t.runDuration.description}>
+      {t.runDuration.completedIn(formatted)}
+    </span>
+  );
+}
+
+export function RunDuration({ durationSeconds }: { durationSeconds: number }) {
+  return (
+    <div className="text-muted-foreground border-border/60 mb-3 border-b pb-3 text-sm">
+      <RunDurationLabel durationSeconds={durationSeconds} />
     </div>
   );
 }

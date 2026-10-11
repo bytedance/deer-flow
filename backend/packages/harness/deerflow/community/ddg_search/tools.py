@@ -7,6 +7,7 @@ import logging
 
 from langchain.tools import tool
 
+from deerflow.community.search_max_results import DEFAULT_MAX_RESULTS, coerce_max_results
 from deerflow.community.search_time_range import DDGS_TIMELIMIT_BY_TIME_RANGE, SearchTimeRange
 from deerflow.config import get_app_config
 
@@ -105,7 +106,7 @@ def _resolve_ddgs_region(query: str, region: str | None, backend: str | list[str
 
 def _search_text(
     query: str,
-    max_results: int = 5,
+    max_results: int = DEFAULT_MAX_RESULTS,
     region: str | None = DEFAULT_REGION,
     safesearch: str | None = DEFAULT_SAFESEARCH,
     backend: str | list[str] | tuple[str, ...] | None = DEFAULT_BACKEND,
@@ -156,7 +157,7 @@ def _search_text(
 @tool("web_search", parse_docstring=True)
 def web_search_tool(
     query: str,
-    max_results: int = 5,
+    max_results: int = DEFAULT_MAX_RESULTS,
     time_range: SearchTimeRange | None = None,
 ) -> str:
     """Search the web for information. Use this tool to find current information, news, articles, and facts from the internet.
@@ -180,7 +181,7 @@ def web_search_tool(
 
     results = _search_text(
         query=query,
-        max_results=max_results,
+        max_results=coerce_max_results(max_results, provider="DDG Search", logger=logger),
         region=region,
         safesearch=safesearch,
         backend=backend,

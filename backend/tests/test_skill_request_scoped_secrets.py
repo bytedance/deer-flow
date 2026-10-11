@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 from langchain.agents.middleware.types import ModelRequest
 from langchain_core.messages import AIMessage, HumanMessage
@@ -23,13 +24,30 @@ from deerflow.skills.types import SecretRequirement, Skill, SkillCategory
 _SLASH_SOURCE_OWNER_TOKEN = "test-slash-source-owner"
 
 
+def _echo_env_probe(name: str) -> str:
+    """Render an env-var echo probe in the syntax of the shell LocalSandbox picks.
+
+    The POSIX `$NAME` form expands under neither PowerShell nor cmd.exe, so on
+    Windows hosts the probe must use the resolved shell's own expansion syntax;
+    otherwise the variable echoes empty and the negative checks below silently
+    stop measuring anything (an unset PowerShell variable prints as a blank
+    line, which would let even a leaked secret pass).
+    """
+    shell = LocalSandbox._get_shell()
+    if LocalSandbox._is_powershell(shell):
+        return f"echo [$env:{name}]"
+    if LocalSandbox._is_cmd_shell(shell):
+        return f"echo [%{name}%]"
+    return f"echo [${name}]"
+
+
 class TestLocalSandboxEnvInjection:
     """LocalSandbox.execute_command(env=...) injects per-call env into the subprocess."""
 
     def test_injected_env_visible_to_command(self):
         sandbox = LocalSandbox(id="local")
         out = sandbox.execute_command(
-            "echo $DEERFLOW_TEST_SECRET",
+            _echo_env_probe("DEERFLOW_TEST_SECRET"),
             env={"DEERFLOW_TEST_SECRET": "s3cret-value"},
         )
         assert "s3cret-value" in out
@@ -38,14 +56,14 @@ class TestLocalSandboxEnvInjection:
         """env=None preserves the legacy inherited-os.environ behaviour."""
         monkeypatch.setenv("DEERFLOW_INHERITED_VAR", "inherited-value")
         sandbox = LocalSandbox(id="local")
-        out = sandbox.execute_command("echo $DEERFLOW_INHERITED_VAR")
+        out = sandbox.execute_command(_echo_env_probe("DEERFLOW_INHERITED_VAR"))
         assert "inherited-value" in out
 
     def test_injected_env_is_per_call_only(self):
         """Injected env must not leak into a subsequent call that does not pass it."""
         sandbox = LocalSandbox(id="local")
-        sandbox.execute_command("true", env={"DEERFLOW_EPHEMERAL": "leaky"})
-        out = sandbox.execute_command("echo [$DEERFLOW_EPHEMERAL]")
+        sandbox.execute_command(_echo_env_probe("DEERFLOW_EPHEMERAL"), env={"DEERFLOW_EPHEMERAL": "leaky"})
+        out = sandbox.execute_command(_echo_env_probe("DEERFLOW_EPHEMERAL"))
         assert "leaky" not in out
 
     def test_platform_secret_scrubbed_from_inherited_env(self, monkeypatch):
@@ -54,14 +72,14 @@ class TestLocalSandboxEnvInjection:
         is security theatre — a skill script could simply read $OPENAI_API_KEY."""
         monkeypatch.setenv("OPENAI_API_KEY", "sk-platform-should-not-leak")
         sandbox = LocalSandbox(id="local")
-        out = sandbox.execute_command("echo [$OPENAI_API_KEY]")
+        out = sandbox.execute_command(_echo_env_probe("OPENAI_API_KEY"))
         assert "sk-platform-should-not-leak" not in out
 
     def test_benign_env_still_inherited_after_scrub(self, monkeypatch):
         """Scrubbing platform secrets must not strip harmless vars that skills rely on."""
         monkeypatch.setenv("DEERFLOW_PLAIN_VAR", "harmless-value")
         sandbox = LocalSandbox(id="local")
-        out = sandbox.execute_command("echo [$DEERFLOW_PLAIN_VAR]")
+        out = sandbox.execute_command(_echo_env_probe("DEERFLOW_PLAIN_VAR"))
         assert "harmless-value" in out
 
     def test_injected_secret_survives_scrub(self, monkeypatch):
@@ -69,10 +87,173 @@ class TestLocalSandboxEnvInjection:
         pattern — injection happens after scrubbing the inherited environment."""
         sandbox = LocalSandbox(id="local")
         out = sandbox.execute_command(
-            "echo [$INJECTED_API_KEY]",
+            _echo_env_probe("INJECTED_API_KEY"),
             env={"INJECTED_API_KEY": "scoped-value"},
         )
         assert "scoped-value" in out
+
+
+class TestLocalSandboxOperatorEnvironment:
+    """``sandbox.environment`` (operator config) rides the authorized injection channel.
+
+    The env-policy scrubber drops secret-looking names from inherited os.environ,
+    and dashboard-driven runs cannot supply request-scoped ``context.secrets``
+    (there is no UI for it), so ``sandbox.environment`` is the only operator-owned
+    path for e.g. ``MINIMAX_API_KEY`` to reach public generation skills on the
+    local provider — matching the AIO provider, which already honors the field.
+    """
+
+    def test_operator_environment_survives_scrub(self):
+        sandbox = LocalSandbox(id="local", environment={"MINIMAX_API_KEY": "operator-value"})
+        out = sandbox.execute_command(_echo_env_probe("MINIMAX_API_KEY"))
+        assert "operator-value" in out
+
+    def test_request_scoped_env_wins_over_operator_environment(self):
+        """A request-scoped value (declared ``required-secrets``) overrides the
+        shared operator value — the per-user-key-overrides-shared-key case."""
+        sandbox = LocalSandbox(id="local", environment={"SHARED_API_KEY": "operator-value"})
+        out = sandbox.execute_command(
+            _echo_env_probe("SHARED_API_KEY"),
+            env={"SHARED_API_KEY": "request-scoped-value"},
+        )
+        assert "request-scoped-value" in out
+        assert "operator-value" not in out
+
+    def test_no_environment_config_keeps_pure_scrubbing(self, monkeypatch):
+        """Omitting the parameter must not weaken the baseline: a platform secret
+        in os.environ still never reaches the subprocess."""
+        monkeypatch.setenv("MINIMAX_API_KEY", "platform-key-should-vanish")
+        sandbox = LocalSandbox(id="local")
+        out = sandbox.execute_command(_echo_env_probe("MINIMAX_API_KEY"))
+        assert "platform-key-should-vanish" not in out
+
+    def test_provider_consumes_config_values_verbatim(self, monkeypatch):
+        """Values from the file-backed AppConfig loader arrive pre-resolved
+        ($VAR substitution happens during config load), so a credential that
+        legitimately starts with ``$`` must pass through untouched — re-running
+        $-resolution would expand it into a different variable or the empty
+        string."""
+        from types import SimpleNamespace
+
+        from deerflow.sandbox.local import local_sandbox_provider as provider_module
+
+        monkeypatch.setattr(
+            "deerflow.config.get_app_config",
+            lambda: SimpleNamespace(sandbox=SimpleNamespace(environment={"APP_PASSWORD": "$s3cret-value"})),
+            raising=False,
+        )
+        provider = provider_module.LocalSandboxProvider()
+        assert provider._environment == {"APP_PASSWORD": "$s3cret-value"}
+
+    def test_provider_missing_config_yields_empty_environment(self, monkeypatch):
+        """A missing/unloadable config must degrade to 'inject nothing', not crash."""
+        from deerflow.sandbox.local import local_sandbox_provider as provider_module
+
+        def _raise():
+            raise RuntimeError("no config on this host")
+
+        monkeypatch.setattr("deerflow.config.get_app_config", _raise, raising=False)
+        provider = provider_module.LocalSandboxProvider()
+        assert provider._environment == {}
+
+    def test_acquire_wires_environment_into_sandboxes(self, monkeypatch):
+        """Both ``acquire()`` call sites must hand the resolved mapping to the
+        LocalSandbox instances they yield — generic singleton and per-thread
+        alike (either construction site could silently drop the kwarg)."""
+        from deerflow.sandbox.local import local_sandbox_provider as provider_module
+
+        environment = {"MINIMAX_API_KEY": "operator-value", "APP_PASSWORD": "$s3cret-value"}
+        monkeypatch.setattr(
+            "deerflow.config.get_app_config",
+            lambda: SimpleNamespace(sandbox=SimpleNamespace(environment=environment)),
+        )
+        provider = provider_module.LocalSandboxProvider()
+
+        for thread_id in (None, "thread-env-wiring"):
+            sandbox = provider.get(provider.acquire(thread_id))
+            assert sandbox.environment == environment
+            for name, value in environment.items():
+                assert value in sandbox.execute_command(_echo_env_probe(name))
+
+    @pytest.mark.parametrize("name", ["MY=KEY", "", "MY-KEY", "MY KEY"])
+    def test_operator_environment_keys_validated_at_construction(self, name):
+        """A typo'd key (``MY=KEY``) fails at construction instead of on the
+        first command execution."""
+        with pytest.raises(ValueError):
+            LocalSandbox(id="local", environment={name: "v"})
+
+    @pytest.mark.parametrize("override", [False, True])
+    @pytest.mark.parametrize("result_kind", ["output", "sandbox_error", "permission_error", "unexpected_error"])
+    def test_operator_environment_masked_from_bash_output(self, override, result_kind):
+        """[P1 regression] An operator-injected credential must not flow back
+        into model-visible tool output when a script echoes its environment —
+        the bash tool's redaction set includes the sandbox's operator
+        environment, with request-scoped values winning on name collision."""
+        from deerflow.sandbox import tools as tools_mod
+        from deerflow.sandbox.exceptions import SandboxRuntimeError
+
+        operator_secret = "operator-secret-value-123456"
+        request_secret = "request-secret-value-987654321"
+        database_secret = "database-credential-value-123456"
+        errors = {
+            "sandbox_error": SandboxRuntimeError,
+            "permission_error": PermissionError,
+            "unexpected_error": RuntimeError,
+        }
+
+        class FakeSandbox:
+            environment = {
+                "MINIMAX_API_KEY": operator_secret,
+                "DATABASE_URL": database_secret,
+                "IMAGE_GENERATION_MODEL": "readable-model-name",
+                "IMAGE_GENERATION_BASE_URL": "https://images.example.test",
+                "REGION": "readable-region-name",
+            }
+            seen_env = None
+
+            def execute_command(self, command, env=None, timeout=None):
+                self.seen_env = env
+                effective_env = {**self.environment, **(env or {})}
+                output = "\n".join(f"{key}={value}" for key, value in effective_env.items())
+                if result_kind in errors:
+                    raise errors[result_kind](output)
+                return output
+
+        active_secrets = {"ERP_TOKEN": request_secret} if override else {}
+        if override:
+            active_secrets["MINIMAX_API_KEY"] = request_secret
+        sandbox = FakeSandbox()
+        runtime = SimpleNamespace(
+            context={"__active_skill_secrets": active_secrets, "user_id": "u-local"},
+            state={"sandbox": {"sandbox_id": "local:1"}},
+        )
+        thread_data = {"workspace_path": "/tmp/ws", "cwd": "/mnt/user-data/workspace"}
+        fake_cfg = SimpleNamespace(sandbox=SimpleNamespace(bash_output_max_chars=20000, bash_command_timeout=42))
+        with (
+            patch.object(tools_mod, "ensure_sandbox_initialized", return_value=sandbox),
+            patch.object(tools_mod, "is_local_sandbox", return_value=True),
+            patch.object(tools_mod, "is_host_bash_allowed", return_value=True),
+            patch.object(tools_mod, "ensure_thread_directories_exist", return_value=None),
+            patch.object(tools_mod, "get_thread_data", return_value=thread_data),
+            patch.object(tools_mod, "validate_local_bash_command_paths", return_value=None),
+            patch.object(tools_mod, "replace_virtual_paths_in_command", side_effect=lambda command, td: command),
+            patch.object(tools_mod, "_apply_cwd_prefix", side_effect=lambda command, td: command),
+            patch.object(tools_mod, "_is_windows", return_value=False),
+            patch("deerflow.config.app_config.get_app_config", return_value=fake_cfg),
+        ):
+            out = tools_mod.bash_tool.func(runtime=runtime, command="env", description="dump env")
+
+        assert sandbox.seen_env == (active_secrets or None)
+        assert operator_secret not in out
+        assert request_secret not in out
+        assert database_secret not in out
+        assert "MINIMAX_API_KEY=[redacted]" in out
+        assert "DATABASE_URL=[redacted]" in out
+        if override:
+            assert "ERP_TOKEN=[redacted]" in out
+        assert "IMAGE_GENERATION_MODEL=readable-model-name" in out
+        assert "IMAGE_GENERATION_BASE_URL=https://images.example.test" in out
+        assert "REGION=readable-region-name" in out
 
 
 class TestAioSandboxEnvInjection:
@@ -84,7 +265,7 @@ class TestAioSandboxEnvInjection:
             return AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
 
     def test_env_none_uses_legacy_shell_path(self, sandbox):
-        """No injected env → unchanged shell.exec_command path (backward compat)."""
+        """No injected env uses the legacy shell path with bounded timeout/status handling."""
         sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="hello")))
         sandbox._client.bash.exec = MagicMock()
         out = sandbox.execute_command("echo hello")
@@ -105,22 +286,194 @@ class TestAioSandboxEnvInjection:
         sandbox._client.shell.exec_command.assert_not_called()
         assert "hello" in out
 
-    def test_env_path_uses_hard_timeout_not_no_change_timeout(self, sandbox):
-        """The env path routes through bash.exec which exposes no idle/no-change
-        timeout; it must use the dedicated wall-clock ``_DEFAULT_HARD_TIMEOUT``,
-        not the legacy idle constant (same numeric value today, but distinct
-        semantics so a future change to one does not silently alter the other)."""
-        from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
-
-        sandbox._client.bash.exec = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(stdout="ok", stderr=None)))
-        sandbox.execute_command("echo hi", env={"X": "1"})
-        _, kwargs = sandbox._client.bash.exec.call_args
-        assert kwargs["hard_timeout"] == AioSandbox._DEFAULT_HARD_TIMEOUT
-        assert AioSandbox._DEFAULT_HARD_TIMEOUT != AioSandbox._DEFAULT_NO_CHANGE_TIMEOUT or (
-            # Same numeric value is fine today; the contract is that they are
-            # named independently so the two call sites evolve independently.
-            AioSandbox._DEFAULT_HARD_TIMEOUT == AioSandbox._DEFAULT_NO_CHANGE_TIMEOUT
+    def test_env_path_uses_explicit_command_timeout_and_request_budget(self, sandbox):
+        sandbox._client.bash.exec = MagicMock(
+            return_value=SimpleNamespace(
+                data=SimpleNamespace(
+                    stdout="ok",
+                    stderr=None,
+                    exit_code=0,
+                    status="completed",
+                )
+            )
         )
+
+        sandbox.execute_command(
+            "echo hi",
+            env={"X": "1"},
+            timeout=3,
+        )
+
+        _, kwargs = sandbox._client.bash.exec.call_args
+        assert kwargs["hard_timeout"] == 3
+        assert kwargs["request_options"] == {
+            "timeout_in_seconds": 8,
+            "max_retries": 0,
+        }
+
+    def test_env_path_uses_default_hard_timeout_when_timeout_is_none(self, sandbox):
+        sandbox._client.bash.exec = MagicMock(
+            return_value=SimpleNamespace(
+                data=SimpleNamespace(
+                    stdout="ok",
+                    stderr=None,
+                    exit_code=0,
+                    status="completed",
+                )
+            )
+        )
+
+        sandbox.execute_command("echo hi", env={"X": "1"})
+
+        _, kwargs = sandbox._client.bash.exec.call_args
+        assert kwargs["hard_timeout"] == sandbox._DEFAULT_HARD_TIMEOUT
+
+    def test_env_hard_timeout_is_rendered_and_not_retried(self, sandbox):
+        executions = 0
+
+        def bash_exec(**kwargs):
+            nonlocal executions
+            executions += 1
+            return SimpleNamespace(
+                data=SimpleNamespace(
+                    stdout="partial",
+                    stderr=None,
+                    exit_code=-1,
+                    status="timed_out",
+                )
+            )
+
+        sandbox._client.bash.exec = bash_exec
+
+        out = sandbox.execute_command(
+            "side-effect; sleep 30",
+            env={"X": "1"},
+            timeout=3,
+        )
+
+        assert executions == 1
+        assert "partial" in out
+        assert "Command timed out after 3 seconds and was terminated." in out
+        assert out.endswith("Exit Code: 124")
+
+    @pytest.mark.parametrize("status", ["timed_out", "killed"])
+    def test_env_interrupted_status_is_never_error_observation_retried(
+        self,
+        sandbox,
+        status,
+    ):
+        executions = 0
+
+        def bash_exec(**kwargs):
+            nonlocal executions
+            executions += 1
+            return SimpleNamespace(
+                data=SimpleNamespace(
+                    stdout="'ErrorObservation' object has no attribute 'exit_code'",
+                    stderr=None,
+                    exit_code=-1,
+                    status=status,
+                )
+            )
+
+        sandbox._client.bash.exec = bash_exec
+
+        sandbox.execute_command(
+            "unsafe-to-repeat",
+            env={"X": "1"},
+            timeout=3,
+        )
+
+        assert executions == 1
+
+    def test_env_session_cleanup_is_bounded_and_does_not_mask_output(self, sandbox):
+        sandbox._client.bash.exec = MagicMock(
+            return_value=SimpleNamespace(
+                data=SimpleNamespace(
+                    stdout="ok",
+                    stderr="",
+                    exit_code=0,
+                    status="completed",
+                )
+            )
+        )
+        sandbox._client.bash.close_session = MagicMock(side_effect=RuntimeError("cleanup failed"))
+
+        assert (
+            sandbox.execute_command(
+                "echo $TOKEN",
+                env={"TOKEN": "secret"},
+                timeout=3,
+            )
+            == "ok"
+        )
+
+        _, kwargs = sandbox._client.bash.close_session.call_args
+        assert kwargs["request_options"] == {
+            "timeout_in_seconds": sandbox._CLEANUP_REQUEST_TIMEOUT_SECONDS,
+            "max_retries": 0,
+        }
+
+    @pytest.mark.parametrize(
+        ("status", "notice"),
+        [
+            ("killed", "Command was killed before completion."),
+            (
+                "running",
+                "Error: Sandbox command returned a non-terminal running status; command outcome is unknown and was not retried.",
+            ),
+        ],
+    )
+    def test_env_interrupted_status_is_rendered_without_exit_fallback(
+        self,
+        sandbox,
+        status,
+        notice,
+    ):
+        sandbox._client.bash.exec = MagicMock(
+            return_value=SimpleNamespace(
+                data=SimpleNamespace(
+                    stdout="partial",
+                    stderr=None,
+                    exit_code=-1,
+                    status=status,
+                )
+            )
+        )
+
+        out = sandbox.execute_command(
+            "unsafe-to-repeat",
+            env={"X": "1"},
+            timeout=3,
+        )
+
+        assert notice in out
+        assert "Exit Code: -1" not in out
+
+    def test_env_transport_timeout_is_ambiguous_and_not_retried(self, sandbox):
+        executions = 0
+
+        def bash_exec(**kwargs):
+            nonlocal executions
+            executions += 1
+            raise httpx.ReadTimeout("response stalled")
+
+        sandbox._client.bash.exec = bash_exec
+
+        out = sandbox.execute_command(
+            "side-effect; sleep 30",
+            env={"X": "1"},
+            timeout=3,
+        )
+
+        assert executions == 1
+        assert "outcome is unknown" in out
+        assert "not retried" in out
+        _, kwargs = sandbox._client.bash.close_session.call_args
+        assert kwargs["request_options"] == {
+            "timeout_in_seconds": sandbox._CLEANUP_REQUEST_TIMEOUT_SECONDS,
+            "max_retries": 0,
+        }
 
     def test_env_path_retries_on_error_observation_signature(self, sandbox):
         """The env path shares the legacy persistent-shell recovery contract: if
@@ -135,6 +488,89 @@ class TestAioSandboxEnvInjection:
         assert sandbox._client.bash.exec.call_count == 2
         assert "recovered" in out
         assert _ERROR_OBSERVATION_SIGNATURE not in out
+
+    @pytest.mark.parametrize(
+        ("retry_result", "expected_fragments", "expected_suffix"),
+        [
+            pytest.param(
+                SimpleNamespace(
+                    data=SimpleNamespace(
+                        stdout="authoritative timeout output",
+                        stderr=None,
+                        exit_code=-1,
+                        status="timed_out",
+                    )
+                ),
+                ("Command timed out after 3 seconds and was terminated.",),
+                "Exit Code: 124",
+                id="timed-out",
+            ),
+            pytest.param(
+                SimpleNamespace(
+                    data=SimpleNamespace(
+                        stdout="authoritative killed output",
+                        stderr=None,
+                        exit_code=-1,
+                        status="killed",
+                    )
+                ),
+                ("Command was killed before completion.",),
+                None,
+                id="killed",
+            ),
+            pytest.param(
+                SimpleNamespace(
+                    data=SimpleNamespace(
+                        stdout="authoritative running output",
+                        stderr=None,
+                        exit_code=-1,
+                        status="running",
+                    )
+                ),
+                (
+                    "non-terminal running status",
+                    "outcome is unknown",
+                    "not retried",
+                ),
+                None,
+                id="running",
+            ),
+            pytest.param(
+                httpx.ReadTimeout("response stalled"),
+                ("outcome is unknown", "not retried"),
+                None,
+                id="transport-timeout",
+            ),
+        ],
+    )
+    def test_env_error_observation_retry_returns_authoritative_outcome(
+        self,
+        sandbox,
+        retry_result,
+        expected_fragments,
+        expected_suffix,
+    ):
+        from deerflow.community.aio_sandbox.aio_sandbox import _ERROR_OBSERVATION_SIGNATURE
+
+        corrupted = SimpleNamespace(
+            data=SimpleNamespace(
+                stdout=f"corrupted: {_ERROR_OBSERVATION_SIGNATURE}",
+                stderr=None,
+                exit_code=0,
+                status="completed",
+            )
+        )
+        sandbox._client.bash.exec = MagicMock(side_effect=[corrupted, retry_result])
+
+        out = sandbox.execute_command("unsafe-to-repeat", env={"X": "1"}, timeout=3)
+
+        assert sandbox._client.bash.exec.call_count == 2
+        assert "corrupted:" not in out
+        assert _ERROR_OBSERVATION_SIGNATURE not in out
+        for expected_fragment in expected_fragments:
+            assert expected_fragment in out
+        if expected_suffix is not None:
+            assert out.endswith(expected_suffix)
 
 
 class TestEnvPolicy:
@@ -247,6 +683,7 @@ class TestEnvPolicy:
         from deerflow.sandbox.env_policy import build_sandbox_env
 
         monkeypatch.setenv("MYSQL_URL", "mysql://user:pw@host/db")
+        monkeypatch.setenv("PWD", "/repo")  # POSIX hosts set PWD themselves; plant it so the survival check runs on Windows too
         monkeypatch.setenv("MYSQL_PWD", "prod-db-password")
         monkeypatch.setenv("REDISCLI_AUTH", "prod-redis-auth")
         env = build_sandbox_env()
@@ -323,12 +760,25 @@ class TestRequiredSecretsParsing:
 
         skill_file = self._write_skill(
             tmp_path,
-            "name: erp-report\ndescription: d\nrequired-secrets:\n  - name: ERP_TOKEN\n    optional: true\n  - name: REQUIRED_ONE",
+            "name: erp-report\ndescription: d\nrequired-secrets:\n  - name: ERP_TOKEN\n    optional: true\n  - name: EXPLICIT_REQUIRED\n    optional: false\n  - name: REQUIRED_ONE",
         )
         skill = parse_skill_file(skill_file, SkillCategory.CUSTOM)
         by_name = {s.name: s for s in skill.required_secrets}
         assert by_name["ERP_TOKEN"].optional is True
+        assert by_name["EXPLICIT_REQUIRED"].optional is False
         assert by_name["REQUIRED_ONE"].optional is False
+
+    @pytest.mark.parametrize("value", ["false", "true", "no", 1, [], {}, None])
+    def test_malformed_optional_fails_closed(self, value, caplog):
+        from deerflow.skills.parser import parse_required_secrets
+
+        requirements = parse_required_secrets(
+            [{"name": "ERP_TOKEN", "optional": value}],
+            Path("SKILL.md"),
+        )
+        assert requirements == (SecretRequirement(name="ERP_TOKEN", optional=False),)
+        assert f"non-boolean optional value of type {type(value).__name__}" in caplog.text
+        assert "required-secrets entry 'ERP_TOKEN' as required" in caplog.text
 
     def test_invalid_env_name_entry_is_dropped(self, tmp_path):
         from deerflow.skills.parser import parse_skill_file
@@ -1025,6 +1475,7 @@ class TestBashToolInjectsActiveSecrets:
 
     def test_local_bash_forwards_env_and_timeout(self, monkeypatch):
         from deerflow.sandbox import tools as tools_mod
+        from deerflow.sandbox.tools import USER_ID_ENV
 
         captured = {}
 
@@ -1036,7 +1487,7 @@ class TestBashToolInjectsActiveSecrets:
                 return "done"
 
         runtime = SimpleNamespace(
-            context={"__active_skill_secrets": {"ERP_TOKEN": "tok-456"}},
+            context={"__active_skill_secrets": {"ERP_TOKEN": "tok-456"}, "user_id": "u-local"},
             state={"sandbox": {"sandbox_id": "local:1"}},
         )
         thread_data = {"workspace_path": "/tmp/ws", "cwd": "/mnt/user-data/workspace"}
@@ -1050,14 +1501,106 @@ class TestBashToolInjectsActiveSecrets:
             patch.object(tools_mod, "validate_local_bash_command_paths", return_value=None),
             patch.object(tools_mod, "replace_virtual_paths_in_command", side_effect=lambda command, td: command),
             patch.object(tools_mod, "_apply_cwd_prefix", side_effect=lambda command, td: command),
+            # Pinned so the assertion below does not depend on the host OS:
+            # the Windows local sandbox publishes the id through ``env`` rather
+            # than the command string (#3919).
+            patch.object(tools_mod, "_is_windows", return_value=False),
+            patch("deerflow.config.app_config.get_app_config", return_value=fake_cfg),
+        ):
+            out = tools_mod.bash_tool.func(runtime=runtime, command="echo hi", description="run local skill")
+
+        assert out == "done"
+        assert captured["command"] == f"export {USER_ID_ENV}=u-local; echo hi"
+        assert captured["env"] == {"ERP_TOKEN": "tok-456"}
+        assert captured["timeout"] == 42
+
+    def test_local_bash_windows_publishes_user_id_via_env(self, monkeypatch):
+        """``export`` is invalid under the Windows local sandbox's
+        PowerShell/cmd.exe shells, so the id moves to the ``env`` channel there
+        instead of being dropped — the PR promises it on every bash command."""
+        from deerflow.sandbox import tools as tools_mod
+        from deerflow.sandbox.tools import USER_ID_ENV
+
+        captured = {}
+
+        class FakeSandbox:
+            def execute_command(self, command, env=None, timeout=None):
+                captured["command"] = command
+                captured["env"] = env
+                return "done"
+
+        runtime = SimpleNamespace(
+            context={"__active_skill_secrets": {"ERP_TOKEN": "tok-789"}, "user_id": "u-win"},
+            state={"sandbox": {"sandbox_id": "local:1"}},
+        )
+        thread_data = {"workspace_path": "/tmp/ws", "cwd": "/mnt/user-data/workspace"}
+        fake_cfg = SimpleNamespace(sandbox=SimpleNamespace(bash_output_max_chars=321, bash_command_timeout=42))
+        with (
+            patch.object(tools_mod, "ensure_sandbox_initialized", return_value=FakeSandbox()),
+            patch.object(tools_mod, "is_local_sandbox", return_value=True),
+            patch.object(tools_mod, "is_host_bash_allowed", return_value=True),
+            patch.object(tools_mod, "ensure_thread_directories_exist", return_value=None),
+            patch.object(tools_mod, "get_thread_data", return_value=thread_data),
+            patch.object(tools_mod, "validate_local_bash_command_paths", return_value=None),
+            patch.object(tools_mod, "replace_virtual_paths_in_command", side_effect=lambda command, td: command),
+            patch.object(tools_mod, "_apply_cwd_prefix", side_effect=lambda command, td: command),
+            patch.object(tools_mod, "_is_windows", return_value=True),
             patch("deerflow.config.app_config.get_app_config", return_value=fake_cfg),
         ):
             out = tools_mod.bash_tool.func(runtime=runtime, command="echo hi", description="run local skill")
 
         assert out == "done"
         assert captured["command"] == "echo hi"
-        assert captured["env"] == {"ERP_TOKEN": "tok-456"}
-        assert captured["timeout"] == 42
+        assert captured["env"] == {"ERP_TOKEN": "tok-789", USER_ID_ENV: "u-win"}
+
+    def test_remote_bash_does_not_forward_shared_timeout(self):
+        from deerflow.sandbox import tools as tools_mod
+
+        captured = {}
+
+        class FakeSandbox:
+            def execute_command(self, command, env=None, timeout=None):
+                captured["command"] = command
+                captured["env"] = env
+                captured["timeout"] = timeout
+                return "done"
+
+        runtime = SimpleNamespace(
+            context={},
+            state={"sandbox": {"sandbox_id": "aio:1"}},
+        )
+        fake_cfg = SimpleNamespace(
+            sandbox=SimpleNamespace(
+                bash_output_max_chars=321,
+                bash_command_timeout=42,
+            )
+        )
+
+        with (
+            patch.object(
+                tools_mod,
+                "ensure_sandbox_initialized",
+                return_value=FakeSandbox(),
+            ),
+            patch.object(tools_mod, "is_local_sandbox", return_value=False),
+            patch.object(
+                tools_mod,
+                "ensure_thread_directories_exist",
+                return_value=None,
+            ),
+            patch(
+                "deerflow.config.app_config.get_app_config",
+                return_value=fake_cfg,
+            ),
+        ):
+            out = tools_mod.bash_tool.func(
+                runtime=runtime,
+                command="echo hi",
+                description="run remote",
+            )
+
+        assert out == "done"
+        assert captured["timeout"] is None
 
 
 _SECRET = "sk-erp-9f3c-DO-NOT-LEAK"

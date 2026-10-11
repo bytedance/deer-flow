@@ -26,6 +26,7 @@ from langgraph.types import Checkpointer
 
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.persistence.postgres_schema import create_schema_sql, dsn_with_search_path, normalize_libpq_dsn
+from deerflow.runtime.cancellation import drained_async_context
 from deerflow.runtime.checkpointer.provider import (
     POSTGRES_CONN_REQUIRED,
     POSTGRES_INSTALL,
@@ -81,7 +82,10 @@ async def _ensure_postgres_schema_with_pool(pool, schema: str) -> None:
     statement = create_schema_sql(schema)
     if statement is None:
         return
-    async with pool.connection() as conn:
+    # Drain the connection's exit like the pool context around it: caller
+    # cancellation must not leave the connection checked out while the pool's
+    # own teardown runs (backend-ownership invariant in runtime/AGENTS.md).
+    async with drained_async_context(pool.connection()) as conn:
         await conn.execute(statement)
 
 
@@ -121,7 +125,7 @@ async def _async_checkpointer(config) -> AsyncIterator[Checkpointer]:
             raise ImportError(SQLITE_INSTALL) from exc
 
         conn_str = await asyncio.to_thread(_prepare_sqlite_checkpointer_path, config.connection_string or "store.db")
-        async with AsyncSqliteSaver.from_conn_string(conn_str) as saver:
+        async with drained_async_context(AsyncSqliteSaver.from_conn_string(conn_str)) as saver:
             await saver.setup()
             yield saver
         return
@@ -132,7 +136,7 @@ async def _async_checkpointer(config) -> AsyncIterator[Checkpointer]:
 
         AsyncPostgresSaver, _ = _ensure_postgres_imports()
         pool = _build_postgres_pool(config.connection_string, config.postgres_schema)
-        async with pool:
+        async with drained_async_context(pool):
             await _ensure_postgres_schema_with_pool(pool, config.postgres_schema)
             saver = AsyncPostgresSaver(conn=pool)
             await saver.setup()
@@ -163,7 +167,7 @@ async def _async_checkpointer_from_database(db_config) -> AsyncIterator[Checkpoi
             raise ImportError(SQLITE_INSTALL) from exc
 
         conn_str = await asyncio.to_thread(_prepare_database_sqlite_checkpointer_path, db_config)
-        async with AsyncSqliteSaver.from_conn_string(conn_str) as saver:
+        async with drained_async_context(AsyncSqliteSaver.from_conn_string(conn_str)) as saver:
             await saver.setup()
             yield saver
         return
@@ -174,7 +178,7 @@ async def _async_checkpointer_from_database(db_config) -> AsyncIterator[Checkpoi
 
         AsyncPostgresSaver, _ = _ensure_postgres_imports()
         pool = _build_postgres_pool(db_config.postgres_url, db_config.postgres_schema)
-        async with pool:
+        async with drained_async_context(pool):
             await _ensure_postgres_schema_with_pool(pool, db_config.postgres_schema)
             saver = AsyncPostgresSaver(conn=pool)
             await saver.setup()

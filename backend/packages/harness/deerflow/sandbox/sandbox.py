@@ -63,6 +63,20 @@ class Sandbox(ABC):
     #: ``False``).
     persistent_shell_sessions: bool | None = None
 
+    #: Whether sandbox ``lark-cli`` runs through a credential-owning broker
+    #: sidecar (Pattern B, issue #4338): ``True`` once the provider has
+    #: attested broker mode for this sandbox, ``False`` for the plaintext
+    #: config/data overlay. Tri-state, failing closed: ``None`` means the
+    #: mode is unverified and ``lark-cli`` execution must refuse to run until
+    #: the mode is attested. The default is ``False`` rather than ``None``
+    #: because most providers have no broker sidecar, no credential mounts,
+    #: and no provisioner to attest a mode — the non-broker overlay is the
+    #: only mode that exists for them. Only the AIO sandbox overrides the
+    #: default with ``None``: its mode is attested per Pod by the
+    #: provisioner, and an unattested Pod must fail closed instead of
+    #: silently mounting credentials.
+    lark_cli_broker: bool | None = False
+
     def __init__(self, id: str):
         self._id = id
 
@@ -200,7 +214,18 @@ class Sandbox(ABC):
 
     @abstractmethod
     def glob(self, path: str, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
-        """Find paths that match a glob pattern under a root directory."""
+        """Find paths that match a glob pattern under a root directory.
+
+        Returns the matches and ``truncated``, which is true whenever the
+        matches may be incomplete: the search stopped at an output cap before
+        filtering, or an eligible match beyond ``max_results`` was dropped.
+
+        Providers differ in how precisely they can decide the second case. One
+        that holds the whole listing can tell an exactly-full result from a
+        cut-off one and reports the former as complete; one reading a capped
+        stream cannot, and reports it as truncated. Treat the flag as "may be
+        incomplete", never as a count.
+        """
         pass
 
     @abstractmethod
@@ -214,7 +239,11 @@ class Sandbox(ABC):
         case_sensitive: bool = False,
         max_results: int = 100,
     ) -> tuple[list[GrepMatch], bool]:
-        """Search for matches inside a text file or files under a directory."""
+        """Search for matches inside a text file or files under a directory.
+
+        Returns the matches and ``truncated``, with the same meaning as in
+        :meth:`glob`.
+        """
         pass
 
     @abstractmethod

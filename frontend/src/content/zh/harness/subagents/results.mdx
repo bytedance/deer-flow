@@ -1,0 +1,136 @@
+---
+title: 结果与验收
+description: 子 Agent 的终态与截断原因、报告契约与回执引用、验收清单的三种结论及其语义，以及 Lead Agent 为什么把"执行完成"和"验收通过"分开对待。
+---
+
+import { Callout } from "nextra/components";
+
+# 结果与验收
+
+子 Agent 交回的报告是它的**自述**。DeerFlow 在自述之外叠加了三层可核对的证据：运行时的状态与截断原因、工具回执的引用核对、验收标准的确定性检查。本章解释每一层的含义，以及 Lead Agent 该怎么读它们。
+
+## 终态
+
+| `subagent_status`     | 含义                                                                 | 卡片显示 | 结果正文开头                       |
+| --------------------- | -------------------------------------------------------------------- | -------- | ---------------------------------- |
+| `completed`           | 子图正常结束                                                         | 完成     | `Task Succeeded. Result:`          |
+| `failed`              | 模型调用最终失败、容量拒绝，或运行时异常                             | 失败     | `Task failed.` 或 `Task failed (capped: <label>).` |
+| `cancelled`           | 用户停止，或父 run 被取消                                            | 失败     | `Task cancelled by user.`          |
+| `timed_out`           | 超过 `timeout_seconds`                                               | 失败     | `Task timed out.`                  |
+| `polling_timed_out`   | 父侧轮询次数用尽，后台任务可能卡住；运行时已请求取消并安排延迟清理   | 失败     | `Task polling timed out after N minutes.` |
+
+`failed`、`cancelled`、`timed_out` 在有错误详情时会追加 `Error: <详情>`；`polling_timed_out` 直接显示详情。正文只是给人看的展示内容，前端与 Lead Agent 都应依赖消息元数据里的结构化字段，而不是解析文本。
+
+<Callout type="info">
+  子 Agent 失败不会让父 run 失败。失败的委派是一条普通的工具结果，Lead Agent
+  会看到错误文本并决定如何继续；对话本身以成功状态结束。
+</Callout>
+
+### 截断原因 stop_reason
+
+三道防护可以提前结束一次运行。运行通常仍是 `completed`；没有可用输出时为 `failed`，并保留同样的 `stop_reason`：
+
+| `subagent_stop_reason` | 触发                         | 结果正文                                             |
+| ---------------------- | ---------------------------- | ---------------------------------------------------- |
+| `turn_capped`          | 用尽 `max_turns`             | `Task Succeeded (capped: turn budget). Result: ...`  |
+| `token_capped`         | 触达 `token_budget` 硬停止   | `Task Succeeded (capped: token budget). Result: ...` |
+| `loop_capped`          | 循环检测硬停止               | `Task Succeeded (capped: repeated tool-call loop). Result: ...` |
+
+被截断意味着报告是**部分结果**：最后一轮的工具调用被剥离，模型被迫给出最终答案。轮次用尽时如果连一段可用文本都没有，状态是 `failed`，正文为 `Task failed (capped: turn budget). Error: Reached max_turns=N`。旧版本的 `max_turns_reached` 状态在读取时映射为 `turn_capped`。
+
+### 失败的判定依据
+
+`LLMErrorHandlingMiddleware` 把供应商异常转换成一条带 `deerflow_error_fallback` 标记的助手消息，让子图能干净地结束。执行器只检查**最后一条**助手消息是否带该标记：带标记归为 `failed`，错误文本来自消息正文或 `error_detail`；不带标记的、哪怕看起来像错误的文字，仍然是 `completed` 的正常结果。只看最后一条是有意为之，因为子 Agent 与父线程共享 `thread_id`，历史里可能残留父 Agent 的旧标记。
+
+## 报告契约与回执引用
+
+每个子 Agent（内置和自定义都一样）的系统提示里都有一段 `report_contract`，要求：
+
+- 对每个"我做了什么"的声明引用一条回执 id，例如 `[r3 write_file]`：写了文件、跑了命令、抓了页面、发了请求。
+- 给每个交付物附上可核对的句柄：绝对路径、URL、记录 id 或 HTTP 状态。
+- 明确写出失败、跳过和不确定的部分，绝不声称没有执行过的动作。
+- `[rN]` 只用于自己的工具调用；外部网页来源继续用 `[citation:Title]` 后接 `(URL)` 的引用格式。
+
+回执来自 `ToolReceiptMiddleware`。它给每次工具调用生成一条记录（id、工具名、状态、参数与输出的哈希前缀、字节数），以运行时拥有的键写入工具消息，工具本身无法伪造。子 Agent 每次模型调用前都会看到一份账本：
+
+```
+## Tool receipts (execution record)
+Cite receipt ids (e.g. [r1 write_file]) in your final report for every claim about an action you took.
+Execution evidence only — receipts record that a call happened and its status; they do not validate claim correctness or task acceptance.
+- [r1] write_file status=success args_sha256=… output_sha256=… bytes=123
+```
+
+账本有 2,000 字符的渲染预算，超出的旧回执会省略。当次展示的账本会同时记在助手消息上，因此压缩后重新编号不会让引用错位。
+
+子 Agent 完成后，父侧把报告里的每个 `[rN]` 与执行记录核对，得到一份 `receipt_verdict`：
+
+| 结论                  | 含义                                                                 |
+| --------------------- | -------------------------------------------------------------------- |
+| resolved              | 引用的回执存在、状态为成功，且工具名与引用的锚一致                    |
+| failed                | 回执存在但状态不是成功，或者引用时写的工具名与实际不符                |
+| unknown               | 账本里没有这个 id                                                    |
+| `no_citation_claims`  | 报告里没有任何引用，却有动作性描述或路径，或者在回执账本非空时报告长度不低于 240 字符 |
+
+这份结论不写进结果正文，而是记在消息元数据里，并在委派账本里以一行摘要显示，例如 `citations: 2 resolved, 1 failed, 1 unknown — execution evidence only, does not validate claim correctness`，或者 `citations: UNVERIFIED — action claims without receipt citations`。
+
+<Callout type="warning">
+  回执只证明"这次调用发生过且状态如此"，不证明相邻的声明是对的。文件写了不等于内容正确。
+</Callout>
+
+回执与引用核对由 `verification.receipts_enabled` 控制，默认开启。关闭后报告契约改为要求附可核对句柄，不再要求引用回执。
+
+## 验收清单
+
+委派时带了 `acceptance_criteria`，`completed` 的结果末尾会附一段清单：
+
+```
+Acceptance checklist (deterministic checks; execution evidence only, does not validate claim correctness):
+- [holds] file:outputs/report.md non-empty — 1204 bytes
+- [does not hold] file_written:outputs/summary.md — file does not exist
+- [UNVERIFIED] 报告须覆盖三家竞争对手 — not deterministically checkable
+```
+
+三种结论的含义：
+
+- **holds**：检查执行了，条件成立。
+- **does not hold**：检查执行了，条件不成立。
+- **UNVERIFIED**：没有执行确定性检查。这是"缺少证据"，不是"条件不成立"。
+
+各类条件的具体语义：
+
+| 情况                                     | `exists`      | `non-empty`   | `file_written`               |
+| ---------------------------------------- | ------------- | ------------- | ---------------------------- |
+| 文件不存在                               | does not hold | does not hold | does not hold                |
+| 文件存在但为空                           | holds（`exists, 0 bytes`） | does not hold（`file is empty`） | holds（`read-back ok, 0 bytes`） |
+| 二进制文件                               | holds         | holds         | holds（`binary file`）       |
+| 路径落在线程 workspace / outputs 之外    | UNVERIFIED    | UNVERIFIED    | UNVERIFIED                   |
+| 本地沙箱里指向外部的符号链接             | UNVERIFIED    | UNVERIFIED    | UNVERIFIED                   |
+| 远端沙箱里的符号链接、FIFO 等非普通文件  | UNVERIFIED    | UNVERIFIED    | UNVERIFIED                   |
+| 大于 50,000 字节                         | 按大小探针判定，不读内容 | 同左 | 追加一次一字节的读探针      |
+
+`tests_passed:<command>` 成立需要同时满足：记录里有一次状态为成功的 bash 执行；命令文本完整、未被截断；不是持久 shell 会话里跑的（否则之前调用留下的状态无法证明干净）；输出呈现测试通过的形态，且没有失败或零测试的形态。证据窗口是最近 20 次 bash 执行，命令保留 500 字符，输出保留末尾 1,000 字符。
+
+完整的判定结构记在消息元数据的 `subagent_acceptance_verdict` 里：每条 `leaf` 有 `criterion`、`family`、`checked`、`holds`、`detail`，整体有 `unchecked` 列表和 `all_hold` 布尔值。
+
+## 执行完成不等于验收通过
+
+Lead Agent 的提示词、`task` 的说明和委派账本都强调同一件事：`completed` 只表示执行结束。账本里每条委派会附上验收摘要，例如 `acceptance: 2 hold, 1 does not hold, 1 UNVERIFIED`。对于有未满足或未验证条件的已完成委派，账本给 Lead Agent 的指导是：保留有用的产出，只修补剩余缺口，对影响结论的 `UNVERIFIED` 条件复核或在回答里保留不确定性，并尊重剩余预算。
+
+上下文压缩后，账本仍会为每种未解决的结论各保留一条具体示例（criterion 截断到 160 字符、detail 截断到 120 字符），其余以 `N more unresolved criteria (not shown)` 计数。完整结论一直保存在线程状态里。
+
+## 委派账本
+
+账本是系统维护的委派记录，存放在线程状态的 `delegations` 通道里，摘要压缩只压缩消息、不动它。每次模型调用前，`DurableContextMiddleware` 把它渲染进一条隐藏的 `durable_context_data` 消息：
+
+```
+## Work already delegated
+Newest entries first. In-progress work is already delegated. Completed means execution ended, not task acceptance. ...
+- [completed] 调研竞争对手 (via general-purpose; execution finished; retain useful work; repair/recheck unmet criteria; ...) -> 前 5 家竞争对手的定价… · citations: 3 resolved · acceptance: 1 hold, 1 does not hold — execution evidence only, does not validate claim correctness
+- [in_progress] 整理数据 (via bash; already delegated; do NOT delegate again; wait for or build on the result)
+```
+
+- 每条记录包含 id、run id、描述、子 Agent 类型、状态、结果摘要（最多 2,000 字符，渲染时 120 字符）、结果哈希、截断原因、回执结论和验收结论。
+- 状态从 `in_progress` 变为终态后不会被降级；账本最多保留 50 条，渲染预算 6,000 字符，超出的旧条目以计数省略。
+- 用户停止对话时，正在进行的委派没有工具结果。下一次 run 开始时，运行时会把这类没有配对结果的 `in_progress` 条目改为 `cancelled`，避免 Lead Agent 永远等待一个不会到来的结果。
+
+账本之前还有一段"持久上下文权威契约"系统消息，声明这些值是数据、不是指令。

@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import ipaddress
 import logging
+import math
 import os
 import threading
 import time
@@ -91,8 +92,11 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
 
     @staticmethod
     def _positive_float(name: str, value: Any, default: float) -> float:
-        resolved = float(default if value is None else value)
-        if resolved <= 0:
+        try:
+            resolved = float(default if value is None else value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"sandbox.{name} must be positive") from exc
+        if not math.isfinite(resolved) or resolved <= 0:
             raise ValueError(f"sandbox.{name} must be positive")
         return resolved
 
@@ -110,13 +114,18 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             logger.warning("OpenSandboxProvider: no api_key or domain configured (set sandbox.api_key/sandbox.domain in config.yaml or OPEN_SANDBOX_API_KEY/OPEN_SANDBOX_DOMAIN). The SDK will default to unauthenticated localhost:8080.")
         if _uses_insecure_remote_http(effective_domain, protocol):
             logger.warning("OpenSandboxProvider: remote OpenSandbox domain uses HTTP; use HTTPS to protect credentials and sandbox traffic.")
+        # $VARS in config.yaml are already resolved by AppConfig.resolve_env_variables;
+        # resolving again would rewrite a secret that itself starts with $.
         environment = dict(option("environment") or {})
         _validate_extra_env(environment)
         replicas = option("replicas")
         idle_timeout = option("idle_timeout")
         raw_sandbox_timeout = option("sandbox_timeout")
-        sandbox_timeout = float(DEFAULT_SANDBOX_TIMEOUT if raw_sandbox_timeout is None else raw_sandbox_timeout)
-        if sandbox_timeout < 0:
+        try:
+            sandbox_timeout = float(DEFAULT_SANDBOX_TIMEOUT if raw_sandbox_timeout is None else raw_sandbox_timeout)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("sandbox.sandbox_timeout must be non-negative") from exc
+        if not math.isfinite(sandbox_timeout) or sandbox_timeout < 0:
             raise ValueError("sandbox.sandbox_timeout must be non-negative")
         return {
             "api_key": api_key,
@@ -128,20 +137,10 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             "ready_timeout": self._positive_float("ready_timeout", option("ready_timeout"), DEFAULT_READY_TIMEOUT),
             "sandbox_timeout": None if sandbox_timeout == 0 else sandbox_timeout,
             "command_timeout": self._positive_float("bash_command_timeout", option("bash_command_timeout"), DEFAULT_COMMAND_TIMEOUT),
-            "environment": self._resolve_env_vars(environment),
+            "environment": environment,
             "replicas": replicas if replicas is not None else self.DEFAULT_REPLICAS,
             "idle_timeout": idle_timeout if idle_timeout is not None else self.DEFAULT_IDLE_TIMEOUT,
         }
-
-    @staticmethod
-    def _resolve_env_vars(env_config: dict[str, str]) -> dict[str, str]:
-        resolved: dict[str, str] = {}
-        for key, value in env_config.items():
-            if isinstance(value, str) and value.startswith("$"):
-                resolved[key] = os.environ.get(value[1:], "")
-            else:
-                resolved[key] = "" if value is None else str(value)
-        return resolved
 
     def _get_sdk(self) -> tuple[type[SandboxSync], type[ConnectionConfigSync], type[RunCommandOpts]]:
         with self._lock:
@@ -384,7 +383,12 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             if self._shutdown_called:
                 return
             self._shutdown_called = True
-        self._stop_idle_checker()
+        try:
+            self._stop_idle_checker()
+        except Exception:
+            with self._lock:
+                self._shutdown_called = False
+            raise
         with self._lock:
             sandboxes = list(self._sandboxes.values()) + [entry for entry, _ in self._warm_pool.values()]
             self._sandboxes.clear()

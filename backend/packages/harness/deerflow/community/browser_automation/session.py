@@ -21,9 +21,12 @@ import os
 import threading
 import time
 from collections.abc import Callable, Coroutine
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from urllib.parse import urlparse
+
+from .egress import BrowserEgressProxy, EgressResolver
 
 if TYPE_CHECKING:
     from playwright.async_api import Browser, BrowserContext, Page, Playwright
@@ -140,16 +143,49 @@ _DEFAULT_MAX_SESSIONS = 32
 _DEFAULT_IDLE_TIMEOUT_S = 30 * 60.0
 
 
-def browser_multi_worker_error(workers: int | None = None) -> str | None:
-    """Return the fail-closed reason for process-local browser sessions."""
-    if workers is None:
+# ``GATEWAY_WORKERS`` is the documented knob and the one docker-compose forwards as
+# ``--workers``; ``backend/Dockerfile`` and ``scripts/serve.sh`` start uvicorn with no
+# worker count at all, and uvicorn then takes the count from ``WEB_CONCURRENCY``. Both
+# must be read, or this gate stays inert in exactly the deployment it exists to refuse.
+# ``app/gateway/routers/channel_connections.py`` reads the same two spellings and treats a
+# blank value as unset the same way, but deliberately differs on unparsable input: that
+# route resolves it to 0 and refuses, while this one falls through to the next spelling
+# and stays inert, because uvicorn rejects ``--workers abc`` itself before serving.
+_WORKER_COUNT_ENV_VARS = ("GATEWAY_WORKERS", "WEB_CONCURRENCY")
+
+
+def _worker_count_from_env() -> tuple[int, str]:
+    """Resolve the worker count and the variable that set it; a blank value is unset."""
+    for name in _WORKER_COUNT_ENV_VARS:
+        raw = os.environ.get(name)
+        if not raw or not raw.strip():
+            continue
         try:
-            workers = int(os.environ.get("GATEWAY_WORKERS", "1"))
+            return int(raw), name
         except (TypeError, ValueError):
-            workers = 1
+            # Unparsable here must not hide a valid count in the other spelling: an
+            # exported ``GATEWAY_WORKERS=abc`` never reaches uvicorn on the launchers
+            # that pass no ``--workers``, so ``WEB_CONCURRENCY`` is still what decides
+            # how many processes start.
+            continue
+    return 1, _WORKER_COUNT_ENV_VARS[0]
+
+
+def browser_multi_worker_error(workers: int | None = None, env_name: str | None = None) -> str | None:
+    """Return the fail-closed reason for process-local browser sessions.
+
+    ``env_name`` is the spelling the caller resolved the count from; the refusal has to
+    name it, because an operator who only ever set ``WEB_CONCURRENCY`` cannot act on a
+    message about ``GATEWAY_WORKERS``. Without it the name is resolved from the
+    environment, which is the same source the count came from.
+    """
+    if workers is None:
+        workers, env_name = _worker_count_from_env()
+    elif env_name is None:
+        env_name = _worker_count_from_env()[1]
     if workers <= 1:
         return None
-    return f"GATEWAY_WORKERS={workers} cannot enable agentic browser tools: browser sessions are process-local and uvicorn does not provide thread affinity. Set GATEWAY_WORKERS=1 or disable the browser_navigate tool."
+    return f"{env_name}={workers} cannot enable agentic browser tools: browser sessions are process-local and uvicorn does not provide thread affinity. Set {env_name}=1 or disable the browser_navigate tool."
 
 
 def ensure_browser_worker_compatibility() -> None:
@@ -170,6 +206,14 @@ class BrowserLiveViewerError(RuntimeError):
 def _is_playwright_timeout_error(exc: Exception) -> bool:
     """Recognize Playwright timeouts without requiring Playwright at import time."""
     return exc.__class__.__name__ == "TimeoutError" and exc.__class__.__module__.startswith("playwright.")
+
+
+def _consume_future_exception(future: asyncio.Future[Any]) -> None:
+    """Retrieve detached close errors; the concurrent-future callback logs them."""
+    if future.cancelled():
+        return
+    with contextlib.suppress(Exception):
+        future.exception()
 
 
 def redact_browser_url(url: str) -> str:
@@ -198,7 +242,7 @@ class _PlaywrightLoopThread:
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return await asyncio.wrap_future(future)
 
-    def submit(self, coro: Coroutine[Any, Any, Any]) -> None:
+    def submit(self, coro: Coroutine[Any, Any, Any]) -> Future[Any]:
         """Schedule *coro* on the private loop without blocking the caller."""
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
 
@@ -209,6 +253,7 @@ class _PlaywrightLoopThread:
                 logger.debug("browser background task failed: %s", exc)
 
         future.add_done_callback(_log_failure)
+        return future
 
     def run_sync(self, coro: Coroutine[Any, Any, T], timeout: float | None = None) -> T:
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
@@ -266,6 +311,7 @@ class BrowserSession:
         viewport: dict[str, int],
         cdp_url: str | None = None,
         url_guard: Callable[[str], str | None] | None = None,
+        egress_resolver: EgressResolver | None = None,
         on_activity: Callable[[], None] | None = None,
     ) -> None:
         self._loop = loop
@@ -281,6 +327,13 @@ class BrowserSession:
         # cloud-metadata host.
         self._url_guard = url_guard
         self._request_guard_bound = False
+        # The request guard resolves a URL's host to screen it, but Chromium
+        # resolves it again to connect. A launched browser therefore sends every
+        # TCP connection through a loopback SOCKS5 proxy that resolves once through
+        # ``egress_resolver`` and connects only to the addresses it vetted, so a
+        # rebinding DNS answer cannot reach a private or metadata host.
+        self._egress_resolver = egress_resolver
+        self._egress_proxy: BrowserEgressProxy | None = None
         # When set, attach to an already-running Chrome via the DevTools
         # Protocol (like Codex's "connect to your real browser") instead of
         # launching a private headless instance. The user watches the agent
@@ -389,7 +442,7 @@ class BrowserSession:
                 return self._page
 
             if self._browser is None or not self._browser.is_connected():
-                self._browser = await self._playwright.chromium.launch(headless=self._headless)
+                self._browser = await self._playwright.chromium.launch(headless=self._headless, proxy=await self._egress_proxy_settings())
             # device_scale_factor=2 renders screenshots at retina density so the
             # panel stays crisp when the image is scaled up to fill the view.
             self._context = await self._browser.new_context(viewport=self._viewport, device_scale_factor=2)
@@ -398,6 +451,15 @@ class BrowserSession:
             self._set_active_page(await self._context.new_page())
             self._bind_new_page_listener()
             return self._page
+
+    async def _egress_proxy_settings(self) -> dict[str, str] | None:
+        if self._egress_resolver is None:
+            return None
+        if self._egress_proxy is None:
+            self._egress_proxy = BrowserEgressProxy(self._egress_resolver)
+        # Playwright already proxies loopback for Chromium unless an environment
+        # override disables it; spell it out so localhost is never exempt.
+        return {"server": await self._egress_proxy.start(), "bypass": "<-loopback>"}
 
     def _set_active_page(self, page: Page) -> None:
         """Adopt *page* as the active page and keep the live screencast on it.
@@ -451,7 +513,8 @@ class BrowserSession:
             url = ""
             with contextlib.suppress(Exception):
                 url = route.request.url
-            if url.startswith(("http://", "https://")) and guard(url) is not None:
+            # The guard resolves hostnames; keep that off the shared browser loop.
+            if url.startswith(("http://", "https://")) and await asyncio.to_thread(guard, url) is not None:
                 logger.warning("browser request blocked by SSRF guard: %s", redact_browser_url(url))
                 with contextlib.suppress(Exception):
                     await route.abort("blockedbyclient")
@@ -682,7 +745,11 @@ class BrowserSession:
             if self._playwright is not None:
                 with contextlib.suppress(Exception):
                     await self._playwright.stop()
+            if self._egress_proxy is not None:
+                with contextlib.suppress(Exception):
+                    await self._egress_proxy.close()
         finally:
+            self._egress_proxy = None
             self._playwright = None
             self._browser = None
             self._context = None
@@ -849,8 +916,18 @@ class BrowserSession:
         with self._activity():
             await self._loop.run(self._dispatch_input(event))
 
+    def _submit_close(self) -> Future[Any]:
+        close_coro = self._close()
+        try:
+            return self._loop.submit(close_coro)
+        except Exception:
+            close_coro.close()
+            raise
+
     async def close(self) -> None:
-        await self._loop.run(self._close())
+        close_future = asyncio.wrap_future(self._submit_close())
+        close_future.add_done_callback(_consume_future_exception)
+        await asyncio.shield(close_future)
 
 
 class BrowserSessionManager:
@@ -897,6 +974,7 @@ class BrowserSessionManager:
         cdp_url: str | None = None,
         allow_unguarded_cdp: bool = False,
         url_guard: Callable[[str], str | None] | None = None,
+        egress_resolver: EgressResolver | None = None,
         pin: bool = False,
     ) -> BrowserSession:
         ensure_browser_worker_compatibility()
@@ -921,6 +999,7 @@ class BrowserSessionManager:
                     viewport=viewport or {"width": 1280, "height": 720},
                     cdp_url=cdp_url,
                     url_guard=url_guard,
+                    egress_resolver=egress_resolver,
                     on_activity=lambda: self._touch_session(key),
                 )
                 self._sessions[key] = session
@@ -1019,8 +1098,19 @@ class BrowserSessionManager:
             sessions = list(self._sessions.values())
             self._sessions.clear()
             self._last_used.clear()
+        close_futures: list[asyncio.Future[Any]] = []
         for session in sessions:
-            await session.close()
+            try:
+                close_future = asyncio.wrap_future(session._submit_close())
+            except Exception as exc:
+                logger.debug("browser session close submission failed: %s", exc)
+                continue
+            close_future.add_done_callback(_consume_future_exception)
+            close_futures.append(close_future)
+        if close_futures:
+            close_group = asyncio.gather(*close_futures)
+            close_group.add_done_callback(_consume_future_exception)
+            await asyncio.shield(close_group)
         return len(sessions)
 
 

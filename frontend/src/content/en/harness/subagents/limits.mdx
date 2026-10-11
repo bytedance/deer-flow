@@ -1,0 +1,106 @@
+---
+title: Limits, Budgets, and Capacity
+description: Every limit that applies to subagents, with its config key, default, range, and what the user sees when it fires. Covers the runaway guards, process-wide capacity, and the queueing policy.
+---
+
+import { Callout } from "nextra/components";
+
+# Limits, Budgets, and Capacity
+
+A subagent runs its own agent loop, so it needs the same backstops the Lead Agent has. This chapter puts every limit in one table and then explains what each one looks like when it fires.
+
+## Overview
+
+| Limit                     | Config key / context key                                                       | Default                                                                       | Range                                          | When it fires                                                                                                            |
+| ------------------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| Per-response concurrency  | request context `max_concurrent_subagents`                                     | `subagent_runtime.max_running` (3)                                            | 1 to 64, capped by `subagent_runtime.max_running` | Excess `task` calls are dropped and only logged                                                                       |
+| Per-run total             | `subagents.max_total_per_run`; request context `max_total_subagents` overrides it | 6                                                                          | 1 to 50                                        | Excess calls are dropped. If the total was already used up before the response, `[SUBAGENT LIMIT REACHED] ...` is appended to the assistant message and the run's `stop_reason` becomes `subagent_limit_capped`; a response that only crosses the cap is trimmed with a log line |
+| Turns                     | `subagents.max_turns` (built-ins only), `subagents.agents.<name>.max_turns`    | general-purpose 150, bash 60, custom 50                                       | at least 1                                     | Partial result kept and marked `turn_capped`; `failed` when no usable text exists                                       |
+| Timeout                   | `subagents.timeout_seconds` (built-ins only), `subagents.agents.<name>.timeout_seconds` | built-ins 1800 s, custom and managed 900 s                           | at least 1                                     | Status `timed_out`                                                                                                       |
+| Polling attempts          | Derived from the timeout: `(timeout_seconds + 60) / 5` polls, every 5 seconds  | follows the timeout                                                           |                                                | Status `polling_timed_out`; the runtime requests cancellation and schedules deferred cleanup                             |
+| Token budget              | `subagents.token_budget`, `subagents.agents.<name>.token_budget`               | enabled; `max_tokens` 2,000,000, or 1,000,000 when summarization is on; `warn_threshold` 0.7 | `max_tokens` at least 1000     | The in-flight turn is capped and forced to finish: `completed` + `token_capped`                                          |
+| Loop detection            | `loop_detection` (shared with the Lead Agent)                                  | enabled; `warn_threshold` 3, `hard_limit` 5, `window_size` 20, `tool_freq_warn` 30, `tool_freq_hard_limit` 50 | | `completed` + `loop_capped`                                                                                              |
+| Summarization             | `summarization` (shared with the Lead Agent)                                   | example config: enabled, trigger at 32,000 tokens, keep the last 10 messages  |                                                | System prompt and latest user message survive; the summary goes into `summary_text` and is re-injected every call        |
+| Process-wide capacity     | `subagent_runtime.max_running`                                                 | 3                                                                             | 1 to 64                                        | When full, queue or reject per `admission_policy`                                                                        |
+| Queue bound               | `subagent_runtime.max_queued`                                                  | 64                                                                            | 0 to 10,000                                    | Rejected when the queue is full: `Subagent execution capacity is full (3 running, 64 queued)`                            |
+| Admission policy          | `subagent_runtime.admission_policy`                                            | `queue`                                                                       | `queue` / `reject`                             | With `reject`, a full slot set fails immediately                                                                         |
+| Queue timeout             | `subagent_runtime.queue_timeout_seconds`                                       | 300                                                                           | 1 to 86,400                                    | `Timed out after 300s waiting for a subagent execution slot`, status `failed`                                             |
+| AIO shell sessions        | `sandbox.environment.MAX_SHELL_SESSIONS`                                       | image default 10; auto-set to `max_running + 1` when needed                   | not below `max_running + 1`                    | Startup error when too low; see [Sandbox and Isolation](/docs/harness/subagents/sandbox)                                 |
+
+The four `subagent_runtime` fields are frozen at Gateway startup and need a restart to change. They bound ordinary `task` calls and durable batches alike. Queued delegations wait asynchronously without holding an execution thread. A capacity rejection or queue timeout becomes a `failed` result for an ordinary `task`; durable batch items are requeued instead.
+
+## Concurrency and total
+
+`SubagentLimitMiddleware` is installed on the Lead Agent chain only and enforces two gates:
+
+- **Per-response concurrency**: how many `task` calls one model response may contain. It defaults to the process capacity `max_running` (3 by default) and is capped by it. Excess calls are dropped with no text appended, only a log line. The HARD LIMITS line in the prompt tells the model the number.
+- **Per-run total**: the cumulative number of delegations in one run, default 6, which is two full batches at the default concurrency. Only ledger entries tagged with the current `run_id` count; without a `run_id` the middleware logs a warning and counts the whole thread. Calls beyond the remaining total are removed. When one response merely crosses the cap, the trim is only logged. Once the total was already exhausted before a response, all of its `task` calls are removed, the run's `stop_reason` becomes `subagent_limit_capped`, and the assistant message gets this appended:
+
+```
+[SUBAGENT LIMIT REACHED] The subagent delegation limit for this run has been reached. Continue using the subagent results already collected, execute remaining simple work directly, or summarize the remaining work instead of launching more subagents.
+```
+
+Both gates depend on the ledger, which `DurableContextMiddleware` writes. Graphs built directly with `create_deerflow_agent` now include it automatically; see [Developers and Integration](/docs/harness/subagents/developers).
+
+`batch_task` does not count against the per-run total; it has its own `max_live_items` and `max_running_items`.
+
+## Turns and timeouts
+
+`max_turns` is the operator-facing notion of a turn: one model call plus the tools it runs. The runtime converts it into LangGraph's super-step budget:
+
+```
+recursion_limit = max_turns × (nodes per turn) + (one-time nodes per invocation)
+```
+
+Nodes per turn is the number of `before_model` / `after_model` hooks implemented on the middleware chain plus 2 (the model node and the tools node); one-time nodes is the number of `before_agent` / `after_agent` hooks. Configuring 150 turns therefore really yields 150 turns, regardless of how many middlewares are installed.
+
+When the turns run out the executor catches `GraphRecursionError`, keeps the last assistant text as a partial result, and marks it `turn_capped`.
+
+The timeout is wall-clock. Once it elapses the subagent is cancelled with status `timed_out`. Turns and timeout are independent axes: when you raise `max_turns`, usually raise `timeout_seconds` too, or the failure merely moves from turns to timeout.
+
+## Runaway guards
+
+The subagent middleware chain mirrors three Lead Agent guards:
+
+- **Loop detection** (`LoopDetectionMiddleware`): breaks a subagent that repeats the same tool call without progress. Subagents have no `task`, so only the tool-loop heuristic can fire. A hard stop marks the result `completed` + `subagent_stop_reason=loop_capped`. Controlled by the `loop_detection` config, with `tool_freq_overrides` for per-tool thresholds.
+- **Token budget** (`TokenBudgetMiddleware`): tracks the run's cumulative tokens against `subagents.token_budget`. At the hard-stop threshold it strips the current turn's tool calls and forces a final answer, marking the result `completed` + `token_capped`. Reaching `warn_threshold` injects a one-time budget warning into the subagent's next model call and logs it at INFO level.
+- **Summarization** (`DeerFlowSummarizationMiddleware`): compacts long subagent transcripts under the same `summarization.enabled` switch as the Lead Agent, and by default summarizes with the subagent's own model. Compaction preserves the subagent's system prompt (role, report contract, acceptance note, skill index, deferred tool catalog) and the latest user message. `DurableContextMiddleware` sits before summarization and re-injects `summary_text` into later requests, so a compacted history never starts with an assistant message.
+
+The default token ceiling is coupled to the summarization switch: 1,000,000 when compaction is on, 2,000,000 when off. An explicit `subagents.token_budget.max_tokens` (global or per agent) always wins, so flipping summarization never silently changes a value you pinned.
+
+## Configuration example
+
+```yaml
+subagent_runtime:              # restart required; shared by task and batches
+  max_running: 3
+  max_queued: 64
+  admission_policy: queue       # or reject
+  queue_timeout_seconds: 300
+
+subagents:
+  timeout_seconds: 1800         # default timeout for built-in subagents
+  # max_turns: 120              # global turn override for built-ins; unset keeps 150 / 60
+  max_total_per_run: 6          # delegations per run, 1 to 50
+
+  token_budget:
+    enabled: true
+    max_tokens: 2000000
+    warn_threshold: 0.7
+
+  agents:
+    general-purpose:
+      timeout_seconds: 2700     # 45 minutes for deep research
+      max_turns: 250
+      token_budget:
+        max_tokens: 3000000
+    bash:
+      timeout_seconds: 300
+      max_turns: 80
+```
+
+Per-agent overrides beat global values. The global `timeout_seconds` and `max_turns` apply to built-in subagents only; custom and managed subagents have their own defaults, so change them through `agents.<name>`.
+
+<Callout type="tip">
+  To allow strictly one subagent at a time, set the request context's
+  `max_concurrent_subagents` to 1. The floor is 1; it is not bumped to 2.
+</Callout>

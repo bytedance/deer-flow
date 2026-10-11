@@ -37,12 +37,12 @@ export function readKnowledgeSources(
     if (message.type !== "tool" || typeof message.content !== "string")
       continue;
     const artifact = message.artifact as Record<string, unknown> | undefined;
-    if (
-      artifact?.knowledge_sources_version !== 1 ||
-      !Array.isArray(artifact.knowledge_sources)
-    )
+    const rawSources = Array.isArray(artifact?.knowledge_sources)
+      ? artifact.knowledge_sources
+      : artifact?.retrieval_sources;
+    if (artifact?.knowledge_sources_version !== 1 || !Array.isArray(rawSources))
       continue;
-    for (const raw of artifact.knowledge_sources.slice(0, 100) as unknown[]) {
+    for (const raw of rawSources.slice(0, 100) as unknown[]) {
       if (!raw || typeof raw !== "object") continue;
       const source = raw as Record<string, unknown>;
       if (
@@ -109,7 +109,7 @@ export function extractCitationSources(
     return [];
   }
 
-  const searchable = maskCode(markdown);
+  const searchable = maskCitationCode(markdown);
   const sourcesByUrl = new Map<string, CitationSource>();
 
   for (const match of searchable.matchAll(CITATION_LINK_RE)) {
@@ -210,7 +210,7 @@ function extractDomain(url: string): string {
 // Blanks out code regions so example citations inside code aren't scraped as
 // real sources, while preserving string length (and newlines) so occurrence
 // indices stay aligned with the original markdown.
-function maskCode(markdown: string): string {
+export function maskCitationCode(markdown: string): string {
   return maskInlineCode(maskFencedCodeBlocks(markdown));
 }
 

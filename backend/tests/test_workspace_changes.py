@@ -703,7 +703,7 @@ async def test_workspace_changes_route_forwards_include_files_flag():
     calls: dict = {}
 
     class FakeStore:
-        async def list_events(self, thread_id, run_id, *, event_types=None, task_id=None, limit=500, after_seq=None):
+        async def list_events(self, thread_id, run_id, *, event_types=None, task_id=None, limit=500, after_seq=None, user_id=None):
             calls.update(thread_id=thread_id, run_id=run_id, event_types=event_types)
             return [
                 {
@@ -734,6 +734,7 @@ async def test_workspace_changes_route_forwards_include_files_flag():
     class FakeRequest:
         app = FakeApp()
         _deerflow_test_bypass_auth = True
+        cookies: dict = {}
 
     response = await get_run_workspace_changes(
         thread_id="thread-1",

@@ -7,10 +7,13 @@ import pytest
 
 from deerflow.config.subagent_batches_config import SubagentBatchesConfig
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.subagents import batch_service as service_module
 from deerflow.subagents.batch_runtime import BatchSubmitRequest
 from deerflow.subagents.batch_service import SubagentBatchService
 from deerflow.subagents.capacity import SubagentExecutionCapacity
+
+_MISSING = object()
 
 
 class FakeStatus(Enum):
@@ -43,6 +46,11 @@ def _request(**overrides) -> BatchSubmitRequest:
                 "system_prompt": "Work carefully.",
             },
             "parent_model": "model-a",
+            "knowledge_scope": {
+                "version": 1,
+                "mode": "selected",
+                "dataset_ids": ["dataset-1"],
+            },
         },
     }
     values.update(overrides)
@@ -65,7 +73,65 @@ async def test_submit_keeps_batch_running_limit_separate_from_one_process_capaci
 
 
 @pytest.mark.asyncio
-async def test_execute_item_marks_real_running_then_persists_terminal_result(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({"max_running_items": 0}, "max_running_items must be between 1 and 64"),
+        ({"max_live_items": 1, "max_running_items": 0}, "max_running_items must be between 1 and 64"),
+        ({"max_live_items": 0}, "max_live_items must be between 1 and 1000"),
+    ],
+)
+async def test_submit_reports_an_explicit_zero_limit_by_name(overrides: dict[str, int], expected: str) -> None:
+    repository = SimpleNamespace(create_batch=AsyncMock(return_value={"id": "batch-1"}))
+    service = SubagentBatchService(
+        repository=repository,
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(),
+    )
+
+    with pytest.raises(ValueError, match=expected):
+        await service.submit(_request(**overrides))
+
+    repository.create_batch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("overrides", "live", "running"),
+    [
+        ({}, 100, 3),
+        ({"max_live_items": 40}, 40, 3),
+        ({"max_live_items": 40, "max_running_items": 5}, 40, 5),
+    ],
+)
+async def test_submit_defaults_only_the_limits_the_caller_omitted(overrides: dict[str, int], live: int, running: int) -> None:
+    repository = SimpleNamespace(create_batch=AsyncMock(return_value={"id": "batch-1"}))
+    service = SubagentBatchService(
+        repository=repository,
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(),
+    )
+
+    await service.submit(_request(**overrides))
+
+    kwargs = repository.create_batch.await_args.kwargs
+    assert (kwargs["max_live_items"], kwargs["max_running_items"]) == (live, running)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("thread_incarnation", "expected_present"),
+    [
+        ("incarnation-1", True),
+        (None, True),
+        (_MISSING, False),
+    ],
+)
+async def test_execute_item_marks_real_running_then_persists_terminal_result(
+    monkeypatch,
+    thread_incarnation,
+    expected_present,
+) -> None:
     result = SimpleNamespace(
         status=FakeStatus.RUNNING,
         result=None,
@@ -73,6 +139,10 @@ async def test_execute_item_marks_real_running_then_persists_terminal_result(mon
         stop_reason=None,
         token_usage_records=None,
     )
+
+    execution_spec = dict(_request().execution_spec)
+    if thread_incarnation is not _MISSING:
+        execution_spec[THREAD_INCARNATION_CONTEXT_KEY] = thread_incarnation
 
     class Repository:
         def __init__(self) -> None:
@@ -90,7 +160,7 @@ async def test_execute_item_marks_real_running_then_persists_terminal_result(mon
                         "thread_id": "thread-1",
                         "user_id": "user-1",
                         "run_id": "run-1",
-                        "execution_spec": _request().execution_spec,
+                        "execution_spec": execution_spec,
                     },
                 }
             ]
@@ -142,6 +212,14 @@ async def test_execute_item_marks_real_running_then_persists_terminal_result(mon
     assert repository.finalized["succeeded"] is True
     assert repository.finalized["result"] == "done"
     assert executor_kwargs["execution_capacity"] is execution_capacity
+    assert executor_kwargs["knowledge_scope"] == {
+        "version": 1,
+        "mode": "selected",
+        "dataset_ids": ["dataset-1"],
+    }
+    assert (THREAD_INCARNATION_CONTEXT_KEY in executor_kwargs) is expected_present
+    if expected_present:
+        assert executor_kwargs[THREAD_INCARNATION_CONTEXT_KEY] is thread_incarnation
 
 
 @pytest.mark.asyncio
@@ -412,3 +490,286 @@ async def test_cancel_during_tool_assembly_skips_launch(monkeypatch, tmp_path) -
         assert batch["counts"]["cancelled"] == 1
     finally:
         await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_start_cannot_replace_poller_while_stop_is_draining(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = SubagentBatchService(
+        repository=SimpleNamespace(),
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(),
+    )
+    poller_entered = asyncio.Event()
+    allow_poller_exit = asyncio.Event()
+
+    async def blocking_poller() -> None:
+        poller_entered.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            await allow_poller_exit.wait()
+
+    monkeypatch.setattr(service, "_run", blocking_poller)
+    await service.start()
+    original_poller = service._poller
+    assert original_poller is not None
+    await asyncio.wait_for(poller_entered.wait(), timeout=1)
+
+    stop_task = asyncio.create_task(service.stop())
+    await asyncio.sleep(0)
+    assert not stop_task.done()
+    assert service._poller is original_poller
+    with pytest.raises(RuntimeError, match="before stop completes"):
+        await service.start()
+    assert service._poller is original_poller
+
+    allow_poller_exit.set()
+    await asyncio.wait_for(stop_task, timeout=1)
+    assert original_poller.done()
+    assert service._poller is None
+    assert not service._stopping
+
+    await service.start()
+    restarted_poller = service._poller
+    assert restarted_poller is not None
+    assert restarted_poller is not original_poller
+    await asyncio.wait_for(service.stop(), timeout=1)
+    assert restarted_poller.done()
+    assert service._poller is None
+
+
+@pytest.mark.asyncio
+async def test_restarted_batch_stop_cancels_and_drains_owned_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = SubagentBatchService(
+        repository=SimpleNamespace(),
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(),
+    )
+    poller_entered = asyncio.Event()
+    item_entered = asyncio.Event()
+    requested: list[str] = []
+    owned_tasks: list[asyncio.Task[None]] = []
+
+    async def poller() -> None:
+        poller_entered.set()
+        await asyncio.Future()
+
+    async def item_work() -> None:
+        item_entered.set()
+        await asyncio.Future()
+
+    monkeypatch.setattr(service, "_run", poller)
+    monkeypatch.setattr(service_module, "request_cancel_background_task", requested.append)
+
+    try:
+        await service.start()
+        first_poller = service._poller
+        assert first_poller is not None
+        owned_tasks.append(first_poller)
+        await asyncio.wait_for(poller_entered.wait(), timeout=1)
+        await asyncio.wait_for(service.stop(), timeout=1)
+        first_cleanup = service._stop_cleanup_task
+        assert first_poller.done()
+
+        poller_entered.clear()
+        await service.start()
+        restarted_poller = service._poller
+        assert restarted_poller is not None
+        assert restarted_poller is not first_poller
+        owned_tasks.append(restarted_poller)
+        await asyncio.wait_for(poller_entered.wait(), timeout=1)
+
+        item_task = asyncio.create_task(item_work())
+        owned_tasks.append(item_task)
+        service._executions["item-2"] = item_task
+        service._execution_ids["item-2"] = "execution-2"
+        service._item_batches["item-2"] = "batch-2"
+        await asyncio.wait_for(item_entered.wait(), timeout=1)
+
+        await asyncio.wait_for(service.stop(), timeout=1)
+        assert requested == ["execution-2"]
+        assert restarted_poller.done()
+        assert item_task.done()
+        assert service._poller is None
+        assert service._executions == {}
+        assert service._execution_ids == {}
+        assert service._item_batches == {}
+        assert service._stop.is_set()
+        assert not service._stopping
+        second_cleanup = service._stop_cleanup_task
+        assert second_cleanup is not None
+        assert second_cleanup is not first_cleanup
+        assert second_cleanup.done()
+
+        await asyncio.wait_for(service.stop(), timeout=1)
+        assert service._stop_cleanup_task is second_cleanup
+        assert requested == ["execution-2"]
+    finally:
+        for task in owned_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*owned_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_batch_stops_share_one_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = SubagentBatchService(
+        repository=SimpleNamespace(),
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(),
+    )
+    poller_entered = asyncio.Event()
+    poller_cancelled = asyncio.Event()
+    release_poller = asyncio.Event()
+    drain_calls = 0
+
+    async def reluctant_poller() -> None:
+        poller_entered.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            poller_cancelled.set()
+            await release_poller.wait()
+
+    original_drain = service._drain_stop
+
+    async def counted_drain(poller, tasks) -> None:
+        nonlocal drain_calls
+        drain_calls += 1
+        await original_drain(poller, tasks)
+
+    monkeypatch.setattr(service, "_run", reluctant_poller)
+    monkeypatch.setattr(service, "_drain_stop", counted_drain)
+    await service.start()
+    await asyncio.wait_for(poller_entered.wait(), timeout=1)
+
+    first_stop = asyncio.create_task(service.stop())
+    await asyncio.wait_for(poller_cancelled.wait(), timeout=1)
+    cleanup_task = service._stop_cleanup_task
+    second_stop = asyncio.create_task(service.stop())
+    await asyncio.sleep(0)
+
+    assert cleanup_task is not None
+    assert service._stop_cleanup_task is cleanup_task
+    assert service._stop_drains == 1
+    assert drain_calls == 1
+    assert not first_stop.done()
+    assert not second_stop.done()
+
+    release_poller.set()
+    await asyncio.wait_for(asyncio.gather(first_stop, second_stop), timeout=1)
+    assert service._stop_cleanup_task is cleanup_task
+    assert cleanup_task.done()
+    assert service._stop_drains == 0
+    assert not service._stopping
+    assert drain_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_batch_stop_allows_successful_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = SubagentBatchService(
+        repository=SimpleNamespace(),
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(),
+    )
+    poller_entered = asyncio.Event()
+    release_poller = asyncio.Event()
+
+    async def reluctant_poller() -> None:
+        poller_entered.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            await release_poller.wait()
+
+    monkeypatch.setattr(service, "_run", reluctant_poller)
+    await service.start()
+    original_poller = service._poller
+    await asyncio.wait_for(poller_entered.wait(), timeout=1)
+
+    first_stop = asyncio.create_task(service.stop())
+    await asyncio.sleep(0)
+    cleanup_task = service._stop_cleanup_task
+    first_stop.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first_stop
+
+    assert cleanup_task is not None
+    assert service._stop_cleanup_task is cleanup_task
+    assert service._stop_drains == 1
+    assert service._stopping
+    assert original_poller is not None
+    assert not original_poller.done()
+    assert not original_poller.cancelled()
+    with pytest.raises(RuntimeError, match="before stop completes"):
+        await service.start()
+
+    retry_stop = asyncio.create_task(service.stop())
+    await asyncio.sleep(0)
+    assert service._stop_cleanup_task is cleanup_task
+    assert not retry_stop.done()
+
+    release_poller.set()
+    await asyncio.wait_for(retry_stop, timeout=1)
+    assert original_poller.done()
+    assert service._poller is None
+    assert service._stop_cleanup_task is cleanup_task
+    assert cleanup_task.done()
+    assert service._stop_drains == 0
+    assert not service._stopping
+
+    await service.start()
+    restarted_poller = service._poller
+    assert restarted_poller is not None
+    assert restarted_poller is not original_poller
+    await asyncio.wait_for(service.stop(), timeout=1)
+    assert restarted_poller.done()
+    assert service._poller is None
+
+
+@pytest.mark.asyncio
+async def test_batch_stop_cleanup_failure_is_reported_to_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = SubagentBatchService(
+        repository=SimpleNamespace(),
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(),
+    )
+    poller_entered = asyncio.Event()
+    release_poller = asyncio.Event()
+    cleanup_error = RuntimeError("stop cleanup failed")
+
+    async def reluctant_poller() -> None:
+        poller_entered.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            await release_poller.wait()
+
+    class FailingClearDict(dict):
+        def clear(self) -> None:
+            raise cleanup_error
+
+    monkeypatch.setattr(service, "_run", reluctant_poller)
+    service._executions = FailingClearDict()
+    await service.start()
+    await asyncio.wait_for(poller_entered.wait(), timeout=1)
+    first_stop = asyncio.create_task(service.stop())
+    await asyncio.sleep(0)
+    first_stop.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first_stop
+
+    cleanup_task = service._stop_cleanup_task
+    assert cleanup_task is not None
+    release_poller.set()
+    with pytest.raises(RuntimeError, match="stop cleanup failed"):
+        await asyncio.wait_for(asyncio.shield(cleanup_task), timeout=1)
+
+    assert service._stopping
+    with pytest.raises(RuntimeError, match="before stop completes"):
+        await service.start()
+
+    with pytest.raises(RuntimeError, match="stop cleanup failed") as raised:
+        await service.stop()
+    assert raised.value is cleanup_error
+    assert service._stop_cleanup_task is cleanup_task

@@ -1,3 +1,4 @@
+import type { Message } from "@langchain/langgraph-sdk";
 import { afterEach, expect, test, rs } from "@rstest/core";
 
 import {
@@ -7,6 +8,7 @@ import {
   isRunNotCancellableError,
   StreamReplayGapError,
 } from "@/core/api/api-client";
+import { getMessageGroups } from "@/core/messages/utils";
 
 function makeSessionStorage() {
   const values = new Map<string, string>();
@@ -82,6 +84,182 @@ test("ignores reconnect metadata storage access failures", () => {
   });
 
   expect(() => clearReconnectRun("thread-1", "run-1")).not.toThrow();
+});
+
+test.each(["http", "network"])(
+  "does not retry run creation after an ambiguous %s failure",
+  async (failure) => {
+    const sessionStorage = makeSessionStorage();
+    let attempts = 0;
+    const fetchFn = rs.fn(async () => {
+      attempts += 1;
+      if (failure === "network") {
+        throw new TypeError("connection interrupted");
+      }
+      const status = attempts === 1 ? 504 : 400;
+      return new Response(JSON.stringify({ detail: "request failed" }), {
+        status,
+      });
+    });
+    rs.stubGlobal("window", {
+      location: { origin: "http://localhost:2026" },
+      sessionStorage,
+    });
+    rs.stubGlobal("fetch", fetchFn);
+
+    const consume = async () => {
+      for await (const entry of getAPIClient(true).runs.stream(
+        "thread-no-retry",
+        "lead_agent",
+        { input: { messages: [] } },
+      )) {
+        void entry;
+      }
+    };
+
+    await expect(consume()).rejects.toThrow(
+      failure === "http" ? "HTTP 504" : "connection interrupted",
+    );
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  },
+);
+
+test.each([0, 1, 4, 5])(
+  "preserves the recovery GET retry budget without recreating the run (%s failures)",
+  async (recoveryFailures) => {
+    const sessionStorage = makeSessionStorage();
+    const encoder = new TextEncoder();
+    let interruptStream: (() => void) | undefined;
+    const interruptedBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            'id: 1-0\nevent: custom\ndata: {"phase":"started"}\n\n',
+          ),
+        );
+        interruptStream = () => {
+          controller.error(new TypeError("connection interrupted"));
+        };
+      },
+    });
+    const requests: Array<{
+      url: string;
+      method: string | undefined;
+      lastEventId: string | null;
+    }> = [];
+    const fetchFn = rs.fn(async (_url: string | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      requests.push({
+        url: String(_url),
+        method: init?.method,
+        lastEventId: headers.get("Last-Event-ID"),
+      });
+      if (requests.length === 1) {
+        return new Response(interruptedBody, {
+          status: 200,
+          headers: {
+            "Content-Type": "text/event-stream",
+            "Content-Location": "/threads/thread-reconnect/runs/run-reconnect",
+            Location:
+              "/threads/thread-reconnect/runs/run-reconnect/stream?stream_mode=custom",
+          },
+        });
+      }
+      if (requests.length <= recoveryFailures + 1) {
+        return new Response(JSON.stringify({ detail: "gateway timeout" }), {
+          status: 504,
+        });
+      }
+      return makeSSEResponse("id: 2-0\nevent: end\ndata: null\n\n");
+    });
+    rs.stubGlobal("window", {
+      location: { origin: "http://localhost:2026" },
+      sessionStorage,
+    });
+    rs.stubGlobal("fetch", fetchFn);
+    rs.stubGlobal("setTimeout", (callback: () => void) => {
+      callback();
+      return 0;
+    });
+
+    const received: Array<{ id?: string; event: string; data: unknown }> = [];
+    const consume = async () => {
+      for await (const entry of getAPIClient(true).runs.stream(
+        "thread-reconnect",
+        "lead_agent",
+        { input: { messages: [] } },
+      )) {
+        received.push(entry);
+        if ("id" in entry && entry.id === "1-0") {
+          interruptStream?.();
+        }
+      }
+    };
+    // The SDK retries four times after the initial HTTP attempt. Exhaustion
+    // must surface the error instead of starting a new run or retrying forever.
+    if (recoveryFailures === 5) {
+      await expect(consume()).rejects.toThrow("HTTP 504");
+    } else {
+      await consume();
+    }
+
+    expect(received).toEqual([
+      { id: "1-0", event: "custom", data: { phase: "started" } },
+      ...(recoveryFailures === 5
+        ? []
+        : [{ id: "2-0", event: "end", data: null }]),
+    ]);
+    expect(requests).toEqual([
+      {
+        url: "http://localhost:2026/mock/api/threads/thread-reconnect/runs/stream",
+        method: "POST",
+        lastEventId: null,
+      },
+      ...Array.from({ length: Math.min(recoveryFailures + 1, 5) }, () => ({
+        url: "http://localhost:2026/mock/api/threads/thread-reconnect/runs/run-reconnect/stream?stream_mode=custom",
+        method: "GET",
+        lastEventId: "1-0",
+      })),
+    ]);
+  },
+);
+
+test("keeps retries for reads and explicit stream joins", async () => {
+  const attempts = new Map<string, number>();
+  const fetchFn = rs.fn(async (url: string | URL) => {
+    const path = new URL(url).pathname;
+    const attempt = (attempts.get(path) ?? 0) + 1;
+    attempts.set(path, attempt);
+    if (attempt === 1) {
+      return new Response("gateway timeout", { status: 504 });
+    }
+    return path.endsWith("/stream")
+      ? makeSSEResponse("event: end\ndata: null\n\n")
+      : Response.json({ status: "running" });
+  });
+  rs.stubGlobal("window", {
+    location: { origin: "http://localhost:2026" },
+    sessionStorage: makeSessionStorage(),
+  });
+  rs.stubGlobal("fetch", fetchFn);
+  rs.stubGlobal("setTimeout", (callback: () => void) => {
+    callback();
+    return 0;
+  });
+
+  const received: Array<{ event: string; data: unknown }> = [];
+  for await (const entry of getAPIClient(true).runs.joinStream(
+    "thread-read-retry",
+    "run-read-retry",
+  )) {
+    received.push(entry);
+  }
+
+  expect(received).toEqual([{ event: "end", data: null }]);
+  expect([...attempts.entries()]).toEqual([
+    ["/mock/api/threads/thread-read-retry/runs/run-read-retry", 2],
+    ["/mock/api/threads/thread-read-retry/runs/run-read-retry/stream", 2],
+  ]);
 });
 
 test("clears stale reconnect metadata when join stream cannot be resumed", async () => {
@@ -240,6 +418,198 @@ test("short-circuits reconnect to a terminal run", async () => {
   // Preflight only — no stream/join request beyond the GET.
   expect(fetchFn).toHaveBeenCalledTimes(1);
   expect(sessionStorage.removeItem).toHaveBeenCalledWith("lg:stream:thread-1");
+});
+
+test("hydrates the active run input before replaying an incremental stream", async () => {
+  const sessionStorage = makeSessionStorage();
+  const fetchFn = rs.fn(async (url: string | URL) => {
+    const path = new URL(url.toString()).pathname;
+    if (path.endsWith("/runs/run-input")) {
+      return new Response(
+        JSON.stringify({
+          status: "running",
+          kwargs: {
+            input: {
+              messages: [
+                { id: "human-2", type: "human", content: "Second question" },
+              ],
+            },
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    if (path.endsWith("/threads/thread-input/state")) {
+      return new Response(
+        JSON.stringify({
+          values: {
+            messages: [
+              { id: "human-1", type: "human", content: "First question" },
+              { id: "human-2", type: "human", content: "Second question" },
+            ],
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    if (path.endsWith("/runs/run-input/stream")) {
+      return makeSSEResponse("event: end\ndata: null\n\n");
+    }
+    return new Response(JSON.stringify({ detail: "unexpected request" }), {
+      status: 500,
+    });
+  });
+  rs.stubGlobal("window", {
+    location: { origin: "http://localhost:2026" },
+    sessionStorage,
+  });
+  rs.stubGlobal("fetch", fetchFn);
+
+  const entries: Array<{ event: string; data: unknown }> = [];
+  for await (const entry of getAPIClient(true).runs.joinStream(
+    "thread-input",
+    "run-input",
+  )) {
+    entries.push(entry);
+  }
+
+  expect(entries[0]).toMatchObject({
+    event: "values",
+    data: {
+      messages: [
+        { id: "human-1", content: "First question" },
+        { id: "human-2", content: "Second question" },
+      ],
+    },
+  });
+  expect(
+    (entries[0]?.data as { messages: Array<{ id: string }> }).messages,
+  ).toHaveLength(2);
+});
+
+test("rejoining a scheduled run shows its launch once", async () => {
+  const origin = {
+    task_id: "task-1",
+    task_run_id: "task-run-x",
+    trigger: "scheduled",
+    run_number: 2,
+    scheduled_for: "2026-10-05T12:21:53+00:00",
+    timezone: "Asia/Shanghai",
+    task_title: "Release checklist",
+    instructions: "Check the list.",
+    stop_condition: null,
+    standing_notes: [],
+  };
+  const launched = {
+    id: "scheduled-x",
+    type: "human",
+    content: "Check the list.",
+    additional_kwargs: { deerflow_scheduled_origin: origin },
+  };
+  const fetchFn = rs.fn(async (url: string | URL) => {
+    const path = new URL(url.toString()).pathname;
+    if (path.endsWith("/runs/run-scheduled")) {
+      return new Response(
+        JSON.stringify({
+          status: "running",
+          kwargs: { input: { messages: [launched] } },
+        }),
+        { status: 200 },
+      );
+    }
+    if (path.endsWith("/threads/thread-scheduled/state")) {
+      return new Response(
+        JSON.stringify({
+          values: {
+            messages: [
+              {
+                id: "scheduled-x",
+                type: "system",
+                content: "<system-reminder>date</system-reminder>",
+                additional_kwargs: { hide_from_ui: true },
+              },
+              { ...launched, id: "scheduled-x__user" },
+            ],
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    if (path.endsWith("/runs/run-scheduled/stream")) {
+      return makeSSEResponse("event: end\ndata: null\n\n");
+    }
+    return new Response(JSON.stringify({ detail: "unexpected request" }), {
+      status: 500,
+    });
+  });
+  rs.stubGlobal("window", {
+    location: { origin: "http://localhost:2026" },
+    sessionStorage: makeSessionStorage(),
+  });
+  rs.stubGlobal("fetch", fetchFn);
+
+  const entries: Array<{ event: string; data: unknown }> = [];
+  for await (const entry of getAPIClient(true).runs.joinStream(
+    "thread-scheduled",
+    "run-scheduled",
+  )) {
+    entries.push(entry);
+  }
+
+  const messages = (entries[0]?.data as { messages: Message[] }).messages;
+  expect(messages.map((message) => message.id)).toEqual([
+    "scheduled-x",
+    "scheduled-x__user",
+  ]);
+  const humans = getMessageGroups(messages).filter(
+    (group) => group.type === "human",
+  );
+  expect(humans).toHaveLength(1);
+  expect(
+    humans[0]?.type === "human" && humans[0].scheduledOrigin?.task_id,
+  ).toBe("task-1");
+});
+
+test("continues reconnect when durable state hydration fails", async () => {
+  const fetchFn = rs.fn(async (url: string | URL) => {
+    const path = new URL(url.toString()).pathname;
+    if (path.endsWith("/runs/run-no-state")) {
+      return new Response(
+        JSON.stringify({
+          status: "running",
+          kwargs: {
+            input: {
+              messages: [{ id: "human-2", type: "human", content: "Second" }],
+            },
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    if (path.endsWith("/threads/thread-no-state/state")) {
+      return new Response(JSON.stringify({ detail: "state unavailable" }), {
+        status: 404,
+      });
+    }
+    if (path.endsWith("/runs/run-no-state/stream")) {
+      return makeSSEResponse("event: end\ndata: null\n\n");
+    }
+    return new Response(JSON.stringify({ detail: "unexpected request" }), {
+      status: 500,
+    });
+  });
+  rs.stubGlobal("fetch", fetchFn);
+
+  const entries: Array<{ event: string; data: unknown }> = [];
+  for await (const entry of getAPIClient(true).runs.joinStream(
+    "thread-no-state",
+    "run-no-state",
+  )) {
+    entries.push(entry);
+  }
+
+  expect(entries).toEqual([{ event: "end", data: null }]);
+  expect(fetchFn).toHaveBeenCalledTimes(3);
 });
 
 test("falls back to join when preflight cannot resolve the run", async () => {
@@ -437,9 +807,25 @@ test("recovers a join stream gap from durable state and resumes after the retain
   const fetchFn = rs.fn(async (url: string | URL, init?: RequestInit) => {
     const path = url.toString();
     if (path.endsWith("/runs/run-1")) {
-      return new Response(JSON.stringify({ status: "running" }), {
-        status: 200,
-      });
+      return new Response(
+        JSON.stringify({
+          status: "running",
+          kwargs: {
+            input: {
+              messages: [
+                {
+                  id: "human-2",
+                  type: "human",
+                  content: "Second question",
+                },
+              ],
+            },
+          },
+        }),
+        {
+          status: 200,
+        },
+      );
     }
     if (path.includes("/runs/run-1/stream")) {
       recoveryRequests.push(init ?? {});
@@ -451,7 +837,11 @@ test("recovers a join stream gap from durable state and resumes after the retain
     if (path.includes("/threads/thread-1/state")) {
       return new Response(
         JSON.stringify({
-          values: { messages: [{ type: "ai", content: "durable" }] },
+          values: {
+            messages: [
+              { id: "human-1", type: "human", content: "First question" },
+            ],
+          },
           next: [],
           tasks: [],
           metadata: {},
@@ -483,19 +873,141 @@ test("recovers a join stream gap from durable state and resumes after the retain
 
   expect(received).toEqual([
     {
+      event: "values",
+      data: {
+        messages: [
+          { id: "human-1", type: "human", content: "First question" },
+          { id: "human-2", type: "human", content: "Second question" },
+        ],
+      },
+    },
+    {
       event: "custom",
       data: { type: "stream_replay_gap", ...gap },
     },
     {
       event: "values",
-      data: { messages: [{ type: "ai", content: "durable" }] },
+      data: {
+        messages: [
+          { id: "human-1", type: "human", content: "First question" },
+          { id: "human-2", type: "human", content: "Second question" },
+        ],
+      },
     },
     { event: "end", data: null },
   ]);
   expect(new Headers(recoveryRequests[1]?.headers).get("Last-Event-ID")).toBe(
     "3-0",
   );
+  expect(sessionStorage.getItem("lg:stream:thread-1")).toBe("run-1");
 });
+
+test.each([
+  ["initial", "another run"],
+  ["join", "another run"],
+  ["initial", "the same run"],
+  ["join", "the same run"],
+])(
+  "handles %s stream gap recovery when %s claims the reconnect pointer",
+  async (kind, claimant) => {
+    const sessionStorage = makeSessionStorage();
+    const threadId = "thread-gap-pointer";
+    const runId = "run-gap-pointer";
+    const claimedRunId = claimant === "the same run" ? runId : "run-newer";
+    const key = "lg:stream:" + threadId;
+    sessionStorage.setItem(key, runId);
+    const gap = {
+      code: "stream_replay_gap",
+      run_id: runId,
+      requested_event_id: "1-0",
+      earliest_available_event_id: "2-0",
+      latest_available_event_id: "3-0",
+      recovery: "reload_durable_state",
+    };
+    let startStateRead: () => void = () => undefined;
+    let finishStateRead: (response: Response) => void = () => undefined;
+    const stateReadStarted = new Promise<void>((resolve) => {
+      startStateRead = resolve;
+    });
+    const stateResponse = new Promise<Response>((resolve) => {
+      finishStateRead = resolve;
+    });
+    const recoveryHeaders: Headers[] = [];
+    const fetchFn = rs.fn(async (url: string | URL, init?: RequestInit) => {
+      const path = String(url);
+      if (path.endsWith("/runs/" + runId)) {
+        return new Response(JSON.stringify({ status: "running" }));
+      }
+      if (path.endsWith("/threads/" + threadId + "/state")) {
+        startStateRead();
+        return stateResponse;
+      }
+      if (
+        path.endsWith("/runs/stream") ||
+        (path.includes("/runs/" + runId + "/stream") &&
+          !new Headers(init?.headers).has("Last-Event-ID"))
+      ) {
+        return makeSSEResponse(
+          "event: gap\ndata: " + JSON.stringify(gap) + "\n\n",
+          {
+            "Content-Location": "/threads/" + threadId + "/runs/" + runId,
+          },
+        );
+      }
+      if (path.includes("/runs/" + runId + "/stream")) {
+        recoveryHeaders.push(new Headers(init?.headers));
+        return makeSSEResponse("event: end\ndata: null\n\n");
+      }
+      throw new Error("Unexpected request: " + path);
+    });
+    rs.stubGlobal("window", {
+      location: { origin: "http://localhost:2026" },
+      sessionStorage,
+    });
+    rs.stubGlobal("fetch", fetchFn);
+
+    const client = getAPIClient(true);
+    const stream =
+      kind === "initial"
+        ? client.runs.stream(threadId, "lead_agent", {})
+        : client.runs.joinStream(threadId, runId);
+    await expect(stream.next()).resolves.toEqual({
+      done: false,
+      value: { event: "custom", data: { type: "stream_replay_gap", ...gap } },
+    });
+    expect(sessionStorage.getItem(key)).toBeNull();
+
+    const snapshot = stream.next();
+    await stateReadStarted;
+    sessionStorage.setItem(key, claimedRunId);
+    sessionStorage.setItem.mockClear();
+    sessionStorage.removeItem.mockClear();
+    finishStateRead(new Response(JSON.stringify({ values: { messages: [] } })));
+
+    await expect(snapshot).resolves.toEqual({
+      done: false,
+      value: { event: "values", data: { messages: [] } },
+    });
+    await expect(stream.next()).resolves.toEqual({
+      done: false,
+      value: { event: "end", data: null },
+    });
+    expect(recoveryHeaders).toHaveLength(1);
+    expect(recoveryHeaders[0]?.get("Last-Event-ID")).toBe("3-0");
+    expect(sessionStorage.getItem(key)).toBe(claimedRunId);
+    if (claimedRunId === runId) {
+      expect(sessionStorage.setItem).toHaveBeenCalledTimes(1);
+      expect(sessionStorage.setItem).toHaveBeenCalledWith(key, runId);
+    } else {
+      expect(sessionStorage.setItem).not.toHaveBeenCalled();
+    }
+    expect(sessionStorage.removeItem).not.toHaveBeenCalled();
+    await expect(stream.next()).resolves.toEqual({
+      done: true,
+      value: undefined,
+    });
+  },
+);
 
 test("recovers a gap emitted by the initial run stream", async () => {
   const sessionStorage = makeSessionStorage();
@@ -558,6 +1070,7 @@ test("recovers a gap emitted by the initial run stream", async () => {
     { event: "end", data: null },
   ]);
   expect(recoveryHeaders[0]?.get("Last-Event-ID")).toBe("5-0");
+  expect(sessionStorage.getItem("lg:stream:thread-2")).toBe("run-2");
 });
 
 test("recovers from stream replay gap with null retained bounds", async () => {
@@ -847,3 +1360,118 @@ test("short-circuits reconnect to an interrupted (user-cancelled) run", async ()
   expect(fetchFn).toHaveBeenCalledTimes(1);
   expect(sessionStorage.removeItem).toHaveBeenCalledWith("lg:stream:thread-1");
 });
+
+test.each(["initial", "join"] as const)(
+  "rejects replay gaps for another run on the %s stream",
+  async (source) => {
+    const sessionStorage = makeSessionStorage();
+    sessionStorage.setItem("lg:stream:thread-guard", "run-newer");
+    sessionStorage.removeItem.mockClear();
+    sessionStorage.setItem.mockClear();
+    const gap = {
+      code: "stream_replay_gap",
+      run_id: "run-other",
+      requested_event_id: "1-0",
+      earliest_available_event_id: "2-0",
+      latest_available_event_id: "3-0",
+      recovery: "reload_durable_state",
+    };
+    const fetchFn = rs.fn(async (url: string | URL) => {
+      const path = new URL(url.toString()).pathname;
+      if (path.endsWith("/runs/run-guard")) {
+        return new Response(JSON.stringify({ status: "running" }));
+      }
+      if (
+        path.endsWith("/runs/stream") ||
+        path.endsWith("/runs/run-guard/stream")
+      ) {
+        return makeSSEResponse(`event: gap\ndata: ${JSON.stringify(gap)}\n\n`, {
+          "Content-Location": "/threads/thread-guard/runs/run-guard",
+        });
+      }
+      return new Response(JSON.stringify({ values: { messages: [] } }));
+    });
+    rs.stubGlobal("window", {
+      location: { origin: "http://localhost:2026" },
+      sessionStorage,
+    });
+    rs.stubGlobal("fetch", fetchFn);
+
+    const client = getAPIClient(true);
+    const stream =
+      source === "initial"
+        ? client.runs.stream("thread-guard", "lead_agent", {})
+        : client.runs.joinStream("thread-guard", "run-guard");
+
+    await expect(stream.next()).rejects.toThrow(
+      "Stream replay gap does not match the active thread run.",
+    );
+    expect(fetchFn).toHaveBeenCalledTimes(source === "initial" ? 1 : 2);
+    expect(sessionStorage.getItem("lg:stream:thread-guard")).toBe("run-newer");
+    expect(sessionStorage.removeItem).not.toHaveBeenCalled();
+    expect(sessionStorage.setItem).not.toHaveBeenCalled();
+  },
+);
+
+test.each(["initial", "join"] as const)(
+  "propagates cancellation during %s stream gap recovery without rejoining",
+  async (source) => {
+    const sessionStorage = makeSessionStorage();
+    sessionStorage.setItem("lg:stream:thread-abort", "run-abort");
+    sessionStorage.setItem.mockClear();
+    const controller = new AbortController();
+    const abortError = new DOMException(
+      "AbortError: Recovery cancelled",
+      "AbortError",
+    );
+    const gap = {
+      code: "stream_replay_gap",
+      run_id: "run-abort",
+      requested_event_id: "1-0",
+      earliest_available_event_id: "2-0",
+      latest_available_event_id: "3-0",
+      recovery: "reload_durable_state",
+    };
+    const fetchFn = rs.fn(async (url: string | URL, init?: RequestInit) => {
+      const path = new URL(url.toString()).pathname;
+      if (path.endsWith("/runs/run-abort")) {
+        return new Response(JSON.stringify({ status: "running" }));
+      }
+      if (
+        path.endsWith("/runs/stream") ||
+        path.endsWith("/runs/run-abort/stream")
+      ) {
+        return makeSSEResponse(`event: gap\ndata: ${JSON.stringify(gap)}\n\n`, {
+          "Content-Location": "/threads/thread-abort/runs/run-abort",
+        });
+      }
+      if (path.endsWith("/threads/thread-abort/state")) {
+        expect(init?.signal).toBe(controller.signal);
+        controller.abort();
+        throw abortError;
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    rs.stubGlobal("window", {
+      location: { origin: "http://localhost:2026" },
+      sessionStorage,
+    });
+    rs.stubGlobal("fetch", fetchFn);
+
+    const client = getAPIClient(true);
+    const options = { signal: controller.signal };
+    const stream =
+      source === "initial"
+        ? client.runs.stream("thread-abort", "lead_agent", options)
+        : client.runs.joinStream("thread-abort", "run-abort", options);
+
+    await expect(stream.next()).resolves.toMatchObject({
+      done: false,
+      value: { event: "custom", data: { type: "stream_replay_gap", ...gap } },
+    });
+    await expect(stream.next()).rejects.toBe(abortError);
+    expect(fetchFn).toHaveBeenCalledTimes(source === "initial" ? 2 : 3);
+    expect(sessionStorage.getItem("lg:stream:thread-abort")).toBeNull();
+    expect(sessionStorage.setItem).not.toHaveBeenCalled();
+  },
+);

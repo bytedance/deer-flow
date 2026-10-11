@@ -115,6 +115,21 @@ class TestDatabaseConfig:
         assert "deerflow" not in url.replace("/db", "")
         assert url.startswith("postgresql+asyncpg://")
 
+    def test_sync_postgres_url_uses_configured_schema(self):
+        c = DatabaseConfig(backend="postgres", postgres_url="postgresql://u:p@h:5432/db", postgres_schema="deerflow")
+        url = c.app_sync_sqlalchemy_url
+        assert url.startswith("postgresql+psycopg://")
+        assert "options=-c%20search_path%3Ddeerflow" in url
+
+    def test_sync_postgres_url_preserves_existing_libpq_options(self):
+        c = DatabaseConfig(
+            backend="postgres",
+            postgres_url="postgresql://u:p@h:5432/db?options=-c%20statement_timeout%3D5000",
+            postgres_schema="deerflow",
+        )
+        url = c.app_sync_sqlalchemy_url
+        assert "options=-c%20statement_timeout%3D5000%20-c%20search_path%3Ddeerflow" in url
+
 
 # -- MemoryRunStore --
 

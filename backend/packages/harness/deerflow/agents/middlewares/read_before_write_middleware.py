@@ -40,8 +40,8 @@ import logging
 import posixpath
 import threading
 import weakref
-from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
+from concurrent.futures import Future, InvalidStateError
 from typing import Any, override
 
 from langchain.agents.middleware import AgentMiddleware
@@ -50,10 +50,11 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
-from deerflow.agents.middlewares.tool_call_args import rewrite_messages_tool_call_args
-from deerflow.agents.middlewares.tool_result_meta import normalize_tool_result, stamp_exception_meta
+from deerflow.agents.middlewares.tool_call_args import pair_tool_call_results, rewrite_messages_tool_call_args
+from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY, normalize_tool_result, stamp_exception_meta
 from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
 from deerflow.sandbox.exceptions import SandboxAuthorizationError
+from deerflow.sandbox.read_file_contract import READ_FILE_EMPTY, READ_FILE_NO_CONTENT_RESULTS, count_file_lines
 from deerflow.sandbox.tools import (
     read_current_file_content,
     sandbox_authorization_scope,
@@ -83,27 +84,83 @@ _ELIDED_PAYLOAD_TEMPLATE = "[payload elided: {chars} chars; this {tool_name} cal
 # treated as "cannot inspect" — the gate fails open and no mark is stamped.
 _UNINSPECTABLE_CONTENT_PREFIX = "Error:"
 
-_BLOCK_MESSAGE = (
-    "Error: {tool_name} blocked — {path} already exists and you have not read its current version. "
-    "Any write invalidates earlier reads, so re-read before every modification. "
-    "Call read_file on it (a ranged read of the relevant section is enough, e.g. the last ~30 lines "
-    "before an append), check what is already there, then retry."
-)
+_BLOCK_MESSAGE = "Error: {tool_name} blocked — {path} already exists ({line_desc}) and you have not read its current version. Any write invalidates earlier reads, so re-read before every modification. {read_hint}"
+
 
 # Per-(scope, path) locks serializing gate check + tool execution. Same
 # WeakValueDictionary pattern as sandbox/file_operation_lock.py, but a
 # separate namespace: the tool-internal file lock only guards the mutation,
 # while this one also spans the authorization that precedes it.
-_GATE_LOCKS: weakref.WeakValueDictionary[tuple[str, str], threading.Lock] = weakref.WeakValueDictionary()
+class _GateLock:
+    """Cross-thread gate whose async waiters never occupy executor workers."""
+
+    def __init__(self) -> None:
+        self._condition = threading.Condition(threading.Lock())
+        self._locked = False
+        self._waiters: set[Future[None]] = set()
+
+    def acquire(self) -> bool:
+        with self._condition:
+            self._condition.wait_for(lambda: not self._locked)
+            self._locked = True
+        return True
+
+    async def acquire_async(self) -> None:
+        while True:
+            with self._condition:
+                if not self._locked:
+                    self._locked = True
+                    return
+                waiter: Future[None] = Future()
+                self._waiters.add(waiter)
+            try:
+                # Each caller owns its signal, so cancellation cannot cancel
+                # another loop's waiter or leave an eventual lock acquisition.
+                await asyncio.wrap_future(waiter)
+            finally:
+                with self._condition:
+                    self._waiters.discard(waiter)
+
+    def release(self) -> None:
+        with self._condition:
+            if not self._locked:
+                raise RuntimeError("release unlocked gate")
+            self._locked = False
+            waiters = tuple(self._waiters)
+            self._waiters.clear()
+            self._condition.notify_all()
+        # Future callbacks can schedule work on other event loops. Notify after
+        # releasing the state lock, and tolerate a concurrent waiter cancellation.
+        # Wake everyone: a caller cancelled before re-acquiring must not leave
+        # the remaining waiters asleep on an unlocked gate.
+        for waiter in waiters:
+            try:
+                waiter.set_result(None)
+            except InvalidStateError:
+                if not waiter.cancelled():
+                    raise
+
+    def locked(self) -> bool:
+        with self._condition:
+            return self._locked
+
+    def __enter__(self) -> bool:
+        return self.acquire()
+
+    def __exit__(self, *_exc: object) -> None:
+        self.release()
+
+
+_GATE_LOCKS: weakref.WeakValueDictionary[tuple[str, str], _GateLock] = weakref.WeakValueDictionary()
 _GATE_LOCKS_GUARD = threading.Lock()
 
 
-def _get_gate_lock(scope: str, norm_path: str) -> threading.Lock:
+def _get_gate_lock(scope: str, norm_path: str) -> _GateLock:
     key = (scope, norm_path)
     with _GATE_LOCKS_GUARD:
         lock = _GATE_LOCKS.get(key)
         if lock is None:
-            lock = threading.Lock()
+            lock = _GateLock()
             _GATE_LOCKS[key] = lock
         return lock
 
@@ -114,6 +171,39 @@ def _normalize_mark_path(path: str) -> str:
 
 def _content_hash(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+async def _await_off_thread(task: asyncio.Task[Any]) -> Any:
+    """Drain an already-dispatched worker operation before propagating cancellation."""
+    first_cancel: asyncio.CancelledError | None = None
+    while True:
+        try:
+            result = await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            if task.cancelled():
+                if first_cancel is not None:
+                    raise first_cancel
+                raise
+            if first_cancel is None:
+                first_cancel = exc
+            if not task.done():
+                continue
+        except BaseException:
+            if first_cancel is None:
+                raise
+        else:
+            if first_cancel is None:
+                return result
+
+        if first_cancel is not None:
+            if task.done() and not task.cancelled():
+                task.exception()
+            raise first_cancel
+
+
+async def _acquire_gate_lock(lock: _GateLock) -> None:
+    """Wait without reserving the executor needed by the current gate holder."""
+    await lock.acquire_async()
 
 
 class ReadBeforeWriteMiddleware(AgentMiddleware):
@@ -181,13 +271,11 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
                 return await handler(request)
             try:
                 async with sandbox_authorization_scope_async(request.runtime):
-                    # threading.Lock may be released from a different thread than the
-                    # acquiring one, so acquiring in a worker thread and releasing on
-                    # the event-loop thread is safe.
                     lock = self._lock_for(request, path)
-                    await asyncio.to_thread(lock.acquire)
+                    await _acquire_gate_lock(lock)
                     try:
-                        blocked = await asyncio.to_thread(self._check_write_gate, request)
+                        check_task = asyncio.create_task(asyncio.to_thread(self._check_write_gate, request))
+                        blocked = await _await_off_thread(check_task)
                         if blocked is not None:
                             return normalize_tool_result(blocked)
                         return await handler(request)
@@ -202,10 +290,11 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
             try:
                 async with sandbox_authorization_scope_async(request.runtime):
                     lock = self._lock_for(request, path)
-                    await asyncio.to_thread(lock.acquire)
+                    await _acquire_gate_lock(lock)
                     try:
                         result = await handler(request)
-                        await asyncio.to_thread(self._attach_read_mark, request, result)
+                        mark_task = asyncio.create_task(asyncio.to_thread(self._attach_read_mark, request, result))
+                        await _await_off_thread(mark_task)
                         return result
                     finally:
                         lock.release()
@@ -229,7 +318,7 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
 
     # -- locking ---------------------------------------------------------
 
-    def _lock_for(self, request: ToolCallRequest, path: str) -> threading.Lock:
+    def _lock_for(self, request: ToolCallRequest, path: str) -> _GateLock:
         return _get_gate_lock(self._lock_scope(request), _normalize_mark_path(path))
 
     @staticmethod
@@ -242,7 +331,9 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
                 return thread_id
         state = request.state
         if isinstance(state, dict):
-            sandbox_state = state.get("sandbox")
+            from deerflow.sandbox.overwrite import unwrap_sandbox
+
+            sandbox_state, _ = unwrap_sandbox(state.get("sandbox"))
             if isinstance(sandbox_state, dict):
                 sandbox_id = sandbox_state.get("sandbox_id")
                 if isinstance(sandbox_id, str) and sandbox_id:
@@ -276,13 +367,38 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
         if self._latest_mark_hash(request.state, norm_path) == _content_hash(current):
             return None
         tool_name = str(tool_call.get("name", "write"))
-        return ToolMessage(
-            content=_BLOCK_MESSAGE.format(tool_name=tool_name, path=path),
+        # count_file_lines matches LocalSandbox.read_file line numbering and the
+        # truncation-marker formula in _truncate_read_file_output, so the number
+        # reported here agrees with start_line/end_line the model can pass back.
+        line_count = count_file_lines(current)
+        line_desc = f"{line_count} line" if line_count == 1 else f"{line_count} lines"
+        if line_count == 0:
+            # Empty file: there is nothing to range-read; keep the hint simple.
+            read_hint = "Call read_file on it first, check what is already there, then retry."
+        else:
+            start = max(1, line_count - 29)
+            read_hint = f"Call read_file on it first (e.g. start_line={start}, end_line={line_count}), check what is already there, then retry."
+        blocked = ToolMessage(
+            content=_BLOCK_MESSAGE.format(tool_name=tool_name, path=path, line_desc=line_desc, read_hint=read_hint),
             tool_call_id=str(tool_call.get("id", "")),
             name=tool_name,
             status="error",
-            additional_kwargs={WRITE_BLOCK_KEY: {"path": norm_path, "tool": tool_name}},
+            additional_kwargs={
+                WRITE_BLOCK_KEY: {"path": norm_path, "tool": tool_name},
+                # Pre-stamp gate metadata so normalize_tool_result's text heuristics
+                # cannot misclassify a numeric line count (e.g. 401, 403, 500) as an
+                # HTTP error code.  normalize_tool_message returns early when an
+                # existing TOOL_META_KEY entry is found (idempotency guard).
+                TOOL_META_KEY: {
+                    "status": "error",
+                    "error_type": None,
+                    "recoverable_by_model": True,
+                    "recommended_next_action": "try_alternative",
+                    "source": "tool_return",
+                },
+            },
         )
+        return blocked
 
     @staticmethod
     def _requested_path(request: ToolCallRequest) -> str | None:
@@ -342,8 +458,26 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
         path = self._requested_path(request)
         if path is None:
             return
-        message = self._extract_tool_message(result)
-        if message is None or message.status == "error":
+        tool_call_id = str(request.tool_call.get("id") or "")
+        message = self._extract_tool_message(result, tool_call_id=tool_call_id)
+        if message is None:
+            logger.debug("read-before-write mark skipped for %r: no result matching request tool_call_id %r", path, tool_call_id)
+            return
+        if message.status == "error":
+            return
+        # In-band contract errors (invalid range, start_line exceeds file length, etc.)
+        # are returned with status="success" by LangChain even though the model received
+        # no real file content. Stamping a hash in that case would open the write gate
+        # for files the model has never actually read — the root cause of issue #6019.
+        # READ_FILE_EMPTY is a successful read of an empty file or a valid range
+        # containing only blank lines. Like any successful ranged read, it stamps
+        # the current full-file hash and can satisfy the gate.
+        tool_content = message.content if isinstance(message.content, str) else ""
+        if tool_content.strip() in READ_FILE_NO_CONTENT_RESULTS - {READ_FILE_EMPTY}:
+            logger.debug(
+                "read-before-write mark skipped for %r: in-band no-content result from read_file",
+                path,
+            )
             return
         try:
             content = self._content_reader(request.runtime, path)
@@ -361,13 +495,17 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
         }
 
     @staticmethod
-    def _extract_tool_message(result: ToolMessage | Command) -> ToolMessage | None:
+    def _extract_tool_message(result: ToolMessage | Command, *, tool_call_id: str) -> ToolMessage | None:
         if isinstance(result, ToolMessage):
-            return result
+            return result if result.tool_call_id == tool_call_id else None
         if isinstance(result, Command) and isinstance(result.update, dict):
-            candidates = [m for m in result.update.get("messages", []) if isinstance(m, ToolMessage)]
-            if candidates:
-                return candidates[-1]
+            messages = result.update.get("messages")
+            if isinstance(messages, ToolMessage):
+                messages = [messages]
+            if isinstance(messages, (list, tuple)):
+                # Command updates may include other calls' results. They are not
+                # evidence that this read succeeded and must never receive its mark.
+                return next((message for message in reversed(messages) if isinstance(message, ToolMessage) and message.tool_call_id == tool_call_id), None)
         return None
 
 
@@ -402,30 +540,12 @@ def elide_blocked_write_payloads(messages: list[Any], *, min_chars: int) -> list
 def _blocked_call_occurrences(messages: list[Any]) -> set[tuple[int, str]]:
     """Return ``(id(ai_message), call_id)`` for every call occurrence answered by a gate-blocked result.
 
-    Tool-call ids may repeat across assistant turns, so a history-wide id set
-    would also hit an earlier (or later) *successful* call with the same id and
-    mislabel it as blocked. Results are paired with call occurrences the way
-    ``DanglingToolCallMiddleware`` does: ToolMessages queue per id in history
-    order and each AIMessage call consumes the next one for its id.
+    Pairing is per occurrence (``tool_call_args.pair_tool_call_results``):
+    tool-call ids may repeat across assistant turns, so a history-wide id set
+    would also hit an earlier (or later) *successful* call with the same id
+    and mislabel it as blocked.
     """
-    results_by_id: dict[str, deque[ToolMessage]] = defaultdict(deque)
-    for message in messages:
-        if isinstance(message, ToolMessage) and isinstance(message.tool_call_id, str) and message.tool_call_id:
-            results_by_id[message.tool_call_id].append(message)
-
-    blocked: set[tuple[int, str]] = set()
-    for message in messages:
-        if not isinstance(message, AIMessage):
-            continue
-        for tool_call in message.tool_calls or ():
-            call_id = tool_call.get("id") if isinstance(tool_call, dict) else None
-            if not isinstance(call_id, str) or not call_id:
-                continue
-            queue = results_by_id.get(call_id)
-            result = queue.popleft() if queue else None
-            if result is not None and isinstance((result.additional_kwargs or {}).get(WRITE_BLOCK_KEY), dict):
-                blocked.add((id(message), call_id))
-    return blocked
+    return {(id(occurrence.message), occurrence.call_id) for occurrence in pair_tool_call_results(messages) if occurrence.result is not None and isinstance((occurrence.result.additional_kwargs or {}).get(WRITE_BLOCK_KEY), dict)}
 
 
 def _elide_args(args: dict[str, Any], tool_name: str, min_chars: int) -> dict[str, Any] | None:

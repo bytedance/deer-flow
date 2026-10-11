@@ -67,8 +67,10 @@ def test_start_line_negative_returns_clean_error(tmp_path, monkeypatch) -> None:
 
 
 def test_start_line_greater_than_end_line_returns_clean_error(tmp_path, monkeypatch) -> None:
+    from deerflow.sandbox.read_file_contract import READ_FILE_EMPTY_RANGE
+
     result = _read(tmp_path, monkeypatch, start_line=4, end_line=2)
-    assert "start_line > end_line" in result
+    assert result == READ_FILE_EMPTY_RANGE
     # No garbage slice content leaked into the error.
     assert "line4" not in result
 
@@ -99,3 +101,23 @@ def test_only_end_line_negative_returns_clean_error(tmp_path, monkeypatch) -> No
 def test_end_line_past_eof_clamps_to_last_line(tmp_path, monkeypatch) -> None:
     result = _read(tmp_path, monkeypatch, end_line=99)
     assert result == _FIVE_LINES
+
+
+def test_contract_constants_parity_with_localsandbox() -> None:
+    """count_file_lines must agree with LocalSandbox line numbering and all no-content
+    strings must remain in READ_FILE_NO_CONTENT_RESULTS."""
+    from deerflow.sandbox.read_file_contract import (
+        READ_FILE_INVALID_RANGE,
+        READ_FILE_NO_CONTENT_RESULTS,
+        count_file_lines,
+    )
+
+    assert READ_FILE_INVALID_RANGE in READ_FILE_NO_CONTENT_RESULTS
+
+    # Parity with LocalSandbox.read_file (Python text-mode, universal \n only):
+    assert count_file_lines("") == 0
+    assert count_file_lines("line1\n") == 1
+    assert count_file_lines("line1\nline2\n") == 2
+    assert count_file_lines("line1\nline2") == 2  # no trailing newline
+    assert count_file_lines("page\fend\n") == 1  # \f not a line separator
+    assert count_file_lines("x\u2028y\n") == 1  # \u2028 not a line separator

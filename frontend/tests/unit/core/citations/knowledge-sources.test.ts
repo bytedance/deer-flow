@@ -20,6 +20,20 @@ const tool = {
 };
 
 describe("knowledge source evidence", () => {
+  it("reads unified evidence alongside native RAGFlow delegation snapshots", () => {
+    const mixed = {
+      ...tool,
+      artifact: {
+        knowledge_sources_version: 1,
+        knowledge_sources: { version: 1, sources: [] },
+        retrieval_sources: [evidence],
+      },
+    };
+    expect(readKnowledgeSources([mixed])).toEqual([evidence]);
+    expect(
+      readKnowledgeSources([{ ...mixed, content: "unrelated report" }]),
+    ).toEqual([]);
+  });
   it("resolves escaped document names without replacing genuine evidence titles", () => {
     const sources = readKnowledgeSources([tool]);
     expect(

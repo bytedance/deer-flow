@@ -27,6 +27,7 @@ from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
 from langgraph.channels import DeltaChannel
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import StateGraph
+from langgraph.graph.message import add_messages
 from langgraph.types import Command, interrupt
 
 from deerflow.agents.thread_state import merge_message_writes
@@ -362,3 +363,89 @@ async def test_rollback_supersede_does_not_pollute() -> None:
         oracle_reread = await oracle_accessor.aget(oracle_by_next[next_key].config)
         assert _digest(reread.values) == _expected_final_digest()[:expected_len]
         assert _digest(reread.values) == _digest(oracle_reread.values)
+
+
+class _FullState(TypedDict):
+    """Pre-delta (full) thread schema: ``messages`` is a plain list channel."""
+
+    messages: Annotated[list[AnyMessage], add_messages]
+
+
+def _noop(state: dict[str, Any]) -> dict[str, Any]:
+    return {}
+
+
+def _build_noop_graph(saver: Any, schema: Any) -> Any:
+    builder = StateGraph(schema)
+    builder.add_node("noop", _noop)
+    builder.set_entry_point("noop")
+    builder.set_finish_point("noop")
+    return builder.compile(checkpointer=saver)
+
+
+_MIGRATION_DELTA_STEPS = 3
+
+
+async def _migrate_full_to_delta(saver: Any, config: dict[str, Any]) -> tuple[list, list, list]:
+    """Seed a thread in full (pre-delta) mode, then swap to delta on it.
+
+    Returns ``(migrated, replayed, history)``: the digest right after the mode
+    swap (the plain-value seed must read back intact), the head after
+    ``_MIGRATION_DELTA_STEPS`` delta appends, and every checkpoint's digest.
+    """
+    full_graph = _build_noop_graph(saver, _FullState)
+    await full_graph.ainvoke(_input(), config)
+
+    delta_graph = _build_noop_graph(saver, _state_schema())
+    accessor = CheckpointStateAccessor.bind(delta_graph, saver, mode="delta")
+    migrated = _digest((await accessor.aget(config)).values)
+
+    for i in range(_MIGRATION_DELTA_STEPS):
+        await delta_graph.ainvoke({"messages": [AIMessage(content=f"delta-{i}", id=f"ai-d{i}")]}, config)
+
+    replayed = _digest((await accessor.aget(config)).values)
+    history = _history_digests(await accessor.ahistory(config))
+    return migrated, replayed, history
+
+
+_CACHE_STATES = ("disabled", "cold", "warm")
+
+
+@pytest.mark.parametrize("cache_state", _CACHE_STATES)
+@pytest.mark.anyio
+async def test_full_to_delta_migration_under_cache_states(cache_state: str) -> None:
+    """The delta-history cache must not change full -> delta migration
+    semantics: with the cache disabled, cold, or already warm, the migrated
+    plain-value seed and the replayed delta chain must stay digest-identical to
+    the raw saver (differential oracle).
+
+    Regression guard for the cache composing ``writes + seed`` on its own
+    (``CachedHistorySaver._aresolve``): a full-mode ``messages`` blob is stored
+    as a plain channel value, not a ``_DeltaSnapshot``, so it is exactly the
+    seed path the cache reconstructs without a saver walk."""
+    inner = _CountingInMemorySaver()
+    saver = CachedHistorySaver(
+        inner,
+        MemoryCheckpointHistoryCache(0 if cache_state == "disabled" else 128),
+        key_prefix=f"itest-migrate-{uuid4().hex}",
+    )
+    config = _config()
+    migrated, replayed, history = await _migrate_full_to_delta(saver, config)
+
+    oracle_inner = _CountingInMemorySaver()
+    oracle_config = _config()
+    oracle_migrated, oracle_replayed, oracle_history = await _migrate_full_to_delta(oracle_inner, oracle_config)
+
+    assert migrated == [("human", "kickoff", "h-0")]
+    assert migrated == oracle_migrated
+    assert replayed == oracle_replayed
+    assert history == oracle_history
+
+    if cache_state == "warm":
+        # A second identical pass over the SAME saver must be served from the
+        # populated cache: same digests, no extra inner history walks.
+        accessor = CheckpointStateAccessor.bind(_build_noop_graph(saver, _state_schema()), saver, mode="delta")
+        walks_before = inner.history_walks
+        assert _digest((await accessor.aget(config)).values) == replayed
+        assert _history_digests(await accessor.ahistory(config)) == history
+        assert inner.history_walks == walks_before, "warm re-read triggered an inner walk"

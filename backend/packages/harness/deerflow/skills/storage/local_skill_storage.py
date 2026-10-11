@@ -6,7 +6,6 @@ import asyncio
 import errno
 import json
 import logging
-import os
 import shutil
 import tempfile
 from collections.abc import Iterable
@@ -16,7 +15,7 @@ from pathlib import Path
 from deerflow.config.runtime_paths import resolve_path
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.permissions import make_skill_written_path_sandbox_readable
-from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, SkillStorage
+from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, SkillStorage, walk_skill_directories
 from deerflow.skills.types import SkillCategory
 
 logger = logging.getLogger(__name__)
@@ -79,7 +78,7 @@ class LocalSkillStorage(SkillStorage):
             category_path = self._host_root / category.value
             if not category_path.exists() or not category_path.is_dir():
                 continue
-            for current_root, dir_names, file_names in os.walk(category_path, followlinks=True):
+            for current_root, dir_names, file_names in walk_skill_directories(category_path):
                 dir_names[:] = sorted(name for name in dir_names if not name.startswith("."))
                 if SKILL_MD_FILE not in file_names:
                     continue
@@ -111,7 +110,7 @@ class LocalSkillStorage(SkillStorage):
                 if tmp_path is not None:
                     tmp_path.unlink(missing_ok=True)
 
-    def remove_custom_skill_file(self, name: str, relative_path: str) -> str:
+    def remove_custom_skill_file(self, name: str, relative_path: str) -> str | None:
         removal = ((SkillCategory.CUSTOM, Path(name)),)
         with self._skill_projection_mutation(remove=removal):
             return super().remove_custom_skill_file(name, relative_path)
@@ -231,7 +230,13 @@ class LocalSkillStorage(SkillStorage):
                 )
         removal = ((SkillCategory.CUSTOM, Path(name)),)
         with self._skill_projection_mutation(remove=removal):
-            if target.exists():
+            if target.is_symlink():
+                # An operator-linked package (see
+                # ``_is_external_skill_directory_symlink``): the skill is the
+                # link, and the external tree is not ours to delete.
+                # ``shutil.rmtree`` refuses symlinks, so unlink instead.
+                target.unlink()
+            elif target.exists():
                 shutil.rmtree(target)
 
     def _skill_projection_mutation(
@@ -263,7 +268,8 @@ class LocalSkillStorage(SkillStorage):
         if not history_path.exists():
             return []
         records: list[dict] = []
-        for line in history_path.read_text(encoding="utf-8").splitlines():
+        # JSONL boundaries are newlines, not Unicode separators inside JSON strings.
+        for line in history_path.read_text(encoding="utf-8").split("\n"):
             if not line.strip():
                 continue
             records.append(json.loads(line))

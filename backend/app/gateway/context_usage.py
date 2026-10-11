@@ -32,10 +32,14 @@ async def _load_checkpoint_messages(accessor: Any, config: dict[str, Any]) -> li
     return list(values.get("messages") or [])
 
 
-async def _resolve_thread_model_name(run_store: Any, thread_id: str, app_config: Any) -> str | None:
-    """Prefer the latest run's model, then fall back to the first configured model."""
+async def _resolve_thread_model_name(run_store: Any, thread_id: str, app_config: Any, user_id: str | None = None) -> str | None:
+    """Prefer the latest run's model, then fall back to the first configured model.
+
+    ``user_id`` scopes the latest-run lookup (``None`` = unfiltered, matching
+    the thread-scoped aggregate semantics).
+    """
     try:
-        runs = await run_store.list_by_thread(thread_id, limit=1)
+        runs = await run_store.list_by_thread(thread_id, limit=1, user_id=user_id)
     except Exception:
         runs = []
     if runs:
@@ -59,7 +63,7 @@ def build_context_usage_payload(*, token_count: int, max_context_tokens: int | N
     }
 
 
-async def build_context_usage(request: Request, thread_id: str, run_store: Any) -> dict[str, Any] | None:
+async def build_context_usage(request: Request, thread_id: str, run_store: Any, user_id: str | None = None) -> dict[str, Any] | None:
     """Return approximate usage for the latest materialized thread checkpoint."""
     try:
         app_config = get_config()
@@ -79,7 +83,7 @@ async def build_context_usage(request: Request, thread_id: str, run_store: Any) 
         logger.warning("Failed to count context messages for thread %s", thread_id, exc_info=True)
         return None
 
-    model_name = await _resolve_thread_model_name(run_store, thread_id, app_config)
+    model_name = await _resolve_thread_model_name(run_store, thread_id, app_config, user_id=user_id)
     model_config = app_config.get_model_config(model_name) if model_name else None
     configured_window = getattr(model_config, "context_window", None) if model_config is not None else None
     max_context_tokens = int(configured_window) if configured_window else None

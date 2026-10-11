@@ -1,9 +1,11 @@
 import builtins
 import os
+import shutil
 import subprocess
 import sys
 
 import pytest
+from support.shell import require_posix_sh
 
 import deerflow.sandbox.local.local_sandbox as local_sandbox
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping, _BoundedPipeCapture
@@ -22,6 +24,31 @@ def test_bounded_pipe_capture_decodes_non_utf8_output_with_configured_encoding()
     assert capture.read() == "caf\u00e9"
 
 
+def test_bounded_pipe_capture_falls_back_to_locale_for_non_utf8_bytes():
+    """A forced UTF-8 decode keeps the locale as a guarded fallback so output
+    from native children (which still use the host code page) survives."""
+    capture = _BoundedPipeCapture(encoding="utf-8", fallback_encoding="cp936")
+    capture.append("\u4f60\u597d".encode("cp936"))
+
+    assert capture.read() == "\u4f60\u597d"
+
+
+def test_bounded_pipe_capture_prefers_primary_encoding_when_valid():
+    capture = _BoundedPipeCapture(encoding="utf-8", fallback_encoding="cp936")
+    capture.append("\u4f60\u597d".encode("utf-8"))
+
+    assert capture.read() == "\u4f60\u597d"
+
+
+def test_bounded_pipe_capture_without_fallback_replaces_non_utf8_bytes():
+    capture = _BoundedPipeCapture(encoding="utf-8")
+    capture.append("\u4f60\u597d".encode("cp936"))
+
+    decoded = capture.read()
+    assert "\ufffd" in decoded
+    assert "\u4f60\u597d" not in decoded
+
+
 def test_bounded_pipe_capture_applies_text_mode_newline_normalization_when_enabled():
     capture = _BoundedPipeCapture(normalize_newlines=True)
     capture.append(b"crlf\r\nbare-cr\rlf\n")
@@ -34,6 +61,131 @@ def test_bounded_pipe_capture_preserves_posix_newlines_by_default():
     capture.append(b"crlf\r\nbare-cr\rlf\n")
 
     assert capture.read() == "crlf\r\nbare-cr\rlf\n"
+
+
+@pytest.mark.parametrize("encoding", [None, "utf-8"])
+def test_windows_pipe_capture_uses_explicit_encoding_or_locale(monkeypatch, encoding):
+    """Exercise real pipes with a legacy locale, even on a POSIX test host."""
+    monkeypatch.setattr(local_sandbox.locale, "getpreferredencoding", lambda _: "cp936")
+    if os.name != "nt":
+        monkeypatch.setattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0, raising=False)
+    expected = "你好 日本語"
+    payload = (expected + "\r\n").encode(encoding or "cp936")
+
+    stdout, stderr, returncode, timed_out = LocalSandbox._run_windows_command(
+        [sys.executable, "-c", f"import os; p=bytes.fromhex('{payload.hex()}'); os.write(1,p); os.write(2,p)"],
+        10,
+        encoding=encoding,
+    )
+
+    assert stdout == stderr == expected + "\n"
+    assert returncode == 0
+    assert timed_out is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Requires real Windows PowerShell")
+@pytest.mark.parametrize("shell_name", ["powershell.exe", "pwsh.exe"])
+@pytest.mark.parametrize("no_console", [False, True], ids=["inherited-console", "no-console"])
+def test_windows_powershell_cjk_roundtrip(shell_name, no_console):
+    shell = shutil.which(shell_name)
+    if shell is None:
+        pytest.skip(f"{shell_name} is not installed")
+    probe = r"""
+import sys
+import deerflow.sandbox.local.local_sandbox as local_sandbox
+from deerflow.sandbox.local.local_sandbox import LocalSandbox
+
+# Keep this regression effective even on an English or UTF-8 Windows runner.
+local_sandbox.locale.getpreferredencoding = lambda _: "cp936"
+LocalSandbox._get_shell = staticmethod(lambda: sys.argv[1])
+expected = "\u4f60\u597d \u65e5\u672c\u8a9e"
+command = f"Write-Output '{expected}'; [Console]::Error.WriteLine('{expected}'); exit 3"
+output = LocalSandbox("encoding-probe").execute_command(command, timeout=15)
+assert output == expected + "\n\nStd Error:\n" + expected + "\n\nExit Code: 3", ascii(output)
+"""
+    env = {**os.environ, "PYTHONUTF8": "0"}
+    result = subprocess.run(
+        [sys.executable, "-c", probe, shell],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        creationflags=subprocess.CREATE_NO_WINDOW if no_console else 0,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Requires a real Windows Git Bash/MSYS shell")
+def test_windows_msys_cjk_roundtrip():
+    """Git Bash/MSYS always emits UTF-8, so the host code page must not decode it."""
+    shell = require_posix_sh()
+    if not LocalSandbox._is_msys_shell(shell):
+        pytest.skip(f"{shell} is not recognised as a Git Bash/MSYS shell")
+    probe = r"""
+import sys
+import deerflow.sandbox.local.local_sandbox as local_sandbox
+from deerflow.sandbox.local.local_sandbox import LocalSandbox
+
+# Keep this regression effective even on an English or UTF-8 Windows runner.
+local_sandbox.locale.getpreferredencoding = lambda _: "cp936"
+LocalSandbox._get_shell = staticmethod(lambda: sys.argv[1])
+expected = "\u4f60\u597d \u65e5\u672c\u8a9e"
+output = LocalSandbox("encoding-probe").execute_command(f"printf '%s\n' '{expected}'", timeout=15)
+assert output == expected + "\n", ascii(output)
+"""
+    env = {**os.environ, "PYTHONUTF8": "0"}
+    result = subprocess.run(
+        [sys.executable, "-c", probe, shell],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Requires a real Windows Git Bash/MSYS shell")
+def test_windows_msys_native_child_cjk_roundtrip():
+    """A Windows-native child of Git Bash (python.exe) inherits the pipe and keeps
+    writing the host code page; the forced UTF-8 decode must fall back to the
+    locale for those bytes instead of replacing the text with U+FFFD."""
+    shell = require_posix_sh()
+    if not LocalSandbox._is_msys_shell(shell):
+        pytest.skip(f"{shell} is not recognised as a Git Bash/MSYS shell")
+    probe = r"""
+import sys
+import deerflow.sandbox.local.local_sandbox as local_sandbox
+from deerflow.sandbox.local.local_sandbox import LocalSandbox
+
+# Pin the fallback code page so the regression holds on non-zh-CN runners.
+local_sandbox.locale.getpreferredencoding = lambda _: "cp936"
+LocalSandbox._get_shell = staticmethod(lambda: sys.argv[1])
+expected = "\u4f60\u597d \u65e5\u672c\u8a9e"
+interpreter = sys.executable.replace("\\", "/")
+command = f"'{interpreter}' -c \"print('{expected}')\""
+# PYTHONIOENCODING makes the native child emit CP936 even on a UTF-8 host,
+# mirroring a zh-CN host's native Python writing to a redirected pipe.
+output = LocalSandbox("encoding-probe").execute_command(command, timeout=30, env={"PYTHONIOENCODING": "cp936"})
+assert output == expected + "\n", ascii(output)
+"""
+    env = {**os.environ, "PYTHONUTF8": "0"}
+    result = subprocess.run(
+        [sys.executable, "-c", probe, shell],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX capture semantics")
@@ -181,10 +333,10 @@ def test_get_shell_uses_cmd_as_last_windows_fallback(monkeypatch):
 
 
 def test_execute_command_uses_powershell_command_mode_on_windows(monkeypatch):
-    calls: list[tuple[list[str], float, dict[str, str]]] = []
+    calls: list[tuple[list[str], float, dict[str, str], str | None]] = []
 
-    def fake_run(args, timeout, env):
-        calls.append((args, timeout, env))
+    def fake_run(args, timeout, env, *, encoding=None):
+        calls.append((args, timeout, env, encoding))
         return "ok", "", 0, False
 
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
@@ -204,18 +356,70 @@ def test_execute_command_uses_powershell_command_mode_on_windows(monkeypatch):
                 r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
                 "-NoProfile",
                 "-Command",
-                "Write-Output hello",
+                "try{[Console]::InputEncoding=[System.Text.Encoding]::UTF8}catch{};try{[Console]::OutputEncoding=[System.Text.Encoding]::UTF8}catch{};$OutputEncoding=[System.Text.Encoding]::UTF8;Write-Output hello",
             ],
             600,
             {"PATH": r"C:\Windows"},
+            "utf-8",
         )
     ]
+
+
+def test_execute_command_forces_utf8_console_for_powershell_cjk_output(monkeypatch):
+    """PowerShell 5.1 defaults console output to the OEM codepage (GBK on
+    zh-CN); without the UTF-8 preamble, CJK output is garbled by the UTF-8
+    pipe reader even though decoding never raises (errors=replace)."""
+    calls: list[tuple[list[str], float, dict[str, str], str | None]] = []
+
+    def fake_run(args, timeout, env, *, encoding=None):
+        calls.append((args, timeout, env, encoding))
+        return "你好", "", 0, False
+
+    monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": r"C:\Windows"})
+    monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: "pwsh"))
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(fake_run))
+
+    output = LocalSandbox("t").execute_command("Write-Output 你好")
+
+    assert output == "你好"
+    cmd = calls[0][0][3]
+    assert cmd.startswith("try{[Console]::InputEncoding=[System.Text.Encoding]::UTF8}catch{};try{[Console]::OutputEncoding=[System.Text.Encoding]::UTF8}catch{};$OutputEncoding=[System.Text.Encoding]::UTF8;")
+    assert cmd.endswith("Write-Output 你好")
+    assert calls[0][3] == "utf-8"
+
+
+def test_execute_command_forces_utf8_decoding_with_locale_fallback_for_msys(monkeypatch):
+    """Git Bash/MSYS writes UTF-8 to its pipes; decoding with the host code page
+    (GBK on zh-CN) mangles CJK output silently because the pipe decoder replaces
+    instead of raising. The native children Git Bash spawns still write the host
+    code page, so the forced UTF-8 decode keeps the locale as a guarded fallback."""
+    calls: list[tuple[list[str], float, dict[str, str], str | None, str | None]] = []
+
+    def fake_run(args, timeout, env, *, encoding=None, fallback_encoding=None):
+        calls.append((args, timeout, env, encoding, fallback_encoding))
+        return "你好", "", 0, False
+
+    monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": r"C:\Program Files\Git\bin"})
+    monkeypatch.setattr(local_sandbox.locale, "getpreferredencoding", lambda _: "cp936")
+    monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: r"C:\Program Files\Git\bin\sh.exe"))
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(fake_run))
+
+    output = LocalSandbox("t").execute_command("echo 你好")
+
+    assert output == "你好"
+    assert calls[0][0] == [r"C:\Program Files\Git\bin\sh.exe", "-c", "echo 你好"]
+    assert calls[0][3] == "utf-8"
+    # Native children of Git Bash keep writing the host code page; the locale is
+    # retained as a guarded fallback instead of forcing every byte through UTF-8.
+    assert calls[0][4] == "cp936"
 
 
 def test_execute_command_keeps_msys_path_conversion_for_host_commands_on_windows(monkeypatch):
     calls: list[tuple[list[str], float, dict[str, str]]] = []
 
-    def fake_run(args, timeout, env):
+    def fake_run(args, timeout, env, *, encoding=None, fallback_encoding=None):
         calls.append((args, timeout, env))
         return "ok", "", 0, False
 
@@ -243,7 +447,7 @@ def test_execute_command_keeps_msys_path_conversion_for_host_commands_on_windows
 def test_execute_command_scopes_msys_path_conversion_exclusions_on_windows(monkeypatch):
     calls: list[tuple[list[str], float, dict[str, str]]] = []
 
-    def fake_run(args, timeout, env):
+    def fake_run(args, timeout, env, *, encoding=None, fallback_encoding=None):
         calls.append((args, timeout, env))
         return "ok", "", 0, False
 
@@ -265,7 +469,7 @@ def test_execute_command_scopes_msys_path_conversion_exclusions_on_windows(monke
 def test_execute_command_ignores_root_msys_mapping_for_host_commands_on_windows(monkeypatch):
     calls: list[tuple[list[str], float, dict[str, str]]] = []
 
-    def fake_run(args, timeout, env):
+    def fake_run(args, timeout, env, *, encoding=None, fallback_encoding=None):
         calls.append((args, timeout, env))
         return "ok", "", 0, False
 

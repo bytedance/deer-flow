@@ -17,7 +17,7 @@ RUNTIME_CHANNEL_DISABLED_FLAG = "_runtime_disabled"
 class ChannelRuntimeConfigStore:
     """JSON-backed store for channel credentials entered from the UI.
 
-    This intentionally mirrors ``ChannelStore``: local/private deployments get
+    This intentionally mirrors ``JsonChannelStore``: local/private deployments get
     durable runtime configuration without needing a public callback URL or a
     config.yaml edit.
     """
@@ -46,6 +46,7 @@ class ChannelRuntimeConfigStore:
     def _save(self) -> None:
         fd = tempfile.NamedTemporaryFile(
             mode="w",
+            encoding="utf-8",
             dir=self._path.parent,
             suffix=".tmp",
             delete=False,

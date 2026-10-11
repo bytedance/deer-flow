@@ -11,6 +11,14 @@ import pytest
 from deerflow.agents.memory.backends.mem0.client import Mem0APIError, Mem0AuthError, Mem0Client
 from deerflow.agents.memory.backends.mem0.config import Mem0Config
 
+#: What each numeric knob holds when the operator does not set it.
+_NUMERIC_DEFAULTS: dict[str, float] = {
+    "top_k": 8,
+    "score_threshold": 0.1,
+    "max_injection_chars": 12000,
+    "timeout_seconds": 10.0,
+}
+
 
 class TestMem0Config:
     def test_defaults(self) -> None:
@@ -84,6 +92,30 @@ class TestMem0Config:
     )
     def test_invalid_values_rejected(self, key: str, value: object) -> None:
         with pytest.raises(ValueError):
+            Mem0Config.from_backend_config({key: value})
+
+    @pytest.mark.parametrize("key", ["top_k", "score_threshold", "max_injection_chars", "timeout_seconds"])
+    @pytest.mark.parametrize("unset", [None, "", "   "])
+    def test_numeric_knob_written_without_a_value_keeps_its_default(self, key: str, unset: object) -> None:
+        """An unquoted ``top_k:`` in YAML parses as unset, not as a broken backend."""
+        cfg = Mem0Config.from_backend_config({key: unset})
+
+        assert getattr(cfg, key) == _NUMERIC_DEFAULTS[key]
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("top_k", "eight"),
+            ("top_k", []),
+            ("score_threshold", "high"),
+            ("score_threshold", {"min": 0.2}),
+            ("max_injection_chars", ["12000"]),
+            ("timeout_seconds", "soon"),
+        ],
+    )
+    def test_non_numeric_knob_names_the_key(self, key: str, value: object) -> None:
+        """The report has to say which knob is wrong, not just that a cast failed."""
+        with pytest.raises(ValueError, match=f"mem0 {key} must be a number"):
             Mem0Config.from_backend_config({key: value})
 
     @pytest.mark.parametrize("policy", ["read", "write"])
@@ -607,6 +639,25 @@ class TestMem0ManagerManage:
     def test_get_memory_no_identity_returns_empty_doc(self) -> None:
         mgr, _fake = _manager()
         assert mgr.get_memory() == {"facts": []}
+
+    def test_mixed_case_agent_identity_matches_write_read_and_clear(self) -> None:
+        """Management must keep the exact agent_id used by existing writes."""
+        mgr, fake = _manager()
+        agent_name = "Research-Agent"
+        mgr.add(
+            "thread-1",
+            [HumanMessage(content="I prefer concise reports"), AIMessage(content="Noted.")],
+            user_id="u1",
+            agent_name=agent_name,
+        )
+        fake.list_results = [{"id": "m1", "memory": "prefers concise reports"}]
+
+        assert mgr.get_memory(user_id="u1", agent_name=agent_name)["facts"][0]["id"] == "m1"
+        assert mgr.clear_memory(user_id="u1", agent_name=agent_name) == {"facts": []}
+
+        assert fake.added[0]["agent_id"] == agent_name
+        assert fake.list_calls[0]["filters"] == {"AND": [{"user_id": "u1"}, {"agent_id": agent_name}]}
+        assert fake.deleted == [{"user_id": "u1", "agent_id": agent_name, "run_id": None}]
 
     def test_clear_memory_deletes_bucket_and_returns_empty(self) -> None:
         mgr, fake = _manager()

@@ -27,8 +27,8 @@ def redact_strings(value: Any, secret: str | None) -> Any:
 
 def strip_source_artifact(artifact: Any) -> Any:
     """Remove only server-owned evidence keys from untrusted writes."""
-    if isinstance(artifact, Mapping) and ("knowledge_sources" in artifact or "knowledge_sources_version" in artifact):
-        return {key: value for key, value in artifact.items() if key not in {"knowledge_sources", "knowledge_sources_version"}}
+    if isinstance(artifact, Mapping) and ("knowledge_sources" in artifact or "knowledge_sources_version" in artifact or "retrieval_sources" in artifact):
+        return {key: value for key, value in artifact.items() if key not in {"knowledge_sources", "knowledge_sources_version", "retrieval_sources"}}
     return artifact
 
 
@@ -40,6 +40,8 @@ def prune_sources(content: str, artifact: Any) -> tuple[str, Any]:
     allowed = {source.id for source in sources}
     pattern = r"\[citation:((?:\\.|[^\]\\])*)\]\(#knowledge-source-([a-f0-9]{32})\)"
     content = re.sub(pattern, lambda match: match[0] if match[2] in allowed else match[1], content)
+    if "retrieval_sources" in artifact:
+        return content, {**artifact, "retrieval_sources": [source.model_dump(mode="json", exclude_none=True) for source in sources]}
     return content, {**artifact, **source_artifact(sources)}
 
 
@@ -120,7 +122,7 @@ def sources_from_messages(messages: Iterable[Any]) -> list[KnowledgeSource]:
             kind, artifact, content = getattr(message, "type", None), getattr(message, "artifact", None), getattr(message, "content", None)
         if kind != "tool" or not isinstance(content, str) or not isinstance(artifact, Mapping) or type(artifact.get("knowledge_sources_version")) is not int or artifact.get("knowledge_sources_version") != ARTIFACT_VERSION:
             continue
-        raw_sources = artifact.get("knowledge_sources")
+        raw_sources = artifact.get("knowledge_sources") if isinstance(artifact.get("knowledge_sources"), list) else artifact.get("retrieval_sources")
         if not isinstance(raw_sources, list):
             continue
         for raw in raw_sources[:100]:

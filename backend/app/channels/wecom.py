@@ -8,7 +8,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
-from app.channels.base import Channel
+from app.channels.base import Channel, ChannelUnavailable
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import (
@@ -20,6 +20,23 @@ from app.channels.message_bus import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Exceptions that mean the transport failed, not the message. ``websockets``
+# is the SDK's socket layer and forwards its close exception unchanged
+# through ``send_message``; it is not an OSError subclass.
+_TRANSPORT_EXCEPTIONS: tuple[type[BaseException], ...] = (ConnectionError, TimeoutError, OSError)
+try:
+    from websockets.exceptions import ConnectionClosed as _WsConnectionClosed
+except Exception:  # pragma: no cover - absent only when the SDK itself is missing
+    pass
+else:
+    _TRANSPORT_EXCEPTIONS = (*_TRANSPORT_EXCEPTIONS, _WsConnectionClosed)
+
+# The SDK surfaces a platform rejection of a sent frame (non-zero ``errcode``
+# in the ACK) as ``RuntimeError`` with this prefix, from the same call that
+# raises ``RuntimeError`` for a closed socket. The prefix is what tells a
+# verdict about the message apart from a transport failure.
+_WECOM_ACK_REJECTION_PREFIX = "Reply ack error"
 
 
 def _file_md5(path: str) -> str:
@@ -102,10 +119,44 @@ class WeComChannel(Channel):
         self._lifecycle_lock = asyncio.Lock()
         self._ws_frames: dict[str, dict[str, Any]] = {}
         self._ws_stream_ids: dict[str, str] = {}
+        # Optimistic until the SDK reports a disconnect: start() hands us a
+        # live client that is connecting/reconnecting. Cleared on disconnect
+        # and restored after a successful send so proactive push can park
+        # without burning the outbox retry budget during a transport outage.
+        self._ws_transport_up = False
         self._ws_send_locks: dict[str, asyncio.Lock] = {}
         self._ws_send_lock_users: dict[str, int] = {}
         self._ws_send_locks_guard = asyncio.Lock()
         self._working_message = "Working on it..."
+        raw_hosts = config.get("allowed_media_hosts")
+        if isinstance(raw_hosts, str):
+            host_values: list[Any] = [raw_hosts]
+        elif isinstance(raw_hosts, (list, tuple, set, frozenset)):
+            host_values = list(raw_hosts)
+        else:
+            host_values = []
+        # Host suffixes; a leading ``*.`` is stripped so ``*.example.com`` and
+        # ``example.com`` behave identically (mirrors WechatChannel._coerce_host_suffixes).
+        normalized_hosts: set[str] = set()
+        for host in host_values:
+            text = str(host).strip().lower().lstrip(".")
+            if text.startswith("*."):
+                text = text[2:]
+            if text:
+                normalized_hosts.add(text)
+        self._allowed_media_host_suffixes = frozenset(normalized_hosts)
+
+    @property
+    def allowed_media_host_suffixes(self) -> frozenset[str]:
+        """Operator host suffixes the manager-side inbound-media gate merges in.
+
+        ``channels.wecom.allowed_media_hosts``: extra host suffixes inbound
+        media URLs may be downloaded from, on top of the built-in ``qq.com``
+        family and the pinned WeCom COS bucket shape. Gives deployments that
+        proxy or mirror WeCom media an escape hatch that does not require
+        widening the hard-coded pattern for everyone.
+        """
+        return self._allowed_media_host_suffixes
 
     @property
     def supports_streaming(self) -> bool:
@@ -162,6 +213,7 @@ class WeComChannel(Channel):
                 self._ws_task = asyncio.create_task(self._ws_client.connect())
                 self._ws_task.add_done_callback(self._on_ws_task_done)
 
+                self._ws_transport_up = True
                 self._running = True
                 self.bus.subscribe_outbound(self._on_outbound)
             logger.info("WeCom channel started")
@@ -181,6 +233,7 @@ class WeComChannel(Channel):
         logger.error("WeCom WebSocket error: %s", error)
 
     def _on_ws_disconnected(self, *args: Any) -> None:
+        self._ws_transport_up = False
         detail = f" ({args[0]})" if args else ""
         logger.warning("WeCom WebSocket disconnected%s; SDK will attempt to reconnect", detail)
 
@@ -217,6 +270,7 @@ class WeComChannel(Channel):
     async def stop(self) -> None:
         async with self._lifecycle_lock:
             self._running = False
+            self._ws_transport_up = False
             self.bus.unsubscribe_outbound(self._on_outbound)
             ws_client = self._ws_client
             ws_task = self._ws_task
@@ -253,6 +307,79 @@ class WeComChannel(Channel):
             await self._send_ws(msg, _max_retries=_max_retries)
             return
         logger.warning("[WeCom] send called but WebSocket client is not available")
+
+    async def send_notification(self, *, target: str, text_markdown: str) -> None:
+        """Proactively push markdown to a bound WeCom identity (issue #4254).
+
+        Goes through ``WSClient.send_message`` (no inbound frame required)
+        and waits for the platform ACK, so an ACK-less call is never treated
+        as success.
+
+        Transport / not-connected failures raise :class:`ChannelUnavailable`
+        so the outbox parks without consuming retries. Platform rejections
+        count against the budget: the SDK reports a non-zero ``errcode`` as
+        ``RuntimeError("Reply ack error: ...")`` from ``send_message`` itself,
+        so they are told apart from its transport ``RuntimeError`` by that
+        prefix. The ``errcode`` check on a returned ACK dict below is kept as
+        a guard for an SDK that returns the frame instead of raising.
+        """
+        if not self._running or not self._ws_client:
+            raise ChannelUnavailable("WeCom channel is not connected")
+        # Ask the SDK first when it already knows the socket is closed: that
+        # fails fast and skips the retry/sleep storm. The except branch below
+        # still parks a closed socket the SDK only discovers during the send.
+        if getattr(self._ws_client, "is_connected", True) is False:
+            self._ws_transport_up = False
+            raise ChannelUnavailable("WeCom websocket is not connected")
+        body = {"msgtype": "markdown", "markdown": {"content": text_markdown}}
+
+        async def _send_once() -> Any:
+            return await self._ws_client.send_message(target, body)
+
+        try:
+            if self._ws_transport_up:
+                ack = await self._send_with_retry(
+                    _send_once,
+                    max_retries=3,
+                    log_prefix="[WeCom]",
+                    operation_name="notification send",
+                )
+            else:
+                # Known disconnect: one probe so a silent SDK reconnect can
+                # recover, without the 3× retry/sleep storm burning shutdown
+                # and poll time while the socket is still down.
+                ack = await _send_once()
+        except ChannelUnavailable:
+            raise
+        except RuntimeError as exc:
+            if str(exc).startswith(_WECOM_ACK_REJECTION_PREFIX):
+                # The platform answered and said no (bad chatid, user out of
+                # range, ...). The frame went out and the ACK came back on
+                # this socket, so the transport is up; the rejection itself
+                # counts like any other deterministic failure.
+                self._ws_transport_up = True
+                raise
+            # Everything else the SDK raises as RuntimeError is transport-side:
+            # a socket that is not open, a connection dropped while an ACK was
+            # pending. Park the outbox row until the SDK reconnects instead of
+            # charging the delivery a counted attempt per poll for a fault
+            # that is not its own.
+            self._ws_transport_up = False
+            raise ChannelUnavailable(f"WeCom transport unavailable: {exc}") from exc
+        except _TRANSPORT_EXCEPTIONS as exc:
+            # Dead/flapping transport, including the socket layer's own close
+            # exception, which the SDK forwards unchanged. Same treatment.
+            self._ws_transport_up = False
+            raise ChannelUnavailable(f"WeCom transport unavailable: {exc}") from exc
+        errcode = None
+        if isinstance(ack, dict):
+            errcode = ack.get("errcode")
+            ack_body = ack.get("body")
+            if errcode is None and isinstance(ack_body, dict):
+                errcode = ack_body.get("errcode")
+        if errcode not in (None, 0):
+            raise RuntimeError(f"WeCom send_message rejected with errcode={errcode}")
+        self._ws_transport_up = True
 
     async def _on_outbound(self, msg: OutboundMessage) -> None:
         if msg.channel_name != self.name:

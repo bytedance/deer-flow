@@ -272,3 +272,13 @@ def test_delete_removes_memory_dir_when_row_exists(store, tmp_path, monkeypatch)
 
     assert store.delete("real", user_id="u1") == "deleted"
     assert not mem_dir.exists()
+
+
+def test_knowledge_defaults_round_trip_and_stay_owner_scoped(store):
+    from deerflow.knowledge_scope import canonicalize_knowledge_scope
+
+    scope = {"version": 1, "mode": "selected", "dataset_ids": ["policies"]}
+    store.create("researcher", {"knowledge_scope": scope}, "Soul", user_id="u1")
+    store.create("researcher", {"knowledge_scope": {"version": 1, "mode": "disabled"}}, "Soul", user_id="u2")
+    assert canonicalize_knowledge_scope(store.get("researcher", user_id="u1").knowledge_scope) == scope
+    assert store.get("researcher", user_id="u2").knowledge_scope.mode == "disabled"

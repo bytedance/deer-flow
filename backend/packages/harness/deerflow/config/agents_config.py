@@ -16,6 +16,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
 from deerflow.config.paths import get_paths
+from deerflow.knowledge_scope import KnowledgeScope
 from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
@@ -217,6 +218,12 @@ class AgentConfig(BaseModel):
     # - [] (explicit empty list): disable all skills
     # - ["skill1", "skill2"]: load only the specified skills
     skills: list[str] | None = None
+    # Stable MCP installation IDs. None inherits all; [] selects none.
+    # This is tool selection, not a replacement for host authorization.
+    mcp_plugins: list[str] | None = None
+    # Default for new Gateway turns; explicit message scope overrides it.
+    # Kept outside managed fields so harness self-updates preserve the binding.
+    knowledge_scope: KnowledgeScope | None = None
     # Controls which deployment-level subagents this custom agent may invoke:
     # None = all currently enabled definitions, [] = none, list = allowlist.
     # The default Lead Agent has no AgentConfig and therefore keeps access to
@@ -231,6 +238,9 @@ class AgentConfig(BaseModel):
     # Per-agent reasoning-effort default for models that support it. None = do
     # not override (a request-supplied reasoning_effort still wins over this).
     reasoning_effort: Literal["low", "medium", "high"] | None = None
+    # Disable every memory path for stateless execution-oriented agents while
+    # preserving the global memory configuration for all other agents.
+    memory_enabled: bool = True
     # Optional binding to GitHub repositories so this agent can respond to
     # webhook events from the gateway dispatcher. None means "no GitHub
     # integration", which is the case for every existing agent.

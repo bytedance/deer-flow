@@ -4,6 +4,8 @@ from pathlib import Path
 
 import yaml
 
+from .diagnostics import SkillLoadDiagnostic, yaml_load_diagnostic
+from .frontmatter import _FRONTMATTER_RE
 from .types import SKILL_MD_FILE, SecretRequirement, Skill, SkillCategory
 
 logger = logging.getLogger(__name__)
@@ -156,7 +158,17 @@ def parse_required_secrets(raw: object, skill_file: Path) -> tuple[SecretRequire
             name, optional = item.strip(), False
         elif isinstance(item, dict):
             name = str(item.get("name") or "").strip()
-            optional = bool(item.get("optional", False))
+            raw_optional = item.get("optional", False)
+            if isinstance(raw_optional, bool):
+                optional = raw_optional
+            else:
+                logger.warning(
+                    "Treating non-boolean optional value of type %s for required-secrets entry %r as required in %s",
+                    type(raw_optional).__name__,
+                    name,
+                    skill_file,
+                )
+                optional = False
         else:
             logger.warning("Ignoring malformed required-secrets entry in %s: %r", skill_file, item)
             continue
@@ -187,7 +199,7 @@ def parse_secrets_autonomous(raw: object, skill_file: Path) -> bool:
     return False
 
 
-def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: Path | None = None) -> Skill | None:
+def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: Path | None = None, *, diagnostics: list[SkillLoadDiagnostic] | None = None) -> Skill | None:
     """Parse a SKILL.md file and extract metadata.
 
     Args:
@@ -195,6 +207,8 @@ def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: P
         category: Category of the skill.
         relative_path: Relative path from the category root to the skill
             directory.  Defaults to the skill directory name when omitted.
+        diagnostics: Optional management-only sink for YAML failures. The caller
+            must authorize the file path before requesting diagnostics.
 
     Returns:
         Skill object if parsing succeeds, None otherwise.
@@ -207,13 +221,15 @@ def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: P
 
         # Keep parser diagnostics richer than the pure helper's host-path-free
         # error string; tests and authoring UX depend on the line-specific hint.
-        front_matter_match = re.match(r"^---\s*\n(.*?)\n---\s*\n?", content, re.DOTALL)
+        front_matter_match = _FRONTMATTER_RE.match(content)
         if not front_matter_match:
             return None
         front_matter_text = front_matter_match.group(1)
         try:
             metadata = yaml.safe_load(front_matter_text)
         except yaml.YAMLError as exc:
+            if diagnostics is not None:
+                diagnostics.append(yaml_load_diagnostic((relative_path or Path(skill_file.parent.name)).as_posix(), exc, front_matter_text, content.count("\n", 0, front_matter_match.start(1))))
             logger.error("%s", _format_yaml_error(skill_file, exc, front_matter_text))
             return None
         if not isinstance(metadata, dict):

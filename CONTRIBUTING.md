@@ -13,8 +13,8 @@ Docker provides a consistent, isolated environment with all dependencies pre-con
 #### Prerequisites
 
 - Docker Desktop or Docker Engine
-- Docker Compose **v2.24 or newer** (check with `docker compose version`). The dev
-  Compose file marks its `env_file` entries optional using the long-form
+- Docker Compose **v2.24 or newer** (check with `docker compose version`). Both
+  Compose files mark their `env_file` entries optional using the long-form
   `path`/`required` syntax; older clients reject it with
   `services.gateway.env_file.0 must be a string`. `make docker-start` verifies the
   version and tells you to upgrade — direct `docker compose` callers get that raw
@@ -37,11 +37,9 @@ Docker provides a consistent, isolated environment with all dependencies pre-con
    ```bash
    make docker-init
    ```
-   This will:
-   - Build Docker images
-   - Install frontend dependencies (pnpm)
-   - Install backend dependencies (uv)
-   - Share pnpm cache with host for faster builds
+   This pulls the sandbox image that the container sandbox modes run, so the
+   first sandbox container does not wait on the download. It is a no-op in
+   local sandbox mode (the default), which needs no image.
 
 3. **Start development services**:
    ```bash
@@ -86,7 +84,7 @@ Docker provides a consistent, isolated environment with all dependencies pre-con
 #### Docker Commands
 
 ```bash
-# Build the custom k3s image (with pre-cached sandbox image)
+# Pull the sandbox image used by the container sandbox modes
 make docker-init
 # Start Docker services (mode-aware, localhost:2026)
 make docker-start
@@ -100,7 +98,7 @@ make docker-logs-frontend
 make docker-logs-gateway
 ```
 
-If Docker builds are slow in your network, you can override the default package registries before running `make docker-init` or `make docker-start`:
+If Docker builds are slow in your network, you can override the default package registries before running `make docker-start`:
 
 ```bash
 export UV_INDEX_URL=https://pypi.org/simple
@@ -335,9 +333,12 @@ before review.
 ## Testing
 
 ```bash
-# Default backend tests (excludes live and blocking-I/O tests)
+# Default backend tests (four parallel shards; excludes live and blocking-I/O tests)
 cd backend
 make test
+
+# Run the same shards sequentially
+make test TEST_JOBS=1
 
 # Strict blocking-I/O tests
 make test-blocking-io

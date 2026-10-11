@@ -3,6 +3,7 @@ import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
 import type {
+  WechatQRLoginSession,
   ChannelConnectResponse,
   ChannelConnection,
   ChannelConnectionsResponse,
@@ -105,4 +106,45 @@ export async function disconnectChannelProvider(
     );
   }
   return response.json() as Promise<ChannelProvider>;
+}
+
+export async function startWechatQRLogin(): Promise<WechatQRLoginSession> {
+  const response = await fetch(channelsUrl("/wechat/qr-login"), {
+    method: "POST",
+  });
+  if (!response.ok)
+    await throwGatewayApiError(response, "Unable to start WeChat QR login");
+  return response.json() as Promise<WechatQRLoginSession>;
+}
+
+export async function pollWechatQRLogin(
+  id: string,
+  signal?: AbortSignal,
+  verifyCode?: string,
+): Promise<WechatQRLoginSession> {
+  const response = await fetch(
+    channelsUrl(`/wechat/qr-login/${encodeURIComponent(id)}/poll`),
+    {
+      method: "POST",
+      signal,
+      ...(verifyCode
+        ? {
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ verify_code: verifyCode }),
+          }
+        : {}),
+    },
+  );
+  if (!response.ok)
+    await throwGatewayApiError(response, "Unable to check WeChat QR login");
+  return response.json() as Promise<WechatQRLoginSession>;
+}
+
+export async function cancelWechatQRLogin(id: string): Promise<void> {
+  const response = await fetch(
+    channelsUrl(`/wechat/qr-login/${encodeURIComponent(id)}`),
+    { method: "DELETE" },
+  );
+  if (!response.ok && response.status !== 404)
+    await throwGatewayApiError(response, "Unable to cancel WeChat QR login");
 }

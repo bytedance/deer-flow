@@ -21,7 +21,11 @@ _SCANNED_MODULES: tuple[str, ...] = ("app", "deerflow")
 # Add DeerFlow-local rules here only when Blockbuster's default rule set misses
 # a generic blocking primitive used by production code. If a path is invisible
 # because no test exercises it, add a production-path runtime anchor instead.
-_PROJECT_BLOCKING_RULES: tuple[tuple[str, BlockBusterFunction], ...] = ()
+_PROJECT_BLOCKING_RULES: tuple[tuple[str, BlockBusterFunction], ...] = (
+    # Blockbuster wraps socket.socket methods but not the module-level resolver,
+    # and the SSRF guard in deerflow.community.url_safety resolves hostnames.
+    ("socket.getaddrinfo", BlockBusterFunction(None, "socket.getaddrinfo", scanned_modules=list(_SCANNED_MODULES))),
+)
 
 
 def _install_project_rules(bb: BlockBuster) -> None:

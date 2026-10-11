@@ -10,6 +10,8 @@ import logging
 import re
 from pathlib import Path
 
+from deerflow.uploads.companions import resolve_companion
+
 logger = logging.getLogger(__name__)
 
 # Regex for bold structural headings produced by pymupdf4llm when it can't
@@ -25,12 +27,12 @@ _BOLD_HEADING_RE = re.compile(r"^\*\*((ITEM|PART|SECTION|SCHEDULE|EXHIBIT|APPEND
 # Requirements:
 #   1. Entire line consists only of **...** blocks separated by whitespace (no prose)
 #   2. First block is a section number (digits and dots, e.g. "1", "3.2", "A.1")
-#   3. Second block must not be purely numeric/punctuation — excludes financial table
-#      headers like **2023** **2022** **2021** while allowing non-ASCII titles such as
+#   3. Every block after the section number must contain more than numbers, punctuation,
+#      or currency symbols — excludes financial table columns while allowing titles such as
 #      **1** **概述** or accented words (negative lookahead instead of [A-Za-z])
-#   4. At most two additional blocks (four total) with [^*]+ (no * inside) to keep
+#   4. One to three title blocks (four total) with [^*]+ (no * inside) to keep
 #      the regex linear and avoid ReDoS on attacker-controlled content
-_SPLIT_BOLD_HEADING_RE = re.compile(r"^\*\*[\dA-Z][\d\.]*\*\*\s+\*\*(?!\d[\d\s.,\-–—/:()%]*\*\*)[^*]+\*\*(?:\s+\*\*[^*]+\*\*){0,2}\s*$")
+_SPLIT_BOLD_HEADING_RE = re.compile(r"^\*\*[\dA-Z][\d\.]*\*\*(?:\s+\*\*(?![\d\s.,+\-–—/:()%$€£¥]+\*\*)[^*]+\*\*){1,3}\s*$")
 
 # Maximum number of outline entries injected into the agent context.
 # Keeps prompt size bounded even for very long documents.
@@ -45,9 +47,16 @@ _TRUNCATION_MARKER = "… (truncated)"
 # the line is an info string when opening, or whitespace only when closing.
 _CODE_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 
+# HTML comment blocks end on the first line containing -->.
+_HTML_COMMENT_START_RE = re.compile(r"^ {0,3}<!--")
+
 # ATX headings require 1-6 hashes and a space/tab separator (or end of line).
 # Match the original indentation so indented code cannot become a heading.
 _ATX_HEADING_RE = re.compile(r"^ {0,3}#{1,6}(?:[ \t]+(.*))?$")
+
+# Root-level indented code starts at four columns, including
+# a tab after up to three spaces. Do not strip it into a heading.
+_INDENTED_CODE_RE = re.compile(r"^( {4}| {0,3}\t)")
 
 
 def _strip_atx_closing_hashes(raw: str) -> str:
@@ -120,15 +129,23 @@ def extract_outline(md_path: Path) -> list[dict]:
     outline: list[dict] = []
     fence_char = ""
     fence_length = 0
+    in_html_comment = False
     try:
-        with md_path.open(encoding="utf-8") as f:
+        with md_path.open(encoding="utf-8-sig") as f:
             for lineno, line in enumerate(f, 1):
+                if in_html_comment:
+                    in_html_comment = "-->" not in line
+                    continue
+
                 fence = _CODE_FENCE_RE.match(line.rstrip("\r\n"))
                 if fence_char:
                     if fence:
                         marker, suffix = fence.groups()
                         if marker[0] == fence_char and len(marker) >= fence_length and not suffix.strip(" \t"):
                             fence_char = ""
+                    continue
+                if _HTML_COMMENT_START_RE.match(line):
+                    in_html_comment = "-->" not in line
                     continue
                 if fence:
                     marker, info = fence.groups()
@@ -138,6 +155,9 @@ def extract_outline(md_path: Path) -> list[dict]:
                         fence_char = marker[0]
                         fence_length = len(marker)
                         continue
+
+                if _INDENTED_CODE_RE.match(line):
+                    continue
 
                 stripped = line.strip()
                 if not stripped:
@@ -156,7 +176,7 @@ def extract_outline(md_path: Path) -> list[dict]:
                         outline.append({"title": _truncate_outline_text(title, _OUTLINE_TITLE_MAX_CHARS), "line": lineno})
 
                 # Style 3: split-bold heading — **<num>** **<title>**
-                # Regex already enforces max 4 blocks and non-numeric second block.
+                # Regex enforces max 4 blocks and rejects numeric columns after the number.
                 elif _SPLIT_BOLD_HEADING_RE.match(stripped):
                     title = " ".join(re.findall(r"\*\*([^*]+)\*\*", stripped))
                     if title:
@@ -175,8 +195,7 @@ def extract_outline(md_path: Path) -> list[dict]:
 def extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
     """Return the document outline and fallback preview for *file_path*.
 
-    Looks for a sibling ``<stem>.md`` file produced by the upload conversion
-    pipeline.
+    Uses a server-owned conversion record for non-Markdown uploads.
 
     Returns:
         (outline, preview) where:
@@ -186,8 +205,8 @@ def extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
           anchor when outline is empty, capped at 2000 characters across all lines.
           Empty when outline is non-empty (no fallback needed).
     """
-    md_path = file_path.with_suffix(".md")
-    if not md_path.is_file():
+    md_path = file_path if file_path.suffix.lower() == ".md" else resolve_companion(file_path)
+    if md_path is None or not md_path.is_file():
         return [], []
 
     outline = extract_outline(md_path)
@@ -199,7 +218,7 @@ def extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
     preview: list[str] = []
     remaining_chars = _OUTLINE_PREVIEW_MAX_CHARS
     try:
-        with md_path.open(encoding="utf-8") as f:
+        with md_path.open(encoding="utf-8-sig") as f:
             for line in f:
                 stripped = line.strip()
                 if stripped:

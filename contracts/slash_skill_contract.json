@@ -4,9 +4,11 @@
   "reserved_slash_skill_names": [
     "agent",
     "bootstrap",
+    "context",
     "goal",
     "help",
     "memory",
+    "model",
     "models",
     "new",
     "status"

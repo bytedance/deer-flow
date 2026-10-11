@@ -1,0 +1,183 @@
+---
+title: 历史缓存
+description: 增量模式的历史缓存：它位于哪一层、条目形态与不可变性论证、database.checkpoint_cache 每个字段的默认值与环境变量回退、清理与 redis 故障语义、可见 stats，以及编译后 accessor 图的容量上限。
+---
+
+import { Callout } from "nextra/components";
+
+# 历史缓存
+
+`delta` 模式下读取没有现成的消息列表可返回：它必须回溯祖先写入直到最近的 `_DeltaSnapshot`，再据此重建（见[快照节奏](/docs/harness/checkpoints/cadence)）。这段回溯就是物化成本。历史缓存把重建出的历史存下来，让下一次读取只需一次查表而不是一次回溯；它包在 delta 路径的原始 saver 外面。
+
+<Callout type="info">
+  缓存纯粹是性能优化。正确性不依赖它：这里没有任何字段会被冻结，不要求跨 worker 一致，
+  而且缓存满、缓存空、完全没有缓存三种情况下物化结果必须完全相同。
+</Callout>
+
+## 缓存位于哪一层
+
+| 路径 | 包装方式 | 后端 |
+| --- | --- | --- |
+| Gateway / 异步 | 生效模式为 `delta` 时，`CachedHistorySaver` 包住选定的 saver；缓存生命周期与 checkpointer 上下文管理器一致 | `memory` 或 `redis` |
+| 内嵌 / TUI（同步） | `_wrap_sync_if_delta` 只允许内存后端 | 仅 `memory` |
+| `full` 模式 | 完全不包装——没有东西需要物化 | — |
+
+`CachedHistorySaver` 只覆盖一个行为：`get_delta_channel_history` / `aget_delta_channel_history`。其余全部——元组读取、写入、列举、复制、删除、裁剪——原样委派给内部 saver。同步路径共享一个进程内内存缓存，并在 `max_entries` 或派生出的键前缀变化时重建，因为旧前缀下的条目既不可达、也不再被线程清理覆盖。
+
+同步路径直接拒绝 `redis`：`database.checkpoint_cache.type 'redis' is not supported on the sync checkpointer path (TUI/embedded); use 'memory'.`
+
+## 条目形态
+
+一个条目就是 `DeltaChannelHistory` 形状的字典，与原始 saver 对同一检查点、同一通道返回的内容完全一致：
+
+| 字段 | 含义 |
+| --- | --- |
+| `writes` | 该通道在路径上的增量，从旧到新，元素是 `PendingWrite` 元组。始终存在，可能为空。存在目标检查点自身的写入是留给下一个 super-step 的 pending 写入，不计入它自己的历史。 |
+| `seed` | 最近一个 `channel_values[channel]` 有值的祖先上存的值。若回溯到根都没找到存值则省略；使用方把"缺失"视为"从空开始"。 |
+
+读取是读时复制：`writes` 返回一份新列表，`seed` 按引用共享且绝不原地修改。
+
+## 不可变性：为什么不需要失效
+
+一个检查点的增量历史是它那条已封存祖先链的纯函数——LangGraph 契约把目标自身的 pending 写入排除在外，父链接在创建时就固定，而祖先的写入在它的子检查点存在后就已封存。因此以「线程、命名空间、检查点 id、通道」为键的条目是不可变的。
+
+| 性质 | 后果 |
+| --- | --- |
+| 键只由不可变成分组成 | 条目一旦写入就不再变化，于是没有失效路径、没有版本字段、也不需要协调 |
+| 子检查点存在即封存祖先 | 共享后端（redis）无需任何握手，跨进程天然一致 |
+| 缓存从不缓存"最新检查点"的解析结果 | 目标先经内部 saver 解析一次再构造键；只有已解析的、不可变的检查点 id 才会成为键 |
+| 线程删除与裁剪是生命周期事件，不是失效 | 它们清理条目是因为源检查点已不存在，而不是因为条目过期 |
+
+正因如此，整套策略是纯性能的，允许每个 worker 配置不同。
+
+## 键与命名空间
+
+`make_history_key(key_prefix, thread_id, checkpoint_ns, checkpoint_id, channel)` 构造：
+
+```
+{key_prefix}:{thread_id}:{sha256(checkpoint_ns \x00 checkpoint_id \x00 channel)[:24]}
+```
+
+| 事实 | 细节 |
+| --- | --- |
+| `thread_id` 保持可读 | 运维不必重算摘要就能认出某个线程的键 |
+| 其余成分以 NUL 分隔后哈希 | 含 `:` 的命名空间不可能产生有歧义的键 |
+| 线程清理前缀 | `{key_prefix}:{thread_id}:`，按前缀匹配，绝不做逐键失效 |
+| 默认前缀 | `ckpt-hist:v{CACHE_FORMAT_VERSION}:{hash12(database identity)}`，其中 `CACHE_FORMAT_VERSION = 1` |
+| `database.checkpoint_cache.key_prefix` | 整体替换派生前缀 |
+| 数据库身份 | 不含凭据：postgres 为 `host:port/database:schema`，sqlite 为文件路径，其余为 `memory`。轮换凭据不会改变命名空间，否则一次凭据轮换就会让缓存变冷、并让旧键一直孤儿到 TTL。两个部署共用同一个 redis 时，默认前缀不同。 |
+
+## 用合成代替回溯
+
+真实运行中每个 super-step 会创建多个检查点，只有其中一部分会被真正物化成读取目标，因此目标的直接父级通常是尚未预热的中间检查点。只合成一层时，实测在 500 步的 sqlite 运行上是零命中。于是包装器改为逐层合成：
+
+| 步骤 | 行为 |
+| --- | --- |
+| 请求的通道未命中 | 从最近的"已预热或已缓存"祖先开始合成，每个中间检查点递归一层 |
+| 深度预算 | `_COMPOSE_MAX_DEPTH = 8` |
+| 稳态 | 每一层合成结果都会被缓存，于是预热边界跟着运行前移，通常约两层内就能命中已预热的祖先 |
+| 父级是快照 | 父级本身持有通道值，直接用父级的写入加它的 seed 构造条目，完全不查父级历史 |
+| 深度 0 的冷链 | 该层只委派**一次**内部快速回溯（两条 SQL），而不是逐个元组爬祖先。它下面的祖先保持冷态，之后会从最近的预热层继续解析 |
+| 根或父级缺失 | `{"writes": []}` |
+| 所有路径上都没有该通道 | `{"writes": []}` |
+| 缓存已禁用 | 直接透传给原始 saver——在全未命中的条目上做合成严格比直接回溯更费 |
+
+同步路径镜像同一套递归逻辑，并共享同一个缓存与深度预算。冷合成从不调用内部 saver 的历史方法：它要么递归，要么自己回溯，因此回退回溯是唯一会触碰原始 saver 的地方。
+
+## 配置
+
+缓存是**随 checkpointer 一起、每个进程构造一次**的。`langgraph_runtime()` 用启动时的 `AppConfig` 快照构造 checkpointer（`backend/app/gateway/deps.py:463`），当时 `make_checkpoint_cache()` 返回什么，delta saver 就被 `CachedHistorySaver` 包住什么（`backend/packages/harness/deerflow/runtime/checkpointer/async_provider.py:250-254`）。运行期不会再读本节，因此下表每个字段在整个进程生命周期内都保持启动时的取值。
+
+| 配置键 | 类型 | 默认值 | 范围 | 是否需重启才生效 | 说明 |
+| --- | --- | --- | --- | --- | --- |
+| `database.checkpoint_cache.type` | `memory` \| `redis` | `memory` | — | 是 | `memory` 是进程内 LRU；`redis` 供多 worker 共享，仅异步/Gateway 路径 |
+| `database.checkpoint_cache.max_entries` | `int` | `128` | `ge=0` | 是 | 内存后端 LRU 容量；`0` 表示禁用缓存 |
+| `database.checkpoint_cache.redis_url` | `str` 或 null | `null` | 任意 redis URL | 是 | 依次回退到 `DEER_FLOW_CHECKPOINT_CACHE_REDIS_URL`、`REDIS_URL`、`redis://localhost:6379/0` |
+| `database.checkpoint_cache.ttl_seconds` | `int` | `86400` | `ge=0` | 是 | redis 条目 TTL，是防泄漏网而非正确性机制；`0` 表示显式关闭过期 |
+| `database.checkpoint_cache.key_prefix` | `str` | `""` | 任意字符串 | 是 | 为空表示使用数据库身份派生的哈希 |
+
+<Callout type="warning">
+  「不冻结」不等于「热重载」。这些设置**在正确性意义上不冻结**：它们不会损坏线程，禁用缓存时结果完全相同，共享同一检查点数据库的多个进程也可以安全地使用不同取值。但运行中的进程不会读到改动——后端、容量、redis 连接、前缀与 TTL 都停留在启动时的取值——因此改动其中任何一项都需要重启 Gateway。内嵌与 TUI 路径同理：它们的 checkpointer 单例只在进程内创建一次并一直复用。只有 [`database.checkpoint_graph_cache.accessor_graph_max`](#编译后的-accessor-图缓存) 会在运行期重新读取。
+</Callout>
+
+```yaml
+database:
+  checkpoint_channel_mode: delta
+  checkpoint_cache:
+    type: memory            # memory | redis（redis 仅 Gateway/异步可用）
+    max_entries: 128        # 0 表示禁用缓存
+    redis_url: null         # 也可用 DEER_FLOW_CHECKPOINT_CACHE_REDIS_URL / REDIS_URL
+    ttl_seconds: 86400      # redis 防泄漏网；清理本身是即时的
+    key_prefix: ""          # 默认：数据库身份的哈希
+```
+
+只有 redis URL 有环境变量回退；本节其他字段都不从环境读取，而配置值里的 `$VAR` 插值由中心化逻辑在本节被解析之前处理。
+
+`max_entries: 0` 对两种类型统一地禁用缓存：工厂返回一个已禁用的内存后端（`enabled` 即 `max_entries > 0`），因此包装器不需要判 None。零容量缓存的行为必须与原始内部 saver 完全一致——摘要相同、`hits == 0`——这条等价性有测试钉住。内存后端拒绝负值，抛 `max_entries must be >= 0`。淘汰是严格 LRU：命中和写入都会刷新最近使用顺序，超容量时丢最旧的条目，并累计 `evictions` 计数。容量为 1 的缓存在每次读时都会抖动，但结果依然正确。
+
+redis 客户端是惰性导入的；缺少可选依赖时构造 redis 后端会抛 `redis is required for the redis checkpoint cache backend. Install it with: uv sync --extra redis`。无法识别的 `type` 会抛 `Unknown checkpoint cache type: {config.type!r}`。
+
+## 清理与生命周期
+
+| 操作 | 缓存动作 |
+| --- | --- |
+| `delete_thread` / `adelete_thread` | 源数据删除后，按键前缀匹配清理该线程的条目 |
+| `prune` / `aprune` | 清理被重写线程的条目：被裁剪过的链不得保留裁剪前的缓存历史，也不得残留对已删除祖先的引用 |
+| `delete_for_runs` / `adelete_for_runs` | **不清理。** 以 run 为单位的删除无法在不额外查询的前提下映射回线程，因此条目原样保留：它们仍然正确（封存论证是逐链成立的），残余保留量由 LRU/TTL 兜底。当前仓库内没有调用方。 |
+| `copy_thread` / `acopy_thread` | 直接委派；不清理 |
+
+理由是数据生命周期：源的删除不应在缓存里留下残余的历史负载。这从来不是正确性要求。
+
+## redis 故障行为
+
+所有 redis 故障都只影响性能。触达缓存时源数据早已更新完毕，所以故障只是损失命中，从不影响可用性：
+
+| 故障 | 告警原文 | 效果 |
+| --- | --- | --- |
+| `mget` 失败 | `checkpoint history cache mget failed; treating as all-miss: %s` | 所有请求的键都按未命中处理，历史被重新合成 |
+| 写入失败 | `checkpoint history cache write failed; skipping: %s` | 跳过该次写入，下次读取直接重算 |
+| 线程清理失败 | `checkpoint history cache thread purge failed; residual entries expire via TTL: %s` | 源删除已经完成；残余副本会随 `ttl_seconds` 过期；这条路径从不抛异常 |
+
+TTL 是防泄漏网而非正确性机制，因为条目不可变、没有任何读取依赖它。`ttl_seconds: 0` 表示彻底关闭过期，此时孤儿键只依赖 redis 的 `maxmemory` 策略。清理失败是已删除线程的历史残留下来的唯一途径，且只残留到 TTL 到期。
+
+## stats
+
+`CachedHistorySaver.stats()` 把后端的计数与包装器自身的合成计数合并在一起。这是唯一暴露的缓存观测面：没有任何 Gateway 接口或健康检查会报告缓存状态。
+
+| 计数 | 来源 | 含义 |
+| --- | --- | --- |
+| `hits` / `misses` | 后端 | 逐键查询的命中与未命中 |
+| `evictions` / `entries` | 仅内存后端 | LRU 淘汰次数与当前条目数。redis 后端这两项恒为 `0`——它不维护本地 LRU 或容量，容量由它自己的 `maxmemory` 策略兜住 |
+| `compose_hits` | 包装器 | 从已存父值或已缓存历史合成出来的层级数 |
+| `full_walks` | 包装器 | 委派内部增量回溯的冷回退次数 |
+
+稳态进程应表现为 `compose_hits` 持续增长而 `full_walks` 保持低位；`full_walks` 长期偏高说明合成总落在冷链上；而预热进程里 `hits` 一直为 `0` 说明查询始终没碰到条目——通常是缓存被禁用，或命名空间与条目前缀不一致（前缀由数据库身份派生）。见[故障排查](/docs/harness/checkpoints/troubleshooting)。
+
+## 编译后的 accessor 图缓存
+
+delta 读取必须走线程状态 accessor，它编译出的图按「assistant、通道模式、快照节奏、应用配置」缓存。该缓存有自己的容量上限：
+
+| 配置键 | 类型 | 默认值 | 范围 | 是否重启 |
+| --- | --- | --- | --- | --- |
+| `database.checkpoint_graph_cache.accessor_graph_max` | `int` | `64` | `ge=1` | 否——热重载生效 |
+
+| 事实 | 后果 |
+| --- | --- |
+| 调大或调小只改变缓存何时淘汰，从不改变图的语义 | 该值在每次淘汰检查时重新读取，因此热重载无需重启即生效 |
+| 到达上限时整个缓存被清空（这里没有 LRU） | 该上限约束的是不同 assistant 与节奏的数量，而非最近使用顺序 |
+| 配置热重载会重建 `AppConfig` 对象，而缓存条目会重新校验工厂与配置身份 | 热重载绝不会返回按旧配置编译的图 |
+| 不可用的值（非整数、布尔、小于 1）回退到代码内默认值 `64` | 桩配置或残缺配置不会破坏 accessor 缓存 |
+
+这个上限对两种模式都生效，与历史缓存无关——后者只包装 delta saver。它不暴露任何计数，只按容量设界。
+
+## 如何度量缓存效果
+
+`cache_effect_ms`（状态冷读减去温读的 p50）是生产环境 accessor 缓存默认值的决策指标，来自生产检查点基准，该基准还报告 `state_cold_ms`、`state_warm_p50_ms`、`state_warm_p95_ms`、`db_bytes` 以及各 `limit` 下的历史读取耗时。通道基准报告 `warm_read_ms`、`cold_read_ms`、`reducer_replay_ms`，比值一律为 `delta/full`。耗时阈值不构成 CI 门禁。见[运维检查点](/docs/harness/checkpoints/operations)。
+
+## 相关章节
+
+- [快照节奏](/docs/harness/checkpoints/cadence)——本缓存所记忆的那次回溯。
+- [通道模式](/docs/harness/checkpoints/modes)——accessor 与模式标记。
+- [可观测性](/docs/harness/checkpoints/observability)——这些计数在哪里出现。
+- [故障排查](/docs/harness/checkpoints/troubleshooting)——内嵌路径的 redis 报错与零命中缓存。
+- [参考附录](/docs/harness/checkpoints/reference)——完整配置键表。

@@ -3,7 +3,8 @@
 `deerflow.knowledge` owns `RetrievalResult`, `RetrievalHit`, `KnowledgeSource`,
 `KnowledgeCapabilities`, and the search-only `RetrievalProvider` protocol.
 These depend on no knowledge management service, resource store, or catalog.
-Scope admission, scope selection UI, and WeKnora belong to subsequent phases.
+Existing RAGFlow scope admission and selection UI remain authoritative.
+The shared contract does not add scope selection or WeKnora support to LightRAG.
 
 ## Sources and citations
 
@@ -38,6 +39,17 @@ handle, and actual excerpt in tool content. Backend readers recompute source IDs
 Assistant labels do not establish evidence. Gateway run input and checkpoint
 writes strip the reserved source keys from caller artifacts.
 
+Complete RAGFlow responses retain the native version-one
+`knowledge_sources: {version, sources}` snapshots and `#knowledge-ID` links
+already supported by the Gateway, frontend, ordinary tasks, and durable batch
+exports. RAGFlow responses without complete provider locators fall back to the
+shared contract above; LightRAG uses it directly. Both formats remain readable
+after replay. When a task cites both formats, native RAGFlow snapshots stay in
+`knowledge_sources`, while shared records live in `retrieval_sources` with
+`knowledge_sources_version: 1`. Readers validate the same evidence and version;
+Gateway strips all three keys from untrusted writes. Budget pruning must not
+overwrite a native snapshot with shared records.
+
 The frontend resolves citations against preceding tool messages in loaded thread
 history, displaying provider, title, excerpt, and only supplied locators. Absent
 evidence stays unresolved until loaded. Historical web citations retain their
@@ -52,15 +64,16 @@ externalization and replaces complete orphan citations with their labels.
 Subagents accumulate at most 100 validated sources across values frames before
 terminal publication, surviving compaction. Ordinary `task` forwards only
 sources whose handles appear in the child report, with a bounded evidence
-appendix. Durable batch source forwarding is outside this phase.
+appendix. Existing native RAGFlow durable batch forwarding is retained;
+shared-contract durable batch forwarding is outside this phase.
 
 ## Adapters and capabilities
 
 Both tools advertise `search` and `sources` in
 `metadata.knowledge_capabilities.operations`. Optional `catalog`, `documents`,
 `dataset_filter`, and `document_filter` describe separate operations. Search
-support implies none of them. This phase does not advertise scope capabilities
-or change operator-configured retrieval scope.
+support implies none of them. These metadata fields do not replace existing
+RAGFlow scope admission or change operator-configured retrieval scope.
 
 RAGFlow maps normalized chunk content, document title, dataset name, and
 `doc_aggs` title fallback. Dataset resolution, embedding-group ordering, access

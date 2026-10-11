@@ -1,0 +1,917 @@
+"""Tests for the notification delivery worker (issue #4254).
+
+The worker consumes the notification outbox written by the scheduled-task
+completion hook and pushes each delivery through the owning channel's
+proactive send path. It must never touch execution state.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import UTC, datetime
+
+import pytest
+
+from app.channels.base import ChannelUnavailable
+from app.channels.message_bus import MessageBus
+from app.channels.wecom import WeComChannel
+from app.scheduler.notification_delivery import NotificationDeliveryWorker, render_notification_text
+from app.scheduler.notification_text import redact_egress_text
+
+
+class FakeDeliveryRepo:
+    def __init__(self, rows=None):
+        self.rows = list(rows or [])
+        self.claims = []
+        self.sent = []
+        self.failed = []
+        self.terminal_failures = []
+        self.resets = []
+        self.events = []
+
+    async def reset_stale_sending_rows(self, *, now, timeout):
+        self.resets.append((now, timeout))
+        self.events.append("reset")
+        return 0
+
+    async def claim_due_deliveries(self, *, now, limit):
+        claimed, self.rows = self.rows[:limit], self.rows[limit:]
+        self.claims.append((now, limit))
+        self.events.append("claim")
+        return claimed
+
+    async def mark_sent(self, delivery_id, *, claim_token=None):
+        self.sent.append(delivery_id)
+
+    async def mark_failed(self, delivery_id, *, claim_token=None, error=None, count_attempt=True, terminal=False):
+        self.failed.append((delivery_id, error, count_attempt))
+        if terminal:
+            self.terminal_failures.append((delivery_id, error))
+
+
+class FakeChannel:
+    def __init__(self, *, fail=False, unavailable=False, running=True):
+        self.sent = []
+        self.fail = fail
+        self.unavailable = unavailable
+        self.is_running = running
+
+    async def send_notification(self, *, target, text_markdown):
+        if self.unavailable:
+            raise ChannelUnavailable("channel transport down")
+        if self.fail:
+            raise RuntimeError("platform rejected the push")
+        self.sent.append((target, text_markdown))
+
+
+def _delivery_row(
+    *,
+    delivery_id="delivery-1",
+    event="run_completed",
+    provider="wecom",
+    target="GaoZhiChao",
+    payload=None,
+):
+    return {
+        "id": delivery_id,
+        "task_id": "task-1",
+        "task_run_id": "task-run-1",
+        "run_id": "run-1",
+        "event": event,
+        "provider": provider,
+        "target": target,
+        "owner_user_id": "user-1",
+        "status": "sending",
+        "payload": payload if payload is not None else {"run_status": "success", "error": None, "task_id": "task-1"},
+    }
+
+
+def _make_worker(repo, channel=None, resolve_run_summary=None, resolve_connections=None):
+    channels = {}
+    if channel is not None:
+        channels["wecom"] = channel
+    return NotificationDeliveryWorker(
+        delivery_repo=repo,
+        resolve_channel=lambda provider: channels.get(provider),
+        poll_interval_seconds=5,
+        resolve_run_summary=resolve_run_summary,
+        resolve_connections=resolve_connections,
+    )
+
+
+def _connection(*, provider="wecom", external_account_id="GaoZhiChao", status="connected", owner_user_id="user-1"):
+    return {
+        "id": f"conn-{provider}-{external_account_id}",
+        "owner_user_id": owner_user_id,
+        "provider": provider,
+        "external_account_id": external_account_id,
+        "status": status,
+    }
+
+
+def test_render_run_completed_text_has_no_raw_ids():
+    text = render_notification_text(_delivery_row(payload={"run_status": "success", "error": None, "task_id": "task-1", "task_title": "Daily digest"}))
+
+    assert "Finished a run." in text
+    assert "“Daily digest”" in text
+    assert "task-1" not in text
+    assert "run-1" not in text
+
+
+def test_render_prefers_task_title_over_id():
+    text = render_notification_text(_delivery_row(payload={"run_status": "success", "error": None, "task_id": "task-1", "task_title": "Daily digest"}))
+
+    assert "“Daily digest”" in text
+    assert "task-1" not in text
+    assert not any(line.startswith("Task:") for line in text.splitlines())
+    # Without a title the notice says so instead of printing the id.
+    untitled = render_notification_text(_delivery_row())
+    assert "Untitled task" in untitled
+    assert "task-1" not in untitled
+
+
+def test_render_run_failed_text_does_not_forward_raw_error():
+    secret = "sk-" + ("x" * 40)
+    text = render_notification_text(
+        _delivery_row(
+            event="run_failed",
+            payload={"run_status": "failed", "error": secret, "task_id": "task-1"},
+        )
+    )
+
+    assert "A run failed." in text
+    assert secret not in text
+    assert "Open DeerFlow → Scheduled tasks for details." in text
+    assert "Error:" not in text
+
+
+def test_render_truncates_unbounded_error_text():
+    text = render_notification_text(
+        _delivery_row(
+            event="run_failed",
+            payload={"run_status": "failed", "error": "x" * 5000, "task_id": "task-1"},
+        )
+    )
+
+    assert len(text) < 1000
+    assert "Error:" not in text
+
+
+@pytest.mark.parametrize("prefix", ["sk-", "sk-proj-", "sk-svcacct-", "sk-admin-", "sk-ant-api03-"])
+@pytest.mark.asyncio
+async def test_delivery_scrubs_sk_bearer_tokens(prefix):
+    # Synthetic credentials, with no secret assignment to provide a fallback.
+    secret = prefix + "A1b2_C3d4-E5f6_G7h8-I9j0" * 3
+    summary = f"Authorization: Bearer {secret}; Repeated: {secret}"
+    safe_summary = "Authorization: Bearer [redacted]; Repeated: [redacted]"
+    assert redact_egress_text(summary) == safe_summary
+
+    repo = FakeDeliveryRepo([_delivery_row()])
+    channel = FakeChannel()
+    worker = _make_worker(repo, channel, resolve_run_summary=lambda *_: summary)
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert repo.sent == ["delivery-1"]
+    assert len(channel.sent) == 1
+    assert safe_summary in channel.sent[0][1]
+    assert secret not in channel.sent[0][1]
+
+
+@pytest.mark.asyncio
+async def test_run_once_delivers_claimed_row_and_marks_sent():
+    repo = FakeDeliveryRepo([_delivery_row()])
+    channel = FakeChannel()
+    worker = _make_worker(repo, channel)
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert repo.sent == ["delivery-1"]
+    assert repo.failed == []
+    assert len(channel.sent) == 1
+    target, text = channel.sent[0]
+    assert target == "GaoZhiChao"
+    assert text.splitlines()[0] == "Scheduled task “Untitled task”"
+    assert "task-1" not in text
+
+
+@pytest.mark.asyncio
+async def test_run_once_marks_failed_when_channel_is_not_running():
+    repo = FakeDeliveryRepo([_delivery_row()])
+    worker = _make_worker(repo, channel=None)
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert repo.sent == []
+    assert len(repo.failed) == 1
+    delivery_id, error, count_attempt = repo.failed[0]
+    assert delivery_id == "delivery-1"
+    assert "wecom" in error
+    # A channel that is simply not running must not burn the retry budget:
+    # the row comes back on a flat long backoff until the channel returns.
+    assert count_attempt is False
+
+
+@pytest.mark.asyncio
+async def test_run_once_parks_when_registered_channel_reports_not_running():
+    repo = FakeDeliveryRepo([_delivery_row()])
+    worker = _make_worker(repo, FakeChannel(running=False))
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert repo.sent == []
+    _, error, count_attempt = repo.failed[0]
+    assert "not running" in error
+    assert count_attempt is False
+
+
+@pytest.mark.asyncio
+async def test_run_once_parks_without_counting_channel_unavailable():
+    repo = FakeDeliveryRepo([_delivery_row()])
+    worker = _make_worker(repo, FakeChannel(unavailable=True))
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert repo.sent == []
+    delivery_id, error, count_attempt = repo.failed[0]
+    assert delivery_id == "delivery-1"
+    assert "transport down" in error
+    assert count_attempt is False
+
+
+@pytest.mark.asyncio
+async def test_run_once_sends_when_target_is_still_connected():
+    repo = FakeDeliveryRepo([_delivery_row()])
+    channel = FakeChannel()
+    seen = []
+
+    async def resolve_connections(owner_user_id):
+        seen.append(owner_user_id)
+        return [_connection(), _connection(provider="slack", external_account_id="U1")]
+
+    worker = _make_worker(repo, channel, resolve_connections=resolve_connections)
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert seen == ["user-1"]
+    assert repo.sent == ["delivery-1"]
+    assert repo.failed == []
+    assert repo.terminal_failures == []
+
+
+@pytest.mark.asyncio
+async def test_run_once_drops_delivery_whose_target_was_disconnected():
+    # The owner unbound the identity after the row was enqueued (the row can
+    # wait up to a day in parking). The push must not go out, and there is
+    # nothing to wait for: the row is finalized, not parked or retried.
+    repo = FakeDeliveryRepo([_delivery_row()])
+    channel = FakeChannel()
+    worker = _make_worker(repo, channel, resolve_connections=lambda owner: [_connection(status="revoked")])
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert channel.sent == []
+    assert repo.sent == []
+    assert repo.terminal_failures == [("delivery-1", "target is no longer a connected wecom identity of its owner")]
+
+
+@pytest.mark.asyncio
+async def test_run_once_ignores_another_owners_binding_of_the_same_target():
+    # The resolver is called with the row's own owner, and a returned row that
+    # names a different owner is skipped too, so a resolver that is not
+    # owner-scoped still cannot make another user's connected binding of the
+    # same external account count for this delivery.
+    repo = FakeDeliveryRepo([_delivery_row()])
+    channel = FakeChannel()
+    calls = []
+
+    def resolve_connections(owner_user_id):
+        calls.append(owner_user_id)
+        return [_connection(owner_user_id="user-OTHER")]
+
+    worker = _make_worker(repo, channel, resolve_connections=resolve_connections)
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert calls == ["user-1"]
+    assert channel.sent == []
+    assert repo.sent == []
+    assert len(repo.terminal_failures) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_once_parks_when_connection_lookup_returns_an_unexpected_shape():
+    # A dict or a str is iterable and would "find" nothing; that is a lookup
+    # problem to park on, not proof that the binding is gone.
+    repo = FakeDeliveryRepo([_delivery_row()])
+    channel = FakeChannel()
+    worker = _make_worker(repo, channel, resolve_connections=lambda owner: {"items": [_connection()]})
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert channel.sent == []
+    delivery_id, error, count_attempt = repo.failed[0]
+    assert "could not verify" in error
+    assert count_attempt is False
+    assert repo.terminal_failures == []
+
+
+@pytest.mark.asyncio
+async def test_run_once_drops_a_disconnected_target_even_while_the_channel_is_down():
+    # Disconnecting a provider revokes its connections and stops its channel
+    # together. The binding check runs first, so the row is finalized instead
+    # of parking for a day behind the channel-down branch.
+    repo = FakeDeliveryRepo([_delivery_row()])
+    worker = _make_worker(repo, FakeChannel(running=False), resolve_connections=lambda owner: [_connection(status="revoked")])
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert repo.sent == []
+    assert len(repo.terminal_failures) == 1
+    assert all(count_attempt is True for _, _, count_attempt in repo.failed)  # no park entry was written
+
+
+@pytest.mark.asyncio
+async def test_run_once_parks_when_connection_lookup_fails():
+    # A store error must neither drop the row nor send against unknown intent.
+    repo = FakeDeliveryRepo([_delivery_row()])
+    channel = FakeChannel()
+
+    async def resolve_connections(owner_user_id):
+        raise RuntimeError("database unavailable")
+
+    worker = _make_worker(repo, channel, resolve_connections=resolve_connections)
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert channel.sent == []
+    assert repo.sent == []
+    delivery_id, error, count_attempt = repo.failed[0]
+    assert delivery_id == "delivery-1"
+    assert "could not verify" in error
+    assert count_attempt is False
+    assert repo.terminal_failures == []
+
+
+@pytest.mark.asyncio
+async def test_run_once_checks_the_connection_before_resolving_the_summary():
+    # The run content must not be read for a push that will not be sent.
+    repo = FakeDeliveryRepo([_delivery_row()])
+    channel = FakeChannel()
+    summary_calls = []
+
+    async def resolve_run_summary(run_id, user_id):
+        summary_calls.append(run_id)
+        return "final answer"
+
+    worker = _make_worker(repo, channel, resolve_run_summary=resolve_run_summary, resolve_connections=lambda owner: [])
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert summary_calls == []
+    assert channel.sent == []
+
+
+@pytest.mark.asyncio
+async def test_run_once_marks_failed_when_send_raises():
+    repo = FakeDeliveryRepo([_delivery_row()])
+    worker = _make_worker(repo, FakeChannel(fail=True))
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert repo.sent == []
+    delivery_id, error, count_attempt = repo.failed[0]
+    assert delivery_id == "delivery-1"
+    assert "platform rejected" in error
+    # A real send error does count against the retry budget.
+    assert count_attempt is True
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_when_poller_exceeds_timeout():
+    repo = FakeDeliveryRepo([])
+    worker = NotificationDeliveryWorker(
+        delivery_repo=repo,
+        resolve_channel=lambda _provider: None,
+        poll_interval_seconds=60,
+        stop_timeout_seconds=0.05,
+    )
+
+    async def _hang_forever():
+        await asyncio.Event().wait()
+
+    worker._stop.clear()
+    worker._task = asyncio.create_task(_hang_forever())
+
+    await worker.stop()
+
+    assert worker._task is None
+
+
+@pytest.mark.asyncio
+async def test_run_once_without_due_rows_is_noop():
+    repo = FakeDeliveryRepo([])
+    worker = _make_worker(repo, FakeChannel())
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert repo.sent == []
+    assert repo.failed == []
+
+
+# ---------------------------------------------------------------------------
+# Crash recovery (review follow-up): a row exploding mid-delivery must not
+# strand the rest of the batch in "sending", and rows orphaned between claim
+# and the final status write come back through the stale reset.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_once_recovers_stale_sending_rows_before_claiming():
+    repo = FakeDeliveryRepo([_delivery_row()])
+    worker = _make_worker(repo, FakeChannel())
+    now = datetime.now(UTC)
+
+    await worker.run_once(now=now)
+
+    assert repo.events == ["reset", "claim"]
+    assert repo.resets[0][0] == now
+
+
+@pytest.mark.asyncio
+async def test_run_once_isolates_crashes_so_rest_of_batch_still_delivers():
+    """Replay the reviewer's worst case: row one crashes even its own
+    mark_failed (e.g. the DB blip that killed the status write), which used
+    to abort the loop and strand every following claimed row in
+    ``sending``."""
+
+    class ExplodingRepo(FakeDeliveryRepo):
+        async def mark_failed(self, delivery_id, **kwargs):
+            if delivery_id == "delivery-1":
+                raise RuntimeError("db gone")
+            await super().mark_failed(delivery_id, **kwargs)
+
+    class TargetFailChannel(FakeChannel):
+        async def send_notification(self, *, target, text_markdown):
+            if target == "GaoZhiChao":
+                raise RuntimeError("platform rejected")
+            await super().send_notification(target=target, text_markdown=text_markdown)
+
+    repo = ExplodingRepo(
+        [
+            _delivery_row(delivery_id="delivery-1"),
+            _delivery_row(delivery_id="delivery-2", target="bob"),
+        ]
+    )
+    worker = _make_worker(repo, TargetFailChannel())
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    # Row one is left for the stale reset to recover; row two must not be
+    # sacrificed with it.
+    assert repo.sent == ["delivery-2"]
+    assert repo.failed == []
+
+
+@pytest.mark.asyncio
+async def test_start_stop_lifecycle():
+    repo = FakeDeliveryRepo([])
+    worker = _make_worker(repo, FakeChannel())
+
+    await worker.start()
+    await worker.stop()
+    # Idempotent stop mirrors the scheduler service contract.
+    await worker.stop()
+
+
+# ---------------------------------------------------------------------------
+# Result summary enrichment (issue #4254): completed runs carry the agent's
+# final answer into the IM push; failed runs keep the error-only skeleton.
+# ---------------------------------------------------------------------------
+
+
+def test_render_includes_result_summary_for_completed_runs():
+    text = render_notification_text(_delivery_row(payload={"run_status": "success", "error": None, "task_id": "task-1", "result_summary": "The answer is 42\nand a second line"}))
+
+    # The tasks page's run summary: the reply's first line only.
+    assert "Result: The answer is 42" in text.splitlines()
+    assert "second line" not in text
+
+
+def test_render_truncates_long_result_summary():
+    text = render_notification_text(_delivery_row(payload={"run_status": "success", "error": None, "task_id": "task-1", "result_summary": "x" * 5000}))
+
+    # Bounded like the tasks page: at most 160 chars, ending in an ellipsis.
+    result_line = next(line for line in text.splitlines() if line.startswith("Result: "))
+    assert len(result_line) == len("Result: ") + 160
+    assert result_line.endswith("\u2026")
+
+
+def test_render_ignores_result_summary_for_failed_runs():
+    text = render_notification_text(
+        _delivery_row(
+            event="run_failed",
+            payload={"run_status": "failed", "error": "boom", "task_id": "task-1", "result_summary": "partial answer"},
+        )
+    )
+
+    assert "partial answer" not in text
+
+
+@pytest.mark.asyncio
+async def test_delivery_enriches_completed_run_with_summary():
+    row = _delivery_row()
+    repo = FakeDeliveryRepo([row])
+    channel = FakeChannel()
+    seen = []
+
+    def resolver(run_id, user_id):
+        seen.append((run_id, user_id))
+        return "The answer is 42"
+
+    worker = _make_worker(repo, channel, resolve_run_summary=resolver)
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert seen == [("run-1", "user-1")]
+    assert repo.sent == ["delivery-1"]
+    assert "The answer is 42" in channel.sent[0][1]
+    # The claimed outbox row itself must not be mutated in place.
+    assert "result_summary" not in row["payload"]
+
+
+@pytest.mark.asyncio
+async def test_delivery_supports_async_summary_resolver():
+    repo = FakeDeliveryRepo([_delivery_row()])
+    channel = FakeChannel()
+
+    async def resolver(run_id, user_id):
+        return "async answer"
+
+    worker = _make_worker(repo, channel, resolve_run_summary=resolver)
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert repo.sent == ["delivery-1"]
+    assert "async answer" in channel.sent[0][1]
+
+
+@pytest.mark.asyncio
+async def test_delivery_skips_resolver_for_failed_runs():
+    repo = FakeDeliveryRepo([_delivery_row(event="run_failed", payload={"run_status": "failed", "error": "boom", "task_id": "task-1"})])
+    channel = FakeChannel()
+    called = []
+
+    def resolver(run_id, user_id):
+        called.append(run_id)
+        return "should not appear"
+
+    worker = _make_worker(repo, channel, resolve_run_summary=resolver)
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert called == []
+    assert repo.sent == ["delivery-1"]
+
+
+@pytest.mark.asyncio
+async def test_delivery_falls_back_to_skeleton_when_resolver_raises():
+    repo = FakeDeliveryRepo([_delivery_row()])
+    channel = FakeChannel()
+
+    def resolver(run_id, user_id):
+        raise RuntimeError("db unavailable")
+
+    worker = _make_worker(repo, channel, resolve_run_summary=resolver)
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    # A summary lookup failure must never block the notification itself.
+    assert repo.sent == ["delivery-1"]
+    assert repo.failed == []
+    assert "Finished a run." in channel.sent[0][1]
+    assert "Result:" not in channel.sent[0][1]
+
+
+@pytest.mark.asyncio
+async def test_delivery_sends_skeleton_when_summary_is_missing():
+    repo = FakeDeliveryRepo([_delivery_row()])
+    channel = FakeChannel()
+    worker = _make_worker(repo, channel, resolve_run_summary=lambda run_id, user_id: None)
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert repo.sent == ["delivery-1"]
+    text = channel.sent[0][1]
+    assert "Finished a run." in text
+    assert "Result:" not in text
+
+
+@pytest.mark.asyncio
+async def test_legacy_row_for_unsupported_provider_fails_terminally_without_send():
+    # Rows queued before only push-capable providers got rows: they can never
+    # be sent, so they end at once instead of using up five retries.
+    repo = FakeDeliveryRepo([_delivery_row(provider="feishu", target="ou_123")])
+    channel = FakeChannel()
+    resolved_channels, checked_connections = [], []
+
+    def resolve_channel(provider):
+        resolved_channels.append(provider)
+        return channel
+
+    def resolve_connections(owner):
+        checked_connections.append(owner)
+        return [_connection(provider="feishu", external_account_id="ou_123")]
+
+    worker = NotificationDeliveryWorker(delivery_repo=repo, resolve_channel=resolve_channel, resolve_connections=resolve_connections)
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert channel.sent == []
+    assert resolved_channels == [] and checked_connections == []
+    assert repo.sent == []
+    assert repo.terminal_failures == [("delivery-1", "provider does not support proactive notifications")]
+
+
+@pytest.mark.asyncio
+async def test_task_stopped_is_enriched_with_summary():
+    row = _delivery_row(event="task_stopped", payload={"payload_version": 2, "task_title": "Release check", "reason_code": "agent_stop", "run_status": "success", "stop_condition": "all items are ticked"})
+    repo = FakeDeliveryRepo([row])
+    channel = FakeChannel()
+    seen = []
+
+    def resolver(run_id, user_id):
+        seen.append((run_id, user_id))
+        return "## All 12 items are ticked\nmore"
+
+    await _make_worker(repo, channel, resolve_run_summary=resolver).run_once(now=datetime.now(UTC))
+
+    assert seen == [("run-1", "user-1")]
+    assert channel.sent[0][1].splitlines() == [
+        "Scheduled task “Release check”",
+        "Paused by agent: its stop condition was met (all items are ticked).",
+        "Result: All 12 items are ticked",
+        "Open DeerFlow → Scheduled tasks for details.",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event", "payload"),
+    [
+        ("run_failed", {"payload_version": 2, "run_status": "failed"}),
+        ("task_finished", {"payload_version": 2, "reason_code": "max_runs", "run_status": "failed", "max_runs": 3}),
+        ("task_stopped", {"payload_version": 2, "reason_code": "agent_stop", "run_status": "interrupted"}),
+    ],
+)
+async def test_failed_run_is_not_enriched(event, payload):
+    repo = FakeDeliveryRepo([_delivery_row(event=event, payload=payload)])
+    channel = FakeChannel()
+    called = []
+
+    def resolver(run_id, user_id):
+        called.append(run_id)
+        return "partial answer"
+
+    await _make_worker(repo, channel, resolve_run_summary=resolver).run_once(now=datetime.now(UTC))
+
+    assert called == []
+    assert repo.sent == ["delivery-1"]
+    assert "partial answer" not in channel.sent[0][1]
+    assert "Result:" not in channel.sent[0][1]
+
+
+@pytest.mark.asyncio
+async def test_worker_uses_default_locale_for_rows_without_locale():
+    legacy = _delivery_row(delivery_id="legacy", event="run_failed", payload={"run_status": "failed", "error": "boom", "task_id": "task-1"})
+    no_preference = _delivery_row(delivery_id="no-preference", event="run_failed", payload={"payload_version": 2, "locale": None, "run_status": "failed"})
+    english_owner = _delivery_row(delivery_id="english-owner", event="run_failed", payload={"payload_version": 2, "locale": "en-US", "run_status": "failed"})
+    repo = FakeDeliveryRepo([legacy, no_preference, english_owner])
+    channel = FakeChannel()
+    worker = NotificationDeliveryWorker(delivery_repo=repo, resolve_channel=lambda provider: channel, default_locale="zh-CN")
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert repo.sent == ["legacy", "no-preference", "english-owner"]
+    texts = [text for _target, text in channel.sent]
+    assert texts[0].splitlines()[1:] == ["一次运行出错了。", "在 DeerFlow 的定时任务页查看详情。"]
+    assert texts[1] == texts[0].replace("Untitled task", "未命名任务")
+    # The owner's own UI language wins over the configured default.
+    assert texts[2].splitlines()[1] == "A run failed."
+
+
+class FakeWsClient:
+    def __init__(self, *, errcode=0):
+        self.calls = []
+        self.errcode = errcode
+
+    async def send_message(self, chatid, body):
+        self.calls.append((chatid, body))
+        return {"errcode": self.errcode, "errmsg": "ok"}
+
+
+def _wecom_channel(ws_client=None):
+    channel = WeComChannel(bus=MessageBus(), config={})
+    channel._ws_client = ws_client
+    channel._running = True
+    channel._ws_transport_up = ws_client is not None
+    return channel
+
+
+@pytest.mark.asyncio
+async def test_wecom_send_notification_pushes_markdown():
+    ws_client = FakeWsClient()
+    channel = _wecom_channel(ws_client)
+
+    await channel.send_notification(target="GaoZhiChao", text_markdown="**done**")
+
+    assert len(ws_client.calls) == 1
+    chatid, body = ws_client.calls[0]
+    assert chatid == "GaoZhiChao"
+    assert body == {"msgtype": "markdown", "markdown": {"content": "**done**"}}
+
+
+@pytest.mark.asyncio
+async def test_wecom_send_notification_raises_on_platform_error():
+    ws_client = FakeWsClient(errcode=853000)
+    channel = _wecom_channel(ws_client)
+
+    with pytest.raises(RuntimeError, match="853000"):
+        await channel.send_notification(target="GaoZhiChao", text_markdown="**done**")
+
+
+@pytest.mark.asyncio
+async def test_wecom_send_notification_raises_when_not_connected():
+    channel = _wecom_channel(None)
+    channel._running = True
+
+    with pytest.raises(ChannelUnavailable, match="not connected"):
+        await channel.send_notification(target="GaoZhiChao", text_markdown="**done**")
+
+
+@pytest.mark.asyncio
+async def test_wecom_send_notification_parks_when_the_sdk_socket_is_closed():
+    # The real SDK client raises a plain RuntimeError when its socket is not open,
+    # which would count against the retry budget instead of parking the row.
+    aibot = pytest.importorskip("aibot")
+    ws_client = aibot.WSClient(aibot.WSClientOptions(bot_id="bot", secret="secret"))
+    assert ws_client.is_connected is False
+    channel = _wecom_channel(ws_client)
+
+    with pytest.raises(ChannelUnavailable, match="not connected"):
+        await channel.send_notification(target="GaoZhiChao", text_markdown="**done**")
+
+    assert channel._ws_transport_up is False
+
+
+@pytest.mark.asyncio
+async def test_wecom_send_notification_wraps_transport_errors_as_unavailable():
+    class BrokenWsClient:
+        async def send_message(self, chatid, body):
+            raise ConnectionError("websocket closed")
+
+    channel = _wecom_channel(BrokenWsClient())
+    channel._ws_transport_up = False  # single probe; no retry/sleep storm
+
+    with pytest.raises(ChannelUnavailable, match="transport unavailable"):
+        await channel.send_notification(target="GaoZhiChao", text_markdown="**done**")
+
+    assert channel._ws_transport_up is False
+
+
+@pytest.mark.asyncio
+async def test_wecom_send_notification_parks_on_the_sdk_runtime_error():
+    # The SDK's send path raises plain RuntimeError for a closed socket, a
+    # connection dropped with replies pending and a full reply queue; none is
+    # a ConnectionError/OSError. With is_connected still (stale) True this used
+    # to escape the ChannelUnavailable wrapping and count against the budget.
+    class StaleSocketWsClient:
+        is_connected = True
+
+        def __init__(self):
+            self.calls = 0
+
+        async def send_message(self, chatid, body):
+            self.calls += 1
+            raise RuntimeError("WebSocket not connected, unable to send data")
+
+    ws_client = StaleSocketWsClient()
+    channel = _wecom_channel(ws_client)
+    channel._ws_transport_up = False  # single probe; no retry/sleep storm
+
+    with pytest.raises(ChannelUnavailable, match="transport unavailable"):
+        await channel.send_notification(target="GaoZhiChao", text_markdown="**done**")
+
+    assert ws_client.calls == 1
+    assert channel._ws_transport_up is False
+
+
+@pytest.mark.asyncio
+async def test_wecom_send_notification_counts_the_sdk_ack_rejection():
+    # The SDK never returns a non-zero errcode ACK as a dict: _handle_reply_ack
+    # turns it into RuntimeError("Reply ack error: ...") from send_message. The
+    # socket is fine, so this must count against the budget, not park.
+    class RejectingWsClient:
+        is_connected = True
+
+        async def send_message(self, chatid, body):
+            raise RuntimeError("Reply ack error: errcode=60111, errmsg=invalid userid")
+
+    channel = _wecom_channel(RejectingWsClient())
+    channel._ws_transport_up = False  # single probe; no retry/sleep storm
+
+    with pytest.raises(RuntimeError, match="errcode=60111"):
+        await channel.send_notification(target="GaoZhiChao", text_markdown="**done**")
+
+    # The ACK came back on this socket, so the transport is known to be up.
+    assert channel._ws_transport_up is True
+
+
+@pytest.mark.asyncio
+async def test_wecom_send_notification_rejection_prefix_survives_the_retry_branch(monkeypatch):
+    # With the transport believed up, the send runs under _send_with_retry; the
+    # prefix check relies on the helper re-raising the SDK's own exception
+    # object rather than wrapping it.
+    import app.channels.base as base_module
+
+    async def no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(base_module.asyncio, "sleep", no_sleep)
+
+    class RejectingWsClient:
+        is_connected = True
+
+        def __init__(self):
+            self.calls = 0
+
+        async def send_message(self, chatid, body):
+            self.calls += 1
+            raise RuntimeError("Reply ack error: errcode=60111, errmsg=invalid userid")
+
+    ws_client = RejectingWsClient()
+    channel = _wecom_channel(ws_client)
+    assert channel._ws_transport_up is True
+
+    with pytest.raises(RuntimeError, match="^Reply ack error: errcode=60111"):
+        await channel.send_notification(target="GaoZhiChao", text_markdown="**done**")
+
+    assert ws_client.calls == 3
+    assert channel._ws_transport_up is True
+
+
+@pytest.mark.asyncio
+async def test_wecom_send_notification_parks_on_the_socket_layer_close_exception():
+    websockets_exceptions = pytest.importorskip("websockets.exceptions")
+    websockets_frames = pytest.importorskip("websockets.frames")
+
+    class ClosingWsClient:
+        is_connected = True
+
+        async def send_message(self, chatid, body):
+            close = websockets_frames.Close(1006, "abnormal closure")
+            raise websockets_exceptions.ConnectionClosedError(close, None)
+
+    channel = _wecom_channel(ClosingWsClient())
+    channel._ws_transport_up = False  # single probe; no retry/sleep storm
+
+    with pytest.raises(ChannelUnavailable, match="transport unavailable"):
+        await channel.send_notification(target="GaoZhiChao", text_markdown="**done**")
+
+    assert channel._ws_transport_up is False
+
+
+@pytest.mark.asyncio
+async def test_wecom_send_notification_propagates_deterministic_errors():
+    class InvalidTargetWsClient:
+        async def send_message(self, chatid, body):
+            raise ValueError("invalid target")
+
+    channel = _wecom_channel(InvalidTargetWsClient())
+
+    with pytest.raises(ValueError, match="invalid target"):
+        await channel.send_notification(target="GaoZhiChao", text_markdown="**done**")
+
+
+@pytest.mark.asyncio
+async def test_binding_check_reads_the_real_connection_repository_shape(tmp_path):
+    # The worker matches on the dict keys the real repository emits; a key
+    # rename there would otherwise fail every delivery silently.
+    from deerflow.persistence.channel_connections import ChannelConnectionRepository
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+
+    await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'conn.db'}", sqlite_dir=str(tmp_path))
+    try:
+        conn_repo = ChannelConnectionRepository(get_session_factory())
+        bound = await conn_repo.upsert_connection(owner_user_id="user-1", provider="wecom", external_account_id="GaoZhiChao")
+        repo = FakeDeliveryRepo([_delivery_row()])
+        worker = _make_worker(repo, FakeChannel(), resolve_connections=conn_repo.list_connections)
+
+        assert await worker._target_still_connected(_delivery_row()) is True
+        # Another owner's row never counts for this delivery.
+        assert await worker._target_still_connected({**_delivery_row(), "owner_user_id": "user-2"}) is False
+
+        assert await conn_repo.disconnect_connection(connection_id=bound["id"], owner_user_id="user-1") is True
+        assert await worker._target_still_connected(_delivery_row()) is False
+    finally:
+        await close_engine()

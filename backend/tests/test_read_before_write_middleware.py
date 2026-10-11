@@ -357,7 +357,7 @@ class TestErrorStringSandboxes:
 
     def test_existing_file_read_still_marked_and_write_allowed(self):
         mw = self._error_string_middleware({self.PATH: "v1"})
-        read_request = _make_request("read_file", {"description": "d", "path": self.PATH})
+        read_request = _make_request("read_file", {"description": "d", "path": self.PATH}, tool_call_id="r1")
         read_handler = MagicMock(return_value=ToolMessage(content="v1", tool_call_id="r1", name="read_file"))
         read_result = mw.wrap_tool_call(read_request, read_handler)
         assert read_result.additional_kwargs["deerflow_read_mark"]["hash"] == _sha("v1")
@@ -423,7 +423,7 @@ class TestSamePathSerialization:
             return ToolMessage(content="OK", tool_call_id="w-call", name="write_file")
 
         async def run():
-            read_task = asyncio.create_task(mw.awrap_tool_call(_make_request("read_file", {"description": "d", "path": self.PATH}), read_handler))
+            read_task = asyncio.create_task(mw.awrap_tool_call(_make_request("read_file", {"description": "d", "path": self.PATH}, tool_call_id="r-call"), read_handler))
             await asyncio.sleep(0.01)
             write_task = asyncio.create_task(
                 mw.awrap_tool_call(
@@ -792,3 +792,233 @@ class TestBlockedPayloadElision:
         assert len(calls) == 1
         assert json.loads(calls[0]["arguments"])["content"].startswith("[payload elided: 5000 chars")
         assert payload not in json.dumps(sent, ensure_ascii=False)
+
+    def test_unanswered_write_with_a_reused_id_is_not_labeled_blocked(self):
+        """Review on #5374: an interrupted write must not inherit the blocked result of a later call that reused its id."""
+        mw = self._middleware()
+        draft = "d" * 5000
+        interrupted = AIMessage(content="", tool_calls=[{"name": "write_file", "id": "reused", "args": {"description": "d", "path": "/mnt/user-data/outputs/other.md", "content": draft}}])
+        blocked_ai, blocked = self._blocked_turn(mw, "write_file", {"description": "d", "path": self.PATH, "content": "b" * 5000}, tool_call_id="reused")
+        request = self._model_request([HumanMessage(content="go"), interrupted, blocked_ai, blocked])
+        handler = MagicMock(return_value=AIMessage(content="ok"))
+
+        mw.wrap_model_call(request, handler)
+
+        captured = self._captured(handler).messages
+        assert captured[1] is interrupted
+        assert captured[2].tool_calls[0]["args"]["content"].startswith("[payload elided: 5000 chars")
+
+    def test_duplicate_ids_in_one_turn_are_never_rewritten(self):
+        """Review on #5374: a successful sibling sharing the id of a blocked write must not be rewritten into it."""
+        from deerflow.agents.middlewares.read_before_write_middleware import WRITE_BLOCK_KEY
+
+        mw = self._middleware()
+        turn = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "write_file", "id": "dup", "args": {"description": "d", "path": self.PATH, "content": "a" * 5000}},
+                {"name": "write_file", "id": "dup", "args": {"description": "d", "path": "/mnt/user-data/outputs/other.md", "content": "b" * 5000}},
+            ],
+        )
+        blocked = ToolMessage(content="Error: blocked", tool_call_id="dup", name="write_file", status="error", additional_kwargs={WRITE_BLOCK_KEY: {"path": self.PATH, "tool": "write_file"}})
+        ok = ToolMessage(content="OK", tool_call_id="dup", name="write_file")
+        request = self._model_request([HumanMessage(content="go"), turn, blocked, ok])
+        handler = MagicMock(return_value=AIMessage(content="ok"))
+
+        mw.wrap_model_call(request, handler)
+
+        assert self._captured(handler) is request
+
+    def test_unhashable_sibling_id_does_not_crash_the_model_call(self):
+        """Review on #5374 (round 3): a malformed sibling id next to a blocked call must be skipped, not hashed."""
+        mw = self._middleware()
+        ai, blocked = self._blocked_turn(mw, "write_file", {"description": "d", "path": self.PATH, "content": "x" * 5000})
+        ai.tool_calls.append({"name": "bash", "id": ["not", "a", "string"], "args": {"command": "ls"}})
+        request = self._model_request([HumanMessage(content="go"), ai, blocked])
+        handler = MagicMock(return_value=AIMessage(content="ok"))
+
+        mw.wrap_model_call(request, handler)
+
+        rewritten = self._captured(handler).messages[1]
+        assert rewritten.tool_calls[0]["args"]["content"].startswith("[payload elided: 5000 chars")
+        assert rewritten.tool_calls[1] == ai.tool_calls[1]
+
+
+def test_lock_scope_resolves_overwrite_wrapped_sandbox():
+    """Fork-restored state wraps sandbox in Overwrite; lock scope must still resolve it."""
+    from langgraph.types import Overwrite
+
+    from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
+
+    req = ToolCallRequest(
+        tool_call={"name": "write_file", "args": {}, "id": "tc-1"},
+        tool=None,
+        state={"sandbox": Overwrite({"sandbox_id": "sb-fork-lock"})},
+        runtime=MagicMock(context={}),
+    )
+    assert ReadBeforeWriteMiddleware._lock_scope(req) == "sb-fork-lock"
+
+
+@pytest.mark.parametrize(
+    "tool,content,expected_desc",
+    [
+        ("write_file", "line1\nline2\nline3", "3 lines"),
+        ("write_file", "line1\n", "1 line"),
+        ("write_file", "line1", "1 line"),
+        ("write_file", "", "0 lines"),
+        ("str_replace", "line1\nline2\n", "2 lines"),
+        # Exotic separators: \f and \u2028 are NOT line boundaries in LocalSandbox
+        # (it ends lines only at \n), so count must match LocalSandbox.
+        ("write_file", "x\fx\n", "1 line"),
+        ("write_file", "x\u2028x\n", "1 line"),
+    ],
+)
+def test_block_message_line_desc(tool, content, expected_desc):
+    PATH = "/mnt/user-data/outputs/report.md"
+    args = {"description": "d", "path": PATH, "content": "v2"} if tool == "write_file" else {"description": "d", "path": PATH, "old_str": "a", "new_str": "b"}
+    mw = _middleware({PATH: content})
+    result = mw.wrap_tool_call(_make_request(tool, args), MagicMock())
+    assert result.status == "error"
+    assert f"{PATH} already exists ({expected_desc}) and you have not read" in result.content
+
+
+@pytest.mark.parametrize("line_count", [401, 403, 404, 500])
+def test_gate_block_on_numeric_line_count_is_recoverable(line_count):
+    """Files with 401/403/404/500 lines must not be misclassified as HTTP error codes."""
+    from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
+
+    PATH = "/mnt/user-data/outputs/report.md"
+    # Build a file with exactly `line_count` lines (no trailing newline).
+    content = "\n" * (line_count - 1) + "x"
+    mw = _middleware({PATH: content})
+    result = mw.wrap_tool_call(
+        _make_request("write_file", {"description": "d", "path": PATH, "content": "v2"}),
+        MagicMock(),
+    )
+    assert result.status == "error"
+    meta = (result.additional_kwargs or {}).get(TOOL_META_KEY)
+    assert meta is not None, f"gate block on {line_count}-line file must carry deerflow_tool_meta"
+    assert meta["recoverable_by_model"] is True, f"{line_count}-line file must not be classified as a fatal auth/server error"
+    assert meta["recommended_next_action"] != "stop", f"{line_count}-line gate block must not tell the agent to stop"
+
+
+class TestStampingGateBugFix:
+    """In-band errors from read_file must not stamp a read mark (issue #6019)."""
+
+    PATH = "/mnt/user-data/outputs/report.md"
+
+    @pytest.mark.parametrize(
+        "no_content_result",
+        [
+            pytest.param("READ_FILE_EMPTY_RANGE", id="empty_range"),
+            pytest.param("READ_FILE_START_LINE_EXCEEDS", id="start_exceeds"),
+            pytest.param("READ_FILE_INVALID_START_LINE", id="invalid_start"),
+            pytest.param("READ_FILE_INVALID_END_LINE", id="invalid_end"),
+        ],
+    )
+    def test_in_band_error_read_does_not_stamp_mark(self, no_content_result):
+        from deerflow.agents.middlewares.read_before_write_middleware import READ_MARK_KEY
+        from deerflow.sandbox import read_file_contract as c
+
+        result_string = getattr(c, no_content_result)
+        mw = _middleware({self.PATH: "a\nb\nc\n"})
+        req = _make_request("read_file", {"description": "d", "path": self.PATH})
+        res = mw.wrap_tool_call(
+            req,
+            lambda r: ToolMessage(content=result_string, tool_call_id="call-1", name="read_file"),
+        )
+        assert READ_MARK_KEY not in res.additional_kwargs, f"in-band error '{result_string}' must not stamp a read mark"
+
+    def test_in_band_error_read_leaves_gate_closed(self):
+        """A write after an in-band-error read must still be blocked."""
+        from deerflow.agents.middlewares.read_before_write_middleware import READ_MARK_KEY
+        from deerflow.sandbox.read_file_contract import READ_FILE_EMPTY_RANGE
+
+        mw = _middleware({self.PATH: "a\nb\nc\n"})
+        req = _make_request("read_file", {"description": "d", "path": self.PATH})
+        read_res = mw.wrap_tool_call(
+            req,
+            lambda r: ToolMessage(content=READ_FILE_EMPTY_RANGE, tool_call_id="call-1", name="read_file"),
+        )
+        assert READ_MARK_KEY not in read_res.additional_kwargs
+        write_req = _make_request(
+            "write_file",
+            {"description": "d", "path": self.PATH, "content": "x"},
+            messages=[read_res],
+        )
+        handler = MagicMock(return_value=ToolMessage(content="OK", tool_call_id="call-1", name="write_file"))
+        result = mw.wrap_tool_call(write_req, handler)
+        handler.assert_not_called()
+        assert result.status == "error"
+
+    @pytest.mark.parametrize(
+        "content,line_range",
+        [
+            pytest.param("a\n\nb\n", {"start_line": 2, "end_line": 2}, id="both_bounds"),
+            pytest.param("a\n\n", {"start_line": 2}, id="start_only"),
+            pytest.param("\nb\n", {"end_line": 1}, id="end_only"),
+            pytest.param("a\r\n\r\nb\r\n", {"start_line": 2, "end_line": 2}, id="crlf_both_bounds"),
+            pytest.param("a\r\n\r\n", {"start_line": 2}, id="crlf_start_only"),
+            pytest.param("\r\nb\r\n", {"end_line": 1}, id="crlf_end_only"),
+        ],
+    )
+    def test_blank_line_range_stamps_full_hash_and_allows_write(self, tmp_path, monkeypatch, content, line_range):
+        """Valid blank ranges satisfy the gate like other successful ranged reads."""
+        from types import SimpleNamespace
+
+        from deerflow.agents.middlewares.read_before_write_middleware import READ_MARK_KEY, ReadBeforeWriteMiddleware
+        from deerflow.sandbox import tools as sandbox_tools
+        from deerflow.sandbox.local.local_sandbox import LocalSandbox
+        from deerflow.sandbox.read_file_contract import READ_FILE_EMPTY
+
+        outputs = tmp_path / "outputs"
+        outputs.mkdir()
+        (outputs / "report.md").write_text(content, encoding="utf-8", newline="")
+        runtime = SimpleNamespace(
+            state={"sandbox": {"sandbox_id": "local:t-test"}, "thread_data": {"outputs_path": str(outputs)}},
+            context={"thread_id": "t-test"},
+        )
+        monkeypatch.setattr(sandbox_tools, "ensure_sandbox_initialized", lambda runtime: LocalSandbox("t-test"))
+        monkeypatch.setattr(sandbox_tools, "ensure_thread_directories_exist", lambda runtime: None)
+        mw = ReadBeforeWriteMiddleware()
+        read_req = ToolCallRequest(
+            tool_call={"name": "read_file", "args": {"path": self.PATH, **line_range}, "id": "read-blank"},
+            tool=None,
+            state=runtime.state,
+            runtime=runtime,
+        )
+
+        def read_handler(request):
+            return ToolMessage(
+                content=sandbox_tools.read_file_tool.func(runtime=request.runtime, **request.tool_call["args"]),
+                tool_call_id=request.tool_call["id"],
+                name="read_file",
+            )
+
+        read_res = mw.wrap_tool_call(read_req, read_handler)
+        assert read_res.content == READ_FILE_EMPTY
+        assert read_res.additional_kwargs[READ_MARK_KEY] == {"path": self.PATH, "hash": _sha(content)}
+
+        write_req = ToolCallRequest(
+            tool_call={"name": "write_file", "args": {"path": self.PATH, "content": "updated"}, "id": "write-after-blank"},
+            tool=None,
+            state={**runtime.state, "messages": [read_res]},
+            runtime=runtime,
+        )
+        handler = MagicMock(return_value=ToolMessage(content="OK", tool_call_id="write-after-blank", name="write_file"))
+        result = mw.wrap_tool_call(write_req, handler)
+        handler.assert_called_once_with(write_req)
+        assert result.status == "success"
+
+    def test_empty_file_read_still_stamps_mark(self):
+        """READ_FILE_EMPTY (genuine empty-file read) must still stamp a mark."""
+        from deerflow.agents.middlewares.read_before_write_middleware import READ_MARK_KEY
+        from deerflow.sandbox.read_file_contract import READ_FILE_EMPTY
+
+        mw = _middleware({self.PATH: ""})
+        req = _make_request("read_file", {"description": "d", "path": self.PATH})
+        res = mw.wrap_tool_call(
+            req,
+            lambda r: ToolMessage(content=READ_FILE_EMPTY, tool_call_id="call-1", name="read_file"),
+        )
+        assert READ_MARK_KEY in res.additional_kwargs, "a full read of a genuinely empty file must stamp a read mark"

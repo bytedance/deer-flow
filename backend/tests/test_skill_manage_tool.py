@@ -252,6 +252,79 @@ def test_skill_manage_remove_file_updates_sandbox_projection_before_return(monke
     assert not projected_file.exists()
 
 
+def _setup_demo_skill_with_binary_asset(monkeypatch, tmp_path):
+    skills_root = tmp_path / "skills"
+    config = _make_config(skills_root)
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.skills.security_scanner.get_app_config", lambda: config)
+    from deerflow.config.paths import Paths
+
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+
+    async def _refresh(user_id: str):
+        return None
+
+    monkeypatch.setattr(skill_manage_module, "refresh_user_skills_system_prompt_cache_async", _refresh)
+    monkeypatch.setattr(skill_manage_module, "scan_skill_content", lambda *args, **kwargs: _async_result("allow", "ok"))
+    runtime = _make_runtime(user_id="default")
+    anyio.run(skill_manage_module.skill_manage_tool.coroutine, runtime, "create", "demo-skill", _skill_content("demo-skill"))
+    # A binary support file as a .skill archive install would leave it (the
+    # installer only rejects *executable* binaries).
+    skill_dir = tmp_path / "users" / "default" / "skills" / "custom" / "demo-skill"
+    (skill_dir / "assets" / "nested").mkdir(parents=True)
+    (skill_dir / "assets" / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\xff\xfe\x00")
+    (skill_dir / "assets" / "nested" / "inner.txt").write_text("inner", encoding="utf-8")
+    return runtime, skill_dir
+
+
+def _history_records(skill_dir: Path) -> list[dict]:
+    import json
+
+    history_file = skill_dir.parent.parent / "history" / "demo-skill.jsonl"
+    if not history_file.exists():  # storage layouts differ; fall back to a search
+        history_file = next(p for p in skill_dir.parent.parent.rglob("*.jsonl") if "demo-skill" in p.name)
+    return [json.loads(line) for line in history_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_skill_manage_remove_file_handles_a_binary_support_file(monkeypatch, tmp_path):
+    runtime, skill_dir = _setup_demo_skill_with_binary_asset(monkeypatch, tmp_path)
+
+    result = anyio.run(skill_manage_module.skill_manage_tool.coroutine, runtime, "remove_file", "demo-skill", None, "assets/logo.png")
+
+    assert result == "Removed 'assets/logo.png' from custom skill 'demo-skill'."
+    assert not (skill_dir / "assets" / "logo.png").exists()
+    record = _history_records(skill_dir)[-1]
+    assert record["action"] == "remove_file"
+    assert record["file_path"] == "assets/logo.png"
+    assert record["prev_content"] is None
+
+
+def test_skill_manage_write_file_can_overwrite_a_binary_support_file(monkeypatch, tmp_path):
+    runtime, skill_dir = _setup_demo_skill_with_binary_asset(monkeypatch, tmp_path)
+
+    result = anyio.run(skill_manage_module.skill_manage_tool.coroutine, runtime, "write_file", "demo-skill", "now text", "assets/logo.png")
+
+    assert result == "Wrote 'assets/logo.png' for custom skill 'demo-skill'."
+    assert (skill_dir / "assets" / "logo.png").read_text(encoding="utf-8") == "now text"
+    record = _history_records(skill_dir)[-1]
+    assert record["action"] == "write_file"
+    assert record["prev_content"] is None
+    assert record["new_content"] == "now text"
+
+
+@pytest.mark.parametrize("action, content", [("remove_file", None), ("write_file", "x")])
+@pytest.mark.parametrize("path", ["assets", "assets/nested"], ids=["bare-subdir", "nested-dir"])
+def test_skill_manage_rejects_a_support_directory_path(monkeypatch, tmp_path, action, content, path):
+    runtime, skill_dir = _setup_demo_skill_with_binary_asset(monkeypatch, tmp_path)
+
+    with pytest.raises(ValueError, match="file"):
+        anyio.run(skill_manage_module.skill_manage_tool.coroutine, runtime, action, "demo-skill", content, path)
+
+    assert (skill_dir / "assets" / "logo.png").exists()
+    assert (skill_dir / "assets" / "nested" / "inner.txt").read_text(encoding="utf-8") == "inner"
+
+
 def test_skill_manage_static_critical_blocks_create_before_llm(monkeypatch, tmp_path):
     skills_root = tmp_path / "skills"
     config = _make_config(skills_root)

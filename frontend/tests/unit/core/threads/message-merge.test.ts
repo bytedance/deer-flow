@@ -116,11 +116,12 @@ test("mergeMessages lets live thread messages replace overlapping history", () =
 });
 
 test("mergeMessages preserves historical run metadata on a live checkpoint replacement", () => {
+  const skillUsages = [{ name: "report", content: "Original snapshot" }];
   const persistedAi = {
     id: "ai-1",
     type: "ai",
     content: "persisted",
-    additional_kwargs: { turn_duration: 114 },
+    additional_kwargs: { turn_duration: 114, skill_usages: skillUsages },
   } as Message;
   const history = buildVisibleHistoryMessages(
     [
@@ -146,7 +147,11 @@ test("mergeMessages preserves historical run metadata on a live checkpoint repla
       run_id: "run-1",
       // The replacement keeps the trusted feed position alongside the run
       // metadata: dropping deerflow_seq here was defect R3.
-      additional_kwargs: { turn_duration: 114, deerflow_seq: 1 },
+      additional_kwargs: {
+        turn_duration: 114,
+        deerflow_seq: 1,
+        skill_usages: skillUsages,
+      },
     },
   ]);
 });

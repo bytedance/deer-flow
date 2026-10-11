@@ -1,5 +1,6 @@
 from .app_config import get_app_config
 from .extensions_config import ExtensionsConfig, get_extensions_config
+from .knowledge_base_config import KnowledgeBaseConfig
 from .loop_detection_config import LoopDetectionConfig
 from .memory_config import MemoryConfig, get_memory_config
 from .paths import Paths, get_paths
@@ -21,6 +22,7 @@ __all__ = [
     "get_paths",
     "SkillsConfig",
     "ExtensionsConfig",
+    "KnowledgeBaseConfig",
     "get_extensions_config",
     "LoopDetectionConfig",
     "MemoryConfig",

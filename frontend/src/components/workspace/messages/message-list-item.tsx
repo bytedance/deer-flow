@@ -11,6 +11,7 @@ import {
 import {
   memo,
   useCallback,
+  useId,
   useMemo,
   useState,
   type ImgHTMLAttributes,
@@ -22,11 +23,6 @@ import {
   MessageContent as AIElementMessageContent,
   MessageToolbar,
 } from "@/components/ai-elements/message";
-import {
-  Reasoning,
-  ReasoningTrigger,
-} from "@/components/ai-elements/reasoning";
-import { Shimmer } from "@/components/ai-elements/shimmer";
 import { Task, TaskTrigger } from "@/components/ai-elements/task";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -44,6 +40,7 @@ import {
   type KnowledgeSource,
   extractCitationSources,
 } from "@/core/citations/sources";
+import { readConversationReferences } from "@/core/conversation-references";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   extractContentFromMessage,
@@ -59,18 +56,22 @@ import {
   resolveSlashSkillDisplay,
 } from "@/core/skills";
 import { useSkills } from "@/core/skills/hooks";
-import { SafeReasoningContent } from "@/core/streamdown/components";
+import { pathOfThread } from "@/core/threads/utils";
 import { cn } from "@/lib/utils";
 
 import { WorkspaceChangeBadge } from "../changes";
 import { CitationSourcesPanel } from "../citations/citation-sources-panel";
+import { KnowledgeSourcesPanel } from "../citations/knowledge-source";
+import { ConversationReferenceChip } from "../conversation-references/conversation-reference-chip";
 import { CopyButton } from "../copy-button";
 import { ReferenceAttachmentSummary } from "../sidecar/reference-attachments";
 import { SlashSkillChip } from "../slash-skill-chip";
 import { Tooltip } from "../tooltip";
 
+import { KnowledgeScopeSummary } from "./knowledge-scope-summary";
 import { MarkdownContent } from "./markdown-content";
 import { createMarkdownLinkComponent } from "./markdown-link";
+import { MessageReasoning } from "./message-reasoning";
 
 function FeedbackButtons({
   threadId,
@@ -150,7 +151,9 @@ export function MessageListItem({
   knowledgeSources = [],
   showCopyButton = true,
   showWorkspaceChanges = false,
+  durationSeconds,
   canEdit = false,
+  editLockedByGoal = false,
   isEditPending = false,
   onEditAndRegenerate,
 }: {
@@ -164,11 +167,15 @@ export function MessageListItem({
   runId?: string;
   showCopyButton?: boolean;
   showWorkspaceChanges?: boolean;
+  durationSeconds?: number;
   canEdit?: boolean;
+  /** Edit would be allowed but for an active goal: show the pencil locked. */
+  editLockedByGoal?: boolean;
   isEditPending?: boolean;
   onEditAndRegenerate?: (replacementText: string) => void | Promise<boolean>;
 }) {
   const { t } = useI18n();
+  const editLockedId = useId();
   const isHuman = message.type === "human";
   // One derivation serves both editing and the toolbar, and only runs when
   // either consumer can use it: assistant rows never render this toolbar
@@ -231,6 +238,7 @@ export function MessageListItem({
         knowledgeSources={knowledgeSources}
         runId={runId}
         showWorkspaceChanges={showWorkspaceChanges}
+        durationSeconds={durationSeconds}
         editState={
           isHuman && isEditing
             ? {
@@ -250,8 +258,10 @@ export function MessageListItem({
             isHuman
               ? "absolute right-0 -bottom-9 left-0 justify-end"
               : "absolute right-0 bottom-0 left-0",
-            "z-20 opacity-0 transition-opacity delay-200 duration-300 group-hover/conversation-message:opacity-100",
+            // focus-within: a keyboard user tabbing to a button sees it.
+            "z-20 opacity-0 transition-opacity delay-200 duration-300 group-hover/conversation-message:opacity-100 focus-within:opacity-100",
           )}
+          data-testid="message-toolbar"
         >
           <div className="pointer-events-auto flex gap-1">
             <CopyButton clipboardData={copyData} />
@@ -265,10 +275,36 @@ export function MessageListItem({
                   disabled={isEditPending || isSubmittingEdit}
                   onClick={startEditing}
                 >
-                  <PencilIcon className="size-3" />
+                  <PencilIcon className="size-4" />
                 </Button>
               </Tooltip>
             )}
+            {!canEdit &&
+              editLockedByGoal &&
+              isHuman &&
+              onEditAndRegenerate &&
+              !isEditing && (
+                <>
+                  <Tooltip content={t.inputBox.goalBar.editLocked}>
+                    <Button
+                      aria-label={t.common.editAndRerun}
+                      aria-disabled="true"
+                      aria-describedby={editLockedId}
+                      className="aria-disabled:cursor-not-allowed"
+                      size="icon-sm"
+                      type="button"
+                      variant="ghost"
+                      data-testid="message-edit-locked"
+                    >
+                      {/* Dim only the icon so the focus ring stays at full strength. */}
+                      <PencilIcon className="size-4 opacity-50" />
+                    </Button>
+                  </Tooltip>
+                  <span id={editLockedId} className="sr-only">
+                    {t.inputBox.goalBar.editLocked}
+                  </span>
+                </>
+              )}
             {feedback !== undefined && runId && threadId && (
               <FeedbackButtons
                 threadId={threadId}
@@ -382,6 +418,7 @@ function MessageContent_({
   knowledgeSources = [],
   runId,
   showWorkspaceChanges = false,
+  durationSeconds,
   editState,
 }: {
   className?: string;
@@ -392,6 +429,7 @@ function MessageContent_({
   knowledgeSources?: readonly KnowledgeSource[];
   runId?: string;
   showWorkspaceChanges?: boolean;
+  durationSeconds?: number;
   editState?: {
     draft: string;
     disabled: boolean;
@@ -403,15 +441,6 @@ function MessageContent_({
 }) {
   const { t } = useI18n();
   const isHuman = message.type === "human";
-  const getReasoningMessage = useCallback(
-    (isStreaming: boolean) =>
-      isStreaming ? (
-        <Shimmer duration={1}>{t.runDuration.reasoning}</Shimmer>
-      ) : (
-        t.runDuration.reasoning
-      ),
-    [t.runDuration.reasoning],
-  );
   const components = useMemo(
     () => ({
       img: (props: ImgHTMLAttributes<HTMLImageElement>) => (
@@ -459,6 +488,10 @@ function MessageContent_({
       ),
     [message.additional_kwargs],
   );
+  const conversationReferences = useMemo(
+    () => readConversationReferences(message.additional_kwargs),
+    [message.additional_kwargs],
+  );
 
   const contentToDisplay = useMemo(() => {
     if (isHuman) {
@@ -497,10 +530,12 @@ function MessageContent_({
   if (!isHuman && reasoningContent && !rawContent) {
     return (
       <AIElementMessageContent className={className}>
-        <Reasoning isStreaming={isLoading}>
-          <ReasoningTrigger getThinkingMessage={getReasoningMessage} />
-          <SafeReasoningContent>{reasoningContent}</SafeReasoningContent>
-        </Reasoning>
+        <MessageReasoning
+          isLoading={isLoading}
+          durationSeconds={durationSeconds}
+        >
+          {reasoningContent}
+        </MessageReasoning>
       </AIElementMessageContent>
     );
   }
@@ -523,6 +558,24 @@ function MessageContent_({
             references={referenceAttachments}
             testId="message-reference-attachment"
           />
+        )}
+        {conversationReferences.length > 0 && (
+          <div
+            aria-label={t.inputBox.referencedConversations}
+            className="flex max-w-full flex-wrap justify-end gap-1"
+            data-testid="message-conversation-references"
+            role="group"
+          >
+            {conversationReferences.map((reference) => (
+              <ConversationReferenceChip
+                href={pathOfThread(reference.threadId, {
+                  agent_name: reference.agentName,
+                })}
+                key={reference.threadId}
+                title={reference.title || t.pages.untitled}
+              />
+            ))}
+          </div>
         )}
         {filesList}
         {editState ? (
@@ -576,6 +629,11 @@ function MessageContent_({
             <HumanMessageText content={contentToDisplay} />
           </AIElementMessageContent>
         ) : null}
+        <KnowledgeScopeSummary
+          additionalKwargs={
+            message.additional_kwargs as Record<string, unknown> | undefined
+          }
+        />
       </div>
     );
   }
@@ -584,10 +642,12 @@ function MessageContent_({
     <AIElementMessageContent className={className}>
       {filesList}
       {reasoningContent && (
-        <Reasoning isStreaming={isLoading}>
-          <ReasoningTrigger getThinkingMessage={getReasoningMessage} />
-          <SafeReasoningContent>{reasoningContent}</SafeReasoningContent>
-        </Reasoning>
+        <MessageReasoning
+          isLoading={isLoading}
+          durationSeconds={durationSeconds}
+        >
+          {reasoningContent}
+        </MessageReasoning>
       )}
       <MarkdownContent
         content={contentToDisplay}
@@ -596,6 +656,7 @@ function MessageContent_({
         components={components}
       />
       <CitationSourcesPanel sources={citationSources} />
+      <KnowledgeSourcesPanel content={contentToDisplay} />
       {message.type === "ai" && showWorkspaceChanges && (
         <WorkspaceChangeBadge
           threadId={threadId}

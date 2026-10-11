@@ -13,7 +13,7 @@ import {
   Trash2,
 } from "lucide-react";
 import Link from "next/link";
-import { useParams, usePathname, useRouter } from "next/navigation";
+import { useParams, usePathname } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -45,7 +45,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
-import { resetThreadChatAfterDelete } from "@/components/workspace/chats/use-thread-chat";
+import { ConversationExtensionActions } from "@/components/workspace/conversation-extension-actions";
 import { getAPIClient } from "@/core/api";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { hasPermission, PERMISSIONS } from "@/core/auth/permissions";
@@ -56,12 +56,13 @@ import { useLocalSettings } from "@/core/settings";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 import { exportThread, type ThreadExportFormat } from "@/core/threads/export";
 import {
-  useDeleteThread,
+  fetchThreadExportMessages,
   useInfiniteThreads,
   useMoveThreadToProject,
   usePinThread,
   useRenameThread,
 } from "@/core/threads/hooks";
+import { threadOriginOf } from "@/core/threads/origin";
 import {
   flattenThreadBranches,
   type ThreadBranchEntry,
@@ -79,7 +80,12 @@ import { env } from "@/env";
 import { isIMEComposing } from "@/lib/ime";
 
 import { MoveToProjectMenu, NewProjectDialog } from "./move-to-project-menu";
-import { ThreadChannelIcon } from "./thread-channel-source";
+import {
+  ThreadOriginIcon,
+  ThreadUnreadDot,
+  unreadLabelOfThread,
+} from "./thread-channel-source";
+import { useThreadDeleteDialog } from "./thread-delete-dialog";
 import { VirtualThreadList } from "./thread-list-virtualizer";
 import { useThreadArchiveAction } from "./use-thread-archive-action";
 
@@ -102,14 +108,7 @@ export function ThreadSidebarItem({
   const { t } = useI18n();
   const { user } = useAuth();
   const canDeleteThreads = hasPermission(user, PERMISSIONS.THREADS_DELETE);
-  const router = useRouter();
-  const pathname = usePathname();
-  const { thread_id: threadIdFromPath, agent_name: agentNameFromPath } =
-    useParams<{
-      thread_id: string;
-      agent_name?: string;
-    }>();
-  const { mutate: deleteThread } = useDeleteThread();
+  const requestDelete = useThreadDeleteDialog();
   const { mutate: renameThread } = useRenameThread();
   const { mutate: updatePinnedThread } = usePinThread();
   // The move mutation is owned here (not inside `MoveToProjectMenu`) because
@@ -139,42 +138,7 @@ export function ThreadSidebarItem({
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const [newProjectDialogOpen, setNewProjectDialogOpen] = useState(false);
-
-  const handleDelete = useCallback(() => {
-    const currentPathname =
-      typeof window === "undefined" ? pathname : window.location.pathname;
-    const threadPath = pathOfThread(thread);
-    const nextThreadPath = pathOfThread("new", {
-      agent_name: agentNameFromPath,
-    });
-    const isNewThreadPath = currentPathname === nextThreadPath;
-    const isCurrentThread =
-      thread.thread_id === threadIdFromPath ||
-      threadPath === currentPathname ||
-      (isNewThreadPath && recentThreadId === thread.thread_id);
-
-    deleteThread({
-      threadId: thread.thread_id,
-      onRemoteDeleted: isCurrentThread
-        ? () => {
-            resetThreadChatAfterDelete({
-              deletedThreadId: thread.thread_id,
-              nextPath: nextThreadPath,
-              force: true,
-            });
-            void router.replace(nextThreadPath);
-          }
-        : undefined,
-    });
-  }, [
-    agentNameFromPath,
-    deleteThread,
-    pathname,
-    recentThreadId,
-    router,
-    thread,
-    threadIdFromPath,
-  ]);
+  const [exporting, setExporting] = useState(false);
 
   const handleRenameSubmit = useCallback(() => {
     if (renameValue.trim()) {
@@ -237,41 +201,55 @@ export function ThreadSidebarItem({
 
   const handleExport = useCallback(
     async (format: ThreadExportFormat) => {
+      setExporting(true);
       try {
-        const apiClient = getAPIClient();
-        const state = await apiClient.threads.getState<AgentThreadState>(
-          thread.thread_id,
-        );
-        const messages = state.values?.messages ?? [];
+        const messages = isStaticWebsiteOnly()
+          ? ((
+              await getAPIClient().threads.getState<AgentThreadState>(
+                thread.thread_id,
+              )
+            ).values?.messages ?? [])
+          : await fetchThreadExportMessages(thread.thread_id);
         if (messages.length === 0) {
           toast.error(t.conversation.noMessages);
           return;
         }
         exportThread(thread, messages, format);
         toast.success(t.common.exportSuccess);
-      } catch {
+      } catch (error) {
+        console.error(error);
         toast.error(t.common.exportFailed);
+      } finally {
+        setExporting(false);
       }
     },
     [t, thread],
   );
 
-  const channelSource = channelSourceOfThread(thread);
+  const channelSource = channelSourceOfThread(thread, t);
+  const origin = threadOriginOf(thread);
   const pinned = isThreadPinned(thread);
   const parentTitle = branchEntry?.parentThread
-    ? titleOfThread(branchEntry.parentThread)
+    ? titleOfThread(branchEntry.parentThread, t.pages.untitled)
     : null;
-  const title = titleOfThread(thread);
+  const title = titleOfThread(thread, t.pages.untitled);
   const branchLabel = parentTitle
     ? t.chats.branchLabel(title, parentTitle)
     : undefined;
+  // The open thread is being read, so it never shows the dot (the chat page
+  // clears its server-side unread state).
+  const unread = thread.unread === true && !isActive;
+  const rowLabel = unread
+    ? unreadLabelOfThread(branchLabel ?? title, t, origin)
+    : branchLabel;
 
   return (
     <SidebarMenuItem className="group/side-menu-item">
       <SidebarMenuButton isActive={isActive} asChild>
         <Link
-          aria-label={branchLabel}
+          aria-label={rowLabel}
           className="text-muted-foreground min-w-0 whitespace-nowrap group-hover/side-menu-item:overflow-hidden"
+          data-unread={unread ? "true" : undefined}
           data-branch-depth={
             branchEntry && branchEntry.depth > 0 ? branchEntry.depth : undefined
           }
@@ -291,7 +269,7 @@ export function ThreadSidebarItem({
               {branchEntry.isLastSibling ? "└─" : "├─"}
             </span>
           )}
-          <ThreadChannelIcon source={channelSource} />
+          <ThreadOriginIcon origin={origin} />
           {pinned && (
             <Pin
               aria-hidden="true"
@@ -299,12 +277,17 @@ export function ThreadSidebarItem({
             />
           )}
           <span className="min-w-0 truncate">{title}</span>
-          {channelSource && (
-            <span
-              className="bg-muted text-muted-foreground ml-auto inline-flex h-5 max-w-14 shrink-0 items-center rounded-md px-1.5 text-[10px] font-medium"
-              title={`${channelSource.label} channel`}
-            >
-              <span className="truncate">{channelSource.label}</span>
+          {(channelSource !== null || unread) && (
+            <span className="ml-auto inline-flex shrink-0 items-center gap-1.5">
+              {channelSource && (
+                <span
+                  className="bg-muted text-muted-foreground inline-flex h-5 max-w-14 shrink-0 items-center rounded-md px-1.5 text-[10px] font-medium"
+                  title={t.threads.origin.fromProvider(channelSource.label)}
+                >
+                  <span className="truncate">{channelSource.label}</span>
+                </span>
+              )}
+              {unread && <ThreadUnreadDot />}
             </span>
           )}
         </Link>
@@ -325,6 +308,10 @@ export function ThreadSidebarItem({
             side={"right"}
             align={"start"}
           >
+            <ConversationExtensionActions
+              context={{ thread }}
+              placement="menu"
+            />
             <DropdownMenuItem onSelect={handleTogglePin}>
               {pinned ? (
                 <PinOff className="text-muted-foreground" />
@@ -335,7 +322,7 @@ export function ThreadSidebarItem({
             </DropdownMenuItem>
             <DropdownMenuItem
               onSelect={() => {
-                setRenameValue(titleOfThread(thread));
+                setRenameValue(titleOfThread(thread, t.pages.untitled));
                 setRenameDialogOpen(true);
               }}
             >
@@ -347,7 +334,7 @@ export function ThreadSidebarItem({
               <span>{t.common.share}</span>
             </DropdownMenuItem>
             <DropdownMenuSub>
-              <DropdownMenuSubTrigger>
+              <DropdownMenuSubTrigger disabled={exporting}>
                 <Download className="text-muted-foreground" />
                 <span>{t.common.export}</span>
               </DropdownMenuSubTrigger>
@@ -379,7 +366,9 @@ export function ThreadSidebarItem({
             {canDeleteThreads && (
               <>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem onSelect={handleDelete}>
+                <DropdownMenuItem
+                  onSelect={() => requestDelete({ thread, recentThreadId })}
+                >
                   <Trash2 className="text-muted-foreground" />
                   <span>{t.common.delete}</span>
                 </DropdownMenuItem>

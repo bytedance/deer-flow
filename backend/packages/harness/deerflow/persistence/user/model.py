@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, DateTime, Index, String, text
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, String, false, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -28,6 +28,15 @@ from deerflow.persistence.base import Base
 # so 0018_oauth_identity_pg_partial.py keeps its own literal by
 # convention (consistent with every other revision in that package).
 OAUTH_IDENTITY_INDEX_NAME = "idx_users_oauth_identity"
+
+
+class UserPreferenceRow(Base):
+    """Independent keys allow concurrent clients to patch disjoint preferences."""
+
+    __tablename__ = "user_preferences"
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    key: Mapped[str] = mapped_column(String(40), primary_key=True)
+    value: Mapped[object] = mapped_column(JSON, nullable=True)
 
 
 class UserRow(Base):
@@ -58,6 +67,12 @@ class UserRow(Base):
     # Auth lifecycle flags
     needs_setup: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     token_version: Mapped[int] = mapped_column(nullable=False, default=0)
+
+    # Account lifecycle (RFC #4063 / issue #3462 gap 3): an operator-disabled
+    # account is rejected at every authentication surface (password login,
+    # JWT session resolution, PAT, OAuth) — the row is retained with its
+    # credentials and role so re-enabling restores exactly what was suspended.
+    disabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
 
     __table_args__ = (
         # sqlite_where alone is a SQLAlchemy dialect-specific kwarg -- it

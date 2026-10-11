@@ -1,0 +1,140 @@
+---
+title: Resume and Rollback
+description: Delta mode cannot fork a thread correctly — a forked delta read replays the abandoned branch's writes. How DeerFlow linearizes a checkpoint resume onto the current head instead, when the rewrite is a no-op, how it fails closed, and what rollback captures first.
+---
+
+import { Callout } from "nextra/components";
+
+# Resume and Rollback
+
+Resuming from an older checkpoint is a fork. In `full` mode that is a normal, well-defined operation. In `delta` mode it produces a wrong read rather than an error — nothing refuses the fork: LangGraph stores the second child, and the delta-mode pre-write gate returns before any compatibility check — so DeerFlow rewrites the fork as a linear write on the current head before the run starts. This chapter covers that rewrite, its failure mode, the rollback point captured around it, the write path it does not cover, and how manual context compaction writes state in the same mode.
+
+## Why a delta run cannot fork correctly
+
+A delta checkpoint stores no full channel values, so its state is reconstructed by replaying ancestor writes. That walk collects **every** `pending_writes` entry stored on each ancestor lying on the path to the target checkpoint — and a shared parent also carries the writes of the sibling child that was abandoned.
+
+```
+            ┌─ C1   abandoned sibling; its writes live under P
+P (shared) ─┤
+            └─ C2   current head
+```
+
+Resuming from `P` means "start again from P's state". But `C1`'s writes are still stored under `P`, so the walk replays them into the new fork: the run starts from a message list that still contains the answer it was supposed to replace.
+
+| Mode | Checkpoint content | Fork behaviour |
+| --- | --- | --- |
+| `full` | Complete `channel_values`, including the whole `messages` list | Fork materializes correctly; LangGraph's branching semantics apply unchanged |
+| `delta` | A `_DeltaSnapshot` sentinel plus per-step writes rows | A shared parent replays the abandoned sibling's writes into the fork |
+
+DeerFlow reproduced this on Postgres, SQLite, and the in-memory saver. The user-visible symptom was **DeerFlow #4458**: regenerating in a branched thread showed the old assistant message reappearing beside the new one after a reload.
+
+Upstream tracks the same defect. PR **#8548** ("don't replay an abandoned branch into a `DeltaChannel` fork") fixes upstream issue **#8443** and is still open; while it is unmerged, the local linearization below cannot be removed.
+
+### Forks are accepted, not refused
+
+Nothing in the stack rejects a delta fork, so "cannot fork" only ever describes the read, never the write. `aupdate_state` against an older checkpoint — or a run resumed from one — creates a second child of that checkpoint with no error: no saver checks for an existing sibling, and `ensure_checkpoint_mode_compatible` returns immediately when the process mode is `delta`. The cost is paid at materialization instead.
+
+Two consequences follow:
+
+- **A resume is the half DeerFlow covers.** The run paths linearize it, so the Gateway and the embedded client never produce this fork on a resume or a rollback.
+- **A state update is not covered.** `POST /api/threads/{thread_id}/state` forwards a client-supplied `checkpoint_id` straight into the accessor's write, and the mutation accessor used while preparing `POST .../branches` accepts the same selector. Nothing linearizes it, so the write is stored under that older checkpoint — the shared parent — and joins the write set that every other child of that parent walks. Reducer channels such as `messages` are written with `Overwrite`, which replaces the accumulated value and therefore masks the parent's other writes for the new branch; the general case is tracked upstream as issue **#8551** ("`update_state` against an older checkpoint writes into the branch it forked away from"), still open. Until it lands, do not select an older `checkpoint_id` on a delta thread; update the head instead.
+
+## What the linearization does
+
+Rather than reimplement write-to-child ownership — that belongs to the saver's `get_delta_channel_history` contract — DeerFlow expresses a resume as what it actually means:
+
+1. Materialize the selected checkpoint's state through the `CheckpointStateAccessor`.
+2. Write that state with **replace semantics** on the **current head**. The head has no other children, so no sibling writes can be replayed into it.
+3. Let the run continue linearly from the rewritten head.
+
+The abandoned turn stays in checkpoint history as the rewritten head's ancestry; it is not deleted.
+
+### Invariants
+
+| Invariant | Behaviour |
+| --- | --- |
+| Every materialized channel is restored | The replacement is built from the selected checkpoint's materialized values |
+| Head-only channels are reset, not inherited | A channel that exists only on the newer head resets to its schema default (for example `[]` or `{}`), or to `None` when the channel has no constructible default. LangGraph has no public "unset channel" update, so this is the closest equivalent |
+| Reducer channels replace instead of merging | The whole-state write wraps every reducer channel — the delta `messages` channel and classic `BinaryOperatorAggregate` channels alike — in `Overwrite`. Reducer channels require that wrapping for replace-style writes in **any** mode; without it the replacement would be merged into the already-aggregated value |
+| Middleware channels are covered | The write goes through the thread's *effective* schema, so channels contributed by custom middleware are included. The base `ThreadState` fallback does not know them, and writes to unknown channels are silently discarded |
+| Agent binding survives | The selected checkpoint's server-authored agent-binding metadata is copied onto the rewritten head |
+| The selector is consumed | Afterwards `checkpoint_id` and `checkpoint_map` are popped from `configurable`, and the run's initial `RunnableConfig` is rebuilt so streaming starts from the rewritten head |
+
+## When the rewrite is a no-op
+
+The helper returns `None` — leaving an ordinary run completely untouched — when any of these holds:
+
+| Condition | Why |
+| --- | --- |
+| `full` mode | Full checkpoints carry complete channel values, so the fork materializes correctly and LangGraph's branching semantics stay untouched |
+| No checkpointer | Nothing is persisted to rewrite |
+| `configurable` is not a dict | There is no selector to interpret |
+| Missing or non-string `checkpoint_id` | No resume target was selected |
+| Non-empty `checkpoint_ns` | Subgraph namespaces have their own lineage, and the Gateway only selects root checkpoints |
+| The selector already names the head | Selecting the head is already linear — no sibling can exist yet |
+
+## Fail-closed behaviour
+
+The linearization never degrades into "fork anyway". Failures propagate, because silently falling back to the fork would persist the corrupted history this code exists to prevent.
+
+| Failure | Error text |
+| --- | --- |
+| The resume state cannot be materialized | `Run {run_id} could not materialize resume checkpoint {checkpoint_id}` |
+| The state schema cannot be inspected for the replacement | `Run {run_id} could not inspect the state schema for {operation}` |
+
+Both are `RuntimeError`s raised before any write, so the run fails rather than persisting a partial replacement.
+
+<Callout type="warning">
+  Delta mode has no degraded read path in the Gateway either. When the agent
+  factory is unavailable, `full` mode falls back to raw checkpointer reads,
+  but delta mode re-raises: materialization needs the graph's channel table,
+  so a fallback could only return sentinels.
+</Callout>
+
+## Rollback
+
+A cancelled run restores the pre-run state. Delta rollback has the same write-ownership problem as a resume: the captured parent now carries writes from the cancelled sibling, so restoring by forking that parent would replay them. Delta rollback therefore restores **linearly on the current head**; `full` mode keeps forking, where every channel inherits from the parent.
+
+### What is captured
+
+| Captured item | How | Notes |
+| --- | --- | --- |
+| Materialized snapshot | Via the `CheckpointStateAccessor` | Raw checkpoint blobs cannot reconstruct delta messages — delta checkpoints omit the materialized value — so the materialized snapshot is the only source for them |
+| Raw `pending_writes` | Via `aget_tuple` | The raw tuple remains valid for tuple-level metadata and in-flight writes |
+| `state_values` | Deep copy of every non-`messages` channel | Captured **only in delta mode**; in full mode the fork inherits those channels from its parent instead |
+| Metadata | From the materialized snapshot | Restored alongside the values |
+
+If capture fails, the run is marked `snapshot_capture_failed` and rollback is disabled — restoring an empty or partial history would silently truncate the thread. If the thread has no checkpoint at all, rollback takes the `adelete_thread` reset path instead.
+
+### Ordering and the thread lock
+
+The pre-run rollback point is captured **before** the resume rewrite. That ordering is what makes cancel-with-rollback restore the real pre-run head rather than the state the linearization just wrote.
+
+Both steps run inside `_checkpoint_thread_lock(thread_id)`, which serializes checkpoint mutations for one thread without blocking goal commands. The lock is non-reentrant and must not be reacquired inside the helper. A previous successful run may still be persisting duration metadata after its admission slot was released, so sharing the lock turns the capture and the rewrite into one uninterrupted read/write sequence against the head.
+
+## Manual compaction
+
+Context compaction replaces a thread's message list with a summary. In delta mode the `messages` channel is append-only, so the replacement only takes effect when it is wrapped:
+
+```python
+updated_config = await accessor.aupdate(
+    update_config,
+    {
+        "messages": Overwrite(list(result.preserved_messages)),
+        "summary_text": result.summary_text,
+        "task_history": result.task_history,
+    },
+    as_node="manual_compaction",
+)
+```
+
+The write goes through the accessor — it needs a materialized `checkpoint_id` — and `Overwrite` is what makes the replace survive the delta channel's append reducer; an unwrapped list would append to the history instead of replacing it. The same rule covers reducer channels in full mode.
+
+Compaction failures keep their existing surface: a summary generation failure raises `ContextCompactionFailed("summary generation failed")` and becomes HTTP 500 `Failed to compact thread context.`; a disabled compaction switch is a 409 `Context compaction is disabled.`
+
+## See also
+
+- [Channel Modes](/docs/harness/checkpoints/modes) — the fail-closed mode gate that a cross-mode resume hits first.
+- [Snapshot Cadence](/docs/harness/checkpoints/cadence) — where `_DeltaSnapshot` blobs come from and why replay depth is bounded.
+- [History Cache](/docs/harness/checkpoints/history-cache) — the ancestor-chain immutability argument that makes cached delta histories safe.
+- [Troubleshooting](/docs/harness/checkpoints/troubleshooting) — the "old answer reappears" symptom and the other delta-mode failure signatures.

@@ -145,6 +145,68 @@ async def test_run_agent_injects_langfuse_metadata(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("requested_model", [None, "missing-model", "actual-model"])
+async def test_run_agent_tags_the_effective_model(monkeypatch, requested_model):
+    from langchain_core.callbacks import BaseCallbackHandler
+
+    from deerflow.agents.lead_agent import agent as lead_agent_module
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.model_config import ModelConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    monkeypatch.setenv("LANGFUSE_TRACING", "true")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+    from deerflow.config.tracing_config import reset_tracing_config
+
+    reset_tracing_config()
+    fake_agent = _FakeAgent()
+    app_config = AppConfig(
+        models=[ModelConfig(name="actual-model", model="actual-model", use="langchain_openai:ChatOpenAI")],
+        sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+    )
+    selected_models = []
+    callback = BaseCallbackHandler()
+
+    def create_model(**kwargs):
+        selected_models.append(kwargs["name"])
+        return object()
+
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", create_model)
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: fake_agent)
+    monkeypatch.setattr(lead_agent_module, "build_tracing_callbacks", lambda: [callback])
+
+    def agent_factory(config):
+        return lead_agent_module.assemble_lead_agent(config, app_config=app_config)
+
+    record = RunRecord(
+        run_id="run-effective-model",
+        thread_id="thread-effective-model",
+        assistant_id="lead-agent",
+        status=RunStatus.pending,
+        on_disconnect=DisconnectMode.cancel,
+        model_name=requested_model,
+    )
+    record.abort_event = asyncio.Event()
+
+    await run_agent(
+        _FakeBridge(),
+        _FakeRunManager(),
+        record,
+        ctx=RunContext(checkpointer=None, app_config=app_config),
+        agent_factory=agent_factory,
+        graph_input={"messages": []},
+        config={"configurable": {"thread_id": record.thread_id, "model_name": requested_model}},
+    )
+
+    assert selected_models == ["actual-model"]
+    assert callback in fake_agent.captured_config["callbacks"]
+    tags = fake_agent.captured_config["metadata"].get("langfuse_tags", [])
+    assert "model:actual-model" in tags
+    assert "model:missing-model" not in tags
+
+
+@pytest.mark.asyncio
 async def test_run_agent_uses_context_user_id_over_contextvar(monkeypatch):
     """A run carrying ``context.user_id`` traces to that user, not the contextvar.
 
