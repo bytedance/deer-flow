@@ -213,6 +213,15 @@ def test_bind_host_renders_a_config_listening_there(checkout: Path, bind_host: s
         "::ffff:192.0.2",
         ":1",
         "1:",
+        # Every validator must see the whole value, not just its first line:
+        # a second line would become extra listen parameters.
+        "localhost\nbad",
+        "localhost\n",
+        "localhost\r",
+        "local\thost",
+        "192.0.2.10\nbad",
+        "fd00::1\nbad",
+        "[fd00::1]\nbad",
     ],
 )
 def test_bind_host_rejects_values_that_are_not_addresses(checkout: Path, bind_host: str):

@@ -67,16 +67,17 @@ is_ipv6() {
 
 # RFC 1123 hostname: dot-separated labels of letters, digits and inner hyphens,
 # 1-63 characters each, 253 in all. All-numeric values are IPv4 or nothing.
+# The character check covers the whole value: read below stops at a newline.
 is_hostname() {
     local IFS=. label
     local -a labels
     [ "${#1}" -le 253 ] || return 1
-    case "$1" in ''|.*|*.|*..*) return 1 ;; esac
+    case "$1" in ''|*[!A-Za-z0-9.-]*|.*|*.|*..*) return 1 ;; esac
     case "$1" in *[!0-9.]*) ;; *) return 1 ;; esac
     read -r -a labels <<< "$1"
     for label in "${labels[@]}"; do
         [ "${#label}" -le 63 ] || return 1
-        case "$label" in *[!A-Za-z0-9-]*|-*|*-) return 1 ;; esac
+        case "$label" in -*|*-) return 1 ;; esac
     done
 }
 
