@@ -4202,6 +4202,15 @@ This release closes that milestone with **439 merged pull requests**.
   agent as an empty string, or as an unrelated host variable's value when that
   name existed. Values are now passed through as loaded, as BoxLite and the
   local provider already did. ([#6673])
+- **frontend:** Loading more chats in the sidebar and on the Chats page no longer
+  re-requests chats it already has. Side chats are hidden from these lists, so a
+  page of 50 visible chats can span more server rows; the page kept that offset
+  as a hidden property on its array, which TanStack Query's structural sharing
+  and the lists' own cache updates dropped. After a rename, a finished run or
+  any list refresh, the next page started too early and fetched overlapping
+  rows, and removing a chat from a full page stopped the list from loading more
+  until it refetched. Each cached page now records how many rows it hid and
+  whether the server has more.
 
 ### Security
 
