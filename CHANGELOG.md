@@ -4156,6 +4156,16 @@ This release closes that milestone with **439 merged pull requests**.
   missing; `verify-versions.yml` installs the uv version the backend image pins.
   ([#6588])
 
+- **tui:** A message the TUI refuses to send now stays in the composer. Submitting
+  cleared the composer before the send was checked, so a prompt typed during an
+  active run, while an interrupted run was still stopping, or when the run could
+  not start was replaced by a notice and survived only in input history; a
+  command-line launch message whose run could not start was lost entirely. The
+  composer now gets the text back as input history recorded it, with the cursor
+  at its end and the command palette closed, so `Enter` resends it; accepted
+  messages and local slash commands clear it as before.
+  ([#6666])
+
 - **tui:** `deerflow --print` and `--json` no longer drop words of an unquoted
   message. Each flag took a single value and never read the positional words,
   so `deerflow --print summarize this repo` sent only `summarize`,
@@ -9577,3 +9587,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6613]: https://github.com/bytedance/deer-flow/pull/6613
 [#6635]: https://github.com/bytedance/deer-flow/pull/6635
 [#6636]: https://github.com/bytedance/deer-flow/pull/6636
+[#6666]: https://github.com/bytedance/deer-flow/pull/6666
