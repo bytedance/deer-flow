@@ -48,6 +48,19 @@ export function buildLoginUrl(returnPath: string): string {
 }
 
 /**
+ * The page the browser is on, query string included, as a `next` target.
+ *
+ * Every client-side bounce for an expired session uses this, so they agree:
+ * pages that carry their target in the query (a `?task_id=` deep link, the
+ * artifact viewer) are otherwise unrecoverable after login, which lands on the
+ * default workspace instead. Browser-only; the server cannot see the URL from
+ * a layout.
+ */
+export function currentReturnPath(): string {
+  return `${window.location.pathname}${window.location.search}`;
+}
+
+/**
  * Login-page URL that surfaces the account-disabled reason (#4063 gap 3).
  * A disabled account cannot sign back in, so unlike buildLoginUrl there is
  * no `next` target to preserve.

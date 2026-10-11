@@ -318,6 +318,10 @@ Direct auth-page visits with a live suspended-session cookie get the SSR
 verdict via `AuthDisabledContext`, so the login form states the known reason
 without waiting for a deliberately generic login failure.
 
+Other sign-in bounces keep path and query via `currentReturnPath()`. The
+workspace layout cannot read the URL, so `unauthenticated` renders
+`WorkspaceLoginRedirect` (never `children`), not `redirect()`.
+
 ### Model reasoning capabilities
 
 `/api/models` projects a per-model `reasoning` contract (issue #5073) beside the

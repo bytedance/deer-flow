@@ -1,6 +1,7 @@
 import {
   ACCOUNT_DISABLED_LOGIN_URL,
   buildLoginUrl,
+  currentReturnPath,
   parseAuthError,
 } from "@/core/auth/types";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
@@ -115,12 +116,7 @@ export async function fetch(
       window.location.href = ACCOUNT_DISABLED_LOGIN_URL;
       throw new UnauthorizedError();
     }
-    // Include the search string: routes that carry their target in the query
-    // (e.g. the standalone artifact viewer) are otherwise unrecoverable after
-    // login, which lands on the default workspace instead.
-    window.location.href = buildLoginUrl(
-      `${window.location.pathname}${window.location.search}`,
-    );
+    window.location.href = buildLoginUrl(currentReturnPath());
     throw new UnauthorizedError();
   }
 
