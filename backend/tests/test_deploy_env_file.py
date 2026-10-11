@@ -44,20 +44,36 @@ def test_deploy_selects_one_env_file_for_build_and_secret_probe(tmp_path, select
     assert probe.returncode == 0, "Compose and its secret probe must read the selected file"
 
 
-@pytest.mark.parametrize("invalid_kind", ["missing", "directory"])
+@pytest.mark.parametrize("invalid_kind", ["missing", "directory", "unreadable"])
 def test_deploy_rejects_invalid_explicit_env_file_before_docker(tmp_path, invalid_kind):
     worktree = _worktree(tmp_path)
     selected = worktree / "stage.env"
     if invalid_kind == "directory":
         selected.mkdir()
+    elif invalid_kind == "unreadable":
+        if os.name != "posix":
+            pytest.skip("file read permissions require a POSIX filesystem")
+        if os.geteuid() == 0:
+            pytest.skip("root can read files despite removed read permissions")
+        selected.write_text("UV_EXTRAS=discord\n", encoding="utf-8")
 
-    result, _, args, config_args, _, _ = _run_deploy_build(
-        tmp_path,
-        worktree,
-        shell_env={"DEER_FLOW_COMPOSE_ENV_FILE": str(selected)},
-        compose_environment={"BETTER_AUTH_SECRET": "test-auth", "DEER_FLOW_INTERNAL_AUTH_TOKEN": "test-internal"},
-        check=False,
-    )
+    original_mode = selected.stat().st_mode if invalid_kind == "unreadable" else None
+    try:
+        if original_mode is not None:
+            selected.chmod(0o000)
+            if os.access(selected, os.R_OK):
+                pytest.skip("filesystem does not enforce file read permissions")
+
+        result, _, args, config_args, _, _ = _run_deploy_build(
+            tmp_path,
+            worktree,
+            shell_env={"DEER_FLOW_COMPOSE_ENV_FILE": str(selected)},
+            compose_environment={"BETTER_AUTH_SECRET": "test-auth", "DEER_FLOW_INTERNAL_AUTH_TOKEN": "test-internal"},
+            check=False,
+        )
+    finally:
+        if original_mode is not None:
+            selected.chmod(original_mode)
 
     assert result.returncode != 0
     assert "DEER_FLOW_COMPOSE_ENV_FILE" in result.stderr
