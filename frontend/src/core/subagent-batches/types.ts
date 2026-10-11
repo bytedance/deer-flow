@@ -65,3 +65,33 @@ export function subagentBatchProgress(batch: SubagentBatch): number {
   if (!Number.isFinite(completed)) return 0;
   return Math.min(100, Math.max(0, (completed / batch.total_items) * 100));
 }
+
+export type SubagentBatchResult = Pick<
+  SubagentBatchItem,
+  | "id"
+  | "item_key"
+  | "position"
+  | "status"
+  | "attempt"
+  | "result_preview"
+  | "result_truncated"
+  | "error"
+  | "stop_reason"
+  | "started_at"
+  | "completed_at"
+  | "updated_at"
+> & {
+  result: string | null;
+  acceptance_criteria: string[] | null;
+  acceptance_verdict: {
+    all_hold: boolean;
+    leaves: Array<{
+      criterion: string;
+      checked: boolean;
+      holds: boolean;
+      detail: string;
+    }>;
+  } | null;
+  evidence: { version: 1; sources: unknown[]; omitted_count: number } | null;
+  revision: string;
+};

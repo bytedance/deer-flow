@@ -51,6 +51,18 @@ function App({ items = messages }: { items?: Message[] }) {
 }
 
 describe("knowledge source dialogs", () => {
+  it("keeps a live-chat empty excerpt citation actionable", () => {
+    const items = JSON.parse(JSON.stringify(messages)) as Message[];
+    Reflect.get(items[0]!, "artifact").knowledge_sources.sources[0].text = "";
+    render(<App items={items} />);
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "View source: Manual.pdf" })[0]!,
+    );
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.textContent).toContain("Manual.pdf");
+    expect(dialog.textContent).toContain("Engineering");
+    expect(dialog.querySelector("blockquote")?.textContent).toBe("");
+  });
   it("opens the actual excerpt and source page from both citation and source list", () => {
     render(<App />);
     const buttons = screen.getAllByRole("button", {
@@ -128,3 +140,59 @@ for (const [surface, Link] of [
     });
   });
 }
+
+describe("saved batch evidence", () => {
+  for (const field of ["dataset_name", "document_name", "text"]) {
+    for (const value of ["", " \n"]) {
+      it(`rejects a blank saved ${field} instead of opening an unnamed or empty source`, () => {
+        const original = Reflect.get(messages[0]!, "artifact").knowledge_sources
+          .sources[0];
+        render(
+          <I18nProvider initialLocale="en-US">
+            <KnowledgeSourcesProvider
+              savedEvidence={{
+                version: 1,
+                sources: [{ ...original, [field]: value }],
+              }}
+            >
+              <KnowledgeCitationLink href={href}>1</KnowledgeCitationLink>
+              <KnowledgeSourcesPanel content={`[citation:1](${href})`} />
+            </KnowledgeSourcesProvider>
+          </I18nProvider>,
+        );
+        expect(screen.queryByRole("button")).toBeNull();
+        expect(screen.queryByRole("dialog")).toBeNull();
+      });
+    }
+  }
+  it("uses an explicit saved snapshot without borrowing conversation sources", () => {
+    const evidence = Reflect.get(messages[0]!, "artifact").knowledge_sources;
+    const view = render(
+      <I18nProvider initialLocale="en-US">
+        <KnowledgeSourcesProvider messages={messages}>
+          <KnowledgeSourcesProvider savedEvidence={evidence}>
+            <KnowledgeCitationLink href={href}>1</KnowledgeCitationLink>
+          </KnowledgeSourcesProvider>
+        </KnowledgeSourcesProvider>
+      </I18nProvider>,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "View source: Manual.pdf" }),
+    );
+    expect(screen.getByRole("dialog").textContent).toContain(
+      "The limit is 42.",
+    );
+    view.rerender(
+      <I18nProvider initialLocale="en-US">
+        <KnowledgeSourcesProvider messages={messages}>
+          <KnowledgeSourcesProvider savedEvidence={null}>
+            <KnowledgeCitationLink href={href}>1</KnowledgeCitationLink>
+          </KnowledgeSourcesProvider>
+        </KnowledgeSourcesProvider>
+      </I18nProvider>,
+    );
+    expect(
+      screen.queryByRole("button", { name: "View source: Manual.pdf" }),
+    ).toBeNull();
+  });
+});

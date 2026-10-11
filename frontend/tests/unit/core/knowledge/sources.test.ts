@@ -4,6 +4,7 @@ import { describe, expect, it } from "@rstest/core";
 import {
   citedKnowledgeSources,
   collectKnowledgeSources,
+  collectSavedKnowledgeSources,
   knowledgeSourceId,
 } from "@/core/knowledge/sources";
 
@@ -26,6 +27,20 @@ const message = {
 } as unknown as Message;
 
 describe("knowledge citation provenance", () => {
+  for (const field of ["dataset_name", "document_name", "text"]) {
+    for (const value of ["", " \n"]) {
+      it(`preserves a blank live ${field} while excluding it from saved evidence`, () => {
+        const original = { ...source, [field]: value };
+        const payload = { version: 1, sources: [original] };
+        const live = {
+          ...message,
+          artifact: { knowledge_sources: payload },
+        } as Message;
+        expect(collectKnowledgeSources([live]).get(id)).toEqual(original);
+        expect(collectSavedKnowledgeSources(payload).size).toBe(0);
+      });
+    }
+  }
   it("resolves repeated citations to the persisted tool evidence after JSON reload", () => {
     const messages = JSON.parse(JSON.stringify([message])) as Message[];
     const sources = collectKnowledgeSources(messages);

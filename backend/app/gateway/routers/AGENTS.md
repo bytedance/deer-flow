@@ -25,3 +25,14 @@ critical section to preserve history ordering. Keep the sidecar distinct from
 the nested projection lock, retain it across requests, and acquire/release both
 off-loop inside the drained worker. Unrelated users retain independent locks;
 external filesystem writers do not participate in this history guarantee.
+
+### Saved native batch reports
+
+`subagent_batches.get_batch_item_result` reuses `threads:read` owner admission
+and `_owned_batch`. It reads one immutable submission position (0–99999), checks
+the returned position and projects through `deerflow.subagents.batch_results`
+off the event loop. Repository availability is sufficient: worker shutdown does
+not remove historical read access. JSONL export and compact item paging stay
+independent; never expose raw result artifacts, prompts, leases or execution specs
+through this selected-report response. Real SQLite HTTP admission and denied
+owner/permission regressions live in `tests/test_batch_results_http.py`.

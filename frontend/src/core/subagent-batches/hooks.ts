@@ -9,6 +9,7 @@ import { toast } from "sonner";
 import {
   controlSubagentBatch,
   fetchSubagentBatchItems,
+  fetchSubagentBatchResult,
   fetchSubagentBatches,
   retrySubagentBatchItem,
 } from "./api";
@@ -95,5 +96,46 @@ export function useRetrySubagentBatchItem(threadId: string, batchId: string) {
       });
     },
     onError: (error: Error) => toast.error(error.message),
+  });
+}
+
+export const subagentBatchResultKey = (
+  threadId: string,
+  batchId: string,
+  position: number,
+  userId: string,
+) =>
+  [
+    ...subagentBatchesKey(threadId),
+    batchId,
+    "result",
+    position,
+    userId,
+  ] as const;
+
+export function useSubagentBatchResult(
+  threadId: string,
+  batchId: string,
+  position: number,
+  userId: string,
+  polling: boolean,
+) {
+  return useQuery({
+    queryKey: subagentBatchResultKey(threadId, batchId, position, userId),
+    queryFn: ({ signal }) =>
+      fetchSubagentBatchResult(threadId, batchId, position, signal),
+    enabled: Boolean(threadId && batchId && userId),
+    // No saved reports survive the last observer; closing or switching scope
+    // cancels the consumed signal and a later open reads the current attempt.
+    gcTime: 0,
+    refetchInterval: (query) =>
+      polling &&
+      query.state.data &&
+      ["pending", "queued", "leased", "running"].includes(
+        query.state.data.status,
+      )
+        ? 2000
+        : false,
+    refetchIntervalInBackground: false,
   });
 }

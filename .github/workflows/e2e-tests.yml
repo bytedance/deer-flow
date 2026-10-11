@@ -6,6 +6,9 @@ on:
     paths:
       - 'frontend/**'
       - 'backend/app/gateway/routers/plugins.py'
+      - 'backend/app/gateway/routers/subagent_batches.py'
+      - 'backend/packages/harness/deerflow/subagents/batch_results.py'
+      - 'backend/extension_test_fixtures/batch_results_gateway.py'
       - 'backend/extension_test_fixtures/bookmark_plugin_gateway.py'
       - 'backend/extension_test_fixtures/browser_asset_gateway.py'
       - 'backend/packages/extension-api/**'
@@ -20,6 +23,9 @@ on:
     paths:
       - 'frontend/**'
       - 'backend/app/gateway/routers/plugins.py'
+      - 'backend/app/gateway/routers/subagent_batches.py'
+      - 'backend/packages/harness/deerflow/subagents/batch_results.py'
+      - 'backend/extension_test_fixtures/batch_results_gateway.py'
       - 'backend/extension_test_fixtures/bookmark_plugin_gateway.py'
       - 'backend/extension_test_fixtures/browser_asset_gateway.py'
       - 'backend/packages/extension-api/**'

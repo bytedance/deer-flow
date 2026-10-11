@@ -17,6 +17,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import {
   citedKnowledgeSources,
   collectKnowledgeSources,
+  collectSavedKnowledgeSources,
   knowledgeSourceId,
   type KnowledgeSource,
 } from "@/core/knowledge/sources";
@@ -25,17 +26,22 @@ const SourcesContext = createContext<ReadonlyMap<string, KnowledgeSource>>(
   new Map(),
 );
 
-export function KnowledgeSourcesProvider({
-  messages,
-  children,
-}: {
-  messages: readonly Message[];
-  children: ReactNode;
-}) {
-  const sources = useMemo(() => collectKnowledgeSources(messages), [messages]);
+type SourcesProviderProps = { children: ReactNode } & (
+  | { messages: readonly Message[]; savedEvidence?: never }
+  | { savedEvidence: unknown; messages?: never }
+);
+
+export function KnowledgeSourcesProvider(props: SourcesProviderProps) {
+  const sources = useMemo(
+    () =>
+      props.messages !== undefined
+        ? collectKnowledgeSources(props.messages)
+        : collectSavedKnowledgeSources(props.savedEvidence),
+    [props.messages, props.savedEvidence],
+  );
   return (
     <SourcesContext.Provider value={sources}>
-      {children}
+      {props.children}
     </SourcesContext.Provider>
   );
 }

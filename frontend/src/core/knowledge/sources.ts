@@ -30,54 +30,80 @@ export function collectKnowledgeSources(messages: readonly Message[]) {
     )
       continue;
     const artifact: unknown = Reflect.get(message, "artifact");
-    const payload = record(artifact) ? artifact.knowledge_sources : null;
-    if (
-      !record(payload) ||
-      payload.version !== 1 ||
-      !Array.isArray(payload.sources)
-    )
-      continue;
-    for (const raw of payload.sources.slice(0, 100)) {
-      if (
-        !record(raw) ||
-        typeof raw.id !== "string" ||
-        !SOURCE_ID.test(raw.id) ||
-        raw.provider !== "ragflow"
-      )
-        continue;
-      if (
-        typeof raw.document_name !== "string" ||
-        raw.document_name.length > 1024 ||
-        typeof raw.dataset_name !== "string" ||
-        raw.dataset_name.length > 1024 ||
-        typeof raw.text !== "string" ||
-        raw.text.length > 200_000 ||
-        typeof raw.truncated !== "boolean" ||
-        !Array.isArray(raw.pages) ||
-        raw.pages.length > 100 ||
-        !raw.pages.every(
-          (page: unknown) =>
-            typeof page === "number" &&
-            Number.isInteger(page) &&
-            page > 0 &&
-            page <= 1_000_000,
-        )
-      )
-        continue;
-      const source: KnowledgeSource = {
-        id: raw.id,
-        provider: "ragflow",
-        dataset_name: raw.dataset_name,
-        document_name: raw.document_name,
-        text: raw.text,
-        truncated: raw.truncated,
-        pages: raw.pages as number[],
-      };
-      // Stream replays can repeat records; never silently replace evidence.
-      if (!sources.has(source.id)) sources.set(source.id, source);
-    }
+    appendKnowledgeSources(
+      record(artifact) ? artifact.knowledge_sources : null,
+      sources,
+    );
   }
   return sources;
+}
+
+/** Explicit durable evidence, kept separate from live conversation messages. */
+export function collectSavedKnowledgeSources(payload: unknown) {
+  const sources = new Map<string, KnowledgeSource>();
+  appendKnowledgeSources(payload, sources, true);
+  return sources;
+}
+
+function appendKnowledgeSources(
+  payload: unknown,
+  sources: Map<string, KnowledgeSource>,
+  rejectBlank = false,
+) {
+  if (
+    !record(payload) ||
+    payload.version !== 1 ||
+    !Array.isArray(payload.sources)
+  )
+    return;
+  for (const raw of payload.sources.slice(0, 100)) {
+    if (
+      !record(raw) ||
+      typeof raw.id !== "string" ||
+      !SOURCE_ID.test(raw.id) ||
+      raw.provider !== "ragflow"
+    )
+      continue;
+    if (
+      typeof raw.document_name !== "string" ||
+      raw.document_name.length > 1024 ||
+      typeof raw.dataset_name !== "string" ||
+      raw.dataset_name.length > 1024 ||
+      typeof raw.text !== "string" ||
+      raw.text.length > 200_000 ||
+      typeof raw.truncated !== "boolean" ||
+      !Array.isArray(raw.pages) ||
+      raw.pages.length > 100 ||
+      !raw.pages.every(
+        (page: unknown) =>
+          typeof page === "number" &&
+          Number.isInteger(page) &&
+          page > 0 &&
+          page <= 1_000_000,
+      )
+    )
+      continue;
+    // Historical report inspection requires usable evidence. Preserve the
+    // existing live-chat behavior for producer records with empty excerpts.
+    if (
+      rejectBlank &&
+      (!raw.document_name.trim() ||
+        !raw.dataset_name.trim() ||
+        !raw.text.trim())
+    )
+      continue;
+    const source: KnowledgeSource = {
+      id: raw.id,
+      provider: "ragflow",
+      dataset_name: raw.dataset_name,
+      document_name: raw.document_name,
+      text: raw.text,
+      truncated: raw.truncated,
+      pages: raw.pages as number[],
+    };
+    // Stream replays can repeat records; never silently replace evidence.
+    if (!sources.has(source.id)) sources.set(source.id, source);
+  }
 }
 
 export function knowledgeSourceId(href: string | undefined): string | null {

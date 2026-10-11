@@ -97,8 +97,16 @@ Language-map membership checks only own properties; inherited names such as
    retries failed items, and exports JSONL. Worker-dependent mutations stay
    disabled in read-only history mode, and persisted progress is normalized to
    a bounded percentage before reaching the UI primitive. Item pagination uses a
-   fixed page size and an explicit load-more control; full results remain available
-   only through JSONL export. The panel must not infer batch mode from prompt text
+   fixed page size and load-more. View report reads one immutable position through
+   the owner-scoped endpoint, never a result page; JSONL remains bulk export.
+   Offer inspection for terminal/preview items. Queries use AbortSignals and
+   principal keys; close drops cached reports, scope changes remove report/source
+   dialogs, retry invalidates results/progress, and revisions close stale sources.
+   Execution and acceptance differ: absent criteria are No criteria; inconclusive
+   existing criteria are Unverified. Reuse `createMarkdownLinkComponent(threadId)`
+   and `MessageImage` for current-thread artifacts/citations. An empty image
+   artifact list prevents relative paths from borrowing parent artifacts.
+   The panel must not infer batch mode from prompt text
    or inject the complete result set into chat state.
    Capability Center > Plugins > Lark uses a local generation only to suppress stale React
    callbacks; server-issued Lark flow generations must be passed through every
@@ -216,7 +224,16 @@ clarification references from full grouping.
 
 ### Knowledge source citations
 
-`KnowledgeSourcesProvider` scopes source records to the current message list.
+`KnowledgeSourcesProvider` scopes source records to either the current message list
+or an explicit saved-evidence payload, never both. Saved batch reports use their
+own provider and the existing static SafeStreamdown/CitationLink path without raw
+HTML parsing; code fences are handled by Markdown, not a second citation scanner.
+Normalize both artifact sources through the same validator and first-seen dedup.
+Reject blank names/excerpts only for saved evidence; live tool artifacts retain
+their existing acceptance behavior, including an empty RAGFlow excerpt.
+An unavailable saved snapshot cannot fall back to surrounding conversation sources.
+Browser regressions exercise nested list-contained tilde fences, source dialogs and
+return focus in the native panel.
 Only versioned native `knowledge_search`/`task` tool artifacts supply evidence;
 AI/human text and metadata cannot create a source. `CitationLink` resolves
 `#knowledge-…` citations through that context and renders unavailable text when
