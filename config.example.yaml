@@ -1059,7 +1059,7 @@ tools:
   # than a single meta description, so results are usable without a follow-up
   # fetch. With no key it uses the keyless endpoint (free tier, currently 100
   # searches/day); set YDC_API_KEY and it switches to the full Search API.
-  # Get a key at https://you.com/platform?utm_source=bytedance-deer-flow&utm_medium=oss_integration&utm_campaign=2026-08-oss-integrations&utm_content=sample
+  # Get a key at https://you.com/platform
   # - name: web_search
   #   group: web
   #   use: deerflow.community.youcom.tools:web_search_tool
