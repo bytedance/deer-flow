@@ -1,5 +1,13 @@
 # Host tool-output publication
 
+Internal output files live under `tool_output.storage_subdir`, default
+`.tool-results` (`TOOL_RESULTS_DIRNAME`), with synopsis and `read_file` references.
+
+Async tool-result persistence uses `run_sync_lifecycle_operation` and drains
+before caller cancellation can release execution resources, including repeated
+cancellation. Preserve the first caller cancellation; custom blocking storage
+operations must return for this drain to finish.
+
 Host and sandbox outputs share a filename helper whose fixed-length SHA-256
 suffix hashes the raw call ID and UTF-8 content with an explicit ID-length
 boundary. Repeating the same call ID and content reuses one path; changed content

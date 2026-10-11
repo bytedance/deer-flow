@@ -2177,6 +2177,8 @@ storage permissions. An unclean shutdown can leave `.tool-output-*.tmp` files in
 Remove leftovers during thread-data maintenance with all Gateway writers stopped,
 or when deleting the corresponding inactive thread's data.
 
+Tool-output persistence finishes before caller cancellation releases its execution resources, including repeated cancellation; remote sandbox writes must return for this drain to finish.
+
 `E2BSandboxProvider` uses `wait` as its default overflow policy. It waits for
 `acquire_timeout`, then fails the agent turn. DeerFlow does not retry the turn
 automatically. Clients can use the structured error to schedule a retry.

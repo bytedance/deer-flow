@@ -23,7 +23,6 @@ read-before-write middleware's own policy; both rewrite through the shared
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import logging
@@ -1209,7 +1208,9 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
             # in-memory sandbox registry, so it is safe to call on the event
             # loop. The actual sandbox I/O happens in the worker thread.
             sandbox = _resolve_sandbox(request)
-            result = await asyncio.to_thread(
+            # Persistence can still be using the execution's sandbox or blob
+            # client after cancellation. Join it before the owner may release.
+            result = await run_sync_lifecycle_operation(
                 _patch_result,
                 result,
                 self._config,
