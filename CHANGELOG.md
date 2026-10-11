@@ -4212,6 +4212,13 @@ This release closes that milestone with **439 merged pull requests**.
   until it refetched. Each cached page now records how many rows it hid and
   whether the server has more. ([#6702])
 
+- **frontend:** A one-time scheduled task whose `run_at` is a bare date
+  (`"2026-12-07"`, which a chat-created task can carry) now shows midnight of
+  that day in the task's timezone, which is when the server runs it. The UI read
+  the trailing `-07` as a UTC offset and displayed UTC midnight instead: 08:00 in
+  `Asia/Shanghai`, and the previous evening west of UTC, in the task list,
+  detail, chat card and the edit form's prefilled time. ([#6692])
+
 ### Security
 
 - **authz:** Enforce permission checks on routes that only had authentication, and
@@ -9625,4 +9632,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6666]: https://github.com/bytedance/deer-flow/pull/6666
 [#6673]: https://github.com/bytedance/deer-flow/pull/6673
 [#6681]: https://github.com/bytedance/deer-flow/pull/6681
+[#6692]: https://github.com/bytedance/deer-flow/pull/6692
 [#6702]: https://github.com/bytedance/deer-flow/pull/6702

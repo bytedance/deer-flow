@@ -3232,6 +3232,11 @@
   取回重叠的行；从满页中移除一条对话也会让列表在重新获取前停止加载更多。现在每个
   缓存页都会记录自己隐藏了多少行，以及服务端是否还有更多。([#6702])
 
+- **前端：** `run_at` 只有日期（如 `"2026-12-07"`，对话中创建的任务可能如此）的单次定时
+  任务，现在显示为任务时区当天的零点，与服务端实际执行时间一致。此前界面把末尾的
+  `-07` 误认为 UTC 偏移量，显示成 UTC 零点：在 `Asia/Shanghai` 显示为 08:00，在 UTC
+  以西的时区则显示为前一天晚上；任务列表、详情、对话卡片和编辑表单的预填时间都受影响。([#6692])
+
 ### 安全
 
 - **鉴权：** 仅有认证而无权限校验的路由现在会强制执行权限检查，且
@@ -7733,4 +7738,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6666]: https://github.com/bytedance/deer-flow/pull/6666
 [#6673]: https://github.com/bytedance/deer-flow/pull/6673
 [#6681]: https://github.com/bytedance/deer-flow/pull/6681
+[#6692]: https://github.com/bytedance/deer-flow/pull/6692
 [#6702]: https://github.com/bytedance/deer-flow/pull/6702
