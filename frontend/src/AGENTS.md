@@ -10,18 +10,19 @@ failure/replay-gap paths. Draft and confirmation regressions live in
 Answer details use `workspace/message-details` descriptors; skill run scoping
 is documented in `docs/skill-usage-ui.md`.
 
-Artifact URLs encode raw filesystem paths, preserving literal percent sequences.
-Only Markdown destinations decode once; relative images match decoded names
-against raw artifact paths before encoding.
-File-type detection uses the basename so extensionless `Dockerfile` and
-`Makefile` artifacts remain recognizable under nested or dotted directories.
-HTML preview base detection skips DOM construction without case-insensitive `base`
-text; otherwise an inert template distinguishes real tags from comments, scripts
-and nested templates without rewriting source. Tests: `preview-base.dom.test.ts`
-(happy-dom); textarea/title RCDATA needs real-browser checks due to parser gaps.
-Other preview helpers retain the node test environment.
-Language-map membership checks only own properties; inherited names such as
-`constructor` and `__proto__` must keep the unknown-file download fallback.
+Encode raw artifact paths, preserving literal percent sequences. Markdown
+decodes once; relative images match decoded names to raw paths before encoding.
+Detect basename file types, including Dockerfile/Makefile.
+Language maps use own properties; `constructor`/`__proto__` keep fallback.
+HTML bases skip DOM without base text; inert templates ignore comments/scripts
+and templates. `preview-base.dom.test.ts` (happy-dom); RCDATA needs
+browser checks; other helpers use node.
+HTML assets: auth fetch current-thread artifacts only; reject redirects,
+bound bytes/count/CSS depth/time/expansion. Keep the opaque sandbox
+(no allow-same-origin); data URLs cross it, parent Blobs do not. External
+refs stay browser-loaded. Abort stale work; revoke document URLs;
+gate content/URL/scroll identity. Tests: `html-assets.dom.test.ts`,
+`artifact-file-preview.dom.test.tsx`, `tests/e2e/artifact-preview.spec.ts`.
 
 1. Optional composer helpers such as `core/input-polish` can rewrite the local draft before submission, and `core/voice-input` can transcribe browser microphone input into that same local draft; confirmed user input then flows to thread hooks (`core/threads/hooks.ts`) → LangGraph SDK streaming. Voice transcript joining separates every adjacent pair of trimmed word segments, preserves CJK joins and provider whitespace, and attaches leading punctuation/percent signs while retaining spaces after sentence punctuation. Regression cases live in `tests/unit/core/voice-input/speech-recognition.test.ts`.
 2. Stream events update thread state (messages, artifacts, todos, goal). The main thread stream uses the LangGraph SDK's `throttle: true` mode so updates received in the same macrotask coalesce before React is notified; do not replace it with a numeric delay without validating the SDK's trailing-debounce behavior on a continuous stream.

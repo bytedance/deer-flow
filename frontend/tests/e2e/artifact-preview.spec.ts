@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { expect, test } from "@playwright/test";
 
 import { mockLangGraphAPI } from "./utils/mock-api";
@@ -89,6 +91,128 @@ function presentFilesMessages(path = PRESENTED_ARTIFACT_PATH) {
 }
 
 test.describe("Artifact preview stability", () => {
+  test("loads protected HTML sibling resources while retaining an opaque sandbox", async ({
+    page,
+    context,
+    baseURL,
+  }, testInfo) => {
+    const threadId = "00000000-0000-0000-0000-000000003140";
+    const filepath = "/mnt/user-data/outputs/authenticated-report.html";
+    const stylesheet =
+      '@import "nested.css"; h1{background-image:url(chart.png)}';
+    const integrity = `sha256-${createHash("sha256").update(stylesheet).digest("base64")}`;
+    const content = `<link rel="stylesheet" href="style.css" integrity="${integrity}"><script src="app.js"></script><h1>Authenticated report</h1><img id="chart" src="chart.png">`;
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: threadId,
+          messages: presentFilesMessages(filepath),
+          artifacts: [filepath],
+        },
+      ],
+    });
+    await context.addCookies([
+      {
+        name: "access_token",
+        value: "preview-session",
+        url: baseURL!,
+        httpOnly: true,
+        sameSite: "Lax",
+      },
+    ]);
+    const resources: Array<{ filename: string; authenticated: boolean }> = [];
+    await page.route(
+      `**/api/threads/${threadId}/artifacts/mnt/user-data/outputs/*`,
+      async (route) => {
+        const filename = new URL(route.request().url()).pathname
+          .split("/")
+          .pop()!;
+        const headers = await route.request().allHeaders();
+        const authenticated =
+          headers.cookie?.includes("access_token=preview-session") ?? false;
+        if (filename !== "authenticated-report.html")
+          resources.push({ filename, authenticated });
+        if (!authenticated)
+          return route.fulfill({ status: 401, body: "unauthorized" });
+        const bodies: Record<
+          string,
+          { contentType: string; body: string | Buffer }
+        > = {
+          "authenticated-report.html": {
+            contentType: "text/html",
+            body: content,
+          },
+          "style.css": {
+            contentType: "text/css",
+            body: stylesheet,
+          },
+          "nested.css": {
+            contentType: "text/css",
+            body: "h1{color:rgb(1,2,3)}",
+          },
+          "app.js": {
+            contentType: "application/javascript",
+            body: "window.addEventListener('DOMContentLoaded',()=>{document.body.dataset.scriptLoaded='true'})",
+          },
+          "chart.png": {
+            contentType: "image/png",
+            body: Buffer.from(
+              "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+yA1kAAAAASUVORK5CYII=",
+              "base64",
+            ),
+          },
+        };
+        const response = bodies[filename];
+        if (!response) return route.fulfill({ status: 404 });
+        await route.fulfill(response);
+      },
+    );
+    await page.goto(`/workspace/chats/${threadId}`);
+    await page
+      .getByText("authenticated-report.html", { exact: true })
+      .first()
+      .click();
+    const iframe = page.locator('#artifacts iframe[title="Artifact preview"]');
+    await expect(iframe).toHaveAttribute(
+      "sandbox",
+      "allow-scripts allow-forms",
+    );
+    const frame = iframe.contentFrame();
+    await expect(frame.locator("body")).toHaveAttribute(
+      "data-script-loaded",
+      "true",
+    );
+    await expect(frame.locator("h1")).toHaveCSS("color", "rgb(1, 2, 3)");
+    await expect
+      .poll(() =>
+        frame
+          .locator("#chart")
+          .evaluate((image) => (image as HTMLImageElement).naturalWidth),
+      )
+      .toBe(1);
+    expect(resources).toHaveLength(4);
+    expect(resources.every((resource) => resource.authenticated)).toBe(true);
+    expect(
+      await frame.locator("body").evaluate(() => {
+        try {
+          return !!window.parent.document;
+        } catch {
+          return false;
+        }
+      }),
+    ).toBe(false);
+    expect(
+      await frame.locator("body").evaluate(() => {
+        try {
+          return document.cookie;
+        } catch {
+          return "blocked";
+        }
+      }),
+    ).toBe("blocked");
+    await iframe.screenshot({ path: testInfo.outputPath("html-preview.png") });
+  });
+
   for (const [index, filename] of ["constructor", "data.__proto__"].entries()) {
     test(`keeps ${filename} artifacts on the download fallback`, async ({
       page,

@@ -274,6 +274,9 @@ export const zhCN: Translations = {
   },
 
   artifactPreview: {
+    loadingPreview: "正在准备预览...",
+    resourcesUnavailable:
+      "部分预览资源无法加载。可查看源代码或下载文件以获取完整内容。",
     limited: (previewSize, totalSize) =>
       totalSize
         ? `当前显示 ${totalSize} 中的前 ${previewSize}。`
