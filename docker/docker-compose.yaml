@@ -180,12 +180,12 @@ services:
       # request arrives through it, so direct mode would only bring back the
       # shared lockout. Set another list in .env to change whom to trust.
       - AUTH_TRUSTED_PROXIES=${AUTH_TRUSTED_PROXIES:-nginx}
-      # Proxy values (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY) are inherited from ../.env via env_file.
+      # Proxy values (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY) are inherited from the selected root dotenv file.
       # Only NO_PROXY is declared here so internal service hostnames are always exempt from the proxy.
       - NO_PROXY=${NO_PROXY:-}${NO_PROXY:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,openviking,host.docker.internal
       - no_proxy=${no_proxy:-}${no_proxy:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,openviking,host.docker.internal
     env_file:
-      - path: ../.env
+      - path: ${DEER_FLOW_COMPOSE_ENV_FILE:-../.env}
         required: false
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -235,7 +235,7 @@ services:
       - NODE_HOST=host.docker.internal
       - K8S_API_SERVER=https://host.docker.internal:26443
     env_file:
-      - path: ../.env
+      - path: ${DEER_FLOW_COMPOSE_ENV_FILE:-../.env}
         required: false
     extra_hosts:
       - "host.docker.internal:host-gateway"

@@ -507,6 +507,12 @@ recovery command and retry. The check honors secret overrides from the shell or
 `.env`, accepts readable read-only secret files, and leaves `make down` available
 without reading or generating secrets.
 
+Production Docker commands can select a root dotenv profile with
+`DEER_FLOW_COMPOSE_ENV_FILE=/srv/deer-flow/stage.env make up`. The same file
+feeds Compose interpolation, Gateway/provisioner variables, and deployment
+secret checks. YAML and runtime-state locations remain separate selectors;
+see [production env files](backend/docs/CONFIGURATION.md#production-compose-env-files).
+
 For persistent deployments, configure `database.backend` as `sqlite` or
 `postgres`. The selected backend is shared by the LangGraph checkpointer,
 LangGraph Store, and DeerFlow application data. The deprecated `checkpointer`

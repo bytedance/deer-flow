@@ -448,3 +448,14 @@ Keep exit codes, timeouts and redaction intact; do not rely on the host locale.
 Regressions use real local children, including ASCII/GBK capture defaults,
 nonzero exits, surrogate characters and malformed output, without invoking
 provider diagnostics. Doctor covers both `_run` streams and pnpm runner capture.
+
+## Production dotenv selection
+
+`deploy.sh` resolves `DEER_FLOW_COMPOSE_ENV_FILE` from the checkout before
+creating state or probing secrets. Keep Compose interpolation, Gateway and
+provisioner env files, secret probes, and UV_EXTRAS discovery on that one path.
+Normalize host paths for Git Bash; quote path arguments rather than sourcing
+dotenv files. Unset/empty selection preserves the optional root .env default;
+explicit invalid files reject build/start before Docker. Stopping remains
+possible after the selected file is removed. Tests: `test_deploy_env_file.py`
+and the existing deployment/Compose suites.
