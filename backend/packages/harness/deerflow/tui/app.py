@@ -216,6 +216,7 @@ class DeerFlowTUI(App):
         self._palette_open = False
         self._palette_items: list = []
         self._palette_index = 0
+        self._restored_draft: str | None = None
         self._history = InputHistory()
         self._transcript_dirty = False
         self._transcript_scroll_pending = False
@@ -277,11 +278,14 @@ class DeerFlowTUI(App):
             return
         self._history.add(text)
         if not self._handle_submit(text):
-            self._restore_draft(event.value)
+            self._restore_draft(text)
 
     def _restore_draft(self, text: str) -> None:
         # A message that did not start is still the user's draft: put it back so
-        # Enter resends it, instead of leaving it only in input history.
+        # Enter resends it, instead of leaving it only in input history. A bare
+        # "/skill" would reopen the palette, where Enter fills instead of sends,
+        # so the palette stays closed until the draft is edited.
+        self._restored_draft = text
         composer = self.query_one("#composer", ComposerInput)
         composer.value = text
         composer.cursor_position = len(text)
@@ -291,6 +295,10 @@ class DeerFlowTUI(App):
             return
         value = event.text_area.value
         event.text_area.set_class("\n" in value, "multiline")
+        if value == self._restored_draft:
+            self._close_palette()
+            return
+        self._restored_draft = None
         if value.startswith("/") and " " not in value and "\n" not in value:
             from .command_registry import build_registry, filter_commands
 

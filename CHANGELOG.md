@@ -4160,8 +4160,9 @@ This release closes that milestone with **439 merged pull requests**.
   active run, while an interrupted run was still stopping, or when the run could
   not start was replaced by a notice and survived only in input history; a
   command-line launch message whose run could not start was lost entirely. The
-  composer now gets the exact text back, with the cursor at its end, so `Enter`
-  resends it; accepted messages and local slash commands clear it as before.
+  composer now gets the text back as input history recorded it, with the cursor
+  at its end and the command palette closed, so `Enter` resends it; accepted
+  messages and local slash commands clear it as before.
   ([#6666])
 
 ### Security
