@@ -17,6 +17,7 @@ class GoalEvaluation(TypedDict):
     blocker: GoalBlocker
     reason: str
     evidence_summary: NotRequired[str]
+    relied_on_assumption: NotRequired[bool]
 
 
 class GoalState(TypedDict):
@@ -29,3 +30,17 @@ class GoalState(TypedDict):
     no_progress_count: int
     max_no_progress_continuations: int
     last_evaluation: NotRequired[dict[str, Any]]
+
+
+class GoalOutcomeState(TypedDict):
+    """The latest met goal, written only by the checkpoint write that clears it."""
+
+    status: Literal["achieved"]
+    objective: str
+    goal_created_at: str
+    achieved_at: str
+    continuation_count: int
+    max_continuations: int
+    reason: str
+    relied_on_assumption: bool
+    reply_message_id: str | None

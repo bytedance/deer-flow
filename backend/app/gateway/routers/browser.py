@@ -11,6 +11,7 @@ from app.gateway.authz import Permissions, require_permission, resolve_route_per
 from app.gateway.browser_capability import browser_capability
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id, reset_current_user, set_current_user
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
@@ -132,8 +133,15 @@ async def _authenticate_ws(websocket: WebSocket):
         if not isinstance(payload, TokenError):
             provider = get_local_provider()
             user = await provider.get_user(payload.sub)
-            if user is not None and user.token_version == payload.ver:
-                return user
+            if user is not None:
+                # Same post-lookup verdicts as every other JWT surface —
+                # including account suspension: WebSockets bypass
+                # AuthMiddleware, so a disabled user's still-valid cookie
+                # must not open a streaming/browser session.
+                from app.gateway.deps import validate_resolved_session_user
+
+                if validate_resolved_session_user(user, payload) is None:
+                    return user
     if is_auth_disabled():
         return get_auth_disabled_user()
     return None
@@ -261,6 +269,7 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
             BrowserLiveViewerError,
             BrowserSessionCapacityError,
             get_browser_session_manager,
+            resolve_browser_egress,
             validate_browser_url,
         )
     except ImportError:
@@ -326,6 +335,7 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
             cdp_url=_cfg_str("cdp_url"),
             allow_unguarded_cdp=_cfg_bool("allow_unguarded_cdp", False),
             url_guard=validate_browser_url,
+            egress_resolver=resolve_browser_egress,
         )
         session = session_lease.__enter__()
     except BrowserSessionCapacityError:
@@ -456,7 +466,7 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
                     # SSRF-screen client-driven navigations with the same policy
                     # the agent tools enforce; reject rather than dispatch.
                     url = event.get("url")
-                    reason = validate_browser_url(url) if isinstance(url, str) else "Error: invalid navigation URL"
+                    reason = await asyncio.to_thread(validate_browser_url, url) if isinstance(url, str) else "Error: invalid navigation URL"
                     if reason is not None:
                         await _send_payload({"type": "nav_rejected", "url": url, "message": reason})
                         continue
@@ -474,13 +484,14 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
     input_task: asyncio.Task | None = None
     reader_task: asyncio.Task | None = None
     poll_task: asyncio.Task | None = None
+    cancellation: asyncio.CancelledError | None = None
     try:
         # Seed the live page from the latest browser_view URL. A thread can have
         # a stale browser session from an earlier panel/live attempt; if that
         # page differs from the latest visible browser artifact, align Live with
         # what the user expects instead of requiring an off/on reconnect.
         seed = websocket.query_params.get("seed")
-        if seed and validate_browser_url(seed) is None:
+        if seed and await asyncio.to_thread(validate_browser_url, seed) is None:
             with contextlib.suppress(Exception):
                 current = await session.current_url()
                 if _should_apply_browser_seed(current, seed):
@@ -498,6 +509,8 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
         await reader_task
     except WebSocketDisconnect:
         pass
+    except asyncio.CancelledError as exc:
+        cancellation = exc
     except Exception as exc:
         logger.exception("browser stream error: thread_id=%s err=%s", thread_id, exc)
     finally:
@@ -508,7 +521,14 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
             reader_task.cancel()
         if poll_task is not None:
             poll_task.cancel()
-        with contextlib.suppress(Exception):
-            await session.stop_screencast(_on_frame)
+        try:
+            await await_drained(session.stop_screencast(_on_frame))
+        except asyncio.CancelledError as exc:
+            if cancellation is None:
+                cancellation = exc
+        except Exception:
+            pass
         session_lease.__exit__(None, None, None)
         reset_current_user(token)
+        if cancellation is not None:
+            raise cancellation

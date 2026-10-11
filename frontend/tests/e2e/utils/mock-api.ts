@@ -11,6 +11,8 @@ import path from "node:path";
 
 import type { Page, Route } from "@playwright/test";
 
+import type { GoalState, ThreadGoalOutcome } from "@/core/threads/types";
+
 // ---------------------------------------------------------------------------
 // Constants — deterministic IDs used across tests
 // ---------------------------------------------------------------------------
@@ -27,6 +29,19 @@ export const THREAD_PINNED_METADATA_KEY = "deerflow_pinned";
 // constant; the mock must mirror the same metadata contract for project
 // membership.
 export const THREAD_PROJECT_METADATA_KEY = "deerflow_project_id";
+
+/**
+ * The keys the Gateway's POST /history head may carry, from the goal contract
+ * the backend router test also reads (`contracts/thread_goal_contract.json`).
+ */
+const HISTORY_HEAD_KEYS: readonly string[] = (
+  JSON.parse(
+    readFileSync(
+      path.resolve(process.cwd(), "../contracts/thread_goal_contract.json"),
+      "utf8",
+    ),
+  ) as { history_head_keys: string[] }
+).history_head_keys;
 
 const MOCK_AUTH_USER = {
   id: "default",
@@ -47,7 +62,14 @@ export type MockThread = {
   metadata?: Record<string, unknown>;
   messages?: unknown[];
   artifacts?: string[];
-  goal?: Record<string, unknown> | null;
+  goal?: GoalState | Record<string, unknown> | null;
+  /**
+   * The record of a met goal (`mockGoalOutcome`). Runs keep it, like the
+   * backend; PUT and DELETE /goal drop it.
+   */
+  goal_outcome?: ThreadGoalOutcome | null;
+  /** Thread search `unread` (a server-originated run changed since it was opened); default false. */
+  unread?: boolean;
 };
 
 export type MockProject = {
@@ -121,34 +143,19 @@ export type MockAPIOptions = {
   trashDocuments?: MockTrashDocument[];
   threadFileGroups?: MockThreadFileGroup[];
   createdThreadMessages?: unknown[];
+  honorRequestedThreadId?: boolean;
   agents?: MockAgent[];
   skills?: MockSkill[];
-  scheduledTasks?: Array<{
-    id: string;
-    thread_id: string | null;
-    context_mode?: "fresh_thread_per_run" | "reuse_thread";
-    assistant_id?: string | null;
-    last_thread_id?: string | null;
-    title: string;
-    prompt: string;
-    schedule_type: "once" | "cron" | "interval";
-    schedule_spec: Record<string, unknown>;
-    timezone: string;
-    status:
-      | "enabled"
-      | "paused"
-      | "running"
-      | "completed"
-      | "failed"
-      | "cancelled";
-    next_run_at: string | null;
-    last_run_at: string | null;
-    last_run_id: string | null;
-    last_error: string | null;
-    run_count: number;
-    created_at: string;
-    updated_at: string;
-  }>;
+  scheduledTasks?: MockScheduledTask[];
+  /** Initial run history per task id (newest first), served by the runs route. */
+  scheduledTaskRuns?: Record<string, MockScheduledTaskRun[]>;
+  /** Lifecycle events per originating chat id, served by `/api/threads/{id}/scheduled-task-events`. */
+  scheduledTaskEvents?: Record<string, MockScheduledTaskEvent[]>;
+  /**
+   * `/api/channels/providers` entries (the list is empty and disabled when
+   * omitted). `proactive_notifications` defaults to true only for `wecom`.
+   */
+  channelProviders?: MockChannelProvider[];
   uploadLimits?: {
     max_files: number;
     max_file_size: number;
@@ -159,9 +166,218 @@ export type MockAPIOptions = {
     browserControlEnabled?: boolean;
     mcpTasksEnabled?: boolean;
     knowledgeScopeSelectionEnabled?: boolean;
+    /** Emitted as `scheduled_tasks`; each flag defaults to true. */
+    scheduledTasks?: {
+      available?: boolean;
+      running?: boolean;
+      toolEnabled?: boolean;
+    };
+    /** Emitted as `thread_activity`; unavailable unless enabled, so nothing polls by default. */
+    threadActivity?: {
+      available?: boolean;
+    };
   };
   runStreamHandler?: (route: Route) => Promise<void>;
 };
+
+/** One `/api/threads/{id}/scheduled-task-events` row; omitted fields are null. */
+export type MockScheduledTaskEvent = {
+  id: string;
+  task_id: string;
+  event: "task_stopped" | "task_paused" | "task_finished";
+  reason_code: string;
+  task_title?: string | null;
+  stop_condition?: string | null;
+  run_thread_id?: string | null;
+  run_number?: number | null;
+  run_status?: MockScheduledTaskRun["status"] | null;
+  max_runs?: number | null;
+  end_at?: string | null;
+  schedule_type?: "once" | "cron" | "interval" | null;
+  after_run_id?: string | null;
+  created_at: string;
+};
+
+export type MockChannelProvider = {
+  provider: string;
+  display_name: string;
+  enabled?: boolean;
+  configured?: boolean;
+  connection_status?: string;
+  proactive_notifications?: boolean;
+};
+
+/** One server-originated run change reported by the mocked `/api/thread-activity`. */
+export type MockThreadActivityEntry = {
+  thread_id: string;
+  /** Default `"schedule"`; `null` is the caller's own interactive run (never listed). */
+  origin_kind?: "schedule" | "im_channel" | "github" | "extension" | null;
+  status?: string;
+};
+
+/** Handles a spec can use to drive the mocked backend after `mockLangGraphAPI`. */
+export type MockAPIController = {
+  /** Add or replace a thread in the thread search results. */
+  upsertThread: (thread: MockThread) => void;
+  /** A thread as the mock now stores it, e.g. the goal a PUT /goal saved. */
+  getThread: (threadId: string) => MockThread | undefined;
+  /**
+   * While on, PUT and DELETE /goal return the Gateway's 409 for a thread
+   * with a run in flight.
+   */
+  setGoalWritesBusy: (busy: boolean) => void;
+  /** Record run changes; the next activity poll after the seed returns them. */
+  pushThreadActivity: (...entries: MockThreadActivityEntry[]) => void;
+  /** Simulate a read on another device (raises `read_version`). */
+  bumpReadVersion: () => void;
+  /**
+   * Replace the scheduled tasks every task route serves (the list, one task,
+   * a chat's tasks), e.g. to flip a task to paused or delete it.
+   */
+  setScheduledTasks: (tasks: MockScheduledTask[]) => void;
+  /** Replace the lifecycle events of an originating chat. */
+  setScheduledTaskEvents: (
+    threadId: string,
+    events: MockScheduledTaskEvent[],
+  ) => void;
+  /** Thread ids of every `POST /api/threads/{id}/read`, in order. */
+  readonly readRequests: readonly string[];
+};
+
+function scheduledTaskEventResponse(event: MockScheduledTaskEvent) {
+  return {
+    task_title: null,
+    stop_condition: null,
+    run_thread_id: null,
+    run_number: null,
+    run_status: null,
+    max_runs: null,
+    end_at: null,
+    schedule_type: null,
+    after_run_id: null,
+    ...event,
+  };
+}
+
+export type MockScheduledTask = {
+  id: string;
+  thread_id: string | null;
+  context_mode?: "fresh_thread_per_run" | "reuse_thread";
+  assistant_id?: string | null;
+  last_thread_id?: string | null;
+  title: string;
+  prompt: string;
+  schedule_type: "once" | "cron" | "interval";
+  schedule_spec: Record<string, unknown>;
+  timezone: string;
+  status:
+    | "enabled"
+    | "paused"
+    | "running"
+    | "completed"
+    | "failed"
+    | "cancelled";
+  next_run_at: string | null;
+  last_run_at: string | null;
+  last_run_id: string | null;
+  last_error: string | null;
+  run_count: number;
+  goal_objective?: string | null;
+  max_runs?: number | null;
+  end_at?: string | null;
+  origin_thread_id?: string | null;
+  standing_notes?: string[] | null;
+  stop_condition?: string | null;
+  automatic_runs_used?: number;
+  active_run_status?: "queued" | "launching" | "running" | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type MockScheduledTaskRun = {
+  id: string;
+  task_id: string;
+  thread_id: string | null;
+  run_id: string | null;
+  scheduled_for: string;
+  trigger: "scheduled" | "manual";
+  status:
+    | "queued"
+    | "launching"
+    | "running"
+    | "success"
+    | "unmet"
+    | "failed"
+    | "skipped"
+    | "interrupted";
+  error: string | null;
+  goal_objective?: string | null;
+  goal_verdict?: Record<string, unknown> | null;
+  stop_requested_run_id?: string | null;
+  attempt_count: number;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string;
+  run_number?: number | null;
+  total_tokens?: number | null;
+  summary?: string | null;
+};
+
+/** Fill the response fields newer backends always send, so older fixtures stay valid. */
+function scheduledTaskResponse(task: MockScheduledTask) {
+  return {
+    context_mode: "fresh_thread_per_run",
+    last_thread_id: null,
+    assistant_id: null,
+    goal_objective: null,
+    max_runs: null,
+    end_at: null,
+    origin_thread_id: null,
+    standing_notes: [],
+    stop_condition: null,
+    automatic_runs_used: 0,
+    active_run_status: null,
+    ...task,
+    thread_id: task.thread_id ?? null,
+  };
+}
+
+function scheduledTaskNotFound(route: Route) {
+  return route.fulfill({
+    status: 404,
+    contentType: "application/json",
+    body: JSON.stringify({
+      detail: { code: "task_not_found", message: "Scheduled task not found" },
+    }),
+  });
+}
+
+const CLEARABLE_TASK_FIELDS = [
+  "goal_objective",
+  "max_runs",
+  "end_at",
+  "stop_condition",
+] as const;
+
+/** PATCH/resume semantics: a present key replaces the value; `null` clears the clearable fields. */
+function applyClearableTaskFields(
+  task: MockScheduledTask,
+  payload: Record<string, unknown>,
+): MockScheduledTask {
+  const next: MockScheduledTask = { ...task };
+  for (const key of CLEARABLE_TASK_FIELDS) {
+    if (!(key in payload)) continue;
+    const value = payload[key];
+    if (value === null || value === "") {
+      next[key] = null;
+    } else if (key === "max_runs" && typeof value === "number") {
+      next.max_runs = value;
+    } else if (key !== "max_runs" && typeof value === "string") {
+      next[key] = value;
+    }
+  }
+  return next;
+}
 
 const DEFAULT_SKILLS: MockSkill[] = [
   {
@@ -210,7 +426,8 @@ function mockMessageRunId(message: unknown, fallback: string) {
   return fallback;
 }
 
-function visibleRunInputMessages(route: Route) {
+/** The visible messages a run stream request submits. */
+export function visibleRunInputMessages(route: Route) {
   try {
     const body = route.request().postDataJSON() as {
       input?: { messages?: unknown[] };
@@ -268,7 +485,8 @@ function mockStreamMessages(
   ];
 }
 
-function runStreamThreadId(route: Route) {
+/** The thread a run stream request targets (path first, then the body). */
+export function runStreamThreadId(route: Route) {
   const pathThreadId = /\/threads\/([^/]+)\/runs\/stream/.exec(
     new URL(route.request().url()).pathname,
   )?.[1];
@@ -295,6 +513,56 @@ function runStreamThreadId(route: Route) {
   }
 }
 
+/** The backend's `is_active_goal`: only an active goal is projected or met. */
+function isActiveGoal(goal: MockThread["goal"]): goal is GoalState {
+  return goal?.status === "active";
+}
+
+/** An active goal as PUT /goal stores it; `overrides` sets counts or a check. */
+export function mockGoal(
+  objective: string,
+  overrides: Partial<GoalState> = {},
+): GoalState {
+  const now = new Date().toISOString();
+  return {
+    objective,
+    status: "active",
+    created_at: now,
+    updated_at: now,
+    continuation_count: 0,
+    max_continuations: 8,
+    no_progress_count: 0,
+    max_no_progress_continuations: 2,
+    ...overrides,
+  };
+}
+
+/**
+ * The record the backend writes when it clears a met goal
+ * (runtime/goal.py `build_goal_outcome`), anchored to `replyMessageId`.
+ */
+export function mockGoalOutcome(
+  goal: Pick<
+    GoalState,
+    "objective" | "created_at" | "continuation_count" | "max_continuations"
+  >,
+  replyMessageId: string | null,
+  overrides: Partial<ThreadGoalOutcome> = {},
+): ThreadGoalOutcome {
+  return {
+    status: "achieved",
+    objective: goal.objective,
+    goal_created_at: goal.created_at,
+    achieved_at: new Date().toISOString(),
+    continuation_count: goal.continuation_count,
+    max_continuations: goal.max_continuations,
+    reason: "The reply meets the goal.",
+    relied_on_assumption: false,
+    reply_message_id: replyMessageId,
+    ...overrides,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // mockLangGraphAPI
 // ---------------------------------------------------------------------------
@@ -304,7 +572,10 @@ function runStreamThreadId(route: Route) {
  * during message sending.  Without these mocks the pages would hang waiting
  * for a real backend.
  */
-export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
+export function mockLangGraphAPI(
+  page: Page,
+  options?: MockAPIOptions,
+): MockAPIController {
   void page.route("**/api/plugins", (route) => route.fulfill({ json: [] }));
   let threads = [...(options?.threads ?? [])];
   const projectsList = (options?.projects ?? []).map((project) => ({
@@ -322,31 +593,14 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   const agents = options?.agents ?? [];
   const skills = options?.skills ?? DEFAULT_SKILLS;
   const scheduledTasks = options?.scheduledTasks ?? [];
-  let mutableScheduledTasks = [...scheduledTasks];
-  const mutableTaskRuns: Record<
-    string,
-    Array<{
-      id: string;
-      task_id: string;
-      thread_id: string | null;
-      run_id: string | null;
-      scheduled_for: string;
-      trigger: "scheduled" | "manual";
-      status:
-        | "queued"
-        | "launching"
-        | "running"
-        | "success"
-        | "failed"
-        | "skipped"
-        | "interrupted";
-      error: string | null;
-      attempt_count: number;
-      started_at: string | null;
-      finished_at: string | null;
-      created_at: string;
-    }>
-  > = {};
+  let mutableScheduledTasks: MockScheduledTask[] = [...scheduledTasks];
+  const mutableTaskRuns: Record<string, MockScheduledTaskRun[]> =
+    Object.fromEntries(
+      Object.entries(options?.scheduledTaskRuns ?? {}).map(([id, runs]) => [
+        id,
+        [...runs],
+      ]),
+    );
   const uploadLimits = options?.uploadLimits ?? {
     max_files: 10,
     max_file_size: 50 * 1024 * 1024,
@@ -381,7 +635,9 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     sandbox_runtime_mode: "init-container" as
       | "none"
       | "gateway-download"
-      | "init-container",
+      | "init-container"
+      | "broker",
+    sandbox_runtime_probed: true,
     sandbox_runtime_ready: false,
     sandbox_runtime_detail:
       "The provisioner has no lark-cli init image configured (LARK_CLI_INIT_IMAGE)." as
@@ -394,6 +650,26 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     mcpTasksEnabled: options?.features?.mcpTasksEnabled ?? true,
     knowledgeScopeSelectionEnabled:
       options?.features?.knowledgeScopeSelectionEnabled ?? false,
+    scheduledTasks: {
+      available: options?.features?.scheduledTasks?.available ?? true,
+      running: options?.features?.scheduledTasks?.running ?? true,
+      toolEnabled: options?.features?.scheduledTasks?.toolEnabled ?? true,
+    },
+    threadActivity: {
+      available: options?.features?.threadActivity?.available ?? false,
+    },
+  };
+  // Thread activity feed: a run-change log ordered by `seq`, plus the
+  // per-user read clock. Cursors are "<seq>:<run id>".
+  const activityLog: Array<
+    Required<MockThreadActivityEntry> & { seq: number }
+  > = [];
+  let activitySeq = 100;
+  let readVersion = 0;
+  const readRequests: string[] = [];
+  let goalWritesBusy = false;
+  const scheduledTaskEvents: Record<string, MockScheduledTaskEvent[]> = {
+    ...(options?.scheduledTaskEvents ?? {}),
   };
 
   const upsertThread = (thread: MockThread) => {
@@ -401,6 +677,45 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       thread,
       ...threads.filter((existing) => existing.thread_id !== thread.thread_id),
     ];
+  };
+
+  // The materialized thread state. Like a checkpoint, it has no `goal` key
+  // before a goal is set or after a clear, and `goal_outcome` only once met.
+  const threadStateValues = (thread: MockThread): Record<string, unknown> => ({
+    title: thread.title ?? "Untitled",
+    messages: thread.messages ?? [
+      {
+        type: "human",
+        id: `msg-human-${thread.thread_id}`,
+        content: [{ type: "text", text: "Previous question" }],
+      },
+      {
+        type: "ai",
+        id: `msg-ai-${thread.thread_id}`,
+        content: `Response in thread ${thread.title ?? thread.thread_id}`,
+      },
+    ],
+    artifacts: thread.artifacts ?? [],
+    ...(thread.goal ? { goal: thread.goal } : {}),
+    ...(thread.goal_outcome ? { goal_outcome: thread.goal_outcome } : {}),
+  });
+
+  // The POST /history head: only the contract's `history_head_keys`, with
+  // `goal` only while active and `goal_outcome` only when achieved (threads.py
+  // get_thread_history). `artifacts` is mock-only: the real head lacks it,
+  // but the artifact specs preload their artifacts through it.
+  const historyHeadValues = (thread: MockThread) => {
+    const state = threadStateValues(thread);
+    const projected = HISTORY_HEAD_KEYS.filter(
+      (key) =>
+        key in state &&
+        (key !== "goal" || isActiveGoal(thread.goal)) &&
+        (key !== "goal_outcome" || thread.goal_outcome?.status === "achieved"),
+    );
+    return {
+      ...Object.fromEntries(projected.map((key) => [key, state[key]])),
+      artifacts: state.artifacts,
+    };
   };
 
   const threadSearchResult = (thread: MockThread) => ({
@@ -413,6 +728,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     },
     status: "idle",
     values: { title: thread.title ?? "Untitled", goal: thread.goal ?? null },
+    unread: thread.unread ?? false,
   });
 
   const threadUpdatedAt = (thread: MockThread) =>
@@ -497,14 +813,148 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
 
   void page.route("**/api/channels/providers", (route) => {
     if (route.request().method() === "GET") {
+      const providers = (options?.channelProviders ?? []).map((provider) => ({
+        enabled: true,
+        configured: true,
+        connectable: true,
+        unavailable_reason: null,
+        auth_mode: "token",
+        connection_status: "not_connected",
+        credential_fields: [],
+        credential_values: {},
+        proactive_notifications: provider.provider === "wecom",
+        ...provider,
+      }));
       return route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ enabled: false, providers: [] }),
+        body: JSON.stringify({
+          enabled: providers.length > 0,
+          providers,
+        }),
       });
     }
     return route.fallback();
   });
+
+  // Thread activity feed (`GET /api/thread-activity`): 503 when unavailable,
+  // like a memory-backed Gateway; no cursor seeds; a cursor returns the
+  // logged changes after it (deduped by thread, latest last).
+  void page.route(/\/api\/thread-activity(?:\?|$)/, (route) => {
+    if (route.request().method() !== "GET") {
+      return route.fallback();
+    }
+    if (!featureFlags.threadActivity.available) {
+      return route.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({ detail: "Thread activity is not available" }),
+      });
+    }
+    const cursor = new URL(route.request().url()).searchParams.get("cursor");
+    if (cursor === null) {
+      const head = activityLog.at(-1);
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          cursor: head ? `${head.seq}:run-${head.seq}` : "0:",
+          threads: [],
+          truncated: false,
+          read_version: readVersion,
+        }),
+      });
+    }
+    const match = /^(\d+):/.exec(cursor);
+    if (!match) {
+      return route.fulfill({
+        status: 422,
+        contentType: "application/json",
+        body: JSON.stringify({
+          detail: {
+            code: "invalid_cursor",
+            message: "Invalid activity cursor",
+          },
+        }),
+      });
+    }
+    const after = Number(match[1]);
+    const changed = activityLog.filter((entry) => entry.seq > after);
+    const last = changed.at(-1);
+    const latest = new Map<string, (typeof changed)[number]>();
+    for (const entry of changed) {
+      latest.delete(entry.thread_id);
+      latest.set(entry.thread_id, entry);
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        cursor: last ? `${last.seq}:run-${last.seq}` : cursor,
+        threads: [...latest.values()]
+          .filter((entry) => entry.origin_kind !== null)
+          .map(({ thread_id, origin_kind, status }) => ({
+            thread_id,
+            origin_kind,
+            status,
+          })),
+        truncated: false,
+        read_version: readVersion,
+      }),
+    });
+  });
+
+  // Mark read (`POST /api/threads/{id}/read`): raises `read_version` only
+  // when the thread was unread, like the Gateway.
+  void page.route(/\/api\/threads\/[^/]+\/read$/, (route) => {
+    if (route.request().method() !== "POST") {
+      return route.fallback();
+    }
+    const parts = new URL(route.request().url()).pathname.split("/");
+    const threadId = decodeURIComponent(parts.at(-2) ?? "");
+    readRequests.push(threadId);
+    const thread = threads.find((item) => item.thread_id === threadId);
+    if (!thread) {
+      return route.fulfill({
+        status: 404,
+        contentType: "application/json",
+        body: JSON.stringify({ detail: `Thread ${threadId} not found` }),
+      });
+    }
+    if (thread.unread) {
+      threads = threads.map((item) =>
+        item.thread_id === threadId ? { ...item, unread: false } : item,
+      );
+      readVersion += 1;
+    }
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ unread: false, read_version: readVersion }),
+    });
+  });
+
+  // Lifecycle events of an originating chat. Rows outlive their task, so
+  // this route never looks at the task list.
+  void page.route(
+    /\/api\/threads\/[^/]+\/scheduled-task-events(?:\?|$)/,
+    (route) => {
+      if (route.request().method() !== "GET") {
+        return route.fallback();
+      }
+      const parts = new URL(route.request().url()).pathname.split("/");
+      const threadId = decodeURIComponent(parts.at(-2) ?? "");
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          events: (scheduledTaskEvents[threadId] ?? []).map(
+            scheduledTaskEventResponse,
+          ),
+        }),
+      });
+    },
+  );
 
   void page.route("**/api/channels/connections", (route) => {
     if (route.request().method() === "GET") {
@@ -533,14 +983,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       return route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify(
-          mutableScheduledTasks.map((task) => ({
-            context_mode: "fresh_thread_per_run",
-            last_thread_id: null,
-            ...task,
-            thread_id: task.thread_id ?? null,
-          })),
-        ),
+        body: JSON.stringify(mutableScheduledTasks.map(scheduledTaskResponse)),
       });
     }
     if (route.request().method() === "POST") {
@@ -551,7 +994,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       const prompt = typeof payload.prompt === "string" ? payload.prompt : "";
       const timezone =
         typeof payload.timezone === "string" ? payload.timezone : "UTC";
-      const created = {
+      const created: MockScheduledTask = {
         id: "task-created",
         thread_id: threadId || null,
         context_mode:
@@ -576,12 +1019,13 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         created_at: "2026-07-01T00:00:00+00:00",
         updated_at: "2026-07-01T00:00:00+00:00",
       };
-      mutableScheduledTasks = [created, ...mutableScheduledTasks];
-      mutableTaskRuns[created.id] = [];
+      const stored = applyClearableTaskFields(created, payload);
+      mutableScheduledTasks = [stored, ...mutableScheduledTasks];
+      mutableTaskRuns[stored.id] = [];
       return route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify(created),
+        body: JSON.stringify(scheduledTaskResponse(stored)),
       });
     }
     return route.fallback();
@@ -593,13 +1037,16 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         new URL(route.request().url()).pathname.split("/").at(-2) ?? "",
       );
       mutableScheduledTasks = mutableScheduledTasks.map((task) =>
-        task.id === taskId ? { ...task, status: "paused" as const } : task,
+        task.id === taskId
+          ? { ...task, status: "paused" as const, active_run_status: null }
+          : task,
       );
       const task = mutableScheduledTasks.find((item) => item.id === taskId);
+      if (!task) return scheduledTaskNotFound(route);
       return route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify(task),
+        body: JSON.stringify(scheduledTaskResponse(task)),
       });
     }
     return route.fallback();
@@ -610,14 +1057,36 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       const taskId = decodeURIComponent(
         new URL(route.request().url()).pathname.split("/").at(-2) ?? "",
       );
+      // Optional renewal body: `max_runs` / `end_at`, `null` clears that cap.
+      const renewal = (() => {
+        try {
+          return (route.request().postDataJSON() ?? {}) as Record<
+            string,
+            unknown
+          >;
+        } catch {
+          return {};
+        }
+      })();
       mutableScheduledTasks = mutableScheduledTasks.map((task) =>
-        task.id === taskId ? { ...task, status: "enabled" as const } : task,
+        task.id === taskId
+          ? {
+              ...applyClearableTaskFields(task, {
+                ...("max_runs" in renewal
+                  ? { max_runs: renewal.max_runs }
+                  : {}),
+                ...("end_at" in renewal ? { end_at: renewal.end_at } : {}),
+              }),
+              status: "enabled" as const,
+            }
+          : task,
       );
       const task = mutableScheduledTasks.find((item) => item.id === taskId);
+      if (!task) return scheduledTaskNotFound(route);
       return route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify(task),
+        body: JSON.stringify(scheduledTaskResponse(task)),
       });
     }
     return route.fallback();
@@ -629,40 +1098,46 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         new URL(route.request().url()).pathname.split("/").at(-2) ?? "",
       );
       const task = mutableScheduledTasks.find((item) => item.id === taskId);
-      if (task) {
-        const runId = `run-${taskId}`;
-        mutableTaskRuns[taskId] = [
-          {
-            id: `task-run-${taskId}`,
-            task_id: taskId,
-            thread_id: task.thread_id,
-            run_id: runId,
-            scheduled_for: "2026-07-01T00:00:00+00:00",
-            trigger: "manual",
-            status: "success",
-            error: null,
-            attempt_count: 1,
-            started_at: "2026-07-01T00:00:00+00:00",
-            finished_at: "2026-07-01T00:00:00+00:00",
-            created_at: "2026-07-01T00:00:00+00:00",
-          },
-          ...(mutableTaskRuns[taskId] ?? []),
-        ];
-        mutableScheduledTasks = mutableScheduledTasks.map((item) =>
-          item.id === taskId
-            ? {
-                ...item,
-                last_run_id: runId,
-                last_run_at: "2026-07-01T00:00:00+00:00",
-                run_count: item.run_count + 1,
-              }
-            : item,
-        );
-      }
+      if (!task) return scheduledTaskNotFound(route);
+      const threadId = task.thread_id ?? `trial-thread-${taskId}`;
+      const runId = `run-${taskId}`;
+      mutableTaskRuns[taskId] = [
+        {
+          id: `task-run-${taskId}`,
+          task_id: taskId,
+          thread_id: threadId,
+          run_id: runId,
+          scheduled_for: "2026-07-01T00:00:00+00:00",
+          trigger: "manual",
+          status: "success",
+          error: null,
+          attempt_count: 1,
+          started_at: "2026-07-01T00:00:00+00:00",
+          finished_at: "2026-07-01T00:00:00+00:00",
+          created_at: "2026-07-01T00:00:00+00:00",
+        },
+        ...(mutableTaskRuns[taskId] ?? []),
+      ];
+      mutableScheduledTasks = mutableScheduledTasks.map((item) =>
+        item.id === taskId
+          ? {
+              ...item,
+              last_run_id: runId,
+              last_run_at: "2026-07-01T00:00:00+00:00",
+              run_count: item.run_count + 1,
+            }
+          : item,
+      );
       return route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify({ id: taskId, triggered: true }),
+        body: JSON.stringify({
+          id: taskId,
+          triggered: true,
+          outcome: "launched",
+          existing: false,
+          thread_id: threadId,
+        }),
       });
     }
     return route.fallback();
@@ -670,18 +1145,30 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
 
   void page.route("**/api/scheduled-tasks/*", (route) => {
     const request = route.request();
+    if (request.method() === "GET") {
+      const taskId = decodeURIComponent(
+        new URL(request.url()).pathname.split("/").at(-1) ?? "",
+      );
+      const task = mutableScheduledTasks.find((item) => item.id === taskId);
+      if (!task) return scheduledTaskNotFound(route);
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(scheduledTaskResponse(task)),
+      });
+    }
     if (request.method() === "PATCH") {
       const taskId = decodeURIComponent(
         new URL(request.url()).pathname.split("/").at(-1) ?? "",
       );
       const payload = request.postDataJSON() as Record<string, unknown>;
-      let updated: (typeof mutableScheduledTasks)[number] | undefined;
+      let updated: MockScheduledTask | undefined;
       mutableScheduledTasks = mutableScheduledTasks.map((task) => {
         if (task.id !== taskId) {
           return task;
         }
         updated = {
-          ...task,
+          ...applyClearableTaskFields(task, payload),
           ...(typeof payload.title === "string"
             ? { title: payload.title }
             : {}),
@@ -700,10 +1187,11 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         };
         return updated;
       });
+      if (!updated) return scheduledTaskNotFound(route);
       return route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify(updated ?? {}),
+        body: JSON.stringify(scheduledTaskResponse(updated)),
       });
     }
     if (request.method() === "DELETE") {
@@ -733,14 +1221,35 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify(
-          mutableScheduledTasks
-            .filter((task) => task.thread_id === threadId)
-            .map((task) => ({
-              context_mode: "fresh_thread_per_run",
-              last_thread_id: null,
-              ...task,
-              thread_id: task.thread_id ?? null,
-            })),
+          mutableScheduledTasks.flatMap((task) => {
+            const runInThread = (mutableTaskRuns[task.id] ?? []).find(
+              (run) => run.thread_id === threadId,
+            );
+            const relation =
+              task.origin_thread_id === threadId
+                ? "origin"
+                : task.thread_id === threadId
+                  ? "reuse"
+                  : runInThread
+                    ? "run"
+                    : null;
+            if (!relation) return [];
+            return [
+              {
+                ...scheduledTaskResponse(task),
+                thread_relation: relation,
+                thread_run:
+                  relation === "run" && runInThread
+                    ? {
+                        run_number: runInThread.run_number ?? null,
+                        trigger: runInThread.trigger,
+                        scheduled_for: runInThread.scheduled_for,
+                        status: runInThread.status,
+                      }
+                    : null,
+              },
+            ];
+          }),
         ),
       });
     }
@@ -816,8 +1325,32 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   // Thread create — called when user sends first message in a new chat
   void page.route("**/api/langgraph/threads", (route) => {
     if (route.request().method() === "POST") {
+      const threadId =
+        (options?.honorRequestedThreadId
+          ? (route.request().postDataJSON() as { thread_id?: string } | null)
+              ?.thread_id
+          : undefined) ?? MOCK_THREAD_ID;
+      // Like the Gateway, a repeat create of a requested id returns the
+      // thread as it is, e.g. with the goal a /goal command saved first.
+      const existing = options?.honorRequestedThreadId
+        ? threads.find((thread) => thread.thread_id === threadId)
+        : undefined;
+      if (existing) {
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            thread_id: threadId,
+            created_at: existing.updated_at ?? new Date().toISOString(),
+            updated_at: existing.updated_at ?? new Date().toISOString(),
+            metadata: existing.metadata ?? {},
+            status: "idle",
+            values: {},
+          }),
+        });
+      }
       upsertThread({
-        thread_id: MOCK_THREAD_ID,
+        thread_id: threadId,
         title: "New Chat",
         updated_at: new Date().toISOString(),
         messages: options?.createdThreadMessages ?? mockStreamMessages(),
@@ -826,7 +1359,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
-          thread_id: MOCK_THREAD_ID,
+          thread_id: threadId,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
           metadata: {},
@@ -1504,9 +2037,27 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       });
     }
 
+    if (
+      goalWritesBusy &&
+      (route.request().method() === "PUT" ||
+        route.request().method() === "DELETE")
+    ) {
+      const action = route.request().method() === "PUT" ? "Set" : "Clear";
+      return route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({
+          detail: `Thread has a run in flight. ${action} the goal after the run finishes.`,
+        }),
+      });
+    }
+
+    // Every goal write also drops the met record (runtime/goal.py
+    // write_thread_goal), so an older "Goal met" cannot come back.
     if (route.request().method() === "DELETE") {
       if (matchingThread) {
         matchingThread.goal = null;
+        matchingThread.goal_outcome = null;
       }
       return route.fulfill({
         status: 200,
@@ -1519,22 +2070,13 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       const payload = route.request().postDataJSON() as {
         objective?: string;
       };
-      const goal = {
-        objective: payload.objective ?? "",
-        status: "active",
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-        continuation_count: 0,
-        max_continuations: 8,
-        no_progress_count: 0,
-        max_no_progress_continuations: 2,
-      };
+      const goal = mockGoal(payload.objective ?? "");
       matchingThread ??= {
         thread_id: threadId,
         title: "New Chat",
         updated_at: new Date().toISOString(),
       };
-      upsertThread({ ...matchingThread, goal });
+      upsertThread({ ...matchingThread, goal, goal_outcome: null });
       return route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -1633,23 +2175,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         contentType: "application/json",
         body: JSON.stringify([
           {
-            values: {
-              title: matchingThread.title ?? "Untitled",
-              goal: matchingThread.goal ?? null,
-              messages: matchingThread.messages ?? [
-                {
-                  type: "human",
-                  id: `msg-human-${matchingThread.thread_id}`,
-                  content: [{ type: "text", text: "Previous question" }],
-                },
-                {
-                  type: "ai",
-                  id: `msg-ai-${matchingThread.thread_id}`,
-                  content: `Response in thread ${matchingThread.title ?? matchingThread.thread_id}`,
-                },
-              ],
-              artifacts: matchingThread.artifacts ?? [],
-            },
+            values: historyHeadValues(matchingThread),
             next: [],
             metadata: {},
             created_at: "2025-01-01T00:00:00Z",
@@ -1680,25 +2206,9 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
-          values: {
-            title: matchingThread?.title ?? "Untitled",
-            goal: matchingThread?.goal ?? null,
-            messages: matchingThread
-              ? (matchingThread.messages ?? [
-                  {
-                    type: "human",
-                    id: `msg-human-${matchingThread.thread_id}`,
-                    content: [{ type: "text", text: "Previous question" }],
-                  },
-                  {
-                    type: "ai",
-                    id: `msg-ai-${matchingThread.thread_id}`,
-                    content: `Response in thread ${matchingThread.title ?? matchingThread.thread_id}`,
-                  },
-                ])
-              : [],
-            artifacts: matchingThread?.artifacts ?? [],
-          },
+          values: matchingThread
+            ? threadStateValues(matchingThread)
+            : { title: "Untitled", messages: [], artifacts: [] },
           next: [],
           metadata: {},
           created_at: "2025-01-01T00:00:00Z",
@@ -1805,15 +2315,21 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       );
       const fallbackGoal = threads.find((thread) => thread.goal)?.goal ?? null;
       const goal = existingThread?.goal ?? fallbackGoal;
+      const goalOutcome = existingThread?.goal_outcome ?? null;
       upsertThread({
         thread_id: threadId,
         title: threadId === MOCK_SIDECAR_THREAD_ID ? "Side chat" : "New Chat",
         updated_at: new Date().toISOString(),
         goal,
+        goal_outcome: goalOutcome,
         metadata: existingThread?.metadata,
         messages: mockStreamMessages(route),
       });
-      return handleRunStream(route, { goal });
+      // Values frames carry every set channel and no key for an unset one.
+      return handleRunStream(route, {
+        ...(goal ? { goal } : {}),
+        ...(goalOutcome ? { goal_outcome: goalOutcome } : {}),
+      });
     });
 
   void page.route("**/api/langgraph/runs/stream", handleMockRunStream);
@@ -1853,6 +2369,15 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
             scope_selection_enabled:
               featureFlags.knowledgeScopeSelectionEnabled,
           },
+          scheduled_tasks: {
+            available: featureFlags.scheduledTasks.available,
+            running: featureFlags.scheduledTasks.running,
+            tool_enabled: featureFlags.scheduledTasks.toolEnabled,
+            min_interval_seconds: 60,
+          },
+          thread_activity: {
+            available: featureFlags.threadActivity.available,
+          },
         }),
       });
     }
@@ -1860,6 +2385,10 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   });
 
   void page.route("**/api/mcp/config", (route) =>
+    route.fulfill({ json: { mcp_servers: {} } }),
+  );
+
+  void page.route("**/api/mcp/personal/config", (route) =>
     route.fulfill({ json: { mcp_servers: {} } }),
   );
 
@@ -1877,7 +2406,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     }),
   );
   void page.route("**/api/capabilities/installations/*", (route) => {
-    const adapter = route.request().url().split("/").pop();
+    const adapter = new URL(route.request().url()).pathname.split("/").pop();
     const items =
       adapter === "lark"
         ? [
@@ -1969,6 +2498,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
           verified: false,
         },
         sandbox_runtime_mode: "init-container",
+        sandbox_runtime_probed: true,
         sandbox_runtime_ready: true,
         sandbox_runtime_detail: null,
       };
@@ -2150,6 +2680,40 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       body: JSON.stringify({ detail: "Agent not found" }),
     });
   });
+
+  return {
+    upsertThread,
+    getThread: (threadId) =>
+      threads.find((thread) => thread.thread_id === threadId),
+    setGoalWritesBusy: (busy) => {
+      goalWritesBusy = busy;
+    },
+    pushThreadActivity: (...entries) => {
+      for (const entry of entries) {
+        activitySeq += 1;
+        activityLog.push({
+          seq: activitySeq,
+          thread_id: entry.thread_id,
+          // Server-originated unless a spec passes `null` (an interactive run).
+          origin_kind:
+            entry.origin_kind === undefined ? "schedule" : entry.origin_kind,
+          status: entry.status ?? "success",
+        });
+      }
+    },
+    bumpReadVersion: () => {
+      readVersion += 1;
+    },
+    setScheduledTasks: (tasks) => {
+      mutableScheduledTasks = [...tasks];
+    },
+    setScheduledTaskEvents: (threadId, events) => {
+      scheduledTaskEvents[threadId] = events;
+    },
+    get readRequests() {
+      return readRequests;
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------

@@ -6,6 +6,7 @@ import shutil
 from pathlib import Path, PureWindowsPath
 
 from deerflow.config.runtime_paths import runtime_home
+from deerflow.utils.host_paths import extended_length_path
 from deerflow.utils.thread_id import validate_thread_id
 
 # Virtual path prefix seen by agents inside the sandbox
@@ -31,14 +32,14 @@ def _validate_thread_id(thread_id: str) -> str:
 
 def _validate_user_id(user_id: str) -> str:
     """Validate a user ID before using it in filesystem paths."""
-    if not _SAFE_USER_ID_RE.match(user_id):
+    if not _SAFE_USER_ID_RE.fullmatch(user_id):
         raise ValueError(f"Invalid user_id {user_id!r}: only alphanumeric characters, hyphens, and underscores are allowed.")
     return user_id
 
 
 def _validate_integration_id(integration_id: str) -> str:
     """Validate an integration ID before using it in filesystem paths."""
-    if not _SAFE_INTEGRATION_ID_RE.match(integration_id):
+    if not _SAFE_INTEGRATION_ID_RE.fullmatch(integration_id):
         raise ValueError(f"Invalid integration_id {integration_id!r}: only alphanumeric characters, dots, hyphens, and underscores are allowed.")
     # The charset allows dots for names like ``some.integration``; reject the
     # bare ``.``/``..`` path components so a future caller cannot escape the
@@ -50,7 +51,7 @@ def _validate_integration_id(integration_id: str) -> str:
 
 def _validate_project_id(project_id: str) -> str:
     """Validate a project ID before using it in filesystem paths."""
-    if not _SAFE_USER_ID_RE.match(project_id):
+    if not _SAFE_USER_ID_RE.fullmatch(project_id):
         raise ValueError(f"Invalid project_id {project_id!r}: only alphanumeric characters, hyphens, and underscores are allowed.")
     return project_id
 
@@ -366,7 +367,7 @@ class Paths:
 
     def user_projects_dir(self, user_id: str) -> Path:
         """Host path root for one user's project shelves: ``users/{user_id}/projects/``."""
-        return self.user_dir(user_id) / "projects"
+        return extended_length_path(self.user_dir(user_id) / "projects")
 
     def user_project_dir(self, user_id: str, project_id: str) -> Path:
         """Host path for one project: ``users/{user_id}/projects/{project_id}/``."""

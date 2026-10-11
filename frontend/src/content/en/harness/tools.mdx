@@ -129,7 +129,7 @@ tools:
 ```
 High-quality search with structured results. Requires a [Tavily](https://tavily.com) API key.
 
-Install: `cd backend && uv add 'deerflow-harness[tavily]'`
+No extra dependency required.
 
   </Tabs.Tab>
   <Tabs.Tab>
@@ -163,7 +163,7 @@ tools:
 ```
 Semantic search with neural retrieval. Requires an [Exa](https://exa.ai) API key.
 
-Install: `cd backend && uv add 'deerflow-harness[exa]'`
+No extra dependency required.
 
   </Tabs.Tab>
   <Tabs.Tab>
@@ -182,7 +182,7 @@ tools:
 ```
 Firecrawl-powered search and crawl. Requires a [Firecrawl](https://firecrawl.dev) API key.
 
-Install: `cd backend && uv add 'deerflow-harness[firecrawl]'`
+No extra dependency required.
 
   </Tabs.Tab>
   <Tabs.Tab>
@@ -210,7 +210,7 @@ Results include the content of each page, not only a snippet. Requires a [Sofya]
 
 ### Web fetch (page content extraction)
 
-<Tabs items={["Jina AI (default)", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya"]}>
+<Tabs items={["Jina AI (default)", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "Unbrowse"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -267,6 +267,15 @@ tools:
 ```
 Returns the page as markdown. Requires a [Sofya](https://sofya.co) API key.
   </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.unbrowse.tools:web_fetch_tool
+    api_key: $UNBROWSE_API_KEY
+    # render: auto # auto | never (plain HTTP only) | always (cloud browser)
+```
+Returns the page as markdown, fetching over plain HTTP when that is enough and rendering JavaScript-heavy pages in a hosted browser. Requires an [Unbrowse](https://unbrowse.ai) API key.
+  </Tabs.Tab>
 </Tabs>
 
 ### Web capture (rendered screenshots)
@@ -288,7 +297,8 @@ tools:
 Captures rendered web pages with Browserless `/screenshot` and presents the image
 through DeerFlow's artifact system. This is useful for visual evidence, UI checks,
 and JavaScript-heavy pages where Markdown extraction is not enough. By default it
-refuses URLs that resolve to private, loopback, or cloud-metadata addresses;
+refuses URLs that resolve to private, loopback, shared (`100.64.0.0/10`, used by
+CGNAT and Tailscale), other non-global, or cloud-metadata addresses;
 set `allow_private_addresses: true` only when you intentionally target an internal host.
 
 ### Image search

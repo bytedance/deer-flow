@@ -1,5 +1,8 @@
 """Managed models: persistence, snapshot resolution and administrator boundaries."""
 
+import asyncio
+import logging
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -57,10 +60,136 @@ def test_missing_encryption_key_never_replaced(store):
     assert not store.key_path.exists()
 
 
+def test_first_save_keeps_a_key_a_peer_created_concurrently(store, monkeypatch):
+    """A peer that publishes the key file first must win; replacing it would orphan the peer's catalog."""
+    from cryptography.fernet import Fernet
+
+    peer_key = Fernet.generate_key()
+    original_generate = Fernet.generate_key
+
+    def peer_wins_the_race():
+        store.key_path.parent.mkdir(parents=True, exist_ok=True)
+        store.key_path.write_bytes(peer_key)
+        return original_generate()
+
+    monkeypatch.setattr(Fernet, "generate_key", staticmethod(peer_wins_the_race))
+    store.save(profile(), expected_revision=None)
+
+    assert store.key_path.read_bytes() == peer_key
+    assert Fernet(peer_key).decrypt(store.path.read_bytes())
+
+
+def test_first_save_recovers_an_empty_key_left_by_an_interrupted_creation(store):
+    """An empty key file with no catalog encrypted no data, so the next save must replace it, not 503 forever."""
+    from cryptography.fernet import Fernet
+
+    store.key_path.parent.mkdir(parents=True, exist_ok=True)
+    store.key_path.write_bytes(b"")
+
+    store.save(profile(), expected_revision=None)
+
+    key = store.key_path.read_bytes()
+    assert key.strip()
+    assert Fernet(key).decrypt(store.path.read_bytes())
+    assert ManagedModelStore().list()[0].api_key.get_secret_value() == "test-secret"
+
+
+def test_an_empty_key_next_to_an_existing_catalog_is_never_replaced(store):
+    """The catalog was encrypted with the lost key; a new key would silently orphan it."""
+    store.save(profile(), expected_revision=None)
+    catalog = store.path.read_bytes()
+    store.key_path.write_bytes(b"")
+
+    with pytest.raises(ValueError):
+        store.save(profile(), expected_revision=None)
+    with pytest.raises(ValueError, match="restore it from backup"):
+        store._cipher(create=True)
+
+    assert store.key_path.read_bytes() == b""
+    assert store.path.read_bytes() == catalog
+
+
 @pytest.mark.parametrize("url", ["file:///tmp/test", "https://user:pass@example.com/v1", "https://example.com/v1?key=abc", "https://example.com/#fragment"])
 def test_endpoint_validation(url):
     with pytest.raises(ValidationError):
         ManagedModel(name="test", model="test", base_url=url)
+
+
+@pytest.mark.asyncio
+async def test_save_model_drains_started_persistence_across_cancellation(monkeypatch):
+    from app.gateway.routers import managed_models as router
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def save(_body):
+        started.set()
+        assert release.wait(timeout=2)
+        return {"name": "managed-test", "has_api_key": True}
+
+    monkeypatch.setattr(router, "_save", save)
+    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
+    body = router.SaveModelRequest(config=profile())
+
+    task = asyncio.create_task(router.save_model(request, body))
+    try:
+        assert await asyncio.to_thread(started.wait, 2)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [OSError, RuntimeError])
+async def test_save_model_logs_failed_drained_persistence_after_cancellation(store, monkeypatch, caplog, failure):
+    from app.gateway.routers import managed_models as router
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def fail_save(self, *_args, **_kwargs):
+        started.set()
+        assert release.wait(timeout=5)
+        raise failure("test-secret must not appear in logs")
+
+    monkeypatch.setattr(router, "get_app_config", lambda: AppConfig.model_validate({"sandbox": {"use": "test"}}))
+    monkeypatch.setattr(ManagedModelStore, "save", fail_save)
+    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
+    body = router.SaveModelRequest(config=profile())
+
+    with caplog.at_level(logging.ERROR, logger=router.__name__):
+        task = asyncio.create_task(router.save_model(request, body))
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release.set()
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    save_errors = [record for record in caplog.records if record.name == router.__name__ and "Managed model save failed" in record.message]
+    assert len(save_errors) == 1
+    expected_detail = "503" if failure is OSError else "RuntimeError"
+    assert expected_detail in save_errors[0].message
+    assert "test-secret" not in caplog.text
 
 
 @pytest.mark.asyncio

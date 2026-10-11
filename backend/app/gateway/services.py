@@ -11,8 +11,10 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import re
 import threading
+import uuid
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -25,8 +27,8 @@ from langchain_core.messages import BaseMessage, ChatMessage, HumanMessage, Syst
 from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 
-from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
-from app.gateway.authz import require_cancel_permission_if
+from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_INTERNAL, get_auth_disabled_user, is_auth_disabled
+from app.gateway.authz import require_cancel_permission_if, resolve_route_permissions
 from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_manager, get_stream_bridge
 from app.gateway.internal_auth import (
     INTERNAL_OWNER_USER_ID_HEADER_NAME,
@@ -36,13 +38,16 @@ from app.gateway.internal_auth import (
 )
 from app.gateway.knowledge_scope_admission import admit_message_knowledge_scope
 from app.gateway.run_models import RunCreateRequest
+from app.gateway.run_origin import resolve_request_origin
 from app.gateway.utils import sanitize_log_param
 from app.mcp_tasks.errors import PermanentNotificationError
 from deerflow.agents.human_input import read_human_input_response
+from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
 from deerflow.agents.middlewares.message_utils import _SUMMARY_MESSAGE_NAME, is_genuine_user_message
 from deerflow.agents.middlewares.skill_usage import SKILL_USAGE_KEY, SKILL_USAGES_KEY
+from deerflow.agents.middlewares.tool_output_budget_middleware import TOOL_OUTPUT_BLOB_KEY
 from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY, TOOL_RECEIPT_LEDGER_KEY
 from deerflow.agents.middlewares.tool_transform_meta import TOOL_TRANSFORMS_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
@@ -63,6 +68,7 @@ from deerflow.runtime import (
     ConflictError,
     DisconnectMode,
     RunContext,
+    RunIdempotencyUnsupported,
     RunManager,
     RunRecord,
     RunStatus,
@@ -85,6 +91,7 @@ from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
 from deerflow.runtime.keyed_lock import KeyedLockTable
+from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY, make_origin
 from deerflow.runtime.runs.naming import resolve_root_run_name
 from deerflow.runtime.secret_context import (
     LegacyRunMetadataSecretError,
@@ -94,13 +101,23 @@ from deerflow.runtime.secret_context import (
 from deerflow.runtime.stream_modes import normalize_stream_modes
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
+from deerflow.scheduler.runtime import scheduler_tools_enabled
+from deerflow.scheduler.schedules import validate_timezone
 from deerflow.subagents.status_contract import SUBAGENT_ACCEPTANCE_VERDICT_KEY, SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_TOOL_RECEIPTS_KEY
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_context, ensure_trace_id
 from deerflow.utils.assembly_io import run_assembly
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
+
+
+class BusyThreadConflict(HTTPException):
+    """A retryable run-manager admission conflict exposed as HTTP 409."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(status_code=409, detail=detail)
 
 
 @asynccontextmanager
@@ -130,15 +147,25 @@ _TERMINAL_RUN_STATUSES = {
 
 _THREAD_METADATA_SETUP_TIMEOUT_SECONDS = 5.0
 
+# Message metadata a scheduled launch puts on its prompt: the task, run and the
+# user-language parts (instructions, stop condition, notes) the run thread shows
+# instead of the launched text. A cross-language contract
+# (contracts/scheduled_goal_notes_contract.json "scheduled_origin_key").
+SCHEDULED_ORIGIN_KEY = "deerflow_scheduled_origin"
+
 _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
     frozenset(
         {
+            # Only the scheduler's internal launch may mark a message as a
+            # scheduled run prompt.
+            SCHEDULED_ORIGIN_KEY,
             _DYNAMIC_CONTEXT_REMINDER_KEY,
             _REMINDER_DATE_KEY,
             _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
             KNOWLEDGE_SCOPE_RUNTIME_KEY,
             TOOL_RECEIPT_KEY,
             TOOL_RECEIPT_LEDGER_KEY,
+            TOOL_OUTPUT_BLOB_KEY,
             TOOL_TRANSFORMS_KEY,
             SKILL_USAGE_KEY,
             SKILL_USAGES_KEY,
@@ -238,9 +265,15 @@ async def _ensure_thread_metadata(
             # /threads/{id}/move — so the key must not persist either.
             if key not in (DEERFLOW_TRACE_METADATA_KEY, THREAD_PROJECT_METADATA_KEY)
         }
+        # A run that names its thread in the input (a scheduled run) creates it
+        # named: the worker copies the title to the thread list only when the
+        # run ends, and a server-created thread is listed as soon as it exists.
+        run_input = (record.kwargs or {}).get("input")
+        title = run_input.get("title") if isinstance(run_input, dict) else None
         existing = await thread_store.create(
             record.thread_id,
             assistant_id=record.assistant_id,
+            display_name=title if isinstance(title, str) and title.strip() else None,
             metadata=metadata,
         )
     return existing
@@ -451,11 +484,15 @@ def _normalize_input_messages(
     return converted
 
 
+#: State channels only the server writes. ``goal_outcome`` is the "goal met"
+#: record that clearing a satisfied goal writes; a caller copy would forge one.
+SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome"})
+
+
 def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, Any]:
     """Validate and sanitize caller-supplied state values before checkpointing.
 
-    The server-owned ``sandbox``, ``thread_data``, and ``viewed_images`` channels
-    are rejected. The ``messages`` channel
+    The ``SERVER_OWNED_STATE_CHANNELS`` are rejected. The ``messages`` channel
     is canonicalized to a list of ``BaseMessage``
     objects, rejects external system/developer roles with HTTP 400, and strips
     server-owned metadata. Other channels keep their existing shapes while
@@ -467,8 +504,7 @@ def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, An
     transform trails, or privileged message roles. Every channel is walked
     because middleware-contributed channels can also carry message-like values.
     """
-    server_owned_channels = {"sandbox", "thread_data", "viewed_images"}
-    rejected = server_owned_channels.intersection(values)
+    rejected = SERVER_OWNED_STATE_CHANNELS.intersection(values)
     if rejected:
         raise HTTPException(
             status_code=400,
@@ -504,10 +540,10 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
     of bubbling up as a 500.  The gateway is a system boundary, so per-entry
     validation errors are the right shape for clients to retry against.
 
-    The ``sandbox``, ``thread_data``, and ``viewed_images`` channels are also
-    server-owned. External callers cannot select a provider resource by id or
-    supply host image paths; trusted internal run admission may carry restored
-    values.
+    The ``SERVER_OWNED_STATE_CHANNELS`` are also rejected. External callers
+    cannot select a provider resource by id, supply host image paths, or forge a
+    met goal; trusted internal run admission may carry restored values. A caller
+    ``goal`` replaces the goal, so it also clears the previous ``goal_outcome``.
 
     ``original_user_content``, dynamic-context reminder markers, the transient
     view-image context marker, the execution-only knowledge-scope marker, tool
@@ -532,8 +568,7 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
     if raw_input is None:
         return {}
     if not trusted_internal:
-        server_owned_channels = {"sandbox", "thread_data", "viewed_images"}
-        rejected = server_owned_channels.intersection(raw_input)
+        rejected = SERVER_OWNED_STATE_CHANNELS.intersection(raw_input)
         if rejected:
             raise HTTPException(
                 status_code=400,
@@ -550,6 +585,9 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
             cleaned = [_strip_external_delegation_verdict(entry) for entry in delegations]
             if cleaned != delegations:
                 result = {**result, "delegations": cleaned}
+        # merge_goal ignores None, so only a goal value replaces the goal.
+        if result.get("goal") is not None:
+            result = {**result, "goal_outcome": None}
     return result
 
 
@@ -570,6 +608,75 @@ def _canonical_run_record_input(
     if isinstance(messages, list):
         canonical["messages"] = [message.model_dump(mode="json") if isinstance(message, BaseMessage) else message for message in messages]
     return canonical
+
+
+RUN_IDEMPOTENCY_REQUEST_VERSION = 1
+
+
+def _strict_json_identity(value: Any, active: set[int] | None = None) -> Any:
+    """Return a type-preserving, order-stable identity for a JSON value."""
+    value_type = type(value)
+    if value is None:
+        return ["null"]
+    if value_type is bool:
+        return ["bool", value]
+    if value_type is int:
+        return ["int", str(value)]
+    if value_type is float:
+        if not math.isfinite(value):
+            raise ValueError("non-finite number")
+        return ["float", value.hex()]
+    if value_type is str:
+        return ["string", value]
+    if value_type not in {list, dict}:
+        raise TypeError(f"unsupported {value_type.__name__}")
+
+    active = active if active is not None else set()
+    identity = id(value)
+    if identity in active:
+        raise ValueError("cyclic value")
+    active.add(identity)
+    try:
+        if value_type is list:
+            return ["array", [_strict_json_identity(item, active) for item in value]]
+        if not all(type(key) is str for key in value):
+            raise TypeError("object keys must be strings")
+        return [
+            "object",
+            [[key, _strict_json_identity(value[key], active)] for key in sorted(value)],
+        ]
+    finally:
+        active.remove(identity)
+
+
+def _run_idempotency_request(body: RunCreateRequest) -> dict[str, Any]:
+    """Build the versioned request identity persisted for keyed admissions."""
+    command = getattr(body, "command", None)
+    if not command or command.get("resume") is None:
+        return {"version": RUN_IDEMPOTENCY_REQUEST_VERSION, "kind": "input"}
+    try:
+        identity = _strict_json_identity(command["resume"])
+        encoded = json.dumps(identity, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()
+    except (RecursionError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="command.resume must be a finite, acyclic strict JSON value") from exc
+    return {
+        "version": RUN_IDEMPOTENCY_REQUEST_VERSION,
+        "kind": "resume",
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
+def _legacy_stored_idempotency_request(kwargs: dict[str, Any]) -> dict[str, Any] | None:
+    """Read only the exact private identity shape emitted by the old writer."""
+    identity = kwargs.get("idempotency_request")
+    if not isinstance(identity, dict) or set(identity) != {"version", "kind", "sha256"}:
+        return None
+    if identity.get("version") != RUN_IDEMPOTENCY_REQUEST_VERSION or identity.get("kind") != "resume":
+        return None
+    digest = identity.get("sha256")
+    if not isinstance(digest, str) or len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        return None
+    return identity
 
 
 _DEFAULT_ASSISTANT_ID = "lead_agent"
@@ -1194,7 +1301,7 @@ class _RawCheckpointSnapshot:
     metadata, config ancestry, created_at) comes straight from the tuple.
     """
 
-    __slots__ = ("checkpoint_exists", "config", "values", "metadata", "parent_config", "created_at", "tasks", "tasks_known", "next")
+    __slots__ = ("checkpoint_exists", "config", "values", "metadata", "parent_config", "created_at", "tasks", "tasks_known", "next", "channel_versions")
 
     def __init__(self, config: dict[str, Any], tup: Any | None) -> None:
         self.checkpoint_exists = tup is not None
@@ -1207,6 +1314,8 @@ class _RawCheckpointSnapshot:
         self.tasks: tuple = ()
         self.tasks_known = False
         self.next: tuple = ()
+        versions = checkpoint.get("channel_versions")
+        self.channel_versions = dict(versions) if isinstance(versions, dict) else None
 
 
 class _RawCheckpointReadAccessor:
@@ -1672,6 +1781,44 @@ async def _validate_scope_thread_binding(
 # Run lifecycle
 # ---------------------------------------------------------------------------
 
+_SCHEDULER_METADATA_KEYS = frozenset(
+    {"scheduled_task_id", "scheduled_task_run_id", "scheduled_trigger", "scheduled_goal_objective", "scheduled_previous_thread_id", "scheduled_context_mode", "scheduled_tool_created", "__scheduler_capability"}
+)
+
+
+_MAX_CLIENT_TIMEZONE_CHARS = 64
+
+
+async def _client_timezone_from_context(context: Mapping[str, Any] | None) -> str | None:
+    """The browser timezone the web client sent in ``body.context``, if valid.
+
+    Read only for the schedule capability (default zone for new tasks). It is
+    not a ``_CONTEXT_CONFIGURABLE_KEYS`` entry, so it never reaches the run
+    config, the checkpoint or the prompt.
+    """
+    raw = context.get("client_timezone") if isinstance(context, Mapping) else None
+    if raw is None:
+        return None
+    if not isinstance(raw, str) or not raw or len(raw) > _MAX_CLIENT_TIMEZONE_CHARS:
+        logger.debug("Ignoring a malformed client_timezone in the run context")
+        return None
+    try:
+        return await asyncio.to_thread(validate_timezone, raw)
+    except (ValueError, OSError):
+        logger.debug("Ignoring an unknown client_timezone %s", sanitize_log_param(raw))
+        return None
+
+
+def _admit_scheduler_metadata(value: object, *, trusted: bool) -> dict[str, Any]:
+    """Keep scheduler snapshots only on the private scheduler launch path."""
+    result = dict(value) if isinstance(value, Mapping) else {}
+    if not trusted:
+        for key in _SCHEDULER_METADATA_KEYS:
+            result.pop(key, None)
+    # A serialized value can never recover an execution capability.
+    result.pop("__scheduler_capability", None)
+    return result
+
 
 async def start_run(
     body: RunCreateRequest,
@@ -1680,6 +1827,7 @@ async def start_run(
     *,
     idempotency_key: str | None = None,
     require_existing_thread: bool = False,
+    scheduled_task_runtime: Mapping[str, Any] | None = None,
 ) -> RunRecord:
     """Create a RunRecord and launch the background agent task.
 
@@ -1703,6 +1851,8 @@ async def start_run(
     # multitask_strategy="reject" and are unaffected. Requests without a
     # stamped auth context (internal/test compositions) skip the gate.
     require_cancel_permission_if(request, body.multitask_strategy != "reject")
+    if scheduled_task_runtime is not None and getattr(request.state, "auth_source", None) != AUTH_SOURCE_INTERNAL:
+        raise HTTPException(status_code=403, detail="Scheduled runtime authority requires an internal launcher")
 
     try:
         validate_thread_id(thread_id)
@@ -1716,6 +1866,8 @@ async def start_run(
         validate_run_metadata_secrets(config_metadata)
     except LegacyRunMetadataSecretError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    request_identity = _run_idempotency_request(body)
+    idempotency_request = request_identity if idempotency_key and request_identity["kind"] == "resume" else None
 
     stream_modes = normalize_stream_modes(body.stream_mode)
     bridge = get_stream_bridge(request)
@@ -1785,7 +1937,10 @@ async def start_run(
         # Validate even when resume takes precedence, so ignored input cannot
         # appear to have been admitted or persist as unchecked run audit data.
         normalized_input = normalize_input(body.input, trusted_internal=is_internal_caller)
-        agent_factory = resolve_agent_factory(body.assistant_id)
+        # Cold resolution imports the lead-agent stack. Use the assembly pool
+        # so import-lock waiters cannot starve unrelated default-executor work.
+        # Keep this before admission so import failures cannot create a run.
+        agent_factory = await run_assembly(resolve_agent_factory, body.assistant_id)
         command = getattr(body, "command", None)
         if command and command.get("resume") is not None:
             graph_input = Command(resume=command["resume"])
@@ -1799,10 +1954,24 @@ async def start_run(
         # without this the run record is the one surface that persists a forged
         # id, disagreeing with the response header, the logs, and the
         # checkpoint. The caller's own metadata keys are preserved.
-        run_metadata = dict(body.metadata) if isinstance(body.metadata, dict) else {}
+        # deerflow_origin is server-owned as well: only a server-side launcher
+        # (request.state.run_origin) or the internal channel caller may set it,
+        # and both metadata forks drop any client copy. build_run_config merges
+        # body.config["metadata"] into the live config, so the second pop below
+        # is what keeps a forged value out of the live run config.
+        origin = resolve_request_origin(request, body.metadata)
+        run_metadata = _admit_scheduler_metadata(body.metadata, trusted=scheduled_task_runtime is not None)
+        run_metadata.pop(DEERFLOW_ORIGIN_KEY, None)
+        if origin is not None:
+            run_metadata[DEERFLOW_ORIGIN_KEY] = origin
         run_metadata[DEERFLOW_TRACE_METADATA_KEY] = ensure_trace_id()
 
         config = build_run_config(thread_id, body.config, run_metadata, assistant_id=body.assistant_id)
+        if isinstance(config.get("metadata"), dict):
+            config["metadata"] = _admit_scheduler_metadata(config["metadata"], trusted=scheduled_task_runtime is not None)
+            config["metadata"].pop(DEERFLOW_ORIGIN_KEY, None)
+            if origin is not None:
+                config["metadata"][DEERFLOW_ORIGIN_KEY] = origin
         await apply_checkpoint_to_run_config(config, body=body, thread_id=thread_id, request=request)
 
         # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
@@ -1877,6 +2046,21 @@ async def start_run(
         run_record_input = _canonical_run_record_input(body.input, graph_input)
 
         internal_owner_user = await resolve_trusted_internal_owner_for_attribution(request, owner_user_id)
+        if internal_owner_user is None and owner_user_id == AUTH_DISABLED_USER_ID and is_auth_disabled():
+            internal_owner_user = get_auth_disabled_user()
+        if getattr(internal_owner_user, "disabled", False):
+            # The scheduler's in-process launches (and MCP task-event
+            # delivery) fabricate requests that skip AuthMiddleware, where
+            # the internal-auth suspension gate lives. Re-assert it at run
+            # admission (#3462 gap 3): a disabled owner's occurrence fails
+            # here instead of driving the agent. The scheduler records the
+            # rejection as the occurrence's launch error.
+            from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
+
+            raise HTTPException(
+                status_code=401,
+                detail=AuthErrorResponse(code=AuthErrorCode.ACCOUNT_DISABLED, message="Account disabled").model_dump(),
+            )
         inject_authenticated_user_context(
             config,
             request,
@@ -1884,6 +2068,8 @@ async def start_run(
             request_context=getattr(body, "context", None),
         )
 
+        if scheduled_task_runtime is not None:
+            run_ctx = replace(run_ctx, scheduled_task_runtime=dict(scheduled_task_runtime))
         conversation_references = list(getattr(body, "conversation_references", None) or [])
         if conversation_references:
             from app.gateway.conversation_access import prepare_conversation_reader
@@ -1921,6 +2107,27 @@ async def start_run(
                         ),
                     ],
                 }
+        elif scheduled_task_runtime is not None and isinstance(run_metadata.get("scheduled_previous_thread_id"), str):
+            from app.gateway.conversation_access import prepare_scheduled_conversation_reader
+
+            owner = internal_owner_user
+            if owner is not None and "runs:read" in await resolve_route_permissions(owner, is_internal=False):
+                prepared = prepare_scheduled_conversation_reader([run_metadata["scheduled_previous_thread_id"]], owner_user_id=str(owner.id), run_context=run_ctx, run_manager=run_mgr, app_config=run_ctx.app_config or get_app_config())
+                if prepared is not None:
+                    reader, source_ids = prepared
+
+                    async def scheduled_reader(*args, **kwargs):
+                        current_owner = get_auth_disabled_user() if str(owner.id) == AUTH_DISABLED_USER_ID and is_auth_disabled() else await get_local_provider().get_user(str(owner.id))
+                        if current_owner is None or "runs:read" not in await resolve_route_permissions(current_owner, is_internal=False):
+                            return json.dumps({"status": "unavailable", "messages": [], "next_cursor": None, "has_more": False})
+                        return await reader(*args, **kwargs)
+
+                    run_ctx = replace(run_ctx, conversation_reader=scheduled_reader)
+                    if isinstance(graph_input, dict):
+                        graph_input = {
+                            **graph_input,
+                            "messages": [*(graph_input.get("messages") or []), HumanMessage(content="Read-only conversation references for this run: " + json.dumps(source_ids), additional_kwargs={"hide_from_ui": True})],
+                        }
         # Resolve and pin the thread's project context once per run (spec
         # §7.1): middlewares and tools read only this server-owned snapshot —
         # nothing re-resolves membership mid-run, and admission never writes
@@ -2034,11 +2241,38 @@ async def start_run(
                             "Thread metadata for %s has an invalid incarnation; MCP access will fail closed",
                             sanitize_log_param(thread_id),
                         )
+            from app.gateway.scheduled_task_access import prepare_scheduler_capability
+
+            human_text = ""
+            if current_human_message is not None:
+                original = current_human_message.additional_kwargs.get("original_user_content", current_human_message.content)
+                if isinstance(original, str):
+                    human_text = original
+                elif isinstance(original, list):
+                    human_text = "\n".join(block["text"] for block in original if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str))
+            scheduler_capability = None
+            if scheduler_tools_enabled(getattr(run_ctx, "app_config", None)):
+                client_timezone = await _client_timezone_from_context(body.context)
+                try:
+                    scheduler_capability = await prepare_scheduler_capability(
+                        request,
+                        user=internal_owner_user or user,
+                        thread_id=thread_id,
+                        run_id=record.run_id,
+                        assistant_id=scope_assistant_id,
+                        original_user_text=human_text,
+                        interaction_policy=resolve_run_interaction_policy(config),
+                        scheduled_task_runtime=scheduled_task_runtime,
+                        client_timezone=client_timezone,
+                    )
+                except Exception:
+                    logger.warning("Scheduler tool capability is unavailable for this run", exc_info=True)
+            execution_context = replace(run_ctx, scheduler_capability=scheduler_capability) if scheduler_capability is not None else run_ctx
             await run_agent(
                 bridge,
                 run_mgr,
                 record,
-                ctx=run_ctx,
+                ctx=execution_context,
                 agent_factory=agent_factory,
                 graph_input=graph_input,
                 config=config,
@@ -2065,43 +2299,53 @@ async def start_run(
                 # cannot both succeed across Gateway workers.
                 if require_existing_thread and not await thread_access_allowed():
                     raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
-                record = await run_mgr.create_or_reject(
-                    thread_id,
-                    body.assistant_id,
-                    on_disconnect=disconnect,
-                    metadata=run_metadata,
-                    # Persist a secret-redacted copy of the config: the run record is
-                    # written to runs.kwargs_json and echoed by the run API, so a
-                    # request-scoped secret (#3861) must not ride along. The live
-                    # config built above keeps the secrets for the actual run.
-                    kwargs={
-                        "input": run_record_input,
-                        **({"knowledge_default_request_hash": knowledge_default_request_hash} if accepts_knowledge_default else {}),
-                        "config": redact_config_secrets(body.config),
-                        **({"conversation_references": conversation_references} if conversation_references else {}),
-                    },
-                    multitask_strategy=body.multitask_strategy,
-                    model_name=model_name,
-                    user_id=owner_user_id,
-                    idempotency_key=idempotency_key,
-                )
+                try:
+                    record = await run_mgr.create_or_reject(
+                        thread_id,
+                        body.assistant_id,
+                        on_disconnect=disconnect,
+                        metadata=run_metadata,
+                        # Persist a secret-redacted copy of the config: the run record is
+                        # written to runs.kwargs_json and echoed by the run API, so a
+                        # request-scoped secret (#3861) must not ride along. The live
+                        # config built above keeps the secrets for the actual run.
+                        kwargs={
+                            "input": run_record_input,
+                            **({"knowledge_default_request_hash": knowledge_default_request_hash} if accepts_knowledge_default else {}),
+                            "config": redact_config_secrets(body.config),
+                            **({"conversation_references": conversation_references} if conversation_references else {}),
+                        },
+                        idempotency_request=idempotency_request,
+                        multitask_strategy=body.multitask_strategy,
+                        model_name=model_name,
+                        user_id=owner_user_id,
+                        idempotency_key=idempotency_key,
+                    )
+                except RunIdempotencyUnsupported as exc:
+                    raise HTTPException(status_code=503, detail=str(exc)) from exc
 
                 if record.idempotency_reused:
                     stored = record.kwargs or {}
                     stored_input = stored.get("input")
-                    # New runs persist the admitted, canonical message snapshot
-                    # so a scope display cannot be rewritten through the run
-                    # record. Accept the raw request as well for records written
-                    # by older Gateway versions, while comparing canonical
-                    # retries to the same representation as the stored record.
-                    matches_default_request = knowledge_default_request_hash is not None and stored.get("knowledge_default_request_hash") == knowledge_default_request_hash
-                    # Pre-feature unscoped records may already contain normalized
-                    # messages, but have no digest. Compare them before injecting
-                    # today's default; explicit scopes and recovery do not use
-                    # this compatibility path.
-                    matches_legacy_default_request = accepts_knowledge_default and "knowledge_default_request_hash" not in stored and stored_input == request_input
-                    matches_input = matches_default_request or matches_legacy_default_request or stored_input == body.input or stored_input == run_record_input
-                    if not matches_input or record.assistant_id != body.assistant_id or stored.get("conversation_references", []) != conversation_references:
+                    stored_idempotency_request = record.idempotency_request or _legacy_stored_idempotency_request(stored)
+                    if request_identity["kind"] == "resume":
+                        matches_idempotency_request = stored_idempotency_request == idempotency_request
+                        matches_input = True
+                    else:
+                        matches_idempotency_request = stored_idempotency_request is None
+                        # New runs persist the admitted, canonical message snapshot
+                        # so a scope display cannot be rewritten through the run
+                        # record. Accept the raw request as well for records written
+                        # by older Gateway versions, while comparing canonical
+                        # retries to the same representation as the stored record.
+                        matches_default_request = knowledge_default_request_hash is not None and stored.get("knowledge_default_request_hash") == knowledge_default_request_hash
+                        # Pre-feature unscoped records may already contain normalized
+                        # messages, but have no digest. Compare them before injecting
+                        # today's default; explicit scopes and recovery do not use
+                        # this compatibility path.
+                        matches_legacy_default_request = accepts_knowledge_default and "knowledge_default_request_hash" not in stored and stored_input == request_input
+                        matches_input = matches_default_request or matches_legacy_default_request or stored_input == body.input or stored_input == run_record_input
+                    if not matches_idempotency_request or not matches_input or record.assistant_id != body.assistant_id or stored.get("conversation_references", []) != conversation_references:
                         raise HTTPException(
                             status_code=409,
                             detail="Idempotency-Key already used with a different request",
@@ -2124,7 +2368,7 @@ async def start_run(
                     )
                     raise
         except ConflictError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            raise BusyThreadConflict(str(exc)) from exc
         except UnsupportedStrategyError as exc:
             raise HTTPException(status_code=501, detail=str(exc)) from exc
 
@@ -2147,7 +2391,16 @@ async def launch_scheduled_thread_run(
     app: Any | None = None,
     owner_user_id: str | None = None,
     metadata: dict[str, Any] | None = None,
+    origin: dict[str, Any] | None = None,
+    title: str | None = None,
 ) -> dict[str, Any]:
+    """Start one scheduled occurrence as an internal run.
+
+    The prompt message gets a stable id per occurrence (retried launches and
+    reconnect hydration see one message) and, with ``origin``, the
+    ``SCHEDULED_ORIGIN_KEY`` metadata the run thread renders. ``title``
+    pre-sets a fresh run thread's title, so no title is generated.
+    """
     if request is None:
         if app is None:
             raise ValueError("launch_scheduled_thread_run requires request or app")
@@ -2157,12 +2410,25 @@ async def launch_scheduled_thread_run(
             state=SimpleNamespace(
                 user=get_internal_user(),
                 auth_source=AUTH_SOURCE_INTERNAL,
+                # Every trigger (schedule or "Run now") is server-started.
+                run_origin=make_origin("schedule"),
             ),
             cookies={},
         )
+    scheduled_task_run_id = (metadata or {}).get("scheduled_task_run_id")
+    message: dict[str, Any] = {
+        "role": "user",
+        "content": prompt,
+        "id": f"scheduled-{scheduled_task_run_id}" if isinstance(scheduled_task_run_id, str) else f"scheduled-{uuid.uuid4().hex}",
+    }
+    if origin:
+        message["additional_kwargs"] = {SCHEDULED_ORIGIN_KEY: origin}
+    graph_input: dict[str, Any] = {"messages": [message]}
+    if title:
+        graph_input["title"] = title
     body = RunCreateRequest(
         assistant_id=assistant_id,
-        input={"messages": [{"role": "user", "content": prompt}]},
+        input=graph_input,
         command=None,
         metadata=metadata or {},
         config={"recursion_limit": _resolve_scheduler_recursion_limit()},
@@ -2186,7 +2452,12 @@ async def launch_scheduled_thread_run(
         if_not_exists="create",
         feedback_keys=None,
     )
-    scheduled_task_run_id = (metadata or {}).get("scheduled_task_run_id")
+    scheduled_task_runtime = None
+    task_id = (metadata or {}).get("scheduled_task_id")
+    if owner_user_id and isinstance(task_id, str) and isinstance(scheduled_task_run_id, str):
+        scheduled_task_runtime = {"task_id": task_id, "occurrence_id": scheduled_task_run_id, "user_id": owner_user_id}
+        if (metadata or {}).get("scheduled_context_mode") == "fresh_thread_per_run" and isinstance((metadata or {}).get("scheduled_goal_objective"), str):
+            scheduled_task_runtime["goal_objective"] = metadata["scheduled_goal_objective"]
     idempotency_key = f"scheduled-task:{scheduled_task_run_id}" if isinstance(scheduled_task_run_id, str) else None
     # Non-HTTP entry point: the lifespan scheduler calls this with a synthetic
     # request, so TraceMiddleware never runs. The scope is opened per launch,
@@ -2200,6 +2471,7 @@ async def launch_scheduled_thread_run(
             thread_id,
             request,
             idempotency_key=idempotency_key,
+            scheduled_task_runtime=scheduled_task_runtime,
         )
     return {"run_id": record.run_id, "thread_id": record.thread_id}
 
@@ -2232,7 +2504,7 @@ async def launch_mcp_task_notification_run(
     request = SimpleNamespace(
         app=app,
         headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: owner_user_id},
-        state=SimpleNamespace(user=get_internal_user(), auth_source=AUTH_SOURCE_INTERNAL),
+        state=SimpleNamespace(user=get_internal_user(), auth_source=AUTH_SOURCE_INTERNAL, run_origin=make_origin("mcp_notification")),
         cookies={},
     )
     body = RunCreateRequest(
@@ -2285,9 +2557,9 @@ async def launch_mcp_task_notification_run(
                 require_existing_thread=True,
             )
     except HTTPException as exc:
-        if exc.status_code == 409:
+        if isinstance(exc, BusyThreadConflict):
             raise ConflictError(str(exc.detail)) from exc
-        if exc.status_code == 404:
+        if exc.status_code in {400, 401, 403, 404, 409, 422, 501}:
             raise PermanentNotificationError(str(exc.detail)) from exc
         raise
     return {"run_id": record.run_id, "thread_id": record.thread_id}
@@ -2344,9 +2616,12 @@ async def sse_consumer(
         return
 
     gap_emitted = False
+    terminal_emitted = False
+    disconnect_observed = False
     try:
         async for entry in bridge.subscribe(record.run_id, last_event_id=last_event_id):
             if await request.is_disconnected():
+                disconnect_observed = True
                 break
 
             if isinstance(entry, StreamGap):
@@ -2366,26 +2641,44 @@ async def sse_consumer(
 
             if entry is HEARTBEAT_SENTINEL:
                 if await _orphan_recovery_observed_after_heartbeat(record, run_mgr):
+                    terminal_emitted = True
                     yield format_sse("end", None)
                     return
                 yield ": heartbeat\n\n"
                 continue
 
             if entry is END_SENTINEL:
+                terminal_emitted = True
                 yield format_sse("end", None, event_id=entry.id or None)
                 return
 
             yield format_sse(entry.event, entry.data, event_id=entry.id or None)
 
+        if not disconnect_observed:
+            raise RuntimeError("stream bridge subscription ended before a terminal event")
+    except (GeneratorExit, asyncio.CancelledError):
+        # Starlette closes the response generator or cancels its request task
+        # when the creator connection disappears. Ordinary bridge exceptions
+        # must not be mistaken for that client-owned lifecycle signal.
+        disconnect_observed = True
+        raise
     finally:
         # store_only records are cross-worker observation handles. An explicit
         # cancel-then-stream action has already persisted its request before
         # subscribing; a plain join disconnect must not invent a new
         # cancellation request. Only apply on_disconnect to locally-owned runs,
         # and only on the creator's own stream — never on an observer join.
-        if apply_on_disconnect and not gap_emitted and not record.store_only and record.status in (RunStatus.pending, RunStatus.running):
+        if disconnect_observed and apply_on_disconnect and not gap_emitted and not terminal_emitted and not record.store_only and record.status in (RunStatus.pending, RunStatus.running):
             if record.on_disconnect == DisconnectMode.cancel:
-                await run_mgr.cancel(record.run_id)
+                await await_drained(run_mgr.cancel(record.run_id))
+
+
+def serialize_wait_run_status(record: RunRecord) -> dict[str, Any]:
+    """Return durable status and the error envelope recognized by the SDK."""
+    result: dict[str, Any] = {"status": record.status.value, "error": record.error}
+    if record.status == RunStatus.error:
+        result["__error__"] = {"error": "RunError", "message": record.error or "Run failed."}
+    return result
 
 
 async def wait_for_run_completion(
@@ -2422,8 +2715,13 @@ async def wait_for_run_completion(
         disconnected.  Callers must skip checkpoint serialization on
         ``False`` so a partial checkpoint is not returned as a normal
         response.
+
+    Raises:
+        RuntimeError: The bridge subscription ended without a terminal event.
+        Other bridge failures propagate unchanged.
     """
     completed = False
+    disconnect_observed = False
     if await _terminal_record_stream_missing(bridge, record):
         return True
 
@@ -2449,11 +2747,17 @@ async def wait_for_run_completion(
                     completed = True
                     return True
                 if await request.is_disconnected():
+                    disconnect_observed = True
                     return False
                 # Heartbeats and regular events: keep waiting for END_SENTINEL.
             if not gap_seen:
-                return completed
+                raise RuntimeError("stream bridge subscription ended before a terminal event")
+    except asyncio.CancelledError:
+        # Request-task cancellation is the non-streaming equivalent of
+        # Starlette closing an SSE response generator.
+        disconnect_observed = True
+        raise
     finally:
-        if not completed and record.status in (RunStatus.pending, RunStatus.running):
+        if disconnect_observed and not completed and record.status in (RunStatus.pending, RunStatus.running):
             if record.on_disconnect == DisconnectMode.cancel:
-                await run_mgr.cancel(record.run_id)
+                await await_drained(run_mgr.cancel(record.run_id))

@@ -142,6 +142,72 @@ def test_cached_load_does_not_scan_all_fact_files(storage: FileMemoryStorage, mo
     assert storage.load("agent-a", user_id="alice")["facts"][0]["content"] == "Project uses Python 3.12"
 
 
+@pytest.mark.parametrize("read", ["load", "reload"])
+def test_unlocked_read_skips_fact_deleted_after_directory_listing(storage: FileMemoryStorage, monkeypatch: pytest.MonkeyPatch, read: str) -> None:
+    for fact_id in ("fact_keep", "fact_drop"):
+        storage.upsert_fact({"id": fact_id, "content": fact_id, "category": "context", "confidence": 0.9}, user_id="alice", agent_name="agent-a")
+    revision = storage.reload("agent-a", user_id="alice")["revision"]
+    storage._memory_cache.clear()
+    parse_fact_markdown = storage_module._parse_fact_markdown
+    raced = False
+
+    def parse_after_concurrent_delete(fact_path: Path) -> dict:
+        nonlocal raced
+        if fact_path.stem == "fact_drop" and not raced:
+            raced = True
+            # Another writer commits the delete after the unlocked read listed
+            # the fact directory but before it opened this file.
+            storage.delete_fact("fact_drop", user_id="alice", agent_name="agent-a")
+        return parse_fact_markdown(fact_path)
+
+    monkeypatch.setattr(storage_module, "_parse_fact_markdown", parse_after_concurrent_delete)
+    racing_read = getattr(storage, read)("agent-a", user_id="alice")
+    monkeypatch.setattr(storage_module, "_parse_fact_markdown", parse_fact_markdown)
+
+    assert raced
+    assert [fact["id"] for fact in racing_read["facts"]] == ["fact_keep"]
+    settled = storage.load("agent-a", user_id="alice")
+    assert [fact["id"] for fact in settled["facts"]] == ["fact_keep"]
+    assert settled["revision"] == revision + 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating symlinks needs privileges on Windows")
+def test_unlocked_read_still_rejects_dangling_fact_symlink(storage: FileMemoryStorage, tmp_path: Path) -> None:
+    storage.upsert_fact({"id": "fact_keep", "content": "kept", "category": "context", "confidence": 0.9}, user_id="alice", agent_name="agent-a")
+    memory_path = storage._get_memory_file_path("agent-a", user_id="alice")
+    dangling = fact_file_path(memory_path, "fact_dangling", agent_name="agent-a")
+    dangling.parent.mkdir(parents=True, exist_ok=True)
+    dangling.symlink_to(tmp_path / "missing.md")
+    storage._memory_cache.clear()
+
+    with pytest.raises(MemoryStorageCorruption, match="fact_dangling"):
+        storage.load("agent-a", user_id="alice")
+
+
+def test_deermem_read_survives_fact_deleted_by_another_worker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    writer = DeerMem(backend_config={"storage_path": str(tmp_path)})
+    reader = DeerMem(backend_config={"storage_path": str(tmp_path)})
+    writer.create_fact("kept fact", user_id="alice")
+    _, deleted_id = writer.create_fact("deleted fact", user_id="alice")
+    parse_fact_markdown = storage_module._parse_fact_markdown
+    raced = False
+
+    def parse_after_concurrent_delete(fact_path: Path) -> dict:
+        nonlocal raced
+        if fact_path.stem == deleted_id and not raced:
+            raced = True
+            writer.delete_fact(deleted_id, user_id="alice")
+        return parse_fact_markdown(fact_path)
+
+    monkeypatch.setattr(storage_module, "_parse_fact_markdown", parse_after_concurrent_delete)
+    # Previously MemoryCorruptionError: a 500 from the memory API and an empty
+    # memory block in the prompt.
+    memory = reader.get_memory(user_id="alice")
+
+    assert raced
+    assert [fact["content"] for fact in memory["facts"]] == ["kept fact"]
+
+
 def test_shared_json_signature_invalidates_cache_after_other_storage_writes(tmp_path: Path) -> None:
     config = DeerMemConfig(storage_path=str(tmp_path))
     first = FileMemoryStorage(config)
@@ -1061,6 +1127,43 @@ def test_full_rebuild_index_accepts_original_email_user_scope(tmp_path: Path) ->
 
     assert result == {"supported": True, "indexed": 1, "failed": 0}
     assert retrieval.fact_ids == ["fact_01HZZZZZZZZZZZZZZZZZZZZZZZ"]
+
+
+def test_full_rebuild_index_skips_fact_deleted_after_directory_listing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class RecordingRetrieval:
+        def __init__(self) -> None:
+            self.fact_ids: list[str] = []
+
+        def upsert(self, fact, *, scope, path):
+            self.fact_ids.append(fact["id"])
+
+        def remove(self, fact_id, *, scope):
+            pass
+
+        def search(self, query, *, scopes, top_k, mode, filters):
+            return []
+
+    retrieval = RecordingRetrieval()
+    scoped = FileMemoryStorage(DeerMemConfig(storage_path=str(tmp_path)), retrieval=retrieval)
+    for fact_id in ("fact_keep", "fact_drop"):
+        scoped.upsert_fact({"id": fact_id, "content": fact_id, "category": "context", "confidence": 0.9}, user_id="alice", agent_name="agent-a")
+    retrieval.fact_ids.clear()
+    parse_fact_markdown = storage_module._parse_fact_markdown
+    raced = False
+
+    def parse_after_concurrent_delete(fact_path: Path) -> dict:
+        nonlocal raced
+        if fact_path.stem == "fact_drop" and not raced:
+            raced = True
+            scoped.delete_fact("fact_drop", user_id="alice", agent_name="agent-a")
+        return parse_fact_markdown(fact_path)
+
+    monkeypatch.setattr(storage_module, "_parse_fact_markdown", parse_after_concurrent_delete)
+    result = scoped.rebuild_index()
+
+    assert raced
+    assert result == {"supported": True, "indexed": 1, "failed": 0}
+    assert retrieval.fact_ids == ["fact_keep"]
 
 
 def test_scope_lock_cache_releases_unused_entries(storage: FileMemoryStorage) -> None:
