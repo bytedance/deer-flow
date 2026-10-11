@@ -241,8 +241,8 @@ class DeerFlowTUI(App):
         self.set_interval(0.1, self._tick_spinner)
         self.set_interval(0.06, self._flush_transcript)  # coalesce streaming re-renders
         self.query_one("#composer", ComposerInput).focus()
-        if self.plan and getattr(self.plan, "message", None):
-            self._send_to_agent(self.plan.message)
+        if self.plan and getattr(self.plan, "message", None) and not self._send_to_agent(self.plan.message):
+            self._restore_draft(self.plan.message)
 
     # ----- session info -------------------------------------------------- #
 
@@ -277,10 +277,14 @@ class DeerFlowTUI(App):
             return
         self._history.add(text)
         if not self._handle_submit(text):
-            # A refused message is still the user's draft: put it back so they can
-            # resend it once the app is ready, instead of digging it out of history.
-            event.input.value = event.value
-            event.input.cursor_position = len(event.value)
+            self._restore_draft(event.value)
+
+    def _restore_draft(self, text: str) -> None:
+        # A message that did not start is still the user's draft: put it back so
+        # Enter resends it, instead of leaving it only in input history.
+        composer = self.query_one("#composer", ComposerInput)
+        composer.value = text
+        composer.cursor_position = len(text)
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         if not isinstance(event.text_area, ComposerInput):

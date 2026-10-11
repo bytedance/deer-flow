@@ -4158,7 +4158,8 @@ This release closes that milestone with **439 merged pull requests**.
 - **tui:** A message the TUI refuses to send now stays in the composer. Submitting
   cleared the composer before the send was checked, so a prompt typed during an
   active run, while an interrupted run was still stopping, or when the run could
-  not start was replaced by a notice and survived only in input history. The
+  not start was replaced by a notice and survived only in input history; a
+  command-line launch message whose run could not start was lost entirely. The
   composer now gets the exact text back, with the cursor at its end, so `Enter`
   resends it; accepted messages and local slash commands clear it as before.
 

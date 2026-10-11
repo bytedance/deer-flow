@@ -270,6 +270,28 @@ async def test_worker_start_failure_restores_idle_state_and_allows_retry(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_launch_message_that_fails_to_start_stays_in_the_composer(monkeypatch):
+    client = _Client()
+    app = DeerFlowTUI(Session(client=client), LaunchPlan(mode="tui", thread_id="thread-a", message="launch question"))
+    original_start = app.run_worker
+
+    def fail_agent_worker(*args, **kwargs):
+        if kwargs.get("group") == "agent":
+            raise RuntimeError("Cannot start the launch worker")
+        return original_start(*args, **kwargs)
+
+    monkeypatch.setattr(app, "run_worker", fail_agent_worker)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert not app._streaming
+        assert any(row.kind == "system" and row.tone == "error" for row in app.state.rows)
+        composer = app.query_one("#composer")
+        assert composer.value == "launch question"
+        assert composer.cursor_position == len("launch question")
+        assert client.calls == []
+
+
+@pytest.mark.asyncio
 async def test_completed_run_rejects_a_duplicate_terminal_callback(monkeypatch):
     client, writer = _Client(), _Writer()
     client.release_old.set()
