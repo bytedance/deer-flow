@@ -168,6 +168,7 @@ restore the exact original timestamp when those edits are reverted.
 
 ## Resources
 
+- [DESIGN.md](DESIGN.md) — tokens, type, components, a11y rules; read before UI work
 - [LangGraph Documentation](https://langchain-ai.github.io/langgraph/)
 - [LangChain Core Concepts](https://js.langchain.com/docs/concepts)
 - [TanStack Query Documentation](https://tanstack.com/query/latest)
