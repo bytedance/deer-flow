@@ -1239,11 +1239,11 @@ async def test_failed_reconciliation_does_not_commit_a_new_baseline(reconciler, 
     real_reconcile = pool.reconcile_bindings
     fail_next = {"armed": True}
 
-    def _maybe_fail(active, removed, *, domain="deployment"):
+    def _maybe_fail(active, removed, *, domain="deployment", retire_unlisted=False, force_rebind=()):
         if fail_next["armed"]:
             fail_next["armed"] = False
             raise RuntimeError("reconcile failed")
-        return real_reconcile(active, removed, domain=domain)
+        return real_reconcile(active, removed, domain=domain, retire_unlisted=retire_unlisted, force_rebind=force_rebind)
 
     monkeypatch.setattr(pool, "reconcile_bindings", _maybe_fail)
     _write_config(cfg, {"A": _stdio("cmd-A2")})
@@ -1399,11 +1399,11 @@ async def test_concurrent_reconcilers_serialize_read_and_apply(reconciler, monke
     release = threading.Event()
     calls: list[str] = []
 
-    def _slow_reconcile(active, removed, *, domain="deployment"):
+    def _slow_reconcile(active, removed, *, domain="deployment", retire_unlisted=False, force_rebind=()):
         calls.append("enter")
         entered.set()
         release.wait(timeout=5)
-        result = real_reconcile(active, removed, domain=domain)
+        result = real_reconcile(active, removed, domain=domain, retire_unlisted=retire_unlisted, force_rebind=force_rebind)
         calls.append("exit")
         return result
 
@@ -2072,7 +2072,7 @@ async def test_first_claim_atomically_tombstones_a_concurrently_retained_server(
     real_reconcile = pool.reconcile_bindings
     interleaved = {"done": False, "binding": None}
 
-    def _reconcile_with_racing_retainer(active, removed, *, domain="deployment", retire_unlisted=False):
+    def _reconcile_with_racing_retainer(active, removed, *, domain="deployment", retire_unlisted=False, force_rebind=()):
         if not interleaved["done"]:
             interleaved["done"] = True
             # The durable caller slips in after the cache listed the retained
@@ -2085,6 +2085,8 @@ async def test_first_claim_atomically_tombstones_a_concurrently_retained_server(
         kwargs = {"domain": domain}
         if retire_unlisted:
             kwargs["retire_unlisted"] = True
+        if force_rebind:
+            kwargs["force_rebind"] = force_rebind
         return real_reconcile(active, removed, **kwargs)
 
     monkeypatch.setattr(pool, "reconcile_bindings", _reconcile_with_racing_retainer)
@@ -2189,7 +2191,15 @@ async def test_rejected_revision_installs_no_epoch_and_no_tombstone(reconciler, 
     published = await cache_module.initialize_mcp_tools()
     assert [tool.name for tool in published] == ["A"]
     assert cache_module._cache_initialized is True
-    assert _binding(pool, "A") is durable
+    # The first successful claim with no trusted applied baseline
+    # conservatively re-epochs every active deployment binding, because a
+    # same-fingerprint ABA is indistinguishable from a compatible rebind.
+    rebound = _binding(pool, "A")
+    assert rebound is not durable
+    assert rebound.epoch > durable.epoch
+    assert rebound.fingerprint == startup_fingerprint
+    with pytest.raises(StaleMCPBindingError):
+        await pool.get_session("A", "task:1", startup_connection, binding=durable)
     assert session_pool_module.get_session_pool() is pool
 
 
@@ -2355,3 +2365,104 @@ async def test_reader_waiting_for_discovery_still_cleans_a_retired_pool(reconcil
     assert pool._entries == {}
     assert pool._inflight == {}
     assert outcome.get("tools") == []
+
+
+def test_committed_cold_path_fences_binding_inserted_after_the_retained_check(reconciler, tmp_path):
+    """A durable bind that lands after the empty retained check must not be recorded as applied.
+
+    ``_plan_committed_mcp_reconciliation_locked`` observes the pool without
+    holding its lock, so a durable-task caller can install a binding between the
+    "no local state" check and the baseline write. The cold path must still run
+    the domain-scoped reconciliation before recording ``_applied_mcp_revision``,
+    or the inserted binding survives while the process claims to have applied a
+    revision whose epochs were never installed.
+    """
+    cfg = tmp_path / "extensions_config.json"
+    servers = {"A": _stdio("cmd-A")}
+    _write_config(cfg, servers)
+    candidate = ExtensionsConfig.from_file(str(cfg))
+
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    personal = pool.ensure_binding("A", "personal-fp", domain="personal")
+
+    real_retained = pool.retained_server_names
+    checked = threading.Event()
+    release = threading.Event()
+
+    def _retained(*, domain="deployment"):
+        # The check observes no deployment state, then the writer is parked
+        # before it acts on that observation.
+        observed = real_retained(domain=domain)
+        checked.set()
+        assert release.wait(timeout=5)
+        return observed
+
+    pool.retained_server_names = _retained  # type: ignore[method-assign]
+
+    injected: dict[str, object] = {}
+
+    def _durable_bind():
+        assert checked.wait(timeout=5)
+        injected["binding"] = pool.ensure_binding("A", _fingerprint(servers, "A"), domain="deployment")
+        release.set()
+
+    thread = threading.Thread(target=_durable_bind)
+    thread.start()
+    pending = None
+    try:
+        pending = cache_module.prepare_mcp_reconciliation(candidate, config_path=cfg)
+    finally:
+        thread.join(timeout=5)
+    if pending is not None:
+        cache_module.finish_mcp_reconciliation(pending)
+
+    assert thread.is_alive() is False
+    inserted = injected["binding"]
+    current = pool._bindings[("deployment", "A")]
+    # The concurrently inserted binding must be superseded before the baseline
+    # is recorded: it can never be reported as an installed epoch.
+    assert current is not inserted
+    assert current.epoch > inserted.epoch
+    assert cache_module._applied_mcp_revision is not None
+    # The deployment-only reconciliation must leave the personal domain alone.
+    assert pool._bindings[("personal", "A")] is personal
+
+
+@pytest.mark.asyncio
+async def test_tombstone_only_change_advances_applied_tokens(reconciler, monkeypatch, tmp_path):
+    """A history change that only moves a tombstone must advance the applied token map."""
+    from deerflow.mcp.lifecycle import LIFECYCLE_KEY, plan_mcp_lifecycle
+
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    log = _session_log()
+    servers = {"A": _stdio("cmd-A"), "B": _stdio("cmd-B")}
+    await _initialize(monkeypatch, cfg, servers, log)
+
+    # A controlled writer deletes A, recording a tombstone token.
+    raw_ab = {"mcpServers": servers, "skills": {}}
+    raw_b = {"mcpServers": {"B": _stdio("cmd-B")}, "skills": {}}
+    raw_b[LIFECYCLE_KEY] = plan_mcp_lifecycle(raw_ab, raw_b)
+    cfg.write_text(json.dumps(raw_b), encoding="utf-8")
+    assert cache_module.refresh_mcp_cache_if_active() is True
+    tombstone = cache_module._applied_mcp_revision.lifecycle_tokens["A"]
+
+    binding_b = _binding(pool, "B")
+    entry_b = _entry(pool, "B")
+
+    # W2 re-adds A then deletes it again: B is unchanged, but A's tombstone moves.
+    raw_ab2 = {"mcpServers": {"A": _stdio("cmd-A"), "B": _stdio("cmd-B")}, "skills": {}}
+    raw_ab2[LIFECYCLE_KEY] = plan_mcp_lifecycle(raw_b, raw_ab2)
+    raw_b2 = {"mcpServers": {"B": _stdio("cmd-B")}, "skills": {}}
+    raw_b2[LIFECYCLE_KEY] = plan_mcp_lifecycle(raw_ab2, raw_b2)
+    cfg.write_text(json.dumps(raw_b2), encoding="utf-8")
+    assert raw_b2[LIFECYCLE_KEY]["servers"]["A"] != tombstone
+
+    # No active server changed, so this is a no-op for sessions...
+    assert cache_module.refresh_mcp_cache_if_active() is False
+    assert _binding(pool, "B") is binding_b
+    assert _entry(pool, "B") is entry_b
+    # ...but the applied token map must not lag the consumed shared version.
+    assert cache_module._applied_mcp_revision.lifecycle_tokens["A"] == raw_b2[LIFECYCLE_KEY]["servers"]["A"]

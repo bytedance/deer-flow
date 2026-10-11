@@ -13,6 +13,9 @@ inline integer assignments. Include Exa and SearXNG in the deferred census;
 pin new-provider copies and docstring false positives with source fixtures.
 This pattern gate does not establish arbitrary provider semantics or change
 deferred providers' validation policy.
+Include You.com in the shared-owner provider checks; it applies its 100-result
+cap after shared normalization. Pin invalid-value defaults and positive count
+bounds through the outbound request in `test_youcom_tools.py`.
 
 Mixed-version resume admission in `test_thread_run_idempotency.py` uses a real
 shared SQL repository and an old-column projection. The frozen pre-6499 helper
@@ -21,6 +24,15 @@ to the new identity-aware policy or claim it runs a complete old Gateway.
 Assert both writer formats: old workers reuse conflicting decisions, upgraded
 workers reject conflicts, and identity-less legacy rows fail closed even for
 identical retries. This pins why rollout requires routing to upgraded workers.
+
+Run-store capability tests in that file check keyed input separately from resume
+identity and assert that rejected admissions create no durable or local run.
+An explicit `idempotency_key` parameter must keep supporting keyed input even
+without resume support. For kwargs-only stores, pin the opt-in on the class
+that defines `create_thread_operation_atomic`: replacing an opted-in parent's
+method requires a fresh declaration; a flag-only child or mixin cannot opt in
+another class's implementation. Also cover unchanged inheritance and durable
+retry reuse, so the rejection tests cannot pass by rejecting every custom store.
 
 Upload case-collision coverage uses separate HTTP requests and preserves both
 reported payloads. Observe real filename-claim inputs to pin the disk seed;
