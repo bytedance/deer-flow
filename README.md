@@ -576,6 +576,12 @@ it does not make old workers safe for resume admission. An upgraded worker retur
 inspect that run and the current thread state before deciding to submit a new
 action. See the [run API contract](backend/docs/API.md#create-run).
 
+Custom run stores must explicitly support every supplied idempotency field.
+Keyed input and resume requests return HTTP 503 before run admission when the
+store cannot guarantee that support. The built-in Memory and SQL stores support
+both fields; older custom stores with an explicit `idempotency_key` parameter
+continue to accept keyed input requests.
+
 #### Option 2: Local Development
 
 If you prefer running services locally:
