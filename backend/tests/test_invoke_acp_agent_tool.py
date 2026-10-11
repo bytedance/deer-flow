@@ -1060,6 +1060,53 @@ async def test_invoke_acp_agent_spawns_the_path_resolved_command(monkeypatch, tm
 
 
 @pytest.mark.anyio
+async def test_invoke_acp_agent_spawns_an_absolute_command_without_an_extension(monkeypatch, tmp_path):
+    """An absolute command has to reach its ``PATHEXT`` shim before the spawn.
+
+    npm installs ``mcode``, ``mcode.cmd``, and ``mcode.ps1`` side by side; a
+    configured absolute path without the extension would spawn the shell
+    script and fail with ``WinError 193``. The resolver has to pick the
+    ``.cmd`` shim the same way it does for a bare name.
+    """
+    import acp as acp_module
+
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "get_paths", lambda: paths_module.Paths(base_dir=tmp_path))
+    monkeypatch.setattr(
+        "deerflow.config.extensions_config.ExtensionsConfig.from_file",
+        classmethod(lambda cls: ExtensionsConfig(mcp_servers={}, skills={})),
+    )
+    script_path = tmp_path / "test_acp_agent.py"
+    script_path.write_text(_ACP_AGENT_SCRIPT, encoding="utf-8")
+    phase_path = tmp_path / "phase.txt"
+
+    shim_name = "deerflow-acp-probe"
+    shim = _write_launcher_shim(tmp_path / "npm", shim_name, f'"{sys.executable}" "{script_path}" "" 0 "{phase_path}"')
+    if sys.platform == "win32":
+        # npm also drops an extensionless shell script next to the .cmd shim.
+        (shim.parent / shim_name).write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+    captured: dict[str, object] = {}
+    real_spawn_agent_process = acp_module.spawn_agent_process
+
+    @contextlib.asynccontextmanager
+    async def _spying_spawn_agent_process(client, cmd, *args, env=None, cwd=None):
+        captured["cmd"] = cmd
+        async with real_spawn_agent_process(client, cmd, *args, env=env, cwd=cwd) as (conn, proc):
+            yield conn, proc
+
+    monkeypatch.setattr(acp_module, "spawn_agent_process", _spying_spawn_agent_process)
+
+    configured = str(shim.parent / shim_name)
+    tool = build_invoke_acp_agent_tool({"probe": ACPAgentConfig(command=configured, description="Probe", timeout_seconds=30)})
+    result = await asyncio.wait_for(tool.coroutine(agent="probe", prompt="do work"), timeout=20)
+
+    assert Path(captured["cmd"]) == shim
+    assert result == "(no response)"
+
+
+@pytest.mark.anyio
 async def test_invoke_acp_agent_reports_guidance_for_an_unresolvable_command(monkeypatch, tmp_path):
     """A command PATH cannot resolve still reports the configured name.
 
@@ -1090,8 +1137,8 @@ def test_agent_path_reads_the_configured_override_case_insensitively():
     assert _agent_path({"Path": "/agent-bin"}) == "/agent-bin"
 
 
-def test_resolve_agent_command_only_resolves_bare_names(monkeypatch, tmp_path):
-    """A configured path is left to the spawn, which runs in the ACP workspace."""
+def test_resolve_agent_command_leaves_relative_paths_to_the_spawn(monkeypatch, tmp_path):
+    """A relative configured path is left to the spawn, which runs in the ACP workspace."""
     resolved_dir = tmp_path / "resolved"
     monkeypatch.setattr(
         "deerflow.tools.builtins.invoke_acp_agent_tool.shutil.which",
@@ -1101,6 +1148,90 @@ def test_resolve_agent_command_only_resolves_bare_names(monkeypatch, tmp_path):
     assert _resolve_agent_command("npx") == str(resolved_dir / "npx")
     assert _resolve_agent_command("bin/agent") == "bin/agent"
     assert _resolve_agent_command("./bin/agent") == "./bin/agent"
+
+
+def test_resolve_agent_command_resolves_absolute_paths_through_the_lookup(monkeypatch, tmp_path):
+    """An absolute command keeps its directory but still goes through the lookup."""
+    seen: list[tuple[str, str | None]] = []
+
+    def _which(command, path=None):
+        seen.append((command, path))
+        return command + ".CMD"
+
+    monkeypatch.setattr("deerflow.tools.builtins.invoke_acp_agent_tool.shutil.which", _which)
+
+    absolute = str(tmp_path / "npm" / "mcode")
+    assert _resolve_agent_command(absolute, str(tmp_path / "agent-bin")) == absolute + ".CMD"
+    assert seen == [(absolute, str(tmp_path / "agent-bin"))]
+
+
+def test_resolve_agent_command_keeps_an_absolute_lookup_result_as_returned(monkeypatch, tmp_path):
+    """An already-absolute lookup result must not be lexically rewritten.
+
+    ``os.path.abspath`` collapses a ``..`` that the kernel resolves after a
+    symlink, which changes the file the spawn runs; the anchoring exists for
+    relative ``PATH`` results only.
+    """
+    literal = str(tmp_path / "current" / ".." / "shared" / "agent")
+    monkeypatch.setattr(
+        "deerflow.tools.builtins.invoke_acp_agent_tool.shutil.which",
+        lambda command, path=None: command,
+    )
+
+    assert _resolve_agent_command(literal) == literal
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="PATHEXT sibling resolution is Windows-only")
+def test_resolve_agent_command_resolves_a_windows_path_without_an_extension(tmp_path):
+    """npm's extensionless sh script and its ``.cmd`` shim sit side by side.
+
+    ``asyncio.create_subprocess_exec`` does not probe ``PATHEXT``, so spawning
+    the configured path runs the shell script and fails with ``WinError 193``;
+    the lookup has to pick the ``.cmd`` shim instead.
+    """
+    npm_bin = tmp_path / "npm"
+    npm_bin.mkdir()
+    extensionless = npm_bin / "mcode"
+    extensionless.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (npm_bin / "mcode.cmd").write_text("@echo off\r\necho ran\r\n", encoding="ascii")
+
+    resolved = _resolve_agent_command(str(extensionless))
+
+    assert Path(resolved) == npm_bin / "mcode.CMD"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX has no PATHEXT indirection to resolve")
+def test_resolve_agent_command_keeps_an_absolute_posix_command(tmp_path):
+    """On POSIX the absolute command itself is the executable; resolution keeps it."""
+    tool = tmp_path / "bin" / "mcode"
+    tool.parent.mkdir()
+    tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    tool.chmod(0o755)
+
+    assert _resolve_agent_command(str(tool)) == str(tool)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlink-plus-parent-segment resolution is POSIX-specific")
+def test_resolve_agent_command_keeps_a_posix_symlink_that_precedes_a_parent_segment(tmp_path):
+    """An absolute command is returned as configured, not lexically rewritten.
+
+    With ``current -> releases/v1``, ``current/../shared/agent`` resolves to
+    ``releases/shared/agent`` for the kernel, while a lexical ``abspath``
+    would collapse it to the nonexistent ``shared/agent`` beside the symlink
+    or to a different file that happens to live there.
+    """
+    release = tmp_path / "releases" / "v1"
+    release.mkdir(parents=True)
+    tool = tmp_path / "releases" / "shared" / "agent"
+    tool.parent.mkdir(parents=True)
+    tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    tool.chmod(0o755)
+    current = tmp_path / "current"
+    current.symlink_to(release, target_is_directory=True)
+
+    configured = str(current / ".." / "shared" / "agent")
+
+    assert _resolve_agent_command(configured) == configured
 
 
 def test_resolve_agent_command_hands_the_effective_path_to_the_lookup(monkeypatch, tmp_path):
