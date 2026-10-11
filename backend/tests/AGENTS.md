@@ -2,6 +2,11 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+Local nginx path fixtures convert MSYS output through the selected Git Bash's
+PATH and decode both renderer and converter output as UTF-8. POSIX Git-layout
+stubs exercise Windows-style locale decoding and missing/failed/empty converters;
+native Windows keeps the real Git Bash renderer checks, including Unicode paths.
+
 `test_skills_custom_multiprocess.py` starts independent spawn workers sharing a
 temporary custom-skill root. Park edit/rollback before the write and before the
 history append, observe the peer reaching the mutation lock, then check both
