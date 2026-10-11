@@ -156,7 +156,7 @@ The provisioner is configured via environment variables (set in [docker-compose-
 | `LARK_CLI_BROKER_IMAGE` | empty (feature off) | Optional lark-cli broker image (Pattern B, issue #4338). When set, sandbox Pods requesting the broker get a shim init container + a `lark-cli-broker` sidecar that holds the credentials; the plaintext `config`/`data` are mounted into the **sidecar only**, never the sandbox. Supersedes `LARK_CLI_INIT_IMAGE` when both are set. See [`docker/lark-cli-broker`](../lark-cli-broker/README.md) |
 | `THREADS_HOST_PATH` | - | **Host machine** path to threads data directory (must be absolute) |
 | `DEER_FLOW_HOST_BASE_DIR` | `/.deer-flow` | **Host machine** DeerFlow data root containing global and per-user `skills_view` projections |
-| `SKILLS_PVC_NAME` | empty (use hostPath) | PVC name for the operator-managed skills root used by unrestricted threads. The Gateway does not populate this PVC; see [PVC skills setup](#pvc-skills-setup) |
+| `SKILLS_PVC_NAME` | empty (use hostPath) | Fallback skills PVC for requests without all four category mount overrides. Normal Gateway requests supply those overrides and bypass this PVC; see [PVC skills setup](#pvc-skills-setup) |
 | `SKILLS_PVC_SUBPATH_TEMPLATE` | empty | Optional `subPath` template for `SKILLS_PVC_NAME`. Supports `{user_id}` and `{thread_id}`. When empty, the skills PVC root is mounted unchanged |
 | `USERDATA_PVC_NAME` | empty (use hostPath) | PVC name for user-data volume; when set, uses PVC with `subPath: deer-flow/users/{user_id}/threads/{thread_id}/user-data` |
 | `KUBECONFIG_PATH` | `/root/.kube/config` | Path to kubeconfig **inside** the provisioner container |
@@ -230,17 +230,31 @@ Move each listed `users/default/threads/{thread_id}` that exists back to `thread
 
 ### PVC Skills Setup
 
-Choose the skills mount mode before deploying. Setting `SKILLS_PVC_NAME` alone does not make per-user custom or legacy skills available in sandbox Pods.
+Choose the skills mount mode before deploying. Normal Gateway requests supply four skill category mounts, including for unrestricted default-agent threads. These mounts replace the provisioner's default skills mount, so setting `SKILLS_PVC_NAME` alone does not make per-user custom or legacy skills available in sandbox Pods.
 
 | Thread configuration | Skills source inside the sandbox | Who populates it? |
 | --- | --- | --- |
-| Custom lead Agent with an explicit `skills` list and shared `USERDATA_PVC_NAME` | Four category subpaths on the user-data PVC | Gateway, before sandbox acquire |
-| New unrestricted thread with `SKILLS_PVC_NAME` | Skills PVC root, or `SKILLS_PVC_SUBPATH_TEMPLATE` within it | Operator |
-| hostPath mode | Enabled-only projections under `DEER_FLOW_HOST_BASE_DIR` | Gateway, before sandbox acquire |
+| Ordinary unrestricted Gateway thread with shared `USERDATA_PVC_NAME` | Global public and per-user category subpaths on the user-data PVC | Gateway, before sandbox acquire |
+| Custom lead Agent with an explicit `skills` list and shared `USERDATA_PVC_NAME` | Four thread-specific category subpaths on the user-data PVC | Gateway, before sandbox acquire |
+| Gateway category mounts without `USERDATA_PVC_NAME` | Projection directories via hostPath | Gateway, before sandbox acquire |
+| Caller omitting category overrides, with `SKILLS_PVC_NAME` | Skills PVC root, or `SKILLS_PVC_SUBPATH_TEMPLATE` within it | Operator |
 
-**Gateway-managed skills on a shared PVC.** Configure a custom lead Agent with an explicit `skills` list containing the required skill names. An omitted or `null` list is unrestricted; `[]` disables all skills. The Gateway materializes the selected, user-visible skills under `users/{user_id}/threads/{thread_id}/skills_view/{public,custom,legacy,integrations}` in its DeerFlow home. Mount the same storage into the Gateway and set `USERDATA_PVC_NAME` for the provisioner, aligning the Gateway home with `deer-flow/` on that PVC. Sandbox Pods then mount the four categories from `deer-flow/users/{user_id}/threads/{thread_id}/skills_view/{category}`. All four category overrides replace the default skills mount, including `SKILLS_PVC_NAME` if set. The PVC must support access from the Gateway and the nodes running sandbox Pods; setting its name only on the provisioner does not share the Gateway's files.
+**Gateway-managed skills on a shared PVC.** Mount the same storage into the Gateway and set `USERDATA_PVC_NAME` for the provisioner, aligning the Gateway's DeerFlow home with `deer-flow/` on that PVC. `DEER_FLOW_HOST_BASE_DIR` must match the base used by the Gateway's supplied mount paths: the provisioner derives each PVC subpath relative to this base and prefixes it with `deer-flow/`. The PVC must support access from the Gateway and the nodes running sandbox Pods; setting its name only on the provisioner does not share the Gateway's files.
 
-**Operator-managed skills PVC for unrestricted threads.** New threads using the default lead Agent or custom Agents with omitted or `null` `skills` use the flat skills-PVC mount. With `SKILLS_PVC_NAME` set, the provisioner mounts the PVC root at `skills.container_path` (default `/mnt/skills`), or the subdirectory selected by `SKILLS_PVC_SUBPATH_TEMPLATE`. Populate that mount source with the category directories `public/`, `custom/`, `legacy/`, and `integrations/` required by the skills you expose. A directory named `custom/` in an old global skills tree does not supply the expected `legacy/` path. The Gateway does not copy per-user skills into this mount or refresh it after skill changes; the operator must maintain the contents and any user-specific layout. The provisioner logs a fallback warning for this mode. A thread that already has a policy-scoped projection keeps that mount root when its policy becomes unrestricted; the Gateway rebuilds that projection with all enabled, user-visible skills. Automatic materialization for new unrestricted PVC-backed threads remains tracked in [#4030](https://github.com/bytedance/deer-flow/issues/4030).
+For an ordinary unrestricted Gateway thread, the enabled-only projections use these PVC subpaths:
+
+| Sandbox path (default skills root) | User-data PVC subpath |
+| --- | --- |
+| `/mnt/skills/public` | `deer-flow/skills_view/public` |
+| `/mnt/skills/custom` | `deer-flow/users/{user_id}/skills_view/custom` |
+| `/mnt/skills/legacy` | `deer-flow/users/{user_id}/skills_view/legacy` |
+| `/mnt/skills/integrations` | `deer-flow/users/{user_id}/skills_view/integrations` |
+
+The AIO provider composes all four mounts, and the remote backend forwards them to the provisioner. The provisioner consequently ignores both `SKILLS_PVC_NAME` and `SKILLS_PVC_SUBPATH_TEMPLATE` for these requests. Without `USERDATA_PVC_NAME`, the same category overrides remain hostPath mounts, even if `SKILLS_PVC_NAME` is set.
+
+A custom lead Agent with an explicit `skills` list instead materializes the selected, user-visible skills under `users/{user_id}/threads/{thread_id}/skills_view/{public,custom,legacy,integrations}` in the Gateway's DeerFlow home. Sandbox Pods mount these from `deer-flow/users/{user_id}/threads/{thread_id}/skills_view/{category}` on the shared user-data PVC. An omitted or `null` list is unrestricted; `[]` disables all skills. A thread that already has a policy-scoped projection keeps that mount root when its policy becomes unrestricted; the Gateway rebuilds it with all enabled, user-visible skills.
+
+**Operator-managed fallback skills PVC.** The flat skills-PVC recipe applies to callers that omit category overrides, such as direct provisioner requests, rather than normal Gateway runs. With `SKILLS_PVC_NAME` set and without all four overrides, the provisioner retains a fallback mount at `skills.container_path` (default `/mnt/skills`), using the PVC root or `SKILLS_PVC_SUBPATH_TEMPLATE`. Populate its source with the `public/`, `custom/`, `legacy/`, and `integrations/` directories required by the skills you expose. A directory named `custom/` in an old global skills tree does not supply the expected `legacy/` path. The Gateway does not populate or refresh this fallback PVC; its contents and any user-specific layout are operator-managed. The provisioner logs a fallback warning for this mode. See [#4030](https://github.com/bytedance/deer-flow/issues/4030) for the original layout discussion.
 
 In hostPath mode, the Gateway materializes enabled-only views under `skills_view/public` and `users/{user_id}/skills_view/{custom,legacy}` beneath `DEER_FLOW_HOST_BASE_DIR`; the provisioner mounts those stable directories. Explicit lead Agent policies instead supply the four thread category mounts described above.
 
@@ -445,7 +459,7 @@ namespace it manages, so this path never runs there.
 
 ## Security Considerations
 
-1. **HostPath Volumes**: The provisioner mounts host directories into sandbox Pods by default. Ensure these paths contain only trusted data. For production, prefer PVC-backed user-data shared with the Gateway to avoid node-specific data loss risks. Configure skills according to [PVC skills setup](#pvc-skills-setup): explicit lead Agent policies use the shared user-data PVC, while unrestricted threads need an operator-populated skills PVC.
+1. **HostPath Volumes**: The provisioner mounts host directories into sandbox Pods by default. Ensure these paths contain only trusted data. For production, prefer PVC-backed user-data shared with the Gateway to avoid node-specific data loss risks. Configure skills according to [PVC skills setup](#pvc-skills-setup): normal Gateway runs use category mounts on the shared user-data PVC, while callers without category overrides need an operator-populated fallback skills PVC.
 
 2. **Resource Limits**: Each sandbox Pod has CPU, memory, and storage limits to prevent resource exhaustion.
 
