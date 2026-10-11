@@ -1,4 +1,4 @@
-"""Process-local LRU backend. Zero serialization on the hit path."""
+"""Process-local LRU backend with serialized LRU and statistics access."""
 
 from __future__ import annotations
 
