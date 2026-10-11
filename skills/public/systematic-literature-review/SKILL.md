@@ -84,7 +84,7 @@ The script prints a JSON array to stdout. Each paper has: `id`, `title`, `author
 
 **If the script returns fewer papers than requested**, that is the real size of the arXiv result set for the query. Do not pad the list — report the actual count to the user and proceed.
 
-**If the script fails** (network error, non-200 from arXiv), tell the user which error and stop. Do not try to fabricate paper metadata.
+**If the script fails** (network error, HTTP error, or an arXiv Atom error entry), tell the user which error and stop. Atom error entries are reported on stderr with a nonzero exit status, not returned as papers. Do not try to fabricate paper metadata.
 
 **Do not save the search results to a file** — the JSON stays in your context for Phase 3. The only file saved during the entire workflow is the final report in Phase 5.
 
