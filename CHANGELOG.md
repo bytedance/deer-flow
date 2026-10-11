@@ -4162,6 +4162,7 @@ This release closes that milestone with **439 merged pull requests**.
   command-line launch message whose run could not start was lost entirely. The
   composer now gets the exact text back, with the cursor at its end, so `Enter`
   resends it; accepted messages and local slash commands clear it as before.
+  ([#6666])
 
 ### Security
 
@@ -9572,3 +9573,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6611]: https://github.com/bytedance/deer-flow/pull/6611
 [#6613]: https://github.com/bytedance/deer-flow/pull/6613
 [#6635]: https://github.com/bytedance/deer-flow/pull/6635
+[#6666]: https://github.com/bytedance/deer-flow/pull/6666

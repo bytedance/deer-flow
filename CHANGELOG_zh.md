@@ -3196,7 +3196,7 @@
   因此在运行进行中、被中断的运行尚未停止，或运行无法启动时输入的提示会被一条提示信息取代，
   只能在输入历史中找回；命令行传入的启动消息在运行无法启动时则会完全丢失。
   现在输入框会恢复原文并把光标放在末尾，按 `Enter` 即可重新发送；
-  被接受的消息和本地斜杠命令仍会像以前一样清空输入框。
+  被接受的消息和本地斜杠命令仍会像以前一样清空输入框。([#6666])
 
 ### 安全
 
@@ -7695,3 +7695,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6611]: https://github.com/bytedance/deer-flow/pull/6611
 [#6613]: https://github.com/bytedance/deer-flow/pull/6613
 [#6635]: https://github.com/bytedance/deer-flow/pull/6635
+[#6666]: https://github.com/bytedance/deer-flow/pull/6666
