@@ -543,6 +543,10 @@ DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser
 >
 > During SSE replay-gap recovery, the Web UI preserves a reconnect pointer claimed by another run while durable state is loading. An older recovery cannot overwrite that pointer when it rejoins its own stream. Even a stale foreign pointer is preserved, so the next reload may first check that run before active-run recovery rejoins, adding a reconnect cycle.
 >
+> Store-only SSE and `/wait` consumers can finish after a heartbeat when run-manager
+> or scheduled-task reconciliation recovers a dead worker's run, even if no END
+> marker was published. Ordinary completions still wait for END to preserve tail events.
+>
 > In single-process JSONL deployments, cancelling an admitted event-store mutation waits for its background file I/O, rollback, and bookkeeping to settle before releasing the thread write lock. This prevents an older cancelled write from recreating deleted records or rolling back a later successful write. Cancellation can therefore wait on slow storage; it does not stop an in-flight filesystem operation. Callers still waiting to acquire the lock can cancel without starting a mutation. A batch spanning multiple threads drains its current thread group before propagating cancellation; subsequent thread groups do not start.
 >
 > After a run publishes its terminal stream marker, its process-local `RunRecord` remains available for the existing five-minute grace period before cleanup; durable run history remains available through `RunStore`, while the stream bridge retains its delivery tail on its separate cleanup schedule.
@@ -1860,6 +1864,8 @@ Rebuild with `make up` after changing the managed extension set. See
 
 Gateway-generated follow-up suggestions now normalize both plain-string model output and block/list-style rich content before parsing the JSON array response, so provider-specific content wrappers do not silently drop suggestions. Follow-up suggestions and input polishing skip content blocks with non-string types, preserving the surrounding text instead of failing the request
 
+Visible-content detection (`has_visible_content`, shared by the empty-response, terminal-response and model-length middlewares) and the subagent dispatch snapshot (`ParentContextSnapshot.from_state`) probe content-block types by equality rather than set membership, so a provider-emitted block with an unhashable type such as `type: []` degrades to a skipped block — keeping the surrounding history — instead of raising TypeError out of the middleware chain
+
 Backend response cleanup preserves unrelated tag names such as `<think-tank>` and `<think:note>` in follow-up suggestions and polished drafts; only the exact `<think>` name (optionally followed by attributes) starts a reasoning block. Self-closing `<think/>` and `<think />` tags are empty reasoning blocks and leave the following answer intact. Delimiters inside quoted attributes, such as `<think note=">"/>`, also leave the following answer intact.
 
 The Web UI composer can polish draft input before sending. The rewrite runs as a short Gateway LLM request using the `input_polish` model configuration, keeps slash skill prefixes such as `/data-analysis`, and only replaces the local draft after the user clicks the polish button; it does not create a thread run or persist a message.
@@ -2446,6 +2452,12 @@ by sibling deletions or runtime failures (such as unavailable sources or policy 
 become available in the next batch, when rejected additions can be retried.
 
 ### Long-Term Memory
+
+DeerMem debounces pending updates independently per conversation, user, and agent.
+`memory.backend_config.debounce_seconds` sets the quiet period (default 30 seconds),
+and `max_wait_seconds` caps debounce deferral from the first pending update
+(default 300 seconds). Activity in another conversation cannot extend that wait.
+Extraction remains serial, so backlog and LLM latency can still delay completion.
 
 The opt-in [DeerMem scope-isolation benchmark](backend/scripts/benchmark/deermem_scope_isolation/README.md)
 checks semantic safety across facts and summaries, and fact routing across users

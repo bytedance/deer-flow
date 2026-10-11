@@ -306,13 +306,14 @@ async def _orphan_recovery_observed_after_heartbeat(
     A normal terminal status is not sufficient: the producer persists status
     before publishing its final error/data frames and END. Orphan recovery is
     different because the producer is known to be gone and the durable
-    ``stop_reason`` is written atomically with the terminal status. Only that
-    explicit signal may synthesize END after a heartbeat.
+    ``stop_reason`` is written atomically with the terminal status by run or
+    scheduled-task reconciliation. Only those explicit recovery signals may
+    synthesize END after a heartbeat.
     """
     if not record.store_only:
         return False
     refreshed = await run_mgr.get(record.run_id, user_id=record.user_id)
-    return refreshed is not None and _run_is_terminal(refreshed) and refreshed.stop_reason == ORPHAN_RECOVERY_STOP_REASON
+    return refreshed is not None and _run_is_terminal(refreshed) and refreshed.stop_reason in (ORPHAN_RECOVERY_STOP_REASON, "scheduled_task_orphan_recovered")
 
 
 # ---------------------------------------------------------------------------

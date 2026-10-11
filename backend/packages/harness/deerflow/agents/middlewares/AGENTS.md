@@ -145,3 +145,12 @@ Resolve the whole batch through user storage, enabled state and agent allowlist
 before activation; reject any invalid entry. Keep bodies in escaped HumanMessage
 context with task text once. Authenticated paths feed secrets/tool policy; record usage per skill.
 Legacy slash syntax is unchanged.
+
+`model_response.py` holds the shared response-classification helpers (`last_ai_message`,
+`has_tool_call_intent`, `has_visible_content`, `append_visible_text`, `finish_reason`) used by the
+llm-error-handling, terminal-response and model-length middlewares. `has_visible_content` probes
+each content block's `type` by equality, never set membership: `type: []` / `type: {}` are legal
+JSON from a provider, and hashing an unhashable value would raise TypeError out of the middleware
+chain instead of skipping the block and reading the remaining text. Tests:
+`tests/test_model_response.py` plus the middleware-level classification cases in
+`tests/test_llm_error_handling_middleware.py`.
