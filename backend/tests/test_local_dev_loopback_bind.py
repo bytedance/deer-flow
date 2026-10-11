@@ -109,12 +109,33 @@ def _run(checkout: Path, bind_host: str | None) -> subprocess.CompletedProcess[s
     )
 
 
+def _normalize_rendered_path(rendered: str) -> str:
+    """Map the script's POSIX rendering back to Windows form on Git Bash hosts.
+
+    ``pwd -P`` inside Git Bash yields the MSYS mount form (``/tmp/...`` for the
+    Windows temp dir), which the test's Windows-side ``Path`` can neither
+    compare nor read. cygpath ships with the same Git for Windows installation
+    as the bash that ran the script.
+    """
+    if os.name != "nt" or not rendered.startswith("/"):
+        return rendered
+    cygpath = Path(require_script_bash()).with_name("cygpath.exe")
+    if not cygpath.exists():
+        return rendered
+    return subprocess.run(
+        [str(cygpath), "-w", rendered],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
 @pytest.mark.parametrize("bind_host", [None, "", "127.0.0.1"], ids=["unset", "blank", "loopback"])
 def test_default_bind_host_uses_the_tracked_config(checkout: Path, bind_host: str | None):
     result = _run(checkout, bind_host)
 
     assert result.returncode == 0, result.stderr
-    assert Path(result.stdout.strip()) == (checkout / "docker" / "nginx" / "nginx.local.conf").resolve()
+    assert Path(_normalize_rendered_path(result.stdout.strip())) == (checkout / "docker" / "nginx" / "nginx.local.conf").resolve()
     assert not (checkout / "temp").exists()
 
 
@@ -131,7 +152,7 @@ def test_bind_host_renders_a_config_listening_there(checkout: Path, bind_host: s
     result = _run(checkout, bind_host)
 
     assert result.returncode == 0, result.stderr
-    rendered = Path(result.stdout.strip())
+    rendered = Path(_normalize_rendered_path(result.stdout.strip()))
     assert rendered == (checkout / "temp" / "nginx.local.conf").resolve()
     content = rendered.read_text(encoding="utf-8")
     assert _listen_directives(content) == expected
