@@ -22,6 +22,13 @@ Both endpoints return the same body — ``{"results": {"web": [...], "news":
 [...]}}`` — so one normalizer covers both. ``web_search`` returns a JSON list of
 ``{title, url, snippet}``.
 
+A missing or null container is a legitimate empty result, but a container that
+is not the expected type (``results``, ``web``, or ``news``), or a non-empty
+container holding no usable objects, is a format error: the tool surfaces
+``{"error": ...}`` instead of "No results found", so a corrupted
+200-wrapped response is never misread as an empty search (the same
+convention tavily codified in #6645).
+
 This module is self-contained (httpx only, no You.com SDK and no new
 dependency). Requests to You.com carry a ``User-Agent`` identifying DeerFlow so
 You.com can attribute integration traffic; it is sent only to You.com hosts.
@@ -128,6 +135,27 @@ def _snippet(result: dict) -> str:
     return description if isinstance(description, str) else ""
 
 
+def _section_objects(sections: dict, section: str) -> list[dict] | None:
+    """Return the object entries of one results section, or None if malformed.
+
+    A missing or null section is empty; a section that is not a list, or a
+    non-empty list holding no objects, is malformed: the caller reports a
+    format error rather than an empty result the agent would misread. Logs
+    the section name and offending type, never payload values.
+    """
+    value = sections.get(section)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        logger.error("You.com returned unexpected '%s' section type: %s", section, type(value).__name__)
+        return None
+    objects = [item for item in value if isinstance(item, dict)]
+    if value and not objects:
+        logger.error("You.com returned '%s' with no usable result objects", section)
+        return None
+    return objects
+
+
 @tool("web_search", parse_docstring=True)
 def web_search_tool(query: str, max_results: int | None = None) -> str:
     """Search the web for information using You.com.
@@ -170,11 +198,26 @@ def web_search_tool(query: str, max_results: int | None = None) -> str:
         )
 
     sections = data.get("results")
-    if not isinstance(sections, dict):
+    if sections is None:
         sections = {}
+    elif not isinstance(sections, dict):
+        logger.error("You.com returned unexpected 'results' payload type: %s", type(sections).__name__)
+        return json.dumps(
+            {"error": "You.com returned an unexpected response format", "query": query},
+            ensure_ascii=False,
+        )
+
+    web = _section_objects(sections, "web")
+    news = _section_objects(sections, "news")
+    if web is None or news is None:
+        return json.dumps(
+            {"error": "You.com returned an unexpected response format", "query": query},
+            ensure_ascii=False,
+        )
+
     # `count` applies per section, so web + news together can exceed it. Web
     # results lead; the merged list is trimmed back to what the caller asked for.
-    results = [r for section in ("web", "news") for r in (sections.get(section) or []) if isinstance(r, dict)]
+    results = web + news
     if not results:
         return json.dumps({"error": "No results found", "query": query}, ensure_ascii=False)
 

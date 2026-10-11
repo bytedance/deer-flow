@@ -388,3 +388,97 @@ def test_package_exports_web_search_tool():
     from deerflow.community.youcom.tools import web_search_tool as direct_web_search_tool
 
     assert web_search_tool is direct_web_search_tool
+
+
+class TestMalformedResponseShapes:
+    """Wrong-typed response containers are format errors, never silent empty results.
+
+    Mirrors the tavily convention (#6645): a missing or null container is a
+    legitimate empty result, but a container that is not the expected type, or a
+    non-empty container holding no usable objects, must surface a format error —
+    an agent reading "No results found" for a corrupted 200-wrapped response
+    would wrongly conclude the query has no hits and end the research loop.
+    """
+
+    @pytest.mark.parametrize(
+        ("payload", "leaked_value"),
+        [
+            ({"results": "maintenance"}, "maintenance"),
+            ({"results": ["unexpected", "list"]}, None),
+            ({"results": {"web": "upstream error page", "news": []}}, "upstream error page"),
+            ({"results": {"web": [], "news": {"0": "bad"}}}, None),
+            ({"results": {"web": ["junk"], "news": []}}, "junk"),
+            ({"results": {"web": ["a", 1], "news": [True]}}, None),
+        ],
+        ids=["results-string", "results-list", "web-string", "news-dict", "web-no-objects", "both-no-objects"],
+    )
+    def test_malformed_container_returns_format_error(self, mock_config_with_key, payload, leaked_value):
+        patcher, _ = _patch_get(_make_response(payload))
+        try:
+            from deerflow.community.youcom.tools import web_search_tool
+
+            parsed = json.loads(web_search_tool.invoke({"query": "test"}))
+        finally:
+            patcher.stop()
+
+        assert parsed["error"] == "You.com returned an unexpected response format"
+        assert parsed["query"] == "test"
+        assert "No results found" not in parsed["error"]
+
+    def test_malformed_section_errors_even_when_other_section_has_hits(self, mock_config_with_key):
+        """Strict like tavily: one malformed container fails the whole call."""
+        patcher, _ = _patch_get(_make_response({"results": {"web": "bad", "news": [_web()]}}))
+        try:
+            from deerflow.community.youcom.tools import web_search_tool
+
+            parsed = json.loads(web_search_tool.invoke({"query": "test"}))
+        finally:
+            patcher.stop()
+
+        assert parsed["error"] == "You.com returned an unexpected response format"
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"results": None},
+            {"results": {}},
+            {"results": {"web": None, "news": None}},
+            {"metadata": {"latency": 0.1}},
+        ],
+        ids=["null-results", "empty-results", "null-sections", "missing-results"],
+    )
+    def test_missing_or_null_containers_stay_empty(self, mock_config_with_key, payload):
+        patcher, _ = _patch_get(_make_response(payload))
+        try:
+            from deerflow.community.youcom.tools import web_search_tool
+
+            parsed = json.loads(web_search_tool.invoke({"query": "test"}))
+        finally:
+            patcher.stop()
+
+        assert parsed == {"error": "No results found", "query": "test"}
+
+    def test_mixed_section_entries_keep_valid_objects(self, mock_config_with_key):
+        patcher, _ = _patch_get(_make_response({"results": {"web": ["junk", _web()], "news": []}}))
+        try:
+            from deerflow.community.youcom.tools import web_search_tool
+
+            parsed = json.loads(web_search_tool.invoke({"query": "test"}))
+        finally:
+            patcher.stop()
+
+        assert [r["url"] for r in parsed] == ["https://ex.com/a"]
+
+    def test_format_error_logs_type_not_payload_values(self, mock_config_with_key, caplog):
+        patcher, _ = _patch_get(_make_response({"results": {"web": "upstream error page", "news": []}}))
+        try:
+            from deerflow.community.youcom.tools import web_search_tool
+
+            with caplog.at_level(logging.ERROR, logger="deerflow.community.youcom.tools"):
+                parsed = json.loads(web_search_tool.invoke({"query": "test"}))
+        finally:
+            patcher.stop()
+
+        assert parsed["error"] == "You.com returned an unexpected response format"
+        assert "upstream error page" not in caplog.text
+        assert "'web' section type: str" in caplog.text
