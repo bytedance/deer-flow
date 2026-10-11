@@ -2,6 +2,7 @@ import argparse
 import base64
 import json
 import logging
+import math
 import os
 import random
 import time
@@ -20,6 +21,7 @@ MINIMAX_RETRYABLE_CODES = {1000, 1001, 1002, 1039}
 DEFAULT_TTS_MAX_RETRIES = 4
 DEFAULT_MAX_WORKERS = 4
 DEFAULT_MINIMAX_MAX_WORKERS = 1
+MAX_RETRY_AFTER_SECONDS = 24 * 60 * 60
 DEFAULT_VOLCENGINE_TTS_VOICE_TYPE_MALE = "zh_male_yangguangqingnian_moon_bigtts"
 DEFAULT_VOLCENGINE_TTS_VOICE_TYPE_FEMALE = "zh_female_sajiaonvyou_moon_bigtts"
 
@@ -90,13 +92,16 @@ def _default_max_workers(provider: str) -> int:
 
 
 def _parse_retry_after(response) -> float | None:
-    """Return the server-provided Retry-After (seconds), if any."""
+    """Return a finite, non-negative delay up to 24 hours, or use local backoff."""
     headers = getattr(response, "headers", None) or {}
     value = headers.get("Retry-After")
     try:
-        return float(value) if value else None
+        delay = float(value)
     except (TypeError, ValueError):
         return None
+    if not math.isfinite(delay) or not 0 <= delay <= MAX_RETRY_AFTER_SECONDS:
+        return None
+    return delay
 
 
 def _backoff_sleep(attempt: int, retry_after: float | None) -> None:
@@ -105,7 +110,7 @@ def _backoff_sleep(attempt: int, retry_after: float | None) -> None:
     Jitter de-synchronizes concurrent workers that all got rate-limited at once,
     avoiding a thundering-herd retry storm.
     """
-    base = retry_after if retry_after else min(2 ** attempt, 30)
+    base = retry_after if retry_after is not None else min(2 ** attempt, 30)
     time.sleep(base + random.uniform(0, 1))
 
 

@@ -205,3 +205,7 @@ Concurrency is owned by each provider internally — MiniMax runs single-threade
 to reduce rate-limit failures, Volcengine uses 4 workers. There is no
 caller-facing concurrency knob; transient rate limits are handled by automatic
 retry with backoff.
+
+Numeric `Retry-After` delays from zero through 24 hours are honored with retry
+jitter. Malformed, negative, non-finite, or larger delays fall back to the local
+exponential backoff instead of aborting generation or waiting indefinitely.
