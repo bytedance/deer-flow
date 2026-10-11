@@ -4155,6 +4155,14 @@ This release closes that milestone with **439 merged pull requests**.
   normalization, so `2.1.0-rc0` still matches `2.1.0rc0`) and fails when `uv` is
   missing; `verify-versions.yml` installs the uv version the backend image pins.
   ([#6588])
+- **tui:** A message the TUI refuses to send now stays in the composer. Submitting
+  cleared the composer before the send was checked, so a prompt typed during an
+  active run, while an interrupted run was still stopping, or when the run could
+  not start was replaced by a notice and survived only in input history; a
+  command-line launch message whose run could not start was lost entirely. The
+  composer now gets the exact text back, with the cursor at its end, so `Enter`
+  resends it; accepted messages and local slash commands clear it as before.
+  ([#6666])
 
 ### Security
 
@@ -9565,3 +9573,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6611]: https://github.com/bytedance/deer-flow/pull/6611
 [#6613]: https://github.com/bytedance/deer-flow/pull/6613
 [#6635]: https://github.com/bytedance/deer-flow/pull/6635
+[#6666]: https://github.com/bytedance/deer-flow/pull/6666

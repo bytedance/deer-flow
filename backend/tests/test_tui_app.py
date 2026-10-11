@@ -638,6 +638,34 @@ async def test_whitespace_only_input_is_not_submitted():
 
 
 @pytest.mark.asyncio
+async def test_message_refused_during_a_run_stays_in_the_composer():
+    session = _FakeSession()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+    pasted = "    def f():\n        return 1\n"
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._streaming = True
+        app.post_message(events.Paste(pasted))
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        composer = app.query_one("#composer")
+        assert composer.value == pasted
+        assert composer.cursor_position == len(pasted)
+        assert any(r.kind == "system" and "Still working" in r.text for r in app.state.rows)
+        assert session.client.stream_calls == []
+
+        app._streaming = False
+        await pilot.press("enter")
+        await _wait_until(lambda: bool(session.client.stream_calls), pilot)
+        assert composer.value == ""
+
+    assert session.client.stream_calls[0][0] == pasted
+    assert app._history.entries() == [pasted]
+
+
+@pytest.mark.asyncio
 async def test_down_on_last_line_of_multiline_input_falls_back_to_history():
     app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
 

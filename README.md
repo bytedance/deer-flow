@@ -2883,6 +2883,7 @@ A tool call already in progress still finishes, so until it does a new prompt in
 that conversation is held back with a notice instead of racing it; `/new` and
 `/resume` stay available.
 If a run cannot start, the TUI reports an error and returns to idle so you can retry.
+A message that is held back or cannot start stays in the composer, so `Enter` resends it.
 
 At the last composer row, `Down` leaves an unsent draft untouched unless you are
 browsing input history; after recalling history, it moves forward to restore your
