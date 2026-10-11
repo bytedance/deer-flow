@@ -247,6 +247,25 @@ def test_web_search_tool_reports_missing_ddgs_dependency(monkeypatch) -> None:
     assert "not installed" in parsed["error"]
 
 
+def test_web_search_tool_reports_client_initialization_failure(monkeypatch, caplog) -> None:
+    """A DDGS client that fails to construct must not escape as a raw exception."""
+
+    class BrokenInitDDGS:
+        def __init__(self, timeout: int) -> None:
+            msg = "client setup failed: invalid proxy configuration"
+            raise RuntimeError(msg)
+
+    monkeypatch.setitem(sys.modules, "ddgs", SimpleNamespace(DDGS=BrokenInitDDGS))
+    monkeypatch.setattr(tools, "get_app_config", lambda: SimpleNamespace(get_tool_config=lambda name: None))
+    caplog.set_level(logging.ERROR, logger=tools.__name__)
+
+    parsed = json.loads(tools.web_search_tool.invoke({"query": "latest news"}))
+
+    assert parsed["query"] == "latest news"
+    assert parsed["error"] == "DuckDuckGo search failed: RuntimeError: client setup failed: invalid proxy configuration"
+    assert any(record.getMessage().startswith("DuckDuckGo search failed") for record in caplog.records)
+
+
 def test_search_text_raises_on_execution_failure(monkeypatch) -> None:
     from ddgs.exceptions import DDGSException
 
@@ -260,6 +279,20 @@ def test_search_text_raises_on_execution_failure(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "ddgs", SimpleNamespace(DDGS=FailingDDGS))
 
     with pytest.raises(tools.DDGSearchError, match="timed out"):
+        tools._search_text("latest news")
+
+
+def test_search_text_reports_client_initialization_failure(monkeypatch) -> None:
+    """Constructing DDGS can already fail; it must raise DDGSearchError, not leak."""
+
+    class BrokenInitDDGS:
+        def __init__(self, timeout: int) -> None:
+            msg = "client setup failed: invalid proxy configuration"
+            raise RuntimeError(msg)
+
+    monkeypatch.setitem(sys.modules, "ddgs", SimpleNamespace(DDGS=BrokenInitDDGS))
+
+    with pytest.raises(tools.DDGSearchError, match="client setup failed: invalid proxy configuration"):
         tools._search_text("latest news")
 
 

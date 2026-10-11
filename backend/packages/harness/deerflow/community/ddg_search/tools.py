@@ -18,9 +18,10 @@ class DDGSearchError(RuntimeError):
     """Raised when a DuckDuckGo search cannot be executed.
 
     ``_search_text`` returns an empty list when the search ran and matched
-    nothing. Execution failures (rate limits, timeouts, blocked requests,
-    SDK errors, a missing ddgs dependency) raise this error instead, so
-    ``web_search_tool`` can report the failure rather than "No results found".
+    nothing. Execution failures (client initialization, rate limits,
+    timeouts, blocked requests, SDK errors, a missing ddgs dependency) raise
+    this error instead, so ``web_search_tool`` can report the failure rather
+    than "No results found".
     """
 
 
@@ -138,17 +139,20 @@ def _search_text(
         List of search results
 
     Raises:
-        DDGSearchError: If the search could not be executed. A genuinely
-            empty result set is not an error and still returns an empty list.
+        DDGSearchError: If the search could not be executed, including a
+            ``DDGS`` client that fails to initialize. A genuinely empty
+            result set is not an error and still returns an empty list.
     """
     try:
         from ddgs import DDGS
     except ImportError as e:
         raise DDGSearchError("ddgs library not installed. Run: pip install ddgs") from e
 
-    ddgs = DDGS(timeout=30)
-
     try:
+        # Constructing the client can already fail (proxy or client setup), so
+        # it stays inside the boundary that maps failures to DDGSearchError.
+        ddgs = DDGS(timeout=30)
+
         backend = _resolve_time_range_backend(backend) if time_range is not None else _normalize_backend(backend)
         safesearch = _normalize_setting(safesearch, DEFAULT_SAFESEARCH)
         effective_region = _resolve_ddgs_region(query, region, backend)
