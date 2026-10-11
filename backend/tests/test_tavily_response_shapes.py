@@ -130,6 +130,30 @@ async def test_search_mixed_entries_preserve_valid_results_in_order(monkeypatch,
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("fields", [{}, {"title": None, "url": None, "content": None}], ids=["missing", "null"])
+async def test_search_missing_or_null_leaf_fields_normalize_to_empty_text(monkeypatch, fields, caplog):
+    result, requests = await _invoke_search(monkeypatch, {"results": [fields]})
+
+    assert json.loads(result) == [{"title": "", "url": "", "snippet": ""}]
+    assert len(requests) == 1
+    assert _error_logs(caplog) == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("field", "output_field"), [("title", "title"), ("url", "url"), ("content", "snippet")])
+async def test_search_null_leaf_does_not_change_other_fields(monkeypatch, field, output_field, caplog):
+    entry = {"title": "Report", "url": "https://example.com/report", "content": "Important findings."}
+    entry[field] = None
+    expected = {"title": "Report", "url": "https://example.com/report", "snippet": "Important findings."}
+    expected[output_field] = ""
+
+    result, _ = await _invoke_search(monkeypatch, {"results": [entry]})
+
+    assert json.loads(result) == [expected]
+    assert _error_logs(caplog) == []
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("payload", [{}, {"results": None}, {"results": []}])
 async def test_search_missing_or_empty_results_keep_empty_list(monkeypatch, payload, caplog):
     result, _ = await _invoke_search(monkeypatch, payload)
@@ -198,6 +222,24 @@ async def test_fetch_malformed_results_returns_format_error(monkeypatch, results
     assert result == "Error: Tavily returned an unexpected response format"
     assert len(_error_logs(caplog)) == 1
     _assert_no_payload_values_leaked(caplog)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("container", "first", "second", "expected"),
+    [
+        ("results", {"title": "First", "raw_content": "First content."}, {"title": "Second", "raw_content": "Second content."}, "# First\n\nFirst content."),
+        ("failed_results", {"error": "First failure"}, {"error": "Second failure"}, "Error: First failure"),
+    ],
+)
+async def test_fetch_mixed_entries_use_first_object_in_order(monkeypatch, container, first, second, expected, caplog):
+    payload = {container: [None, "invalid", [], first, False, second]}
+
+    result, requests = await _invoke_fetch(monkeypatch, payload)
+
+    assert result == expected
+    assert len(requests) == 1
+    assert _error_logs(caplog) == []
 
 
 @pytest.mark.anyio

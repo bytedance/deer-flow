@@ -24,9 +24,9 @@ object, a `results`/`failed_results` container that is not a list, or a non-empt
 list whose entries hold no objects is a format error, not a legitimate empty result:
 search returns the structured `{"error": ..., "query": ...}` response and fetch
 returns the `Error: ...` string. Non-object entries are skipped while valid objects
-are preserved in order, and missing leaf fields (`title`, `url`, `content`)
-normalize to empty text. A missing, null, or empty `results` keeps search's `[]` and
-fetch's "Error: No results found"; a failed extraction whose object has no `error`
+are preserved in order, and missing or null search leaf fields (`title`, `url`,
+`content`) normalize to empty text. A missing, null, or empty `results` keeps
+search's `[]` and fetch's "Error: No results found"; a failed extraction whose object has no `error`
 message reports "Error: Extraction failed". `web_fetch` coerces non-string
 `raw_content` to text before truncating to 4096 characters. Log the malformed
 container's name and type, or that no usable result objects remain, before
@@ -35,4 +35,5 @@ returning — never the query, URL, credentials, or payload values.
 `backend/tests/test_tavily_response_shapes.py` drives the real tools and the real
 AsyncTavilyClient through an offline HTTPX MockTransport; non-object top-level
 payloads stub the client because the SDK's public wrappers reject that shape before
-the tools see it.
+the tools see it. Cover null search fields individually and together, and mixed
+fetch lists so the first retained object supplies the result or extraction error.

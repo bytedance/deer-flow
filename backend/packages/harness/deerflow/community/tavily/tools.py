@@ -75,9 +75,9 @@ async def web_search_tool(query: str, time_range: SearchTimeRange | None = None)
         return json.dumps({"error": _FORMAT_ERROR, "query": query}, ensure_ascii=False)
     normalized_results = [
         {
-            "title": result.get("title", ""),
-            "url": result.get("url", ""),
-            "snippet": result.get("content", ""),
+            "title": result.get("title") or "",
+            "url": result.get("url") or "",
+            "snippet": result.get("content") or "",
         }
         for result in results
     ]
