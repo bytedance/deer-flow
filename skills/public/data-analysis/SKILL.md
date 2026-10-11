@@ -242,6 +242,7 @@ This is especially useful when running multiple queries against the same data fi
 
 ## Notes
 
+- CSV-only analysis requires DuckDB, without Excel packages or the spatial extension. Excel inputs initialize openpyxl and spatial when first loaded; their first installation requires package/extension repository access.
 - DuckDB supports full SQL including window functions, CTEs, subqueries, and advanced aggregations
 - Excel date columns are automatically parsed; use DuckDB date functions (`DATE_TRUNC`, `EXTRACT`, etc.)
 - For very large files (100MB+), DuckDB handles them efficiently without loading everything into memory

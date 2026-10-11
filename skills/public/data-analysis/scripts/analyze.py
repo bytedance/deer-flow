@@ -22,13 +22,8 @@ try:
     import duckdb
 except ImportError:
     logger.error("duckdb is not installed. Installing...")
-    subprocess.run([sys.executable, "-m", "pip", "install", "duckdb", "openpyxl", "-q"], check=True)
+    subprocess.run([sys.executable, "-m", "pip", "install", "duckdb", "-q"], check=True)
     import duckdb
-
-try:
-    import openpyxl  # noqa: F401
-except ImportError:
-    subprocess.run([sys.executable, "-m", "pip", "install", "openpyxl", "-q"], check=True)
 
 # Cache directory for persistent DuckDB databases
 CACHE_DIR = os.path.join(tempfile.gettempdir(), ".data-analysis-cache")
@@ -93,8 +88,8 @@ def load_files(con: duckdb.DuckDBPyConnection, files: list[str]) -> dict[str, st
 
     Returns a mapping of original_name -> sanitized_table_name.
     """
-    con.execute("INSTALL spatial; LOAD spatial;")
     table_map: dict[str, str] = {}
+    spatial_loaded = False
 
     for file_path in files:
         if not os.path.exists(file_path):
@@ -104,6 +99,9 @@ def load_files(con: duckdb.DuckDBPyConnection, files: list[str]) -> dict[str, st
         ext = os.path.splitext(file_path)[1].lower()
 
         if ext in (".xlsx", ".xls"):
+            if not spatial_loaded:
+                con.execute("INSTALL spatial; LOAD spatial;")
+                spatial_loaded = True
             _load_excel(con, file_path, table_map)
         elif ext == ".csv":
             _load_csv(con, file_path, table_map)
@@ -117,7 +115,13 @@ def _load_excel(
     con: duckdb.DuckDBPyConnection, file_path: str, table_map: dict[str, str]
 ) -> None:
     """Load all sheets from an Excel file into DuckDB tables."""
-    import openpyxl
+    try:
+        import openpyxl
+    except ImportError:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "openpyxl", "-q"], check=True
+        )
+        import openpyxl
 
     wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
     sheet_names = wb.sheetnames
