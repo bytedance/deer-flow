@@ -6,6 +6,8 @@ from typing import Any
 
 import httpx
 
+from deerflow.community.provider_credentials import redact_secret
+
 _DATASET_PAGE_SIZE = 100
 _MAX_DATASET_PAGES = 100
 
@@ -52,10 +54,7 @@ class RAGFlowClient:
         self._transport = transport
 
     def _redact(self, value: object) -> str:
-        text = str(value)
-        if self._api_key:
-            text = text.replace(self._api_key, "[REDACTED]")
-        return text
+        return redact_secret(value, self._api_key)
 
     async def _request(
         self,
