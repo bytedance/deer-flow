@@ -183,7 +183,8 @@ class Sandbox(ABC):
             ValueError: If max_bytes is not a non-negative integer or None.
             PermissionError: If path traversal is detected or the path is outside
                 the allowed virtual prefix.
-            OSError: If the file cannot be read or does not exist.  Both local
+            OSError: If the file cannot be read or does not exist, or with
+                errno.EFBIG if it exceeds the effective byte limit. Both local
                 and remote implementations must raise ``OSError`` so callers
                 have a single exception type to handle.
         """
