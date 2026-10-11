@@ -2370,7 +2370,7 @@ otel = [
 
 [[package]]
 name = "lark-oapi"
-version = "1.5.5"
+version = "1.7.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
@@ -2379,8 +2379,9 @@ dependencies = [
     { name = "requests-toolbelt" },
     { name = "websockets" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/8f/5f/a0cc291039501fae117602074006508c17d6c9c83f1daa61b8d029004662/lark_oapi-1.7.3.tar.gz", hash = "sha256:e532e57fa295a1cc10e3432191f80638a082a190dc678cb2eddb6de301ff3573", size = 2346519, upload-time = "2026-08-19T09:27:42.208Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b4/72/c2e973066da57e9f6720c229364e673d89c884fac65c265a08e2c32eed3c/lark_oapi-1.5.5-py3-none-any.whl", hash = "sha256:c953d3f87e5b43d9e99cdee7c2d962568ac05d5c01ef57ad662fbb5d4ec0e69f", size = 6995394, upload-time = "2026-04-21T04:00:42.216Z" },
+    { url = "https://files.pythonhosted.org/packages/7c/65/91961331ba56308101cb932d446bd1b80e7d23234e498cefc6384ca04018/lark_oapi-1.7.3-py3-none-any.whl", hash = "sha256:c91f00087b7977dc9059ab492e8fe435e1a873863dca1d4e660d2be5b801e4cd", size = 7708570, upload-time = "2026-08-19T09:27:33.078Z" },
 ]
 
 [[package]]
@@ -4572,8 +4573,8 @@ name = "standard-aifc"
 version = "3.13.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "audioop-lts" },
-    { name = "standard-chunk" },
+    { name = "audioop-lts", marker = "python_full_version >= '3.13'" },
+    { name = "standard-chunk", marker = "python_full_version >= '3.13'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c4/53/6050dc3dde1671eb3db592c13b55a8005e5040131f7509cef0215212cb84/standard_aifc-3.13.0.tar.gz", hash = "sha256:64e249c7cb4b3daf2fdba4e95721f811bde8bdfc43ad9f936589b7bb2fae2e43", size = 15240, upload-time = "2024-10-30T16:01:31.772Z" }
 wheels = [
