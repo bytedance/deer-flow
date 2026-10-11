@@ -183,6 +183,12 @@ When adding features:
 4. Run `pnpm check` before committing
 5. Update this `AGENTS.md` when architecture, commands, or conventions change
 
+Docs search: `pnpm build` runs `search:index` to write the Pagefind index
+(`public/_pagefind/`, gitignored), so it works only on a build. The docs layout
+passes `<Search>` through `Header`'s `search` slot with a per-page `lang` filter;
+`globals.css` restyles it because Nextra's `<Head>` variables are unset. See
+`tests/unit/app/docs-search.test.ts`.
+
 Route asset budgets are enforced with `pnpm perf:check`. The command measures
 `/login` from a normal production build, then builds in static-demo mode for the
 fixture-backed workspace routes. It starts the production server on temporary local

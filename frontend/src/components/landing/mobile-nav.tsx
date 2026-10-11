@@ -2,7 +2,8 @@
 
 import { MenuIcon } from "lucide-react";
 import Link from "next/link";
-import { useState } from "react";
+import { usePathname } from "next/navigation";
+import { type ReactNode, useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -18,25 +19,62 @@ export type MobileNavLink = {
   label: string;
 };
 
-export function MobileNav({ links }: { links: MobileNavLink[] }) {
-  const [open, setOpen] = useState(false);
+// Nextra's search results render in a portal outside the sheet, so a tap on a
+// result would otherwise count as an outside click and close the sheet first.
+const SEARCH_RESULTS_SELECTOR = ".nextra-search-results";
+
+function isSearchResultsTarget(target: EventTarget | null) {
+  return target instanceof Element && !!target.closest(SEARCH_RESULTS_SELECTOR);
+}
+
+export function MobileNav({
+  links,
+  search,
+}: {
+  links: MobileNavLink[];
+  search?: ReactNode;
+}) {
+  const pathname = usePathname();
+  // Track the path the sheet was opened on so navigating (e.g. picking a
+  // search result) closes it without a state-syncing effect.
+  const [openPath, setOpenPath] = useState<string | null>(null);
+  const open = openPath === pathname;
+
+  useEffect(() => {
+    if (!open) return;
+    // Same-page search results only change the hash.
+    const close = () => setOpenPath(null);
+    window.addEventListener("hashchange", close);
+    return () => window.removeEventListener("hashchange", close);
+  }, [open]);
+
   return (
-    <Sheet open={open} onOpenChange={setOpen}>
+    <Sheet
+      open={open}
+      onOpenChange={(next) => setOpenPath(next ? pathname : null)}
+    >
       <SheetTrigger asChild className="sm:hidden">
         <Button variant="ghost" size="icon" aria-label="Open menu">
           <MenuIcon className="size-5" />
         </Button>
       </SheetTrigger>
-      <SheetContent side="right" className="w-64">
+      <SheetContent
+        side="right"
+        className="w-64"
+        onInteractOutside={(event) => {
+          if (isSearchResultsTarget(event.target)) event.preventDefault();
+        }}
+      >
         <SheetHeader>
           <SheetTitle className="font-serif text-xl">DeerFlow</SheetTitle>
         </SheetHeader>
+        {search && <div className="px-4 [&_input]:h-11">{search}</div>}
         <nav className="flex flex-col gap-1 px-4 text-base font-medium">
           {links.map((link) => (
             <Link
               key={link.href}
               href={link.href}
-              onClick={() => setOpen(false)}
+              onClick={() => setOpenPath(null)}
               className="text-secondary-foreground hover:text-foreground rounded-md py-2 transition-colors"
             >
               {link.label}
