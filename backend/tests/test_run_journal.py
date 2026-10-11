@@ -148,6 +148,39 @@ async def test_cross_thread_middleware_events_are_serialized_on_owner_loop():
     assert events[0]["content"]["changes"]["to_phase"] == "warned"
 
 
+@pytest.mark.anyio
+async def test_close_commits_cross_thread_event_still_pending_when_flush_starts():
+    """A hop queued by a worker that already returned must survive close(flush=True).
+
+    The worker runs on a raw thread and is joined with no await in between, so
+    its ``call_soon_threadsafe`` hop is provably still pending when ``close()``
+    starts. Without the yield at the top of ``flush()`` the flush executes zero
+    awaits, detach runs first and ``_put`` drops the event on ``_closed``; this
+    pins the behaviour on every Python version, not only on 3.13+ where
+    ``asyncio.to_thread`` can resume before the hop runs.
+    """
+    store = MemoryRunEventStore()
+    journal = RunJournal("r-pending", "t-pending", store, flush_threshold=100)
+
+    def record_from_tool_worker() -> None:
+        journal.record_middleware(
+            "tool_progress",
+            name="ToolProgressMiddleware",
+            hook="wrap_tool_call",
+            action="warn",
+            changes={"from_phase": "active", "to_phase": "warned"},
+        )
+
+    worker = threading.Thread(target=record_from_tool_worker)
+    worker.start()
+    worker.join()
+
+    await journal.close(flush=True)
+
+    events = await store.list_events("t-pending", "r-pending")
+    assert [event["event_type"] for event in events] == ["middleware:tool_progress"]
+
+
 def test_middleware_event_without_owner_loop_keeps_cross_thread_append():
     store = MemoryRunEventStore()
     journal = RunJournal("r-sync", "t-sync", store, flush_threshold=100)

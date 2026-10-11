@@ -4,16 +4,97 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import zipfile
+from pathlib import Path
 
 import pytest
 import support_bundle
+from support.shell import require_script_bash
+
+
+@pytest.fixture(autouse=True)
+def _isolate_runtime_paths(monkeypatch):
+    for name in ("DEER_FLOW_HOME", "DEER_FLOW_PROJECT_ROOT", "DEER_FLOW_ENV_FILE"):
+        monkeypatch.delenv(name, raising=False)
 
 
 def _zip_text(zip_path, name: str) -> str:
     with zipfile.ZipFile(zip_path) as zf:
         return zf.read(name).decode("utf-8")
+
+
+@pytest.mark.parametrize("failure", ["permission", "encoding"])
+@pytest.mark.parametrize("configured_home", [False, True])
+def test_unreadable_dotenv_keeps_thread_diagnostics(tmp_path, monkeypatch, failure, configured_home):
+    project = tmp_path / "checkout"
+    project.mkdir()
+    home = tmp_path / "data" if configured_home else project / ".deer-flow"
+    (home / "threads" / "broken-env" / "user-data").mkdir(parents=True)
+    env_file = project / ".env"
+    # A valid prefix must not partially change runtime paths when decoding fails.
+    env_file.write_bytes(b"DEER_FLOW_HOME=wrong-home\n" + b"#" * 10000 + b"\xff")
+    if configured_home:
+        monkeypatch.setenv("DEER_FLOW_HOME", str(home))
+    if failure == "permission":
+        original_open = Path.open
+
+        def guarded_open(path, *args, **kwargs):
+            if path == env_file:
+                raise PermissionError("Cannot read .env")
+            return original_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", guarded_open)
+
+    summary = support_bundle.collect_thread_summary(project, "broken-env")
+    assert summary["found"] is True
+
+
+@pytest.mark.parametrize("layout", ["threads/thread-home", "users/alice/threads/thread-home"])
+def test_thread_summary_uses_configured_runtime_home(tmp_path, monkeypatch, layout):
+    project = tmp_path / "checkout"
+    project.mkdir()
+    home = tmp_path / "runtime-data"
+    outputs = home / layout / "user-data" / "outputs"
+    outputs.mkdir(parents=True)
+    (outputs / "report.txt").write_text("private document contents", encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_HOME", str(home))
+
+    summary = support_bundle.collect_thread_summary(project, "thread-home")
+
+    assert summary["found"] is True
+    assert summary["outputs"][0]["path"] == "report.txt"
+    assert "private document contents" not in json.dumps(summary)
+    assert str(home) not in json.dumps(summary)
+    assert summary["layout"].startswith("{DEER_FLOW_HOME}/")
+
+
+def test_configured_home_does_not_fall_back_to_stale_checkout_thread(tmp_path, monkeypatch):
+    project = tmp_path / "checkout"
+    (project / ".deer-flow" / "threads" / "thread-home" / "user-data").mkdir(parents=True)
+    home = tmp_path / "runtime-data"
+    monkeypatch.setenv("DEER_FLOW_HOME", str(home))
+
+    summary = support_bundle.collect_thread_summary(project, "thread-home")
+
+    assert summary["found"] is False
+    assert summary["checked_layouts"] == ["{DEER_FLOW_HOME}/threads/thread-home/user-data"]
+
+
+def test_relative_runtime_home_is_resolved_from_current_directory(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DEER_FLOW_HOME", "runtime-data")
+    data = tmp_path / "runtime-data" / "users" / "alice" / "threads" / "thread-home" / "user-data"
+    data.mkdir(parents=True)
+    assert support_bundle.collect_thread_summary(tmp_path, "thread-home")["found"] is True
+
+
+def test_empty_runtime_home_keeps_legacy_lookup(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_HOME", "")
+    data = tmp_path / "backend" / ".deer-flow" / "threads" / "thread-home" / "user-data"
+    data.mkdir(parents=True)
+    assert support_bundle.collect_thread_summary(tmp_path, "thread-home")["found"] is True
 
 
 @pytest.mark.parametrize("host_encoding", ["ascii", "cp936"])
@@ -841,3 +922,236 @@ def test_main_prints_reporter_next_steps_and_optional_upload(tmp_path, capsys):
     assert "Suggested next steps:" in captured.out
     assert "If an AI assistant files the issue, start from the issue draft" in captured.out
     assert "Attach the zip if a maintainer asks" in captured.out
+
+
+@pytest.mark.parametrize("invocation_dir", [".", "backend"])
+def test_relative_home_matches_launcher_from_both_directories(tmp_path, monkeypatch, invocation_dir):
+    project = tmp_path / "checkout"
+    (project / "backend").mkdir(parents=True)
+    (project / ".deer-flow" / "users" / "alice" / "threads" / "relative" / "user-data").mkdir(parents=True)
+    monkeypatch.setenv("DEER_FLOW_HOME", ".deer-flow")
+    monkeypatch.chdir(project / invocation_dir)
+    assert support_bundle.collect_thread_summary(project, "relative")["found"] is True
+
+
+def test_thread_home_from_dotenv_does_not_mutate_environment(tmp_path, monkeypatch):
+    project = tmp_path / "checkout"
+    project.mkdir()
+    home = tmp_path / "data"
+    (home / "users" / "alice" / "threads" / "dotenv" / "user-data").mkdir(parents=True)
+    (project / ".env").write_text(f'DEER_FLOW_HOME="{home.as_posix()}"\nPRIVATE_KEY=private-value\n', encoding="utf-8")
+    monkeypatch.delenv("DEER_FLOW_HOME", raising=False)
+    original = dict(os.environ)
+    summary = support_bundle.collect_thread_summary(project, "dotenv")
+    assert summary["found"] is True
+    assert dict(os.environ) == original
+    assert "private-value" not in json.dumps(summary)
+    assert str(home) not in json.dumps(summary)
+
+
+def test_dotenv_home_wins_over_shell_without_exporting_secrets(tmp_path, monkeypatch):
+    (tmp_path / ".env").write_text("DEER_FLOW_HOME=dotenv-data\nPRIVATE_KEY=private-value\n", encoding="utf-8")
+    home = tmp_path / "shell-data"
+    (home / "threads" / "conflict" / "user-data").mkdir(parents=True)
+    (tmp_path / "dotenv-data" / "threads" / "conflict" / "user-data").mkdir(parents=True)
+    monkeypatch.setenv("DEER_FLOW_HOME", str(home))
+    original = dict(os.environ)
+    summary = support_bundle.collect_thread_summary(tmp_path, "conflict")
+    assert summary["layout"] == "dotenv-data/threads/conflict/user-data"
+    assert dict(os.environ) == original
+    assert "private-value" not in json.dumps(summary)
+
+
+@pytest.mark.parametrize("source", ["shell", "dotenv"])
+def test_thread_summary_honors_project_root_override(tmp_path, monkeypatch, source):
+    project = tmp_path / "checkout"
+    project.mkdir()
+    runtime_project = tmp_path / "other-project"
+    (runtime_project / ".deer-flow" / "threads" / "custom-root" / "user-data").mkdir(parents=True)
+    monkeypatch.delenv("DEER_FLOW_HOME", raising=False)
+    monkeypatch.delenv("DEER_FLOW_PROJECT_ROOT", raising=False)
+    if source == "shell":
+        monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(runtime_project))
+    else:
+        (project / ".env").write_text(f'DEER_FLOW_PROJECT_ROOT="{runtime_project.as_posix()}"\n', encoding="utf-8")
+    summary = support_bundle.collect_thread_summary(project, "custom-root")
+    assert summary["found"] is True
+    assert str(runtime_project) not in json.dumps(summary)
+
+
+def _local_launcher_home(project):
+    """Execute the launcher's actual dotenv/default blocks without starting services."""
+    bash = require_script_bash()
+    serve = (Path(support_bundle.__file__).parent / "serve.sh").read_text(encoding="utf-8")
+    dotenv_block = serve.split("# ── Load .env", 1)[1].split("\n\n", 1)[1].split("_pick_python()", 1)[0]
+    defaults = serve[serve.index("# Runtime path defaults.") :].split("# Extra flags", 1)[0]
+    result = subprocess.run(
+        [
+            bash,
+            "-c",
+            # Git Bash answers with POSIX paths, and its mount table (for example Windows TEMP
+            # at /tmp) is not reproducible from Python, so convert inside the shell. Passing the
+            # value through argv instead would let MSYS rewrite shell syntax inside it.
+            'set -e\ncd "$REPO_ROOT"\n' + dotenv_block + defaults + '\nif command -v cygpath >/dev/null 2>&1; then cygpath -w "$DEER_FLOW_HOME"; else printf "%s" "$DEER_FLOW_HOME"; fi',
+        ],
+        cwd=project,
+        env={**os.environ, "REPO_ROOT": str(project)},
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    )
+    return Path(result.stdout.strip())
+
+
+@pytest.mark.parametrize("invocation_dir", [".", "backend"])
+@pytest.mark.parametrize("source", ["shell", "dotenv"])
+def test_project_root_only_finds_launchers_default_home(tmp_path, monkeypatch, invocation_dir, source):
+    project = tmp_path / "checkout"
+    (project / "backend").mkdir(parents=True)
+    runtime_project = tmp_path / "custom-project"
+    # A stale standalone-harness thread must not shadow the local launcher.
+    (runtime_project / ".deer-flow" / "threads" / "launcher" / "user-data").mkdir(parents=True)
+    if source == "shell":
+        monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(runtime_project))
+    else:
+        (project / ".env").write_text(f'DEER_FLOW_PROJECT_ROOT="{runtime_project.as_posix()}"\n', encoding="utf-8")
+    home = _local_launcher_home(project)
+    (home / "users" / "alice" / "threads" / "launcher" / "user-data").mkdir(parents=True)
+    monkeypatch.chdir(project / invocation_dir)
+
+    summary = support_bundle.collect_thread_summary(project, "launcher")
+
+    assert home == project / "backend" / ".deer-flow"
+    assert summary["found"] is True
+    assert summary["layout"] == "backend/.deer-flow/users/alice/threads/launcher/user-data"
+    assert str(runtime_project) not in json.dumps(summary)
+
+
+@pytest.mark.parametrize("value", ["~/runtime-data", "'~/runtime-data'", '"~/runtime-data"'])
+@pytest.mark.parametrize("variable", ["DEER_FLOW_HOME", "DEER_FLOW_PROJECT_ROOT"])
+def test_dotenv_tilde_matches_launcher_quote_semantics(tmp_path, monkeypatch, value, variable):
+    project = tmp_path / "checkout"
+    project.mkdir()
+    user_home = tmp_path / "user-home"
+    user_home.mkdir()
+    monkeypatch.setenv("HOME", str(user_home))
+    if os.name == "nt":
+        # Git Bash expands "~" from HOME, but Python's expanduser() reads USERPROFILE
+        # on Windows; pin both so the two resolution paths stay comparable.
+        monkeypatch.setenv("USERPROFILE", str(user_home))
+    (project / ".env").write_text(f"{variable}={value}\n", encoding="utf-8")
+    if variable == "DEER_FLOW_HOME":
+        home = _local_launcher_home(project)
+    else:
+        home = (project / "~/runtime-data" if value.startswith(("'", '"')) else user_home / "runtime-data") / ".deer-flow"
+    (home / "threads" / "tilde" / "user-data").mkdir(parents=True)
+    original = dict(os.environ)
+
+    summary = support_bundle.collect_thread_summary(project, "tilde")
+
+    assert summary["found"] is True
+    assert dict(os.environ) == original
+    assert str(user_home) not in json.dumps(summary)
+
+
+@pytest.mark.parametrize("dotenv_home", ["", "stale-data"])
+def test_dotenv_empty_home_also_overrides_shell(tmp_path, monkeypatch, dotenv_home):
+    project = tmp_path / "checkout"
+    project.mkdir()
+    (project / ".env").write_text(f"DEER_FLOW_HOME={dotenv_home}\n", encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path / "shell-data"))
+    home = _local_launcher_home(project)
+    (home / "threads" / "empty-home" / "user-data").mkdir(parents=True)
+
+    summary = support_bundle.collect_thread_summary(project, "empty-home")
+
+    assert summary["found"] is True
+    assert summary["layout"] == home.relative_to(project).as_posix() + "/threads/empty-home/user-data"
+
+
+@pytest.mark.parametrize("source", ["shell", "legacy"])
+def test_missing_dotenv_keeps_support_bundle_available(tmp_path, monkeypatch, source):
+    (tmp_path / ".env").write_text("DEER_FLOW_HOME=unavailable-data\nPRIVATE_KEY=private-value\n", encoding="utf-8")
+    import builtins
+
+    real_import = builtins.__import__
+
+    def without_dotenv(name, *args, **kwargs):
+        if name == "dotenv" or name.startswith("dotenv."):
+            raise ModuleNotFoundError("No module named dotenv")
+        return real_import(name, *args, **kwargs)
+
+    if source == "shell":
+        home = tmp_path / "shell-data"
+        monkeypatch.setenv("DEER_FLOW_HOME", str(home))
+    else:
+        home = tmp_path / "backend" / ".deer-flow"
+    (home / "threads" / "no-dotenv" / "user-data").mkdir(parents=True)
+    original = dict(os.environ)
+    with monkeypatch.context() as context:
+        context.setattr(builtins, "__import__", without_dotenv)
+        summary = support_bundle.collect_thread_summary(tmp_path, "no-dotenv")
+
+    assert summary["found"] is True
+    assert dict(os.environ) == original
+    assert "private-value" not in json.dumps(summary)
+
+
+@pytest.mark.parametrize("invocation_dir", [".", "backend"])
+@pytest.mark.parametrize(
+    ("setup", "value"),
+    [
+        ("", "$PWD/backend/.deer-flow"),
+        ("", '"$PWD/backend/.deer-flow"'),
+        ("", '"${PWD}/backend/.deer-flow"'),
+        ("", "'$PWD/backend/.deer-flow'"),
+        ("", "'${PWD}/backend/.deer-flow'"),
+        ("", r'"\$PWD/backend/.deer-flow"'),
+        ('RUNTIME_DATA="$PWD/runtime-data"\n', '"$RUNTIME_DATA"'),
+        ('RUNTIME_DATA="$PWD/old"\nRUNTIME_DATA="$PWD/new"\n', '"${RUNTIME_DATA}"'),
+        ('RUNTIME_DATA="$PWD/first"\nRUNTIME_DATA="$RUNTIME_DATA/second"\n', '"$RUNTIME_DATA"'),
+        ("", '"${RUNTIME_DATA:-runtime-data}"'),
+    ],
+)
+def test_dotenv_variable_paths_match_launcher(tmp_path, monkeypatch, invocation_dir, setup, value):
+    project = tmp_path / "checkout"
+    (project / "backend").mkdir(parents=True)
+    monkeypatch.setenv("PWD", str(tmp_path / "other-cwd"))
+    monkeypatch.setenv("RUNTIME_DATA", "")
+    (project / ".env").write_text(setup + f"DEER_FLOW_HOME={value}\nPRIVATE_KEY=private-value\n", encoding="utf-8")
+    home = _local_launcher_home(project)
+    outputs = home / "users" / "alice" / "threads" / "variables" / "user-data" / "outputs"
+    outputs.mkdir(parents=True)
+    (outputs / "report.txt").write_text("private contents", encoding="utf-8")
+    monkeypatch.chdir(project / invocation_dir)
+    original = dict(os.environ)
+
+    summary = support_bundle.collect_thread_summary(project, "variables")
+
+    assert summary["found"] is True
+    assert summary["outputs"][0]["path"] == "report.txt"
+    assert dict(os.environ) == original
+    assert "private-value" not in json.dumps(summary)
+    assert "private contents" not in json.dumps(summary)
+
+
+def test_dotenv_shell_variable_project_root_is_resolved(tmp_path, monkeypatch):
+    project = tmp_path / "checkout"
+    project.mkdir()
+    (project / ".env").write_text('DEER_FLOW_PROJECT_ROOT="$PWD/standalone"\n', encoding="utf-8")
+    home = project / "standalone" / ".deer-flow"
+    (home / "threads" / "variables" / "user-data").mkdir(parents=True)
+    monkeypatch.setenv("PWD", str(tmp_path / "other-cwd"))
+
+    assert support_bundle.collect_thread_summary(project, "variables")["found"] is True
+
+
+def test_dotenv_path_lookup_does_not_execute_shell_commands(tmp_path):
+    marker = tmp_path / "shell-executed"
+    (tmp_path / ".env").write_text(f'DEER_FLOW_HOME="$(touch {marker.as_posix()})"\n', encoding="utf-8")
+
+    summary = support_bundle.collect_thread_summary(tmp_path, "variables")
+
+    assert summary["found"] is False
+    assert not marker.exists()

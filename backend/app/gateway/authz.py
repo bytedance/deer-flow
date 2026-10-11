@@ -821,15 +821,27 @@ async def try_acquire_sandbox_for_request(
             provider=None,
         )
 
-    from deerflow.sandbox.lease import get_sandbox_lease_manager
+    from deerflow.sandbox.lease import SandboxClientUnavailableError, get_sandbox_lease_manager
 
     owner_id = f"{owner_prefix}:{uuid.uuid4()}"
-    sandbox_id = await get_sandbox_lease_manager(sandbox_provider).acquire_async(
-        owner_id,
-        thread_id,
-        user_id=user_id,
-        release_on_last=release_on_last,
-    )
+    try:
+        sandbox_id = await get_sandbox_lease_manager(sandbox_provider).acquire_async(
+            owner_id,
+            thread_id,
+            user_id=user_id,
+            release_on_last=release_on_last,
+        )
+    except SandboxClientUnavailableError as error:
+        # The manager already reconciled this acquire without binding our
+        # holder. Preserve the callers' missing-client error path and avoid
+        # requesting a second release.
+        return SandboxRequestLease(
+            sandbox=None,
+            sandbox_id=error.sandbox_id,
+            denied=False,
+            owner_id=None,
+            provider=sandbox_provider,
+        )
     return SandboxRequestLease(
         sandbox=sandbox_provider.get(sandbox_id),
         sandbox_id=sandbox_id,

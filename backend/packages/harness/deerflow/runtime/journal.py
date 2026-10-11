@@ -2009,6 +2009,22 @@ class RunJournal(BaseCallbackHandler):
     ) -> bool:
         if self._closed:
             return True
+        current = asyncio.current_task()
+        if not self._buffer and (current is None or current.cancelling() == 0):
+            # Events recorded from worker threads reach this loop through
+            # call_soon_threadsafe (see record_middleware). Since Python 3.13 an
+            # awaited run_in_executor()/to_thread() may complete without yielding
+            # to the loop when the worker finished before its future was chained,
+            # so such callbacks can still be queued when the drain starts. Yield
+            # once so they land in the buffer instead of being dropped after
+            # detach. A non-empty buffer is already re-scanned after each write
+            # (the write path yields to the loop too), and a caller whose
+            # cancellation was requested before entry must still confirm the
+            # durable write before that cancellation is re-raised, so neither of
+            # those cases yields here.
+            await asyncio.sleep(0)
+            if self._closed:
+                return True
         quarantine = self._quarantine
         if quarantine is not None:
             if retry_noncommitted and quarantine.disposition is JournalWriteDisposition.NOT_COMMITTED:

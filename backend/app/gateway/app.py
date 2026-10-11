@@ -416,7 +416,50 @@ async def _shutdown_scheduled_task_service(app: FastAPI) -> None:
         logger.exception("Failed to stop scheduled task service")
 
 
-def _scheduled_task_notification_repos(startup_config: AppConfig):
+async def _shutdown_subagent_batch_service(app: FastAPI) -> None:
+    """Bound durable subagent batch stop so Gateway exit cannot hang forever."""
+    service = getattr(app.state, "subagent_batch_service", None)
+    if service is None:
+        return
+    app.state.subagent_batches_available = False
+    try:
+        await asyncio.wait_for(service.stop(), timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS)
+    except TimeoutError:
+        logger.warning(
+            "Subagent batch service shutdown exceeded %.1fs; proceeding with worker exit.",
+            _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        logger.exception("Failed to stop subagent batch service")
+    finally:
+        from deerflow.subagents.batch_runtime import set_subagent_batch_submitter
+
+        set_subagent_batch_submitter(None)
+
+
+async def _load_credentials_cipher(startup_config: AppConfig):
+    """Load the at-rest credentials cipher when an enabled feature stores credentials, else ``None``.
+
+    Without ``DEER_FLOW_CREDENTIALS_KEY`` the first load creates
+    ``{base_dir}/.credentials_key``, so it runs in a worker thread. The startup
+    gate has already refused a malformed environment key; a key file that
+    cannot be read or created leaves stored credentials unavailable (the
+    behaviour before the key existed) instead of failing the Gateway.
+    """
+    from app.gateway.deps import credentials_key_consumers
+
+    if not credentials_key_consumers(startup_config):
+        return None
+    from deerflow.config import credentials_key
+
+    try:
+        return await asyncio.to_thread(credentials_key.get_credentials_cipher)
+    except Exception:
+        logger.exception("Failed to load the credentials encryption key; stored channel connection credentials stay unavailable")
+        return None
+
+
+def _scheduled_task_notification_repos(startup_config: AppConfig, credentials_cipher=None):
     """Return ``(connection_repo, notification_repo)`` for the scheduled-run outbox (issue #4254).
 
     Both are None unless channel connections are enabled, because the completion
@@ -433,7 +476,7 @@ def _scheduled_task_notification_repos(startup_config: AppConfig):
     session_factory = get_session_factory()
     if session_factory is None:
         return None, None
-    return ChannelConnectionRepository(session_factory), NotificationDeliveryRepository(session_factory)
+    return ChannelConnectionRepository(session_factory, cipher=credentials_cipher), NotificationDeliveryRepository(session_factory)
 
 
 async def _start_scheduled_task_notification_delivery(app: FastAPI, startup_config: AppConfig, notification_repo, connection_repo) -> None:
@@ -642,12 +685,35 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # already-started file worker drains before the runtime is torn down.
         app.state.startup_trash_sweep_task = asyncio.create_task(_run_startup_trash_sweep(app, startup_config))
 
+        # Best-effort per-document summary generation.
+        # Workers start only when projects.summaries_enabled is true; the
+        # write routes' enqueue is a no-op otherwise. Needs the session
+        # factory and paths, both ready after langgraph_runtime.
+        try:
+            from deerflow.config.paths import get_paths
+            from deerflow.persistence.engine import get_session_factory
+            from deerflow.projects.summaries import init_summary_generator
+
+            _summary_sf = get_session_factory()
+            if _summary_sf is not None:
+                summary_generator = init_summary_generator(session_factory=_summary_sf, paths=get_paths(), app_config=startup_config)
+                await summary_generator.start()
+                app.state.summary_generator = summary_generator
+        except Exception:
+            logger.exception("Failed to start summary generation workers")
+
+        # At-rest credentials cipher (DEER_FLOW_CREDENTIALS_KEY) shared by every
+        # ChannelConnectionRepository this process builds; None when no enabled
+        # feature stores credentials.
+        credentials_cipher = await _load_credentials_cipher(startup_config)
+        app.state.credentials_cipher = credentials_cipher
+
         # Enqueue side of the scheduled-run notification outbox (issue #4254).
         # It only needs the durable table, so it is wired with the scheduler;
         # the delivery worker starts after the channel service, further down.
         notification_connection_repo = scheduled_notification_repo = None
         try:
-            notification_connection_repo, scheduled_notification_repo = _scheduled_task_notification_repos(startup_config)
+            notification_connection_repo, scheduled_notification_repo = _scheduled_task_notification_repos(startup_config, credentials_cipher)
         except Exception:
             logger.exception("Failed to prepare the scheduled-task notification outbox")
 
@@ -698,6 +764,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             channel_service = await start_channel_service(
                 startup_config,
                 get_stream_bridge=lambda: getattr(app.state, "stream_bridge", None),
+                credentials_cipher=credentials_cipher,
             )
             logger.info("Channel service started: %s", channel_service.get_status())
         except Exception:
@@ -793,6 +860,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         yield
 
         await _shutdown_startup_trash_sweep(app)
+        try:
+            from deerflow.projects.summaries import get_summary_generator, reset_summary_generator
+
+            _generator = get_summary_generator()
+            if _generator is not None:
+                await _generator.stop()
+            reset_summary_generator()
+        except Exception:
+            logger.exception("Failed to stop summary generation workers")
 
         try:
             await auth.close_oidc_service()
@@ -848,16 +924,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         set_mcp_task_config_snapshot(None)
 
-        if getattr(app.state, "subagent_batch_service", None) is not None:
-            app.state.subagent_batches_available = False
-            try:
-                await app.state.subagent_batch_service.stop()
-            except Exception:
-                logger.exception("Failed to stop subagent batch service")
-            finally:
-                from deerflow.subagents.batch_runtime import set_subagent_batch_submitter
-
-                set_subagent_batch_submitter(None)
+        await _shutdown_subagent_batch_service(app)
 
         # Browser sessions have their own bounded teardown. MCP sessions close
         # after the runtime drains runs, since those runs may still call tools.

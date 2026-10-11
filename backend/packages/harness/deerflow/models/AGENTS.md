@@ -129,6 +129,23 @@ Offline HTTP-stream coverage: `tests/test_codex_stream_terminal_events.py`.
 - `ClaudeChatModel.model_post_init` calls `load_claude_code_credential()` for every instance, and `create_chat_model` builds fresh instances per run (lead agent, title, summarization, subagents)
 - `$CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` is a one-shot handoff: a pipe returns EOF and a file keeps its advanced offset. `_read_secret_from_file_descriptor` therefore caches a non-empty secret per `(env_var, fd)` under a lock held across the read. Do not drop the cache or the lock — later instances would get no credential, and the Anthropic SDK raises `TypeError: Could not resolve authentication method` before sending. Empty reads, `OSError`, and UTF-8 decode failures are not cached; unreadable handoffs return `None` so the loader can try credential files. Warnings must not include token contents. The key is the descriptor number on purpose — a closed handoff keeps serving its token, and a secret placed on a recycled number in-process is not re-read unless the cache is cleared. The cache is per process, so a new process (e.g. a uvicorn `--reload` worker) cannot recover a drained descriptor. Pinned by `tests/test_credential_loader.py` and `tests/test_claude_fd_encoding.py`, including two-instance `ClaudeChatModel` tests
 
+### Claude Retry Delays (`claude_provider.py`)
+
+`_calc_backoff_ms` uses `utils.retry_after.bounded_retry_after_ms` for integer-second
+provider hints. Invalid or over-24-hour values retain local exponential backoff;
+finite negative values clamp to zero. Sync/async 429/500 regressions live in
+`tests/test_claude_provider_retry_after.py` and use offline provider doubles.
+
+### Provider Retry Admission (`claude_provider.py`, `openai_codex_provider.py`)
+
+With DeerFlow `RequestAdmission`, `ClaudeChatModel` and `CodexChatModel` disable their own retry loops
+(`retry_max_attempts=1`) even when config/caller kwargs request more attempts.
+Log a warning with the previous attempt count when reducing a value above one;
+already-single-attempt models should not warn.
+The factory also disables SDK retries; middleware retries re-enter admission.
+Unpaced models and unrelated custom rate limiters keep their wrapper retry policy.
+`tests/test_model_request_admission.py` covers public sync/async calls through offline HTTP transports.
+
 ### Claude Prompt Caching (`packages/harness/deerflow/models/claude_provider.py`)
 
 - The request payload shares objects with the caller: langchain-anthropic forwards Claude-native blocks (an image or document with a `source`, search results) and list-form system blocks by reference, and a reused tool binding passes its own tool dicts (the lead agent re-binds per call, so its tool dicts are fresh). Writing `cache_control` in place checkpointed the markers with the thread's messages, and the stale ones pushed every later request past the 4-breakpoint limit
@@ -136,14 +153,29 @@ Offline HTTP-stream coverage: `tests/test_codex_stream_terminal_events.py`.
 - `_apply_prompt_caching` must call `_strip_cache_control` first: it then replaces slots in those payload-owned lists with marked copies and writes `msg["content"]` on copied message dicts, placing at most four breakpoints. Pinned by `tests/test_claude_provider_prompt_caching.py`
 - Exclude `thinking` and `redacted_thinking` blocks before selecting the last four cache candidates: Anthropic forbids direct `cache_control` on these blocks. Keep their content, signatures/data and order intact so they remain part of the prefix covered by a later eligible breakpoint. Stripping stale markers must not add them back to thinking blocks or mutate caller-owned history. The same suite exercises real sync/async SDK tool-followup requests through offline transports.
 
+### Claude Thinking Budget (`packages/harness/deerflow/models/claude_provider.py`)
+
+- With `auto_thinking_budget=True`, manual `thinking.type=enabled` requests validate integer budgets of at least 1024. Ordinary thinking also requires `budget_tokens < max_tokens` and integer `max_tokens > 1024`; an absent/null budget uses `max(1024, int(max_tokens * 0.8))`, defaulting to an 8192 output limit.
+- Manual interleaving permits a budget equal to or above a positive integer output limit, but only with tools, the effective `interleaved-thinking-2025-05-14` beta, and a supported Sonnet 4/4.5/4.6 or Opus 4/4.1/4.5 model (aliases and dated IDs). Haiku 4.5 and Opus 4.6 do not interleave in manual mode even with that header. Follow [Anthropic's model-specific rules](https://platform.claude.com/docs/en/build-with-claude/extended-thinking#interleaved-thinking-in-manual-mode) when updating this capability gate.
+- Resolve the beta header as the SDK does: client defaults, then request `betas` (including an empty list), then `extra_headers`. Match comma-separated beta names exactly; a removed or replaced beta must not relax the budget bound.
+- Automatic allocation replaces the payload's thinking mapping with a copy: LangChain aliases it to `self.thinking`, so in-place writes leak across requests and make smaller per-call output limits fail. `auto_thinking_budget=False` bypasses normalization/validation; absent, disabled and adaptive thinking remain untouched. Coverage: `tests/test_claude_provider_thinking.py`, including native request construction and offline SDK serialization.
+
 ### vLLM Provider (`packages/harness/deerflow/models/vllm_provider.py`)
 
 - `VllmChatModel` subclasses `langchain_openai:ChatOpenAI` for vLLM 0.19.0 OpenAI-compatible endpoints
 - Preserves vLLM's non-standard assistant `reasoning` field on full responses, streaming deltas, and follow-up tool-call turns, falling back to the legacy `reasoning_content` wire field when `reasoning` is absent or null (a payload carrying both keeps `reasoning`); `_pick_reasoning` owns this precedence across all three paths and preserves empty-string `reasoning` rather than falling back
 - Designed for configs that enable thinking through `extra_body.chat_template_kwargs.enable_thinking` on vLLM 0.19.0 Qwen reasoning models, while accepting the older `thinking` alias
+- Normalize the legacy thinking alias on a request-owned `extra_body` copy. Never modify model defaults or caller-owned mappings: a reused request must be able to switch `thinking` off without inheriting a synthesized `enable_thinking=True`. Preserve explicit canonical-key precedence and unrelated fields. Coverage: `tests/test_vllm_provider.py`.
 - `cumulative_stream_usage` is an opt-in model setting (default `false`) for endpoints that repeat cumulative token totals on each streaming chunk. The provider converts snapshots to deltas only when a stable completion id is present, isolates interleaved streams by id, and leaves the original usage untouched otherwise. Per-model tracking is lock-protected and cleared on the trailing empty-`choices` frame whether or not that frame carries usage. A soft cap of 1024 ids evicts only entries idle for at least one hour; active streams may temporarily exceed the cap so eviction cannot corrupt their deltas. Regression coverage lives in `tests/test_vllm_provider.py`.
 
 ### MindIE Provider (`packages/harness/deerflow/models/mindie_provider.py`)
+
+Public sync and async streams use the same message normalization. No-tool native
+streams share the fence-stateful newline decoder; tool-enabled streams explicitly
+request `stream=False`, including with `streaming=True` model defaults, then use
+the shared simulated chunker. Preserve terminal usage exactly once, XML/native
+tool calls, invalid calls, and the original messages. Offline SDK boundary tests:
+`tests/test_mindie_provider.py::test_public_stream_compatibility_through_sdk`.
 
 `_fix_messages` converts tool results to the XML text format expected by MindIE.
 Only tool-message `type=json` payloads join the text channel; other non-text

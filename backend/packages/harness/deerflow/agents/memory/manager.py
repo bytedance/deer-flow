@@ -24,7 +24,7 @@ import os
 import sys
 import threading
 from abc import abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from types import ModuleType
 from typing import Any, ClassVar, Literal
@@ -1099,6 +1099,27 @@ def _refresh_judge_for_reloaded_config(manager: MemoryManager) -> None:
     logger.info("Memory judge refreshed after a memory judging-config change")
 
 
+def resolve_deermem_storage_path(backend_config: Mapping[str, Any]) -> str:
+    """Return the absolute DeerMem data root the host injects for ``backend_config``.
+
+    Zero-config UX: an empty ``storage_path`` is deer-flow's state dir (absolute,
+    CWD-independent), so memory lands at ``{runtime_home}/users/{user_id}/memory.json``
+    (deer-flow's base_dir, same as pre-abstraction). A relative value is resolved
+    against ``runtime_home()`` to preserve those semantics; left as-is it would be
+    CWD-relative and fragile. Resolved in host code so the portable ``paths.py``
+    stays free of any runtime_home dependency. The Gateway startup gate reuses it
+    to locate the derived retrieval index without constructing a backend.
+    """
+    from deerflow.config.runtime_paths import runtime_home
+
+    storage_path = str(backend_config.get("storage_path") or "")
+    if not storage_path:
+        return str(runtime_home())
+    if not Path(storage_path).is_absolute():
+        return str((Path(runtime_home()) / storage_path).resolve())
+    return storage_path
+
+
 # ── Singleton factory ─────────────────────────────────────────────────────
 def get_memory_manager() -> MemoryManager:
     """Return the singleton :class:`MemoryManager` for the active config.
@@ -1134,22 +1155,7 @@ def get_memory_manager() -> MemoryManager:
         manager_class = cfg.manager_class
         cls = _resolve_manager_class(manager_class)
         backend_config = dict(cfg.backend_config or {})
-        # Zero-config UX: default DeerMem storage to deer-flow's state dir
-        # (absolute, CWD-independent) so memory lands at
-        # {runtime_home}/users/{user_id}/memory.json (deer-flow's base_dir,
-        # same as pre-abstraction) unless the host explicitly sets storage_path.
-        if not backend_config.get("storage_path"):
-            from deerflow.config.runtime_paths import runtime_home
-
-            backend_config["storage_path"] = str(runtime_home())
-        elif not Path(backend_config.get("storage_path", "")).is_absolute():
-            # A relative storage_path is resolved against runtime_home() (base_dir-
-            # relative, CWD-independent) to preserve pre-abstraction semantics; left
-            # as-is it would be CWD-relative and fragile. (Resolved here in host code
-            # so the portable paths.py stays free of any runtime_home dependency.)
-            from deerflow.config.runtime_paths import runtime_home
-
-            backend_config["storage_path"] = str((Path(runtime_home()) / backend_config["storage_path"]).resolve())
+        backend_config["storage_path"] = resolve_deermem_storage_path(backend_config)
         # storage_path-is-a-file guard lives on DeerMemConfig.model_validator
         # now (DeerMem-private semantics; fires even when the factory bypassed).
         # Host hook providers: the factory supplies these as kwargs; each

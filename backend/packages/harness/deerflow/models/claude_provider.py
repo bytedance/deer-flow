@@ -19,6 +19,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import socket
 import time
 import uuid
@@ -29,10 +30,18 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import BaseMessage
 from pydantic import PrivateAttr
 
+from deerflow.utils.retry_after import bounded_retry_after_ms
+
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
 THINKING_BUDGET_RATIO = 0.8
+MIN_THINKING_BUDGET_TOKENS = 1024
+INTERLEAVED_THINKING_BETA = "interleaved-thinking-2025-05-14"
+# Manual interleaving is supported by Sonnet 4/4.5/4.6 and Opus 4/4.1/4.5,
+# including the 4-0 aliases and dated model IDs. Haiku 4.5 and Opus 4.6
+# accept the beta header but do not interleave in manual thinking mode.
+_MANUAL_INTERLEAVED_MODEL = re.compile(r"claude-(?:sonnet-4(?:-[056])?|opus-4(?:-[015])?)(?:-\d{8})?")
 
 # Billing header required by Anthropic API for OAuth token access.
 # Must be the first system prompt block. Format mirrors Claude Code CLI.
@@ -75,8 +84,15 @@ class ClaudeChatModel(ChatAnthropic):
             is_oauth_token,
             load_claude_code_credential,
         )
+        from deerflow.models.request_admission import RequestAdmission
 
         self._validate_retry_config()
+        if isinstance(self.rate_limiter, RequestAdmission):
+            # These wrapper retries, like SDK retries, bypass BaseChatModel's
+            # admission hook. Leave paced retries to the LLM middleware.
+            if self.retry_max_attempts != 1:
+                logger.warning("Request admission enabled; ignoring configured retry_max_attempts=%d; provider retries are handled by middleware", self.retry_max_attempts)
+            self.retry_max_attempts = 1
 
         # Extract actual key value (SecretStr.str() returns '**********')
         current_key = ""
@@ -264,18 +280,45 @@ class ClaudeChatModel(ChatAnthropic):
         for container, index in candidates[-MAX_CACHE_BREAKPOINTS:]:
             container[index] = {**container[index], "cache_control": {"type": "ephemeral"}}
 
+    def _uses_manual_interleaved_thinking(self, payload: dict) -> bool:
+        """Resolve the beta header with the Anthropic SDK's request precedence."""
+        if not payload.get("tools") or not _MANUAL_INTERLEAVED_MODEL.fullmatch(payload.get("model", self.model)):
+            return False
+
+        headers = dict(self.default_headers or {})
+        betas = payload.get("betas")
+        if isinstance(betas, (list, tuple)):
+            headers["anthropic-beta"] = ",".join(str(beta) for beta in betas)
+        headers.update(payload.get("extra_headers") or {})
+        return any(INTERLEAVED_THINKING_BETA in (beta.strip() for beta in value.split(",")) for key, value in headers.items() if key.lower() == "anthropic-beta" and isinstance(value, str))
+
     def _apply_thinking_budget(self, payload: dict) -> None:
-        """Auto-allocate thinking budget (80% of max_tokens)."""
+        """Validate manual thinking and allocate an unset budget (80% of max_tokens)."""
         thinking = payload.get("thinking")
         if not thinking or not isinstance(thinking, dict):
             return
         if thinking.get("type") != "enabled":
             return
-        if thinking.get("budget_tokens"):
+        interleaved = self._uses_manual_interleaved_thinking(payload)
+        max_tokens = payload.get("max_tokens", 8192)
+        minimum_max_tokens = 0 if interleaved else MIN_THINKING_BUDGET_TOKENS
+        if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens <= minimum_max_tokens:
+            raise ValueError(f"Claude extended thinking requires integer max_tokens > {minimum_max_tokens}; got {max_tokens}")
+
+        budget_tokens = thinking.get("budget_tokens")
+        if budget_tokens is not None:
+            if not isinstance(budget_tokens, int) or isinstance(budget_tokens, bool) or budget_tokens < MIN_THINKING_BUDGET_TOKENS or (not interleaved and budget_tokens >= max_tokens):
+                upper_bound = "" if interleaved else f" and strictly less than max_tokens ({max_tokens})"
+                raise ValueError(f"Claude extended thinking requires budget_tokens to be an integer at least {MIN_THINKING_BUDGET_TOKENS}{upper_bound}; got {budget_tokens}")
             return
 
-        max_tokens = payload.get("max_tokens", 8192)
-        thinking["budget_tokens"] = int(max_tokens * THINKING_BUDGET_RATIO)
+        payload["thinking"] = {
+            **thinking,
+            "budget_tokens": max(
+                MIN_THINKING_BUDGET_TOKENS,
+                int(max_tokens * THINKING_BUDGET_RATIO),
+            ),
+        }
 
     @staticmethod
     def _strip_cache_control(payload: dict) -> None:
@@ -393,8 +436,10 @@ class ClaudeChatModel(ChatAnthropic):
             retry_after = error.response.headers.get("Retry-After")
             if retry_after:
                 try:
-                    total_ms = int(retry_after) * 1000
-                except (ValueError, TypeError):
+                    hint_ms = bounded_retry_after_ms(int(retry_after) * 1000)
+                    if hint_ms is not None:
+                        total_ms = hint_ms
+                except (ValueError, TypeError, OverflowError):
                     pass
 
         return total_ms

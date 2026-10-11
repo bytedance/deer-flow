@@ -1,3 +1,10 @@
+### Model Retry Hints
+
+`retry_after.py::bounded_retry_after_ms` shares the 24-hour provider-hint ceiling
+between LLM middleware (numeric/date hints) and Claude backoff. Non-finite or
+over-limit delays return `None` for local backoff; finite negatives clamp to zero.
+Validate before integer truncation and preserve valid hints above the jitter cap.
+
 ### Port Allocation Bounds
 
 `network.py::PortAllocator.allocate` caps its exclusive search endpoint at
@@ -23,11 +30,27 @@ which takes a whole message and uses different list/mapping semantics.
 Regression coverage lives in `tests/test_utils_messages.py`,
 `tests/test_subagent_executor.py`, and `tests/test_task_continuity.py`.
 
+`llm_text.py::extract_response_text` ignores content blocks with non-string
+`type` values, including lists and mappings, while retaining adjacent text and
+output-text blocks. Tests cover extraction and the one-shot input-polish path
+with real LangChain messages in `tests/test_utils_llm_text.py` and
+`tests/test_input_polish_router.py`.
+
 `llm_text.py::strip_think_blocks` scans opening and closing tags forward so
 repeated unclosed `<think>` prefixes in model output do not rescan the same
 suffix. Keep its case-insensitive tag handling, optional whitespace before
 the closing `>`, and the `truncate_unclosed` behavior. Regression coverage
 lives in `tests/test_utils_llm_text.py`.
+
+Opening reasoning tags require whitespace, `>`, or `/>` after the exact `think`
+name; punctuated names such as `<think-tank>`, `<think:note>`, and `<think/other>`
+are ordinary content. The shared prefix regex owns this boundary rule; do not
+duplicate it in a manual re-check. Self-closing `<think/>` and `<think />` tags
+are empty reasoning blocks: remove the tag without consuming subsequent text.
+Both cleanup functions find opening delimiters outside quoted attributes; a
+quoted `>` cannot terminate the tag or hide an answer after a self-closing tag.
+Keep exact unfinished `<think` prefixes hidden in leading summaries. Coverage:
+`tests/test_think_tag_boundaries.py`.
 
 Display summaries use `strip_leading_think_blocks` before limiting text;
 `test_run_journal_visible_summary.py` preserves literal tags in the answer.
@@ -42,6 +65,11 @@ pins offload, executor isolation, request context, and failure ordering.
 Tool and agent assembly re-enters `get_available_tools()` and may block on MCP discovery, so the four async assembly entry points — `run_agent`'s `agent_factory` call, `task_tool`, durable batch `_execute_item`, and `abuild_checkpoint_state_accessor` — dispatch through `deerflow.utils.assembly_io.run_assembly`, a dedicated ContextVar-preserving bounded executor (`DEER_FLOW_ASSEMBLY_WORKERS`, default 8) rather than the loop's default executor; a hung MCP server therefore parks an assembly worker instead of queueing unrelated default-executor work, and the pool logs a warning when pending assemblies exceed the worker count. `tests/blocking_io/test_tool_assembly_offloop.py` pins all four offloads plus the ContextVar propagation.
 
 ### Uploaded Document Summaries
+
+Outlines skip root-level HTML comment blocks (`<!--` with up to three leading
+spaces through the first `-->` line). Comment contents cannot open code fences;
+comment markers inside fenced code cannot open comment blocks. Keep line numbers
+and limits unchanged. Coverage: `tests/test_file_outline_html_comments.py`.
 
 `file_outline.py` reads outlines and fallback previews as `utf-8-sig` so an
 optional leading UTF-8 BOM cannot hide a first-line heading or code fence, or
@@ -77,11 +105,22 @@ lives in `tests/test_file_conversion_cancellation.py`.
 
 ### Host Path Portability
 
+`host_paths.extended_length_path()` provides lexical Windows filesystem
+spelling (absolute `\\?\` drive paths or `\\?\UNC\` shares); it is a no-op
+on POSIX. It does not replace symlink resolution or confinement checks and
+must not be used for persisted relative paths or Docker mount sources.
+Existing extended (`\\?\`) and device (`\\.\`, including named pipes)
+namespaces pass through unchanged before normalization.
+
 `host_paths.py` rejects Windows device names for host-visible creation paths on
 every platform, including the `COM`/`LPT` aliases with superscript ¹, ² and ³.
 The console aliases `CONIN$` and `CONOUT$` are reserved too; match them
 case-insensitively before the first dot, without rejecting longer ordinary
 names such as `CONIN$notes.txt`.
+Device-name comparison ignores ASCII spaces before the first dot, so
+`NUL .txt` and `COM1  .log` remain reserved. Trim the comparison stem only,
+not the supplied filename; ordinary names such as `report .txt` and
+non-ASCII whitespace remain unchanged.
 Do not normalize arbitrary Unicode digits into device numbers: names such as
 `COM⁴.txt` and `COM¹notes.txt` are ordinary portable names. Read/removal callers
 retain their existing portability exemptions.

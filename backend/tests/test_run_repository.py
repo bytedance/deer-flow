@@ -81,6 +81,49 @@ class _CustomRunStoreWithoutProgress(RunStore):
         return False
 
 
+class _LegacyExplicitPutRunStore(_CustomRunStoreWithoutProgress):
+    async def put(
+        self,
+        run_id,
+        *,
+        thread_id,
+        assistant_id=None,
+        user_id=None,
+        model_name=None,
+        status="pending",
+        operation_kind="run",
+        multitask_strategy="reject",
+        metadata=None,
+        kwargs=None,
+        error=None,
+        stop_reason=None,
+        created_at=None,
+        goal_verdict=None,
+        owner_worker_id=None,
+        lease_expires_at=None,
+        idempotency_key=None,
+    ):
+        del (
+            run_id,
+            thread_id,
+            assistant_id,
+            user_id,
+            model_name,
+            status,
+            operation_kind,
+            multitask_strategy,
+            metadata,
+            kwargs,
+            error,
+            stop_reason,
+            created_at,
+            goal_verdict,
+            owner_worker_id,
+            lease_expires_at,
+            idempotency_key,
+        )
+
+
 @pytest.mark.anyio
 async def test_update_run_progress_defaults_to_noop_for_custom_store():
     store = _CustomRunStoreWithoutProgress()
@@ -110,6 +153,33 @@ async def test_legacy_create_run_atomic_store_remains_compatible():
         )
 
 
+@pytest.mark.anyio
+async def test_non_idempotent_run_remains_compatible_with_legacy_explicit_put_signature():
+    manager = RunManager(store=_LegacyExplicitPutRunStore())
+
+    record = await manager.create("t1")
+
+    assert record.thread_id == "t1"
+
+
+@pytest.mark.anyio
+async def test_keyed_resume_rejects_legacy_create_run_atomic_adapter_before_admission():
+    from deerflow.runtime import RunIdempotencyUnsupported
+
+    manager = RunManager(store=_CustomRunStoreWithoutProgress())
+
+    with pytest.raises(RunIdempotencyUnsupported, match="does not support keyed resume"):
+        await manager.create_or_reject(
+            "t1",
+            idempotency_key="http-run:resume",
+            idempotency_request={
+                "version": 1,
+                "kind": "resume",
+                "sha256": "a" * 64,
+            },
+        )
+
+
 class TestRunRepository:
     @pytest.mark.anyio
     async def test_put_and_get(self, tmp_path):
@@ -133,6 +203,30 @@ class TestRunRepository:
         assert row["assistant_id"] == "new-agent"
         assert row["status"] == "running"
         assert row["error"] == "retry"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_manager_snapshot_put_preserves_private_idempotency_request(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        manager = RunManager(store=repo, worker_id="worker-a")
+        identity = {
+            "version": 1,
+            "kind": "resume",
+            "sha256": "a" * 64,
+        }
+        record = await manager.create_or_reject(
+            "t1",
+            idempotency_key="http-run:key",
+            idempotency_request=identity,
+        )
+
+        record.error = "snapshot retry"
+        assert await manager._persist_to_store(record) is True
+
+        row = await repo.get(record.run_id)
+        assert row is not None
+        assert row["idempotency_request"] == identity
+        assert row["error"] == "snapshot retry"
         await _cleanup()
 
     @pytest.mark.anyio
@@ -829,6 +923,55 @@ class TestRunRepository:
 
         assert reused.run_id == first.run_id
         assert reused.idempotency_reused is True
+        assert len(await repo.list_by_thread("thread-T", user_id="user-1")) == 1
+        await _cleanup()
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("strategy", ["interrupt", "rollback"])
+    async def test_peer_interrupt_strategy_reuses_live_idempotency_key_before_foreign_lease_conflict(
+        self,
+        tmp_path,
+        strategy,
+    ):
+        from deerflow.config.run_ownership_config import RunOwnershipConfig
+
+        repo = await _make_repo(tmp_path)
+        ownership = RunOwnershipConfig(
+            lease_seconds=30,
+            grace_seconds=10,
+            heartbeat_enabled=True,
+        )
+        owner = RunManager(
+            store=repo,
+            worker_id="worker-a",
+            run_ownership_config=ownership,
+        )
+        peer = RunManager(
+            store=repo,
+            worker_id="worker-b",
+            run_ownership_config=ownership,
+        )
+        first = await owner.create_or_reject(
+            "thread-T",
+            user_id="user-1",
+            multitask_strategy=strategy,
+            idempotency_key="http-run:same",
+        )
+
+        reused = await peer.create_or_reject(
+            "thread-T",
+            user_id="user-1",
+            multitask_strategy=strategy,
+            idempotency_key="http-run:same",
+        )
+
+        assert reused.run_id == first.run_id
+        assert reused.idempotency_reused is True
+        assert reused.store_only is True
+        stored = await repo.get(first.run_id, user_id="user-1")
+        assert stored is not None
+        assert stored["status"] == "pending"
+        assert stored["owner_worker_id"] == "worker-a"
         assert len(await repo.list_by_thread("thread-T", user_id="user-1")) == 1
         await _cleanup()
 
