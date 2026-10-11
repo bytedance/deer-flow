@@ -232,10 +232,11 @@ class TestWebSearchTool:
 
         assert params["count"] == 5
 
-    def test_max_results_clamped_to_cap(self):
+    @pytest.mark.parametrize(("max_results", "expected"), [(0, 5), (-2, 5), (1, 1), (100, 100), ("500", 100)])
+    def test_max_results_clamped_to_provider_bounds(self, max_results, expected):
         with patch("deerflow.community.youcom.tools.get_app_config") as mock:
             tool_config = MagicMock()
-            tool_config.model_extra = {"api_key": "k", "max_results": "500"}
+            tool_config.model_extra = {"api_key": "k", "max_results": max_results}
             mock.return_value.get_tool_config.return_value = tool_config
             patcher, mock_client_cls = _patch_get(_make_response({"results": {"web": [_web()]}}))
             try:
@@ -246,7 +247,7 @@ class TestWebSearchTool:
             finally:
                 patcher.stop()
 
-        assert params["count"] == 100
+        assert params["count"] == expected
 
     def test_invalid_max_results_falls_back_to_default_with_warning(self, caplog):
         with patch("deerflow.community.youcom.tools.get_app_config") as mock:
