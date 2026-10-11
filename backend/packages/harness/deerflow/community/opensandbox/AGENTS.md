@@ -14,3 +14,8 @@ Keep failed synchronization best effort, preserve prior complete copies, and
 do not remove remotely deleted files. Cover the real listing shell and release
 to Gateway artifact reader with offline transports in
 `tests/test_opensandbox_provider.py`.
+Decode each NUL-framed filename separately; invalid UTF-8 records consume the
+candidate budget but must not prevent valid outputs from being mirrored.
+Portable reserved-name checks include COM/LPT superscript digits and console
+device names without `PureWindowsPath.is_reserved`. Catch only the serializer's
+typed closure exception after verifying the client has been untracked.

@@ -520,6 +520,59 @@ def test_output_sync_refreshes_existing_content_and_keeps_literal_filename(outpu
     assert not list(outputs.glob(".opensandbox-sync-*"))
 
 
+@pytest.mark.parametrize("file_limit", [1, 2])
+def test_output_sync_skips_invalid_utf8_record_within_file_budget(output_sync_provider, monkeypatch, caplog, file_limit):
+    provider, remote, sandbox_id, outputs = output_sync_provider
+    remote.file_data["/mnt/user-data/outputs/report.txt"] = b"valid report"
+    listing = b"/mnt/user-data/outputs/\xff\0/mnt/user-data/outputs/report.txt\0"
+    monkeypatch.setattr(provider, "_MAX_SYNC_FILES", file_limit)
+    monkeypatch.setattr(remote.commands, "run", lambda *args, **kwargs: _execution(stdout=(base64.b64encode(listing).decode(), "__DF_OUTPUT_SYNC__:0:0:0")))
+    provider.release(sandbox_id)
+    if file_limit == 2:
+        assert (outputs / "report.txt").read_bytes() == b"valid report"
+    else:
+        assert not outputs.exists()
+        assert remote.files.calls == []
+    assert "non-UTF-8" in caplog.text
+    assert sandbox_id in provider._warm_pool
+
+
+def test_output_sync_refreshes_same_size_edits(output_sync_provider):
+    provider, remote, sandbox_id, outputs = output_sync_provider
+    remote.file_data["/mnt/user-data/outputs/report.txt"] = b"first"
+    provider.release(sandbox_id)
+    assert (outputs / "report.txt").read_bytes() == b"first"
+    provider.acquire("thread", user_id="owner")
+    remote.file_data["/mnt/user-data/outputs/report.txt"] = b"later"
+    provider.release(sandbox_id)
+    assert (outputs / "report.txt").read_bytes() == b"later"
+
+
+@pytest.mark.parametrize("name", ["con.txt", "PRN", "aux .log", "NUL.bin", "COM9", "lpt1.doc", "COM¹.txt", "LPT²", "CONIN$.txt", "CONOUT$"])
+def test_output_destination_rejects_reserved_components_without_deprecated_api(tmp_path, monkeypatch, name):
+    from pathlib import PureWindowsPath
+
+    def unavailable(*args):
+        raise AssertionError("PureWindowsPath.is_reserved is unavailable")
+
+    monkeypatch.setattr(PureWindowsPath, "is_reserved", unavailable)
+    with pytest.raises(ValueError, match="Unsafe"):
+        OpenSandboxProvider._output_destination(tmp_path / "outputs", f"/mnt/user-data/outputs/{name}")
+    assert not (tmp_path / "outputs").exists()
+
+
+@pytest.mark.parametrize("name", ["CONSOLE.txt", "COM10.txt", "LPT0", "report # 中文.txt"])
+def test_output_destination_accepts_nonreserved_names_without_deprecated_api(tmp_path, monkeypatch, name):
+    from pathlib import PureWindowsPath
+
+    def unavailable(*args):
+        raise AssertionError("PureWindowsPath.is_reserved is unavailable")
+
+    monkeypatch.setattr(PureWindowsPath, "is_reserved", unavailable)
+    outputs = tmp_path / "outputs"
+    assert OpenSandboxProvider._output_destination(outputs, f"/mnt/user-data/outputs/{name}") == outputs / name
+
+
 @pytest.mark.parametrize("remote_path", ["/tmp/outside", "/mnt/user-data/uploads/input.txt", "/mnt/user-data/outputs/../outside", "/mnt/user-data/outputs//bad", "/mnt/user-data/outputs/C:bad", "/mnt/user-data/outputs/NUL.txt"])
 def test_output_sync_rejects_unconfined_paths(output_sync_provider, remote_path):
     provider, remote, sandbox_id, outputs = output_sync_provider
@@ -809,6 +862,38 @@ def test_release_is_noop_when_lifecycle_closes_before_serializer_hold(output_syn
     provider.release(sandbox_id)
     assert provider.get(sandbox_id) is None
     assert not outputs.exists()
+
+
+@pytest.mark.parametrize("untrack", [True, False])
+def test_release_tolerates_typed_closure_independent_of_message(output_sync_provider, monkeypatch, untrack):
+    from deerflow.sandbox import acquire_serialization
+
+    provider, remote, sandbox_id, outputs = output_sync_provider
+
+    def close_before_hold(key):
+        if untrack:
+            provider.reset()
+        raise acquire_serialization.AcquireSerializerClosed("No further scope holders accepted")
+
+    monkeypatch.setattr(provider._acquire_serializer, "hold", close_before_hold)
+    if untrack:
+        provider.release(sandbox_id)
+        assert provider.get(sandbox_id) is None
+    else:
+        with pytest.raises(acquire_serialization.AcquireSerializerClosed):
+            provider.release(sandbox_id)
+
+
+def test_release_does_not_swallow_unrelated_runtime_error_with_old_closure_message(output_sync_provider, monkeypatch):
+    provider, remote, sandbox_id, outputs = output_sync_provider
+
+    def fail_hold(key):
+        provider.reset()
+        raise RuntimeError("AcquireSerializer is closed")
+
+    monkeypatch.setattr(provider._acquire_serializer, "hold", fail_hold)
+    with pytest.raises(RuntimeError, match="AcquireSerializer is closed"):
+        provider.release(sandbox_id)
 
 
 @pytest.mark.parametrize("exit_code", [1, None])

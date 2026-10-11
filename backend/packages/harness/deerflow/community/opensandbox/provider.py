@@ -16,12 +16,12 @@ import time
 import uuid
 from datetime import timedelta
 from functools import partial
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from deerflow.config import get_app_config
-from deerflow.sandbox.acquire_serialization import AcquireSerializer
+from deerflow.sandbox.acquire_serialization import AcquireSerializer, AcquireSerializerClosed
 from deerflow.sandbox.identity import derive_sandbox_scope_token
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.sandbox_provider import SandboxProvider
@@ -43,6 +43,7 @@ DEFAULT_SANDBOX_TIMEOUT = 4 * 60 * 60
 DEFAULT_COMMAND_TIMEOUT = 10 * 60
 _BOOTSTRAP_TIMEOUT = 30.0
 _BOOTSTRAP_COMMAND = "mkdir -p /mnt/user-data/workspace /mnt/user-data/uploads /mnt/user-data/outputs"
+_WINDOWS_RESERVED_NAMES = frozenset({"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"} | {f"{prefix}{digit}" for prefix in ("COM", "LPT") for digit in "123456789¹²³"})
 
 
 def _uses_insecure_remote_http(domain: Any, protocol: str) -> bool:
@@ -372,12 +373,12 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         try:
             with self._acquire_serializer.hold(sandbox_id):
                 self._release_scope_locked(sandbox_id)
-        except RuntimeError as exc:
+        except AcquireSerializerClosed:
             # reset/shutdown can close the serializer between the existence
             # check and checkout. Preserve release's no-op after termination.
             with self._lock:
                 untracked = sandbox_id not in self._sandboxes
-            if str(exc) != "AcquireSerializer is closed" or not untracked:
+            if not untracked:
                 raise
 
     def _release_scope_locked(self, sandbox_id: str) -> None:
@@ -411,7 +412,7 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         if not remote_path.startswith(prefix) or "\\" in remote_path:
             raise ValueError("Output path is outside the outputs directory")
         parts = remote_path[len(prefix) :].split("/")
-        if any(part in {"", ".", ".."} or ":" in part or PureWindowsPath(part).is_reserved() or part.endswith((" ", ".")) for part in parts):
+        if any(part in {"", ".", ".."} or ":" in part or part.partition(".")[0].rstrip(" ").upper() in _WINDOWS_RESERVED_NAMES or part.endswith((" ", ".")) for part in parts):
             raise ValueError("Unsafe output path")
         target = root.joinpath(*PurePosixPath(*parts).parts)
         # Reject links/junctions in existing parents, including the owner/thread
@@ -456,14 +457,18 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         if len(raw_listing) > self._MAX_SYNC_LISTING_BYTES:
             logger.warning("OpenSandbox output listing exceeded %d bytes; skipping synchronization", self._MAX_SYNC_LISTING_BYTES)
             return
-        listing = raw_listing.decode("utf-8")
-        if listing and not listing.endswith("\0"):
+        if raw_listing and not raw_listing.endswith(b"\0"):
             raise OSError("OpenSandbox output listing was incomplete")
         total = 0
-        for index, remote_path in enumerate(filter(None, listing.split("\0"))):
+        for index, remote_record in enumerate(filter(None, raw_listing.split(b"\0"))):
             if index >= self._MAX_SYNC_FILES or total >= self._MAX_SYNC_TOTAL_BYTES or time.monotonic() >= deadline:
                 logger.warning("OpenSandbox output synchronization stopped at its file, byte or time limit")
                 break
+            try:
+                remote_path = remote_record.decode("utf-8")
+            except UnicodeDecodeError:
+                logger.warning("Skipping non-UTF-8 OpenSandbox output %r", remote_record)
+                continue
             staged: Path | None = None
             transferring = False
             try:

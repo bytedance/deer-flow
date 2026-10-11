@@ -793,6 +793,8 @@ the sandbox ID and probe output before replacing the sandbox.
 The optional OpenSandbox provider mirrors generated output files to local thread
 storage at turn completion for Gateway previews and downloads; see its
 [synchronization limits and failure behavior](backend/packages/harness/deerflow/community/opensandbox/README.md#lifecycle-and-contract).
+An invalid UTF-8 filename is skipped without blocking other outputs, and
+same-size content edits are still copied on release.
 
 BoxLite shutdown rejects late VM registration and keeps its SDK loop open while
 in-flight acquisitions finish. If they cannot drain within five seconds,

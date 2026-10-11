@@ -65,6 +65,10 @@ Mirrored names must also be portable host paths: traversal, backslashes, colons,
 Windows reserved components and components ending in a space or dot are skipped
 with a warning, including when the Gateway runs on Unix.
 Files deleted remotely are not removed from the local outputs directory.
+Non-UTF-8 filename records are skipped individually with a warning and still
+count against the file limit. Each release revisits retained outputs, including
+unchanged files; equal file size does not prove equal content. Large accumulated
+output directories may reach the pass limits before all files are mirrored.
 
 Create returns only after the SDK readiness check and DeerFlow's
 `/mnt/user-data/{workspace,uploads,outputs}` bootstrap succeed. A bootstrap
