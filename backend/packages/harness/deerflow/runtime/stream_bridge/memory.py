@@ -13,7 +13,7 @@ from typing import Any
 from .base import DEFAULT_HEARTBEAT_INTERVAL_SECONDS, END_SENTINEL, HEARTBEAT_SENTINEL, StreamBridge, StreamEvent, StreamGap, StreamItem
 
 logger = logging.getLogger(__name__)
-_MEMORY_STREAM_ID_RE = re.compile(r"\d+-(\d+)")
+_MEMORY_STREAM_ID_RE = re.compile(r"[0-9]+-([0-9]+)")
 
 
 @dataclass

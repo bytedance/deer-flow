@@ -809,10 +809,11 @@ async def test_redis_invalid_last_event_id_on_terminal_run_replays_end(redis_bri
     await redis_bridge.publish_end(run_id)
 
     received = []
-    async for entry in redis_bridge.subscribe(run_id, last_event_id=last_event_id, heartbeat_interval=1.0):
-        received.append(entry)
-        if entry is END_SENTINEL:
-            break
+    with anyio.fail_after(2):
+        async for entry in redis_bridge.subscribe(run_id, last_event_id=last_event_id, heartbeat_interval=1.0):
+            received.append(entry)
+            if entry is END_SENTINEL:
+                break
 
     assert [entry.event for entry in received[:-1]] == ["metadata"]
     assert received[-1] is END_SENTINEL
@@ -1136,6 +1137,10 @@ def _linear_resolve(stream, last_event_id):
     [
         ("1718000000000-0", 0),
         ("1718000000000-42", 42),
+        ("١-0", None),
+        ("1-٠", None),
+        ("١-٠", None),
+        ("1-" + "9" * 5000, None),
         ("-1", None),  # malformed live-tail sentinel, not a valid event id
         ("garbage", None),  # no separator
         ("1718000000000-x", None),  # non-integer seq
@@ -1144,6 +1149,38 @@ def _linear_resolve(stream, last_event_id):
 )
 def test_parse_event_seq(event_id, expected):
     assert MemoryStreamBridge._parse_event_seq(event_id) == expected
+
+
+@pytest.mark.parametrize(
+    "event_id,expected",
+    [
+        ("0", (0, 0)),
+        ("0-0", (0, 0)),
+        ("1718000000000", (1718000000000, 0)),
+        ("1718000000000-42", (1718000000000, 42)),
+        ("18446744073709551615", (18446744073709551615, 0)),
+        ("18446744073709551615-0", (18446744073709551615, 0)),
+        ("1-18446744073709551615", (1, 18446744073709551615)),
+        ("18446744073709551615-18446744073709551615", (18446744073709551615, 18446744073709551615)),
+        ("18446744073709551616", None),
+        ("18446744073709551616-0", None),
+        ("1-18446744073709551616", None),
+        ("9" * 5000 + "-0", None),
+        ("1-" + "9" * 5000, None),
+        ("١-0", None),
+        ("1-٠", None),
+        ("١-٠", None),
+        ("", None),
+        ("-1", None),
+        ("garbage", None),
+        ("1-", None),
+        ("1--1", None),
+        ("1-0-0", None),
+        ("1-0\n", None),
+    ],
+)
+def test_parse_stream_id(event_id, expected):
+    assert RedisStreamBridge._parse_stream_id(event_id) == expected
 
 
 @pytest.mark.anyio
@@ -1213,11 +1250,21 @@ async def test_subscribe_with_unknown_last_event_id_replays_from_earliest():
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("last_event_id", [pytest.param("-1", id="sentinel"), pytest.param("1-" + "9" * 5000, id="oversized-sequence")])
+@pytest.mark.parametrize(
+    "last_event_id",
+    [
+        pytest.param("-1", id="sentinel"),
+        pytest.param("1-" + "9" * 5000, id="oversized-sequence"),
+        pytest.param("١-0", id="non-ascii-milliseconds"),
+        pytest.param("1-٠", id="non-ascii-sequence"),
+        pytest.param("١-٠", id="non-ascii-both-components"),
+    ],
+)
 async def test_memory_malformed_last_event_id_is_not_reported_as_gap(last_event_id: str):
     """Malformed cursor policy stays separate from valid evicted cursors."""
     bridge = MemoryStreamBridge(queue_maxsize=2)
     run_id = "run-malformed-id"
+    await bridge.publish(run_id, "evicted", {})
     await bridge.publish(run_id, "first", {})
     await bridge.publish(run_id, "second", {})
     await bridge.publish_end(run_id)
