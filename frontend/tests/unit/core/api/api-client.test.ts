@@ -899,7 +899,115 @@ test("recovers a join stream gap from durable state and resumes after the retain
   expect(new Headers(recoveryRequests[1]?.headers).get("Last-Event-ID")).toBe(
     "3-0",
   );
+  expect(sessionStorage.getItem("lg:stream:thread-1")).toBe("run-1");
 });
+
+test.each([
+  ["initial", "another run"],
+  ["join", "another run"],
+  ["initial", "the same run"],
+  ["join", "the same run"],
+])(
+  "handles %s stream gap recovery when %s claims the reconnect pointer",
+  async (kind, claimant) => {
+    const sessionStorage = makeSessionStorage();
+    const threadId = "thread-gap-pointer";
+    const runId = "run-gap-pointer";
+    const claimedRunId = claimant === "the same run" ? runId : "run-newer";
+    const key = "lg:stream:" + threadId;
+    sessionStorage.setItem(key, runId);
+    const gap = {
+      code: "stream_replay_gap",
+      run_id: runId,
+      requested_event_id: "1-0",
+      earliest_available_event_id: "2-0",
+      latest_available_event_id: "3-0",
+      recovery: "reload_durable_state",
+    };
+    let startStateRead: () => void = () => undefined;
+    let finishStateRead: (response: Response) => void = () => undefined;
+    const stateReadStarted = new Promise<void>((resolve) => {
+      startStateRead = resolve;
+    });
+    const stateResponse = new Promise<Response>((resolve) => {
+      finishStateRead = resolve;
+    });
+    const recoveryHeaders: Headers[] = [];
+    const fetchFn = rs.fn(async (url: string | URL, init?: RequestInit) => {
+      const path = String(url);
+      if (path.endsWith("/runs/" + runId)) {
+        return new Response(JSON.stringify({ status: "running" }));
+      }
+      if (path.endsWith("/threads/" + threadId + "/state")) {
+        startStateRead();
+        return stateResponse;
+      }
+      if (
+        path.endsWith("/runs/stream") ||
+        (path.includes("/runs/" + runId + "/stream") &&
+          !new Headers(init?.headers).has("Last-Event-ID"))
+      ) {
+        return makeSSEResponse(
+          "event: gap\ndata: " + JSON.stringify(gap) + "\n\n",
+          {
+            "Content-Location": "/threads/" + threadId + "/runs/" + runId,
+          },
+        );
+      }
+      if (path.includes("/runs/" + runId + "/stream")) {
+        recoveryHeaders.push(new Headers(init?.headers));
+        return makeSSEResponse("event: end\ndata: null\n\n");
+      }
+      throw new Error("Unexpected request: " + path);
+    });
+    rs.stubGlobal("window", {
+      location: { origin: "http://localhost:2026" },
+      sessionStorage,
+    });
+    rs.stubGlobal("fetch", fetchFn);
+
+    const client = getAPIClient(true);
+    const stream =
+      kind === "initial"
+        ? client.runs.stream(threadId, "lead_agent", {})
+        : client.runs.joinStream(threadId, runId);
+    await expect(stream.next()).resolves.toEqual({
+      done: false,
+      value: { event: "custom", data: { type: "stream_replay_gap", ...gap } },
+    });
+    expect(sessionStorage.getItem(key)).toBeNull();
+
+    const snapshot = stream.next();
+    await stateReadStarted;
+    sessionStorage.setItem(key, claimedRunId);
+    sessionStorage.setItem.mockClear();
+    sessionStorage.removeItem.mockClear();
+    finishStateRead(new Response(JSON.stringify({ values: { messages: [] } })));
+
+    await expect(snapshot).resolves.toEqual({
+      done: false,
+      value: { event: "values", data: { messages: [] } },
+    });
+    await expect(stream.next()).resolves.toEqual({
+      done: false,
+      value: { event: "end", data: null },
+    });
+    expect(recoveryHeaders).toHaveLength(1);
+    expect(recoveryHeaders[0]?.get("Last-Event-ID")).toBe("3-0");
+    expect(sessionStorage.getItem(key)).toBe(claimedRunId);
+    if (claimedRunId === runId) {
+      expect(sessionStorage.setItem).toHaveBeenCalledTimes(1);
+      expect(sessionStorage.setItem).toHaveBeenCalledWith(key, runId);
+    } else {
+      expect(sessionStorage.setItem).not.toHaveBeenCalled();
+    }
+    expect(sessionStorage.removeItem).not.toHaveBeenCalled();
+    await expect(stream.next()).resolves.toEqual({
+      done: true,
+      value: undefined,
+    });
+  },
+);
 
 test("recovers a gap emitted by the initial run stream", async () => {
   const sessionStorage = makeSessionStorage();
@@ -962,6 +1070,7 @@ test("recovers a gap emitted by the initial run stream", async () => {
     { event: "end", data: null },
   ]);
   expect(recoveryHeaders[0]?.get("Last-Event-ID")).toBe("5-0");
+  expect(sessionStorage.getItem("lg:stream:thread-2")).toBe("run-2");
 });
 
 test("recovers from stream replay gap with null retained bounds", async () => {
