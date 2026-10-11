@@ -25,6 +25,7 @@ from app.channels.feishu_card_interaction import (
     build_button_card,
 )
 from app.channels.message_bus import (
+    HUMAN_INPUT_RESPONSE_METADATA_KEY,
     PENDING_CLARIFICATION_METADATA_KEY,
     RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY,
     InboundMessage,
@@ -177,6 +178,8 @@ class FeishuChannel(Channel):
         # feature needs a one-time console subscription to card.action.trigger.
         self._card_interaction_enabled = bool(config.get("card_interaction_enabled", False))
         self._card_registry = PendingCardRegistry()
+        self._CallBackToast = None
+        self._P2CardActionTriggerResponse = None
         self._pending_inbound_batches: dict[tuple[str, str], dict[str, Any]] = {}
         self._CreateFileRequest = None
         self._CreateFileRequestBody = None
@@ -249,15 +252,20 @@ class FeishuChannel(Channel):
         return self._thread is not None and self._thread.is_alive()
 
     def _build_event_handler(self, lark):
-        return (
+        builder = (
             lark.EventDispatcherHandler.builder("", "")
             .register_p2_im_message_receive_v1(self._on_message)
             .register_p2_im_message_message_read_v1(self._on_ignored_message_event)
             .register_p2_im_message_reaction_created_v1(self._on_ignored_message_event)
             .register_p2_im_message_reaction_deleted_v1(self._on_ignored_message_event)
             .register_p2_im_message_recalled_v1(self._on_ignored_message_event)
-            .build()
         )
+        if self._card_interaction_enabled:
+            # Card clicks arrive as WS EVENT frames routed through the SDK's
+            # callback processor map (verified against lark-oapi source); the
+            # synchronous return value becomes the click's toast ack.
+            builder = builder.register_p2_card_action_trigger(self._on_card_action)
+        return builder.build()
 
     async def start(self) -> None:
         if self._running:
@@ -286,6 +294,13 @@ class FeishuChannel(Channel):
             return
 
         self._lark = lark
+        from lark_oapi.event.callback.model.p2_card_action_trigger import (
+            CallBackToast,
+            P2CardActionTriggerResponse,
+        )
+
+        self._CallBackToast = CallBackToast
+        self._P2CardActionTriggerResponse = P2CardActionTriggerResponse
         self._CreateMessageRequest = CreateMessageRequest
         self._CreateMessageRequestBody = CreateMessageRequestBody
         self._ReplyMessageRequest = ReplyMessageRequest
@@ -966,6 +981,87 @@ class FeishuChannel(Channel):
         except FutureCancelledError:
             logger.info("[Feishu] %s cancelled by channel stop", name)
             raise StoreLookupUnresolved("cancelled by channel stop") from None
+
+    def _card_action_toast(self, content: str, *, toast_type: str = "info"):
+        """Build the synchronous toast ack for a card click."""
+        toast = self._CallBackToast()
+        toast.type = toast_type
+        toast.content = content
+        resp = self._P2CardActionTriggerResponse()
+        resp.toast = toast
+        return resp
+
+    def _on_card_action(self, data):
+        """Sync card-click callback on the lark SDK loop: validate, ack, dispatch.
+
+        Only validation and the toast ack happen on this thread; the state
+        change (terminal card update + hidden synthetic inbound) is dispatched
+        to the Gateway loop. Registry consumption is one-time, so a validated
+        click can never be replayed, and a non-originator click leaves the
+        entry intact for the real originator.
+        """
+        try:
+            value = getattr(data.event.action, "value", None) or {}
+            request_id = value.get("request_id")
+            option_id = value.get("option_id")
+            option_value = value.get("option_value")
+            operator_open_id = getattr(data.event.operator, "open_id", None)
+        except AttributeError:
+            return self._card_action_toast("无法处理的卡片操作", toast_type="warning")
+        if not (request_id and option_value and operator_open_id):
+            return self._card_action_toast("无法处理的卡片操作", toast_type="warning")
+
+        entry, reason = self._card_registry.consume_if_originator(request_id, operator_open_id)
+        if reason == "not_originator":
+            return self._card_action_toast("仅提问发起人可操作", toast_type="warning")
+        if entry is None:
+            return self._card_action_toast("此卡片已失效或已处理", toast_type="warning")
+
+        if self._main_loop and self._main_loop.is_running():
+            scheduled = self._submit_threadsafe_coroutine(
+                self._resolve_card_click(entry, option_id=option_id, option_value=option_value, operator_open_id=operator_open_id),
+                self._main_loop,
+                name="resolve_card_click",
+                msg_id=entry.get("card_message_id") or request_id,
+            )
+            if not scheduled:
+                logger.warning("[Feishu] card click could not be dispatched (loop closing): request_id=%s", request_id)
+        else:
+            logger.warning("[Feishu] card click dropped, no running Gateway loop: request_id=%s", request_id)
+        return self._card_action_toast(f"已选择：{option_value}", toast_type="success")
+
+    async def _resolve_card_click(self, entry, *, option_id: str | None, option_value: str, operator_open_id: str) -> None:
+        """Apply a validated click: mark the card resolved, then inject a hidden
+        human-input response routed at the card's thread mapping."""
+        card_message_id = entry.get("card_message_id")
+        if card_message_id:
+            try:
+                await self._update_card(card_message_id, f"✅ 已选择：{option_value}")
+            except Exception:
+                logger.exception("[Feishu] failed to mark card resolved: %s", card_message_id)
+
+        response = {
+            "version": 1,
+            "kind": "human_input_response",
+            "source": "feishu_card",
+            "request_id": entry["request_id"],
+            "response_kind": "option",
+            "option_id": option_id or "",
+            "value": option_value,
+        }
+        inbound = self._make_inbound(
+            chat_id=entry["chat_id"],
+            user_id=operator_open_id,
+            text=option_value,
+            thread_ts=card_message_id,
+            metadata={
+                "message_id": card_message_id,
+                "user_id": operator_open_id,
+                "hide_from_ui": True,
+                HUMAN_INPUT_RESPONSE_METADATA_KEY: response,
+            },
+        )
+        await self._publish_inbound_or_drop(inbound)
 
     def _remember_pending_clarification(self, msg: OutboundMessage, card_message_id: str | None) -> None:
         if not msg.is_final or msg.metadata.get(PENDING_CLARIFICATION_METADATA_KEY) is not True:

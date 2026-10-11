@@ -250,3 +250,175 @@ class TestFeishuChannelButtonCardWiring:
         assert any(e.get("tag") == "action" for e in card["elements"])
         entry = channel._card_registry.consume("clarification:call_1")
         assert entry["card_message_id"] == "om_running"
+
+
+class TestConsumeIfOriginator:
+    """Atomic validate-and-consume for card clicks. Identity mismatch must NOT
+    consume the entry (the real originator may still click later)."""
+
+    def _registry_with_entry(self):
+        registry = PendingCardRegistry()
+        registry.register(
+            request_id="clarification:call_1",
+            thread_id="thread-1",
+            chat_id="chat-1",
+            originator_open_id="ou_originator",
+            options=("Alpha", "Beta"),
+            card_message_id="om_card_1",
+        )
+        return registry
+
+    def test_originator_consumes_and_gets_entry(self):
+        registry = self._registry_with_entry()
+        entry, reason = registry.consume_if_originator("clarification:call_1", "ou_originator")
+        assert reason is None
+        assert entry is not None
+        assert entry["card_message_id"] == "om_card_1"
+        # replayed click: entry already gone
+        entry2, reason2 = registry.consume_if_originator("clarification:call_1", "ou_originator")
+        assert entry2 is None
+        assert reason2 == "unknown"
+
+    def test_non_originator_rejected_without_consuming(self):
+        registry = self._registry_with_entry()
+        entry, reason = registry.consume_if_originator("clarification:call_1", "ou_someone_else")
+        assert entry is None
+        assert reason == "not_originator"
+        # the real originator can still click afterwards
+        entry2, reason2 = registry.consume_if_originator("clarification:call_1", "ou_originator")
+        assert reason2 is None
+        assert entry2 is not None
+
+    def test_unknown_request_id(self):
+        registry = self._registry_with_entry()
+        entry, reason = registry.consume_if_originator("clarification:nope", "ou_originator")
+        assert entry is None
+        assert reason == "unknown"
+
+    def test_expired_entry_is_unknown(self):
+        registry = self._registry_with_entry()
+        future = time.time() + 31 * 60
+        entry, reason = registry.consume_if_originator("clarification:call_1", "ou_originator", now=future)
+        assert entry is None
+        assert reason == "unknown"
+
+
+def _make_card_action_event(*, request_id: str, option_value: str, option_id: str = "option-1", operator_open_id: str = "ou_originator"):
+    """Build a minimal P2CardActionTrigger-shaped stand-in."""
+    from unittest.mock import MagicMock
+
+    event = MagicMock()
+    event.event.action.value = {"request_id": request_id, "option_id": option_id, "option_value": option_value}
+    event.event.operator.open_id = operator_open_id
+    return event
+
+
+class TestOnCardActionValidation:
+    """Sync layer of the card-action callback: validation + toast, no state change."""
+
+    def _channel(self):
+        from unittest.mock import MagicMock
+
+        from app.channels.feishu import FeishuChannel
+        from app.channels.message_bus import MessageBus
+
+        channel = FeishuChannel(MessageBus(), {"app_id": "t", "app_secret": "t", "card_interaction_enabled": True})
+        channel._card_registry.register(
+            request_id="clarification:call_1",
+            thread_id="thread-1",
+            chat_id="chat-1",
+            originator_open_id="ou_originator",
+            options=("Alpha", "Beta"),
+            card_message_id="om_card_1",
+        )
+        channel._main_loop = MagicMock()
+        channel._main_loop.is_running.return_value = True
+        channel._submit_threadsafe_coroutine = MagicMock(return_value=True)
+
+        class _Toast:
+            pass
+
+        class _Resp:
+            pass
+
+        channel._CallBackToast = _Toast
+        channel._P2CardActionTriggerResponse = _Resp
+        return channel
+
+    def test_non_originator_gets_refusal_toast_and_entry_survives(self):
+        channel = self._channel()
+        resp = channel._on_card_action(_make_card_action_event(request_id="clarification:call_1", option_value="Alpha", operator_open_id="ou_other"))
+        assert resp.toast is not None
+        assert "发起人" in resp.toast.content
+        channel._submit_threadsafe_coroutine.assert_not_called()
+        # entry not consumed: originator can still click
+        entry, reason = channel._card_registry.consume_if_originator("clarification:call_1", "ou_originator")
+        assert reason is None and entry is not None
+
+    def test_unknown_request_id_gets_stale_toast(self):
+        channel = self._channel()
+        resp = channel._on_card_action(_make_card_action_event(request_id="clarification:nope", option_value="Alpha"))
+        assert resp.toast is not None
+        assert "失效" in resp.toast.content
+        channel._submit_threadsafe_coroutine.assert_not_called()
+
+    def test_originator_gets_ack_toast_and_dispatches_async_resolution(self):
+        channel = self._channel()
+        resp = channel._on_card_action(_make_card_action_event(request_id="clarification:call_1", option_value="Alpha"))
+        assert resp.toast is not None
+        assert "Alpha" in resp.toast.content
+        channel._submit_threadsafe_coroutine.assert_called_once()
+        # one-time: the entry is consumed by the click
+        entry, reason = channel._card_registry.consume_if_originator("clarification:call_1", "ou_originator")
+        assert entry is None and reason == "unknown"
+
+
+class TestResolveCardClick:
+    """Async layer: terminal card update + hidden synthetic inbound publication."""
+
+    @pytest.mark.asyncio
+    async def test_publishes_hidden_inbound_and_marks_card_resolved(self):
+        from unittest.mock import AsyncMock
+
+        from app.channels.feishu import FeishuChannel
+        from app.channels.message_bus import HUMAN_INPUT_RESPONSE_METADATA_KEY, MessageBus
+
+        bus = MessageBus()
+        channel = FeishuChannel(bus, {"app_id": "t", "app_secret": "t", "card_interaction_enabled": True})
+        channel._update_card = AsyncMock()
+
+        published = []
+
+        async def capture(msg):
+            published.append(msg)
+            return True
+
+        channel._publish_inbound_or_drop = capture
+
+        entry = {
+            "request_id": "clarification:call_1",
+            "thread_id": "thread-1",
+            "chat_id": "chat-1",
+            "originator_open_id": "ou_originator",
+            "options": ("Alpha", "Beta"),
+            "card_message_id": "om_card_1",
+        }
+        await channel._resolve_card_click(entry, option_id="option-1", option_value="Alpha", operator_open_id="ou_originator")
+
+        # terminal card: no buttons, shows the choice
+        assert channel._update_card.await_count == 1
+        terminal_text = channel._update_card.await_args.args[1]
+        assert "Alpha" in terminal_text
+
+        # synthetic inbound: hidden human-input response routed at the card message
+        assert len(published) == 1
+        inbound = published[0]
+        assert inbound.chat_id == "chat-1"
+        assert inbound.user_id == "ou_originator"
+        assert inbound.thread_ts == "om_card_1"
+        response = inbound.metadata[HUMAN_INPUT_RESPONSE_METADATA_KEY]
+        assert response["kind"] == "human_input_response"
+        assert response["response_kind"] == "option"
+        assert response["request_id"] == "clarification:call_1"
+        assert response["value"] == "Alpha"
+        assert inbound.metadata.get("hide_from_ui") is True

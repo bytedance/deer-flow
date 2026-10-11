@@ -30,6 +30,7 @@ from app.channels.connection_identity import lookup_thread_id
 from app.channels.dedupe_store import InboundDedupeStore, MemoryInboundDedupeStore
 from app.channels.message_bus import (
     HUMAN_INPUT_REQUEST_METADATA_KEY,
+    HUMAN_INPUT_RESPONSE_METADATA_KEY,
     INBOUND_FILE_CONTENT_KEY,
     PENDING_CLARIFICATION_METADATA_KEY,
     InboundMessage,
@@ -1056,6 +1057,23 @@ def _unknown_command_reply(command: str | None = None) -> str:
     if command:
         return f"Unknown command: /{command}. Available commands: {available}"
     return f"Unknown command. Available commands: {available}"
+
+
+def _human_input_message_with_channel_response(content: str, *, metadata: Mapping[str, Any], original_content: str | None = None, files: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """``_human_input_message`` plus a channel-synthesized human-input answer.
+
+    Card-driven channels (Feishu button clicks) carry the answer in inbound
+    metadata; it must land on the human message's additional_kwargs for the
+    Gateway's human_input protocol, hidden from transcripts like Web card
+    replies.
+    """
+    message = _human_input_message(content, original_content=original_content, files=files)
+    response = metadata.get(HUMAN_INPUT_RESPONSE_METADATA_KEY)
+    if isinstance(response, Mapping):
+        additional_kwargs = message.setdefault("additional_kwargs", {})
+        additional_kwargs[HUMAN_INPUT_RESPONSE_METADATA_KEY] = dict(response)
+        additional_kwargs["hide_from_ui"] = True
+    return message
 
 
 def _human_input_message(content: str, *, original_content: str | None = None, files: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -2944,7 +2962,7 @@ class ChannelManager:
 
         original_text = msg.text
         uploaded = await _ingest_inbound_files(thread_id, msg, user_id=storage_user_id)
-        human_message = _human_input_message(msg.text, original_content=original_text, files=uploaded or None)
+        human_message = _human_input_message_with_channel_response(msg.text, metadata=msg.metadata, original_content=original_text, files=uploaded or None)
 
         if self._channel_supports_streaming(msg.channel_name):
             await self._handle_streaming_chat(

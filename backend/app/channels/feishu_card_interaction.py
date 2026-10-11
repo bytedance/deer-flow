@@ -162,6 +162,34 @@ class PendingCardRegistry:
             if entry is not None:
                 entry["card_message_id"] = card_message_id
 
+    def consume_if_originator(
+        self,
+        request_id: str,
+        operator_open_id: str,
+        *,
+        now: float | None = None,
+    ) -> tuple[PendingCardEntry | None, str | None]:
+        """Atomically validate a click and consume the entry on success.
+
+        Returns ``(entry, None)`` for the originator; ``(None, "not_originator")``
+        for anyone else (entry kept — the real originator may still click);
+        ``(None, "unknown")`` for unknown or expired request ids (entry dropped).
+        """
+        with self._lock:
+            entry = self._entries.get(request_id)
+            if entry is None:
+                return None, "unknown"
+            created_at = entry.get("created_at")
+            now = time.time() if now is None else now
+            if not isinstance(created_at, (int, float)) or now - created_at > self._ttl_seconds:
+                del self._entries[request_id]
+                logger.info("[Feishu] pending card request expired: request_id=%s", request_id)
+                return None, "unknown"
+            if entry.get("originator_open_id") != operator_open_id:
+                return None, "not_originator"
+            del self._entries[request_id]
+            return entry, None
+
     def consume(self, request_id: str, *, now: float | None = None) -> PendingCardEntry | None:
         """Pop the entry for *request_id*, or None when unknown or expired."""
         with self._lock:

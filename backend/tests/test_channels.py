@@ -13489,3 +13489,33 @@ class TestResponseMetadataClarificationPassthrough:
         result = {"messages": [{"type": "ai", "content": "done"}]}
         metadata = _response_metadata_with_clarification(result, {}, pending_clarification=False)
         assert HUMAN_INPUT_REQUEST_METADATA_KEY not in metadata
+
+
+class TestHumanInputResponseTranslation:
+    """A channel-synthesized human-input answer must land on the run's human
+    message as additional_kwargs, hidden from transcripts (Web card parity)."""
+
+    def test_response_metadata_key_is_translated_to_additional_kwargs(self):
+        from app.channels.manager import _human_input_message_with_channel_response
+        from app.channels.message_bus import HUMAN_INPUT_RESPONSE_METADATA_KEY
+
+        response = {
+            "version": 1,
+            "kind": "human_input_response",
+            "source": "feishu_card",
+            "request_id": "clarification:call_1",
+            "response_kind": "option",
+            "option_id": "option-1",
+            "value": "Alpha",
+        }
+        message = _human_input_message_with_channel_response("Alpha", metadata={HUMAN_INPUT_RESPONSE_METADATA_KEY: response})
+        assert message["content"] == "Alpha"
+        assert message["additional_kwargs"][HUMAN_INPUT_RESPONSE_METADATA_KEY] == response
+        assert message["additional_kwargs"]["hide_from_ui"] is True
+
+    def test_plain_message_unchanged(self):
+        from app.channels.manager import _human_input_message_with_channel_response
+
+        message = _human_input_message_with_channel_response("hello", metadata={})
+        assert message["content"] == "hello"
+        assert "additional_kwargs" not in message
