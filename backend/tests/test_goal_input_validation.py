@@ -1,4 +1,4 @@
-"""Goal writes reject unusable objectives before state or run admission."""
+"""Goal writes reject unusable objectives and counters before admission."""
 
 from __future__ import annotations
 
@@ -43,6 +43,49 @@ def test_external_goal_requires_a_usable_objective(boundary, goal):
 
 
 @pytest.mark.parametrize("boundary", [services.normalize_input, services.strip_server_owned_state_metadata])
+@pytest.mark.parametrize("field", ["continuation_count", "max_continuations", "no_progress_count", "max_no_progress_continuations"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("many", id="text"),
+        pytest.param("2", id="numeric-string"),
+        pytest.param(-1, id="negative"),
+        pytest.param(1.5, id="float"),
+        pytest.param(True, id="boolean"),
+        pytest.param(None, id="null"),
+    ],
+)
+def test_external_goal_rejects_invalid_present_counters(boundary, field, value):
+    source = {"goal": {"objective": "finish", field: value}}
+    with pytest.raises(HTTPException) as rejected:
+        boundary(source)
+    assert rejected.value.status_code == 400
+    assert f"goal.{field}" in rejected.value.detail
+    assert "many" not in rejected.value.detail
+    assert source == {"goal": {"objective": "finish", field: value}}
+
+
+@pytest.mark.parametrize("boundary", [services.normalize_input, services.strip_server_owned_state_metadata])
+@pytest.mark.parametrize(
+    "counters",
+    [
+        {"continuation_count": 0, "max_continuations": 0, "no_progress_count": 0, "max_no_progress_continuations": 0},
+        {"continuation_count": 7, "max_continuations": 8, "no_progress_count": 1, "max_no_progress_continuations": 2},
+        {"continuation_count": 9, "max_continuations": 8, "no_progress_count": 3, "max_no_progress_continuations": 2},
+    ],
+    ids=["zero", "remaining-budget", "used-budget"],
+)
+def test_external_goal_preserves_valid_counters_without_resetting_budget(boundary, counters):
+    goal = {"objective": "finish", **counters}
+    assert boundary({"goal": goal})["goal"] == goal
+
+
+def test_trusted_internal_goal_input_keeps_existing_restore_protocol():
+    source = {"goal": {"objective": "finish", "continuation_count": "many"}}
+    assert services.normalize_input(source, trusted_internal=True) == source
+
+
+@pytest.mark.parametrize("boundary", [services.normalize_input, services.strip_server_owned_state_metadata])
 def test_valid_sparse_goals_are_normalized_without_building_fresh_state(boundary):
     sparse = {"objective": "  finish\n the report  "}
     source = {"goal": sparse}
@@ -73,7 +116,17 @@ class _StateRunManager:
 
 
 @pytest.mark.parametrize("mode", ["full", "delta"])
-def test_state_route_rejects_missing_objective_without_changing_checkpoint(monkeypatch, mode):
+@pytest.mark.parametrize(
+    "invalid_goal",
+    [
+        pytest.param({"status": "active"}, id="missing-objective"),
+        pytest.param({"objective": "finish", "continuation_count": "many"}, id="invalid-count"),
+        pytest.param({"objective": "finish", "max_continuations": True}, id="boolean-limit"),
+        pytest.param({"objective": "finish", "no_progress_count": -1}, id="negative-count"),
+        pytest.param({"objective": "finish", "max_no_progress_continuations": None}, id="null-limit"),
+    ],
+)
+def test_state_route_rejects_invalid_goal_without_changing_checkpoint(monkeypatch, mode, invalid_goal):
     user = User(email="goal-input@example.com", password_hash="x", id=UUID("00000000-0000-0000-0000-000000000001"))
     app = make_authed_test_app(user_factory=lambda: user, bind_current_user=True)
     app.include_router(threads.router)
@@ -99,7 +152,7 @@ def test_state_route_rejects_missing_objective_without_changing_checkpoint(monke
         builder.reset_mock()
         reservations = manager.reservations
 
-        rejected = client.post("/api/threads/goal-input-http/state", json={"values": {"goal": {"status": "active"}, "title": "must not write"}})
+        rejected = client.post("/api/threads/goal-input-http/state", json={"values": {"goal": invalid_goal, "title": "must not write"}})
         assert rejected.status_code == 400, rejected.text
         builder.assert_not_awaited()
         assert manager.reservations == reservations
@@ -123,7 +176,14 @@ def test_state_route_rejects_missing_objective_without_changing_checkpoint(monke
         "/api/runs/wait",
     ],
 )
-def test_run_routes_reject_missing_objective_before_admission(monkeypatch, path):
+@pytest.mark.parametrize(
+    "invalid_goal",
+    [
+        pytest.param({"status": "active"}, id="missing-objective"),
+        pytest.param({"objective": "finish", "continuation_count": "many"}, id="invalid-counter"),
+    ],
+)
+def test_run_routes_reject_invalid_goal_before_admission(monkeypatch, path, invalid_goal):
     app = make_authed_test_app()
     app.include_router(runs.router)
     app.include_router(thread_runs.router)
@@ -136,7 +196,7 @@ def test_run_routes_reject_missing_objective_before_admission(monkeypatch, path)
     monkeypatch.setattr(services, "run_agent", worker)
 
     with TestClient(app, raise_server_exceptions=False) as client:
-        rejected = client.post(path, json={"input": {"goal": {"status": "active"}}})
+        rejected = client.post(path, json={"input": {"goal": invalid_goal}})
 
     assert rejected.status_code == 400, rejected.text
     factory.assert_not_called()

@@ -226,6 +226,10 @@ External state updates and run input that supply a non-null `goal` must include
 a string `objective` that is non-empty after whitespace normalization and at
 most 4,000 normalized characters. Invalid values return 400 before state writes
 or run admission. Optional goal timestamps and counters are not required or reset.
+When present, `continuation_count`, `max_continuations`, `no_progress_count` and
+`max_no_progress_continuations` must be non-negative integers; booleans, numeric
+strings, floats and null values are rejected with 400. Valid counters and limits
+are preserved, including an already-used continuation budget.
 `goal: null` retains its existing semantics: it clears a state update's goal,
 but does not replace a goal through run input.
 

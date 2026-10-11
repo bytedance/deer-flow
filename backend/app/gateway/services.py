@@ -500,6 +500,9 @@ def _normalize_external_goal(value: Any, *, location: str) -> dict[str, Any] | N
         objective = normalize_goal_objective(value["objective"])
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"{location}: {exc}") from None
+    for field in ("continuation_count", "max_continuations", "no_progress_count", "max_no_progress_continuations"):
+        if field in value and (type(value[field]) is not int or value[field] < 0):
+            raise HTTPException(status_code=400, detail=f"{location}.{field} must be a non-negative integer")
     return {**value, "objective": objective}
 
 
