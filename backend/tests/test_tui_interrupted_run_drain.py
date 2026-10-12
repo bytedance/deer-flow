@@ -123,10 +123,11 @@ async def test_send_waits_for_the_interrupted_run_before_reusing_its_thread():
             assert any(STILL_STOPPING in text for text in _system_texts(app))
             assert [message for message, _ in client.calls] == ["old question"]
             assert not app._streaming
+            assert app.query_one("#composer").value == "new question"
 
             client.release_old_tool.set()
             await _settle(pilot, lambda: "old question" in client.finished and app._run.stopped.is_set())
-            await _submit(app, pilot, "new question")
+            await pilot.press("enter")
             await _settle(pilot, lambda: "new question" in client.finished and not app._streaming)
         finally:
             client.release_old_tool.set()
