@@ -401,12 +401,24 @@ def copy_upload_file_no_symlink(base_dir: Path, filename: str, src: Path) -> Pat
     return dest
 
 
+def _validate_upload_copy_identity(path: Path, expected: os.stat_result) -> None:
+    try:
+        current = path.lstat()
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        raise UnsafeUploadPathError(f"Upload copy disappeared: {path.name}") from exc
+    if not stat.S_ISREG(current.st_mode) or not os.path.samestat(current, expected):
+        raise UnsafeUploadPathError(f"Upload copy changed during publication: {path.name}")
+
+
 def copy_upload_file_no_replace(base_dir: Path, filename: str, src: Path) -> Path:
     """Publish a complete copy without replacing a concurrently claimed name.
 
     The staging file lives in the upload directory so the final hard link is
     atomic and cannot cross filesystems. It remains hidden from upload listings
-    and is removed whether publication succeeds or fails.
+    and cleanup is attempted whether publication succeeds or fails. Publication
+    rejects a staging name that no longer identifies the open copy. Where the
+    platform supports it, the link also refuses to follow symlinks; otherwise
+    pre/post identity checks narrow, but cannot eliminate, the link-time race.
     """
     safe_name = normalize_filename(filename)
     dest = validate_upload_destination(base_dir, safe_name, exclusive=True)
@@ -421,14 +433,41 @@ def copy_upload_file_no_replace(base_dir: Path, filename: str, src: Path) -> Pat
                 staged_fh.flush()
                 if os.chmod in os.supports_fd:
                     os.chmod(staged_fh.fileno(), stat.S_IMODE(src_stat.st_mode))
-                os.link(staging, dest)
+                staged_stat = os.fstat(staged_fh.fileno())
+                _validate_upload_copy_identity(staging, staged_stat)
+                if os.link in os.supports_follow_symlinks:
+                    os.link(staging, dest, follow_symlinks=False)
+                else:
+                    os.link(staging, dest)
+                try:
+                    _validate_upload_copy_identity(dest, staged_stat)
+                except (UnsafeUploadPathError, OSError):
+                    try:
+                        dest.unlink(missing_ok=True)
+                    except OSError:
+                        logger.warning("Failed to remove invalid upload copy: %s", dest, exc_info=True)
+                    raise
                 # Keep the staging mtime fresh until publication, so the orphan
                 # sweep cannot mistake a copy of an old source for stale work.
                 if os.utime in os.supports_fd:
                     os.utime(staged_fh.fileno(), ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns))
         finally:
-            staging.unlink(missing_ok=True)
+            try:
+                staging.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Failed to remove upload staging file: %s", staging, exc_info=True)
     return dest
+
+
+def publish_upload_copy(base_dir: Path, filename: str, src: Path, *, claim_seed: str, seen_names: set[str]) -> Path:
+    """Publish a new upload, retrying occupied names from the normalized seed."""
+    claim_seed = normalize_filename(claim_seed)
+    seen_names.add(filename)
+    while True:
+        try:
+            return copy_upload_file_no_replace(base_dir, filename, src)
+        except FileExistsError:
+            filename = claim_unique_filename(claim_seed, seen_names)
 
 
 def apply_upload_sandbox_permits(file_path: os.PathLike[str] | str, extra_mode_bits: int) -> None:

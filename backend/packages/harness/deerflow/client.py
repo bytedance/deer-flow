@@ -75,7 +75,6 @@ from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 from deerflow.uploads.manager import (
     UnsafeUploadPathError,
     claim_unique_filename,
-    copy_upload_file_no_replace,
     copy_upload_file_no_symlink,
     delete_file_safe,
     enrich_file_listing,
@@ -83,6 +82,7 @@ from deerflow.uploads.manager import (
     get_uploads_dir,
     list_files_in_dir,
     normalize_filename,
+    publish_upload_copy,
     upload_artifact_url,
     upload_virtual_path,
 )
@@ -1778,8 +1778,9 @@ class DeerFlowClient:
                 raise FileNotFoundError(f"File not found: {f}")
             if not p.is_file():
                 raise ValueError(f"Path is not a file: {f}")
-            dest_name = claim_unique_filename(normalize_filename(p.name), seen_names)
-            resolved_files.append((p, dest_name))
+            claim_seed = normalize_filename(p.name)
+            dest_name = claim_unique_filename(claim_seed, seen_names)
+            resolved_files.append((p, dest_name, claim_seed))
             if not has_convertible_file and p.suffix.lower() in CONVERTIBLE_EXTENSIONS:
                 has_convertible_file = True
 
@@ -1806,17 +1807,13 @@ class DeerFlowClient:
             return asyncio.run(convert_file_to_markdown(path, output_path=output_path))
 
         try:
-            for src_path, dest_name in resolved_files:
+            for src_path, dest_name, claim_seed in resolved_files:
                 try:
                     if dest_name in existing_names:
                         dest = copy_upload_file_no_symlink(uploads_dir, dest_name, src_path)
                     else:
-                        while True:
-                            try:
-                                dest = copy_upload_file_no_replace(uploads_dir, dest_name, src_path)
-                                break
-                            except FileExistsError:
-                                dest_name = claim_unique_filename(src_path.name, seen_names)
+                        dest = publish_upload_copy(uploads_dir, dest_name, src_path, claim_seed=claim_seed, seen_names=seen_names)
+                        dest_name = dest.name
                 except UnsafeUploadPathError:
                     logger.warning("Skipping upload with unsafe destination: %s", dest_name)
                     skipped_files.append(dest_name)
@@ -1860,12 +1857,8 @@ class DeerFlowClient:
                                 if unique_md_name in existing_names:
                                     md_path = copy_upload_file_no_symlink(uploads_dir, unique_md_name, converted)
                                 else:
-                                    while True:
-                                        try:
-                                            md_path = copy_upload_file_no_replace(uploads_dir, unique_md_name, converted)
-                                            break
-                                        except FileExistsError:
-                                            unique_md_name = claim_unique_filename(provisional_md_name, seen_names)
+                                    md_path = publish_upload_copy(uploads_dir, unique_md_name, converted, claim_seed=provisional_md_name, seen_names=seen_names)
+                                    unique_md_name = md_path.name
                     except UnsafeUploadPathError:
                         logger.warning("Skipping markdown companion with unsafe destination: %s", unique_md_name)
                         md_path = None

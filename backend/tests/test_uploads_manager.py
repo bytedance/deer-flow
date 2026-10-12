@@ -395,12 +395,12 @@ class TestCopyUploadFileNoSymlink:
         source_stat = src.stat()
         real_link = os.link
 
-        def publish(staged, dest):
+        def publish(staged, dest, **kwargs):
             assert not dest.exists()
             assert list_files_in_dir(uploads)["files"] == []
             assert staged.read_bytes() == b"complete contents"
             assert cleanup_stale_upload_staging_files(tmp_path) == 0
-            real_link(staged, dest)
+            real_link(staged, dest, **kwargs)
 
         with patch("deerflow.uploads.manager.os.link", side_effect=publish):
             dest = copy_upload_file_no_replace(uploads, "notes.txt", src)

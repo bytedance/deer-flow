@@ -2625,6 +2625,9 @@ When concurrent `upload_files()` calls claim a filename absent at the start of
 each call, both files are preserved with numeric suffixes and their actual saved
 names are returned. The same rule applies to newly created Markdown companions.
 An exact filename already present when a call starts retains replacement behavior.
+New copies reject detected staging-file replacement instead of reporting another
+file's contents as uploaded. Cleanup failures are logged without turning an
+otherwise successful upload into a failure.
 
 The HTTP Gateway accepts `values`, `messages-tuple`, `updates`, `debug`, `tasks`, `checkpoints`, and `custom` stream modes. Unsupported modes such as `messages` and `events`, unsupported non-default run options such as webhooks, delayed execution, or `multitask_strategy="enqueue"`, and undeclared SDK options such as checkpoint durability overrides return `422` before execution instead of being silently ignored or downgraded.
 

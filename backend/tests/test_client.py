@@ -5134,6 +5134,63 @@ class TestUploadDuplicateFilenames:
     includes original_filename so the agent / caller can see what happened.
     """
 
+    @pytest.mark.parametrize("companion", [False, True])
+    def test_rejects_substituted_upload_copy(self, client, tmp_path, monkeypatch, companion):
+        from support.symlinks import symlink_or_skip
+
+        from deerflow.uploads import manager
+
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        source = tmp_path / ("notes.pdf" if companion else "notes.txt")
+        source.write_bytes(b"original upload")
+        outside = tmp_path / "outside.txt"
+        outside.write_bytes(b"private test fixture")
+        real_copy = manager.shutil.copyfileobj
+        copy_count = 0
+
+        def copy_and_swap(src, dst):
+            nonlocal copy_count
+            real_copy(src, dst)
+            copy_count += 1
+            if copy_count == (2 if companion else 1):
+                staging = next(uploads.glob(".upload-*.part"))
+                try:
+                    staging.unlink()
+                except PermissionError:
+                    if os.name == "nt":
+                        pytest.skip("host prevents replacing an open staging file")
+                    raise
+                symlink_or_skip(staging, outside)
+
+        async def fake_convert(path, output_path=None):
+            output_path.write_bytes(b"converted content")
+            return output_path
+
+        monkeypatch.setattr(manager.shutil, "copyfileobj", copy_and_swap)
+        with (
+            patch("deerflow.client.ensure_uploads_dir", return_value=uploads),
+            patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+            patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=fake_convert),
+        ):
+            result = client.upload_files("t-dup", [source])
+
+        assert outside.read_bytes() == b"private test fixture"
+        assert outside.stat().st_nlink == 1
+        assert not list(uploads.glob(".upload-*.part"))
+        if companion:
+            assert copy_count == 2
+            assert result["success"] is True
+            assert (uploads / "notes.pdf").read_bytes() == b"original upload"
+            assert "markdown_file" not in result["files"][0]
+            assert not os.path.lexists(uploads / "notes.md")
+        else:
+            assert copy_count == 1
+            assert result["success"] is False
+            assert result["files"] == []
+            assert result["skipped_files"] == ["notes.txt"]
+            assert not os.path.lexists(uploads / "notes.txt")
+
     @pytest.mark.parametrize("count", [2, 3])
     @pytest.mark.parametrize("suffix", [".txt", ".pdf"])
     def test_concurrent_uploads_claim_distinct_names(self, client, tmp_path, count, suffix):
