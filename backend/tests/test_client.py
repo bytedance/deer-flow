@@ -3169,7 +3169,7 @@ class TestUploads:
                 # src_path again during conversion (instead of the snapshot)
                 # goes red even though the copy-time hook no longer fires on
                 # the fixed code path.
-                if Path(path) != source:
+                if Path(path) == source:
                     source.write_bytes(b"VERSION B")
                 md_path = output_path if output_path is not None else path.with_suffix(".md")
                 md_path.write_bytes(b"CONVERTED:" + path.read_bytes())
