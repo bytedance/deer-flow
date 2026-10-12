@@ -1,9 +1,13 @@
 """Embedded upload and conversion must consume the same captured bytes."""
 
 import asyncio
+import getpass
 import os
 import shutil
 import stat
+import subprocess
+import sys
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -179,14 +183,68 @@ def test_capture_failure_preserves_existing_upload(upload_case, monkeypatch, tmp
     existing = uploads / "report.pdf"
     existing.write_bytes(b"EXISTING CONTENT")
     captures = []
+    real_copyfileobj = shutil.copyfileobj
 
-    def fail_capture(src, dest):
-        captures.append(Path(dest.name))
-        raise OSError("snapshot disk full")
+    def fail_capture(src, dest, *args, **kwargs):
+        src_name, dest_name = getattr(src, "name", None), getattr(dest, "name", None)
+        if isinstance(src_name, (str, os.PathLike)) and isinstance(dest_name, (str, os.PathLike)):
+            capture = Path(dest_name)
+            if Path(src_name) == source and capture.parent.name.startswith("deerflow-upload-source-"):
+                captures.append(capture)
+                raise OSError("snapshot disk full")
+        return real_copyfileobj(src, dest, *args, **kwargs)
 
     monkeypatch.setattr(manager.shutil, "copyfileobj", fail_capture)
+    unrelated_copy = BytesIO()
+    shutil.copyfileobj(BytesIO(b"UNRELATED CONTENT"), unrelated_copy)
+    assert unrelated_copy.getvalue() == b"UNRELATED CONTENT"
     with pytest.raises(OSError, match="snapshot disk full"):
         client.upload_files("snapshot-thread", [source])
     assert existing.read_bytes() == b"EXISTING CONTENT"
     assert source.read_bytes() == b"NEW CONTENT"
     assert not captures[0].parent.exists()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="chmod +a ACL grants require macOS")
+@pytest.mark.parametrize("in_loop", [False, True])
+def test_acl_only_readable_source_uploads_and_converts(upload_case, monkeypatch, tmp_path, in_loop):
+    """Preserve the ACL-only source case identified in the #6621 review."""
+    import deerflow.utils.file_conversion as conversion
+
+    if os.geteuid() == 0:
+        pytest.skip("root bypasses source permission checks")
+    client, uploads = upload_case
+    source = tmp_path / "report.pdf"
+    source.write_bytes(b"ACL-AUTHORIZED CONTENT")
+    source.chmod(0o000)
+    saved = uploads / source.name
+    conversion_paths = []
+
+    async def convert(path, output_path=None):
+        conversion_paths.append(path)
+        output_path.write_bytes(b"CONVERTED:" + path.read_bytes())
+        return output_path
+
+    monkeypatch.setattr(conversion, "CONVERTIBLE_EXTENSIONS", {".pdf"})
+    monkeypatch.setattr(conversion, "convert_file_to_markdown", convert)
+    try:
+        subprocess.run(["chmod", "+a", f"user:{getpass.getuser()} allow read", str(source)], check=True)
+        assert stat.S_IMODE(source.stat().st_mode) == 0
+        assert source.read_bytes() == b"ACL-AUTHORIZED CONTENT"
+        response = call_upload(client, source, in_loop)
+        assert response["success"]
+        companion = resolve_companion(saved)
+        assert companion is not None
+        assert companion.read_bytes() == b"CONVERTED:ACL-AUTHORIZED CONTENT"
+        if os.chmod in os.supports_fd:
+            assert stat.S_IMODE(saved.stat().st_mode) == 0
+        # The uploaded copy preserves mode bits, but not the source ACL.
+        saved.chmod(0o600)
+        assert saved.read_bytes() == b"ACL-AUTHORIZED CONTENT"
+        assert conversion_paths[0] != source
+        assert not conversion_paths[0].is_relative_to(uploads)
+        assert not conversion_paths[0].parent.exists()
+    finally:
+        source.chmod(0o600)
+        if saved.exists():
+            saved.chmod(0o600)
