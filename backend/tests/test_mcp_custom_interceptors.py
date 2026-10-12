@@ -278,3 +278,54 @@ def test_custom_interceptor_non_callable_return_logs_warning():
         assert len(_get_interceptors(mock_cls)) == 0
         mock_warn.assert_called_once()
         assert "non-callable" in mock_warn.call_args[0][0]
+
+
+def test_custom_interceptor_builder_runs_once_per_enabled_server():
+    """Builders are per server, so instances are never shared across servers.
+
+    Locks the F1 lifecycle contract (see ``docs/MCP_SERVER.md``): server-scoped
+    discovery builds interceptors from a single-server config view. If this ever
+    regresses to one shared instance per discovery, the F2 server-scoped cache
+    would hand a server a foreign interceptor instance.
+    """
+    built: list = []
+
+    def fake_builder():
+        async def interceptor(request, handler):
+            return await handler(request)
+
+        built.append(interceptor)
+        return interceptor
+
+    config = ExtensionsConfig.model_validate(
+        {
+            "mcpInterceptors": ["my_package.auth:build_interceptor"],
+            "mcpServers": {
+                "alpha": {"type": "http", "url": "https://alpha.example/mcp"},
+                "beta": {"type": "http", "url": "https://beta.example/mcp"},
+            },
+        }
+    )
+    clients: list[tuple[set[str], list]] = []
+
+    def make_client(connections, **kwargs):
+        client = MagicMock()
+        client.get_tools = AsyncMock(return_value=[])
+        clients.append((set(connections), kwargs.get("tool_interceptors") or []))
+        return client
+
+    with (
+        patch("deerflow.config.extensions_config.ExtensionsConfig.from_file", return_value=config),
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient", side_effect=make_client),
+        patch("deerflow.mcp.tools.get_initial_oauth_headers", new_callable=AsyncMock, return_value={}),
+        patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),
+        patch("deerflow.mcp.tools.resolve_variable", return_value=fake_builder),
+    ):
+        asyncio.run(get_mcp_tools())
+
+    assert len(built) == 2, f"builder ran {len(built)} times, expected once per server"
+    assert len(clients) == 2
+    per_client = [interceptors[0] for _names, interceptors in clients]
+    assert per_client[0] is built[0]
+    assert per_client[1] is built[1]
+    assert per_client[0] is not per_client[1]

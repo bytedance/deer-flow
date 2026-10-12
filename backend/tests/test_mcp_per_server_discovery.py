@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -635,3 +636,78 @@ async def test_task_configuration_error_propagates_from_grouped_discovery(monkey
 
     with pytest.raises(McpTaskConfigurationError, match="missing raw tool"):
         await get_mcp_tools_by_server(config, server_names={"A"})
+
+
+@pytest.mark.asyncio
+async def test_selection_matching_only_unknown_or_disabled_names(monkeypatch, caplog):
+    """A selection that matches nothing is not "nothing is configured"."""
+    config = _config(
+        {
+            "A": {"enabled": True, "type": "http", "url": "https://a.example/mcp"},
+            "B": {"enabled": False, "type": "http", "url": "https://b.example/mcp"},
+        }
+    )
+    client_calls: list = []
+    monkeypatch.setattr(
+        "langchain_mcp_adapters.client.MultiServerMCPClient",
+        lambda *args, **kwargs: client_calls.append((args, kwargs)) or MagicMock(),
+    )
+    headers = AsyncMock(return_value={})
+    monkeypatch.setattr("deerflow.mcp.tools.get_initial_oauth_headers", headers)
+
+    with caplog.at_level(logging.INFO, logger="deerflow.mcp.tools"):
+        assert await get_mcp_tools_by_server(config, server_names={"B", "UNKNOWN"}) == {}
+
+    assert client_calls == []
+    headers.assert_not_awaited()
+    assert "No enabled MCP servers matched the requested selection" in caplog.text
+    assert "No enabled MCP servers configured" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_discovery_and_wrapper_use_the_same_session_init_timeout(monkeypatch):
+    """Preparation derives the timeout once; discovery and wrapping share it."""
+    config = _config(
+        {
+            "A": {
+                "enabled": True,
+                "type": "stdio",
+                "command": "npx",
+                "args": [],
+                "session_init_timeout": 5,
+            }
+        }
+    )
+    observed: dict[str, float | None] = {}
+
+    class FakeClient:
+        def __init__(self, connections, **kwargs):
+            pass
+
+        async def get_tools(self, *, server_name=None):
+            return [_tool("A_search")]
+
+    real_wait_for = asyncio.wait_for
+
+    async def spy_wait_for(awaitable, timeout):
+        observed["discovery"] = timeout
+        return await real_wait_for(awaitable, timeout)
+
+    monkeypatch.setattr("langchain_mcp_adapters.client.MultiServerMCPClient", FakeClient)
+    monkeypatch.setattr("deerflow.mcp.tools.asyncio.wait_for", spy_wait_for)
+    monkeypatch.setattr("deerflow.mcp.tools.get_initial_oauth_headers", AsyncMock(return_value={}))
+    monkeypatch.setattr("deerflow.mcp.tools.build_mcp_tool_interceptors", lambda *a, **kw: [])
+
+    real_make_tool = __import__("deerflow.mcp.tools", fromlist=["_make_session_pool_tool"])._make_session_pool_tool
+
+    def spy_make_tool(*args, **kwargs):
+        observed["wrapper"] = kwargs.get("session_init_timeout")
+        return real_make_tool(*args, **kwargs)
+
+    monkeypatch.setattr("deerflow.mcp.tools._make_session_pool_tool", spy_make_tool)
+
+    groups = await get_mcp_tools_by_server(config, server_names={"A"})
+
+    assert len(groups["A"].tools) == 1
+    assert observed["discovery"] == 5.0
+    assert observed["wrapper"] == observed["discovery"]

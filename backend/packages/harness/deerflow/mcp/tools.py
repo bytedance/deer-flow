@@ -1099,15 +1099,21 @@ def _wrap_discovered_server_tools(
     connection: dict[str, Any],
     raw_discovery: _RawServerDiscovery,
     *,
+    tool_name_prefix: bool,
+    session_init_timeout: float | None,
     pool: MCPSessionPool | None,
     binding: ServerBinding | None,
     ownership_domain: MCPPoolDomain,
     connection_scope: str,
 ) -> ServerDiscoveryResult:
-    """Validate, tag, wrap, and task-configure one successful discovery."""
+    """Validate, tag, wrap, and task-configure one successful discovery.
+
+    ``tool_name_prefix`` and ``session_init_timeout`` are supplied by the
+    prepared client so discovery and wrapping share one derivation of the
+    server config instead of two that can drift apart.
+    """
     server_cfg = extensions_config.mcp_servers.get(server_name)
     transport = connection.get("transport", "stdio")
-    tool_name_prefix = server_cfg.tool_name_prefix if server_cfg is not None else True
     current_server_tools: list[BaseTool] = []
 
     for tool in raw_discovery.tools:
@@ -1127,7 +1133,6 @@ def _wrap_discovered_server_tools(
             tag_mcp_routing(tool, routing)
         if transport == "stdio":
             _timeout = server_cfg.tool_call_timeout if server_cfg else None
-            _init_timeout = _resolve_session_init_timeout(server_cfg)
             current_server_tools.append(
                 _make_session_pool_tool(
                     tool,
@@ -1135,7 +1140,7 @@ def _wrap_discovered_server_tools(
                     connection,
                     raw_discovery.tool_interceptors,
                     tool_call_timeout=_timeout,
-                    session_init_timeout=_init_timeout,
+                    session_init_timeout=session_init_timeout,
                     tool_name_prefix=tool_name_prefix,
                     ownership_domain=ownership_domain,
                     pool=pool,
@@ -1217,7 +1222,16 @@ def _prepare_server_discovery(
     requested = set(all_enabled) if server_names is None else set(server_names) & set(all_enabled)
     selected_names = [name for name in all_enabled if name in requested]
     if not selected_names:
-        logger.info("No enabled MCP servers configured")
+        # Distinguish "nothing is enabled" from "the caller's selection matched
+        # nothing". Unknown or disabled names are dropped per the documented
+        # selection contract, but that must not be reported as an empty config.
+        if server_names is None:
+            logger.info("No enabled MCP servers configured")
+        else:
+            logger.info(
+                "No enabled MCP servers matched the requested selection: %s",
+                sorted(set(server_names)),
+            )
         return None
 
     selected_view = extensions_config.model_copy(
@@ -1293,17 +1307,21 @@ async def _discover_and_wrap_prepared(
         )
     )
     raw_by_server = {server_name: raw for server_name, raw in pairs if raw is not None}
+    prepared_by_server = {prepared_client.server_name: prepared_client for prepared_client in prepared_clients}
 
     groups: dict[str, ServerDiscoveryResult] = {}
     for server_name in prepared.server_names:
         raw_discovery = raw_by_server.get(server_name)
         if raw_discovery is None:
             continue
+        prepared_client = prepared_by_server[server_name]
         groups[server_name] = _wrap_discovered_server_tools(
             extensions_config,
             server_name,
-            prepared.connections[server_name],
+            prepared_client.connection,
             raw_discovery,
+            tool_name_prefix=prepared_client.tool_name_prefix,
+            session_init_timeout=prepared_client.session_init_timeout,
             pool=prepared.pool,
             binding=prepared.bindings.get(server_name),
             ownership_domain=prepared.ownership_domain,
@@ -1325,7 +1343,29 @@ async def get_mcp_tools_by_server(
     personal_user_id: str | None = None,
     session_pool: MCPSessionPool | None = None,
 ) -> dict[str, ServerDiscoveryResult]:
-    """Discover selected enabled MCP servers independently."""
+    """Discover selected enabled MCP servers independently.
+
+    Args:
+        extensions_config: Optional pre-loaded config. ``None`` reads the latest
+            revision from disk; callers that must prove which revision produced
+            the tools pass the exact snapshotted instance.
+        server_names: Restrict discovery to these server names. Names that are
+            unknown or currently disabled are ignored, because a cache caller's
+            selection can legitimately lag the latest config; an effective
+            selection of nothing returns ``{}`` without contacting any server.
+            ``None`` selects every enabled server.
+        personal_user_id: When set, the caller's personal MCP configuration is
+            authorized and used instead of the deployment configuration.
+        session_pool: Optional session pool captured by the caller. Cache
+            initializers pass the exact pool their generation owns so a
+            superseded claim cannot install bindings into a replacement pool;
+            ``None`` resolves the current singleton.
+
+    Returns:
+        One entry per server whose discovery succeeded, keyed by server name.
+        A server whose discovery failed or timed out is **absent**; a server
+        that succeeded with zero tools is **present** with ``tools=()``.
+    """
     adapter_symbols = _load_mcp_adapter_symbols()
     if adapter_symbols is None:
         return {}
@@ -1354,6 +1394,23 @@ async def get_mcp_tools(
     binding capture stay outside the broad discovery-phase handler so they keep
     the base API's exception semantics. Only OAuth/discovery/wrapping is
     softened by that handler.
+
+    Args:
+        extensions_config: Optional pre-loaded config. ``None`` reads the latest
+            revision from disk, so Gateway API edits are picked up without a
+            restart. Callers that must prove which revision produced these tools
+            (the cache initializer) pass the exact instance they snapshotted.
+        personal_user_id: When set, that user's authorized personal MCP
+            configuration is discovered instead of the deployment one.
+        session_pool: Optional session pool pinned by the caller. Cache
+            initializers pass the exact pool their initialization generation
+            owns, so a superseded claim cannot install bindings into a
+            replacement pool; ``None`` resolves the current singleton.
+
+    Returns:
+        Wrapped tools from every enabled server, in enabled-server declaration
+        order. Returns an empty list when the adapter is unavailable or when a
+        discovery-phase failure is caught by the handler described above.
     """
     adapter_symbols = _load_mcp_adapter_symbols()
     if adapter_symbols is None:
