@@ -1,9 +1,5 @@
 import { afterEach, describe, expect, rs, test } from "@rstest/core";
-import {
-  QueryClient,
-  QueryClientProvider,
-  type InfiniteData,
-} from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen, within } from "@testing-library/react";
 
 const nav = rs.hoisted(() => ({ activeThreadId: null as string | null }));
@@ -26,7 +22,10 @@ import { AuthProvider } from "@/core/auth/AuthProvider";
 import type { User } from "@/core/auth/types";
 import type { Locale } from "@/core/i18n";
 import { I18nProvider } from "@/core/i18n/context";
-import { INFINITE_THREADS_QUERY_KEY_PREFIX } from "@/core/threads/hooks";
+import {
+  INFINITE_THREADS_QUERY_KEY_PREFIX,
+  type InfiniteThreadsData,
+} from "@/core/threads/hooks";
 import type { AgentThread } from "@/core/threads/types";
 
 import { expectNoRawIdentifiers } from "../../helpers/readable";
@@ -89,9 +88,12 @@ function renderList(locale: Locale, activeThreadId: string | null = null) {
     defaultOptions: { queries: { retry: false, staleTime: Infinity } },
   });
   clients.push(queryClient);
-  queryClient.setQueryData<InfiniteData<AgentThread[]>>(
+  queryClient.setQueryData<InfiniteThreadsData>(
     [...INFINITE_THREADS_QUERY_KEY_PREFIX, { archived: false }],
-    { pages: [THREADS], pageParams: [0] },
+    {
+      pages: [{ threads: THREADS, hiddenCount: 0, hasMore: false }],
+      pageParams: [0],
+    },
   );
   const user = {
     id: "user-1",
