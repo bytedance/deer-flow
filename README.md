@@ -2093,6 +2093,8 @@ Content-less sub-agent final messages report `No response generated` instead of 
 
 An ordinary `task` also receives a defensive snapshot of the dispatching run's current uploads. This lets eligible sub-agents use `list_uploaded_files` to find earlier-turn files without returning same-turn attachments as historical. Delayed or recovered `batch_task` workers leave this tool disabled because they have no valid turn-local upload boundary.
 
+Embedded Python uploads use the same captured content for the saved document and its Markdown conversion, even if the caller's source changes during upload.
+
 历史上传发现支持稳定续页：`list_uploaded_files` 默认每页 20 项、最多 100 项，
 将返回的 `next_cursor` 作为下一次调用的 `cursor`，保留相同过滤条件，直到末页不再
 返回游标。目录元数据或调用上下文变化时会明确要求重新枚举；详情见
@@ -2664,6 +2666,14 @@ client.clear_goal("thread-1")
 ```
 
 When continuing a thread, `values` still contains the full conversation state, while `messages-tuple` and `end.usage` cover only the current turn.
+
+Concurrent `upload_files()` calls preserve filenames absent at the start of each
+call by assigning numeric suffixes and returning the actual saved names. The same
+rule applies to new Markdown companions. Exact names already present retain
+replacement behavior. Convertible files use one private source capture through
+all filename retries and conversion, preserving the original permissions and
+timestamps. Detected staging-file substitution is rejected; staging cleanup
+failures are logged without masking the upload outcome.
 
 The HTTP Gateway accepts `values`, `messages-tuple`, `updates`, `debug`, `tasks`, `checkpoints`, and `custom` stream modes. Unsupported modes such as `messages` and `events`, unsupported non-default run options such as webhooks, delayed execution, or `multitask_strategy="enqueue"`, and undeclared SDK options such as checkpoint durability overrides return `422` before execution instead of being silently ignored or downgraded.
 
