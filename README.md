@@ -2280,8 +2280,9 @@ Files presented through `present_files` remain part of the thread's artifact sta
 Unsaved artifact edits survive switching chats, workspace pages, or visiting the
 home page and returning in the same browser tab. Drafts stay in memory for the
 current account until saved or discarded; changing accounts or signing out clears them.
-An unavailable Gateway auth probe retains drafts until authentication is known;
-recovering as another account or confirming logout clears the retained content.
+Public showcase visits and unavailable Gateway auth probes retain hidden drafts
+until authentication is known. Recovering as another account or confirming logout
+clears the retained content.
 Refreshing or closing the tab warns while any chat has unsaved edits. Draft file
 contents are not stored in browser storage and do not survive a reload.
 
