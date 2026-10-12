@@ -835,6 +835,33 @@ export interface Translations {
       removeCapBlocked: string;
       submit: string;
     };
+    notificationGroup: {
+      savedUnavailable: string;
+      clearSaved: string;
+      bind: string;
+      refresh: string;
+      bindInstructions: string;
+      generating: string;
+      bindFailed: string;
+      command: string;
+      expiresAt: string;
+      copy: string;
+      copied: string;
+      copyFailed: string;
+      newCode: string;
+      close: string;
+      label: string;
+      detailLabel: string;
+      none: string;
+      personalHint: string;
+      emptyHint: string;
+      loading: string;
+      unavailable: string;
+      unavailableHint: string;
+      unnamed: string;
+      unnamedHint: string;
+      loadFailed: string;
+    };
     form: {
       createTitle: string;
       editTitle: string;
@@ -995,6 +1022,7 @@ export interface Translations {
       invalidGoal: string;
       goalRequiresFreshThread: string;
       invalidStopCondition: string;
+      invalidNotificationGroup: string;
       invalidMaxRuns: string;
       endAtInPast: string;
       endAtBeforeFirstRun: string;

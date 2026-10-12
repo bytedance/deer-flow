@@ -56,6 +56,10 @@ class FakeChannel:
         self.unavailable = unavailable
         self.is_running = running
         self.owners = []
+        self.group_sent = []
+
+    async def send_group_notification_for_owner(self, *, owner_user_id, target, text_markdown):
+        self.group_sent.append((owner_user_id, target, text_markdown))
 
     async def send_notification_for_owner(self, *, owner_user_id, target, text_markdown):
         self.owners.append(owner_user_id)
@@ -112,6 +116,78 @@ def _connection(*, provider="wecom", external_account_id="GaoZhiChao", status="c
         "external_account_id": external_account_id,
         "status": status,
     }
+
+
+def _group_connection(**updates):
+    return {**_connection(provider="feishu", external_account_id="ou_owner"), "id": "group-binding", "workspace_id": "oc_group", "metadata": {"chat_id": "oc_group", "chat_type": "group"}, **updates}
+
+
+@pytest.mark.asyncio
+async def test_group_notice_uses_selected_binding_and_only_group_hook():
+    repo = FakeDeliveryRepo([_delivery_row(provider="feishu", target="group-binding", payload={"target_type": "group", "run_status": "success"})])
+    channel = FakeChannel()
+    worker = NotificationDeliveryWorker(delivery_repo=repo, resolve_channel=lambda provider: channel, resolve_connections=lambda owner: [_group_connection()])
+    await worker.run_once(now=datetime.now(UTC))
+    assert repo.sent == ["delivery-1"]
+    assert channel.group_sent[0][:2] == ("user-1", "group-binding")
+    assert channel.sent == []
+    assert channel.owners == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "updates",
+    [
+        None,
+        {"id": "another-binding"},
+        {"owner_user_id": "another-owner"},
+        {"status": "revoked"},
+        {"provider": "wecom"},
+        {"workspace_id": "oc_other"},
+        {"metadata": {"chat_id": "oc_group", "chat_type": "p2p"}},
+        {"metadata": {"chat_id": "oc_group"}},
+    ],
+)
+async def test_group_notice_requires_current_exact_group_binding(updates):
+    repo = FakeDeliveryRepo([_delivery_row(provider="feishu", target="group-binding", payload={"target_type": "group"})])
+    channel = FakeChannel()
+    rows = [] if updates is None else [_group_connection(**updates)]
+    worker = NotificationDeliveryWorker(delivery_repo=repo, resolve_channel=lambda provider: channel, resolve_connections=lambda owner: rows)
+    await worker.run_once(now=datetime.now(UTC))
+    assert repo.sent == []
+    assert len(repo.terminal_failures) == 1
+    assert channel.sent == []
+    assert channel.group_sent == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider,target_type", [("wecom", "group"), ("feishu", "unknown"), ("feishu", "private")])
+async def test_invalid_group_target_type_never_falls_back_to_personal_notice(provider, target_type):
+    repo = FakeDeliveryRepo([_delivery_row(provider=provider, target="ou_owner", payload={"target_type": target_type})])
+    channel = FakeChannel()
+    worker = NotificationDeliveryWorker(delivery_repo=repo, resolve_channel=lambda provider: channel, resolve_connections=lambda owner: [_connection(provider=provider, external_account_id="ou_owner")])
+    await worker.run_once(now=datetime.now(UTC))
+    assert repo.sent == []
+    assert len(repo.terminal_failures) == 1
+    assert channel.sent == []
+    assert channel.group_sent == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resolver_missing", [False, True])
+async def test_group_notice_parks_when_binding_cannot_be_checked(resolver_missing):
+    repo = FakeDeliveryRepo([_delivery_row(provider="feishu", target="group-binding", payload={"target_type": "group"})])
+    channel = FakeChannel()
+
+    def unavailable(owner):
+        raise OSError("lookup unavailable")
+
+    worker = NotificationDeliveryWorker(delivery_repo=repo, resolve_channel=lambda provider: channel, resolve_connections=None if resolver_missing else unavailable)
+    await worker.run_once(now=datetime.now(UTC))
+    assert repo.sent == []
+    assert repo.failed[0][2] is False
+    assert channel.sent == []
+    assert channel.group_sent == []
 
 
 def test_render_run_completed_text_has_no_raw_ids():
