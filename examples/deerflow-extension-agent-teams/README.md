@@ -90,17 +90,34 @@ own teams. Sharing a host conversation does **not** share its team's private dat
   or raw model invocation. Capabilities are process-local, never stored in SQLite.
   Gateway rechecks the user, permission ceiling, current permissions and thread
   access on every call. PAT/internal callers without this capability cannot run teams.
-- Different member conversations can run concurrently; admissions are bounded to
-  eight active plugin jobs shared by all owners in this process, without per-owner
-  quotas or fair scheduling. A busy owner can keep other owners' jobs queued.
-  The tick loop holds a shared lock while checking/admitting jobs, with a ten-second
-  timeout per job advancement; slow host calls delay create, send, cancel, resume,
-  delete and reconnect for all teams until the pass releases the lock. Per-owner
-  fairness and finer-grained locking are outside this example's current scope.
-  Each conversation is serialized, including result
-  receipts. A busy host conversation stays queued without cancelling its run.
-  Queued jobs blocked by an unanswered question or interrupt do not consume the
-  active-job budget before admission; an unknown admission outcome still does.
+- Admissions are bounded to eight active plugin jobs across this database.
+  New requests and pending answers rotate by owner, one admission attempt per
+  owner per round. The unfinished round carries over between passes, including
+  when a served owner's queue becomes empty. Unavailable queues drop out and new
+  owners join the tail. Spare capacity can be used by any queued owner; existing
+  runs are not preempted when another owner joins.
+- Each team has its own execution/control lock and background worker. Slow host
+  calls in one team do not hold another team's create, send, cancel, resume,
+  delete or reconnect operations, nor stop its background polling. Operations
+  within the same team remain serialized, with a ten-second timeout per job
+  advancement. Shutdown cancels and drains all workers before releasing the
+  database service lock.
+- Each conversation is serialized, including result receipts targeting a source
+  shared across teams. The first unfinished job retains the conversation until
+  it finishes or is cancelled. A busy host conversation stays queued without
+  cancelling its run. Unadmitted conversation waits release their temporary
+  reservation. An admitted job in `waiting_input` also releases its slot even
+  though its original input remains frozen; it still retains the conversation's
+  queue head. Pending answers wait for capacity. Other unfinished frozen jobs,
+  including unknown admission outcomes and resumes already attempted, keep their
+  slots while disconnected and after service restart. Reconnect the owning team
+  to reconcile them. Cancelling an unstarted answer does not admit it.
+- Each planning pass uses one indexed batch query for teams with unfinished jobs.
+  Completed history is not decoded. The plugin database adds a pending-job flag
+  and index, reads legacy rows completely before transactionally backfilling
+  them at initialization, and updates the flag with each team mutation. The
+  projection includes waiting-input jobs for conversation ordering even though
+  those jobs do not occupy active slots.
 - Each owner can have 20 teams. A team accepts at most 100 requests, with separate
   space for up to 100 result receipts (200 total job entries); a handoff chain
   accepts at most 12 requests. Start a new user request for another chain, or a
@@ -152,7 +169,14 @@ real ToolNode dispatch, mention middleware in the Lead middleware pipeline,
 host-compatible mention labels at the UTF-16 boundary with stable routing IDs,
 serialization, interrupts, cancellation, restart/reconnect (including incomplete
 creation), request capacity independent of receipts, ambiguous admission, and
-lifecycle locking. Host-run transport is controlled for deterministic tests.
+lifecycle locking. Event-gated scheduling regressions also cover cross-team control
+isolation, continued background cancellation, owner rotation with single-slot
+release and mixed backlogs, exhausted/cancelled queues and new owners, overlapping
+ticks, pending answers, shared-source receipts, worker
+shutdown and durable slots across restart. Storage regressions cover indexed batch
+reads, terminal-history exclusion, complete legacy reads before backfill, rollback
+and projection updates when queuing, cancelling, finishing or creating receipts.
+Host-run transport is controlled for deterministic tests.
 Clarification tests execute the host's real tool and middleware in an Agent graph,
 including repeated questions, peer/mention/result-receipt paths, lost response
 acknowledgements and restart. Response regressions cover the 7,999/8,000/8,001-byte

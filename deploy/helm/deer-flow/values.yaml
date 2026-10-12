@@ -35,6 +35,10 @@ gateway:
   # inert (its worker count only sees one Pod). Still single-instance: IM
   # channels (every Pod connects to every platform -- keep replicas at 1
   # while channels are enabled), the WeChat QR login, and browser tools.
+  # `channels.leader_lease` in `config` (default `auto`) is reserved for the
+  # per-provider leader lease that will give one Pod each platform connection;
+  # until it ships the setting only drives the startup gate, which refuses
+  # `enabled: false` while channels are enabled (see the chart README).
   # Multi-node clusters also need `persistence.home.accessMode: ReadWriteMany`,
   # and `agent_storage.backend: db` keeps custom agents visible on every Pod.
   # Memory stays on that shared volume, but DeerMem's SQLite retrieval index is
@@ -364,7 +368,7 @@ ingress:
 # -- DeerFlow config.yaml content. Secrets MUST stay as $VAR references — never
 #    inline literal secret values here. The default enables provisioner sandbox.
 config: |
-  config_version: 59
+  config_version: 60
   log_level: info
   recursion_limit: 100
   max_recursion_limit: 1000
