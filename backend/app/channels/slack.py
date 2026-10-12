@@ -10,7 +10,7 @@ from typing import Any
 
 from markdown_to_mrkdwn import SlackMarkdownConverter
 
-from app.channels.allowed_users import parse_allowed_users
+from app.channels.allowed_users import parse_allowed_users, parse_string_or_int_user_id
 from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
@@ -50,31 +50,15 @@ def _escape_slack_text(text: str) -> str:
     return re.sub(r"(?m)^&gt;", ">", escaped)
 
 
-def _parse_slack_user_id(entry: Any) -> str | None:
-    """A Slack user ID from a non-blank string or an integer, else ``None``.
-
-    An unquoted YAML number keeps matching its string form, as before.
-    """
-    if isinstance(entry, bool):
-        # bool is an int subclass: ``true`` must not become the user "True".
-        return None
-    if isinstance(entry, int):
-        return str(entry)
-    if isinstance(entry, str):
-        return entry.strip() or None
-    return None
-
-
 def _parse_allowed_users(allowed_users: Any) -> frozenset[str] | None:
     """Parse Slack user IDs with the shared fail-closed allowlist semantics."""
-    if isinstance(allowed_users, str) and ("," in allowed_users or any(char.isspace() for char in allowed_users.strip())):
-        logger.warning("[Slack] allowed_users is a scalar string containing separators; treating it as one literal user ID. Use a YAML list for multiple IDs")
     return parse_allowed_users(
         allowed_users,
-        parse_user_id=_parse_slack_user_id,
+        parse_user_id=parse_string_or_int_user_id,
         logger=logger,
         channel_name="Slack",
         expected_id="a Slack user ID such as U123456",
+        warn_on_scalar_separators=True,
     )
 
 

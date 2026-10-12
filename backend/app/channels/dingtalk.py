@@ -14,7 +14,7 @@ from typing import Any
 
 import httpx
 
-from app.channels.allowed_users import parse_allowed_users
+from app.channels.allowed_users import parse_allowed_users, parse_string_or_int_user_id
 from app.channels.base import Channel, ChannelStopTimeout
 from app.channels.commands import is_known_channel_command, strip_leading_mentions
 from app.channels.connection_identity import attach_connection_identity
@@ -61,33 +61,19 @@ def _normalize_conversation_type(raw: Any) -> str:
     return _CONVERSATION_TYPE_P2P
 
 
-def _parse_dingtalk_user_id(entry: Any) -> str | None:
-    """A DingTalk staff ID from a non-blank string or an integer, else ``None``.
-
-    Staff IDs are often all digits, so an unquoted YAML number keeps matching
-    its string form, as before. Quote IDs with leading zeros.
-    """
-    if isinstance(entry, bool):
-        # bool is an int subclass: ``true`` must not become the user "True".
-        return None
-    if isinstance(entry, int):
-        return str(entry)
-    if isinstance(entry, str):
-        return entry.strip() or None
-    return None
-
-
 def _parse_allowed_users(allowed_users: Any) -> frozenset[str] | None:
-    """Parse DingTalk staff IDs with the shared fail-closed allowlist semantics."""
-    if isinstance(allowed_users, str) and ("," in allowed_users or any(char.isspace() for char in allowed_users.strip())):
-        logger.warning("[DingTalk] allowed_users is a scalar string containing separators; treating it as one literal staff ID. Use a YAML list for multiple IDs")
+    """Parse DingTalk staff IDs with the shared fail-closed allowlist semantics.
+
+    Staff IDs are often all digits, so integer entries are accepted as text.
+    """
     return parse_allowed_users(
         allowed_users,
-        parse_user_id=_parse_dingtalk_user_id,
+        parse_user_id=parse_string_or_int_user_id,
         logger=logger,
         channel_name="DingTalk",
         expected_id="a DingTalk staff ID (senderStaffId)",
         valid_id_name="staff ID",
+        warn_on_scalar_separators=True,
     )
 
 

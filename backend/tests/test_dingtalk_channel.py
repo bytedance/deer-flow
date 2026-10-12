@@ -143,9 +143,10 @@ class TestParseAllowedUsers:
     def test_numeric_scalar_is_one_entry(self):
         assert _parse_allowed_users(12345) == {"12345"}
 
-    def test_scalar_with_separators_stays_one_literal_id_and_warns(self, caplog):
+    @pytest.mark.parametrize("allowed_users", ["user1,user2", ","])
+    def test_scalar_with_separators_stays_one_literal_id_and_warns(self, allowed_users, caplog):
         with caplog.at_level(logging.WARNING, logger="app.channels.dingtalk"):
-            assert _parse_allowed_users("user1,user2") == {"user1,user2"}
+            assert _parse_allowed_users(allowed_users) == {allowed_users}
         assert "YAML list" in caplog.text
 
     def test_invalid_entries_are_dropped_with_a_warning(self, caplog):

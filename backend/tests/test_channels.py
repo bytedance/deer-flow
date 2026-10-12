@@ -10732,11 +10732,12 @@ class TestSlackAllowedUsers:
             assert _parse_allowed_users(allowed_users) is None
         assert caplog.records == []
 
-    def test_scalar_with_separators_stays_one_literal_id_and_warns(self, caplog):
+    @pytest.mark.parametrize("allowed_users", ["U123456,U654321", ","])
+    def test_scalar_with_separators_stays_one_literal_id_and_warns(self, allowed_users, caplog):
         from app.channels.slack import _parse_allowed_users
 
         with caplog.at_level(logging.WARNING, logger="app.channels.slack"):
-            assert _parse_allowed_users("U123456,U654321") == {"U123456,U654321"}
+            assert _parse_allowed_users(allowed_users) == {allowed_users}
         assert "YAML list" in caplog.text
 
     def test_invalid_entries_are_dropped_with_a_warning(self, caplog):
