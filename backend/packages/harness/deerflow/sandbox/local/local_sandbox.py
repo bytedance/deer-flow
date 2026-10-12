@@ -50,20 +50,33 @@ class _BoundedPipeCapture:
         self._chunks: list[bytes] = []
         self._kept_bytes = 0
         self._total_bytes = 0
+        # Set when the child may have been killed mid-write (timeout path): the
+        # capture may end in a partial multi-byte sequence that the strict
+        # retry is allowed to trim. A complete buffer — no byte-cap cut, no
+        # kill — never trims, so a valid locale-encoded tail (e.g. cp1252
+        # ``b'caf\xe9'``) reaches the fallback with every byte intact.
+        self._split_tail = False
         self._lock = threading.Lock()
 
-    def _decode(self, data: bytes) -> str:
+    def mark_split_tail(self) -> None:
+        """Authorize the trim retry because the child may have been killed
+        mid-write, leaving a partial multi-byte sequence at the buffer end."""
+        with self._lock:
+            self._split_tail = True
+
+    def _decode(self, data: bytes, *, allow_trim: bool) -> str:
         """Decode captured bytes, preferring the primary encoding when valid.
 
         A forced ``encoding`` describes the shell's *own* output. Windows-native
         children (``python.exe``, CLI shims) inherit the pipe and keep writing the
         host code page, which is not valid in the forced encoding. Rather than
         replacing every such byte with U+FFFD, retry the whole buffer with
-        ``fallback_encoding`` (the locale) when the primary decode fails. A
-        capture cut mid-character (capture-cap boundary or a timeout kill) ends
-        in a partial multi-byte sequence; the strict attempt is retried once
-        without that tail so one split character cannot cascade the whole
-        buffer to the fallback.
+        ``fallback_encoding`` (the locale) when the primary decode fails. Only a
+        capture that may have been cut mid-character (a byte-cap cut or a
+        timeout kill, signalled via ``allow_trim``) retries the strict attempt
+        without the trailing partial sequence; a complete buffer — even one
+        that merely *ends* in a byte shaped like a bare UTF-8 lead — goes to
+        the fallback untouched so no locale-encoded tail byte is dropped.
         """
         if self._fallback_encoding is None:
             return data.decode(self._encoding, errors="replace")
@@ -71,12 +84,12 @@ class _BoundedPipeCapture:
             return data.decode(self._encoding)
         except UnicodeDecodeError:
             pass
-        if self._encoding.replace("_", "-").lower() == "utf-8":
-            # A capture cut mid-character (capture-cap boundary or a timeout
-            # kill) ends in a partial multi-byte sequence. Retry the strict
-            # attempt without that tail so one split character cannot cascade
-            # the whole buffer to the fallback; complete non-UTF-8 buffers
-            # still fail the retried attempt and reach the fallback untouched.
+        if allow_trim and self._encoding.replace("_", "-").lower() == "utf-8":
+            # The capture may have been cut mid-character (capture-cap
+            # boundary or a timeout kill). Retry the strict attempt without
+            # that tail so one split character cannot cascade the whole
+            # buffer to the fallback; a tail that survives the trim still
+            # fails the retried attempt and reaches the fallback untouched.
             trimmed = _trim_trailing_partial_utf8(data)
             if len(trimmed) != len(data):
                 try:
@@ -99,10 +112,14 @@ class _BoundedPipeCapture:
         with self._lock:
             data = b"".join(self._chunks)
             truncated = self._total_bytes > self._kept_bytes
+            split_tail = self._split_tail
             total_bytes = self._total_bytes
             kept_bytes = self._kept_bytes
 
-        output = self._decode(data)
+        # Trimming is only justified on a capture that may have been cut
+        # mid-character — a byte-cap cut or a timeout kill. A complete buffer
+        # goes to the fallback with every byte intact.
+        output = self._decode(data, allow_trim=truncated or split_tail)
         if self._normalize_newlines:
             # Match ``subprocess.run(..., text=True)``: text streams use universal
             # newlines, translating both CRLF and bare CR to LF.
@@ -118,10 +135,11 @@ def _trim_trailing_partial_utf8(data: bytes) -> bytes:
 
     A bounded capture can stop mid-character: the byte cap may cut between a
     lead byte and its continuations, and a timeout kill can interrupt the
-    child mid-write. The result is only used as a retry after a failed strict
-    decode — a complete buffer that merely *ends* in a byte shaped like a bare
-    UTF-8 lead (for example the ``C3`` tail of a CP936 buffer) still fails the
-    retried strict attempt and reaches the locale fallback untouched.
+    child mid-write. Only invoked when the caller has signalled such a cut
+    (``allow_trim``) — a complete buffer is never trimmed, so a locale-encoded
+    tail that merely *looks* like a bare UTF-8 lead (for example the ``E9``
+    byte of a cp1252 ``café``) reaches the locale fallback with every byte
+    intact instead of being dropped as an incomplete sequence.
     """
     for offset in range(min(len(data), 4)):
         byte = data[len(data) - 1 - offset]
@@ -745,6 +763,11 @@ class LocalSandbox(Sandbox):
             except subprocess.TimeoutExpired:
                 timed_out = True
                 LocalSandbox._terminate_windows_process_tree(process)
+                # The kill can interrupt the child mid-write, leaving a partial
+                # multi-byte sequence at the capture end; authorize the trim
+                # retry so the valid prefix survives the strict decode.
+                stdout_capture.mark_split_tail()
+                stderr_capture.mark_split_tail()
             returncode = process.returncode if process.returncode is not None else 0
         finally:
             join_timeout = 10 if timed_out else _PIPE_DRAIN_JOIN_TIMEOUT_SECONDS

@@ -62,14 +62,60 @@ def test_bounded_pipe_capture_trims_capture_cap_split_multibyte_tail():
     assert capture.read() == "abcdefgh\n... [output truncated after 10 of 14 bytes; remaining output discarded] ..."
 
 
+def test_bounded_pipe_capture_preserves_complete_locale_tail_for_fallback():
+    """A complete buffer that ends in a byte shaped like an incomplete UTF-8
+    lead must reach the locale fallback untouched: on a cp1252 host the child
+    writes ``caf\xe9`` (a complete é), and trimming that byte would silently
+    drop it while accepting the ASCII prefix as valid UTF-8."""
+    capture = _BoundedPipeCapture(encoding="utf-8", fallback_encoding="cp1252")
+    capture.append(b"caf\xe9")
+
+    assert capture.read() == "caf\u00e9"
+
+
 def test_bounded_pipe_capture_trims_partial_tail_left_by_timeout_kill():
     """A child killed mid-write can leave an incomplete multi-byte sequence at
-    the end of the capture; trimming it keeps the valid prefix decodable."""
+    the end of the capture; marking the split tail authorizes the trim retry
+    so the valid prefix stays decodable."""
     capture = _BoundedPipeCapture(encoding="utf-8", fallback_encoding="cp936")
     capture.append(b"abc")
     capture.append("\u4f60".encode("utf-8")[:-1])
+    capture.mark_split_tail()
 
     assert capture.read() == "abc"
+
+
+def test_bounded_pipe_capture_without_cut_signal_falls_back_on_partial_shaped_tail():
+    """The same partial-shaped tail without a cut signal (no cap cut, no
+    timeout kill) must NOT be trimmed away: the whole buffer goes to the
+    locale fallback instead of being accepted as a truncated UTF-8 prefix.
+    cp1252 is used as the fallback so every byte has a defined mapping."""
+    capture = _BoundedPipeCapture(encoding="utf-8", fallback_encoding="cp1252")
+    capture.append(b"abc")
+    capture.append("\u4f60".encode("utf-8")[:-1])
+
+    assert capture.read() == "abcä½"
+
+
+def test_windows_command_timeout_marks_capture_for_trim(monkeypatch):
+    """A real timeout kill must authorize the trim retry through
+    ``_run_windows_command``: the child wrote a partial UTF-8 sequence and was
+    killed mid-command, so the trimmed empty prefix survives instead of the
+    whole buffer cascading to the locale fallback as U+FFFD."""
+    if os.name != "nt":
+        monkeypatch.setattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0, raising=False)
+    partial = "\u4f60".encode("utf-8")[:-1]
+    script = f"import os, time; os.write(1, bytes.fromhex('{partial.hex()}')); time.sleep(30)"
+
+    stdout, stderr, returncode, timed_out = LocalSandbox._run_windows_command(
+        [sys.executable, "-c", script],
+        1,
+        encoding="utf-8",
+        fallback_encoding="cp936",
+    )
+
+    assert timed_out is True
+    assert stdout == ""
 
 
 def test_bounded_pipe_capture_applies_text_mode_newline_normalization_when_enabled():
