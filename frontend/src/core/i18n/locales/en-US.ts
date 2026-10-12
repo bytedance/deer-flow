@@ -1812,7 +1812,8 @@ export const enUS: Translations = {
       title: "User management",
       description:
         "Suspend or restore sign-in for accounts on this deployment. A disabled account is rejected by every authentication surface; its active sessions end immediately.",
-      adminOnly: "Only administrators can manage users.",
+      adminOnly:
+        "Only administrators can manage users. This feature is unavailable in demos.",
       loading: "Loading users…",
       failed: "Failed to load users.",
       reload: "Reload",
