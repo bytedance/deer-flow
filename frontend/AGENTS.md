@@ -166,6 +166,11 @@ UI validation separate from the API payload. Preserve the original instant when
 wall time and timezone match the mounted snapshot; validate changed inputs, and
 restore the exact original timestamp when those edits are reverted.
 
+Wall-time conversion matches the scheduler's `ZoneInfo(fold=0)` policy: choose
+the first occurrence of a repeated time and the pre-transition offset for a
+skipped time. Stored one-time schedules use that instant for display; the form's
+round-trip validation must still reject newly entered skipped times.
+
 ## Resources
 
 - [LangGraph Documentation](https://langchain-ai.github.io/langgraph/)
