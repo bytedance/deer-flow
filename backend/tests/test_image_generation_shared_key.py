@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from deerflow.config import encrypted_catalog
 from deerflow.config.image_generation import (
     ImageGenerationProfile,
     ManagedImageGenerationProfile,
@@ -18,16 +19,16 @@ def _save_first_image_profile(home: str, key_write_started, release_key_write) -
     os.environ["DEER_FLOW_HOME"] = home
     os.environ["DEER_FLOW_MANAGED_IMAGE_PROFILES_ENABLED"] = "true"
     store = ManagedImageGenerationProfileStore()
-    write_bytes = store._catalog.write_bytes
+    read_or_create = encrypted_catalog.read_or_create_secret_file
 
-    def pause_key_write(path: Path, content: bytes) -> None:
+    def pause_key_creation(path: Path, generate, **kwargs) -> str:
         if path == store.key_path:
             key_write_started.set()
             if not release_key_write.wait(timeout=10):
-                raise TimeoutError("The first key write was not released")
-        write_bytes(path, content)
+                raise TimeoutError("The first key creation was not released")
+        return read_or_create(path, generate, **kwargs)
 
-    store._catalog.write_bytes = pause_key_write
+    encrypted_catalog.read_or_create_secret_file = pause_key_creation
     store.save(
         ManagedImageGenerationProfile(name="web", provider="openai", model="test-image", base_url="https://images.example/v1", api_key="synthetic-web-key"),
         expected_revision=None,

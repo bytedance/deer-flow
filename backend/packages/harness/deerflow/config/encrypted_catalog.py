@@ -7,6 +7,7 @@ from contextlib import nullcontext
 from pathlib import Path
 
 from deerflow.config.extensions_config import extensions_config_file_lock
+from deerflow.config.secret_file import read_or_create_secret_file
 
 
 class EncryptedCatalog:
@@ -21,11 +22,18 @@ class EncryptedCatalog:
         # Hold its lock across both initialization and loading the winning key.
         lock = extensions_config_file_lock(self.key_path) if create else nullcontext()
         with lock:
-            if not self.key_path.exists():
+            key = self.key_path.read_bytes() if self.key_path.exists() else b""
+            if not key.strip():
                 if not create or self.path.exists():
                     raise ValueError("Catalog encryption key is missing; restore it from backup")
-                self.write_bytes(self.key_path, Fernet.generate_key())
-            return Fernet(self.key_path.read_bytes())
+                # A missing or abandoned empty key may be replaced only before
+                # a catalog exists. Keep a peer's independently published key.
+                key = read_or_create_secret_file(
+                    self.key_path,
+                    lambda: Fernet.generate_key().decode("ascii"),
+                    validate=lambda value: Fernet(value.encode("ascii")),
+                ).encode("ascii")
+            return Fernet(key)
 
     def read(self) -> list[dict]:
         if not self.path.exists():
