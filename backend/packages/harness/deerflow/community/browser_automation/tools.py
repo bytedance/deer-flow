@@ -18,7 +18,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import re
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -433,9 +435,28 @@ def _thread_outputs_path(runtime: Runtime) -> Path | str:
     return Path(outputs_path)
 
 
+def _publish_bytes_atomically(path: Path, content: bytes) -> None:
+    """Publish *content* at *path* without exposing a partial file.
+
+    ``write_bytes`` truncates first, so a failure part-way through left a
+    half-written capture under the final name while this function still reported
+    it as saved.
+    """
+    fd, temporary = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+
+
 def _write_screenshot(outputs_path: Path, name: str, content: bytes) -> str:
     outputs_path.mkdir(parents=True, exist_ok=True)
-    (outputs_path / name).write_bytes(content)
+    _publish_bytes_atomically(outputs_path / name, content)
     return name
 
 

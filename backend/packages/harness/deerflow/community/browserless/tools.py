@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import re
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
@@ -243,11 +244,30 @@ def _dedupe_output_name(outputs_path: Path, output_name: str) -> str:
     return f"{stem}-{timestamp}{suffix}"
 
 
+def _publish_bytes_atomically(path: Path, content: bytes) -> None:
+    """Publish *content* at *path* without exposing a partial file.
+
+    ``write_bytes`` truncates first, so a failure part-way through left a
+    half-written capture under the final name while this function still reported
+    it as saved.
+    """
+    fd, temporary = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+
+
 def _write_capture_output(outputs_path: Path, output_name: str, content: bytes) -> str:
     """Write ``content`` into ``outputs_path`` and return the actual filename used."""
     outputs_path.mkdir(parents=True, exist_ok=True)
     final_name = _dedupe_output_name(outputs_path, output_name)
-    (outputs_path / final_name).write_bytes(content)
+    _publish_bytes_atomically(outputs_path / final_name, content)
     return final_name
 
 
