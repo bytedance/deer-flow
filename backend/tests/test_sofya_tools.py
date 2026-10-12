@@ -607,6 +607,25 @@ class TestWebFetchTool:
 
         assert result == "Error: Sofya returned an unexpected response format"
 
+    def test_mixed_results_returns_first_object_content(self, mock_config_with_key):
+        results = [
+            "junk",
+            None,
+            {"title": "First page", "content": "First body", "success": True},
+            7,
+            {"title": "Second page", "content": "Second body", "success": True},
+            False,
+        ]
+
+        with patch("deerflow.community.sofya.tools.httpx.Client") as mock_client_cls:
+            mock_client_cls.return_value.__enter__.return_value.post.return_value = _make_fetch_response(results)
+
+            from deerflow.community.sofya.tools import web_fetch_tool
+
+            result = web_fetch_tool.invoke({"url": "https://example.com"})
+
+        assert result == "# First page\n\nFirst body"
+
     def test_http_error_returns_error_string(self, mock_config_with_key):
         request = httpx.Request("POST", "https://sofya.co/v1/fetch")
         response = httpx.Response(401, text="Invalid API key", request=request)
