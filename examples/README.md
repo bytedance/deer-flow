@@ -9,6 +9,10 @@ independent Python package using the public `deerflow-extension-api` contract.
 | [Conversation bookmarks](deerflow-extension-bookmarks/README.md) | A browser page, conversation action, backend actions, packaged resources, and a model tool. Start here for full-stack plugins. |
 | [Agent teams](deerflow-extension-agent-teams/README.md)          | Full Agent orchestration. Use this after the basic contribution and lifecycle patterns are familiar.                           |
 
+Additional examples cover [text-list classification](deerflow-extension-jev-classify/README.md),
+[context pruning](deerflow-extension-jev-context/README.md), and
+[advisory screening of fetched content](deerflow-extension-jev-screening/README.md).
+
 ## Edit, test, check, then install
 
 1. Copy the selected example outside the DeerFlow checkout. Rename its Python

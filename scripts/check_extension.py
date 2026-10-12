@@ -112,7 +112,8 @@ def check_wheel(source: Path, wheel: Path, *, manifests: Sequence[str] = ()) -> 
         for manifest in manifest_paths:
             if manifest not in names:
                 raise ValueError(f"Browser manifest is not packaged: {manifest}")
-        archive.extractall(temporary)
+        if manifest_paths:
+            archive.extractall(temporary)
         for manifest in sorted(manifest_paths):
             path = Path(temporary) / manifest
             load_browser_assets(BrowserAssets("check", path.parent, manifest=path.name))

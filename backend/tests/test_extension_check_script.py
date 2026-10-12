@@ -43,6 +43,14 @@ def test_packaged_entry_is_checked_without_importing_plugin(tmp_path):
     checker.check_wheel(tmp_path, wheel(tmp_path))
 
 
+def test_backend_only_wheel_skips_extraction(tmp_path, monkeypatch):
+    def fail_if_extracted(*args, **kwargs):
+        pytest.fail("Backend-only wheels must not be extracted")
+
+    monkeypatch.setattr(ZipFile, "extractall", fail_if_extracted)
+    checker.check_wheel(tmp_path, wheel(tmp_path))
+
+
 @pytest.mark.parametrize(
     ("entry", "message"),
     [
