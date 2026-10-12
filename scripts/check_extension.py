@@ -14,7 +14,7 @@ import sys
 import tempfile
 from collections.abc import Sequence
 from email.parser import Parser
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from zipfile import BadZipFile, ZipFile
 
 from deerflow_extension_api import API_VERSION, BrowserAssets
@@ -22,6 +22,7 @@ from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
 from deerflow.extensions.browser_assets import load_browser_assets
+from deerflow.extensions.manager import _validate_entry_point
 
 
 def check_wheel(source: Path, wheel: Path, *, manifests: Sequence[str] = ()) -> None:
@@ -34,7 +35,12 @@ def check_wheel(source: Path, wheel: Path, *, manifests: Sequence[str] = ()) -> 
             raise ValueError("Duplicate wheel paths")
         for name in names:
             path = PurePosixPath(name)
-            if path.is_absolute() or ".." in path.parts or "\\" in name:
+            if (
+                path.is_absolute()
+                or PureWindowsPath(name).drive
+                or ".." in path.parts
+                or "\\" in name
+            ):
                 raise ValueError("Invalid wheel path")
 
         metadata_paths = [
@@ -72,11 +78,8 @@ def check_wheel(source: Path, wheel: Path, *, manifests: Sequence[str] = ()) -> 
         ):
             raise ValueError("Declare exactly one deerflow.extensions entry point")
         entry_name, target = next(iter(entries["deerflow.extensions"].items()))
-        module, separator, attribute = target.partition(":")
-        if not separator or not all(
-            part.isidentifier() for part in (*module.split("."), *attribute.split("."))
-        ):
-            raise ValueError("Extension entry point must use module:callable syntax")
+        _validate_entry_point(entry_name, target)
+        module, _ = target.rsplit(":", 1)
         module_path = module.replace(".", "/")
         if not any(
             name in names

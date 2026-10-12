@@ -47,13 +47,21 @@ def test_packaged_entry_is_checked_without_importing_plugin(tmp_path):
     ("entry", "message"),
     [
         ("example = missing:install", "entry module"),
-        ("example = example", "module:callable"),
+        ("example = example", "entry point target"),
+        ("example = example:factory.install", "entry point target"),
         ("example = example:install\nsecond = example:install", "exactly one"),
     ],
 )
 def test_invalid_packaged_entry_is_rejected(tmp_path, entry, message):
     with pytest.raises(ValueError, match=message):
         checker.check_wheel(tmp_path, wheel(tmp_path, entry=entry))
+
+
+def test_dotted_entry_module_is_accepted_without_importing_plugin(tmp_path):
+    checker.check_wheel(
+        tmp_path,
+        wheel(tmp_path, entry="example = example.nested:install", files={"example/nested.py": "raise RuntimeError('The checker must not import plugin code')\n"}),
+    )
 
 
 @pytest.mark.parametrize(
@@ -112,10 +120,14 @@ def test_single_module_source_cannot_drop_its_manifest(tmp_path):
         checker.check_wheel(tmp_path, wheel(tmp_path))
 
 
-def test_wheel_paths_cannot_escape_temporary_directory(tmp_path):
+@pytest.mark.parametrize("name", ["../escaped", "/escaped", r"example\escaped", "C:/ui_manifest.json", "C:ui_manifest.json", "C:/example/ui_manifest.json", "C:example/ui_manifest.json"])
+def test_wheel_paths_cannot_escape_temporary_directory(tmp_path, monkeypatch, name):
+    def fail_if_extracted(*args, **kwargs):
+        pytest.fail("Unsafe wheel paths reached extraction")
+
+    monkeypatch.setattr(ZipFile, "extractall", fail_if_extracted)
     with pytest.raises(ValueError, match="wheel path"):
-        checker.check_wheel(tmp_path, wheel(tmp_path, files={"../escaped": "no"}))
-    assert not (tmp_path.parent / "escaped").exists()
+        checker.check_wheel(tmp_path, wheel(tmp_path, files={name: "no"}))
 
 
 def test_invalid_packaged_python_is_rejected(tmp_path):
