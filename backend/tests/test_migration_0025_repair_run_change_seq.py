@@ -16,6 +16,7 @@ import pytest
 import sqlalchemy as sa
 from alembic import command
 from alembic.script import ScriptDirectory
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import deerflow.persistence.models  # noqa: F401  -- registers ORM models
 from deerflow.persistence.base import Base
@@ -118,17 +119,14 @@ async def test_0025_downgrade_preserves_ancestor_owned_schema_and_data(tmp_path)
     """
     db_path = tmp_path / "downgrade.db"
     url = f"sqlite+aiosqlite:///{db_path.as_posix()}"
-    await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+    engine = create_async_engine(url)
     try:
-        from deerflow.persistence.engine import get_engine
-
-        engine = get_engine()
-        assert engine is not None
         cfg = _get_alembic_config(engine)
+        # Start at the actual repair revision, not the later guarded native head.
+        await asyncio.to_thread(command.upgrade, cfg, REVISION)
 
         # Allocate a clock position so the data-preservation claim is real.
-        sf = get_session_factory()
-        assert sf is not None
+        sf = async_sessionmaker(engine, expire_on_commit=False)
         async with sf() as session:
             assert await RunRepository._next_change_seq(session) == 1
             await session.commit()
@@ -153,4 +151,4 @@ async def test_0025_downgrade_preserves_ancestor_owned_schema_and_data(tmp_path)
         with sqlite3.connect(db_path) as raw:
             assert raw.execute("SELECT value FROM run_change_clock WHERE id = 1").fetchone()[0] == 1
     finally:
-        await close_engine()
+        await engine.dispose()

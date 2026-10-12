@@ -45,7 +45,7 @@ async def test_0026_adds_nullable_claim_tokens_and_downgrades(tmp_path):
         await asyncio.to_thread(bootstrap._upgrade, cfg, PREVIOUS)
         assert await token_columns() == {}
 
-        await asyncio.to_thread(bootstrap._upgrade, cfg, "head")
+        await asyncio.to_thread(bootstrap._upgrade, cfg, REVISION)
         # Nullable so rows written before this revision stay valid.
         assert await token_columns() == dict.fromkeys(TOKEN_COLUMNS, True)
 

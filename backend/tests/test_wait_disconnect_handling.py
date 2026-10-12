@@ -524,7 +524,8 @@ class TestWaitForRunCompletion:
             completed = await asyncio.wait_for(wait_task, timeout=1.0)
 
             assert completed is True
-            assert record.status == RunStatus.running
+            assert record.status == RunStatus.error
+            assert record.error == "lease expired"
 
         asyncio.run(run())
 

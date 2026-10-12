@@ -1,6 +1,6 @@
 # 原生 DeerFlow ECS 工作池架构
 
-更新：2026-10-09。本文对应 `codex/ecs-native-reuse` 的实际实现。B 主干及 C 执行部分已通过本地验证和独立审查；C→B→C 依赖合同已通过本地主干与独立审查。原生 Scheduler 已通过真实自动派发组合主干与独立审查；原生记忆共享与本地索引也已通过真实主干及独立审查；浏览器原生模型步骤及无模型控制主干已分段验证并通过独立审查；fork 合并、运维及云验收仍待完成。本文不是部署完成声明。
+Updated 2026-10-10. B, C and C→B→C coexist using native DeerFlow runtime and shared execution accounting. Shanghai main acceptance, final backend composite and production image installation are complete; Scheduler/memory/fork integration retain their earlier independent evidence. See [current acceptance](ecs-native-shanghai-acceptance-2026-10-10.md) for exact evidence and operational boundaries.
 
 ## 需求与职责
 

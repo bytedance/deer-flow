@@ -17,8 +17,8 @@ goal injection, model tools or tool execution. Native memory retains shared owne
 browser control uses an immutable operator provider snapshot, native scoped
 Playwright sessions and an outbound native HTTP/Live relay. Worker teardown is
 owned by native-host release after finalizers; strict retired sessions cannot
-reinitialize. See the Gateway and tools guides. Cloud WSS/cgroup/NAS acceptance
-remains separate work.
+reinitialize. See the Gateway and tools guides. Shanghai native HTTP/WSS, cgroups and NAS main acceptance is recorded in
+`../docs/ecs-native-testing.md`; this does not establish OS reboot recovery.
 
 The backend runs a LangGraph-based super agent with sandbox execution, persistent memory, subagent delegation, and extensible tools in isolated per-thread environments.
 
@@ -31,8 +31,7 @@ The backend runs a LangGraph-based super agent with sandbox execution, persisten
 **Runtime**:
 - `make dev`, Docker dev, and production all run the agent runtime in Gateway via `RunManager` + `run_agent()` + `StreamBridge` (`packages/harness/deerflow/runtime/`). Nginx exposes that runtime at `/api/langgraph/*` and rewrites it to Gateway's native `/api/*` routers.
 - Gateway streams `write_file` and `str_replace` argument deltas in bounded batches for multi-mode `messages-tuple` consumers; single-mode message consumers retain the original per-chunk contract. Non-message frames flush pending batches, and `values` remains an optional complete-state snapshot rather than a prerequisite for batching.
-- With `stream_subgraphs`, subgraph frames keep their namespace in the SSE event name (`values|<ns>`, LangGraph Platform style) instead of impersonating root frames — a delegated subagent inherits the parent checkpoint namespace, so publishing its `values` snapshot as bare `values` replaces the whole thread view in SDK clients (#4399). Root-only consumers (file-tool chunk batcher, subagent event persistence, LLM error-fallback detection) ignore namespaced frames. The web frontend does not request subgraph streaming; subtask progress rides root-namespace `task_*` custom events.
-- Background subagent identity is deliberately split: the provider `tool_call_id` remains the correlation key for `ToolMessage`, `task_*` SSE events, persisted lifecycle events, frontend cards, and the public `ExtensionData.scope_id` contract (stored as `SubagentResult.external_task_id`), while `SubagentExecutor.execute_async()` generates a full server-side `execution_id` for `SubagentResult.task_id`, the process-wide registry, polling, cancellation, timeout handling, and cleanup. Provider IDs are not globally unique across parent runs, so they must never become registry ownership keys; scheduler closures retain their own `SubagentResult` rather than resolving ownership again through the mutable registry. Terminal subagent token usage travels in the current run's `ToolMessage.additional_kwargs` and is attributed from message state, never through a process-global provider-ID cache.
+- Subgraph SSE frames retain their namespace; root consumers must not treat them as root state. Background subagents use provider tool_call_id for messages/events/public scope and a distinct server execution_id for registry ownership, cancellation and cleanup. Provider IDs are not globally unique; retain each SubagentResult in scheduler closures. Usage comes from the run's ToolMessage, never a global ID cache. See [runtime](packages/harness/deerflow/runtime/AGENTS.md) and [subagents](packages/harness/deerflow/subagents/AGENTS.md) for streaming, lazy entrypoints and lifecycle contracts.
 - Scheduled tasks dispatch through the normal Gateway run path. `launch_scheduled_thread_run` reads `get_app_config()` at dispatch and passes `scheduler.recursion_limit` (default 1000, matching the web UI; clamped by `max_recursion_limit`), so YAML changes apply on the next run without restarting Gateway.
 - Run-history `status` filters are occurrence states, not task states. `ScheduledTaskRunStatus` in `persistence/scheduled_tasks/model.py` is the shared API/repository vocabulary and must match the active and terminal occurrence-status sets. Keep owner lookup before reading history, and apply SQL task/status predicates before pagination; omitted status preserves the existing response.
 - The background scheduler is single-instance by default. `scheduler.multi_instance=true` opts into lease-aware recovery across Gateway instances and requires shared Postgres, `run_ownership.heartbeat_enabled=true`, and `run_events.backend=db`; otherwise startup rejects the configuration. Live scheduled runs are preserved when a peer starts; expired launch claims return to the durable queue, expired run leases are atomically taken over, stale launch writes are fenced by lease ownership, and the Postgres advisory-locked budget makes `max_concurrent_runs` a shared global cap for `launching`/`running` rows.
@@ -40,64 +39,17 @@ The backend runs a LangGraph-based super agent with sandbox execution, persisten
 - The multi-process startup gate also fires on `deployment.multi_instance: true`; contract in `docs/CONFIGURATION.md`.
 - Long-running MCP work uses a separate durable task runtime (`McpTaskService` + `mcp_tasks`, lease-based recovery) rather than keeping remote task IDs or status polling inside the Agent loop; only submit remains Agent-visible, the database is the source of truth, and `ThreadState` receives only a bounded current-thread projection. Full contract (leases, cancellation fencing, delivery idempotency, management-tool exposure): [packages/harness/deerflow/mcp/AGENTS.md](packages/harness/deerflow/mcp/AGENTS.md).
 - MCP task notification retries, dead-lettering, and the cancel endpoint's worker-stopped 503 are part of that same contract — see [packages/harness/deerflow/mcp/AGENTS.md](packages/harness/deerflow/mcp/AGENTS.md).
-- Scheduled-task dispatch permits one active occurrence per task via `uq_scheduled_task_run_active` (`task_id WHERE status IN ('queued','launching','running')`). Durable `queued` rows survive restarts; only lease-fenced `launching` may call Gateway launch; `running` references the durable run. Stable admission idempotency keys reuse that run after recovery. Reused-thread `ConflictError` returns `launching` to `queued`; other launch errors become `failed`. Atomic queue claims enforce `max_concurrent_runs` and the per-owner cap, excluding waiting rows; the budget count and its UPDATE are separate statements, so writers must serialize before the count (Postgres advisory lock; SQLite `BEGIN IMMEDIATE`, whose deferred transaction otherwise reserves the writer only at the UPDATE) or claims on distinct rows overshoot the cap. Repeated triggers coalesce; same-thread FIFO blocks behind older active rows. Queue admission, PATCH/resume, pause and delete lock the parent before the occurrence, freezing active task definitions. Pause/delete atomically cancel `queued` work but reject `launching`/`running`; PATCH/resume reject all active states. Only queued conflicts offer pause cancellation. Manual triggers may queue/run while paused.
+- Scheduled admission allows one active queued/launching/running occurrence per task. Only lease-fenced launching calls Gateway; stable idempotency reuses durable runs. Queue conflicts return to queued, other launch errors fail. Serialize before shared/global and per-owner budget counts (Postgres advisory lock; SQLite BEGIN IMMEDIATE), excluding waiting rows. Coalesce triggers and enforce same-thread FIFO. Mutations lock parent before occurrence: pause/delete cancel queued but reject launching/running; PATCH/resume reject all active states. Manual triggers may queue/run while paused. The persistence guide owns exact leases, queue timeouts and recovery semantics.
 - Scheduled-task lifecycle, recovery and queue timeout: [persistence guide](packages/harness/deerflow/persistence/AGENTS.md#scheduled-task-lifecycle).
 - `POST /api/scheduled-tasks/preview-cron` requires authenticated `threads:read`. Bounded cron previews call the shared scheduler calculator in `asyncio.to_thread`, preserving its DST semantics. Capture the optional aware reference once; return UTC and offset-bearing local occurrences without acquiring task/thread/run stores or dispatching work. This advisory API does not reserve execution.
 - Gateway MCP/skill updates write `extensions_config.json` at runtime. Production Compose mounts it read-write (`config.yaml` stays `:ro`); Helm seeds a writable home-volume copy. Hold both `extensions_config_write_lock` and the sidecar advisory `extensions_config_file_lock` during read-modify-write to prevent lost updates across workers. `atomic_write_extensions_config` uses temp-file replacement; only mount-point `EBUSY` permits a non-atomic in-place overwrite (crashes can truncate). Warn about this fallback once per target; propagate other errors. `get_extensions_config()` revalidates reads by file signature; see [config caching](packages/harness/deerflow/config/AGENTS.md). Tests: `tests/test_compose_extensions_config_writable.py`, `tests/test_extensions_config_atomic_write.py`, `tests/test_helm_extensions_config_writable.py`.
 - MCP cache reset scope and discovery fencing: [MCP guide](packages/harness/deerflow/mcp/AGENTS.md).
 
-**Project Structure**:
-```
-deer-flow/
-├── Makefile                    # Root commands (check, install, dev, stop)
-├── config.yaml                 # Main application configuration
-├── extensions_config.json      # MCP servers and skills configuration
-├── backend/                    # Backend application (this directory)
-│   ├── Makefile               # Backend-only commands (dev, gateway, lint)
-│   ├── langgraph.json         # LangGraph Studio graph configuration
-│   ├── packages/
-│   │   ├── extension-api/     # public, host-independent extension contracts (import: deerflow_extension_api.*)
-│   │   └── harness/           # deerflow-harness package (import: deerflow.*)
-│   │       ├── pyproject.toml
-│   │       └── deerflow/
-│   │           ├── agents/            # LangGraph agent system
-│   │           │   ├── lead_agent/    # Main agent (factory + system prompt)
-│   │           │   ├── middlewares/   # middleware components (see Middleware Chain section)
-│   │           │   ├── memory/        # Memory extraction, queue, prompts
-│   │           │   └── thread_state.py # ThreadState schema
-│   │           ├── sandbox/           # Sandbox execution system
-│   │           │   ├── local/         # Local filesystem provider
-│   │           │   ├── sandbox.py     # Abstract Sandbox interface
-│   │           │   ├── tools.py       # bash, ls, read/write/str_replace
-│   │           │   └── middleware.py  # Sandbox lifecycle management
-│   │           ├── subagents/         # Subagent delegation system
-│   │           │   ├── builtins/      # general-purpose, bash agents
-│   │           │   ├── executor.py    # Background execution engine
-│   │           │   └── registry.py    # Agent registry
-│   │           ├── tools/builtins/    # Built-in tools (present_files, ask_clarification, view_image, review_skill_package)
-│   │           ├── mcp/               # MCP integration (tools, cache, client)
-│   │           ├── integrations/      # Managed first-party integration installers (e.g. Lark CLI skill pack)
-│   │           ├── extensions/        # Python plugin loader, registry, placement, and isolation
-│   │           ├── models/            # Model factory with thinking/vision support
-│   │           ├── skills/            # Skills discovery, loading, parsing
-│   │           ├── config/            # Configuration system (app, model, sandbox, tool, etc.)
-│   │           ├── community/         # Community tools (search/fetch/scrape, image search, AIO sandbox)
-│   │           ├── reflection/        # Dynamic module loading (resolve_variable, resolve_class)
-│   │           ├── utils/             # Utilities (network, readability)
-│   │           └── client.py          # Embedded Python client (DeerFlowClient)
-│   ├── app/                   # Application layer (import: app.*)
-│   │   ├── gateway/           # FastAPI Gateway API
-│   │   │   ├── app.py         # FastAPI application
-│   │   │   └── routers/       # FastAPI route modules (models, mcp, memory, skills, uploads, threads, artifacts, agents, suggestions, channels)
-│   │   └── channels/          # IM platform integrations
-│   ├── scripts/benchmark/       # Standalone reproducible backend benchmarks
-│   ├── tests/                 # Test suite
-│   └── docs/                  # Documentation
-├── frontend/                   # Next.js frontend application
-└── skills/                     # Agent skills directory
-    ├── public/                # Public skills (committed)
-    └── custom/                # Custom skills (gitignored)
-```
+**Module map** (read the owning guide before changing a module):
+- Gateway REST/auth/runtime wiring: [app/gateway/AGENTS.md](app/gateway/AGENTS.md); IM platforms: [app/channels/AGENTS.md](app/channels/AGENTS.md).
+- Harness framework: [packages/harness/deerflow/AGENTS.md](packages/harness/deerflow/AGENTS.md). Its agents, runtime, sandbox, MCP, config, persistence, models, skills, extensions and tools directories each own an `AGENTS.md`.
+- Public extension contracts: `packages/extension-api/` (`deerflow_extension_api.*`); native ECS adapter: [packages/ecs-executor/README.md](packages/ecs-executor/README.md).
+- Tests: [tests/AGENTS.md](tests/AGENTS.md); benchmarks: `scripts/benchmark/`; application configuration and skills live at the repo root.
 
 ATX outline closing markers use a linear suffix scan; do not use unanchored
 whitespace regex searches on unbounded uploaded headings. The long-heading
@@ -133,40 +85,9 @@ production functions; never duplicate them or introduce an alternative runtime.
 - Use fixed clocks and deterministic ordering for offline selection. Results
   must record the config, manifest, prompt, dataset, and git revisions used.
 
-`scripts/benchmark/deermem_eviction/` evaluates the production
-`select_facts_for_capacity()` implementation used by DeerMem. It compares only
-the historical `confidence` policy and PR #4789's opt-in `hybrid-v1`; do not add
-another eviction strategy to this evaluation. Run its offline checks from
-`backend/`:
+`scripts/benchmark/deermem_eviction/` evaluates production `select_facts_for_capacity()` only for historical confidence and opt-in hybrid-v1. Its [README](scripts/benchmark/deermem_eviction/README.md) owns commands/dataset contracts. Offline tests use synthetic fixtures and require no provider credentials, network or LongMemEval dataset.
 
-```bash
-PYTHONPATH=. uv run python -m scripts.benchmark.deermem_eviction validate-contracts
-PYTHONPATH=. uv run python -m scripts.benchmark.deermem_eviction validate --dataset "$LONGMEMEVAL_ORACLE_PATH"
-PYTHONPATH=. uv run python -m scripts.benchmark.deermem_eviction run-policy \
-  --dataset "$LONGMEMEVAL_ORACLE_PATH" \
-  --output-dir /tmp/deermem-eviction-policy-run
-PYTHONPATH=. uv run pytest tests/test_bench_deermem_eviction_*.py -q
-```
-
-The offline test suite must not require network access, provider credentials,
-or the LongMemEval dataset. Small LongMemEval-shaped fixtures must be synthetic
-and generated by tests.
-
-`scripts/benchmark/concurrency/` measures multi-process contention on the
-`users` table (N separate OS processes, not asyncio tasks) for SQLite vs
-Postgres -- the scenario `CONFIGURATION.md` requires Postgres for. `worker.py`
-connects directly via SQLAlchemy (skipping the ~8.5s Alembic bootstrap the
-orchestrator already ran once) and mirrors the app's per-connection SQLite
-PRAGMAs; `run_concurrency_bench.py` seeds a disposable per-run Postgres schema,
-synchronises workers on a READY/GO barrier before timing, and exits non-zero on
-any crash, short op count, or `errors > 0`. Postgres runs need a throwaway
-database via `--pg-url`; nothing here touches `public`. Run from `backend/`:
-
-```bash
-uv run python scripts/benchmark/concurrency/run_concurrency_bench.py \
-  --backend sqlite --workers 2,4,8,16 --ops-per-worker 50 --read-ratio 0.7
-uv run pytest tests/test_bench_concurrency.py tests/test_bench_worker.py -q
-```
+`scripts/benchmark/concurrency/` measures users-table contention in separate OS processes, not asyncio tasks, for SQLite/Postgres. Its orchestrator bootstraps once; workers mirror production SQLite PRAGMAs, synchronize READY/GO and fail on crashes, short counts or errors. PostgreSQL uses a disposable per-run schema from --pg-url, never public. Run the existing `run_concurrency_bench.py` and `tests/test_bench_concurrency.py`/`test_bench_worker.py` from backend.
 
 ## Commands
 
@@ -216,7 +137,12 @@ More specific `AGENTS.md` files in backend code directories contain the subsyste
 
 ## Architecture
 
-- **Native ECS local execution bridge**: optional `packages/ecs-executor` registers `ecs_executor.interceptor:build_execution_scope_interceptor` through native `mcpInterceptors`. Exact HTTP raw submit calls use current runtime user/thread/run/incarnation; background management scopes bind only authenticated persisted owner/task ID and require enabled fail-closed `user_auth` plus a matching `task_toolsets` group. The standalone ordinary-tools MCP server stages jobs in its separate `ecs_execution_jobs` SQL ledger; native `McpTaskService` commits `mcp_tasks` before its first signed status poll activates work. Explicit single-host mode uses one POSIX/Docker worker; PostgreSQL pool mode uses the same engine through outbound HTTP workers. Fixed operator nodes, node-specific credentials, protocol/version and NAS-marker checks precede admission. `Scheduling` serializes shared B/C resource reservations with a Postgres advisory lock, subtracting resident Gateway overhead. Admission aggregates unreleased resource scalars in SQL, filters eligible queued work with FIFO LIMIT 1, and recovery filters node/kind/unreleased before loading snapshots; completed history is never materialized by worker polling. C is delivered separately by `ecs_executor.agent_dispatch` to an opt-in native Gateway worker; the B Docker worker never adopts C. `ECS_NATIVE_CONFIG` installs the operator host before native orphan reconciliation and fails startup closed when enabled configuration is invalid. The host snapshots the already-admitted native Run, signs owner/thread/incarnation/run/job/generation/budget, and adopts that exact pending Run through `native_admission.adopt_native_run`; `services.execute_admitted_native_run` remains the sole native execution closure. Queued ownership is renewed from C-only durable rows before orphan recovery on every native role; workers first require authenticated outbound central bootstrap and fail startup closed when unavailable. Queued cancellation and pre-adoption refusal persist typed SQL-filtered settlement intent before native terminal commit, through END publication and reservation release; error CAS cannot overwrite accepted cancellation. Changed native ownership stays uncertain and reserved. Adopted native tasks and owned STOP remain tracked through transport/report retries; shutdown quiesces claims/adoption before manager drain, fences CAS-to-task attachment, and retains cleanup-only observation of already-adopted aborts. The host waits within the 120-second physical allowance and quarantines client/node lock until native finalizers and STOP unwind. Request secrets cross only as native Fernet-encrypted caller string pairs bound to owner/thread/incarnation/Run/node inside the signed assignment snapshot, then rebind solely into worker memory for native skill activation; ledger/API config remains redacted. Native worker and B daemon have separate node locks, while shared Scheduling accounts both against the same node. Native warm AIO is charged continuously as resident capacity, requires Docker 1 CPU/1 GiB, replicas=1 with opt-in hard_capacity and strict physical container counting. Dynamic reservation release follows the full native task finalizer; cancellation additionally destroys and verifies the exact physical sandbox. The initial shell acceptance excludes browser/memory capabilities explicitly; Dependency notification admissions now forward outbound to central; full configured browser/memory integration and cloud Gateway cgroup enforcement remain pending acceptance. Assignment/attempt/generation persist before delivery; reports whitelist mutable result/start/STOP fields and require owner/generation plus a fresh snapshot. Lease expiry never frees or moves unknown jobs; same-node recovery changes only report ownership after the default 120-second safety allowance and never replays start. Node labels fence physical ownership and cleanup is node-scoped. The worker persists start intent before starting, never replays unknown starts, and returns retryable cancel errors until physical removal is confirmed. Terminal completion/output/publication failures persist `cleanup_pending` with the result; terminal scans verify ownership and STOP, remove the container, and clear pending only after observed absence, preserving results and retry intent across removal errors/restarts. Operator profiles own image/resources/non-root user/network (`none` by default, explicit network allowlist). Native declared file references resolve through fixed `Paths`, owner/incarnation `threads_meta` row locks, no-follow dirfds and SHA256 checks, then persist immutable input snapshots. Bounded safe output collection supplies a manifest; publication uses the same metadata guard and dirfd-relative atomic rename into native `outputs/<job_id>`, returning the existing artifact API. Metadata DB access performs SELECT/row locks only, no application writes or schema changes. Dependency coordination reads canonical native `mcp_tasks` membership; the executor owns no second task authority, thread or Agent loop. Central pool mode never executes Docker work or connects inbound to workers. See the package README/config examples and `test_ecs_executor_b_main.py` for offline and opt-in real TCP/Docker/Postgres coverage. Native file paths preserve exact Unicode names and spaces, with 512 UTF-8 bytes total/255 per component; reject control characters, backslashes and empty/dot components without normalizing aliases.
+- **Native ECS execution bridge**: optional `packages/ecs-executor` integrates ordinary persistent MCP jobs with native Gateway execution; [package contract](packages/ecs-executor/README.md) owns protocol, recovery, dependency and browser depth. No second Agent loop, checkpoint, goal, thread or native task authority is permitted. Harness imports neither app nor executor.
+- Submit scopes bind authenticated owner/thread/run/incarnation; management scopes bind persisted owner/task and require fail-closed `user_auth` plus matching `task_toolsets`. Native `McpTaskService` commits before signed status polling activates the executor's separate ledger. Fixed node credentials, protocol/version and canonical NAS marker precede admission. Central never executes Docker or connects inbound to workers; B workers never adopt C.
+- Shared Scheduling uses a PostgreSQL advisory lock and resident deductions; SQL aggregates unreleased capacity, selects eligible FIFO work with LIMIT 1, and filters recovery before loading records. Never materialize completed history during polling. C snapshots/signs the admitted native Run and adopts it through `native_admission.adopt_native_run`; `services.execute_admitted_native_run` remains the sole execution closure. Install the host before orphan recovery and fail closed on invalid configuration or unavailable authenticated outbound bootstrap.
+- Assignment/attempt/generation and start intent persist before delivery/start. Reports whitelist result/start/STOP fields and fence owner/generation/snapshot. Never replay unknown starts or release/move uncertain work on lease expiry. Same-node recovery changes only report ownership after the 120-second safety allowance. Queued cancellation/pre-adoption refusal persists settlement intent before native terminal commit/END/release; error CAS cannot overwrite cancellation. Changed native ownership stays reserved.
+- Shutdown fences claims/adoption/task attachment, tracks adopted aborts through finalizers and physical STOP, and quarantines client/node locks when uncertain. Native and B node locks are separate but capacity is shared. Warm AIO is charged continuously: 1 CPU/1 GiB, replicas=1, hard capacity and strict physical counts. Release follows native finalizers; cancellation verifies exact sandbox destruction. Terminal output/publication failures retain results plus cleanup_pending; node-scoped cleanup clears it only after verified physical absence, preserving retries across removal errors/restarts.
+- Profiles own immutable image/resources/non-root user/network; default network is none with an explicit allowlist. Request secrets cross only as native Fernet-encrypted caller pairs bound to signed owner/thread/incarnation/Run/node, then rebind into worker memory; ledger/API configuration remains redacted. Inputs use fixed Paths, owner/incarnation threads_meta row locks, no-follow dirfds and SHA256 immutable snapshots. Outputs use bounded manifests and atomic dirfd rename to native outputs/job_id; metadata DB access is SELECT/row-lock only. Preserve Unicode/spaces (512 UTF-8 bytes total, 255/component); reject controls, backslashes and empty/dot components without alias normalization.
 
 ### Harness / App Split
 
@@ -227,22 +153,7 @@ The backend is split into two layers with a strict dependency direction:
 
 **Dependency rule**: App imports deerflow, but deerflow never imports app. This boundary is enforced by `tests/test_harness_boundary.py` which runs in CI.
 
-**Import conventions**:
-```python
-# Harness internal
-from deerflow.agents import make_lead_agent
-from deerflow.models import create_chat_model
-
-# App internal
-from app.gateway.app import app
-from app.channels.service import start_channel_service
-
-# App → Harness (allowed)
-from deerflow.config import get_app_config
-
-# Harness → App (FORBIDDEN — enforced by test_harness_boundary.py)
-# from app.gateway.routers.uploads import ...  # ← will fail CI
-```
+Use `deerflow.*` for harness imports and `app.*` for application imports. Never import app from harness, even indirectly; the boundary test enforces this.
 
 Package import hygiene: the `deerflow.agents` and `deerflow.subagents` package
 roots expose heavyweight graph/executor entrypoints lazily. The
@@ -353,9 +264,7 @@ DDGS 9.14.1 recency uses only enabled Brave/DuckDuckGo/Yahoo engines honoring
 `timelimit`: `auto`/`all` selects this set; drop incompatible engines and fall back
 to this set if empty. Re-check on DDGS upgrades.
 
-### Tavily Fetch
-
-Title fallback: result URL, then request URL.
+Tavily titles fall back to result URL, then request URL.
 
 ### File Upload
 
@@ -372,7 +281,7 @@ Outlines use ATX syntax (1–6 hashes, space/tab separator, ≤3 leading spaces)
 - Mounted uploads skip sandbox acquire/sync. AIO remote/provisioner requires accurate `sandbox.thread_data_mounts: true`; omission keeps backend auto-detection.
 - `UploadsMiddleware` caps outline titles at 200 characters and previews at 2000 including markers. Titles use `original_user_content`, not upload-prefixed content; attachment-only titles use a sanitized, bounded filename or count.
 
-See [docs/FILE_UPLOAD.md](docs/FILE_UPLOAD.md) for details.
+[Upload details](docs/FILE_UPLOAD.md).
 
 ### Plan Mode
 
@@ -399,14 +308,9 @@ Automatic conversation summarization when approaching token limits:
   preventing either worker-local or cross-worker checkpoint-write races.
 - Cache only first-candidate no-ops; never suppress primary retries with fallback results. See [reuse and telemetry](docs/summarization.md#reuse-and-telemetry) for cache and counter contracts.
 
-See [docs/summarization.md](docs/summarization.md) for details.
-
 ### Vision Support
 
-For models with `supports_vision: true`:
-- `ViewImageMiddleware` processes images in conversation
-- `view_image_tool` added to agent's toolset
-- Images are converted to base64 and appended to the model request as a hidden message carrying both a reserved ID prefix and a server-owned metadata marker; Gateway strips that marker from untrusted input, and the middleware requires both identifiers to recognize its own message. The middleware injects inside `wrap_model_call`, so the payload never enters graph state: checkpoints retain only lightweight `viewed_images` metadata, while client-chosen IDs survive. It also sweeps its own message out of every request before rebuilding it, so a payload stranded in an older checkpoint by an interrupted run stops being resent
+Models with supports_vision enable ViewImageMiddleware/view_image_tool. Base64 payloads require both server-owned marker and reserved ID; Gateway strips untrusted markers. Inject only inside wrap_model_call, never graph state/checkpoints; persist lightweight metadata, preserve client IDs and sweep stranded payloads before rebuilding. See [middleware guide](packages/harness/deerflow/agents/middlewares/AGENTS.md).
 
 ## Code Style
 
@@ -417,7 +321,7 @@ For models with `supports_vision: true`:
 
 ## Documentation
 
-See `docs/` directory for detailed documentation:
+Module documentation:
 - [CONFIGURATION.md](docs/CONFIGURATION.md) - Configuration options
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md) - Architecture details
 - [API.md](docs/API.md) - API reference
@@ -434,3 +338,18 @@ legacy Fleet intent immediately after native DB initialization, before checkpoin
 recovery and scheduler activation. A schema upgrade is not permission to replay old
 intent. Inventory/disposition and stopped-writer rollback are documented in
 `docs/ecs-native-fork-integration.md`; cloud/ops gates remain separate.
+
+Task6B native role Compose, private reference-only generation, durable operator drain
+and stopped-writer image selection are documented in `docs/ecs-native-deployment.md`. Installed/cloud acceptance is separately recorded in
+`docs/ecs-native-shanghai-resume-2026-10-10.md`. The current Shanghai run accepts
+B/C/BC, worker CLI/controller Compose lifecycle and native browser HTTP/WSS
+control and same-schema compatible rollback (#48). OS reboot recovery and final
+cold artifacts remain separate gates. Use the owned Jenkins test job; do not run Docker/runtime tests locally.
+
+Native ECS publication keeps staging private, then makes only the completed job output tree readable (0755 directories / non-executable 0644 files) through pinned no-follow descriptors before atomic rename. This matches native per-thread sandbox mounts across UIDs; owner/incarnation locks and artifact API checks remain authoritative. Executor pool data, tenant ancestors and existing publications are unchanged. Regression: `tests/test_ecs_native_publication_permissions.py` requires the owned Linux root test container to verify an actual non-root reader.
+
+
+Runtime artifact MIME lookup requires the system `media-types` table even on a slim image; `backend/Dockerfile` installs it in the runtime stage over HTTPS. Preserve native active-content attachment handling instead of relaxing MIME/security assertions when that table is absent. Full offline backend CI also needs a Git executable and real repository metadata for benchmark identity checks. Archive-based isolated fixtures may initialize a new repository from verified public bytes, but must identify its commit as synthetic fixture metadata, retain the original source/overlay hashes, and never copy private Git credentials/history. Git is a test-image dependency; adding it to CI must not silently add it to production role images.
+
+
+Native ECS cloud CI note: trusted repository regression fixtures require Git and make and the extension-manager source-install tests require package-index access and their own loopback Git/index servers. Keep Git/make in the test-only image. Invoke `/app/backend/.venv/bin/python -m pytest` and `/app/backend/.venv/bin/ruff` directly. Remove inherited `UV_PROJECT_ENVIRONMENT` and `UV_OFFLINE`. Give the frozen source backend an independent byte copy of the installed venv (no shared writable packages); `UV_NO_SYNC=1` keeps ordinary `uv run` on that installed checkout. ExtensionManager strips the selector and no-sync keys for its installs; direct extension-test `uv sync` must target its own temporary project. Check selected base-package metadata afterward to detect damage to the fixed top-level environment. A CI Docker bridge may provide dependency transport while mounting only reviewed public test source; no credentials, env files, Docker socket, NAS/database data or published ports belong in that fixture. This CI transport does not change ordinary B sandbox network-none isolation or production dependencies. Full-collection tests must select the already-loaded backend conftest plugin by exact path when checking its hooks; bare `import conftest` can resolve a nested test plugin.

@@ -135,7 +135,7 @@ class NativeDispatchHost:
             thread = await self.app.state.thread_store.get(record.thread_id, user_id=record.user_id)
             if thread is not None:
                 node = await asyncio.to_thread(_affinity, self.pool.store, record.user_id, record.thread_id, thread["incarnation"])
-        if node is None and getattr(self, "browser_control", None) is None and origin.get("kind") not in self.config.get("remote_origins", ["schedule"]):
+        if node is None and self.config.get("remote_all") is not True and getattr(self, "browser_control", None) is None and origin.get("kind") not in self.config.get("remote_origins", ["schedule"]):
             return False
         node = node or self.config["native_node"]
         snapshot = await snapshot_factory(transport_node=node, transport_secret=self.credentials[node])

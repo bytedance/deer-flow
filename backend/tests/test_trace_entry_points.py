@@ -274,7 +274,7 @@ async def test_mcp_notification_launcher_binds_a_trace_context(_stub_app_config,
 
     for attempt in (1, 2):
         await launch_mcp_task_notification_run(
-            app=SimpleNamespace(),
+            app=SimpleNamespace(state=SimpleNamespace()),
             thread_id="thread-mcp",
             assistant_id="lead_agent",
             owner_user_id="user-1",

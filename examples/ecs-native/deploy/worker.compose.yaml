@@ -1,0 +1,35 @@
+# No published port. Native Gateway and outbound B daemon share resident cgroups.
+services:
+  resident:
+    image: ${ECS_ROLE_IMAGE:?immutable image required}
+    pull_policy: never
+    cpus: 0.5
+    mem_limit: 1g
+    pids_limit: 512
+    env_file: ${ECS_PRIVATE_DIR:?required}/worker.env
+    environment:
+      ECS_RESIDENT_ROLE: worker
+      ECS_NATIVE_CONFIG: /run/operator/worker.json
+      ECS_WORKER_CONFIG: /run/operator/b-worker.json
+      DEER_FLOW_CONFIG_PATH: /run/operator/native.json
+      DEER_FLOW_EXTENSIONS_CONFIG_PATH: /run/operator/extensions.json
+      DEER_FLOW_HOME: ${ECS_NAS_ROOT:?required}
+      DEER_FLOW_MEMORY_INDEX_PATH: /var/cache/deerflow/memory
+      DEER_FLOW_SANDBOX_HOST: host.docker.internal
+      DEER_FLOW_SANDBOX_CPUS: '1'
+      DEER_FLOW_SANDBOX_MEMORY: 1g
+    command: [python, -m, ecs_executor.resident]
+    volumes:
+      - ${ECS_PRIVATE_DIR}:/run/operator:ro
+      - ${ECS_NAS_ROOT}:${ECS_NAS_ROOT}
+      - /var/run/docker.sock:/var/run/docker.sock
+      - worker_memory:/var/cache/deerflow/memory
+    extra_hosts: [host.docker.internal:host-gateway]
+    stop_grace_period: 240s
+    healthcheck:
+      test: [CMD, python, -c, 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8001/health/ready", timeout=5)']
+      interval: 3s
+      timeout: 6s
+      retries: 60
+volumes:
+  worker_memory:

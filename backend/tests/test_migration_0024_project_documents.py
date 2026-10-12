@@ -12,6 +12,7 @@ import asyncio
 import pytest
 import sqlalchemy as sa
 from alembic import command
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from deerflow.persistence.bootstrap import _get_alembic_config
 from deerflow.persistence.engine import close_engine, init_engine
@@ -79,9 +80,11 @@ async def test_0024_upgrade_creates_table_and_indexes(tmp_path):
 
 
 async def test_0024_downgrade_drops_table_and_reupgrade_recreates(tmp_path):
-    engine = await _engine(tmp_path)
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'roundtrip.db'}")
     try:
         cfg = _get_alembic_config(engine)
+        # Exercise this historical revision without crossing the guarded native merge.
+        await asyncio.to_thread(command.upgrade, cfg, REVISION)
         await asyncio.to_thread(command.downgrade, cfg, PREVIOUS)
         exists, _, _ = await _inspect(engine)
         assert not exists
@@ -95,7 +98,7 @@ async def test_0024_downgrade_drops_table_and_reupgrade_recreates(tmp_path):
         assert columns == COLUMNS
         assert INDEXES <= indexes
     finally:
-        await close_engine()
+        await engine.dispose()
 
 
 async def test_0024_upgrade_is_guarded_against_an_existing_table(tmp_path):

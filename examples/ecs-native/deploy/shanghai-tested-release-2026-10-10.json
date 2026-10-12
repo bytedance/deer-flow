@@ -1,0 +1,53 @@
+{
+  "format_version": 1,
+  "date": "2026-10-10",
+  "scope": "tested_native_shanghai_release",
+  "source_sha256": "c6af94a95ae710b273ad2f07385beaa756f0c85e29f2e558eb92dee0f34da137",
+  "source_archive_sha256": "e40428adefee18821b93104b5215852521b3555a390ad02531049ba2fa80b1a4",
+  "source_manifest_sha256": "33078fa2fb16f7e7f5cbc6c96ecce3bf644f9298745b94efae0d64908ae09f1b",
+  "backend_image_id": "sha256:e84bc2845f89279aaf6d480302792461582c8eba306d79b377b5c867a7c838ae",
+  "frontend_image_id": "sha256:d302f8c890fbb3259f633fe38244d841f8614016cdf77818660d7bf949bb46de",
+  "frontend_provenance": "separate previously accepted native UI source566/archivee27; not a c6af frontend build",
+  "image_archive_sha256": "3534a12756038a388d732a4e9a2abcbd6098d50e070b7eebe938fe153d0fb9d3",
+  "image_archive_bytes": 804700672,
+  "jenkins_job": "deerflow-shanghai-test",
+  "builds": {
+    "65": "SUCCESS",
+    "66": "SUCCESS",
+    "67": "SUCCESS",
+    "68": "FAILURE",
+    "69": "SUCCESS"
+  },
+  "receipts": {
+    "proof/production-repaired-contract-transfer.json": "7decea751374f814bc1d0e22fd38c8b89b0ebc7c91721deadeb3cf62a83e14b3",
+    "proof/final-production-repaired-contract-image.json": "a6174550ce71c124926515ddc2a48fc2b8445070c9fbd670bb0be9709194ac3a",
+    "transfer/production-repaired-contract-c6af94a95ae7-image.json": "dfec67485468a158f75a1bd9a25dc45bd08bd2338bb9fe5a68b5cfa0c4ee4b17",
+    "proof/final-code-gates-repaired-composite.json": "838e2518b5bedb66989049c1b9343cc6047b157c9cc6a22048518d02e1372245",
+    "proof/production-repaired-contract-recovery-deployment.json": "72e3327ecc4fd677dc621cc9bca5b4d41fef314e519f5afe71afbc51d71e6206"
+  },
+  "native_revision": "0035_native_fork_compatibility",
+  "executor_revision": "e0001_execution_ledger",
+  "operator_drain": true,
+  "unreleased": 0,
+  "history_preserved": true,
+  "models_called_by_final_delivery": false,
+  "worker_resident": {
+    "cpu_millis": 500,
+    "memory_bytes": 1073741824,
+    "memory_swap_bytes": 2147483648
+  },
+  "operation_scope": "worker installed operator CLI; controller guarded host Compose; manual NAS bind recovery",
+  "unverified": [
+    "controller installed CLI",
+    "OS reboot automatic NAS bind",
+    "database point-in-time rollback"
+  ],
+  "cold_entry": "docs/ecs-native-deployment.md",
+  "acceptance": "docs/ecs-native-shanghai-acceptance-2026-10-10.md",
+  "artifact_locations": {
+    "jenkins_root": "/data/jenkins-agent/deerflow/native-task6b-56636cebddc6",
+    "source_archive": "transfer/deer-native-final-source-c6af94a95ae7.tar.gz",
+    "image_archive": "transfer/production-repaired-contract-c6af94a95ae7-image.tar",
+    "ecs_received_root": "/srv/deerflow-native-task6b/56636cebddc6/received/"
+  }
+}

@@ -263,6 +263,7 @@ def test_run_wait_readers_return_materialized_final_values() -> None:
         run_id="run-1",
         thread_id="thread-1",
         task=None,
+        ownership_lost=False,
         status=RunStatus.success,
         error=None,
     )
@@ -321,6 +322,7 @@ def test_run_wait_readers_preserve_terminal_error_without_checkpoint() -> None:
         run_id="run-1",
         thread_id="thread-1",
         task=None,
+        ownership_lost=False,
         status=RunStatus.error,
         error="run failed before checkpoint",
     )
@@ -370,6 +372,7 @@ def test_run_wait_readers_preserve_terminal_error_when_accessor_builder_fails(ro
         run_id="run-1",
         thread_id="thread-1",
         task=None,
+        ownership_lost=False,
         status=RunStatus.error,
         error="run failed before checkpoint",
     )

@@ -81,8 +81,13 @@ async def test_worker_http_forwarding_supplies_native_asgi_method_and_identity()
     assert response["kind"] == "http" and response["status"] == 200 and response["body"]["title"] == "native"
 
 
-def test_native_live_session_disables_secret_bearing_locals(monkeypatch):
-    import conftest
+def test_native_live_session_disables_secret_bearing_locals(monkeypatch, request):
+    from pathlib import Path
+
+    expected = Path(__file__).resolve().with_name("conftest.py")
+    plugins = [plugin for plugin in request.config.pluginmanager.get_plugins() if getattr(plugin, "__file__", None) and Path(plugin.__file__).resolve() == expected]
+    assert len(plugins) == 1, "Backend privacy conftest plugin must be loaded exactly once"
+    conftest = plugins[0]
 
     assert hasattr(conftest, "pytest_configure"), "Live privacy policy is missing"
     config = SimpleNamespace(option=SimpleNamespace(showlocals=True))

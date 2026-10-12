@@ -24,7 +24,7 @@ class Scheduling:
         with self.transaction() as connection:
             for node_id, node in nodes.items():
                 old = connection.execute(select(_NODES.c.record).where(_NODES.c.id == node_id)).scalar_one_or_none()
-                record = {"config": node.model_dump(mode="json"), "heartbeat_at": (old or {}).get("heartbeat_at", 0)}
+                record = {"config": node.model_dump(mode="json"), "heartbeat_at": (old or {}).get("heartbeat_at", 0), "operator_drain": (old or {}).get("operator_drain", False)}
                 if old is None:
                     connection.execute(_NODES.insert().values(id=node_id, record=record))
                 else:
@@ -44,6 +44,30 @@ class Scheduling:
             except BaseException:
                 connection.rollback()
                 raise
+
+    def set_operator_drain(self, node_id, drain):
+        """Operator-only admission fence, serialized with claims; reports still work."""
+        if node_id not in self.nodes or type(drain) is not bool:
+            raise ValueError("Unknown fixed node or invalid drain value")
+        with self.transaction() as connection:
+            record = connection.execute(select(_NODES.c.record).where(_NODES.c.id == node_id)).scalar_one()
+            connection.execute(update(_NODES).where(_NODES.c.id == node_id).values(record={**record, "operator_drain": drain}))
+
+    def node_status(self, node_id):
+        """Bounded safe operator observation: never return inputs, identity or secrets."""
+        if node_id not in self.nodes:
+            raise ValueError("Unknown fixed node")
+        with self.transaction() as connection:
+            record = connection.execute(select(_NODES.c.record).where(_NODES.c.id == node_id)).scalar_one()
+            count = connection.execute(
+                select(func.count())
+                .select_from(_JOBS)
+                .where(
+                    _JOBS.c.record["node_id"].as_string() == node_id,
+                    func.coalesce(_JOBS.c.record["physical_stopped"].as_boolean(), False).is_(False),
+                )
+            ).scalar_one()
+            return {"operator_drain": record.get("operator_drain", False), "unreleased": count}
 
     def eligible(self, node_id, job):
         node = self.nodes[node_id]
@@ -68,7 +92,7 @@ class Scheduling:
             ).one()
             available_cpu = node.cpu_millis - node.resident_cpu_millis - cpu
             available_memory = node.memory_mib - node.resident_memory_mib - memory
-            if node.drain or kind not in node.kinds or count >= node.max_concurrency:
+            if node.drain or persisted.get("operator_drain", False) or kind not in node.kinds or count >= node.max_concurrency:
                 return None
             query = (
                 select(_JOBS)

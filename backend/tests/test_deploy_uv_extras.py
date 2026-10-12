@@ -23,9 +23,9 @@ pytestmark = pytest.mark.skipif(BASH is None, reason="repo shell-script tests ne
 
 def _backend_dockerfile_uv_sync_script() -> str:
     dockerfile = (REPO_ROOT / "backend" / "Dockerfile").read_text(encoding="utf-8")
-    match = re.search(r"""sh -c (?P<quote>["'])(?P<script>.*?uv sync.*?)(?P=quote)""", dockerfile, re.S)
+    match = re.search(r"sh -c (?P<command>.*?uv sync.*?)(?:\n\n|\Z)", dockerfile, re.S)
     assert match is not None
-    return match.group("script").replace("\\\n", "\n")
+    return shlex.split(match.group("command").replace("\\\n", "\n"))[0]
 
 
 def test_backend_dockerfile_expands_multiple_uv_extras(tmp_path):

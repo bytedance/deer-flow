@@ -65,8 +65,13 @@ def _native_http_acceptance(tmp_path, *, dependency_mode=False, scheduled_mode=F
     backend = Path(__file__).resolve().parents[1]
     run_id = uuid.uuid4().hex[:12]
     names, processes, handles = [], [], []
-    private_env = _PrivateMapping(dotenv_values(os.environ["ECS_NATIVE_MODEL_ENV"]))
-    model = next(value.copy() for value in yaml.safe_load(Path(os.environ["ECS_NATIVE_MODEL_CONFIG"]).read_text())["models"] if value["name"] == "deepseek-chat")
+    if browser_control_only:
+        # Control-only acceptance does not read private model config/environment.
+        private_env = _PrivateMapping({"C_NATIVE_SYNTHETIC_KEY": "owned-zero-model-fixture", "C_NATIVE_SYNTHETIC_URL": "http://127.0.0.1:9/v1"})
+        model = {"name": "deepseek-chat", "use": "langchain_openai:ChatOpenAI", "model": "owned-zero-model-fixture", "api_key": "$C_NATIVE_SYNTHETIC_KEY", "base_url": "$C_NATIVE_SYNTHETIC_URL"}
+    else:
+        private_env = _PrivateMapping(dotenv_values(os.environ["ECS_NATIVE_MODEL_ENV"]))
+        model = next(value.copy() for value in yaml.safe_load(Path(os.environ["ECS_NATIVE_MODEL_CONFIG"]).read_text())["models"] if value["name"] == "deepseek-chat")
     environment = _PrivateMapping({**os.environ, **{key: value for key, value in private_env.items() if value is not None}})
     if browser_mode:
         # Browser main needs only system process settings and references in its

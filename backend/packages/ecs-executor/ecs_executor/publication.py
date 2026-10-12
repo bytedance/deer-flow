@@ -54,12 +54,41 @@ def read_at(root_fd, name, limit):
 def write_at(root_fd, name, content):
     parts = relative_file(name).split("/")
     with directory_at(root_fd, parts[:-1], create=True) as parent:
-        fd = os.open(parts[-1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+        fd = os.open(
+            parts[-1],
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=parent,
+        )
         with os.fdopen(fd, "wb") as stream:
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
         os.fsync(parent)
+
+
+def readable_publication_at(root_fd):
+    """Make only a complete staged artifact tree readable by native sandbox UIDs."""
+    for name in os.listdir(root_fd):
+        observed = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        if stat.S_ISDIR(observed.st_mode):
+            with directory_at(root_fd, [name]) as child:
+                readable_publication_at(child)
+        elif stat.S_ISREG(observed.st_mode) and observed.st_nlink == 1:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root_fd)
+            try:
+                actual = os.fstat(fd)
+                if not stat.S_ISREG(actual.st_mode) or actual.st_nlink != 1 or (actual.st_dev, actual.st_ino) != (observed.st_dev, observed.st_ino):
+                    raise ValueError("Unsafe staged publication file")
+                os.fchmod(fd, 0o644)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        else:
+            raise ValueError("Unsafe staged publication entry")
+    # Bottom-up: the staging root stays private until all descendants are ready.
+    os.fchmod(root_fd, 0o755)
+    os.fsync(root_fd)
 
 
 def remove_tree_at(parent_fd, name):
@@ -116,7 +145,11 @@ class WorkspacePublication:
                 if set(reference) != {"path", "sha256"} or re.fullmatch(r"[0-9a-f]{64}", reference["sha256"]) is None:
                     raise ValueError("Native reference requires relative path and SHA256 digest")
                 relative_file(reference["path"])
-                if reference["path"].split("/")[0] not in {"uploads", "workspace", "outputs"}:
+                if reference["path"].split("/")[0] not in {
+                    "uploads",
+                    "workspace",
+                    "outputs",
+                }:
                     raise ValueError("Native reference must name current thread user-data")
                 payload = read_at(fd, reference["path"], limit)
                 if hashlib.sha256(payload).hexdigest() != reference["sha256"]:
@@ -144,7 +177,13 @@ class WorkspacePublication:
                                     write_at(files_fd, name, content)
                                 os.fsync(files_fd)
                         os.fsync(staged_fd)
-                    os.rename(temporary, job["id"], src_dir_fd=outputs_fd, dst_dir_fd=outputs_fd)
+                        readable_publication_at(staged_fd)
+                    os.rename(
+                        temporary,
+                        job["id"],
+                        src_dir_fd=outputs_fd,
+                        dst_dir_fd=outputs_fd,
+                    )
                     os.fsync(outputs_fd)
                 finally:
                     try:

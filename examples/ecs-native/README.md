@@ -122,3 +122,9 @@ is a trusted optional Gateway hook, not a public extension. See the package's
 for startup, authentication, physical-capacity, reverse-proxy, and acceptance
 boundaries. The central and worker JSON examples remain browser-disabled by
 default; explicitly merge the provider section only when browser tools are enabled.
+
+Task6B native role Compose, private reference-only generation, durable operator drain
+and stopped-writer image selection are documented in `docs/ecs-native-deployment.md`. Shanghai B/C/BC, browser and lifecycle acceptance is recorded in the testing guide; final source/production packaging checks run through the dedicated Jenkins test task.
+
+
+Current Shanghai installed release: [acceptance](../../docs/ecs-native-shanghai-acceptance-2026-10-10.md), [deployment/recovery](../../docs/ecs-native-deployment.md), and [immutable release lock](deploy/shanghai-tested-release-2026-10-10.json). Historical fixed-pin Shanghai helpers retain their original inputs; cold deployment uses the generic generation/Compose/schema/operations workflow.

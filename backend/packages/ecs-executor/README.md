@@ -122,7 +122,7 @@ verified on reads. With fixed `workspace_root` and `metadata_database_url`,
 publication locks the existing native thread metadata and verifies owner and
 incarnation again. Directory traversal, writes and rename use no-follow dirfds;
 publication atomically creates `outputs/<job_id>/` and returns the existing native
-artifact API URI. A stale or reassigned thread fails publication and keeps the
+artifact API URI. Completed native output trees use directories 0755 and non-executable files 0644 so the existing per-thread sandbox mount can read artifacts from a different UID. Staging remains private until content is complete; only the staged job tree changes mode through no-follow directory/file descriptors. Private executor pool results and inputs keep their existing permissions. Owner/incarnation checks and the native artifact API still enforce tenant access. A stale or reassigned thread fails publication and keeps the
 private result. This metadata connection needs logical SELECT and row-lock
 permissions only; it performs no application schema migration or row mutation.
 Without shared publication configured, the owner-authenticated executor artifact
@@ -529,3 +529,7 @@ Current live helpers now provision an owned independent executor database and
 observe native tables through the native URL. Their prior model evidence is
 historical; these schema wiring edits were checked without repeating model runs.
 Ops/cgroup/cloud/restart acceptance belongs to Task6B.
+
+Task6B native role Compose, private reference-only generation, durable operator drain
+and stopped-writer image selection are documented in `docs/ecs-native-deployment.md`. Installed/cloud acceptance remains separately recorded;
+cloud/Jenkins work is paused.

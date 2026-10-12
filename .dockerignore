@@ -84,3 +84,14 @@ backend/sandbox/
 !backend/extensions/
 !backend/extensions/sources/
 !backend/extensions/sources/**
+
+# Operator configuration and secret material never belong in role images.
+**/config.yaml
+**/extensions_config.json
+**/.env*
+**/private/
+**/operator/
+**/*.pem
+**/*.key
+**/*.p12
+**/acceptance-artifacts/

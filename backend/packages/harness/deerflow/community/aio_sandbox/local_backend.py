@@ -1375,7 +1375,7 @@ class LocalContainerBackend(SandboxBackend):
 
     def count_running_strict(self) -> int:
         """Physical native hard-capacity count; unknown Docker state fails closed."""
-        result = subprocess.run([self._runtime, "ps", "--filter", f"name={self._container_prefix}-", "--format", "{{.Names}}"], capture_output=True, text=True, timeout=10)
+        result = subprocess.run([self._runtime, "ps", "--filter", f"name={self._container_prefix}-", "--format", "{{.Names}}"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
         if result.returncode != 0:
             raise RuntimeError("Native AIO physical capacity is unavailable")
         return sum(name.startswith(self._container_prefix + "-") for name in result.stdout.splitlines())

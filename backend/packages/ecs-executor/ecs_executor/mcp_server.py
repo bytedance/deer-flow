@@ -130,7 +130,7 @@ def main():
     if not path:
         raise ValueError("ECS_EXECUTOR_CONFIG must name an operator configuration file")
     config = json.loads(Path(path).read_text(encoding="utf-8"))
-    store = JobStore(config["database_url"])
+    store = JobStore(os.environ[config["database_url_env"]] if "database_url_env" in config else config["database_url"])
     from ecs_executor.schema import require_schema
 
     require_schema(store.engine)
@@ -143,7 +143,7 @@ def main():
         artifact_root=Path(config["artifact_root"]),
         allowed_networks=set(config.get("allowed_networks", ["none"])),
         workspace_root=Path(config["workspace_root"]) if config.get("workspace_root") else None,
-        metadata_database_url=config.get("metadata_database_url"),
+        metadata_database_url=os.environ[config["metadata_database_url_env"]] if "metadata_database_url_env" in config else config.get("metadata_database_url"),
         max_input_bytes=config.get("max_input_bytes", 8 * 1024 * 1024),
     )
     pool = None
@@ -167,7 +167,7 @@ def main():
         discovery_credential=os.environ[config["discovery_credential_env"]],
         artifact_base_url=config["artifact_base_url"],
     )
-    uvicorn.run(app, host="127.0.0.1", port=config.get("port", 8003))
+    uvicorn.run(app, host=config.get("bind_host", "127.0.0.1"), port=config.get("port", 8003))
 
 
 if __name__ == "__main__":

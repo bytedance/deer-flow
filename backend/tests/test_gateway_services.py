@@ -3704,12 +3704,16 @@ def test_launch_mcp_task_notification_run_hides_internal_prompt(_stub_app_config
             *,
             idempotency_key=None,
             require_existing_thread=False,
+            dependency_continuation=None,
+            scheduled_task_runtime=None,
         ):
             captured["body"] = body
             captured["thread_id"] = thread_id
             captured["request"] = request
             captured["idempotency_key"] = idempotency_key
             captured["require_existing_thread"] = require_existing_thread
+            captured["dependency_continuation"] = dependency_continuation
+            captured["scheduled_task_runtime"] = scheduled_task_runtime
             return SimpleNamespace(run_id="run-notification", thread_id=thread_id)
 
         with patch("app.gateway.services.start_run", side_effect=fake_start_run):
@@ -3732,6 +3736,8 @@ def test_launch_mcp_task_notification_run_hides_internal_prompt(_stub_app_config
     assert captured["thread_id"] == "thread-notification"
     assert captured["idempotency_key"] == "mcp-task:task-1:2:3"
     assert captured["require_existing_thread"] is True
+    assert captured["dependency_continuation"] is None
+    assert captured["scheduled_task_runtime"] is None
     assert body.metadata == {
         "mcp_task_notification": {
             "task_id": "task-1",

@@ -1,6 +1,8 @@
 # 原生 ECS 工作池库表说明
 
-更新：2026-10-09。B/C 基础字段核对自已审查代码；下述 Task5 依赖字段已通过主干、离线回归和独立 SPEC/质量复审。旧 docs/ecs-fleet-database.md 属于上一版 Fleet，不能作为本次重做的部署 schema。
+更新：2026-10-10。B/C 基础字段核对自已审查代码；下述 Task5 依赖字段已通过主干、离线回归和独立 SPEC/质量复审。旧 docs/ecs-fleet-database.md 属于上一版 Fleet，不能作为本次重做的部署 schema。
+
+当前上海 schema：native `0035_native_fork_compatibility`，版本表 `alembic_version`；executor `e0001_execution_ledger`，独立版本表 `ecs_executor_alembic_version`。兼容镜像切换保留两库与 NAS 历史；native0035 的降级保护仍禁止直接 Alembic 回退，数据库时间点恢复未作为镜像回退验收。
 
 ## 数据权威与逻辑关系
 
@@ -115,7 +117,7 @@ Scheduler 复用 scheduled_tasks 与 scheduled_task_runs，active occurrence 的
 
 原生版本 0035_native_fork_compatibility 合并原生 0034 与旧 fork 0022，保留 0018_thread_execution_bindings、0019_scheduled_execution 的版本和父节点。真实 PostgreSQL 测试已验证全新库、原生 0034 和旧 Fleet 0022 升级及代表性数据保留。发现旧绑定、非 NULL 的 scheduled_tasks.execution 或任意 fleet_* 表时，Gateway 在恢复和调度之前拒绝激活；不自动转换、删除或重放旧执行意图。
 
-依赖等待使用执行记录的 JSON 字段和原生仓库合同，不新增目标或通知表。离线升级、只读清点、旧数据隔离与完整备份回退步骤见 [fork 兼容文档](ecs-native-fork-integration.md)。实际启停、镜像和云环境验证仍属 Task6B。架构入口：[ecs-native-architecture.md](ecs-native-architecture.md)。
+依赖等待使用执行记录的 JSON 字段和原生仓库合同，不新增目标或通知表。离线升级、只读清点、旧数据隔离与完整备份回退步骤见 [fork 兼容文档](ecs-native-fork-integration.md)。Installed lifecycle #38, same-schema rollback #48 and final production recovery #69 accepted; native/executor revisions and persisted history remain unchanged. See [Shanghai acceptance](ecs-native-shanghai-acceptance-2026-10-10.md).架构入口：[ecs-native-architecture.md](ecs-native-architecture.md)。
 
 ## 原生记忆数据位置
 

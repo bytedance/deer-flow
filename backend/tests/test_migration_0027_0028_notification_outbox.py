@@ -23,7 +23,6 @@ OUTBOX = "0027_notification_deliveries"
 PARKED = "0028_parked_attempts"
 SCHEDULER = "0029_scheduler_agent_tasks"
 CLAIM_TOKENS = "0030_notification_claim_tokens"
-HEAD = "0034_run_event_seq_watermark"
 PREVIOUS = "0026_mcp_task_lease_tokens"
 TABLE = "notification_deliveries"
 
@@ -63,7 +62,7 @@ async def test_outbox_revisions_upgrade_and_downgrade(tmp_path):
         assert columns is not None and "parked_attempts" not in columns
         assert "claim_token" not in columns
 
-        await asyncio.to_thread(bootstrap._upgrade, cfg, "head")
+        await asyncio.to_thread(bootstrap._upgrade, cfg, CLAIM_TOKENS)
         columns = await outbox_columns()
         assert columns["parked_attempts"]["nullable"] is False
         # The backfill default is dropped so the schema matches create_all.
@@ -102,12 +101,9 @@ async def test_bootstrap_claim_tokens_preserves_existing_scheduler_and_outbox(tm
                 assert (await conn.execute(sa.text("SELECT run_count,goal_objective FROM scheduled_tasks WHERE id='task'"))).one() == (7, "deliver")
                 assert (await conn.execute(sa.text("SELECT status,attempts,parked_attempts FROM notification_deliveries WHERE id='delivery'"))).one() == ("pending", 2, 1)
 
-        for _ in range(2):
-            await bootstrap.bootstrap_schema(engine, backend="sqlite")
-            await assert_preserved()
-            async with engine.connect() as conn:
-                assert (await conn.execute(sa.text("SELECT version_num FROM alembic_version"))).scalar_one() == HEAD
-                assert (await conn.execute(sa.text("SELECT claim_token FROM notification_deliveries WHERE id='delivery'"))).scalar_one() is None
+        await asyncio.to_thread(bootstrap._upgrade, cfg, CLAIM_TOKENS)
+        async with engine.connect() as conn:
+            assert (await conn.execute(sa.text("SELECT claim_token FROM notification_deliveries WHERE id='delivery'"))).scalar_one() is None
 
         await asyncio.to_thread(command.downgrade, cfg, SCHEDULER)
         await assert_preserved()
@@ -115,7 +111,12 @@ async def test_bootstrap_claim_tokens_preserves_existing_scheduler_and_outbox(tm
             columns = await conn.run_sync(lambda sync: {col["name"] for col in sa.inspect(sync).get_columns(TABLE)})
             assert "claim_token" not in columns
             assert (await conn.execute(sa.text("SELECT version_num FROM alembic_version"))).scalar_one() == SCHEDULER
-        await bootstrap.bootstrap_schema(engine, backend="sqlite")
-        await assert_preserved()
+        for _ in range(2):
+            await bootstrap.bootstrap_schema(engine, backend="sqlite")
+            await assert_preserved()
+            async with engine.connect() as conn:
+                assert (await conn.execute(sa.text("SELECT version_num FROM alembic_version"))).scalar_one() == bootstrap._get_head_revision()
+                assert (await conn.execute(sa.text("SELECT claim_token FROM notification_deliveries WHERE id='delivery'"))).scalar_one() is None
+
     finally:
         await engine.dispose()

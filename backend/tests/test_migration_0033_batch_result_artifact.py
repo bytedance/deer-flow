@@ -46,8 +46,8 @@ async def test_upgrade_downgrade_and_reupgrade_preserve_report(tmp_path, backend
                     "VALUES ('i','b','k',0,'p','succeeded',1,'old report',FALSE,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"
                 )
             )
-        await bootstrap.bootstrap_schema(engine, backend=backend, postgres_schema=schema or "")
-        await bootstrap.bootstrap_schema(engine, backend=backend, postgres_schema=schema or "")
+        await asyncio.to_thread(bootstrap._upgrade, cfg, "0033_batch_result_artifact")
+        await asyncio.to_thread(bootstrap._upgrade, cfg, "0033_batch_result_artifact")
         async with engine.connect() as conn:
             row = (await conn.execute(sa.text("SELECT result,status,result_artifact FROM subagent_batch_items"))).one()
             assert tuple(row) == ("old report", "succeeded", None)
@@ -61,7 +61,7 @@ async def test_upgrade_downgrade_and_reupgrade_preserve_report(tmp_path, backend
             columns = await conn.run_sync(lambda sync: {column["name"] for column in sa.inspect(sync).get_columns("subagent_batch_items")})
             assert "result_artifact" not in columns
             assert (await conn.execute(sa.text("SELECT result FROM subagent_batch_items"))).scalar_one() == "old report"
-        await bootstrap.bootstrap_schema(engine, backend=backend, postgres_schema=schema or "")
+        await asyncio.to_thread(bootstrap._upgrade, cfg, "0033_batch_result_artifact")
         async with engine.connect() as conn:
             assert (await conn.execute(sa.text("SELECT result_artifact FROM subagent_batch_items"))).scalar_one() is None
     finally:

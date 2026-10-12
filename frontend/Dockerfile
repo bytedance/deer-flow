@@ -37,7 +37,16 @@ RUN cd /app/frontend && pnpm install --frozen-lockfile
 # and the frontend falls back to package.json's version.
 ARG APP_VERSION=""
 ENV NEXT_PUBLIC_APP_VERSION=$APP_VERSION
-RUN cd /app/frontend && SKIP_ENV_VALIDATION=1 pnpm build
+ARG DEER_FLOW_BUILD_BUNDLER=""
+ARG DEER_FLOW_BUILD_MEMORY_OPTIMIZATIONS=""
+RUN cd /app/frontend && case "$DEER_FLOW_BUILD_MEMORY_OPTIMIZATIONS" in \
+      ""|1) ;; \
+      *) echo "Unsupported frontend memory build option" >&2; exit 1 ;; \
+    esac && case "$DEER_FLOW_BUILD_BUNDLER" in \
+      "") DEER_FLOW_BUILD_MEMORY_OPTIMIZATIONS="$DEER_FLOW_BUILD_MEMORY_OPTIMIZATIONS" SKIP_ENV_VALIDATION=1 pnpm build ;; \
+      webpack) DEER_FLOW_BUILD_MEMORY_OPTIMIZATIONS="$DEER_FLOW_BUILD_MEMORY_OPTIMIZATIONS" SKIP_ENV_VALIDATION=1 pnpm build --webpack ;; \
+      *) echo "Unsupported frontend build bundler" >&2; exit 1 ;; \
+    esac
 
 # ── Prod: minimal runtime with pre-built output ───────────────────────────────
 FROM node:22-alpine AS prod

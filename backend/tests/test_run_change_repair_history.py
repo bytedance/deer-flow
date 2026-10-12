@@ -105,8 +105,8 @@ async def test_repair_preserves_clock_and_downgrade_keeps_ancestor_schema(tmp_pa
             # The old repository's first write used to create this singleton;
             # direct historical fixture seeding must include that persisted fact.
             await connection.execute(sa.text("INSERT INTO run_change_clock (id, value) VALUES (1, 100) ON CONFLICT (id) DO UPDATE SET value = 100"))
-        await bootstrap_schema(engine, backend="sqlite")
-        await bootstrap_schema(engine, backend="sqlite")
+        await asyncio.to_thread(command.upgrade, cfg, "0025_repair_run_change_seq")
+        await asyncio.to_thread(command.upgrade, cfg, "0025_repair_run_change_seq")
         repo = RunRepository(async_sessionmaker(engine, expire_on_commit=False))
         async with engine.connect() as connection:
             assert await connection.scalar(sa.text("SELECT value FROM run_change_clock WHERE id = 1")) == 100

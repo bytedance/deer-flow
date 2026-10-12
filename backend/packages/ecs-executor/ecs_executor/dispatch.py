@@ -143,7 +143,11 @@ def main():
     root = Path(config["artifact_root"])
     # Fail closed if the NAS marker is missing; never mkdir a fallback mount.
     store = OutboundStore(url=config["executor_url"], node_id=config["node_id"], credential=os.environ[config["credential_env"]], artifact_root=root)
-    publication = WorkspacePublication(workspace_root=Path(config["workspace_root"]), metadata_database_url=config["metadata_database_url"]) if config.get("workspace_root") else None
+    publication = (
+        WorkspacePublication(workspace_root=Path(config["workspace_root"]), metadata_database_url=os.environ[config["metadata_database_url_env"]] if "metadata_database_url_env" in config else config["metadata_database_url"])
+        if config.get("workspace_root")
+        else None
+    )
     jobs = SimpleNamespace(store=store, artifact_root=root, publication=publication)
     with (root / ("node-" + config["node_id"] + ".lock")).open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
