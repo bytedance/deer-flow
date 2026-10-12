@@ -85,7 +85,12 @@ function ToolGroupSelection({
   const options = new Map(toolGroups.map((name) => [name, name]));
   for (const name of value ?? []) {
     if (!options.has(name)) {
-      options.set(name, `${name} (${t.agents.settingsToolGroupUnavailable})`);
+      options.set(
+        name,
+        !isLoading && !error
+          ? `${name} (${t.agents.settingsToolGroupUnavailable})`
+          : name,
+      );
     }
   }
 

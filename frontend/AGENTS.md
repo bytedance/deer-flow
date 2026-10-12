@@ -113,6 +113,8 @@ Custom Agent tool access is edited from the configured names returned by
 `GET /api/agent-tool-groups`. Preserve the `null` / `[]` / explicit-list
 contract (inherit all / disable all / allowlist), retain missing selected names
 as removable entries, and submit `tool_groups` only when the user changes it.
+Mark missing names unavailable only after a successful catalog load; loading
+and errors preserve neutral labels and removable selections.
 When a changed allowlist excludes `knowledge`, send `knowledge_scope: null` in
 the same update so a saved retrieval default cannot break run admission. Gate
 knowledge selection on both draft and persisted tool access: catalog reads
