@@ -448,6 +448,32 @@ Neither can make anything be *acted on*. The `allowed_users` allowlist and per-e
 
 **Bound identity:** once a pubkey completes `/connect`, its inbound messages resolve to that connection and run under the bound DeerFlow user (memory, files, and artifacts land in that user's buckets). Bindings are scoped to the relay host, so the same pubkey on a different relay is a different identity and must bind separately.
 
+### Feishu scheduled-task notifications
+
+Feishu/Lark sends scheduled-task result and lifecycle notices as static Markdown
+cards to the task owner's currently bound user. The existing notification outbox
+provides retry, localization, redaction and send-time binding checks; Settings
+reports this through `proactive_notifications`. Manual trial runs stay silent.
+
+The configured app needs bot messaging permission (`im:message:send_as_bot`, or
+its broader `im:message` alternative), and the recipient must be in its available
+scope. Complete `/connect <code>` in a private chat with the same app. The outbox
+keeps the application-scoped `open_id` as its identity; delivery prefers that
+owner's currently connected, explicitly recorded private-chat address. Group
+chats are never used for these personal notices. Older bindings without recorded
+chat type keep the `open_id` path; if Feishu rejects it with `230101`, bind again
+in private chat. Changing the app also requires rebinding.
+The existing WebSocket channel must be running; sends use the configured SDK's
+REST client, so no public callback or interactive-card subscription is needed.
+
+For provider-backed acceptance, bind a test user, let a once task run on its
+schedule, and confirm the notice arrives without another chat message. Check
+that a platform rejection is recorded as a failed delivery and that unbinding
+prevents later sends. API acceptance is not a read receipt. The shared outbox
+can retry an ambiguously acknowledged send; it does not promise exactly-once
+messages at the provider. Record whether domestic Feishu or international Lark
+was actually exercised.
+
 ### QQ WebSocket setup (MVP)
 
 QQ uses an outbound WebSocket connection for events and the QQ Open Platform

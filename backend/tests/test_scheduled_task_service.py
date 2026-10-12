@@ -1330,6 +1330,7 @@ async def _notices(env):
 
 async def _deliver_all(env, *, default_locale="en-US"):
     """Send every queued notice through the real worker with a fake WeCom channel; return the texts."""
+    from app.channels.base import Channel as BaseChannel
     from app.scheduler.notification_delivery import NotificationDeliveryWorker
     from deerflow.persistence.run import RunRepository
 
@@ -1337,6 +1338,7 @@ async def _deliver_all(env, *, default_locale="en-US"):
 
     class Channel:
         is_running = True
+        send_notification_for_owner = BaseChannel.send_notification_for_owner
 
         async def send_notification(self, *, target, text_markdown):
             sent.append(text_markdown)
@@ -1354,14 +1356,21 @@ async def _deliver_all(env, *, default_locale="en-US"):
 
 
 @pytest.mark.asyncio
-async def test_unsupported_provider_gets_no_outbox_row(outbox):
+async def test_only_push_capable_connected_providers_get_outbox_rows(outbox):
     await _task(outbox)
     await _bind(outbox, "feishu", "ou_feishu")
     await _bind(outbox, "wecom", "wecom-user")
+    await _bind(outbox, "slack", "U123")
+    await _bind(outbox, "feishu", "ou_revoked", status="revoked")
     await _bind(outbox, "wecom", "revoked-user", status="revoked")
     occurrence_id, run_id = await _occurrence(outbox)
     assert await _complete(outbox, occurrence_id, run_id) is True
-    assert [(row["event"], row["provider"], row["target"]) for row in await _notices(outbox)] == [("run_completed", "wecom", "wecom-user")]
+    assert sorted((row["event"], row["provider"], row["target"]) for row in await _notices(outbox)) == [
+        ("run_completed", "feishu", "ou_feishu"),
+        ("run_completed", "wecom", "wecom-user"),
+    ]
+    assert await _complete(outbox, occurrence_id, run_id) is False
+    assert len(await _notices(outbox)) == 2
 
 
 @pytest.mark.asyncio
