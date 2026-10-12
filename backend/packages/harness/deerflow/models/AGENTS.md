@@ -136,6 +136,16 @@ provider hints. Invalid or over-24-hour values retain local exponential backoff;
 finite negative values clamp to zero. Sync/async 429/500 regressions live in
 `tests/test_claude_provider_retry_after.py` and use offline provider doubles.
 
+### Provider Retry Admission (`claude_provider.py`, `openai_codex_provider.py`)
+
+With DeerFlow `RequestAdmission`, `ClaudeChatModel` and `CodexChatModel` disable their own retry loops
+(`retry_max_attempts=1`) even when config/caller kwargs request more attempts.
+Log a warning with the previous attempt count when reducing a value above one;
+already-single-attempt models should not warn.
+The factory also disables SDK retries; middleware retries re-enter admission.
+Unpaced models and unrelated custom rate limiters keep their wrapper retry policy.
+`tests/test_model_request_admission.py` covers public sync/async calls through offline HTTP transports.
+
 ### Claude Prompt Caching (`packages/harness/deerflow/models/claude_provider.py`)
 
 - The request payload shares objects with the caller: langchain-anthropic forwards Claude-native blocks (an image or document with a `source`, search results) and list-form system blocks by reference, and a reused tool binding passes its own tool dicts (the lead agent re-binds per call, so its tool dicts are fresh). Writing `cache_control` in place checkpointed the markers with the thread's messages, and the stale ones pushed every later request past the 4-breakpoint limit

@@ -2352,7 +2352,7 @@ def _github_env_from_runtime(runtime: Runtime) -> dict[str, str] | None:
 _LARK_CLI_COMMAND_RE = re.compile(r"(?<![A-Za-z0-9_.-])lark-cli(?![A-Za-z0-9_.-])")
 
 
-def _lark_cli_env_from_runtime(runtime: Runtime, command: str, *, sandbox_paths: bool) -> dict[str, str] | None:
+def _lark_cli_env_from_runtime(runtime: Runtime, command: str, *, sandbox_paths: bool, sandbox: Sandbox | None = None) -> dict[str, str] | None:
     """Expose Settings-page Lark auth to sandbox ``lark-cli`` commands.
 
     Settings authorizes ``lark-cli`` under DeerFlow's per-user integration
@@ -2368,14 +2368,12 @@ def _lark_cli_env_from_runtime(runtime: Runtime, command: str, *, sandbox_paths:
     """
     if not _LARK_CLI_COMMAND_RE.search(command):
         return None
-    try:
-        from deerflow.integrations.lark_cli import lark_cli_env_overlay, sandbox_lark_broker_active
+    from deerflow.integrations.lark_cli import lark_cli_env_overlay
 
-        broker = sandbox_paths and sandbox_lark_broker_active()
-        return lark_cli_env_overlay(resolve_runtime_user_id(runtime), sandbox_paths=sandbox_paths, broker=broker)
-    except Exception:
-        logger.warning("Could not build Lark CLI env overlay; running command without managed auth", exc_info=True)
-        return None
+    broker = getattr(sandbox, "lark_cli_broker", None) if sandbox_paths else False
+    if broker is None:
+        raise RuntimeError("Sandbox Lark broker mode is unverified; refusing to execute lark-cli")
+    return lark_cli_env_overlay(resolve_runtime_user_id(runtime), sandbox_paths=sandbox_paths, broker=broker)
 
 
 @tool("bash", parse_docstring=True)
@@ -2412,7 +2410,7 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
         identity_prefix = _channel_identity_prefix(runtime)
         user_prefix = _user_identity_prefix(runtime)
         github_env = _github_env_from_runtime(runtime)
-        lark_cli_env = _lark_cli_env_from_runtime(runtime, command, sandbox_paths=not is_local_sandbox(runtime))
+        lark_cli_env = _lark_cli_env_from_runtime(runtime, command, sandbox_paths=not is_local_sandbox(runtime), sandbox=sandbox)
         if github_env:
             injected_env = {**(injected_env or {}), **github_env}
         if lark_cli_env:

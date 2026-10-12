@@ -185,19 +185,28 @@ class PersistenceRetryPolicy:
 
 
 class RunIdempotencyUnsupported(RuntimeError):
-    """The configured store cannot safely persist keyed-resume identity."""
+    """The configured store cannot safely persist the requested idempotency fields."""
 
 
-def _store_accepts_idempotency_request(store: RunStore) -> bool:
-    """Best-effort capability check for old explicit RunStore overrides."""
+def _store_accepts_idempotency_parameter(store: RunStore, parameter_name: str) -> bool:
+    """Require an explicit keyword parameter or an opt-in owned by the method."""
     callable_ = store.create_thread_operation_atomic
     if getattr(callable_, "__func__", None) is RunStore.create_thread_operation_atomic:
         return False
     try:
         parameters = inspect.signature(callable_).parameters
     except (TypeError, ValueError):
+        return False
+    parameter = parameters.get(parameter_name)
+    if parameter is not None and parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
         return True
-    return "idempotency_request" in parameters or any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+    if not any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+        return False
+    implementation_owner = next(
+        (candidate for candidate in type(store).__mro__ if "create_thread_operation_atomic" in candidate.__dict__),
+        None,
+    )
+    return bool(implementation_owner and implementation_owner.__dict__.get("supports_idempotency_request_kwargs", False))
 
 
 @dataclass
@@ -1497,6 +1506,12 @@ class RunManager:
                     run_id,
                     grace_seconds=grace_seconds,
                     error=take_over_msg,
+                    # The owner is presumed dead, so a cross-worker consumer's
+                    # only liveness edge is the durable row. Mark the takeover
+                    # like periodic orphan recovery; without this stop reason
+                    # SSE/`wait` subscribers that outlive the crashed owner
+                    # loop on heartbeats forever (their fallback requires it).
+                    stop_reason=ORPHAN_RECOVERY_STOP_REASON,
                 ),
             )
         except Exception:
@@ -1728,8 +1743,10 @@ class RunManager:
             # 2) Persist to store while still holding the local lock. The
             #    store is the source of truth for cross-process atomicity.
             if self._store is not None:
-                if idempotency_request is not None and not _store_accepts_idempotency_request(self._store):
+                if idempotency_request is not None and not _store_accepts_idempotency_parameter(self._store, "idempotency_request"):
                     raise RunIdempotencyUnsupported("The configured RunStore does not support keyed resume idempotency")
+                if idempotency_key is not None and not _store_accepts_idempotency_parameter(self._store, "idempotency_key"):
+                    raise RunIdempotencyUnsupported("The configured RunStore does not support keyed run idempotency")
                 if multitask_strategy == "reject":
                     create_kwargs = {
                         "run_id": run_id,
@@ -2510,7 +2527,12 @@ class RunManager:
         resources are still open. Only runs that do **not** settle on their own
         are marked ``interrupted`` — a run that completes (e.g. ``success``)
         during the drain keeps its real terminal status instead of being
-        blanket-overwritten. The whole drain, including the trailing status
+        blanket-overwritten. Runs whose terminal status is staged in memory with
+        a deferred commit are still writing their final duration checkpoint and
+        then commit that status, so they are awaited in the same bounded drain —
+        without cancellation, which would skip their terminal tail (#5542),
+        exactly as ``_renew_leases`` keeps them active through
+        ``_awaits_terminal_commit``. The whole drain, including the trailing status
         persistence, is bounded by ``timeout`` so a run stuck in cleanup (or a
         slow store under DB pressure) cannot hang worker shutdown — the
         precondition for the signal-reentrancy deadlock guarded by
@@ -2522,12 +2544,20 @@ class RunManager:
 
         async with self._lock:
             inflight = [record for record in self._runs.values() if record.status in (RunStatus.pending, RunStatus.running) and record.task is not None and not record.task.done()]
+            # A run whose terminal status is staged in memory (deferred commit)
+            # keeps writing the duration checkpoint before committing that
+            # status. Drain it too — but never cancel it — so the write lands
+            # while the checkpointer is still open. ``_renew_leases`` already
+            # treats these runs as active through ``_awaits_terminal_commit``.
+            finalizing = [record for record in self._runs.values() if self._awaits_terminal_commit(record) and record.status not in (RunStatus.pending, RunStatus.running) and record.task is not None and not record.task.done()]
+            finalizing_ids = {record.run_id for record in finalizing}
             for record in inflight:
                 record.abort_action = "interrupt"
                 record.abort_event.set()
                 record.task.cancel()  # type: ignore[union-attr]  # filtered above
                 # Status is decided AFTER the drain (below), not here: a run that
                 # completes on its own during the drain must keep its real status.
+            inflight += finalizing
 
         await self.stop_heartbeat(timeout=max(0.0, deadline - loop.time()))
 
@@ -2548,7 +2578,18 @@ class RunManager:
                 if task not in pending and not task.cancelled():
                     # Completed on its own — retrieve any surfaced exception so it
                     # is not reported as "never retrieved", and keep its status.
-                    task.exception()  # type: ignore[union-attr]  # done & not cancelled
+                    error = task.exception()  # type: ignore[union-attr]  # done & not cancelled
+                    if error is not None and record.run_id in finalizing_ids:
+                        logger.warning(
+                            "Run %s failed during terminal finalization on shutdown; staged status %s may not be committed",
+                            record.run_id,
+                            record.status.value,
+                            exc_info=(type(error), error, error.__traceback__),
+                        )
+                    continue
+                if record.run_id in finalizing_ids:
+                    # The staged terminal status is committed by the run's own
+                    # finalizer; shutdown must not overwrite it with interrupted.
                     continue
                 if record.status in (RunStatus.pending, RunStatus.running):
                     record.status = RunStatus.interrupted

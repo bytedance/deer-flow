@@ -12,6 +12,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.read_file_contract import split_file_lines
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
@@ -271,7 +272,7 @@ class OpenSandboxSandbox(Sandbox):
             return f"Error: {exc}"
         if start_line is None and end_line is None:
             return content or ""
-        lines = (content or "").splitlines()
+        lines = split_file_lines(content or "")
         # Clamp like LocalSandbox.read_file: a negative start would otherwise
         # wrap around through Python's negative-index slicing.
         start = max(start_line or 1, 1)
@@ -355,7 +356,8 @@ class OpenSandboxSandbox(Sandbox):
         matches: list[str] = []
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
-        for entry in output.text.splitlines():
+        # Records are LF-delimited; other splitlines() boundaries can be path characters.
+        for entry in output.text.split("\n"):
             # Do NOT strip: trailing whitespace can be part of the filename.
             if not entry or (entry != root and not entry.startswith(root_prefix)) or should_ignore_path_under_root(entry, root):
                 continue
@@ -410,7 +412,8 @@ class OpenSandboxSandbox(Sandbox):
         root_prefix = root if root == "/" else f"{root}/"
         matches: list[GrepMatch] = []
         seen_positions: set[tuple[str, int]] = set()
-        for raw in output.text.splitlines():
+        # Keep non-LF separators inside filenames and matched text intact.
+        for raw in output.text.split("\n"):
             try:
                 file_path, line_number_text, line = raw.split(":", 2)
                 line_number = int(line_number_text)

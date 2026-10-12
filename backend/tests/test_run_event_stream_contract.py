@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 from pathlib import Path
 from uuid import uuid4
 
@@ -33,6 +34,7 @@ from deerflow.subagents.step_events import SUBAGENT_STEP_MAX_CHARS, capture_step
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONTRACT_PATH = REPO_ROOT / "contracts" / "run_event_stream_contract.json"
+DOC_PATH = REPO_ROOT / "backend" / "docs" / "RUN_EVENT_STREAM.md"
 
 
 def _load_contract() -> dict:
@@ -367,6 +369,14 @@ def test_dynamic_middleware_event_rejects_tags_that_do_not_fit_persistence(tag):
             action="record",
             changes={},
         )
+
+
+def test_documented_middleware_tags_match_the_catalog():
+    doc = DOC_PATH.read_text(encoding="utf-8")
+    sentence = re.search(r"Current middleware tags are (.+?)\.", doc, re.DOTALL)
+
+    assert sentence is not None
+    assert set(re.findall(r"`([^`]+)`", sentence.group(1))) == set(MIDDLEWARE_EVENT_TAGS)
 
 
 def test_tool_promotion_tag_is_declared_and_fits_the_persisted_event_type():

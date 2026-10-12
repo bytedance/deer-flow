@@ -33,6 +33,7 @@ from langchain.agents.middleware.types import ModelRequest
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
+from support.symlinks import symlink_or_skip
 
 from deerflow.agents.middlewares.view_image_middleware import (
     _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
@@ -902,7 +903,7 @@ def test_host_image_copy_is_scoped_to_current_user_and_thread(tmp_path, monkeypa
 
     alias_path = paths.sandbox_outputs_dir("thread-a", user_id="user-a") / "canary.png"
     alias_path.parent.mkdir(parents=True)
-    alias_path.symlink_to(owner_path)
+    symlink_or_skip(alias_path, owner_path)
     assert model_payloads("user-a", "thread-a", alias_path) == []
 
 

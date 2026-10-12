@@ -62,6 +62,24 @@ test.each([
   expect(onChange).toHaveBeenLastCalledWith(initial);
 });
 
+test("a date-only run_at opens at midnight in the task's zone and is kept as sent", () => {
+  // The server runs a bare date at midnight in the task's zone; reading it as
+  // UTC midnight put the New York field on the previous evening.
+  const initial = once("2026-12-07");
+  const onChange = rs.fn();
+  const ui = render(
+    <ScheduledTaskScheduleInput
+      initial={initial}
+      onChange={onChange}
+      scheduleTypeLocked
+    />,
+  );
+  expect((ui.getByLabelText("Run at") as HTMLInputElement).value).toBe(
+    "2026-12-07T00:00",
+  );
+  expect(onChange).toHaveBeenLastCalledWith(initial);
+});
+
 test("parent feedback and title-only rerenders retain the original instant", () => {
   const original = once("2026-11-01T06:30:00Z");
   function Editor() {

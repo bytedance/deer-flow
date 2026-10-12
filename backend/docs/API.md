@@ -211,6 +211,37 @@ GET /api/langgraph/threads/{thread_id}/state
 }
 ```
 
+#### Get Thread History
+
+```http
+POST /api/langgraph/threads/{thread_id}/history
+```
+
+Only the newest entry carries `messages`, the `goal` while it is active, and
+`goal_outcome` (the latest met goal, kept until the next goal change). Older
+entries carry only `title` and `thread_data`. `goal_outcome` is server-owned:
+state updates and run input that include it are rejected with 400.
+
+External state updates and run input that supply a non-null `goal` must include
+a string `objective` that is non-empty after whitespace normalization and at
+most 4,000 normalized characters. Invalid values return 400 before state writes
+or run admission. Optional goal timestamps and counters are not required or reset.
+When present, `continuation_count`, `max_continuations`, `no_progress_count` and
+`max_no_progress_continuations` must be non-negative integers; booleans, numeric
+strings, floats and null values are rejected with 400. Valid counters and limits
+are preserved, including an already-used continuation budget.
+Goal payloads must be state values, not reducer control wrappers: the reserved
+`__overwrite__` key and `type: "__overwrite__"` are rejected with 400 at both
+external boundaries. Ordinary `type`/`value` fields remain compatible.
+`goal: null` retains its existing semantics: it clears a state update's goal,
+but does not replace a goal through run input.
+
+Replaying messages from an earlier root checkpoint, including response regeneration, preserves
+the thread's current goal and continuation budget. A cleared or achieved goal
+is not restored from history. A valid goal explicitly supplied in run input
+still replaces it. Historical replay clears the old `goal_outcome`, because
+the previous answer's verdict does not certify the replacement answer.
+
 ### Runs
 
 #### Create Run
@@ -1384,7 +1415,7 @@ GET /api/projects/{project_id}/documents?limit=100&offset=0
 
 **Query Parameters:** `limit` (default 100, 1..1000), `offset` (default 0) — out-of-bounds values are `422`.
 
-**Response:** `{"documents": [{"id", "name", "size_bytes", "sha256", "source_thread_id", "source_kind", "source_name", "created_at", "updated_at", "content_missing"}], "total", "limit", "offset"}` in `updated_at DESC, id ASC` order. `content_missing` is read-time truth (never persisted): `true` when the document's immutable original is missing or size-mismatched (external interference); the derived `converted.md` companion is not the integrity anchor.
+**Response:** `{"documents": [{"id", "name", "size_bytes", "sha256", "source_thread_id", "source_kind", "source_name", "created_at", "updated_at", "summary", "content_missing"}], "total", "limit", "offset"}` in `updated_at DESC, id ASC` order. `content_missing` is read-time truth (never persisted): `true` when the document's immutable original is missing or size-mismatched (external interference); the derived `converted.md` companion is not the integrity anchor. `summary` is a best-effort LLM-generated one-line description (nullable; see `projects.summaries_enabled` in `config.example.yaml`) — null when generation is disabled, pending, failed, or the source is ineligible; it is LLM-processed untrusted content and is tag-neutralized at every model-visible exit.
 
 #### Upload Document
 
