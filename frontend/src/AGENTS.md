@@ -228,8 +228,10 @@ link renderers: Sources lists use ordinary titles without a `citation:` prefix.
 
 Custom-agent settings persist `knowledge_scope` as an optional retrieval default.
 Use `knowledgeScopeToSelection` to restore all execution IDs, falling back to IDs
-where the bounded display snapshot lacks names. Only dirty knowledge settings
-are sent on save. Custom-agent chat derives its initial selection from the saved
+where the bounded display snapshot lacks names. Send knowledge settings only
+when edited or when a changed tool allowlist removes knowledge access; the latter
+must atomically clear the default. Catalog selection requires saved knowledge
+access as well as draft access. Custom-agent chat derives its initial selection from the saved
 binding; explicit page-local overrides survive new-thread route replacement and
 reset on conversation changes. Gateway supplies defaults for clients without a
 selector; frontend visibility must not become a runtime enforcement boundary.

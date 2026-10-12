@@ -1372,6 +1372,8 @@ export const enUS: Translations = {
     settingsKnowledgeHint:
       "New conversations use this knowledge scope. Individual messages can override it. Selecting all knowledge bases removes the binding.",
     settingsKnowledgeReset: "Use all knowledge bases",
+    settingsKnowledgeSaveToolAccess:
+      "Save tool access before choosing default knowledge bases.",
     settingsModel: "Default model",
     settingsModelDefault: "Use global default",
     settingsTemperature: "Temperature",

@@ -1128,6 +1128,7 @@ export interface Translations {
     settingsKnowledge: string;
     settingsKnowledgeHint: string;
     settingsKnowledgeReset: string;
+    settingsKnowledgeSaveToolAccess: string;
     settingsModel: string;
     settingsModelDefault: string;
     settingsTemperature: string;

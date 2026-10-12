@@ -1285,6 +1285,7 @@ export const zhCN: Translations = {
     settingsKnowledgeHint:
       "新对话默认使用此知识库范围，单条消息可以临时覆盖。选择全部知识库可解除绑定。",
     settingsKnowledgeReset: "使用全部知识库",
+    settingsKnowledgeSaveToolAccess: "请先保存工具权限，再选择默认知识库。",
     settingsModel: "默认模型",
     settingsModelDefault: "使用全局默认",
     settingsTemperature: "温度",

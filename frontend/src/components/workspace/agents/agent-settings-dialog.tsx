@@ -106,6 +106,18 @@ export function AgentSettingsDialog({
   const [toolGroups, setToolGroups] = useState<string[] | null>(
     agent.tool_groups ?? null,
   );
+  const toolGroupsChanged = !sameSelection(
+    toolGroups,
+    initialSelections.toolGroups,
+  );
+  const knowledgeAllowed =
+    toolGroups === null || toolGroups.includes("knowledge");
+  const clearKnowledgeDefault = toolGroupsChanged && !knowledgeAllowed;
+  // Catalog reads authorize against saved groups, never the dialog's draft.
+  const knowledgeAccessNeedsSave =
+    knowledgeAllowed &&
+    agent.tool_groups != null &&
+    !agent.tool_groups.includes("knowledge");
   const [displayName, setDisplayName] = useState(agent.display_name ?? "");
 
   const [model, setModel] = useState(agent.model ?? DEFAULT_MODEL_VALUE);
@@ -198,9 +210,9 @@ export function AgentSettingsDialog({
         name: agent.name,
         request: {
           display_name: displayName.trim() || null,
-          ...(knowledgeChanged && {
+          ...((knowledgeChanged || clearKnowledgeDefault) && {
             knowledge_scope:
-              knowledgeSelection.mode === "all"
+              clearKnowledgeDefault || knowledgeSelection.mode === "all"
                 ? null
                 : buildKnowledgeScopeSnapshot(knowledgeSelection),
           }),
@@ -208,7 +220,7 @@ export function AgentSettingsDialog({
             mcp_plugins: plugins,
           }),
           ...(!sameSelection(skills, initialSelections.skills) && { skills }),
-          ...(!sameSelection(toolGroups, initialSelections.toolGroups) && {
+          ...(toolGroupsChanged && {
             tool_groups: toolGroups,
           }),
           model: model === DEFAULT_MODEL_VALUE ? null : model,
@@ -268,15 +280,22 @@ export function AgentSettingsDialog({
                 unavailableReason={
                   !scopeSelectionEnabled
                     ? t.knowledge.scope.loadFailed
-                    : toolGroups != null && !toolGroups.includes("knowledge")
+                    : !knowledgeAllowed
                       ? t.knowledge.scope.agentUnavailable
-                      : undefined
+                      : knowledgeAccessNeedsSave
+                        ? t.agents.settingsKnowledgeSaveToolAccess
+                        : undefined
                 }
                 onChange={(selection) => {
                   setKnowledgeSelection(selection);
                   setKnowledgeChanged(true);
                 }}
               />
+              {scopeSelectionEnabled && knowledgeAccessNeedsSave && (
+                <p className="text-muted-foreground text-xs">
+                  {t.agents.settingsKnowledgeSaveToolAccess}
+                </p>
+              )}
               {knowledgeSelection.mode === "selected" && (
                 <p className="text-muted-foreground text-xs [overflow-wrap:anywhere]">
                   {knowledgeSelection.datasets
