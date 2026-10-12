@@ -43,6 +43,10 @@ Upload case-collision coverage uses separate HTTP requests and preserves both
 reported payloads. Observe real filename-claim inputs to pin the disk seed;
 case-insensitive hosts can otherwise mask a missing seed through link retries.
 
+Embedded upload source-parity regressions overwrite the caller's file before a
+converter reading that path consumes it. The test must reject conversion from
+the original path even when the upload copy still uses a private snapshot.
+
 Channel reload cancellation regressions must assert the worker returned the
 stale snapshot before checking that newer runtime config survived. Completion
 alone cannot prove the race: loader exceptions are caught and return `None`.

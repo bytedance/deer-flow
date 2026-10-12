@@ -1659,6 +1659,15 @@ changed, or cleared, including unscoped runs accepted before this feature.
 This default applies to Gateway-hosted custom-agent turns; direct harness/client
 integrations continue to supply their own execution scope.
 
+In Agent settings, **Tool access** can inherit every configured tool group,
+allow selected groups, or disable all groups. Saved groups stay visible and
+removable while the catalog loads or fails to load. A saved group is marked
+unavailable only when a successful catalog load confirms it is missing.
+Saving a selection that removes `knowledge` also clears the saved default
+knowledge selection. When enabling knowledge access for an agent that
+previously lacked it, save the tool access first, then reopen settings to
+choose its default knowledge bases.
+
 The `knowledge_base` block is provider-neutral and only controls whether the
 knowledge capability and selector are enabled. RAGFlow connection, dataset
 allowlist, and retrieval parameters (`base_url`, `api_key`, `datasets`,
@@ -2281,6 +2290,8 @@ On Windows, `st_ctime_ns` may represent creation time; a same-size rewrite that
 restores the original `mtime` can evade validation. Timestamp checks are
 conservative metadata validation, not a guarantee of content equality.
 
+Sandbox image downloads enforce the 20 MiB vision limit while reading, including model-context rereads. Oversized streams stop at the first over-limit chunk. Custom sandbox providers must accept and enforce the `download_file(..., max_bytes=...)` keyword; older implementations fail the image read instead of falling back to an unrestricted download.
+
 Image bytes loaded for a vision-model call are transient: DeerFlow removes the hidden base64 message after the model consumes it so later checkpoints do not keep duplicating that payload.
 
 After each run, DeerFlow records a workspace change summary for the run-owned `workspace` and `outputs` directories. The Web UI shows a compact "files changed" badge on the assistant turn; opening it reveals created, modified, and deleted files with text diffs when safe to display. Uploads are excluded because they are user inputs, not agent-generated changes, and stdio MCP temporary/debug files under the DeerFlow-owned `.mcp/` namespace are excluded because they are process-internal state (like `.git/` and `node_modules/`, any directory named `.mcp` is excluded at any depth). Large, binary, or sensitive-looking files are shown as metadata only.
@@ -2788,6 +2799,8 @@ Current MVP limits:
 - No channel or GitHub dispatch targets (result push above is not a dispatch target)
 
 Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigger uses the same scheduled-task resource and execution path.
+
+In the task form, switching an hourly, daily, weekly, or monthly schedule to **Custom cron** starts from its current timing, including selected weekdays or day of the month. Switching back to Custom cron after preset edits uses those edits rather than an older expression.
 
 ### Optional Feishu group notifications
 

@@ -119,6 +119,18 @@ keep `name` for React identity, URLs, requests, and runtime `agent_name`.
 The 100-code-point budget uses `[...value.trim()].length`, matching Pydantic;
 do not use HTML `maxLength`, which counts UTF-16 code units instead.
 
+Custom Agent tool access is edited from the configured names returned by
+`GET /api/agent-tool-groups`. Preserve the `null` / `[]` / explicit-list
+contract (inherit all / disable all / allowlist), retain missing selected names
+as removable entries, and submit `tool_groups` only when the user changes it.
+Mark missing names unavailable only after a successful catalog load; loading
+and errors preserve neutral labels and removable selections.
+When a changed allowlist excludes `knowledge`, send `knowledge_scope: null` in
+the same update so a saved retrieval default cannot break run admission. Gate
+knowledge selection on both draft and persisted tool access: catalog reads
+authorize against the saved agent, so new access must be saved first. Restored
+tool selections remain unchanged and must not clear a knowledge default.
+
 Custom Agent portability uses the versioned `deerflow.custom-agent` JSON
 document through `core/agents/api.ts`. Keep file parsing client-side only for
 previewing the proposed local name; the Gateway is authoritative for schema,
@@ -137,6 +149,12 @@ from the filtered list so hidden tasks cannot remain actionable. Keep literal
 matching in `core/scheduled-tasks/search.ts`; clearing search retains other filters.
 
 Single-run schedule edits retain the mounted task's original `run_at` while its wall time and timezone match. The parent echoes edits through `initial`; retain a stable snapshot and reset the parent draft during render before remounting with a task key when switching tasks. Use the resolved timezone consistently for the snapshot and displayed wall time. Component and scheduled-task E2E tests cover DST folds and timestamp precision.
+
+The scheduled-task schedule input initializes Custom cron from the current
+preset and its current fields on every transition into the custom editor.
+Do not substitute a daily schedule or restore stale `parts.raw` after preset
+edits. Component tests cover emitted specs; browser tests pin unchanged
+schedules through the task form's PATCH payload on desktop and mobile.
 
 ## Environment
 
@@ -355,30 +373,10 @@ a model switch without changing the backend's direct legacy-request behavior.
 
 ## Full-stack plugin UI
 
-`core/extensions/` loads authenticated deployment-installed ES modules from `/api/plugins`.
-Inline modules use authenticated fetch plus a released Blob URL. Manifest assets use
-native credentialed module scripts, preserving relative imports and resource URLs.
-Both honor the backend base and prefixes; transport and cache semantics are documented in
-`docs/full-stack-plugins.md`. Host copy belongs in the typed locale dictionaries.
-Conversation action factories, shapes and availability callbacks are guarded per plugin;
-only validated value snapshots reach the toolbar/sidebar render paths.
-`PluginNavigation` and the dynamic workspace extension route consume page declarations;
-Capability Center defaults to the repository examples in `core/extensions/catalog.ts`,
-merged by explicit namespace with runtime descriptors. Catalog-only entries are discovery
-metadata, never module-loader inputs or proof of installation. Backend-only examples may
-have no plugin descriptor; keep their runtime status unasserted. Details link to package
-installation instructions. Keep the catalog aligned with `examples/deerflow-extension-*`.
-Agent teams uses `community.agent-teams`; merge its installed descriptor into the
-localized catalog entry without asserting runtime status for a catalog-only row.
-Conversation action slots augment normal/custom-agent toolbars and sidebar menus without replacing native export or notification.
-Plugin views use mount/dispose and abort signals; Shadow DOM is CSS isolation, not a sandbox.
-Descriptors are user-keyed page snapshots, refreshed manually. Backend calls bind the plugin's
-namespace, action allowlist and expected viewer identity. See `docs/full-stack-plugins.md`.
-
-Plugin page `openConversation(threadId)` resolves authenticated thread metadata
-with `pathOfThread`; do not let plugins hardcode default-agent routes. The page's
-abort signal fences late navigation after unmount/account changes. Synchronous
-conversation-action callbacks reject Promise returns while consuming rejections.
+Before changing plugin loaders, pages or conversation actions, read the mandatory
+[Frontend implementation invariants](../docs/full-stack-plugins.md#frontend-implementation-invariants).
+Preserve authenticated, viewer-bound loading, native actions, localization and
+mount/dispose plus abort fencing; Shadow DOM is not a security sandbox.
 
 ### Composer references
 
