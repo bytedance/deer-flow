@@ -2622,6 +2622,12 @@ messages. Keep `runs/.seq-watermark` with the run files when backing up this
 backend. New or replaced watermarks inherit the deleted run file's permission bits.
 Deleting the complete thread removes the watermark and resets allocation.
 
+JSONL history pages and targeted lookups stream the logs without retaining
+unrelated event payloads. Positive page limits bound retained candidates;
+counting and deletion counts also stream. Reads still scan the relevant logs,
+and a single large record or requested page can still use substantial memory.
+See [the offline memory benchmark](backend/docs/jsonl-history-memory.md).
+
 Thread IDs may be supplied by callers and do not have to be UUIDs. Explicit
 IDs must contain 1–64 ASCII letters, digits, hyphens, or underscores
 (`^[A-Za-z0-9_-]{1,64}$`). DeerFlow generates a UUID only when `thread_id` is

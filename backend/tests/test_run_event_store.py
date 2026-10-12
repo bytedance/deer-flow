@@ -1444,11 +1444,11 @@ class TestJsonlRunEventStore:
                 "seq": 2,
             },
         ]
-        with patch.object(store, "_read_thread_events", return_value=events) as read_thread_events:
+        with patch.object(store, "_iter_thread_events", return_value=events) as read_thread_events:
             assert await store.find_latest_ai_message_run_ids("t1", {"target"}, user_id=None) == {"target": "valid-run"}
         read_thread_events.assert_called_once_with("t1")
 
-        with patch.object(store, "_read_thread_events", side_effect=AssertionError("empty input must not read")) as read_thread_events:
+        with patch.object(store, "_iter_thread_events", side_effect=AssertionError("empty input must not read")) as read_thread_events:
             assert await store.find_latest_ai_message_run_ids("t1", set()) == {}
         read_thread_events.assert_not_called()
 
