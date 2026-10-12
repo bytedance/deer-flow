@@ -233,7 +233,10 @@ def test_original_aliases_work_on_read_only_cache(analysis, tmp_path):
     db = tmp_path / "cached.duckdb"
     table_map = {}
     with duckdb.connect(str(db)) as con:
-        analysis["_load_csv"](con, csv_file(tmp_path, 'sales-"2026.csv', 7), table_map)
+        analysis["_load_csv"](con, csv_file(tmp_path, "sales-2026.csv", 7), table_map)
+    # Double quotes are valid SQL alias characters, but Windows forbids them
+    # in disk filenames. Exercise alias escaping independently of the CSV path.
+    table_map['sales-"2026'] = table_map.pop("sales-2026")
     before = db.read_bytes()
     with duckdb.connect(str(db), read_only=True) as con:
         for i in range(2):
