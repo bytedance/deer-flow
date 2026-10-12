@@ -294,6 +294,22 @@ test("bounds repeated data URLs and preserves out-of-route CSS resolution", asyn
   expect(request).toHaveBeenCalledTimes(1);
 });
 
+test("quotes absolute CSS URLs that replace escaped unquoted references", async () => {
+  request.mockResolvedValue(
+    new Response(".chart{background:url(//cdn.example/chart\\(1\\).png)}"),
+  );
+  const result = await prepareHtmlPreview(
+    '<link rel="stylesheet" href="style.css">',
+    url,
+  );
+  const document = new DOMParser().parseFromString(result.content, "text/html");
+  const stylesheet = atob(
+    document.querySelector("link")!.getAttribute("href")!.split(",")[1]!,
+  );
+  expect(stylesheet).toContain('url("https://cdn.example/chart(1).png")');
+  expect(result.failedResources).toBe(0);
+});
+
 test("aborts late responses before exposing prepared HTML", async () => {
   const controller = new AbortController();
   request.mockImplementation(async (input) => {

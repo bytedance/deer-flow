@@ -12,6 +12,11 @@ async function rewriteCss(
   css: string,
   replace: (value: string, stylesheet: boolean) => Promise<string>,
 ) {
+  const quoteUrl = (value: string) =>
+    `"${value
+      .replace(/\\/g, "\\\\")
+      .replace(/"/g, '\\"')
+      .replace(/[\r\n\f]/g, "\\A ")}"`;
   const tokens = /\/\*|["']|\burl\s*\(|@import\s+/gi;
   let result = "";
   let copied = 0;
@@ -71,9 +76,13 @@ async function rewriteCss(
       },
     );
     const replacement = await replace(value, imported);
-    result +=
-      css.slice(copied, valueStart) +
-      (replacement === value ? raw : replacement);
+    const formattedReplacement =
+      replacement === value || quote
+        ? replacement === value
+          ? raw
+          : replacement
+        : quoteUrl(replacement);
+    result += css.slice(copied, valueStart) + formattedReplacement;
     copied = end;
     tokens.lastIndex = end + (quote ? 1 : 0);
   }
