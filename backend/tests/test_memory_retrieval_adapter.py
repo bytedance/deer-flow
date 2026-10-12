@@ -338,6 +338,9 @@ def test_substring_fallback_searches_every_fact_of_a_large_scope(tmp_path: Path)
 
         assert len(results) == 150
         returned_ids = {item["fact"]["id"] for item in results}
-        assert {"fact-100", "fact-101", "fact-150"} <= returned_ids
+        # fact-001..fact-100 sat inside the old first page too (``matched[0:100]``
+        # in insertion order), so fact-101 and fact-150 are the ids only a
+        # complete-scope read can return.
+        assert {"fact-101", "fact-150"} <= returned_ids
     finally:
         storage.close()
