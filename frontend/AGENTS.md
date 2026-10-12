@@ -36,7 +36,7 @@ upstream dependency chain resolves a patched version without it; regenerate
 | `pnpm typecheck` | TypeScript type check (`tsc --noEmit`)        |
 | `pnpm start`     | Start production server                       |
 
-Unit tests live under `tests/unit/` and mirror the `src/` layout (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Powered by Rstest; import source modules via the `@/` path alias.
+Rstest unit tests under `tests/unit/` mirror `src/` (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Import source modules via `@/`.
 
 Webpack is the default development bundler. Use `DEER_FLOW_DEV_BUNDLER=turbo` with `pnpm dev` to opt in to Turbopack when diagnosing a local Next.js bundler issue.
 
@@ -70,7 +70,7 @@ Frontend (Next.js) ──▶ LangGraph SDK ──▶ LangGraph Backend (lead_age
                                               └── Tools & Skills
 ```
 
-The frontend is a stateful chat application. Users create **threads** (conversations), send messages, set thread-scoped `/goal` completion conditions, and receive streamed AI responses. The backend orchestrates agents that can produce **artifacts** (files/code), **todos**, and goal state updates.
+Users create **threads** (conversations), send messages, set thread-scoped `/goal` completion conditions, and receive streamed responses, agent **artifacts** (files/code), **todos** and goal state updates.
 
 ### Source Layout (`src/`)
 
