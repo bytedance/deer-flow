@@ -1,6 +1,6 @@
 """Thread deletion treats configured cache namespaces as literal Redis keys."""
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -27,6 +27,8 @@ async def test_purge_escapes_namespace_and_filters_results(prefix, thread_id, si
     cache = RedisCheckpointHistoryCache.__new__(RedisCheckpointHistoryCache)
     client = AsyncMock()
     cache._client = client
+    client.connection_pool = Mock()
+    client.connection_pool.get_encoder.return_value.encode.side_effect = lambda value: value.encode("utf-8")
     owned = make_history_key(prefix, thread_id, "", "c1", "messages").encode()
     foreign = make_history_key("tenant-other", thread_id, "", "c1", "messages").encode()
     sibling = make_history_key(prefix, sibling_thread_id, "", "c1", "messages").encode()
@@ -51,6 +53,8 @@ async def test_purge_escapes_namespace_and_filters_results(prefix, thread_id, si
 async def test_purge_does_not_unlink_empty_filtered_page():
     cache = RedisCheckpointHistoryCache.__new__(RedisCheckpointHistoryCache)
     cache._client = AsyncMock()
+    cache._client.connection_pool = Mock()
+    cache._client.connection_pool.get_encoder.return_value.encode.side_effect = lambda value: value.encode("utf-8")
     cache._client.scan.return_value = (0, [b"other:t1:history"])
     await cache.adelete_thread("owned", "t1")
     cache._client.unlink.assert_not_awaited()
@@ -62,6 +66,7 @@ async def test_purge_uses_client_encoding_for_byte_key_fence():
     cache = RedisCheckpointHistoryCache.__new__(RedisCheckpointHistoryCache)
     client = AsyncMock()
     cache._client = client
+    client.connection_pool = Mock()
     client.connection_pool.get_encoder.return_value.encode.side_effect = lambda value: value.encode("latin-1")
     owned = make_history_key("café", "t1", "", "c1", "messages").encode("latin-1")
     sibling = make_history_key("café", "t10", "", "c1", "messages").encode("latin-1")
