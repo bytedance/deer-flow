@@ -1,10 +1,10 @@
 # AGENTS.md
 
-This file is the DeerFlow frontend's source of truth for coding agents. `CLAUDE.md` imports it via `@AGENTS.md`.
+This is the source of truth for DeerFlow frontend coding agents; the sibling `CLAUDE.md` imports it via `@AGENTS.md`.
 
 ## Project Overview
 
-The DeerFlow frontend is a Next.js 16 chat interface for a LangGraph backend, with streaming conversations, artifacts and skills/tools.
+DeerFlow's Next.js 16 frontend provides thread-based AI conversations with streaming responses, artifacts, skills, and tools through a LangGraph backend.
 
 **Stack**: Next.js 16, React 19, TypeScript 5.8, Tailwind CSS 4, pnpm 10.26.2. Requires Node.js 22+ and pnpm 10.26.2+.
 

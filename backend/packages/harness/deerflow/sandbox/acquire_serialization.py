@@ -26,6 +26,10 @@ from functools import partial
 DEFAULT_MAX_WORKERS = min(32, (os.cpu_count() or 1) + 4)
 
 
+class AcquireSerializerClosed(RuntimeError):
+    """A scope checkout or queued acquire was rejected during shutdown."""
+
+
 @dataclass
 class _Entry:
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -154,7 +158,7 @@ class AcquireSerializer[KeyT: Hashable]:
             worker_future = self._executor.submit(acquire.run)
         except RuntimeError:  # executor shut down between checkout and scheduling
             self._checkin(key, entry)
-            raise RuntimeError("AcquireSerializer is closed") from None
+            raise AcquireSerializerClosed("AcquireSerializer is closed") from None
         # concurrent.futures callbacks run in the cancelling/worker thread, so
         # executor-shutdown cleanup does not depend on this loop progressing.
         worker_future.add_done_callback(acquire.worker_done)
@@ -172,7 +176,7 @@ class AcquireSerializer[KeyT: Hashable]:
                 # only pending cancellation (no stale count left by an outer
                 # swallowed CancelledError).
                 acquire.cancel_queued()
-                raise RuntimeError("AcquireSerializer is closed") from None
+                raise AcquireSerializerClosed("AcquireSerializer is closed") from None
             if acquire_future.cancelled():
                 acquire.cancel_queued()
             else:
@@ -204,7 +208,7 @@ class AcquireSerializer[KeyT: Hashable]:
     def _checkout(self, key: KeyT) -> _Entry:
         with self._table_lock:
             if self._closed:
-                raise RuntimeError("AcquireSerializer is closed")
+                raise AcquireSerializerClosed("AcquireSerializer is closed")
             entry = self._table.get(key)
             if entry is None:
                 entry = _Entry()
