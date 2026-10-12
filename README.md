@@ -2277,6 +2277,8 @@ On Windows, `st_ctime_ns` may represent creation time; a same-size rewrite that
 restores the original `mtime` can evade validation. Timestamp checks are
 conservative metadata validation, not a guarantee of content equality.
 
+Sandbox image downloads enforce the 20 MiB vision limit while reading, including model-context rereads. Oversized streams stop at the first over-limit chunk. Custom sandbox providers must accept and enforce the `download_file(..., max_bytes=...)` keyword; older implementations fail the image read instead of falling back to an unrestricted download.
+
 Image bytes loaded for a vision-model call are transient: DeerFlow removes the hidden base64 message after the model consumes it so later checkpoints do not keep duplicating that payload.
 
 After each run, DeerFlow records a workspace change summary for the run-owned `workspace` and `outputs` directories. The Web UI shows a compact "files changed" badge on the assistant turn; opening it reveals created, modified, and deleted files with text diffs when safe to display. Uploads are excluded because they are user inputs, not agent-generated changes, and stdio MCP temporary/debug files under the DeerFlow-owned `.mcp/` namespace are excluded because they are process-internal state (like `.git/` and `node_modules/`, any directory named `.mcp` is excluded at any depth). Large, binary, or sensitive-looking files are shown as metadata only.
