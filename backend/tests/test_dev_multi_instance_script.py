@@ -141,6 +141,39 @@ def test_overlay_keeps_channels_when_asked():
     assert config["channels"]["telegram"]["enabled"] is True
 
 
+@pytest.mark.parametrize("keep_channels", [False, True])
+def test_overlay_handles_ui_connectable_providers_without_mutating_settings(keep_channels):
+    providers = ("slack", "telegram", "discord", "feishu", "dingtalk", "wechat", "wecom", "buzz", "qq")
+    base = {
+        "channels": {"leader_lease": {"enabled": False, "lease_seconds": 15}},
+        "channel_connections": {
+            "enabled": True,
+            "require_bound_identity": False,
+            "notification_locale": "zh-CN",
+            **{provider: {"enabled": True} for provider in providers},
+        },
+    }
+    base["channel_connections"]["telegram"]["bot_username"] = "test_bot"
+    snapshot = yaml.safe_dump(base)
+
+    config, notes = _overlay(base, keep_channels=keep_channels)
+
+    assert yaml.safe_dump(base) == snapshot
+    assert config["channels"]["leader_lease"] == base["channels"]["leader_lease"]
+    connections = config["channel_connections"]
+    assert connections["enabled"] is True
+    assert connections["require_bound_identity"] is False
+    assert connections["notification_locale"] == "zh-CN"
+    assert connections["telegram"]["bot_username"] == "test_bot"
+    assert all(connections[provider]["enabled"] is keep_channels for provider in providers)
+    channel_notes = [note for note in notes if "channel_connections" in note]
+    if keep_channels:
+        assert channel_notes == []
+    else:
+        assert len(channel_notes) == 1
+        assert all(provider in channel_notes[0] for provider in providers)
+
+
 def test_overlay_drops_a_postgres_checkpointer_pointing_at_the_developers_database():
     # An explicit checkpointer section wins over database.postgres_url for LangGraph
     # checkpoints and the Store, so keeping it would write into the real database.
@@ -285,6 +318,35 @@ def test_generated_config_from_a_hostile_base_passes_the_real_startup_gate(tmp_p
     config = _load_generated(tmp_path, monkeypatch, base_path, index_dir=tmp_path / "index-b")
 
     _enforce_postgres_for_multi_worker(config)
+
+
+@pytest.mark.parametrize("keep_channels", [False, True])
+@pytest.mark.parametrize("yaml_channel_enabled", [False, True])
+def test_generated_config_handles_ui_channels_with_disabled_lease(tmp_path, monkeypatch, keep_channels, yaml_channel_enabled):
+    base = {
+        "config_version": 1,
+        "models": [],
+        "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+        "channels": {"leader_lease": {"enabled": False}, "telegram": {"enabled": yaml_channel_enabled, "bot_token": "test-token"}},
+        "channel_connections": {"enabled": True, "telegram": {"enabled": True, "bot_username": "test_bot"}},
+    }
+    base_path = tmp_path / "base.yaml"
+    base_path.write_text(yaml.safe_dump(base), encoding="utf-8")
+    _enforce_postgres_for_multi_worker(AppConfig.from_file(str(base_path)))
+    out = tmp_path / "generated.yaml"
+    monkeypatch.setenv(mi.RETRIEVAL_INDEX_ENV_VAR, str(tmp_path / "index"))
+
+    mi.render_config(base_path, out, database_url=DATABASE_URL, redis_url=REDIS_URL, state_dir=tmp_path / "state", keep_channels=keep_channels)
+    config = AppConfig.from_file(str(out))
+
+    assert config.model_extra["channels"]["leader_lease"] == {"enabled": False}
+    if keep_channels:
+        assert config.channel_connections.telegram.enabled is True
+        with pytest.raises(SystemExit, match="channels.leader_lease.enabled=false while IM channels telegram"):
+            _enforce_postgres_for_multi_worker(config)
+    else:
+        _enforce_postgres_for_multi_worker(config)
+        assert config.channel_connections.telegram.enabled is False
 
 
 def test_each_process_resolves_its_own_retrieval_index(tmp_path, monkeypatch):
