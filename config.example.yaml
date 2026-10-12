@@ -552,6 +552,18 @@ models:
   #       thinking:
   #         type: disabled
 
+  # Example: DemonRoute (OpenAI-compatible gateway for open-weight models)
+  # See: https://demonroute.com/docs
+  # - name: demonroute-dolphin-3-llama-3.1-8b
+  #   display_name: DemonRoute Dolphin 3.0 Llama 3.1 8B
+  #   use: langchain_openai:ChatOpenAI
+  #   model: dphn/Dolphin3.0-Llama3.1-8B
+  #   api_key: $DEMONROUTE_API_KEY
+  #   base_url: https://api.demonroute.com/v1
+  #   request_timeout: 600.0
+  #   max_retries: 2
+  #   max_tokens: 4096
+
   # Example: StepFun (阶跃星辰) reasoning models
   # StepFun provides OpenAI-compatible API with reasoning models.
   # With reasoning_format: deepseek-style, the API returns reasoning_content
