@@ -128,6 +128,12 @@ matching in `core/scheduled-tasks/search.ts`; clearing search retains other filt
 
 Single-run schedule edits retain the mounted task's original `run_at` while its wall time and timezone match. The parent echoes edits through `initial`; retain a stable snapshot and reset the parent draft during render before remounting with a task key when switching tasks. Use the resolved timezone consistently for the snapshot and displayed wall time. Component and scheduled-task E2E tests cover DST folds and timestamp precision.
 
+The scheduled-task schedule input initializes Custom cron from the current
+preset and its current fields on every transition into the custom editor.
+Do not substitute a daily schedule or restore stale `parts.raw` after preset
+edits. Component tests cover emitted specs; browser tests pin unchanged
+schedules through the task form's PATCH payload on desktop and mobile.
+
 ## Environment
 
 Scheduled-task interval forms preserve the initial `every_seconds` on mount,
