@@ -17,6 +17,7 @@ delta instead of re-freezing the literals, so any other drift still goes red.
 
 from __future__ import annotations
 
+import ntpath
 import re
 from pathlib import Path
 
@@ -134,9 +135,10 @@ def test_direct_replacer_matches_a_windows_case_variant_without_rewriting_case(
     original case intact.
 
     CI runs on POSIX where ``os.path.normcase`` is an identity, so the test
-    stubs it to lower-case to reproduce the Windows semantics.
+    stubs it with the real Windows path semantics (``ntpath.normcase``) to
+    reproduce the Windows case-folding behaviour.
     """
-    monkeypatch.setattr(path_patterns_module.os.path, "normcase", str.lower)
+    monkeypatch.setattr(path_patterns_module.os.path, "normcase", ntpath.normcase)
 
     replacer = getattr(path_patterns_module, "replace_output_path_matches", None)
     assert replacer is not None

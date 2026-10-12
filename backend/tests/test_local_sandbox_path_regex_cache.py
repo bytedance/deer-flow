@@ -4,6 +4,7 @@ host-path masking avoids process-global regex retention.
 
 from __future__ import annotations
 
+import ntpath
 import os
 import re
 from pathlib import Path
@@ -210,8 +211,11 @@ def test_reverse_resolve_path_matches_windows_case_variant(monkeypatch):
     sb._resolved_local_paths = {mapping: "C:\\Users\\test\\workspace"}
     monkeypatch.setattr(local_sandbox_module.os.path, "realpath", lambda raw: raw.replace("/", "\\"))
     # Windows paths compare case-insensitively; CI runs on POSIX where
-    # ``normcase`` is an identity, so stub it to reproduce that semantics.
-    monkeypatch.setattr(local_sandbox_module.os.path, "normcase", str.lower)
+    # ``normcase`` is an identity, so stub it with the real Windows path
+    # semantics (ntpath.normcase) rather than str.lower — str.lower is not
+    # length-preserving for all code points (e.g. U+0130), which would
+    # misalign the original-spelling slice.
+    monkeypatch.setattr(local_sandbox_module.os.path, "normcase", ntpath.normcase)
 
     # Lower-cased drive + uppercase user/workspace spelling.
     result = sb._reverse_resolve_path("c:\\users\\TEST\\WORKSPACE\\sub\\f.txt")

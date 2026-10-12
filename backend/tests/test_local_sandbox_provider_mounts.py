@@ -1,4 +1,5 @@
 import errno
+import ntpath
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -157,8 +158,11 @@ class TestReadOnlyPath:
         monkeypatch.setattr(local_sandbox_module.os, "sep", "\\")
         monkeypatch.setattr(local_sandbox_module.os.path, "realpath", lambda raw: raw)
         # Windows paths compare case-insensitively; CI runs on POSIX where
-        # ``normcase`` is an identity, so stub it to reproduce that semantics.
-        monkeypatch.setattr(local_sandbox_module.os.path, "normcase", str.lower)
+        # ``normcase`` is an identity, so stub it with the real Windows path
+        # semantics (ntpath.normcase) rather than str.lower — str.lower is not
+        # length-preserving for all code points (e.g. U+0130), which would
+        # misalign the original-spelling slice.
+        monkeypatch.setattr(local_sandbox_module.os.path, "normcase", ntpath.normcase)
 
         assert sandbox._is_read_only_path(r"c:\users\TEST\SKILLS\file.txt") is True
 
