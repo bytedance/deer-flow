@@ -1,0 +1,251 @@
+pipeline {
+  agent { node { label 'shanghai-builder'; customWorkspace '/data/jenkins-agent/deerflow/native-task6b-56636cebddc6' } }
+  options { disableConcurrentBuilds(); skipDefaultCheckout(true); timeout(time: 120, unit: 'MINUTES'); timestamps() }
+  parameters { choice(name: 'PHASE', choices: ['frontend-only', 'transfer', 'bootstrap', 'b-main', 'b-cleanup', 'c-main', 'bc-main', 'publication-build', 'publication-transfer', 'publication-deploy', 'bc-repair', 'bc-proof', 'installed-lifecycle'], description: 'Build reviewed images or transfer existing immutable images only'); string(name: 'SOURCE_BUNDLE_SHA256', defaultValue: 'e27c3d4ce58b7f762c09386cfe1fc97464c5df639dc2d855332713915e3fa34b', description: 'Exact reviewed public source archive hash') }
+  environment { NATIVE_BUILDER = 'deer-native-820d7a3429d9'; NATIVE_ROLE_IMAGE = 'deerflow-native:05e260329244-core'; NATIVE_UI_IMAGE = 'deerflow-native-ui:56636cebddc6' }
+  stages {
+    stage('Verify reviewed public source') {
+      steps {
+        sh '''set +x
+set -eu
+python3 scripts/ecs_native_build.py verify-source "$SOURCE_BUNDLE_SHA256"
+'''
+      }
+    }
+    stage('Installed drained lifecycle slice') {
+      when { expression { params.PHASE == 'installed-lifecycle' } }
+      steps {
+        withCredentials([sshUserPrivateKey(credentialsId: 'shanghai-deploy-ssh', keyFileVariable: 'DEPLOY_KEY', usernameVariable: 'DEPLOY_USER')]) {
+          sh '''set +x
+set -eu
+python3 -c "import hashlib;from pathlib import Path;assert hashlib.sha256(Path('scripts/ecs_native_shanghai_lifecycle_host.py').read_bytes()).hexdigest()=='098b6105a26abea10eed62e31b15c0a634daec468fd41c88f037d403b23fc89a';assert hashlib.sha256(Path('scripts/ecs_native_shanghai_lifecycle_transport.py').read_bytes()).hexdigest()=='87cde074ed25844592cf368edb47bcca251f59e8dd3594b65c86ffc07d205804'"
+python3 scripts/ecs_native_shanghai_lifecycle_transport.py
+'''
+        }
+      }
+    }
+    stage('Verify isolated Shanghai targets') {
+      steps {
+        withCredentials([sshUserPrivateKey(credentialsId: 'shanghai-deploy-ssh', keyFileVariable: 'DEPLOY_KEY', usernameVariable: 'DEPLOY_USER')]) {
+          sh '''set +x
+set -eu
+for host in 192.168.0.190 192.168.0.189; do
+  ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WORKSPACE/known_hosts.native" -i "$DEPLOY_KEY" "$DEPLOY_USER@$host" python3 - <<'PY'
+import os,subprocess
+from pathlib import Path
+root=Path('/srv/deerflow-native-test')
+assert os.path.ismount(root)
+assert (root/'pool/pool-mount-id').read_text().strip()=='820d7a3429d9'
+kind=subprocess.check_output(['findmnt','-n','-o','FSTYPE','--target',str(root)],text=True).strip()
+source=subprocess.check_output(['findmnt','-n','-o','SOURCE','--target',str(root)],text=True).strip()
+assert kind=='nfs4'
+assert source.startswith('031sp6l7o6sh4hzha32-jow11.cn-shanghai.nas.aliyuncs.com:/')
+PY
+done
+'''
+        }
+      }
+    }
+    stage('Build frontend on dedicated controller; no role start') {
+      when { expression { params.PHASE == 'frontend-only' } }
+      steps {
+        withCredentials([sshUserPrivateKey(credentialsId: 'shanghai-deploy-ssh', keyFileVariable: 'DEPLOY_KEY', usernameVariable: 'DEPLOY_USER')]) {
+          sh '''set +x
+set -eu
+python3 -c "import hashlib;from pathlib import Path;assert hashlib.sha256(Path('scripts/ecs_native_controller_build.py').read_bytes()).hexdigest()=='4098cacd4d7112839c81488cbc13cdef63fb3514be64f962ffb5b3f59cf3fcfc'"
+python3 scripts/ecs_native_controller_build.py
+'''
+        }
+      }
+    }
+    stage('Bootstrap fixed owned native roles; zero model B preparation') {
+      when { expression { params.PHASE == 'bootstrap' } }
+      steps {
+        withCredentials([sshUserPrivateKey(credentialsId: 'shanghai-deploy-ssh', keyFileVariable: 'DEPLOY_KEY', usernameVariable: 'DEPLOY_USER')]) {
+          sh '''set +x
+set -eu
+python3 -c "import hashlib;from pathlib import Path;assert hashlib.sha256(Path('scripts/ecs_native_shanghai_bootstrap.py').read_bytes()).hexdigest()=='8d9f9613a0bdda49b763a5cf84c8b41d25e1e13dc351a9d4012928e88952a92a'"
+python3 scripts/ecs_native_shanghai_bootstrap.py
+'''
+        }
+      }
+    }
+    stage('One owned ordinary MCP B infrastructure main; zero model') {
+      when { expression { params.PHASE == 'b-main' } }
+      steps {
+        withCredentials([sshUserPrivateKey(credentialsId: 'shanghai-deploy-ssh', keyFileVariable: 'DEPLOY_KEY', usernameVariable: 'DEPLOY_USER')]) {
+          sh '''set +x
+set -eu
+python3 -c "import hashlib;from pathlib import Path;assert hashlib.sha256(Path('scripts/ecs_native_shanghai_b_transport.py').read_bytes()).hexdigest()=='b9d621f7d27d1b3faac437e109a18e0c911eaf2aacc5b3216dcbb3c78a8b6190'"
+python3 scripts/ecs_native_shanghai_b_transport.py
+'''
+        }
+      }
+    }
+    stage('Archive completed owned B receipt and native thread cleanup') {
+      when { expression { params.PHASE == 'b-cleanup' } }
+      steps {
+        withCredentials([sshUserPrivateKey(credentialsId: 'shanghai-deploy-ssh', keyFileVariable: 'DEPLOY_KEY', usernameVariable: 'DEPLOY_USER')]) {
+          sh '''set +x
+set -eu
+python3 - <<'PYCODE'
+import hashlib,importlib.util
+from pathlib import Path
+root=Path('/data/jenkins-agent/deerflow/native-task6b-56636cebddc6')
+helper=root/'scripts/ecs_native_shanghai_bootstrap.py'
+assert hashlib.sha256(helper.read_bytes()).hexdigest()=='8d9f9613a0bdda49b763a5cf84c8b41d25e1e13dc351a9d4012928e88952a92a'
+spec=importlib.util.spec_from_file_location('fixed_bootstrap',helper);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+module.copy_public('192.168.0.190',root/'scripts/ecs_native_shanghai_b_cleanup.py',module.REMOTE+'/bootstrap/ecs_native_shanghai_b_cleanup_recovery.py','01d5d4aa61ae537397b1eafdd6181ec4c8cc1a039bbdd4db261625f407c32d2d')
+code="""
+import subprocess,json,pathlib,importlib.util,time
+root=pathlib.Path('/srv/deerflow-native-task6b/56636cebddc6');script=root/'bootstrap/ecs_native_shanghai_b_cleanup_recovery.py'
+def checked(args,timeout=120):
+ r=subprocess.run(args,capture_output=True,timeout=timeout)
+ if r.returncode:
+  for line in r.stdout.decode().splitlines():
+   try:value=json.loads(line)
+   except json.JSONDecodeError:continue
+   if value.get('cleanup_failed'):print(json.dumps(value),flush=True)
+  raise SystemExit('Owned cleanup recovery refused; private output withheld')
+ return r.stdout
+print(checked(['python3',str(script),'--prepare-notifications']).decode(),end='',flush=True)
+private=root/'private/820d7a3429d9/resident'
+checked(['docker','compose','--project-name','deer-native-820d7a3429d9-controller','--env-file',str(private/'controller.env'),'-f',str(root/'source/examples/ecs-native/deploy/controller.compose.yaml'),'restart','gateway'])
+spec=importlib.util.spec_from_file_location('cleanup',script);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+for _ in range(45):
+ state=module.query('deerflow',"SELECT notification_status FROM mcp_tasks WHERE id='mcp-task-113001fb128f451f9a8f10e0a71acc12';")
+ if state=='dead_letter':break
+ time.sleep(2)
+else:raise SystemExit('Normal notification completion not proven; retained for diagnosis')
+print(checked(['python3',str(script)]).decode(),end='',flush=True)
+"""
+print(module.remote('192.168.0.190',code).decode())
+PYCODE
+'''
+        }
+      }
+    }
+    stage('One original DeepSeek native C main on installed peers') {
+      when { expression { params.PHASE == 'c-main' } }
+      steps {
+        withCredentials([sshUserPrivateKey(credentialsId: 'shanghai-deploy-ssh', keyFileVariable: 'DEPLOY_KEY', usernameVariable: 'DEPLOY_USER')]) {
+          sh '''set +x
+set -eu
+python3 -c "import hashlib;from pathlib import Path;assert hashlib.sha256(Path('scripts/ecs_native_shanghai_c_repair_transport.py').read_bytes()).hexdigest()=='26d4f7233cdd35ffba9cec2ddd882f3e741950382940475ea8f95b67c43d248c'"
+python3 scripts/ecs_native_shanghai_c_repair_transport.py
+'''
+        }
+      }
+    }
+    stage('One installed native goal C to B to C main') {
+      when { expression { params.PHASE == 'bc-main' } }
+      steps {
+        withCredentials([sshUserPrivateKey(credentialsId: 'shanghai-deploy-ssh', keyFileVariable: 'DEPLOY_KEY', usernameVariable: 'DEPLOY_USER')]) {
+          sh '''set +x
+set -eu
+python3 -c "import hashlib;from pathlib import Path;assert hashlib.sha256(Path('scripts/ecs_native_shanghai_bc_transport.py').read_bytes()).hexdigest()=='8092c7504a7a28b04f0e64c6060c7b3b5359d444055389255ae0cfcaffca5b8c'"
+python3 scripts/ecs_native_shanghai_bc_transport.py
+'''
+        }
+      }
+    }
+    stage('Build one publication patch derivative and focused cloud regressions') {
+      when { expression { params.PHASE == 'publication-build' } }
+      steps {
+        sh '''set +x
+set -eu
+python3 -c "import hashlib;from pathlib import Path;assert hashlib.sha256(Path('scripts/ecs_native_publication_build.py').read_bytes()).hexdigest()=='7e6740f52091e62cb805a31d425a59f22cc14b8d0b3dd9f17879bed56fb92874'"
+python3 scripts/ecs_native_publication_build.py
+python3 - <<'PYREG'
+import hashlib,json,os,pathlib,subprocess
+root=pathlib.Path('/data/jenkins-agent/deerflow/native-task6b-56636cebddc6');work=root/'publication-bdd2931a1a6f'
+proof=json.loads((root/'proof/publication-image.json').read_text());image=proof['image_id']
+assert proof['publication_sha256']=='bdd2931a1a6f8f35b9eb191fb809aa38c8dae85b6e65b44c15feb3d8a6cc8a9e'
+expected={'test_publication.py':'dc96d689c85e774122d1d6dd9249cb5a15b5bc7fee4852fe48027214e576ff34','backend/tests/test_namespace.py':'56f5b399896eda29c4ba0d625770420f7e415fe09807c2ee2c5ba95f55b78c4d','scripts/ecs_native.py':'4b4efcede53655cd003e12196b6ee4c278318f456c53df47616bfe86c25c79a0'}
+for name,sha in expected.items():
+ p=work/'regressions'/name;assert p.is_file() and not p.is_symlink() and hashlib.sha256(p.read_bytes()).hexdigest()==sha
+results=[]
+for name,test in [('publication','/run/regressions/test_publication.py'),('namespace','/run/regressions/backend/tests/test_namespace.py')]:
+ args=['docker','run','--rm','--name','deer-native-'+name+'-green-820d7a3429d9','--cpus','1','--memory','512m','--network','none','-e','PYTHONPATH=.:packages/ecs-executor','-v',str(work/'regressions')+':/run/regressions:ro',image,'python','-m','pytest',test,'-q','--no-showlocals','--tb=short']
+ r=subprocess.run(args,capture_output=True,text=True,timeout=120)
+ value={'test':name,'returncode':r.returncode,'one_case_passed':r.returncode==0 and '1 passed' in r.stdout,'models_called':False};results.append(value)
+ assert value['one_case_passed'],'Owned focused regression failed; raw details withheld'
+p=root/'proof/publication-green.json';fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+with os.fdopen(fd,'w') as f:json.dump({'image_id':image,'results':results},f);print(file=f)
+print(json.dumps({'derivative_focused_regressions':'PASS','image_id':image,'results':results}))
+PYREG
+'''
+      }
+    }
+    stage('Transfer exact publication derivative; no role start') {
+      when { expression { params.PHASE == 'publication-transfer' } }
+      steps {
+        withCredentials([sshUserPrivateKey(credentialsId: 'shanghai-deploy-ssh', keyFileVariable: 'DEPLOY_KEY', usernameVariable: 'DEPLOY_USER')]) {
+          sh '''set +x
+set -eu
+python3 -c "import hashlib;from pathlib import Path;assert hashlib.sha256(Path('scripts/ecs_native_publication_transfer.py').read_bytes()).hexdigest()=='947d434760f2d7a2abeb332c84c920d913fb19dbea2d139ebbe8174dacd17876'"
+python3 scripts/ecs_native_publication_transfer.py
+'''
+        }
+      }
+    }
+    stage('Refresh publication image while admission remains drained') {
+      when { expression { params.PHASE == 'publication-deploy' } }
+      steps {
+        withCredentials([sshUserPrivateKey(credentialsId: 'shanghai-deploy-ssh', keyFileVariable: 'DEPLOY_KEY', usernameVariable: 'DEPLOY_USER')]) {
+          sh '''set +x
+set -eu
+python3 -c "import hashlib;from pathlib import Path;assert hashlib.sha256(Path('scripts/ecs_native_publication_role_refresh.py').read_bytes()).hexdigest()=='abcd8155362b70ccb39c57d1e107c07b65fa3f3d440b15f0e5d48c62df0e8014';assert hashlib.sha256(Path('scripts/ecs_native_publication_deploy.py').read_bytes()).hexdigest()=='9d9d18a0a6b705b3c2f2c024c85da902ce34f13a57d8585c138fa758fd836141'"
+python3 scripts/ecs_native_publication_deploy.py
+'''
+        }
+      }
+    }
+    stage('One new native goal trial after publication repair') {
+      when { expression { params.PHASE == 'bc-repair' } }
+      steps {
+        withCredentials([sshUserPrivateKey(credentialsId: 'shanghai-deploy-ssh', keyFileVariable: 'DEPLOY_KEY', usernameVariable: 'DEPLOY_USER')]) {
+          sh '''set +x
+set -eu
+python3 -c "import hashlib;from pathlib import Path;assert hashlib.sha256(Path('scripts/ecs_native_shanghai_bc_repair_main.py').read_bytes()).hexdigest()=='fb2a4c8c7b64f896e5432b73d32e5f25051f21d163f6e91e0e77060330b2ca12';assert hashlib.sha256(Path('scripts/ecs_native_shanghai_bc_repair_transport.py').read_bytes()).hexdigest()=='4848d3941dad34f68114feb231ce88c845be8df933abd2724008cd989ce2cda0'"
+python3 scripts/ecs_native_shanghai_bc_repair_transport.py
+'''
+        }
+      }
+    }
+    stage('Read-only proof for the completed native BC repair trial') {
+      when { expression { params.PHASE == 'bc-proof' } }
+      steps {
+        withCredentials([sshUserPrivateKey(credentialsId: 'shanghai-deploy-ssh', keyFileVariable: 'DEPLOY_KEY', usernameVariable: 'DEPLOY_USER')]) {
+          sh '''set +x
+set -eu
+python3 -c "import hashlib;from pathlib import Path;assert hashlib.sha256(Path('scripts/ecs_native_shanghai_bc_repair_verify.py').read_bytes()).hexdigest()=='f1e70d0dce7ae167f9529a14ff8b4572be0e55ce3b384100ee591afb999f51bb';assert hashlib.sha256(Path('scripts/ecs_native_shanghai_bc_repair_verify_transport.py').read_bytes()).hexdigest()=='ded5420b9ef27366205ccad0e5744429ddd8056d7a9171b880f3f5e6eb1e2a2d'"
+python3 scripts/ecs_native_shanghai_bc_repair_verify_transport.py
+'''
+        }
+      }
+    }
+    stage('Transfer fixed native images; no role start') {
+      when { expression { params.PHASE == 'transfer' } }
+      steps {
+        withCredentials([sshUserPrivateKey(credentialsId: 'shanghai-deploy-ssh', keyFileVariable: 'DEPLOY_KEY', usernameVariable: 'DEPLOY_USER')]) {
+          sh '''set +x
+set -eu
+python3 -c "import hashlib;from pathlib import Path;assert hashlib.sha256(Path('scripts/ecs_native_transfer.py').read_bytes()).hexdigest()=='1536b0e109d0a8db481eca906e50fbb2f0b84f217214d2e29056e97cd0d13300'"
+python3 scripts/ecs_native_transfer.py
+'''
+        }
+      }
+    }
+  }
+  post {
+    always {
+      withCredentials([sshUserPrivateKey(credentialsId: 'shanghai-deploy-ssh', keyFileVariable: 'DEPLOY_KEY', usernameVariable: 'DEPLOY_USER')]) {
+        sh(returnStatus: true, script: '''set +x
+ssh -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$WORKSPACE/known_hosts.native" -i "$DEPLOY_KEY" "$DEPLOY_USER@192.168.0.190" env ECS_NATIVE_CONTROLLER_BUILD=1 python3 /srv/deerflow-native-task6b/56636cebddc6/frontend-build/scripts/ecs_native_build.py stop-builder
+''')
+      }
+      archiveArtifacts artifacts: 'proof/*.json', allowEmptyArchive: true, fingerprint: true
+    }
+  }
+}
