@@ -99,16 +99,21 @@ async def test_allowed_users_gate_precedes_identity_query(channel):
 
 
 OPEN_ID = "E4F4AEA33253A2797FB897C50B81D7ED"
+GROUP_OPEN_ID = "0A1B2C3D4E5F60718293A4B5C6D7E8F9"
 
 
-async def admits(allowed_users, sender=OPEN_ID):
-    """Whether an ordinary C2C message from *sender* passes ``allowed_users``."""
+async def admits(allowed_users, sender=OPEN_ID, kind="c2c"):
+    """Whether an ordinary message from *sender* passes ``allowed_users``."""
+    frame = event(kind, sender=sender, target=GROUP_OPEN_ID)
+    if kind == "group":
+        # Group frames identify the sender by member_openid only.
+        frame["d"]["author"] = {"member_openid": sender}
     instance = qq.QQChannel(
         bus=MessageBus(),
         config={"app_id": "app1", "client_secret": "fixture-secret", "allowed_users": allowed_users},
     )
     try:
-        await instance._handle_inbound(event(sender=sender))
+        await instance._handle_inbound(frame)
         return not instance.bus.inbound_queue.empty()
     finally:
         await instance.stop()
@@ -128,12 +133,19 @@ async def test_unset_or_empty_allowlist_admits_everyone_quietly(allowed_users, c
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["c2c", "group"])
 @pytest.mark.parametrize("collection", [list, tuple, set, frozenset])
-async def test_listed_open_ids_are_admitted_and_others_denied(collection):
+async def test_listed_open_ids_are_admitted_and_others_denied(collection, kind):
     allowed = collection([OPEN_ID, "another-open-id"])
-    assert await admits(allowed)
-    assert await admits(allowed, sender="another-open-id")
-    assert not await admits(allowed, sender="stranger")
+    assert await admits(allowed, kind=kind)
+    assert await admits(allowed, sender="another-open-id", kind=kind)
+    assert not await admits(allowed, sender="stranger", kind=kind)
+
+
+@pytest.mark.asyncio
+async def test_group_messages_are_gated_by_member_not_group_open_id():
+    assert not await admits([GROUP_OPEN_ID], kind="group")
+    assert await admits([OPEN_ID], kind="group")
 
 
 @pytest.mark.asyncio

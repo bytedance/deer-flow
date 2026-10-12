@@ -499,7 +499,9 @@ everyone in the group.
 
 List several OpenIDs as a YAML list. A single OpenID, such as an
 `allowed_users: $QQ_ALLOWED_USERS` reference, is one entry rather than a
-sequence of characters. Entries that are not OpenID strings, such as numeric
+sequence of characters. An unset or null value, an empty list, and a blank or
+whitespace-only string such as `" "` all allow every sender; they do not
+restrict access. Entries that are not OpenID strings, such as numeric
 QQ account numbers, are ignored with a warning, and a mapping is rejected as a
 whole, so none of its keys is authorized. A configured value with no valid
 OpenID denies every sender and logs an error.
