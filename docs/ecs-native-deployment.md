@@ -1,11 +1,11 @@
 # 原生 ECS 工作池部署与恢复
 
-更新：2026-10-12。用户已将两台上海 ECS 停机节省费用；下表公网 IP 与后文“当前安装”均是 2026-10-10 验收快照，重新开机后应重新确认公网 IP、NAS 挂载、容器与 drain 状态。这里是操作指南；此前构建过程保存在 [部署历史](ecs-native-deployment-history-2026-10-10.md)，实际运行证据见 [测试文档](ecs-native-testing.md) 和 [恢复记录](ecs-native-shanghai-resume-2026-10-10.md)。旧固定 source566/5dda 的 Shanghai build/transfer/bootstrap 脚本是历史验收输入，不能作为当前源码的冷部署入口。
+更新：2026-10-12。两台 ECS 已开机，经 Jenkins deerflow-native-recovery #2 恢复原 e84 容器与手工 NAS bind。公网地址按本次用户信息更新，私网身份及原 host key 已核对，保持 drain。2026-10-10 验收仍作为独立历史记录。这里是操作指南；此前构建过程保存在 [部署历史](ecs-native-deployment-history-2026-10-10.md)，实际运行证据见 [测试文档](ecs-native-testing.md) 和 [恢复记录](ecs-native-shanghai-resume-2026-10-10.md)。旧固定 source566/5dda 的 Shanghai build/transfer/bootstrap 脚本是历史验收输入，不能作为当前源码的冷部署入口。
 
 | 资源 | 当前地址 / 约束 |
 | --- | --- |
-| Controller | `101.133.235.59` / `192.168.0.190`，2c8g |
-| Worker01 | `47.103.28.252` / `192.168.0.189`，2c4g；不发布公网服务端口 |
+| Controller | `139.224.205.56` / `192.168.0.190`，2c8g |
+| Worker01 | `47.117.93.194` / `192.168.0.189`，2c4g；不发布公网服务端口 |
 | Jenkins | `106.14.210.163`；仅 `deerflow-shanghai-test` 管理这次验收 |
 | NAS | `031sp6l7o6sh4hzha32-jow11.cn-shanghai.nas.aliyuncs.com:/` |
 | 命名空间 | `task6b-native-820d7a3429d9`，两端 bind 到 `/srv/deerflow-native-test` |
@@ -16,7 +16,7 @@ B/C/BC, NAS, HTTP/WSS browser, lifecycle and same-schema rollback mains are acce
 
 Gateway 或 MCP 容器重建后，必须在现有 proxy 容器内执行 `nginx -t`，成功后执行 `nginx -s reload`，再检查严格 TLS 的 `/health/ready` 和正常 owner 会话，最后启动 worker。这里的静态 `proxy_pass` 在 Nginx 加载配置时解析容器地址；只重建应用、保留代理而不 reload 会继续连接旧 IP，产生 502。重载保持代理容器、证书和配置不变。升级前先 drain 并确认 ledger/原生 Run/物理任务均已收尾，停止 idle worker resident；不要依赖出站 daemon 在控制端不可达期间自动存活。恢复保持 drain，验证两端健康后才显式 resume。
 
-可复用同 schema 后端镜像更新入口见 [Jenkins 交付流程](ecs-native-release-ci.md)。新流程尚待开机后验证；旧固定 pin 任务仍只是历史证据。
+可复用同 schema 后端镜像更新入口见 [Jenkins 交付流程](ecs-native-release-ci.md)。新流程守卫与 Groovy 已验证，正式镜像交付继续验证；旧固定 pin 任务仍只是历史证据。
 
 ## Images and private configuration
 

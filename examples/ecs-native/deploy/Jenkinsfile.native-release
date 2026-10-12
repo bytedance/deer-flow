@@ -9,10 +9,12 @@ pipeline {
     skipDefaultCheckout(true)
   }
   parameters {
-    choice(name: 'PHASE', choices: ['build', 'transfer', 'deploy', 'smoke'], description: 'One explicit release phase; deploy keeps admission drained.')
+    choice(name: 'PHASE', choices: ['guards', 'build', 'transfer', 'deploy', 'smoke'], description: 'One explicit release phase; deploy keeps admission drained.')
     string(name: 'SOURCE_COMMIT', defaultValue: '', description: 'Full reviewed 40-character Git commit. SCM must check out this commit.')
     string(name: 'RELEASE_ID', defaultValue: '', description: 'Unique lowercase release ID; reuse the same ID across phases.')
     string(name: 'BUILDER', defaultValue: 'deer-native-820d7a3429d9', description: 'Existing dedicated resource-limited builder, at most 1 CPU/3GiB.')
+    string(name: 'SOURCE_DIRECTORY', defaultValue: '.', description: 'SCM destination or operator-prepared clean Git checkout; never the artifact output directory.')
+    booleanParam(name: 'PREPARED_CHECKOUT', defaultValue: false, description: 'Use a separately verified Git bundle checkout while remote publication is paused; full commit and clean-tree checks remain mandatory.')
   }
   environment {
     ECS_RELEASE_ROOT = '/data/jenkins-agent/deerflow/releases'
@@ -20,7 +22,11 @@ pipeline {
   stages {
     stage('Selected source') {
       steps {
-        checkout scm
+        dir(params.SOURCE_DIRECTORY) {
+          script {
+            if (params.PREPARED_CHECKOUT) { echo 'Using the operator-prepared checkout; verifying its immutable source identity.' }
+            else { checkout scm }
+          }
         sh '''#!/bin/sh
 set -eu
 set +x
@@ -32,23 +38,38 @@ source_check(os.environ['SOURCE_COMMIT'])
 if not NAME.fullmatch(os.environ['RELEASE_ID']): raise SystemExit('Explicit release ID required')
 PY
 '''
+        }
+      }
+    }
+    stage('Release guards') {
+      when { expression { params.PHASE == 'guards' || params.PHASE == 'build' } }
+      steps {
+        dir(params.SOURCE_DIRECTORY) {
+          sh '''#!/bin/sh
+set -eu
+set +x
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p test_ecs_native_release.py
+'''
+        }
       }
     }
     stage('Build and lock') {
       when { expression { params.PHASE == 'build' } }
       steps {
+        dir(params.SOURCE_DIRECTORY) {
         sh '''#!/bin/sh
 set -eu
 set +x
-python3 -m unittest discover -s tests -p test_ecs_native_release.py
 python3 scripts/ecs_native_release.py build --expected-commit "$SOURCE_COMMIT" \
   --release-id "$RELEASE_ID" --output-root "$ECS_RELEASE_ROOT" --builder "$BUILDER"
 '''
+        }
       }
     }
     stage('Transfer, guarded rollout or readiness') {
-      when { expression { params.PHASE != 'build' } }
+      when { expression { ['transfer', 'deploy', 'smoke'].contains(params.PHASE) } }
       steps {
+        dir(params.SOURCE_DIRECTORY) {
         withCredentials([
           sshUserPrivateKey(credentialsId: 'shanghai-deploy-ssh', keyFileVariable: 'DEPLOY_KEY', usernameVariable: 'DEPLOY_USER'),
           file(credentialsId: 'deerflow-shanghai-release-environment', variable: 'ECS_RELEASE_ENVIRONMENT'),
@@ -61,6 +82,7 @@ python3 scripts/ecs_native_release.py "$PHASE" --expected-commit "$SOURCE_COMMIT
   --release-id "$RELEASE_ID" --output-root "$ECS_RELEASE_ROOT" \
   --environment "$ECS_RELEASE_ENVIRONMENT"
 '''
+        }
         }
       }
     }

@@ -7,3 +7,5 @@
 - [ ] 5. After user starts Shanghai ECS, recover existing mounts/services and run five guard tests plus one Jenkins delivery main; then one chosen real workflow smoke.
 
 Implementation is prepared; cloud validation remains pending. No remote Git publication or cloud mutation in this phase.
+
+2026-10-12 cloud checkpoint: guard #3 SUCCESS (5 cases, 0.018s); original #1/#2 workspace/@tmp failures retained. Recovery #2 SUCCESS after correcting read-only runs.run_id audit; #1 retained. NAS binds, original e84 container IDs, private fingerprints, native0035/executor e0001 and three-table history hashes preserved; strict TLS, worker500m/1GiB and drain/unreleased0 verified, no model calls. Prepared-checkout entry passes actual Jenkins Groovy validation. Task5 still awaits new build/transfer/deploy/readiness and one real workflow.

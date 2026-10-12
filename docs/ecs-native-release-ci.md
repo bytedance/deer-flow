@@ -1,6 +1,6 @@
 # 可复用原生 ECS 交付流程
 
-状态：2026-10-12，代码已准备；新 Jenkins 流水线尚未在上海执行。两台 ECS 由用户停机，本文不把静态检查称为云端部署验收。原 B/C/BC、浏览器和生命周期证据继续见 `ecs-native-shanghai-acceptance-2026-10-10.md`。
+状态：2026-10-12，Jenkins 守卫 #3 已执行原定 5 个用例并 SUCCESS；恢复 #2 已恢复两端 NAS bind 与原 e84 容器，保持 drain。原失败记录保留。正式新镜像交付主干仍待验证。原 B/C/BC、浏览器和生命周期证据继续见 `ecs-native-shanghai-acceptance-2026-10-10.md`。
 
 入口是 `examples/ecs-native/deploy/Jenkinsfile.native-release`，配合 `scripts/ecs_native_release.py` 与只接受可信运维输入的 `scripts/ecs_native_release_host.py`。建议新建 `deerflow-native-release` 专属任务，保留 `deerflow-shanghai-test` 的历史结果。
 
@@ -12,21 +12,22 @@
 
 ## 一次性 Jenkins 准备
 
-Jenkins 使用 Python 3.12、Git、Docker Buildx 和已有独立 builder；给 Jenkins 执行用户预建 `/data/jenkins-agent/deerflow/releases`，目录 mode0700。不要让此任务与别的任务共享该 builder。构建需要锁文件中的依赖、基础镜像和 Chromium 下载可达；新流程的完整镜像构建尚待实际验证。
+Jenkins 使用 Python 3.12、Git、Docker Buildx 和已有独立 builder；给 Jenkins 执行用户预建 `/data/jenkins-agent/deerflow/releases`，目录 mode0700，当前代理账户 uid999/gid987。自定义工作目录及同级 @tmp 也须提前创建为该账户所有的 mode0700，不能为此放宽公共父目录权限。不要让此任务与别的任务共享该 builder。构建需要锁文件中的依赖、基础镜像和 Chromium 下载可达；新流程的完整镜像构建尚待实际验证。
 
-SCM 指向用户自己的 fork 或 Jenkins 本地 Git mirror，checkout 必须恰好是 `SOURCE_COMMIT`，不自动向上游仓库推送。当前远程发布暂停；必要时可在恢复测试时通过 Git bundle 提供本地 mirror，再单独核对 commit。仅作业创建和执行阶段需要 Jenkins 变更，本次没有修改线上 Jenkins 任务。
+SCM 指向用户自己的 fork 或 Jenkins 本地 Git mirror，checkout 必须恰好是 `SOURCE_COMMIT`，不自动向上游仓库推送。当前远程发布暂停；通过 Git bundle 准备干净 checkout 后，设置 PREPARED_CHECKOUT=true、SOURCE_DIRECTORY=其绝对路径；完整 SOURCE_COMMIT 与干净工作树检查仍然强制执行。默认 false 保留 checkout scm。独立 guards 阶段只运行相同 5 个用例，不取部署凭据。只管理 DeerFlow 专属任务。
 
 配置三个专属凭据：现有 SSH 凭据 `shanghai-deploy-ssh`、文件凭据 `deerflow-shanghai-known-hosts`、文件凭据 `deerflow-shanghai-release-environment`。host key 必须通过既有受信记录核验；脚本强制严格匹配。环境文件从 `release-environment.example.json` 填写并保存为 mode0600，不包含密钥或数据库 URL。
 
 环境文件每个角色绑定私网 IP、实际 ops JSON 路径、现有 role/UI 镜像 ID、公开 Compose 文件 SHA、私有配置 fingerprint、受审查备份 generation、严格 TLS health URL 和本机 CA 路径。当前上海私有配置路径不可直接照抄示例占位路径。`config_sha256` 沿用 `ecs_executor.operations.config_fingerprint`：按固定次序拼接六个角色 JSON 和该角色 env 的文件名、NUL、原始字节、NUL。只读取私有配置计算摘要，不能输出内容。实际 ops 文件及父目录需已存在并分别为 mode0600、0700。两端另外预建 mode0700 的 `incoming_dir`；脚本不会创建 NAS 的替代本地目录。
 
-## 四个显式阶段
+## 守卫与四个交付阶段
 
 同一 `RELEASE_ID` 与完整 `SOURCE_COMMIT` 贯穿四阶段，每次只执行一个阶段。发布 ID 不覆盖旧目录或旧镜像标签。
 
 | 阶段 | 行为 | 输出 |
 | --- | --- | --- |
-| build | 执行 5 个无 Docker/网络的交付守卫单测；从指定 commit 构建后端、导出镜像 | source.tar、role-image.tar、release.json、私有 build.log |
+| guards | 仅验证源码并执行 5 个无 Docker/网络的守卫用例 | Jenkins 实际日志 |
+| build | 执行相同 5 个守卫用例；从指定 commit 构建后端、导出镜像 | source.tar、role-image.tar、release.json、私有 build.log |
 | transfer | 核对本地包和环境 SHA，严格 SSH 传到两端，复核包、加载并验证镜像标签/ID | transfer.json |
 | deploy | 两端预检；先封住 controller proxy/Gateway，再停止空闲 worker，更新 controller、重载原代理，再更新 worker | 每步 deploy-NN-role-step.json；最终 deploy.json |
 | smoke | 检查两端镜像、健康、严格 TLS、worker 限额、两库版本、drain 和执行账，以及 PG/Redis/UI/proxy 容器身份 | 时间戳 smoke 回执 |
@@ -45,6 +46,6 @@ controller 更新只 force-recreate Gateway/MCP；PG、Redis、前端和现有�
 
 ## 待开机后一次验证
 
-先确认两台机器的新公网 IP 和既有私网身份，恢复 NAS/bind/marker，使用既有 e84 镜像按当前部署指南恢复，保持 drain。然后检查新的 Jenkins 源码输入、builder 和私有环境清单，依次验证新流水线四阶段。先跑交付主干，成功后只选一个真实业务工作流冒烟；不用重跑已经通过的全部测试矩阵。当前新流程的 5 个守卫单测及实际构建/传输/部署均列为待 Jenkins 执行。
+先确认两台机器的新公网 IP 和既有私网身份，恢复 NAS/bind/marker，使用既有 e84 镜像按当前部署指南恢复，保持 drain。然后检查新的 Jenkins 源码输入、builder 和私有环境清单，依次验证新流水线四阶段。先跑交付主干，成功后只选一个真实业务工作流冒烟；不用重跑已经通过的全部测试矩阵。5 个守卫用例已经在 Jenkins #3 通过，原 e84 冷恢复已通过；正式构建/传输/更新与业务冒烟继续顺序验证。
 
-本次静态证据：Ruff check/format、三个 Python 文件语法编译、示例 JSON、三个 Jenkins shell 段的 sh -n、OpenSpec 严格校验及 67 个历史输入 SHA 一致性均通过。没有执行新守卫单测、Groovy/Jenkins 解析、Docker 构建或云端交付；这些待开机后在 Jenkins 验证。
+本次静态证据：Ruff check/format、三个 Python 文件语法编译、示例 JSON、三个 Jenkins shell 段的 sh -n、OpenSpec 严格校验及 67 个历史输入 SHA 一致性均通过。随后 5 个守卫用例已在 Jenkins #3 通过，prepared-checkout 流水线通过实际 Jenkins Groovy 校验；原 e84 恢复仍不能当作新镜像交付成功。
