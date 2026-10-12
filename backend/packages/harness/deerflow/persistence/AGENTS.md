@@ -26,3 +26,7 @@ Scheduled-task lifecycle rules live in one place each. `ScheduledTaskRepository.
 The per-owner run cap `scheduler.max_concurrent_runs_per_user` is effective `min(per_user, max_concurrent_runs)` (0 = off) and is checked in `claim_queued_run` right after the global count, under the same budget lock. `list_queued_runs` ranks same-thread FIFO heads per owner (`ROW_NUMBER() OVER (PARTITION BY owner)`) and orders the batch by that rank, so the drain is owner-fair even with the cap off; owners at their cap drop out before the batch limit, and orphan rows (task deleted while queued) are never held back by the cap. Scheduled-task repository boundaries coerce serialized timestamps before SQL `DateTime` binding.
 
 Recovery locks task/run pairs in task-id/run-id order and restores `run_id`, `started_at` and live errors before releasing launch claims. Launch/failure/timeout updates use one parent-first transaction to prevent interleaved claims. Queue timeout fails the occurrence and advances scheduled work to prevent immediate requeue.
+
+## MCP control leases
+
+`McpTaskRepository` reserves the SQLite writer before poll/cancel claim SELECTs; `FOR UPDATE SKIP LOCKED` alone does not serialize SQLite readers. Renewal is one owner/token/phase/expiry-fenced UPDATE and changes only lease expiry, explicitly preserving the ORM `updated_at` column. A stale generation, expired lease, terminal task or changed cancellation phase cannot renew. Keep local draining-row exclusions before LIMIT. See [control-call leases](../../../../docs/mcp-control-leases.md).
