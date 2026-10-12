@@ -29,6 +29,7 @@ class Repository:
             {"id": "item-2", "batch_id": "batch-1", "item_key": "two", "status": "failed", "error": "bad"},
         ]
         self.include_result_calls = []
+        self.limits = []
 
     async def get_batch(self, batch_id, *, user_id):
         if batch_id != self.batch["id"] or user_id != self.batch["user_id"]:
@@ -42,6 +43,7 @@ class Repository:
     async def list_items(self, batch_id, *, user_id, offset=0, limit=100, status=None, include_result=False):
         assert batch_id == "batch-1" and user_id == "user-1"
         self.include_result_calls.append(include_result)
+        self.limits.append(limit)
         values = self.items
         if status is not None:
             values = [item for item in values if item["status"] == status]
@@ -124,3 +126,24 @@ async def test_jsonl_export_streams_item_results(monkeypatch) -> None:
     assert [row["id"] for row in rows] == ["item-1", "item-2"]
     assert rows[0]["result"] == "done"
     assert repo.include_result_calls and all(repo.include_result_calls)
+
+
+@pytest.mark.asyncio
+async def test_jsonl_export_reads_full_results_in_small_pages(monkeypatch) -> None:
+    # A full row can hold max_result_chars of report plus as much evidence
+    # JSON, up to 2M characters at the config ceiling; 500-row pages
+    # materialized hundreds of MB per request before the first line streamed.
+    repo = Repository()
+    repo.items = [{"id": f"item-{index}", "batch_id": "batch-1", "status": "succeeded", "result": str(index)} for index in range(25)]
+    monkeypatch.setattr(subagent_batches, "get_current_user", AsyncMock(return_value="user-1"))
+
+    response = await subagent_batches.export_batch_results.__wrapped__(
+        thread_id="thread-1",
+        batch_id="batch-1",
+        request=_request(repo),
+    )
+    payload = b"".join([chunk async for chunk in response.body_iterator]).decode()
+
+    assert [json.loads(line)["id"] for line in payload.splitlines()] == [f"item-{index}" for index in range(25)]
+    assert max(repo.limits) <= 10
+    assert len(repo.limits) > 2

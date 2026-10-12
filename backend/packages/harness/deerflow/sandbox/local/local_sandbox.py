@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT, download_limit
 from deerflow.sandbox.env_policy import build_sandbox_env
 from deerflow.sandbox.local.list_dir import list_dir
 from deerflow.sandbox.path_patterns import replace_output_path_matches
@@ -921,7 +922,8 @@ class LocalSandbox(Sandbox):
             # Re-raise with the original path for clearer error messages, hiding internal resolved paths
             raise type(e)(e.errno, e.strerror, path) from None
 
-    def download_file(self, path: str) -> bytes:
+    def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
+        max_download_size = download_limit(max_bytes, DEFAULT_DOWNLOAD_LIMIT)
         normalised = path.replace("\\", "/")
         stripped_path = normalised.lstrip("/")
         allowed_prefix = VIRTUAL_PATH_PREFIX.lstrip("/")
@@ -930,15 +932,15 @@ class LocalSandbox(Sandbox):
             raise PermissionError(errno.EACCES, f"Access denied: path must be under '{VIRTUAL_PATH_PREFIX}'", path)
 
         resolved_path = self._resolve_path(path)
-        max_download_size = 100 * 1024 * 1024
         try:
             file_size = os.path.getsize(resolved_path)
             if file_size > max_download_size:
                 raise OSError(errno.EFBIG, f"File exceeds maximum download size of {max_download_size} bytes", path)
-            # TOCTOU note: the file could grow between getsize() and read(); accepted
-            # tradeoff since this is a controlled sandbox environment.
             with open(resolved_path, "rb") as f:
-                return f.read()
+                data = f.read(max_download_size + 1)
+            if len(data) > max_download_size:
+                raise OSError(errno.EFBIG, f"File exceeds maximum download size of {max_download_size} bytes", path)
+            return data
         except OSError as e:
             # Re-raise with the original path for clearer error messages, hiding internal resolved paths
             raise type(e)(e.errno, e.strerror, path) from None

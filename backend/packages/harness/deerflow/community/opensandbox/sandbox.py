@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
-import errno
 import logging
 import posixpath
 import re
 import shlex
 import threading
 import time
+from contextlib import suppress
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT as _MAX_DOWNLOAD_SIZE
+from deerflow.sandbox.download import download_limit, read_download_stream
 from deerflow.sandbox.read_file_contract import split_file_lines
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
@@ -28,7 +30,6 @@ logger = logging.getLogger(__name__)
 
 _TERMINAL_ERROR_NAMES = frozenset({"SandboxUnhealthyException"})
 _COMMAND_TTL_GRACE = timedelta(seconds=30)
-_MAX_DOWNLOAD_SIZE = 100 * 1024 * 1024
 
 
 def _exception_chain(error: BaseException):
@@ -299,30 +300,31 @@ class OpenSandboxSandbox(Sandbox):
         resolved = self._resolve_path(path)
         self._file_op(lambda files: files.write_file(resolved, content, mode=644))
 
-    def download_file(self, path: str) -> bytes:
-        return self._download_file_bounded(path, max_bytes=_MAX_DOWNLOAD_SIZE)
+    def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
+        return self._download_file_bounded(path, max_bytes=download_limit(max_bytes, _MAX_DOWNLOAD_SIZE))
 
     def _download_file_bounded(self, path: str, *, max_bytes: int, deadline: float | None = None) -> bytes:
         """Use the native streaming transport with the release pass's remaining budget."""
         resolved = self._resolve_download_path(path)
 
         def read_bounded(files) -> bytes:
-            chunks: list[bytes] = []
-            total = 0
             stream = files.read_bytes_stream(resolved)
-            try:
-                for chunk in stream:
-                    if deadline is not None and time.monotonic() >= deadline:
-                        raise TimeoutError("OpenSandbox output synchronization timed out")
-                    total += len(chunk)
-                    if total > max_bytes:
-                        raise OSError(errno.EFBIG, f"File exceeds maximum download size of {max_bytes} bytes", path)
-                    chunks.append(chunk)
-            finally:
-                close = getattr(stream, "close", None)
-                if callable(close):
-                    close()
-            return b"".join(chunks)
+            if deadline is None:
+                return read_download_stream(stream, max_bytes, path)
+
+            def timed_chunks():
+                try:
+                    for chunk in stream:
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError("OpenSandbox output synchronization timed out")
+                        yield chunk
+                finally:
+                    close = getattr(stream, "close", None)
+                    if callable(close):
+                        with suppress(Exception):
+                            close()
+
+            return read_download_stream(timed_chunks(), max_bytes, path)
 
         try:
             return self._file_op(read_bounded)
