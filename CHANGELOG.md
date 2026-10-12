@@ -597,7 +597,7 @@ This release closes that milestone with **439 merged pull requests**.
   a single instance is unchanged. `ChannelService` no longer treats the block as
   a provider, and the two-Gateway harness leaves it alone. `config_version` 60;
   the Helm chart and docs drop the comment-only "keep 1 replica" guidance in
-  favour of the gate.
+  favour of the gate. ([#6746])
 
 - **channels:** WeChat can be connected by scanning a QR code from the web UI.
   The connection dialog in the sidebar and Settings gains QR login with
@@ -9636,3 +9636,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6673]: https://github.com/bytedance/deer-flow/pull/6673
 [#6681]: https://github.com/bytedance/deer-flow/pull/6681
 [#6692]: https://github.com/bytedance/deer-flow/pull/6692
+[#6746]: https://github.com/bytedance/deer-flow/pull/6746

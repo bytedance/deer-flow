@@ -488,7 +488,7 @@
   网页连接时拒绝 `enabled: false`，错误信息列出相关 provider 与回滚方式；格式
   错误的配置段在任何拓扑下都会拒绝启动。`auto` 跟随多进程信号，单实例行为不变。
   `ChannelService` 不再把该配置段当作 provider，双 Gateway 联调脚本也不再改动它。
-  `config_version` 升至 60；Helm chart 与文档不再依赖"保持 1 副本"的注释提醒。
+  `config_version` 升至 60；Helm chart 与文档不再依赖"保持 1 副本"的注释提醒。 ([#6746])
 
 - **渠道：** 现在可以在 Web UI 中扫码连接微信。
   侧边栏与设置中的连接对话框新增二维码登录，带进度、配对码输入、
@@ -7742,3 +7742,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6673]: https://github.com/bytedance/deer-flow/pull/6673
 [#6681]: https://github.com/bytedance/deer-flow/pull/6681
 [#6692]: https://github.com/bytedance/deer-flow/pull/6692
+[#6746]: https://github.com/bytedance/deer-flow/pull/6746
