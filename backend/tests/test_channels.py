@@ -7518,14 +7518,16 @@ class TestHandleChatWithArtifacts:
 
 
 class TestDiscordChannel:
+    # Auto-generated ids for these payloads run 2-36 KB; the 36 KB one exceeds the
+    # 32767-char PYTEST_CURRENT_TEST limit on Windows, so give them short ids.
     @pytest.mark.parametrize(
         "text",
         [
-            "x" * 1990 + "\n\n" + "y" * 30,
-            "x" * 2000 + "\n\n\n" + "y" * 30,
-            "x" * 2000 + "\n" + "y" * 2000,
-            ("第一段\n\n" + "句" * 1990 + "\n\n最后一段") * 3,
-            "x" * 4500,
+            pytest.param("x" * 1990 + "\n\n" + "y" * 30, id="paragraph-tail"),
+            pytest.param("x" * 2000 + "\n\n\n" + "y" * 30, id="paragraph-trailing-newlines"),
+            pytest.param("x" * 2000 + "\n" + "y" * 2000, id="newline-mid-message"),
+            pytest.param(("第一段\n\n" + "句" * 1990 + "\n\n最后一段") * 3, id="multibyte-paragraphs"),
+            pytest.param("x" * 4500, id="unbroken-run"),
         ],
     )
     def test_split_text_preserves_content_within_discord_limit(self, text: str):
@@ -13408,3 +13410,114 @@ def test_streaming_chat_never_publishes_hidden_memory_context(monkeypatch):
         assert [m.text for m in outbound_received] == ["All green. ▉", "All green."]
 
     _run(go())
+
+
+# _extract_human_input_payload / clarification metadata passthrough tests
+
+
+class TestExtractHumanInputPayload:
+    def test_returns_payload_from_ask_clarification_artifact(self):
+        from app.channels.manager import _extract_human_input_payload
+
+        payload = {
+            "version": 1,
+            "kind": "human_input_request",
+            "source": "ask_clarification",
+            "request_id": "clarification:call_1",
+            "question": "Pick one",
+            "input_mode": "choice_with_other",
+            "options": [{"id": "option-1", "label": "Alpha", "value": "Alpha"}],
+        }
+        result = {
+            "messages": [
+                {"type": "human", "content": "hi"},
+                {
+                    "type": "tool",
+                    "name": "ask_clarification",
+                    "content": "Pick one",
+                    "artifact": {"human_input": payload},
+                },
+            ]
+        }
+        assert _extract_human_input_payload(result) == payload
+
+    def test_returns_none_without_artifact(self):
+        from app.channels.manager import _extract_human_input_payload
+
+        result = {"messages": [{"type": "tool", "name": "ask_clarification", "content": "q"}]}
+        assert _extract_human_input_payload(result) is None
+
+    def test_returns_none_for_non_clarification(self):
+        from app.channels.manager import _extract_human_input_payload
+
+        result = {"messages": [{"type": "ai", "content": "done"}]}
+        assert _extract_human_input_payload(result) is None
+
+    def test_ignores_previous_turn_clarification(self):
+        from app.channels.manager import _extract_human_input_payload
+
+        payload = {"kind": "human_input_request", "request_id": "clarification:old"}
+        result = {
+            "messages": [
+                {"type": "tool", "name": "ask_clarification", "content": "old", "artifact": {"human_input": payload}},
+                {"type": "human", "content": "answer"},
+                {"type": "ai", "content": "next"},
+            ]
+        }
+        assert _extract_human_input_payload(result) is None
+
+
+class TestResponseMetadataClarificationPassthrough:
+    def test_pending_clarification_carries_human_input_payload(self):
+        from app.channels.manager import _response_metadata_with_clarification
+        from app.channels.message_bus import HUMAN_INPUT_REQUEST_METADATA_KEY, PENDING_CLARIFICATION_METADATA_KEY
+
+        payload = {"kind": "human_input_request", "request_id": "clarification:call_1", "input_mode": "choice_with_other"}
+        result = {
+            "messages": [
+                {"type": "human", "content": "hi"},
+                {"type": "tool", "name": "ask_clarification", "content": "q", "artifact": {"human_input": payload}},
+            ]
+        }
+        metadata = _response_metadata_with_clarification(result, {"user_id": "ou_1"}, pending_clarification=True)
+        assert metadata[PENDING_CLARIFICATION_METADATA_KEY] is True
+        assert metadata[HUMAN_INPUT_REQUEST_METADATA_KEY] == payload
+        assert metadata["user_id"] == "ou_1"
+
+    def test_non_clarification_outbound_never_carries_payload(self):
+        from app.channels.manager import _response_metadata_with_clarification
+        from app.channels.message_bus import HUMAN_INPUT_REQUEST_METADATA_KEY
+
+        result = {"messages": [{"type": "ai", "content": "done"}]}
+        metadata = _response_metadata_with_clarification(result, {}, pending_clarification=False)
+        assert HUMAN_INPUT_REQUEST_METADATA_KEY not in metadata
+
+
+class TestHumanInputResponseTranslation:
+    """A channel-synthesized human-input answer must land on the run's human
+    message as additional_kwargs, hidden from transcripts (Web card parity)."""
+
+    def test_response_metadata_key_is_translated_to_additional_kwargs(self):
+        from app.channels.manager import _human_input_message_with_channel_response
+        from app.channels.message_bus import HUMAN_INPUT_RESPONSE_METADATA_KEY
+
+        response = {
+            "version": 1,
+            "kind": "human_input_response",
+            "source": "feishu_card",
+            "request_id": "clarification:call_1",
+            "response_kind": "option",
+            "option_id": "option-1",
+            "value": "Alpha",
+        }
+        message = _human_input_message_with_channel_response("Alpha", metadata={HUMAN_INPUT_RESPONSE_METADATA_KEY: response})
+        assert message["content"] == "Alpha"
+        assert message["additional_kwargs"][HUMAN_INPUT_RESPONSE_METADATA_KEY] == response
+        assert message["additional_kwargs"]["hide_from_ui"] is True
+
+    def test_plain_message_unchanged(self):
+        from app.channels.manager import _human_input_message_with_channel_response
+
+        message = _human_input_message_with_channel_response("hello", metadata={})
+        assert message["content"] == "hello"
+        assert "additional_kwargs" not in message

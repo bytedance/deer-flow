@@ -25,6 +25,8 @@ import threading
 from typing import TYPE_CHECKING, TypeVar
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT as _MAX_DOWNLOAD_SIZE
+from deerflow.sandbox.download import download_limit
 from deerflow.sandbox.read_file_contract import split_file_lines
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
@@ -40,7 +42,6 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-_MAX_DOWNLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
 # One base64 chunk stays well under Linux MAX_ARG_STRLEN (128 KiB per argv entry),
 # and 60000 is a multiple of 4 so each chunk is a self-contained base64 unit whose
 # decoded bytes concatenate losslessly.
@@ -267,31 +268,31 @@ class BoxliteBox(Sandbox):
                 raise OSError(f"write '{resolved}' failed: {(r.stderr or '').strip()}")
             first = False
 
-    def download_file(self, path: str) -> bytes:
+    def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
+        limit = download_limit(max_bytes, _MAX_DOWNLOAD_SIZE)
         normalized = self._guard_traversal(path)
         stripped = normalized.lstrip("/")
         allowed = VIRTUAL_PATH_PREFIX.lstrip("/")
         if stripped != allowed and not stripped.startswith(f"{allowed}/"):
             raise PermissionError(f"Access denied: path must be under '{VIRTUAL_PATH_PREFIX}': '{path}'")
 
-        # Enforce the size cap before buffering the whole payload.
-        size_r = self._sh(f"wc -c < {shlex.quote(normalized)}")
-        if size_r.exit_code not in (0, None):
-            raise OSError(f"cannot read '{path}' from box: {(size_r.stderr or '').strip() or 'not found'}")
-        try:
-            size = int((size_r.stdout or "0").strip() or "0")
-        except ValueError:
-            size = 0
-        if size > _MAX_DOWNLOAD_SIZE:
-            raise OSError(errno.EFBIG, f"File exceeds maximum download size of {_MAX_DOWNLOAD_SIZE} bytes", path)
-
-        r = self._sh(f"base64 {shlex.quote(normalized)}")
+        # Limit the remote read itself, including a one-byte overflow probe.
+        # sh lacks pipefail: encode head's status with the payload so base64
+        # success cannot hide a missing file or a partial read failure.
+        script = f"{{ head -c {limit + 1} {shlex.quote(normalized)}; printf '\\n__DF_READ_STATUS__:%s\\n' \"$?\"; }} | base64"
+        r = self._sh(script)
         if r.exit_code not in (0, None):
             raise OSError(f"cannot read '{path}' from box: {(r.stderr or '').strip()}")
         try:
-            return base64.b64decode("".join((r.stdout or "").split()))
+            decoded = base64.b64decode("".join((r.stdout or "").split()), validate=True)
         except Exception as e:
             raise OSError(f"failed to decode '{path}' from box: {e}") from e
+        data, marker, status = decoded.rpartition(b"\n__DF_READ_STATUS__:")
+        if not marker or status != b"0\n":
+            raise OSError(f"cannot read '{path}' from box: {(r.stderr or '').strip() or 'incomplete read'}")
+        if len(data) > limit:
+            raise OSError(errno.EFBIG, f"File exceeds maximum download size of {limit} bytes", path)
+        return data
 
     def list_dir(self, path: str, max_depth: int = 2) -> list[str]:
         resolved = self._resolve_path(path)

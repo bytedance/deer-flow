@@ -566,7 +566,7 @@ Notes:
 - Manual trigger uses the same scheduled-task resource and run lifecycle.
 - Scheduled task definitions and task-run history are persisted in the application database.
 - With `channel_connections.enabled: true`, the scheduler sends IM notices ("scheduled task updates") to the task owner's connected identities. A delivery worker (same poll cadence as the scheduler) pushes them.
-  - **Which apps:** only providers whose channel implements proactive push get notices; today that is WeCom (`proactive_notifications` in `app/channels/capabilities.py`, also returned by `GET /api/channels/providers`, where Settings shows "sent here" or "not available for this app yet"). Other providers get no outbox rows at all, and rows queued for them before the upgrade end once as `failed` without retries.
+  - **Which apps:** only providers whose channel implements proactive push get notices; today those are WeCom and Feishu/Lark (`proactive_notifications` in `app/channels/capabilities.py`, also returned by `GET /api/channels/providers`, where Settings shows "sent here" or "not available for this app yet"). Other providers get no outbox rows at all, and rows queued for them before the upgrade end once as `failed` without retries.
   - **Events:** `run_completed`, `run_failed`, `run_unmet` (goal missed), `task_paused` (automatic pause after three missed goals), `task_stopped` (paused by the agent because its stop condition was met) and `task_finished` (all `max_runs` done or `end_at` reached).
   - **One message per occurrence:** when one occurrence produces several events, only the first of `task_stopped` > `task_paused` > `task_finished` > `run_failed` > `run_unmet` > `run_completed` is sent, and that message still says how the last run went ("The last run failed." / "didn't meet the goal"). A one-time task sends only its run's outcome, never a separate `task_finished`.
   - **Transactional:** notices are queued by the finalization observer in the same database transaction that records the outcome and are deduplicated per occurrence (or per end time for a task that ends between runs), so an occurrence finalized by crash or lease recovery notifies exactly once. Plain manual "run now" trials and interrupted runs stay silent; a trial that pauses or finishes the task still sends that notice. Occurrences that end without a finished run (launch error, queue timeout, interrupted by a restart) stay silent.
@@ -594,6 +594,42 @@ Notes:
 - With the default DeerMem backend, the declaration also warns when the derived SQLite retrieval index sits inside the shared `storage_path` (the default `{storage_path}/.retrieval`). Set `memory.backend_config.retrieval_index_path` to an instance-local directory (relative values resolve against `storage_path`): SQLite WAL is unsupported on network filesystems, and the index is rebuilt from the Markdown facts at startup and re-synced per user scope after a peer writes.
 - A declared multi-instance deployment that enables a feature storing credentials (today `channel_connections.enabled: true`) also needs one shared `DEER_FLOW_CREDENTIALS_KEY`; see [Credentials encryption key](#credentials-encryption-key-deer_flow_credentials_key).
 - Restart-required: the gate runs once at startup. Restart all Gateway instances together after changing it.
+
+#### Local two-Gateway harness
+
+`scripts/dev_multi_instance.sh` (also `make dev-multi`, `make dev-multi-check`, `make dev-multi-down`) runs this topology on one machine, so cross-instance behavior can be checked without a cluster:
+
+- Throwaway `postgres:17-alpine` and `redis:7-alpine` containers (`deerflow-mi-postgres`, `deerflow-mi-redis`) on `127.0.0.1:55432` and `127.0.0.1:56379`, Gateway A on `127.0.0.1:8001` and Gateway B on `127.0.0.1:8011` (8002 stays free for the provisioner). When nginx is installed, `http://localhost:2027` round-robins `/api` over both Gateways, names the Gateway that answered in an `X-DeerFlow-Upstream` response header, and forwards `/` to a frontend on port 3000 if you start one. Ports, container names and images are overridable; see `--help`.
+- The generated `config.yaml` is your own `config.yaml` (otherwise `config.example.yaml`; `DEERFLOW_MI_BASE_CONFIG` picks another file) plus `deployment.multi_instance: true`, `database.backend: postgres`, `run_events.backend: db`, `run_ownership.heartbeat_enabled: true` and `stream_bridge.type: redis`. Settings the startup gate refuses are changed and reported: process-local browser tools are removed and an enabled scheduler gets `scheduler.multi_instance: true`. Enabled IM channels are disabled because both Gateways would connect the same bot; `DEERFLOW_MI_KEEP_CHANNELS=1` keeps them.
+- Everything the pair writes stays in the harness, never in your own deployment: any `checkpointer` section is removed (it would win over `database` for checkpoints and the Store), an explicit `sandbox.ownership` and a Redis `database.checkpoint_cache` point at the harness Redis (ownership timing settings are kept), a DeerMem `storage_path` (either spelling) and `blob_storage.backend_config.root` are dropped so their data lands in the harness home, and a local AIO sandbox gets a `container_prefix` derived from the state dir, so the harness never adopts or reaps sandbox containers it did not start. A non-DeerMem memory backend is used as configured, and the harness says so.
+- Both processes share one `DEER_FLOW_HOME`, one copy of `extensions_config.json` (MCP and skill edits never reach your own file), and generated `AUTH_JWT_SECRET`, `DEER_FLOW_INTERNAL_AUTH_TOKEN` and `DEER_FLOW_CREDENTIALS_KEY` values. Each process keeps its own DeerMem `retrieval_index_path`, which the shared config reads from `$DEERFLOW_MI_RETRIEVAL_INDEX_PATH`.
+- Gateway B starts only after A answers `/health`. Alembic migrations are serialized by an advisory lock, but the LangGraph checkpointer and store `setup()` that runs next is not, so two cold starts against an empty database could race.
+- State lives in `.deer-flow/multi-instance/` (gitignored). `down` stops the Gateways and nginx, removes the containers together with their anonymous data volumes and deletes everything there except `logs/`. Each container is labelled with the state dir that created it, and only that state dir removes it: a harness started from another checkout or `DEERFLOW_MI_STATE_DIR` refuses to start rather than remove them (give it its own `DEERFLOW_MI_*_CONTAINER` names and ports). If `up` fails partway, everything it already started is torn down. Do not run `make dev` or `make stop` alongside the harness: both reclaim port 8001 and this checkout's Gateway processes.
+
+```bash
+scripts/dev_multi_instance.sh up             # containers, config, Gateway A, then B, then nginx
+scripts/dev_multi_instance.sh check          # automated cross-instance checks (below)
+scripts/dev_multi_instance.sh stop b --kill  # SIGKILL B to simulate a crash; `start b` brings it back
+scripts/dev_multi_instance.sh logs a -f
+scripts/dev_multi_instance.sh down
+```
+
+`check` signs in as a throwaway account it creates on first use (on a fresh database it becomes the first admin, which the skill toggle needs; the credentials are in `.deer-flow/multi-instance/check-user.json`) and verifies that:
+
+- `GET /health/ready` reports `ready` and `stream_bridge: ok` on both Gateways;
+- B accepts a session issued by A, and both accept the shared internal token while refusing a wrong one;
+- a thread created on A is readable on B, and a file uploaded on A is listed on B, which serves identical bytes from `GET /api/threads/{id}/artifacts/{path}`;
+- a public skill toggled with `PUT /api/skills/{name}` on A shows the new state on B within 30 s (the toggle is reverted afterwards);
+- nginx reaches both Gateways;
+- a run created on A can be joined on B and resumed on A from a `Last-Event-ID`. With no model configured the run fails before any LLM call; when models are configured, or the model list could not be read, this check is skipped unless you pass `check --with-llm`. Each stream read has a time budget that heartbeats do not extend.
+
+These still need a manual pass:
+
+- stop B with `stop b --kill` while A has an active run: A's run must not turn `error`;
+- cancel a run on B from A: it takes effect within about one heartbeat (~10 s; a lower `run_ownership.lease_seconds` makes the boundary easier to observe);
+- change an MCP filesystem server's args on A: B's local-bash allowlist follows;
+- edit a skill on A: B's system-prompt skills section changes within 30 s;
+- the IM channel gates (one leader per platform, failover after killing the leader, runtime-config changes), once channel leader election lands; run them with `DEERFLOW_MI_KEEP_CHANNELS=1`.
 
 ### Credentials encryption key (`DEER_FLOW_CREDENTIALS_KEY`)
 
@@ -647,6 +683,10 @@ uv run --no-sync --project backend python backend/scripts/migrate_agents_to_db.p
 ```
 
 The importer is idempotent (already-present agents are skipped) and leaves the source files untouched, so reverting `agent_storage.backend` to `file` is a clean rollback. Agent *memory* (`memory.json`) is unaffected by this switch.
+
+With `backend: db`, retained legacy files do not block HTTP or `update_agent`
+updates to the imported SQL definitions. With `backend: file`, shared legacy
+agents still require the user-isolation migration before they can be updated.
 
 ### Tools
 
@@ -727,11 +767,60 @@ cannot cancel work already started by Jina. Enabling retries can send up to `1 +
 and incur additional cost. Successful content and final `Error:` results retain
 the existing contract.
 
+#### Jina request admission
+
+On the Jina `web_fetch` tool entry, `request_admission` is omitted/null by default
+(disabled). To enable it, supply all three fields as YAML numbers:
+
+```yaml
+request_admission:
+  max_concurrent_requests: 3
+  max_queue_size: 32
+  max_wait_seconds: 10
+```
+
+These are example values, not recommended or measured optimal limits. Concurrency
+must be a positive integer, queue capacity a nonnegative integer (zero rejects
+whenever all permits are held), and wait a finite positive number. Booleans,
+strings, missing/unknown fields and malformed values return `Error:` before client
+creation. The public tool arguments remain unchanged.
+
+Before the first enabled call, omitted/null settings bypass admission and do not
+initialize a policy. The first enabled call freezes one policy for the process.
+After that, identical and omitted/null settings reuse it, so a live config reload
+cannot silently bypass the active cap; conflicts return `restart required`.
+Restart to change or disable enabled settings. Lead/subagents, client instances,
+threads and event loops share the enabled budget. Each worker process or replica
+has its own budget; this is neither a distributed quota nor a per-user/account
+limit, and it does not control requests per minute.
+
+Each physical attempt holds a permit through response consumption and response
+stream close, including errors and cancellation. One HTTP client is reused across
+the logical crawl's retries; closing its idle connection pool happens after the
+final attempt and does not hold an attempt permit. Enabled admission streams even
+without a byte cap, preserving complete text and charset decoding. Response cleanup
+drains before release, so cancellation or a retry deadline may take longer to return
+if local close is slow; cancellation still wins if cleanup also fails. This cannot
+stop work already running remotely. Readability extraction and retry backoff hold no
+permit. Every retry joins admission again. Existing retry eligibility, Retry-After
+floors and decoded response byte caps apply.
+
+Waiting is bounded FIFO: full queues return terminal local
+`Error: Local Jina request admission rejected: queue full` without HTTP dispatch.
+Expired waits return `Error: Local Jina request admission rejected: wait expired`.
+Neither is described as a provider/network failure, fabricates a provider 429, or
+triggers a retry. Cancellation removes queued tickets. Waiting consumes the original
+retry budget when retries are enabled; the earlier of that deadline and
+`max_wait_seconds` applies and is checked again at dispatch. With retries disabled,
+only queue wait is bounded by admission, and the existing HTTP timeout semantics
+still apply.
+
 #### Jina response byte budget
 
 On the same Jina `web_fetch` tool entry, optionally set `max_response_bytes: 1048576`
 (for example, 1 MiB). This uses existing tool configuration extras; no model-facing
-argument is added. Omitted or `null` preserves the buffered default. An enabled
+argument is added. Omitted or `null` preserves the buffered default unless request
+admission is enabled. An enabled
 value must be a positive integer; booleans, strings, fractions, zero and negative
 values return `Error:` before HTTP client creation or network activity.
 
@@ -894,7 +983,7 @@ offline mocked tests verify request composition and local filtering, not provide
 retrieval behavior. No paid API calls are needed for the regression suite.
 
 **Built-in Tools**:
-- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, Firecrawl, fastCRW, GroundRoute, Sofya)
+- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, Firecrawl, fastCRW, GroundRoute, Sofya, You.com)
 - `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, Unbrowse)
 - `web_capture` - Capture rendered webpage screenshots as artifacts (Browserless)
 - `image_search` - Search for reference images (DuckDuckGo, InfoQuest, Serper, Brave)
@@ -1569,6 +1658,7 @@ models:
 - `GROUNDROUTE_API_KEY` - GroundRoute meta-search API key for `web_search` and `web_fetch` (routes across Serper, Brave, Exa, Tavily, Firecrawl, Perplexity with gain-share pricing)
 - `SOFYA_API_KEY` - [Sofya](https://sofya.co) key for `web_search` and `web_fetch`
 - `UNBROWSE_API_KEY` - [Unbrowse](https://unbrowse.ai) key for `web_fetch`
+- `YDC_API_KEY` - You.com Search API key for `web_search` (optional: without it the provider uses You.com's keyless free-tier endpoint)
 - `BROWSERLESS_TOKEN` - Browserless token for `web_fetch` (Browserless provider) and `web_capture`, sent as the `token` query parameter (required by Browserless Cloud and by a self-hosted instance started with `TOKEN`)
 - `DEER_FLOW_PROJECT_ROOT` - Project root for relative runtime paths
 - `DEER_FLOW_CONFIG_PATH` - Custom config file path

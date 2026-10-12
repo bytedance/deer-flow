@@ -477,6 +477,27 @@ def test_nonempty_or_non_stop_response_is_not_classified_as_empty(message: AIMes
     assert attempts == 1
 
 
+@pytest.mark.parametrize("block_type", [[], {}, ["text"], {"type": "text"}])
+def test_unhashable_block_type_does_not_break_empty_response_classification(block_type: object) -> None:
+    """A provider may emit ``type: []`` / ``type: {}``; the visible-text probe must skip, not raise."""
+    message = AIMessage(
+        content=[{"type": block_type, "text": "ignored"}, {"type": "text", "text": "visible answer"}],
+        response_metadata={"finish_reason": "stop"},
+    )
+    middleware = _build_middleware(retry_max_attempts=3)
+    attempts = 0
+
+    def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        return message
+
+    result = middleware.wrap_model_call(SimpleNamespace(), handler)
+
+    assert result is message
+    assert attempts == 1
+
+
 @pytest.mark.parametrize(
     "message",
     [

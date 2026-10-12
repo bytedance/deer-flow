@@ -33,6 +33,17 @@ Installed `lark-shared` guidance points to Capability Center > Plugins > Lark
 (`/workspace/capabilities?tab=plugins&plugin=lark`). Guidance changes bump the
 version marker; reinstalling the managed skill pack refreshes the stored text.
 
+Managed skill-pack installation holds `_lark_install_lock` while preparing a
+private tree. The final `staging_target.rename(target)` publishes the validated
+skill bodies and manifest together; extraction, guidance and manifest writes
+remain private until that boundary. A write failure leaves the previous pack
+unchanged and discards staging. Replacement moves the old target to a backup
+first and restores it on an ordinary publication error. Atomic file writes
+fsync their temporary files, but extraction writes and parent directories are
+not fsynced; this does not guarantee whole-tree durability after power loss.
+Callers own final file modes: runtime artifacts are executable, while installed
+skill bodies and manifests are made read-only for sandbox access.
+
 App registration and direct app switching replace the per-user Lark credential
 tree transactionally. Clear the old OAuth data before running `lark-cli config
 init`: on Linux that command writes the new app secret into the file-backed

@@ -71,9 +71,9 @@ note rather than exiting early on Apple Container success.
 The root `PORT` value configures Docker's published nginx ingress only; local
 orchestration pins Next.js to `3000`. Local runs bind the Gateway and Next.js to
 `127.0.0.1`; `nginx-local-conf.sh` keeps nginx on loopback or, for a set
-`BIND_HOST`, renders `temp/nginx.local.conf` listening there. `serve.sh`
-resolves it before stopping anything, so a bad value cannot tear down a running
-stack. Keep `dev.mjs`'s all-interfaces default: the Docker dev frontend needs
+`BIND_HOST` (strict IP/hostname check), renders `temp/nginx.local.conf`
+listening there. `serve.sh` resolves it before stopping anything, so a bad
+value cannot tear down a running stack. Keep `dev.mjs`'s all-interfaces default: the Docker dev frontend needs
 it. Runtime commands launch from the already
 synchronized environment with `uv run --no-sync`. Production Compose probes
 Gateway `/health`, and `deploy.sh` waits for all services before reporting
@@ -166,6 +166,12 @@ defaults `DEER_FLOW_PROJECT_ROOT` to the checkout, as `serve.sh` does, so
 `DEER_FLOW_CONFIG_PATH` or invalid project root is an error, never a fallback.
 Only "no config anywhere" creates `<checkout>/config.yaml` from the example.
 `backend/tests/test_config_version.py::test_config_upgrade_*` pins this.
+
+## Multi-Instance Dev Harness
+
+`dev_multi_instance.{sh,py}` must keep the rendered config passing the real
+multi-instance gate and every endpoint/data root inside its state dir
+(`backend/tests/test_dev_multi_instance_script.py`).
 
 ## Shell Script Invocation Contract
 

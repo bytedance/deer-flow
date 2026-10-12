@@ -1360,12 +1360,20 @@ export const enUS: Translations = {
       "Display name must be at most 100 Unicode code points.",
     settingsDisplayNameHint:
       "Supports Unicode. Leave blank to use the agent identifier",
+    settingsToolGroups: "Tool access",
+    settingsToolGroupsHint:
+      "Restrict which configured tool groups this agent and its delegated tasks may use.",
+    settingsToolGroupsAll: "Use every configured tool group",
+    settingsToolGroupsLoadFailed: "Tool groups could not be loaded.",
+    settingsToolGroupUnavailable: "unavailable",
     settingsDescription:
       "Choose a display name and model defaults for this agent. Model changes take effect on the next message.",
     settingsKnowledge: "Default knowledge",
     settingsKnowledgeHint:
       "New conversations use this knowledge scope. Individual messages can override it. Selecting all knowledge bases removes the binding.",
     settingsKnowledgeReset: "Use all knowledge bases",
+    settingsKnowledgeSaveToolAccess:
+      "Save tool access before choosing default knowledge bases.",
     settingsModel: "Default model",
     settingsModelDefault: "Use global default",
     settingsTemperature: "Temperature",
@@ -1808,8 +1816,28 @@ export const enUS: Translations = {
       connection_failed:
         "Connection test failed. Check the endpoint, credentials, model ID and streaming/tool support.",
     },
+    users: {
+      title: "User management",
+      description:
+        "Suspend or restore sign-in for accounts on this deployment. A disabled account is rejected by every authentication surface; its active sessions end immediately.",
+      adminOnly:
+        "Only administrators can manage users. This feature is unavailable in demos.",
+      loading: "Loading users…",
+      failed: "Failed to load users.",
+      reload: "Reload",
+      empty: "No users yet.",
+      email: "Email",
+      role: "Role",
+      status: "Status",
+      active: "Active",
+      disabled: "Disabled",
+      disable: "Disable",
+      enable: "Enable",
+      updateFailed: "Failed to update the account.",
+    },
     sections: {
       models: "Models",
+      users: "Users",
       account: "Account",
       appearance: "Appearance",
       channels: "Channels",
@@ -2212,6 +2240,16 @@ export const enUS: Translations = {
       },
     },
     skills: {
+      diagnosticsTitle: "Could not load",
+      diagnosticsScope:
+        "Only YAML syntax errors in your own custom skills are shown. After correcting a SKILL.md file, reload skills. Missing frontmatter, metadata validation errors, and unreadable or non-UTF-8 files are not reported. Shared and externally linked packages are excluded.",
+      diagnosticsInvalid: "Invalid YAML frontmatter.",
+      diagnosticsQuote: "Quote values containing a colon followed by a space.",
+      diagnosticsRefresh: "Reload skills",
+      diagnosticsRefreshing: "Reloading skills…",
+      diagnosticsFailed:
+        "Could not check custom skills for YAML errors. Reload to try again.",
+      diagnosticsReloadFailed: "Could not reload skills. Try again.",
       exportPrevious: "Previous 50 files",
       exportNotices: {
         skill_export_yaml_alias:
@@ -2361,6 +2399,8 @@ export const enUS: Translations = {
         "An account with this email already exists. Please sign in with your password or contact your administrator.",
       sso_not_allowed:
         "SSO login is not allowed for your account. Contact your administrator.",
+      account_disabled:
+        "This account has been disabled. Contact your administrator.",
     },
   },
 };
