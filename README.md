@@ -1657,6 +1657,15 @@ changed, or cleared, including unscoped runs accepted before this feature.
 This default applies to Gateway-hosted custom-agent turns; direct harness/client
 integrations continue to supply their own execution scope.
 
+In Agent settings, **Tool access** can inherit every configured tool group,
+allow selected groups, or disable all groups. Saved groups stay visible and
+removable while the catalog loads or fails to load. A saved group is marked
+unavailable only when a successful catalog load confirms it is missing.
+Saving a selection that removes `knowledge` also clears the saved default
+knowledge selection. When enabling knowledge access for an agent that
+previously lacked it, save the tool access first, then reopen settings to
+choose its default knowledge bases.
+
 The `knowledge_base` block is provider-neutral and only controls whether the
 knowledge capability and selector are enabled. RAGFlow connection, dataset
 allowlist, and retrieval parameters (`base_url`, `api_key`, `datasets`,
