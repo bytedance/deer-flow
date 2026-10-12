@@ -31,3 +31,33 @@ class TestToolProgressConfigBounds:
 
         with pytest.raises(ValueError, match="min_word_count_for_similarity"):
             ToolProgressConfig(min_word_count_for_similarity=False)
+
+    @pytest.mark.parametrize(
+        "field",
+        ["stagnation_threshold", "warn_escalation_count", "max_tracked_threads"],
+    )
+    def test_rejects_boolean_on_the_sibling_int_fields(self, field):
+        # Same coercion, same consequence: lax mode turns ``true`` into 1, which
+        # each field's ``ge=1`` bound accepts, so the typo loads silently and
+        # retunes the guard (e.g. warning after the very first problem call, or an
+        # LRU that tracks a single thread).
+        with pytest.raises(ValueError, match=field):
+            ToolProgressConfig(**{field: True})
+
+        with pytest.raises(ValueError, match=field):
+            ToolProgressConfig(**{field: False})
+
+    @pytest.mark.parametrize(
+        "field",
+        ["stagnation_threshold", "warn_escalation_count", "min_word_count_for_similarity", "max_tracked_threads"],
+    )
+    def test_guard_leaves_ordinary_integers_alone(self, field):
+        assert getattr(ToolProgressConfig(**{field: 2}), field) == 2
+
+    @pytest.mark.parametrize(
+        "field",
+        ["stagnation_threshold", "warn_escalation_count", "max_tracked_threads"],
+    )
+    def test_existing_bounds_still_apply_to_the_sibling_fields(self, field):
+        with pytest.raises(ValueError, match=field):
+            ToolProgressConfig(**{field: 0})

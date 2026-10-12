@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 
 class ToolProgressConfig(BaseModel):
@@ -47,10 +47,10 @@ class ToolProgressConfig(BaseModel):
         description="Maximum number of thread histories to keep in memory (LRU eviction)",
     )
 
-    @field_validator("min_word_count_for_similarity", mode="before")
+    @field_validator("stagnation_threshold", "warn_escalation_count", "min_word_count_for_similarity", "max_tracked_threads", mode="before")
     @classmethod
-    def reject_boolean_min_word_count(cls, value: Any) -> Any:
-        """Reject booleans before Pydantic coerces them to 1/0."""
+    def _reject_boolean_int_settings(cls, value: Any, info: ValidationInfo) -> Any:
+        """Reject booleans before Pydantic coerces them to 1/0, which every bound below accepts as 1."""
         if isinstance(value, bool):
-            raise ValueError("min_word_count_for_similarity must be a positive integer, not a boolean")
+            raise ValueError(f"{info.field_name} must be a positive integer, not a boolean")
         return value
