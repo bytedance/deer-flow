@@ -1,4 +1,5 @@
 import { mkdir } from "node:fs/promises";
+import { EOL } from "node:os";
 import { join } from "node:path";
 
 import { expect, test, type Page } from "@playwright/test";
@@ -312,9 +313,10 @@ test("terminal-only history keeps original raw copy and scrolls long snapshots s
     panel.getByRole("heading", { name: "Long report", exact: true }),
   ).toBeVisible();
   await panel.getByRole("button", { name: "复制技能快照" }).click();
+  // Native Windows clipboards convert this LF-only fixture to CRLF.
   await expect
     .poll(() => page.evaluate(() => navigator.clipboard.readText()))
-    .toBe(content);
+    .toBe(content.replaceAll("\n", EOL));
   await expect(panel.getByRole("link", { name: "Local template" })).toHaveCount(
     0,
   );
