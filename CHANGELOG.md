@@ -5831,6 +5831,13 @@ This release closes that milestone with **621 merged pull requests**.
   default limit (roughly 1.7 GB at the 1,000,000 ceiling) and stalled the event
   loop for over half a second per page. The exported lines and their order are
   unchanged. ([#6706])
+- **gateway:** The subagent batch item list
+  (`GET /api/threads/{thread_id}/subagent-batches/{batch_id}/items`), which the
+  workspace polls every 2 seconds while a batch runs, no longer loads each
+  item's full report, evidence JSON and prompt only to return its preview.
+  With the default `max_result_chars`, one 100-item page held about 34 MB and
+  blocked the event loop for about 70 ms (170 MB and 300 ms at `limit=500`);
+  it now holds under 1 MB. The response is unchanged.
 
 ### Security
 

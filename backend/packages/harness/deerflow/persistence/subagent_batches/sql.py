@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import defer
 
 from deerflow.persistence.subagent_batches.model import SubagentBatchItemRow, SubagentBatchRow
 from deerflow.subagents.acceptance_checks import AcceptanceVerdict, validate_acceptance_verdict
@@ -222,6 +223,12 @@ class SubagentBatchRepository:
             if batch is None or batch.user_id != user_id:
                 return None
             stmt = select(SubagentBatchItemRow).where(SubagentBatchItemRow.batch_id == batch_id)
+            # Full reports and evidence reach max_result_chars each; the polled
+            # item list returns only previews, so leave them out of the SELECT.
+            if not include_result:
+                stmt = stmt.options(defer(SubagentBatchItemRow.result, raiseload=True), defer(SubagentBatchItemRow.result_artifact, raiseload=True))
+            if not include_prompt:
+                stmt = stmt.options(defer(SubagentBatchItemRow.prompt, raiseload=True))
             if status is not None:
                 stmt = stmt.where(SubagentBatchItemRow.status == status)
             stmt = stmt.order_by(SubagentBatchItemRow.position).offset(offset).limit(limit)
