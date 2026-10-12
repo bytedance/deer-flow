@@ -14,10 +14,9 @@ from weakref import WeakValueDictionary
 from deerflow_extension_api import AgentRunError
 from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
 
-from .store import Store
+from .store import TERMINAL, Store
 
 NAMESPACE = "community.agent-teams"
-TERMINAL = {"completed", "failed", "cancelled"}
 LIMIT = 100
 
 
@@ -80,7 +79,6 @@ class Teams:
         self.handles = {}
         self.locks = WeakValueDictionary()
         self.scheduling_lock = asyncio.Lock()
-        self.known = {}
         self.workers = {}
         self.in_flight = set()
         self.last_owner = None
@@ -105,7 +103,7 @@ class Teams:
 
         self.process_lock = await asyncio.to_thread(acquire)
         try:
-            self.known.update(dict.fromkeys(await self.db("keys"), True))
+            await self.db("scheduling_snapshots")
         except BaseException:
             await asyncio.to_thread(self.process_lock.close)
             self.process_lock = None
@@ -121,7 +119,6 @@ class Teams:
                 await self.task
         await self.cancel_workers()
         self.handles.clear()
-        self.known.clear()
         if self.process_lock:
             await asyncio.to_thread(self.process_lock.close)
             self.process_lock = None
@@ -155,7 +152,6 @@ class Teams:
             raise ValueError("Full Agent control requires an authenticated Gateway session")
         key = (context.principal.user_id, team_id)
         self.handles[key] = context.agent_runs
-        self.known[key] = True
 
     async def create(self, payload, context):
         fields(payload, "request_id name goal members")
@@ -338,7 +334,6 @@ class Teams:
                 await runs.create_thread(assistant_id=member["agent"], thread_id=member["thread_id"], metadata={})
                 content = text({"text": message.content}, "text")
                 self.handles[(owner, team_id)] = runs
-                self.known[(owner, team_id)] = True
                 await self.db("change", owner, team_id, lambda t: self.enqueue(t, member_id=member_id, content=content, request_id=f"mention:{message.id}:{member_id}", source=source))
                 queued += 1
         if not queued:
@@ -417,7 +412,6 @@ class Teams:
                 raise ValueError("Cancel or complete pending requests first")
             await self.db("delete", owner, team_id)
             self.handles.pop((owner, team_id), None)
-            self.known.pop((owner, team_id), None)
         return {"deleted": True}
 
     @staticmethod
@@ -432,12 +426,7 @@ class Teams:
         # Only SQLite snapshots and slot bookkeeping live under this lock.
         # Host calls run in independent workers, serialized by team.
         async with self.scheduling_lock:
-            teams = {}
-            for key in list(self.known):
-                try:
-                    teams[key] = await self.db("get", *key)
-                except ValueError:
-                    continue  # A terminal team was deleted during this pass.
+            teams = await self.db("scheduling_snapshots")
             heads, entries = {}, []
             for key, team in teams.items():
                 occupied = set()

@@ -5,7 +5,9 @@ imports public `deerflow_extension_api` contracts and its declared LangChain
 dependency; do not import host `app.*` or `deerflow.*` internals. Browser code is a
 manifest-listed native module with no host React dependency.
 
-Every storage operation is owner-scoped. Native mentions use Gateway's stamped
+Public reads and all team mutations are owner-scoped. The service-only snapshot
+spans owners for scheduling bookkeeping and is never exposed as a public read.
+Native mentions use Gateway's stamped
 runtime identity and delegated capability, never an owner from mention content.
 Thread sharing is not team sharing. Keep peer content on human-message channels.
 
@@ -21,12 +23,19 @@ host calls. Background ticks launch independent team workers and shutdown drains
 all workers. Preserve first-unfinished order within each thread, including source
 receipts shared across teams; legacy timestamps must not reorder a team's queue.
 Rotate new admission attempts by owner, carrying the cursor between passes.
-Reserve before dispatch, and count in-flight reservations as well as durable
-frozen jobs against eight slots. Unfrozen waits release their reservation; frozen
-jobs remain charged through disconnection and startup, even without a capability.
-Pending answers wait for a slot; persist resume.started before attempting them,
+Reserve before dispatch and count in-flight reservations against eight slots.
+Terminal jobs and waiting_input jobs release their slots, even if the original
+input remains frozen; waiting_input still retains its thread's queue head.
+Unfrozen conversation waits also release their temporary reservation. Pending
+answers with resume.started=false wait for capacity. Other unfinished frozen
+jobs remain charged through disconnection/startup without a capability.
+Persist resume.started before attempting an answer,
 and keep uncertain admissions charged. Legacy resumes without the marker are
 conservatively charged. Cancelling an unstarted answer never admits it.
+Maintain the indexed has_pending_jobs projection in the same transaction as team
+data, including receipt creation. It tracks all unfinished jobs, not only charged
+jobs. Each planning pass uses one batch query; terminal history must not be
+parsed and missing keys must not remain in a separate scheduling registry.
 
 Reconnect ensures every member thread before persisting readiness, serialized
 with deletion and task updates. Count only requests toward the 100-request cap;

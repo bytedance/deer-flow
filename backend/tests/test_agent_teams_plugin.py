@@ -1336,12 +1336,12 @@ async def test_startup_snapshot_failure_releases_the_process_lock(plugin, monkey
     _, _, service = plugin
     db = service.db
 
-    async def fail_keys(method, *args):
-        if method == "keys":
+    async def fail_snapshot(method, *args):
+        if method == "scheduling_snapshots":
             raise OSError("snapshot failed")
         return await db(method, *args)
 
-    monkeypatch.setattr(service, "db", fail_keys)
+    monkeypatch.setattr(service, "db", fail_snapshot)
     with pytest.raises(OSError, match="snapshot failed"):
         await service.start(None)
     assert service.process_lock is None and not service.task
@@ -1430,3 +1430,133 @@ async def test_resume_with_lost_ack_keeps_its_slot_before_any_new_owner_admissio
     await service.tick()
     assert queued["id"] not in runs.runs
     assert sum(run.status == "running" for run in runs.runs.values()) == 8
+
+
+@pytest.mark.asyncio
+async def test_scheduler_does_not_read_or_decode_completed_history_per_team(plugin, monkeypatch):
+    _, actions, service = plugin
+    runs = Runs()
+    for index in range(100):
+        owner = f"archive-{index // 20}"
+        team = await scheduling_team(actions, runs, owner, f"History {index}")
+        await scheduling_send(actions, runs, owner, team, team["members"][0], "completed")
+        await service.db("change", owner, team["id"], lambda t: t["jobs"][0].update(status="completed", input={"messages": []}))
+    connections, decoded = [], []
+    connect, decode = service.store.connection, json.loads
+
+    def record_connection():
+        db = connect()
+        connections.append(db)
+        return db
+
+    def record_decode(*args, **kwargs):
+        decoded.append(1)
+        return decode(*args, **kwargs)
+
+    monkeypatch.setattr(service.store, "connection", record_connection)
+    monkeypatch.setattr(json, "loads", record_decode)
+    await service.tick(wait=False)
+    assert len(connections) == 1
+    assert not decoded and not runs.starts
+
+
+@pytest.mark.asyncio
+async def test_deleted_team_does_not_leave_a_repeated_missing_key_lookup(plugin, monkeypatch):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    await service.db("delete", "alice", team["id"])
+    methods = []
+    db = service.db
+
+    async def record(method, *args):
+        methods.append(method)
+        return await db(method, *args)
+
+    monkeypatch.setattr(service, "db", record)
+    await service.tick(wait=False)
+    await service.tick(wait=False)
+    assert "get" not in methods
+    assert not service.workers
+
+
+@pytest.mark.asyncio
+async def test_pending_projection_tracks_queue_wait_finish_and_requeue(plugin):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    key = ("alice", team["id"])
+    assert key not in await service.db("scheduling_snapshots")
+    sent = await scheduling_send(actions, runs, "alice", team, team["members"][0], "first")
+    assert key in await service.db("scheduling_snapshots")
+    await service.tick()
+    runs.finish(sent["id"], interrupted=True)
+    await service.tick()
+    waiting = (await service.db("scheduling_snapshots"))[key]["jobs"][0]
+    assert waiting["status"] == "waiting_input" and waiting["input"] is not None
+    assert not service.charged(waiting)  # Keep the thread head, release the slot.
+    await actions["cancel"]({"team_id": team["id"], "job_id": sent["id"]}, context(runs))
+    await service.tick()
+    assert key not in await service.db("scheduling_snapshots")
+    assert (await actions["get"]({"team_id": team["id"]}, context(runs)))["connected"]
+    runs.threads[team["members"][0]["thread_id"]].update(next=[], interrupts=[])
+    await scheduling_send(actions, runs, "alice", team, team["members"][0], "second")
+    assert key in await service.db("scheduling_snapshots")
+
+
+@pytest.mark.asyncio
+async def test_pending_projection_keeps_a_receipt_created_by_terminal_result(plugin):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    sender, recipient = team["members"]
+    sent = await actions["send"]({"team_id": team["id"], "member_id": recipient["id"], "text": "Check", "request_id": "peer"}, context(runs, thread=sender["thread_id"]))
+    await service.tick()
+    runs.finish(sent["id"])
+    await service.tick()
+    jobs = (await service.db("scheduling_snapshots"))[("alice", team["id"])]["jobs"]
+    assert jobs[0]["status"] == "completed" and jobs[-1]["kind"] == "receipt"
+    assert jobs[-1]["status"] == "queued"
+
+
+def test_pending_projection_backfills_legacy_rows_and_uses_an_index(plugin, tmp_path):
+    import sqlite3
+    from contextlib import closing
+
+    from deerflow_extension_agent_teams.store import Store
+
+    path = tmp_path / "legacy.sqlite"
+    states = ["completed", "queued", "waiting_input", "resuming", "unknown-legacy-state"]
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute("CREATE TABLE teams (id TEXT PRIMARY KEY, owner TEXT NOT NULL, data TEXT NOT NULL)")
+        for index, status in enumerate(states):
+            job = {"status": status, "input": {"messages": []}, "resume": {"started": False}}
+            db.execute("INSERT INTO teams VALUES (?,?,?)", (str(index), f"owner-{index}", json.dumps({"jobs": [job]})))
+    store = Store(path)
+    snapshots = store.scheduling_snapshots()
+    assert set(snapshots) == {(f"owner-{i}", str(i)) for i in range(1, len(states))}
+    with closing(store.connection()) as db:
+        plan = db.execute("EXPLAIN QUERY PLAN SELECT owner, id, data FROM teams WHERE has_pending_jobs=1 ORDER BY rowid").fetchall()
+        assert any("teams_pending_jobs" in row[3] for row in plan)
+    # Reopening must use the projection instead of re-decoding legacy history.
+    again = Store(path)
+    assert again.scheduling_snapshots() == snapshots
+
+
+def test_failed_projection_backfill_rolls_back_schema_and_rows(plugin, tmp_path):
+    import sqlite3
+    from contextlib import closing
+
+    from deerflow_extension_agent_teams.store import Store
+
+    path = tmp_path / "invalid-legacy.sqlite"
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute("CREATE TABLE teams (id TEXT PRIMARY KEY, owner TEXT NOT NULL, data TEXT NOT NULL)")
+        db.execute("INSERT INTO teams VALUES ('first','alice',?)", (json.dumps({"jobs": [{"status": "queued"}]}),))
+        db.execute("INSERT INTO teams VALUES ('invalid','bob','invalid json')")
+    with pytest.raises(json.JSONDecodeError):
+        Store(path)
+    with closing(sqlite3.connect(path)) as db, db:
+        assert "has_pending_jobs" not in {row[1] for row in db.execute("PRAGMA table_info(teams)")}
+        db.execute("UPDATE teams SET data=? WHERE id='invalid'", (json.dumps({"jobs": [{"status": "completed"}]}),))
+    assert set(Store(path).scheduling_snapshots()) == {("alice", "first")}

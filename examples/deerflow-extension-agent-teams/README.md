@@ -104,12 +104,18 @@ own teams. Sharing a host conversation does **not** share its team's private dat
 - Each conversation is serialized, including result receipts targeting a source
   shared across teams. The first unfinished job retains the conversation until
   it finishes or is cancelled. A busy host conversation stays queued without
-  cancelling its run. An unanswered question/interrupt releases an unfrozen
-  reservation; frozen inputs and unknown admission outcomes keep their slots,
-  including while disconnected and after service restart. Reconnect the owning
-  team to reconcile and release those slots. Pending resume answers wait for
-  capacity; once admission starts, the durable marker retains ownership across
-  lost acknowledgements. Cancelling an unstarted answer does not admit it.
+  cancelling its run. Unadmitted conversation waits release their temporary
+  reservation. An admitted job in `waiting_input` also releases its slot even
+  though its original input remains frozen; it still retains the conversation's
+  queue head. Pending answers wait for capacity. Other unfinished frozen jobs,
+  including unknown admission outcomes and resumes already attempted, keep their
+  slots while disconnected and after service restart. Reconnect the owning team
+  to reconcile them. Cancelling an unstarted answer does not admit it.
+- Each planning pass uses one indexed batch query for teams with unfinished jobs.
+  Completed history is not decoded. The plugin database adds a pending-job flag
+  and index, backfills legacy rows transactionally at initialization, and updates
+  the flag with each team mutation. The projection includes waiting-input jobs
+  for conversation ordering even though those jobs do not occupy active slots.
 - Each owner can have 20 teams. A team accepts at most 100 requests, with separate
   space for up to 100 result receipts (200 total job entries); a handoff chain
   accepts at most 12 requests. Start a new user request for another chain, or a
@@ -164,7 +170,9 @@ creation), request capacity independent of receipts, ambiguous admission, and
 lifecycle locking. Event-gated scheduling regressions also cover cross-team control
 isolation, continued background cancellation, owner rotation with single-slot
 release, overlapping ticks, pending answers, shared-source receipts, worker
-shutdown and durable slots across restart. Host-run transport is controlled for deterministic tests.
+shutdown and durable slots across restart. Storage regressions cover indexed batch
+reads, terminal-history exclusion, legacy backfill/rollback and projection updates
+when queuing, cancelling, finishing or creating receipts. Host-run transport is controlled for deterministic tests.
 Clarification tests execute the host's real tool and middleware in an Agent graph,
 including repeated questions, peer/mention/result-receipt paths, lost response
 acknowledgements and restart. Response regressions cover the 7,999/8,000/8,001-byte
