@@ -57,6 +57,16 @@ Run status `unmet` identifies a finished occurrence whose scheduled goal was not
 `core/scheduled-tasks/goal-outcome.ts` maps goal verdicts and host reason codes for run history; show known codes as localized labels; unknown codes, raw run errors and the evaluator's reason stay behind the run row's Details. Check-failure codes are "unchecked", not a miss. `contracts/scheduled_goal_notes_contract.json` pins the host strings it and `run-error.ts` match.
 Scheduled-task views read state through the pure `core/scheduled-tasks` helpers (`status.ts`, `actions.ts`, `format.ts`, `describeTaskSchedule`, `errors.ts`) so list, detail and chat card agree. "Is a run active?" is `status === "running"` or `active_run_status` (a recurring task stays `enabled` while it runs). Default views show no IDs, ISO times, cron strings or enum names; errors localize by `detail.code` (`contracts/scheduled_task_errors_contract.json`) with raw text only behind Details. `tests/e2e/utils/readable.ts` and `tests/unit/helpers/readable.ts` assert this.
 The tasks page (`app/workspace/scheduled-tasks/page.tsx`) only composes `components/workspace/scheduled-tasks/*`: list with status tabs, detail (Runs / Stops when / goal / Does / notes / History), outcome notice, create/edit/duplicate dialog (PATCH sends only changed fields, `null` clears) and the renew dialog that a `limits_exhausted` Resume opens. `?task_id=` selects a task; `?thread_id=` scopes the list to one chat.
+`notification_group_connection_id` adds one Feishu group without changing personal
+notifications. The selector requires `features.scheduled_tasks.group_notifications`
+(absent = false); otherwise a saved target is preserved but explicitly clearable.
+Reuse `useChannelConnections`: offer connected Feishu `group` bindings with matching
+nonempty metadata chat/workspace IDs. Show workspace names; disable unnamed groups
+and never display raw IDs. Loading/errors preserve selections. PATCH omits unchanged
+groups, clears with `null`, and leaves schedules untouched; Duplicate copies the group.
+`BindFeishuGroup` uses the connect API for a persistent, copyable `/connect` command
+and explicitly refreshes the shared query. The general connection poll stops early
+when a private binding already exists, so cannot wait for a new group.
 In chat, a `schedule_task` result becomes an `assistant:scheduled-task` group (`core/scheduled-tasks/tool-result.ts`, last card per task per turn; not a turn boundary) rendered by `ScheduledTaskCard`, which polls the task only while on screen. A human message with `additional_kwargs.deerflow_scheduled_origin` stays a `human` group with `scheduledOrigin`: `ScheduledRunPrompt` renders the origin's user-language parts, never the launched text, and it is not editable.
 Server-created threads: `core/threads/origin.ts` reads `metadata.deerflow_origin` (`contracts/thread_origin_contract.json`), then `channel_source`, then a legacy `scheduled_task_id`; provider names come from `threads.origin.providers`. `core/threads/activity.ts` polls `/api/thread-activity` (mount `useThreadActivity` once; unmounting resets its cursor; first poll only seeds; invalidate lists only on server-origin threads, truncation or a higher `read_version`) and `useMarkThreadRead` posts reads. `core/scheduled-tasks/events.ts` loads a chat's lifecycle events, not gated on its task list; `placeTaskEvents` puts each at the end of its `after_run_id` turn. The UI language is saved as the `locale` preference once per session and on each switch, only when the Gateway's preferences include `locale`.
 Thread rows (sidebar, `/workspace/chats`) show `ThreadOriginIcon` and, if `unread === true` and not the open thread, `ThreadUnreadDot` with `threads.unreadLabel` as row label. `WorkspaceSidebar` mounts `useThreadActivity`. Chat pages call `useMarkOpenThreadRead` once metadata loads (marks read on load, on an unread flip, on tab visible, and via its callback from `onFinish`).
@@ -386,5 +396,7 @@ sends, with retry on failure. Polish restores whole labels longest-first in one
 pass. Confirmed thread creation seeds metadata before migration; references stay
 locked during attachment. Deleting an object removes its context; undo restores
 references already attached to the draft. Labels grant no read authority. IME,
-caret, thread changes and attachment fences apply to editor and picker. The `@`
+caret, thread changes and attachment fences apply to editor and picker. Commit
+mention text before restoring focus synchronously; a delayed callback must not
+overwrite subsequent typing or caret movement. The `@`
 and attachment buttons share the picker.

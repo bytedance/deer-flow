@@ -157,6 +157,14 @@ class Channel(ABC):
         """
         await self.send_notification(target=target, text_markdown=text_markdown)
 
+    async def send_group_notification_for_owner(self, *, owner_user_id: str | None, target: str, text_markdown: str) -> None:
+        """Push to an explicitly selected group binding, never a personal fallback.
+
+        ``target`` is the owner's connection ID, not a provider chat ID.
+        Providers must revalidate that binding before sending to its group.
+        """
+        raise NotImplementedError(f"channel '{self.name}' does not support group notifications")
+
     # -- helpers -----------------------------------------------------------
 
     async def _send_with_retry(

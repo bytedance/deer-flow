@@ -1879,6 +1879,8 @@ Unsent Web UI composer drafts survive page reloads and switching between convers
 
 The Web UI composer supports `@` references at the cursor or through the `@` button. Search enabled skills, documents in the current project, and other conversations in a grouped picker; selected references appear inline alongside the draft text and can be removed with normal editing. Multiple skills can be selected in one message (up to 16 unique skills); selecting a checked skill again removes it, with each selection checked against the current user registry and agent allowlist. Project files are attached only after ingestion succeeds; conversation references require the `read_conversation` capability and retain its per-run limit. If capability discovery fails, saved conversation references remain intact and sending waits for a successful retry. Polishing preserves complete reference labels when instructions are reordered. The file group also offers local uploads. `/goal`, `/compact`, and legacy `/skill-name` input remain supported.
 
+After picking an inline reference, typing continues immediately after it. Moving the cursor keeps the position you chose, including when editing text beside a reference.
+
 The Web UI composer also supports browser-based voice dictation when the browser exposes the Web Speech API. The microphone button transcribes speech into the local draft only; DeerFlow receives only the transcribed text, while audio handling is delegated to the browser or operating system speech-recognition service according to that environment's policy. Users can review or edit the text before sending. Dictation keeps words separated when browsers trim transcript segments, preserves Chinese and Japanese joins, and attaches leading punctuation and percent signs without adding spaces.
 
 The Web UI displays a localized AI-generated-content disclaimer below the composer in both standard and custom-agent conversations, reminding users to verify important
@@ -2764,7 +2766,7 @@ Current MVP capabilities:
 - Pause, resume, trigger, inspect history, and delete tasks
 - Search task titles or prompts, combined with status/type filters and the current thread scope.
 - Execute scheduled work through the normal DeerFlow run lifecycle
-- When `channel_connections.enabled: true`, send scheduled task updates to the task owner's connected IM identities (outbox + delivery worker) on apps that support proactive push, which today is WeCom; Settings shows for each app whether updates are sent there, and other apps get none. Each occurrence sends at most one message: a finished, failed or goal-missed run, the automatic pause after three missed goals, a pause by the agent (its stop condition was met) or the task finishing (all `max_runs` done, `end_at` reached); when several apply, the pause or finish wins and still says how the last run went. A one-time task sends only its run's outcome. The message is queued in the same database transaction that records the outcome, so runs finalized after a crash or a lost lease notify exactly once. It reads on its own, in your web UI language (else `channel_connections.notification_locale`): the task title, what happened, a one-line result when the agent replied, and "Open DeerFlow → Scheduled tasks for details.", with no IDs and no links. Plain manual "run now" trials and interrupted runs stay silent, and so do occurrences that end without a finished run (launch error, queue timeout, interrupted by a restart). Channel/transport outages park deliveries without exhausting retries, for up to about a day; platform rejections retry for roughly 15 minutes before settling as `failed`. An identity you disconnect while a delivery is waiting is never pushed to: the row is dropped as `failed`.
+- When `channel_connections.enabled: true`, send scheduled task updates to the task owner's connected IM identities (outbox + delivery worker) on apps that support proactive push, which today is WeCom and Feishu/Lark; Settings shows for each app whether updates are sent there, and other apps get none. Each occurrence queues at most one message per target: a finished, failed or goal-missed run, the automatic pause after three missed goals, a pause by the agent (its stop condition was met) or the task finishing (all `max_runs` done, `end_at` reached); when several apply, the pause or finish wins and still says how the last run went. A one-time task sends only its run's outcome. The message is queued in the same database transaction that records the outcome, so runs finalized after a crash or a lost lease do not enqueue a duplicate notice for the same target. It reads on its own, in your web UI language (else `channel_connections.notification_locale`): the task title, what happened, a one-line result when the agent replied, and "Open DeerFlow → Scheduled tasks for details.", with no IDs and no links. Plain manual "run now" trials and interrupted runs stay silent, and so do occurrences that end without a finished run (launch error, queue timeout, interrupted by a restart). Channel/transport outages park deliveries without exhausting retries, for up to about a day; platform rejections retry for roughly 15 minutes before settling as `failed`. An identity you disconnect while a delivery is waiting is never pushed to: the row is dropped as `failed`.
 - Browse execution history in pages of 50; older pages pause automatic refresh, with an explicit return to the latest runs. Counts appear only after a successful read; loading and failed reads are not reported as zero runs.
 
 Derived run summaries omit leading inline `<think>` reasoning before limiting the text, so a long thought does not replace the actual answer in previews or scheduled notices. Original response history and literal tags in the answer are unchanged; previously stored run summaries are not rewritten.
@@ -2781,6 +2783,20 @@ Current MVP limits:
 - No channel or GitHub dispatch targets (result push above is not a dispatch target)
 
 Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigger uses the same scheduled-task resource and execution path.
+
+### Optional Feishu group notifications
+
+In a task's create or edit form, **Also notify a Feishu group (optional)** adds
+one chosen group to the existing personal notifications. Add the app bot to the
+group, use **Bind a Feishu group** to get a command, send it while mentioning the
+bot in that group, then refresh the list and select the group by name. The app
+needs bot-send permission and `im:chat:read` to display its group names.
+
+No group is selected automatically. Clearing the selection stops new group
+notices; changing it affects future notices, while already queued notices keep
+their original target. A disconnected binding never receives a waiting notice.
+The first version is configured through the task form or REST API; conversation
+schedule tools keep their existing inputs. See the [group delivery guide](backend/docs/IM_CHANNEL_CONNECTIONS.md#feishu-group-notifications).
 
 ### Lifecycle, safety caps and stop conditions
 

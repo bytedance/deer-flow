@@ -36,6 +36,7 @@ from app.channels.message_bus import (
     OutboundMessage,
     ResolvedAttachment,
 )
+from app.channels.notification_groups import is_feishu_notification_group
 from app.channels.sandbox_files import sync_file_to_thread_sandbox
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
@@ -189,6 +190,7 @@ class FeishuChannel(Channel):
         self._CreateImageRequest = None
         self._CreateImageRequestBody = None
         self._GetMessageResourceRequest = None
+        self._GetChatRequest = None
         self._thread_lock = threading.Lock()
         # Per-chat FIFO of messages whose routing is deferred to the Gateway loop
         # (unresolved store lookups); guarded by ``_thread_lock``. A chat with a
@@ -286,6 +288,7 @@ class FeishuChannel(Channel):
                 CreateMessageRequest,
                 CreateMessageRequestBody,
                 Emoji,
+                GetChatRequest,
                 GetMessageResourceRequest,
                 PatchMessageRequest,
                 PatchMessageRequestBody,
@@ -318,6 +321,7 @@ class FeishuChannel(Channel):
         self._CreateImageRequest = CreateImageRequest
         self._CreateImageRequestBody = CreateImageRequestBody
         self._GetMessageResourceRequest = GetMessageResourceRequest
+        self._GetChatRequest = GetChatRequest
 
         app_id = self.config.get("app_id", "")
         app_secret = self.config.get("app_secret", "")
@@ -484,6 +488,21 @@ class FeishuChannel(Channel):
             raise ChannelUnavailable("Feishu notification transport is unavailable") from exc
         if not response.success():
             raise RuntimeError(f"Feishu notification rejected: code={response.code}")
+
+    async def send_group_notification_for_owner(self, *, owner_user_id: str | None, target: str, text_markdown: str) -> None:
+        if self._connection_repo is None or not owner_user_id:
+            raise ChannelUnavailable("Feishu notification binding lookup is unavailable")
+        try:
+            connections = await self._connection_repo.list_connections(owner_user_id)
+        except Exception as exc:
+            raise ChannelUnavailable("Feishu notification binding lookup is unavailable") from exc
+        for connection in connections:
+            if connection.get("owner_user_id") != owner_user_id or connection.get("id") != target:
+                continue
+            if is_feishu_notification_group(provider=connection.get("provider"), status=connection.get("status"), workspace_id=connection.get("workspace_id"), metadata=connection.get("metadata")):
+                await self._send_notification_card(receive_id=connection["workspace_id"], receive_id_type="chat_id", text_markdown=text_markdown)
+                return
+        raise RuntimeError("Feishu notification group is no longer connected")
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if not self._api_client:
@@ -1679,6 +1698,19 @@ class FeishuChannel(Channel):
             workspace_id=inbound.chat_id,
         )
 
+    async def _get_group_name(self, chat_id: str) -> str | None:
+        """Best-effort display name; missing read permission must not break binding."""
+        if not self._api_client or not self._GetChatRequest:
+            return None
+        try:
+            request = self._GetChatRequest.builder().chat_id(chat_id).build()
+            response = await asyncio.to_thread(self._api_client.im.v1.chat.get, request)
+            if response.success():
+                return self._non_empty_str(getattr(response.data, "name", None))
+        except Exception:
+            logger.debug("[Feishu] group name lookup unavailable; binding without a display name")
+        return None
+
     async def _bind_connection_from_connect_code(self, *, message_id: str, chat_id: str, user_id: str, code: str, chat_type: str | None = None) -> bool:
         if self._connection_repo is None or not code:
             return False
@@ -1697,6 +1729,7 @@ class FeishuChannel(Channel):
             provider="feishu",
             external_account_id=user_id,
             workspace_id=chat_id,
+            workspace_name=await self._get_group_name(chat_id) if chat_type == "group" else None,
             metadata={
                 "chat_id": chat_id,
                 "message_id": message_id,

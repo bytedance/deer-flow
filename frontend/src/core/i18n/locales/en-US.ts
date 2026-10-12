@@ -1019,6 +1019,39 @@ export const enUS: Translations = {
         "Tasks created in chat that run more often than hourly need a safety cap.",
       submit: "Resume",
     },
+    notificationGroup: {
+      savedUnavailable:
+        "This task has a saved group destination, but group notifications are unavailable on this server.",
+      clearSaved: "Clear group notification",
+      bind: "Bind a Feishu group",
+      refresh: "Refresh group list",
+      bindInstructions:
+        "Add the bot to the group, then mention the bot and send this command in that group. Refresh the group list after binding.",
+      generating: "Generating a binding code…",
+      bindFailed: "Could not create a binding code. Try again.",
+      command: "Group binding command",
+      expiresAt: "Expires at {time}.",
+      copy: "Copy command",
+      copied: "Copied",
+      copyFailed: "Could not copy. Select and copy the command above.",
+      newCode: "Generate a new code",
+      close: "Close binding instructions",
+      label: "Also notify a Feishu group (optional)",
+      detailLabel: "Additional Feishu group",
+      none: "No additional group",
+      personalHint:
+        "Your personal notifications stay unchanged. The selected group also receives task updates.",
+      emptyHint: "Bind a Feishu group below, then refresh the list.",
+      loading: "Loading groups…",
+      unavailable: "Selected group unavailable",
+      unavailableHint:
+        "The selected group is no longer available. Keep it, remove it, or choose another group.",
+      unnamed: "Group name unavailable",
+      unnamedHint:
+        "Check the app's group-information permission, then bind the group again to load its name.",
+      loadFailed:
+        "Could not load groups. Your selection is kept; you can save other changes or remove it.",
+    },
     form: {
       createTitle: "New scheduled task",
       editTitle: "Edit task",
@@ -1190,6 +1223,8 @@ export const enUS: Translations = {
       goalRequiresFreshThread: "A goal needs each run to start a new chat.",
       invalidStopCondition:
         "The stop condition must be at most {max_chars} characters.",
+      invalidNotificationGroup:
+        "This Feishu group is no longer available. Select another group or remove the additional notification.",
       invalidMaxRuns: "The run limit must be a whole number of at least 1.",
       endAtInPast: "Pick an end time in the future.",
       endAtBeforeFirstRun: "The end time must leave room for at least one run.",
