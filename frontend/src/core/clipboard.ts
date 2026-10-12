@@ -41,8 +41,9 @@ function copyTextWithExecCommand(text: string): boolean {
     }
     if (
       restoreFocus &&
-      activeElement instanceof HTMLElement &&
-      activeElement.isConnected
+      activeElement?.isConnected &&
+      "focus" in activeElement &&
+      typeof activeElement.focus === "function"
     ) {
       activeElement.focus({ preventScroll: true });
     }

@@ -60,6 +60,59 @@ test("writes text with the Clipboard API when available", async () => {
   expect(writeText).toHaveBeenCalledWith("hello");
 });
 
+test.each(["success", "false", "throw", "handoff", "detached"] as const)(
+  "handles fallback focus restoration: %s",
+  async (outcome) => {
+    const previous = { isConnected: true, focus: rs.fn() };
+    const other = { isConnected: true, focus: rs.fn() };
+    let activeElement: object | null = previous;
+    const textarea = {
+      value: "",
+      style: {},
+      setAttribute: rs.fn(),
+      select: () => {
+        activeElement = textarea;
+      },
+      remove: rs.fn(() => {
+        if (activeElement === textarea) activeElement = null;
+      }),
+    };
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: {},
+    });
+    Object.defineProperty(globalThis, "document", {
+      configurable: true,
+      value: {
+        get activeElement() {
+          return activeElement;
+        },
+        body: { appendChild: rs.fn() },
+        createElement: () => textarea,
+        execCommand: () => {
+          if (outcome === "handoff") activeElement = other;
+          if (outcome === "detached") previous.isConnected = false;
+          if (outcome === "throw") throw new Error("Copy failed");
+          return outcome !== "false";
+        },
+      },
+    });
+
+    await expect(writeTextToClipboard("hello")).resolves.toBe(
+      outcome !== "false" && outcome !== "throw",
+    );
+    expect(textarea.remove).toHaveBeenCalledTimes(1);
+    if (outcome === "handoff" || outcome === "detached") {
+      expect(previous.focus).not.toHaveBeenCalled();
+    } else {
+      expect(previous.focus).toHaveBeenCalledExactlyOnceWith({
+        preventScroll: true,
+      });
+    }
+    if (outcome === "handoff") expect(activeElement).toBe(other);
+  },
+);
+
 test("returns false when Clipboard API is unavailable", async () => {
   Object.defineProperty(globalThis, "navigator", {
     configurable: true,

@@ -2,6 +2,43 @@ import { expect, test } from "@playwright/test";
 
 import { MOCK_THREAD_ID, mockLangGraphAPI } from "./utils/mock-api";
 
+test("clipboard fallback restores focus to an SVG control", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: undefined,
+    });
+  });
+  mockLangGraphAPI(page);
+  await page.goto("/workspace/chats/new");
+  await expect(page.getByPlaceholder(/how can i assist you/i)).toBeVisible();
+  await page.evaluate(() => {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("tabindex", "0");
+    svg.setAttribute("data-testid", "svg-copy");
+    svg.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        void navigator.clipboard.writeText("SVG copy").then(
+          () => {
+            svg.dataset.result = "copied";
+          },
+          () => {
+            svg.dataset.result = "failed";
+          },
+        );
+      }
+    });
+    document.body.appendChild(svg);
+  });
+  const svg = page.getByTestId("svg-copy");
+  await svg.focus();
+  await svg.press("Enter");
+  await expect(svg).toHaveAttribute("data-result", "copied");
+  await expect(svg).toBeFocused();
+});
+
 for (const outcome of ["success", "false", "throw", "handoff"] as const) {
   test(`clipboard fallback preserves keyboard focus: ${outcome}`, async ({
     page,
