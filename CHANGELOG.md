@@ -946,6 +946,22 @@ This release closes that milestone with **621 merged pull requests**.
 
 #### Channels
 
+- **channels:** New `channels.leader_lease` section (`enabled: auto|true|false`,
+  `lease_seconds`, `grace_seconds`; startup-only), reserved for the per-provider
+  leader lease that will give one Gateway instance each IM platform connection
+  (the transport ownership itself ships separately; until then keep one
+  instance while channels are enabled). The
+  multi-process startup gate now refuses `enabled: false` while an IM channel
+  other than GitHub is enabled under `channels.*` or connectable through
+  `channel_connections`, naming the providers and only the remedies that work
+  today, and a malformed
+  block is refused on every topology. `auto` follows the multi-process signal, so
+  a single instance is unchanged. `ChannelService` no longer treats the block as
+  a provider, and the two-Gateway harness leaves it alone. `config_version` 60;
+  the Helm chart and docs keep the "keep 1 replica while channels are enabled"
+  guidance but no longer rely on that comment alone: the gate now enforces the
+  disabled-lease case. ([#6746])
+
 - **channels:** WeChat can be connected by scanning a QR code from the web UI.
   The connection dialog in the sidebar and Settings gains QR login with
   progress, pairing-code input, expiry and retry states, and a "Scan again"
@@ -11591,3 +11607,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6692]: https://github.com/bytedance/deer-flow/pull/6692
 [#6702]: https://github.com/bytedance/deer-flow/pull/6702
 [#6706]: https://github.com/bytedance/deer-flow/pull/6706
+[#6746]: https://github.com/bytedance/deer-flow/pull/6746
