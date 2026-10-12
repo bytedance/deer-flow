@@ -41,18 +41,31 @@ def test_from_app_config_strips_the_block(monkeypatch, tmp_path):
     assert service.leader_lease.enabled == "auto"
 
 
-def test_ensure_ready_channels_ignores_non_provider_keys():
-    """A settings block whose ``enabled`` is truthy must never be started as a channel."""
+def test_ensure_ready_channels_ignores_non_provider_keys(caplog):
+    """A settings block whose ``enabled`` is truthy must never be started as a channel.
+
+    A dict block that is neither a registered provider nor ``leader_lease`` is
+    almost certainly a misspelled provider key, so it is skipped with a warning
+    (before the registry guard it reached ``_start_channel`` and logged
+    'Unknown channel type'; silence would hide the typo).
+    """
     service = ChannelService(channels_config={"telegram": {"enabled": False}})
     # Simulate a later configure/overlay that put non-provider dicts back into the live config.
     service._config["leader_lease"] = {"enabled": "auto"}
-    service._config["not_a_provider"] = {"enabled": True}
+    service._config["telegam"] = {"enabled": True, "bot_token": "x"}
+    service._config["disabled_typo"] = {"enabled": False}
     service._running = True
     try:
-        ready = asyncio.run(service.ensure_ready_channels())
+        with caplog.at_level("WARNING", logger="app.channels.service"):
+            ready = asyncio.run(service.ensure_ready_channels())
     finally:
         service._running = False
     assert ready == {}
+    warnings = [record.message for record in caplog.records if record.levelname == "WARNING"]
+    assert len(warnings) == 1, warnings
+    assert warnings[0].startswith("Ignoring channels.telegam:")
+    assert "telegram" in warnings[0]  # the registry is listed so the operator sees the right spelling
+    assert "leader_lease" not in "\n".join(warnings)
 
 
 def _app_config(*, channels=None, connections=None):

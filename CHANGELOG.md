@@ -958,8 +958,9 @@ This release closes that milestone with **621 merged pull requests**.
   block is refused on every topology. `auto` follows the multi-process signal, so
   a single instance is unchanged. `ChannelService` no longer treats the block as
   a provider, and the two-Gateway harness leaves it alone. `config_version` 60;
-  the Helm chart and docs drop the comment-only "keep 1 replica" guidance in
-  favour of the gate. ([#6746])
+  the Helm chart and docs keep the "keep 1 replica while channels are enabled"
+  guidance but no longer rely on that comment alone: the gate now enforces the
+  disabled-lease case. ([#6746])
 
 - **channels:** WeChat can be connected by scanning a QR code from the web UI.
   The connection dialog in the sidebar and Settings gains QR login with

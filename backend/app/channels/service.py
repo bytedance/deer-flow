@@ -283,7 +283,14 @@ class ChannelService:
         """Start or restart enabled configured channels that are not ready."""
         ready_status: dict[str, bool] = {}
         for name, channel_config in self._config.items():
-            if not isinstance(channel_config, dict) or name not in _CHANNEL_REGISTRY:
+            if not isinstance(channel_config, dict):
+                continue
+            if name not in _CHANNEL_REGISTRY:
+                # __init__ already popped the settings blocks (session, leader_lease),
+                # so an enabled dict here is almost certainly a misspelled provider
+                # key; say so instead of skipping it silently.
+                if name != CHANNEL_LEADER_LEASE_KEY and channel_config.get("enabled", False):
+                    logger.warning("Ignoring channels.%s: it is enabled but is not a registered provider (%s). Check the key spelling in config.yaml.", name, ", ".join(sorted(_CHANNEL_REGISTRY)))
                 continue
             if not channel_config.get("enabled", False):
                 if _channel_has_credentials(name, channel_config):
