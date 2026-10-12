@@ -39,36 +39,45 @@ def call_upload(client, source, in_loop):
 
 @pytest.mark.parametrize("in_loop", [False, True])
 @pytest.mark.parametrize("change", ["edit", "remove"])
-def test_conversion_keeps_uploaded_version(upload_case, monkeypatch, tmp_path, in_loop, change):
+@pytest.mark.parametrize("existing", [False, True])
+def test_conversion_keeps_uploaded_version(upload_case, monkeypatch, tmp_path, in_loop, change, existing):
     import deerflow.client as client_module
     import deerflow.utils.file_conversion as conversion
 
     client, uploads = upload_case
     source = tmp_path / "report.pdf"
     source.write_bytes(b"VERSION A")
-    real_copy = client_module.copy_upload_file_no_symlink
+    if existing:
+        (uploads / source.name).write_bytes(b"OLD UPLOAD")
     conversion_paths = []
+    changes = []
 
-    def copy_then_change(base, name, src, **kwargs):
-        result = real_copy(base, name, src, **kwargs)
-        if Path(src) == source:
-            if change == "edit":
-                source.write_bytes(b"VERSION B")
-            else:
-                source.unlink()
-        return result
+    def wrap_copy(real_copy):
+        def copy_then_change(base, name, src, **kwargs):
+            result = real_copy(base, name, src, **kwargs)
+            if Path(src) == source:
+                changes.append(change)
+                if change == "edit":
+                    source.write_bytes(b"VERSION B")
+                else:
+                    source.unlink()
+            return result
+
+        return copy_then_change
 
     async def convert(path, output_path=None):
         conversion_paths.append(path)
         output_path.write_bytes(b"CONVERTED:" + path.read_bytes())
         return output_path
 
-    monkeypatch.setattr(client_module, "copy_upload_file_no_symlink", copy_then_change)
+    monkeypatch.setattr(client_module, "copy_upload_file_no_symlink", wrap_copy(client_module.copy_upload_file_no_symlink))
+    monkeypatch.setattr(client_module, "publish_upload_copy", wrap_copy(client_module.publish_upload_copy))
     monkeypatch.setattr(conversion, "CONVERTIBLE_EXTENSIONS", {".pdf"})
     monkeypatch.setattr(conversion, "convert_file_to_markdown", convert)
     response = call_upload(client, source, in_loop)
 
     assert response["success"]
+    assert changes == [change]
     saved = uploads / response["files"][0]["filename"]
     assert saved.read_bytes() == b"VERSION A"
     companion = resolve_companion(saved)
@@ -138,7 +147,8 @@ def test_captured_upload_preserves_original_metadata(upload_case, monkeypatch, t
 
 
 @pytest.mark.parametrize("in_loop", [False, True])
-def test_real_xlsx_conversion_uses_captured_version(upload_case, monkeypatch, tmp_path, in_loop):
+@pytest.mark.parametrize("existing", [False, True])
+def test_real_xlsx_conversion_uses_captured_version(upload_case, monkeypatch, tmp_path, in_loop, existing):
     from openpyxl import Workbook, load_workbook
 
     import deerflow.client as client_module
@@ -148,18 +158,26 @@ def test_real_xlsx_conversion_uses_captured_version(upload_case, monkeypatch, tm
     workbook = Workbook()
     workbook.active["A1"] = "VERSION A"
     workbook.save(source)
-    real_copy = client_module.copy_upload_file_no_symlink
+    if existing:
+        (uploads / source.name).write_bytes(b"OLD UPLOAD")
+    saves = []
 
-    def copy_then_save(base, name, src, **kwargs):
-        result = real_copy(base, name, src, **kwargs)
-        if Path(src) == source:
-            workbook.active["A1"] = "VERSION B"
-            workbook.save(source)
-        return result
+    def wrap_copy(real_copy):
+        def copy_then_save(base, name, src, **kwargs):
+            result = real_copy(base, name, src, **kwargs)
+            if Path(src) == source:
+                saves.append(source)
+                workbook.active["A1"] = "VERSION B"
+                workbook.save(source)
+            return result
 
-    monkeypatch.setattr(client_module, "copy_upload_file_no_symlink", copy_then_save)
+        return copy_then_save
+
+    monkeypatch.setattr(client_module, "copy_upload_file_no_symlink", wrap_copy(client_module.copy_upload_file_no_symlink))
+    monkeypatch.setattr(client_module, "publish_upload_copy", wrap_copy(client_module.publish_upload_copy))
     response = call_upload(client, source, in_loop)
     assert response["success"]
+    assert saves == [source]
     saved = uploads / "report.xlsx"
     saved_workbook = load_workbook(saved)
     try:
@@ -248,3 +266,78 @@ def test_acl_only_readable_source_uploads_and_converts(upload_case, monkeypatch,
         source.chmod(0o600)
         if saved.exists():
             saved.chmod(0o600)
+
+
+@pytest.mark.parametrize("in_loop", [False, True])
+@pytest.mark.parametrize("change", ["edit", "remove"])
+def test_collision_retries_keep_one_capture(upload_case, monkeypatch, tmp_path, in_loop, change):
+    """Retry new names without reopening the source or losing its metadata."""
+    import builtins
+
+    import deerflow.uploads.manager as manager
+    import deerflow.utils.file_conversion as conversion
+
+    client, uploads = upload_case
+    source = tmp_path / "report.pdf"
+    source.write_bytes(b"VERSION A")
+    source.chmod(0o640)
+    os.utime(source, ns=(1_700_000_000_000_000_000, 1_700_000_001_000_000_000))
+    before = source.stat()
+    real_open = builtins.open
+    real_link = manager.os.link
+    source_opens = []
+    attempts = []
+    captures = []
+
+    def record_open(path, mode="r", *args, **kwargs):
+        if mode == "rb" and isinstance(path, (str, os.PathLike)) and Path(path) == source:
+            source_opens.append(path)
+        return real_open(path, mode, *args, **kwargs)
+
+    def claim_then_link(staging, destination, **kwargs):
+        if destination.suffix == ".pdf":
+            attempts.append(destination.name)
+            if len(attempts) == 1:
+                # Another caller wins two names while this call is publishing.
+                (uploads / "report.pdf").write_bytes(b"FIRST OWNER")
+                (uploads / "report_1.pdf").write_bytes(b"SECOND OWNER")
+                if change == "edit":
+                    source.write_bytes(b"VERSION B")
+                    source.chmod(0o600)
+                    os.utime(source, ns=(1_800_000_000_000_000_000, 1_800_000_001_000_000_000))
+                else:
+                    source.unlink()
+        return real_link(staging, destination, **kwargs)
+
+    async def convert(path, output_path=None):
+        captures.append(path)
+        output_path.write_bytes(b"CONVERTED:" + path.read_bytes())
+        return output_path
+
+    monkeypatch.setattr(builtins, "open", record_open)
+    monkeypatch.setattr(manager.os, "link", claim_then_link)
+    monkeypatch.setattr(conversion, "CONVERTIBLE_EXTENSIONS", {".pdf"})
+    monkeypatch.setattr(conversion, "convert_file_to_markdown", convert)
+    response = call_upload(client, source, in_loop)
+
+    assert response["success"]
+    info = response["files"][0]
+    assert info["filename"] == "report_2.pdf"
+    assert info["original_filename"] == "report.pdf"
+    assert attempts == ["report.pdf", "report_1.pdf", "report_2.pdf"]
+    assert len(source_opens) == 1
+    saved = uploads / info["filename"]
+    assert saved.read_bytes() == b"VERSION A"
+    companion = resolve_companion(saved)
+    assert companion == uploads / "report_2.md"
+    assert companion.read_bytes() == b"CONVERTED:VERSION A"
+    assert (uploads / "report.pdf").read_bytes() == b"FIRST OWNER"
+    assert (uploads / "report_1.pdf").read_bytes() == b"SECOND OWNER"
+    if os.chmod in os.supports_fd:
+        assert stat.S_IMODE(saved.stat().st_mode) == stat.S_IMODE(before.st_mode)
+    if os.utime in os.supports_fd:
+        assert saved.stat().st_mtime_ns == before.st_mtime_ns
+    assert captures[0] != source
+    assert not captures[0].is_relative_to(uploads)
+    assert not captures[0].parent.exists()
+    assert not list(uploads.glob(".upload-*.part"))

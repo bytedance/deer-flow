@@ -17,6 +17,7 @@ from deerflow.uploads.manager import (
     apply_upload_sandbox_permits,
     claim_unique_filename,
     cleanup_stale_upload_staging_files,
+    copy_upload_file_no_replace,
     copy_upload_file_no_symlink,
     delete_file_safe,
     list_files_in_dir,
@@ -352,6 +353,64 @@ class TestCopyUploadFileNoSymlink:
         dest = copy_upload_file_no_symlink(uploads, "notes.txt", src)
 
         assert dest.read_bytes() == b"new contents"
+
+    def test_no_replace_copy_preserves_existing_file_and_cleans_stage(self, tmp_path):
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        dest = uploads / "notes.txt"
+        dest.write_bytes(b"old contents")
+        src = tmp_path / "notes.txt"
+        src.write_bytes(b"new contents")
+
+        with pytest.raises(FileExistsError):
+            copy_upload_file_no_replace(uploads, "notes.txt", src)
+
+        assert dest.read_bytes() == b"old contents"
+        assert sorted(path.name for path in uploads.iterdir()) == ["notes.txt"]
+
+    def test_no_replace_copy_failure_removes_stage_without_publishing(self, tmp_path):
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        src = tmp_path / "notes.txt"
+        src.write_bytes(b"new contents")
+
+        def fail_copy(source, staged):
+            staged.write(b"partial")
+            raise OSError("copy failed")
+
+        with patch("deerflow.uploads.manager.shutil.copyfileobj", side_effect=fail_copy):
+            with pytest.raises(OSError, match="copy failed"):
+                copy_upload_file_no_replace(uploads, "notes.txt", src)
+
+        assert list(uploads.iterdir()) == []
+
+    def test_no_replace_copy_publishes_complete_file_and_preserves_metadata(self, tmp_path):
+        uploads = tmp_path / "threads" / "t1" / "user-data" / "uploads"
+        uploads.mkdir(parents=True)
+        src = tmp_path / "notes.txt"
+        src.write_bytes(b"complete contents")
+        src.chmod(0o640)
+        old_time = time.time_ns() - 3 * 24 * 60 * 60 * 1_000_000_000
+        os.utime(src, ns=(old_time, old_time))
+        source_stat = src.stat()
+        real_link = os.link
+
+        def publish(staged, dest, **kwargs):
+            assert not dest.exists()
+            assert list_files_in_dir(uploads)["files"] == []
+            assert staged.read_bytes() == b"complete contents"
+            assert cleanup_stale_upload_staging_files(tmp_path) == 0
+            real_link(staged, dest, **kwargs)
+
+        with patch("deerflow.uploads.manager.os.link", side_effect=publish):
+            dest = copy_upload_file_no_replace(uploads, "notes.txt", src)
+
+        assert dest.read_bytes() == b"complete contents"
+        assert sorted(path.name for path in uploads.iterdir()) == ["notes.txt"]
+        if os.chmod in os.supports_fd:
+            assert stat.S_IMODE(dest.stat().st_mode) == stat.S_IMODE(source_stat.st_mode)
+        if os.utime in os.supports_fd:
+            assert dest.stat().st_mtime_ns == source_stat.st_mtime_ns
 
     def test_rejects_symlink_destination(self, tmp_path):
         uploads = tmp_path / "uploads"

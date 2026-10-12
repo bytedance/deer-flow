@@ -81,6 +81,7 @@ from deerflow.uploads.manager import (
     get_uploads_dir,
     list_files_in_dir,
     normalize_filename,
+    publish_upload_copy,
     upload_artifact_url,
     upload_virtual_path,
 )
@@ -1741,12 +1742,15 @@ class DeerFlowClient:
                 raise FileNotFoundError(f"File not found: {f}")
             if not p.is_file():
                 raise ValueError(f"Path is not a file: {f}")
-            dest_name = claim_unique_filename(normalize_filename(p.name), seen_names)
-            resolved_files.append((p, dest_name))
+            claim_seed = normalize_filename(p.name)
+            dest_name = claim_unique_filename(claim_seed, seen_names)
+            resolved_files.append((p, dest_name, claim_seed))
             if not has_convertible_file and p.suffix.lower() in CONVERTIBLE_EXTENSIONS:
                 has_convertible_file = True
 
         uploads_dir = ensure_uploads_dir(thread_id)
+        with os.scandir(uploads_dir) as entries:
+            existing_names = {entry.name for entry in entries if entry.is_file(follow_symlinks=False)}
         uploaded_files: list[dict] = []
         skipped_files: list[str] = []
 
@@ -1768,16 +1772,21 @@ class DeerFlowClient:
 
         conversion_sources = None
         try:
-            for src_path, dest_name in resolved_files:
+            for src_path, dest_name, claim_seed in resolved_files:
                 try:
                     conversion_source = None
                     if src_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
                         if conversion_sources is None:
                             conversion_sources = tempfile.TemporaryDirectory(prefix="deerflow-upload-source-")
                         conversion_source = Path(conversion_sources.name) / dest_name
-                        dest = copy_upload_file_no_symlink(uploads_dir, dest_name, src_path, snapshot_path=conversion_source)
+                    if dest_name in existing_names:
+                        if conversion_source is not None:
+                            dest = copy_upload_file_no_symlink(uploads_dir, dest_name, src_path, snapshot_path=conversion_source)
+                        else:
+                            dest = copy_upload_file_no_symlink(uploads_dir, dest_name, src_path)
                     else:
-                        dest = copy_upload_file_no_symlink(uploads_dir, dest_name, src_path)
+                        dest = publish_upload_copy(uploads_dir, dest_name, src_path, claim_seed=claim_seed, seen_names=seen_names, snapshot_path=conversion_source)
+                        dest_name = dest.name
                 except UnsafeUploadPathError:
                     if conversion_source is not None:
                         conversion_source.unlink(missing_ok=True)
@@ -1817,7 +1826,11 @@ class DeerFlowClient:
                                 # copy, not write_bytes: the companion keeps the
                                 # converter's permissions, so a sandbox running as
                                 # another uid can still read it.
-                                md_path = copy_upload_file_no_symlink(uploads_dir, unique_md_name, converted)
+                                if unique_md_name in existing_names:
+                                    md_path = copy_upload_file_no_symlink(uploads_dir, unique_md_name, converted)
+                                else:
+                                    md_path = publish_upload_copy(uploads_dir, unique_md_name, converted, claim_seed=provisional_md_name, seen_names=seen_names)
+                                    unique_md_name = md_path.name
                     except UnsafeUploadPathError:
                         logger.warning("Skipping markdown companion with unsafe destination: %s", unique_md_name)
                         md_path = None

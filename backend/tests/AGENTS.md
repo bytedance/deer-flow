@@ -3,6 +3,10 @@
 `test_client_upload_snapshot.py` keeps upload publication and conversion on the
 same private capture. Cover source edits/removal, both conversion branches,
 same-file rejection, metadata and cleanup; retain sandbox symlink defenses.
+Exercise both replacement and first-time publication; mutation hooks must actually
+run on both paths. Force collision retries while editing/removing the source and
+assert one source open, original metadata, preserved competing uploads, companion
+ownership and capture cleanup. Retain the real XLSX conversion coverage.
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
