@@ -60,6 +60,9 @@ A 120-second
 cooperative deadline is checked between files and download chunks; an active SDK
 read is bounded by `request_timeout`, so this is not a hard wall-clock limit.
 The listing requires `find`, `head`, `base64` and `mktemp` in the remote image.
+If `find` reports a traversal error, complete NUL-framed records are still
+mirrored with a warning; oversized or incomplete listings and failed pipeline
+stages skip the pass.
 Remote links are not followed and linked local destinations are rejected.
 Mirrored names must also be portable host paths: traversal, backslashes, colons,
 Windows reserved components and components ending in a space or dot are skipped

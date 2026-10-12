@@ -449,7 +449,7 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         # SSE stdout is line-oriented. Base64 keeps event boundaries from
         # inserting newlines into filenames (NUL frames alone cannot do that).
         payload, marker = execution_stdout(execution).rsplit("\n", 1)
-        if marker not in {"__DF_OUTPUT_SYNC__:0:0:0", "__DF_OUTPUT_SYNC__:141:0:0"}:
+        if marker not in {"__DF_OUTPUT_SYNC__:0:0:0", "__DF_OUTPUT_SYNC__:1:0:0", "__DF_OUTPUT_SYNC__:141:0:0"}:
             raise OSError(f"OpenSandbox output listing failed: {marker}")
         raw_listing = base64.b64decode("".join(payload.split()), validate=True)
         if marker == "__DF_OUTPUT_SYNC__:141:0:0" and len(raw_listing) <= self._MAX_SYNC_LISTING_BYTES:
@@ -459,6 +459,8 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             return
         if raw_listing and not raw_listing.endswith(b"\0"):
             raise OSError("OpenSandbox output listing was incomplete")
+        if marker == "__DF_OUTPUT_SYNC__:1:0:0":
+            logger.warning("OpenSandbox output listing had traversal errors; synchronizing complete records")
         total = 0
         for index, remote_record in enumerate(filter(None, raw_listing.split(b"\0"))):
             if index >= self._MAX_SYNC_FILES or total >= self._MAX_SYNC_TOTAL_BYTES or time.monotonic() >= deadline:

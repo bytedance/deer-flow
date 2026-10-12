@@ -6,9 +6,11 @@ the active entry during transfer so reuse and warm reaping cannot overlap it.
 Never repool a client invalidated or untracked during synchronization.
 
 The bounded listing uses base64-encoded NUL frames to survive line-oriented SSE
-events. POSIX pipelines must report every stage's exit status explicitly. Native
-downloads enforce the remaining byte budget and cooperative deadline and close
-the stream on failure. Publish via an exclusively created temporary file and
+events. POSIX pipelines must report every stage's exit status explicitly.
+`find` exit 1 permits complete records with a warning only after size/framing
+validation; failed head/encoder stages and truncated listings still fail closed.
+Native downloads enforce the remaining byte budget and cooperative deadline,
+closing the stream on failure. Publish via an exclusively created temporary file and
 atomic replacement; reject traversal and existing linked host destinations.
 Keep failed synchronization best effort, preserve prior complete copies, and
 do not remove remotely deleted files. Cover the real listing shell and release

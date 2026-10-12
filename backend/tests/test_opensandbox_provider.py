@@ -681,6 +681,18 @@ def test_output_sync_closes_stream_when_single_file_exceeds_cap(output_sync_prov
     assert remote.stream_closed
 
 
+@pytest.mark.parametrize("ticks", [[2], [0, 2]])
+def test_bounded_download_deadline_closes_native_stream(monkeypatch, ticks):
+    remote = _FakeRemote("remote")
+    path = "/mnt/user-data/outputs/report.txt"
+    remote.file_data[path] = b"123456789"
+    box = _box(remote)
+    monkeypatch.setattr("deerflow.community.opensandbox.sandbox.time", types.SimpleNamespace(monotonic=iter(ticks).__next__))
+    with pytest.raises(TimeoutError, match="synchronization timed out"):
+        box._download_file_bounded(path, max_bytes=100, deadline=1)
+    assert remote.stream_closed
+
+
 @pytest.fixture
 def output_sync_shell(output_sync_provider, monkeypatch, tmp_path):
     """Run the production listing pipeline; only rebase the transport paths."""
@@ -779,6 +791,42 @@ def test_output_sync_real_shell_rejects_unexpected_sigpipe(output_sync_shell, ca
     provider.release(sandbox_id)
     assert not outputs.exists() and not remote.files.calls
     assert "listing failed" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("case", "warning"),
+    [
+        ("complete", "traversal errors"),
+        ("incomplete", "listing was incomplete"),
+        ("oversized", "listing exceeded"),
+        ("head_failure", "listing failed"),
+        ("encoder_failure", "listing failed"),
+        ("find_failure", "listing failed"),
+    ],
+)
+def test_output_sync_real_shell_find_walk_error_preserves_only_complete_listing(output_sync_shell, monkeypatch, caplog, case, warning):
+    provider, remote, sandbox_id, outputs, native, fake_bin = output_sync_shell
+    remote.file_data["/mnt/user-data/outputs/report.txt"] = b"report"
+    find = fake_bin / "find"
+    tail = "printf 'unfinished'\n" if case == "incomplete" else ""
+    status = 2 if case == "find_failure" else 1
+    find.write_text(f"#!/bin/sh\nprintf '/mnt/user-data/outputs/report.txt\\0'\n{tail}echo 'find: entry vanished' >&2\nexit {status}\n", encoding="utf-8")
+    find.chmod(0o755)
+    if case == "oversized":
+        monkeypatch.setattr(provider, "_MAX_SYNC_LISTING_BYTES", 16)
+    elif case in {"head_failure", "encoder_failure"}:
+        binary = "head" if case == "head_failure" else "base64"
+        command = "cat" if binary == "head" else "command -p base64"
+        failing = fake_bin / binary
+        failing.write_text(f"#!/bin/sh\n{command}\nexit 1\n", encoding="utf-8")
+        failing.chmod(0o755)
+    provider.release(sandbox_id)
+    if case == "complete":
+        assert (outputs / "report.txt").read_bytes() == b"report"
+    else:
+        assert not outputs.exists() and not remote.files.calls
+    assert warning in caplog.text
+    assert sandbox_id in provider._warm_pool
 
 
 def test_output_sync_real_shell_does_not_follow_remote_links(output_sync_shell, tmp_path, caplog):
