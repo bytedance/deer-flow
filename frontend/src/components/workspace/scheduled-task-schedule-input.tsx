@@ -223,8 +223,12 @@ export function ScheduledTaskScheduleInput({
       if (next === "monthly" && merged.dayOfMonth == null) {
         merged.dayOfMonth = 1;
       }
-      if (next === "custom" && !merged.raw) {
-        merged.raw = serializeCron("daily", prev);
+      if (next === "custom") {
+        // Initialize the editor from the preset being left, so switching to
+        // Custom shows the current schedule (weekly days, monthly day, hourly
+        // cadence) instead of collapsing to a daily default, and never revives
+        // a stale expression the user already moved away from.
+        merged.raw = serializeCron(preset, prev);
       }
       return merged;
     });
@@ -379,6 +383,7 @@ export function ScheduledTaskScheduleInput({
                 onChange={(e) => updateParts({ raw: e.target.value })}
                 placeholder={labels.fields.cronPlaceholder}
                 aria-label={labels.fields.cron}
+                data-testid="schedule-cron"
               />
               <a
                 href="https://crontab.guru/"
