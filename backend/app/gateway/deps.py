@@ -165,8 +165,11 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
        channel other than GitHub is enabled: every instance would open the
        platform connection with the same bot credentials (Telegram rejects
        the second poller with 409, Discord answers every message twice).
-       ``auto`` (the default) and ``true`` pass; the lease then decides which
-       instance starts each provider's transport.
+       ``auto`` (the default) and ``true`` pass the clause, but they are reserved
+       configuration for the lease-backed transport ownership that ships
+       separately: in this version they do not stop the duplicate connections,
+       so the refusal offers only the single-instance and channel-disable
+       remedies.
 
     This gate runs once at startup before any persistence engine is
     initialised so the error message is clear and the process exits
@@ -247,8 +250,9 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
                 f"{reason} cannot run with {CHANNEL_LEADER_LEASE_FIELD}.enabled=false while IM channels {', '.join(providers)} are enabled: "
                 "every instance would open the platform connection with the same bot credentials (Telegram rejects the second poller "
                 "with 409 Conflict, Discord answers every message twice, and per-process channel state diverges). "
-                f"Set {CHANNEL_LEADER_LEASE_FIELD}.enabled to auto or true so one instance owns each provider's connection. {rollback}, "
-                "or disable those channels (channels.<provider>.enabled=false and channel_connections.<provider>.enabled=false)."
+                f"{rollback}, or disable those channels (channels.<provider>.enabled=false and channel_connections.<provider>.enabled=false). "
+                f"{CHANNEL_LEADER_LEASE_FIELD}.enabled=auto|true is reserved for the per-provider leader lease that ships separately and does not "
+                "yet stop these duplicate connections, so it is not a remedy here."
             )
 
 

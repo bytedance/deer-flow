@@ -588,11 +588,14 @@ This release closes that milestone with **439 merged pull requests**.
 #### Channels
 
 - **channels:** New `channels.leader_lease` section (`enabled: auto|true|false`,
-  `lease_seconds`, `grace_seconds`; startup-only) for the per-provider leader
-  lease that gives one Gateway instance each IM platform connection. The
+  `lease_seconds`, `grace_seconds`; startup-only), reserved for the per-provider
+  leader lease that will give one Gateway instance each IM platform connection
+  (the transport ownership itself ships separately; until then keep one
+  instance while channels are enabled). The
   multi-process startup gate now refuses `enabled: false` while an IM channel
   other than GitHub is enabled under `channels.*` or connectable through
-  `channel_connections`, naming the providers and the rollback, and a malformed
+  `channel_connections`, naming the providers and only the remedies that work
+  today, and a malformed
   block is refused on every topology. `auto` follows the multi-process signal, so
   a single instance is unchanged. `ChannelService` no longer treats the block as
   a provider, and the two-Gateway harness leaves it alone. `config_version` 60;

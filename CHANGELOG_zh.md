@@ -482,10 +482,11 @@
 #### 渠道
 
 - **channels:** 新增 `channels.leader_lease` 配置段（`enabled: auto|true|false`、
-  `lease_seconds`、`grace_seconds`；仅启动时读取），用于按 provider 的 leader 租约，
-  让每个 IM 平台连接只由一个 Gateway 实例持有。多进程启动门禁现在会在
+  `lease_seconds`、`grace_seconds`；仅启动时读取），为按 provider 的 leader 租约预留，
+  落地后每个 IM 平台连接只由一个 Gateway 实例持有（传输归属本身另行提交，在此之前
+  启用通道时仍需保持单实例）。多进程启动门禁现在会在
   `channels.*` 启用了 GitHub 以外的 IM 通道、或 `channel_connections` 允许从
-  网页连接时拒绝 `enabled: false`，错误信息列出相关 provider 与回滚方式；格式
+  网页连接时拒绝 `enabled: false`，错误信息列出相关 provider 和当前真正可用的补救方式；格式
   错误的配置段在任何拓扑下都会拒绝启动。`auto` 跟随多进程信号，单实例行为不变。
   `ChannelService` 不再把该配置段当作 provider，双 Gateway 联调脚本也不再改动它。
   `config_version` 升至 60；Helm chart 与文档不再依赖"保持 1 副本"的注释提醒。 ([#6746])

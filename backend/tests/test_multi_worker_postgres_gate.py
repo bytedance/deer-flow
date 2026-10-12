@@ -989,6 +989,7 @@ def test_multi_worker_rejects_disabled_leader_lease_with_an_enabled_channel(monk
     assert "slack" not in msg
     assert "409" in msg
     assert "Set GATEWAY_WORKERS=1" in msg
+    _assert_lease_is_not_offered_as_a_remedy(msg)
 
 
 @pytest.mark.parametrize("leader_lease", [None, {}, {"enabled": "auto"}, {"enabled": True}, {"enabled": True, "lease_seconds": 15, "grace_seconds": 5}])
@@ -1022,6 +1023,22 @@ def test_declared_multi_instance_rejects_disabled_leader_lease_for_ui_connectabl
     assert "IM channels telegram are enabled" in msg
     assert "deployment.multi_instance=false and run a single Gateway instance" in msg
     assert "channel_connections.<provider>.enabled=false" in msg
+    _assert_lease_is_not_offered_as_a_remedy(msg)
+
+
+def _assert_lease_is_not_offered_as_a_remedy(msg: str) -> None:
+    """Transport arbitration ships separately: until then auto/true only bypass the refusal.
+
+    The remedies the refusal may offer are the ones that work today -- a single
+    instance or disabled channels. Recommending ``auto``/``true`` would send an
+    operator straight back into the duplicate connections the clause exists to
+    prevent (review on #6746).
+    """
+    assert "Set channels.leader_lease.enabled to auto" not in msg
+    assert "so one instance owns" not in msg
+    assert "reserved" in msg and "not a remedy" in msg
+    remedies = msg.split("diverges). ", 1)[1]
+    assert remedies.startswith(("Set GATEWAY_WORKERS=1", "Set deployment.multi_instance=false", "Unset DEER_FLOW_MULTI_INSTANCE")), remedies
 
 
 def test_disabled_channel_connections_master_switch_does_not_count_providers():

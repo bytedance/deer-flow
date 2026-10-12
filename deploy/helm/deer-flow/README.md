@@ -303,13 +303,13 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   to drain nodes first. `gateway.replicas: 1` stays the
   default because the following are still single-instance: **IM channels**
   (every Pod would connect to every platform — Telegram polling conflicts and
-  Discord double-processes). `channels.leader_lease` in `config` (default
-  `auto`, on for replicas > 1) is the switch for the per-provider leader
-  lease that gives one Pod each platform connection, and the startup gate
-  refuses `enabled: false` while channels are enabled; keep 1 replica while
-  channels are enabled until the lease-backed transport ownership ships.
-  Also single-instance: the WeChat QR login and browser tools. Before
-  raising replicas, also set
+  Discord double-processes; keep 1 replica while channels are enabled).
+  `channels.leader_lease` in `config` (default `auto`) is reserved for the
+  per-provider leader lease that will give one Pod each platform connection;
+  until that ships the setting only drives the startup gate, which refuses
+  `enabled: false` while channels are enabled, and `auto`/`true` do not yet
+  make several replicas safe. Also single-instance: the WeChat QR login and
+  browser tools. Before raising replicas, also set
   `persistence.home.accessMode: ReadWriteMany` on multi-node clusters (thread
   uploads, outputs, memory and `extensions_config.json` live on that volume)
   and `agent_storage.backend: db` so custom agents are visible on every Pod.
