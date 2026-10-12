@@ -57,6 +57,30 @@ def test_scalar_extension_config_narrows_the_allowlist(caplog):
     assert _warning_messages(caplog) == []
 
 
+def test_scalar_extension_config_with_separators_warns(caplog):
+    """A comma-separated scalar is one literal entry, and that must be visible at startup.
+
+    ``allowed_file_extensions: ".pdf, .zip"`` reads like a list but yields the
+    single bogus member ``{".pdf, .zip"}``, which matches no suffix and so blocks
+    every file. The value stays fail-closed; ``_parse_allowed_users`` logs the
+    same shape instead of leaving the operator to infer it from per-file warnings.
+    """
+    caplog.set_level(logging.WARNING, logger="app.channels.wechat")
+    channel = _channel(".pdf, .zip")
+
+    assert channel._allowed_file_extensions == {".pdf, .zip"}
+    assert not channel._is_allowed_file_type("report.pdf", "application/pdf")
+    assert any("scalar string containing separators" in message for message in _warning_messages(caplog))
+
+
+def test_space_separated_scalar_extension_config_warns(caplog):
+    caplog.set_level(logging.WARNING, logger="app.channels.wechat")
+    channel = _channel(".pdf .zip")
+
+    assert channel._allowed_file_extensions == {".pdf .zip"}
+    assert any("scalar string containing separators" in message for message in _warning_messages(caplog))
+
+
 def test_unreadable_extension_entry_is_skipped_and_logged(caplog):
     """A non-string entry must not become a bogus member such as ``.123``."""
     caplog.set_level(logging.WARNING, logger="app.channels.wechat")
