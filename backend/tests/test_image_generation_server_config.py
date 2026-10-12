@@ -47,6 +47,31 @@ def test_typed_server_profile_loads_from_yaml_with_environment_key(tmp_path, mon
     assert config.image_generation_environment["IMAGE_GENERATION_MODEL"] == "synthetic-image-model"
 
 
+@pytest.mark.parametrize("typed", [False, True], ids=["legacy", "typed"])
+def test_yaml_image_secret_beginning_with_dollar_is_resolved_only_once(tmp_path, monkeypatch, typed):
+    from deerflow.config.image_generation import resolve_server_image_profile
+
+    extensions = tmp_path / "extensions.json"
+    extensions.write_text('{"mcpServers": {}, "skills": {}}', encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions))
+    monkeypatch.setenv("SYNTHETIC_IMAGE_TEST_KEY", "$literal-secret")
+    section = (
+        "sandbox:\n  use: test\nimage_generation:\n  provider: openai\n  model: synthetic-image-model\n  base_url: https://images.example/v1\n  api_key: $SYNTHETIC_IMAGE_TEST_KEY\n"
+        if typed
+        else "sandbox:\n  use: test\n  environment:\n"
+        "    IMAGE_GENERATION_PROVIDER: openai\n"
+        "    IMAGE_GENERATION_MODEL: synthetic-image-model\n"
+        "    IMAGE_GENERATION_BASE_URL: https://images.example/v1\n"
+        "    IMAGE_GENERATION_API_KEY: $SYNTHETIC_IMAGE_TEST_KEY\n"
+    )
+    config = AppConfig._from_yaml_text(section, tmp_path / "config.yaml")
+
+    profile = resolve_server_image_profile(config)
+    assert profile is not None
+    assert profile.usable()
+    assert profile.api_key.get_secret_value() == "$literal-secret"
+
+
 def test_legacy_server_profile_remains_available(tmp_path, monkeypatch):
     from deerflow.config.image_generation import resolve_server_image_profile
 

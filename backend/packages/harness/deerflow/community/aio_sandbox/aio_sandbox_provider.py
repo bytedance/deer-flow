@@ -91,6 +91,7 @@ IDLE_CHECK_INTERVAL = _SHARED_IDLE_CHECK_INTERVAL
 # when DeerFlow's configured execution capacity cannot fit.
 _AIO_DEFAULT_MAX_SHELL_SESSIONS = 10
 _SHELL_SESSION_HEADROOM = 1
+_EMPTY_IMAGE_CREDENTIALS = {key: "" for key in ("IMAGE_GENERATION_API_KEY", "GEMINI_API_KEY", "MINIMAX_API_KEY")}
 
 
 class SandboxBeingDestroyedError(RuntimeError):
@@ -308,6 +309,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 self._ownership_config.type,
             )
         self._backend: SandboxBackend = self._create_backend()
+        # Only a confirmed positive local-image capability can skip the
+        # disposable probe. A cached negative could inject a managed key into
+        # an image that gained per-command environment support after a pull.
+        self._command_environment_support: tuple[LocalContainerBackend, str] | None = None
 
         # Register shutdown handler
         atexit.register(self.shutdown)
@@ -2634,6 +2639,18 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         finally:
             sandbox.close()
 
+    def _has_confirmed_local_command_environment(self) -> bool:
+        backend = self._backend
+        cached = getattr(self, "_command_environment_support", None)
+        image = getattr(backend, "_image", None)
+        return isinstance(backend, LocalContainerBackend) and isinstance(image, str) and bool(image) and cached is not None and cached[0] is backend and cached[1] == image
+
+    def _remember_local_command_environment(self) -> None:
+        backend = self._backend
+        image = getattr(backend, "_image", None)
+        if isinstance(backend, LocalContainerBackend) and isinstance(image, str) and image:
+            self._command_environment_support = (backend, image)
+
     def _create_sandbox(self, thread_id: str | None, sandbox_id: str, *, user_id: str | None = None) -> str:
         """Create a new sandbox via the backend.
 
@@ -2689,7 +2706,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             create_kwargs["skills_container_path"] = self._configured_skills_container_path()
         # A failed probe teardown must not leave an uncredentialed runtime under
         # the final identity that a later acquisition could adopt.
-        candidate_id = f"probe-{uuid.uuid4().hex[:12]}" if profile is not None else sandbox_id
+        confirmed_support = profile is not None and self._has_confirmed_local_command_environment()
+        candidate_id = f"probe-{uuid.uuid4().hex[:12]}" if profile is not None and not confirmed_support else sandbox_id
         try:
             info = self._backend.create(
                 thread_id,
@@ -2714,14 +2732,27 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             self._destroy_unready_sandbox(candidate_id, info)
             raise RuntimeError(f"Sandbox {candidate_id} failed to become ready within timeout at {info.sandbox_url}")
 
-        if profile is not None:
+        if profile is not None and not confirmed_support:
             try:
-                supports_env = self._probe_command_environment(info)
+                try:
+                    supports_env = self._probe_command_environment(info)
+                except (RuntimeError, OSError):
+                    # Unknown capability must not block unrelated sandbox tools
+                    # or be mistaken for a legacy image that needs startup keys.
+                    logger.warning("Image command environment capability is unknown; creating a sandbox without managed image credentials")
+                    supports_env = None
             finally:
                 self._destroy_unready_sandbox(candidate_id, info)
+            if supports_env:
+                self._remember_local_command_environment()
             # The final container has its own ID, even if probe cleanup fails.
             # Only legacy images receive long-lived startup credentials.
-            image_environment = {"extra_environment": profile.command_environment()} if not supports_env else {}
+            if supports_env is False:
+                image_environment = {"extra_environment": profile.command_environment()}
+            elif supports_env is None:
+                image_environment = {"extra_environment": _EMPTY_IMAGE_CREDENTIALS}
+            else:
+                image_environment = {}
             try:
                 info = self._backend.create(
                     thread_id,
@@ -2740,6 +2771,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             if not wait_for_sandbox_ready(info.sandbox_url, timeout=SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT, **readiness_kwargs):
                 self._destroy_unready_sandbox(sandbox_id, info)
                 raise RuntimeError(f"Sandbox {sandbox_id} failed to become ready within timeout at {info.sandbox_url}")
+        if profile is not None:
             current = self._managed_image_profile()
             if current is None or current.revision != profile.revision:
                 self._destroy_unready_sandbox(sandbox_id, info)
@@ -2795,7 +2827,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             create_kwargs["config_mount_exclusion_root"] = config_mount_exclusion_root
         if isinstance(self._backend, RemoteSandboxBackend):
             create_kwargs["skills_container_path"] = self._configured_skills_container_path()
-        candidate_id = f"probe-{uuid.uuid4().hex[:12]}" if profile is not None else sandbox_id
+        confirmed_support = profile is not None and self._has_confirmed_local_command_environment()
+        candidate_id = f"probe-{uuid.uuid4().hex[:12]}" if profile is not None and not confirmed_support else sandbox_id
         try:
             info = await run_sync_lifecycle_operation(
                 self._backend.create,
@@ -2825,12 +2858,23 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             await run_sync_lifecycle_operation(self._destroy_unready_sandbox, candidate_id, info)
             raise RuntimeError(f"Sandbox {candidate_id} failed to become ready within timeout at {info.sandbox_url}")
 
-        if profile is not None:
+        if profile is not None and not confirmed_support:
             try:
-                supports_env = await run_sync_lifecycle_operation(self._probe_command_environment, info)
+                try:
+                    supports_env = await run_sync_lifecycle_operation(self._probe_command_environment, info)
+                except (RuntimeError, OSError):
+                    logger.warning("Image command environment capability is unknown; creating a sandbox without managed image credentials")
+                    supports_env = None
             finally:
                 await run_sync_lifecycle_operation(self._destroy_unready_sandbox, candidate_id, info)
-            image_environment = {"extra_environment": profile.command_environment()} if not supports_env else {}
+            if supports_env:
+                self._remember_local_command_environment()
+            if supports_env is False:
+                image_environment = {"extra_environment": profile.command_environment()}
+            elif supports_env is None:
+                image_environment = {"extra_environment": _EMPTY_IMAGE_CREDENTIALS}
+            else:
+                image_environment = {}
             try:
                 info = await run_sync_lifecycle_operation(
                     self._backend.create,
@@ -2850,6 +2894,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             if not await wait_for_sandbox_ready_async(info.sandbox_url, timeout=SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT, **readiness_kwargs):
                 await run_sync_lifecycle_operation(self._destroy_unready_sandbox, sandbox_id, info)
                 raise RuntimeError(f"Sandbox {sandbox_id} failed to become ready within timeout at {info.sandbox_url}")
+        if profile is not None:
             current = await run_sync_lifecycle_operation(self._managed_image_profile)
             if current is None or current.revision != profile.revision:
                 await run_sync_lifecycle_operation(self._destroy_unready_sandbox, sandbox_id, info)

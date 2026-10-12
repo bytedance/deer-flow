@@ -181,6 +181,91 @@ def test_image_choice_card_uses_chinese_for_chinese_chat(image_choice):
     assert args["options"][0].startswith("网页:")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize(
+    ("content", "expected_content"),
+    [
+        ("I will make the cover image now.", "I will make the cover image now."),
+        (
+            [
+                {"type": "text", "text": "I will make the cover image now."},
+                {"type": "tool_use", "id": "call-image", "name": "generate_image", "input": {}},
+            ],
+            [{"type": "text", "text": "I will make the cover image now."}],
+        ),
+    ],
+    ids=["text", "provider-blocks"],
+)
+async def test_image_choice_preserves_narration_without_replaying_original_call(image_choice, async_mode, content, expected_content):
+    middleware = ClarificationMiddleware()
+    original = AIMessage(
+        id="assistant-image-turn",
+        content=content,
+        tool_calls=[{"name": "generate_image", "args": {}, "id": "call-image"}],
+        invalid_tool_calls=[{"name": "bash", "args": "{broken", "id": "invalid-bash", "error": "invalid arguments"}],
+        additional_kwargs={
+            "tool_calls": [{"id": "call-image", "type": "function", "function": {"name": "generate_image", "arguments": "{}"}}],
+            "function_call": {"name": "generate_image", "arguments": "{}"},
+        },
+    )
+    state = {"messages": [original]}
+    runtime = Runtime(context={})
+
+    update = await middleware.aafter_model(state, runtime) if async_mode else middleware.after_model(state, runtime)
+
+    assert update is not None
+    patched = update["messages"][0]
+    assert patched.id == original.id
+    assert patched.content == expected_content
+    assert [call["name"] for call in patched.tool_calls] == ["ask_clarification"]
+    assert patched.additional_kwargs.get("tool_calls") is None
+    assert patched.additional_kwargs.get("function_call") is None
+    assert patched.invalid_tool_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize(
+    "content",
+    [
+        "I will make the image.",
+        [
+            {"type": "text", "text": "I will make the image."},
+            {"type": "function_call", "id": "fc_original", "call_id": "call-image", "name": "generate_image", "arguments": "{}"},
+        ],
+    ],
+    ids=["text", "responses-blocks"],
+)
+async def test_image_choice_replays_rewritten_call_with_responses_api(image_choice, async_mode, content):
+    from langchain_openai import ChatOpenAI
+
+    original = AIMessage(
+        id="assistant-image-turn",
+        content=content,
+        tool_calls=[{"name": "generate_image", "args": {}, "id": "call-image"}],
+        response_metadata={"id": "resp_original_image_call", "model_name": "gpt-4.1"},
+    )
+    middleware = ClarificationMiddleware()
+    runtime = Runtime(context={})
+
+    update = await middleware.aafter_model({"messages": [original]}, runtime) if async_mode else middleware.after_model({"messages": [original]}, runtime)
+
+    assert update is not None
+    patched = update["messages"][0]
+    assert patched.id == original.id
+    assert patched.response_metadata == {"model_name": "gpt-4.1"}
+    result = middleware._handle_clarification(SimpleNamespace(tool_call=patched.tool_calls[0]))
+    model = ChatOpenAI(model="gpt-4.1", api_key="synthetic-key", use_responses_api=True, use_previous_response_id=True)
+    payload = model._get_request_payload([HumanMessage(content="Make an image"), patched, result.update["messages"][0]])
+    assert "previous_response_id" not in payload
+    calls = [item for item in payload["input"] if item.get("type") == "function_call"]
+    assert len(calls) == 1
+    assert calls[0]["name"] == "ask_clarification"
+    assert all(item.get("name") != "generate_image" for item in payload["input"])
+    assert any(item.get("type") == "function_call_output" for item in payload["input"])
+
+
 def test_server_first_web_profile_still_prompts_before_image_execution(image_choice, monkeypatch):
     from deerflow.sandbox import tools as sandbox_tools
     from deerflow.tools.builtins.image_generation_tool import generate_image_tool
@@ -458,7 +543,7 @@ async def test_real_agent_graph_replaces_image_tool_with_inline_choice(image_cho
                     ChatGeneration(
                         message=AIMessage(
                             id="image-choice-request",
-                            content="",
+                            content="I will make the cover image now.",
                             tool_calls=[{"name": "generate_image", "args": {"prompt_file": "/mnt/user-data/prompt.txt"}, "id": "call-image"}],
                         )
                     )
@@ -476,10 +561,12 @@ async def test_real_agent_graph_replaces_image_tool_with_inline_choice(image_cho
     assert model.call_count == 1
     assert executions == []
     ai = next(item for item in result["messages"] if isinstance(item, AIMessage))
+    assert ai.content == "I will make the cover image now."
     assert [item["name"] for item in ai.tool_calls] == ["ask_clarification"]
     card = next(item for item in result["messages"] if isinstance(item, ToolMessage))
     assert card.artifact["human_input"]["clarification_type"] == "image_model_choice"
     checkpoint = await agent.aget_state(run_config) if async_mode else agent.get_state(run_config)
+    assert next(item for item in checkpoint.values["messages"] if isinstance(item, AIMessage)).content == "I will make the cover image now."
     assert any(isinstance(item, ToolMessage) and item.id == card.id for item in checkpoint.values["messages"])
     assert isinstance(checkpoint.values["messages"][-1], ToolMessage)
     assert checkpoint.values["messages"][-1].id == card.id

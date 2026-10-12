@@ -2,6 +2,11 @@
 
 Local AIO image profiles scope container IDs to the selected profile generation.
 Image configuration errors do not block generic sandbox tools.
+For managed image profiles, cache only confirmed positive per-command
+environment support for the current local backend/image. Legacy negatives and
+remote backends still probe before deciding whether startup credentials are needed.
+Probe errors mean unknown support: clear inherited image keys so generic tools
+remain available; only a confirmed legacy result permits managed startup keys.
 
 ## Stdin contracts per transport
 

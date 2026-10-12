@@ -625,6 +625,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         call = {
             "name": ASK_CLARIFICATION_TOOL_NAME,
             "id": f"image-choice-{uuid.uuid4().hex}",
+            "type": "tool_call",
             "args": {
                 "question": "这张图片要使用哪个图片模型？" if chinese else "Which image model should I use for this image?",
                 "clarification_type": "image_model_choice",
@@ -636,9 +637,19 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
                 "_image_profile_choice": choice_marker,
             },
         }
-        # Build a fresh message with the original id. Reusing the provider's
-        # raw tool-call blocks would replay generate_image on some adapters.
-        patched = AIMessage(id=last.id, content="", tool_calls=[call], response_metadata=last.response_metadata, usage_metadata=last.usage_metadata)
+        # Keep text already shown to the user while removing every original
+        # provider tool-call representation before checkpointing the choice.
+        source = last.model_copy(update={"invalid_tool_calls": []})
+        patched = clone_ai_message_with_tool_calls(source, [call])
+        additional_kwargs = dict(patched.additional_kwargs)
+        additional_kwargs.pop("function_call", None)
+        response_metadata = dict(patched.response_metadata)
+        response_id = response_metadata.get("id")
+        if isinstance(response_id, str) and response_id.startswith("resp_"):
+            # This message no longer matches the provider's stored response.
+            # Force the Responses adapter to replay the rewritten tool call.
+            response_metadata.pop("id")
+        patched = patched.model_copy(update={"additional_kwargs": additional_kwargs, "response_metadata": response_metadata})
         return {"messages": [patched]}
 
     @override

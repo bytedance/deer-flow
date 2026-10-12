@@ -349,7 +349,9 @@ class ServerImageProbeStore:
 
 
 def _legacy_environment(raw: dict[str, str]) -> dict[str, str]:
-    return {key: os.environ.get(value[1:], "") if isinstance(value, str) and value.startswith("$") else str(value) for key, value in raw.items()}
+    # AppConfig resolves YAML environment references before this function runs.
+    # A resolved secret may itself begin with '$'; do not expand it a second time.
+    return {key: str(value) for key, value in raw.items()}
 
 
 def legacy_image_profile(raw_environment: dict[str, str]) -> ImageGenerationProfile | None:

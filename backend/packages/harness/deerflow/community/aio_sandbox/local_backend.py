@@ -2097,9 +2097,9 @@ class LocalContainerBackend(SandboxBackend):
                 cmd.extend(["--label", f"{key}={value}"])
 
         # Environment variables
-        for key, value in self._environment.items():
-            cmd.extend(["-e", f"{key}={value}"])
-        for key, value in (extra_environment or {}).items():
+        # Each name must appear once: an override may deliberately clear a
+        # configured image key when a capability check could not finish.
+        for key, value in {**self._environment, **(extra_environment or {})}.items():
             cmd.extend(["-e", f"{key}={value}"])
 
         # Config-level volume mounts. A policy-scoped skills view owns its

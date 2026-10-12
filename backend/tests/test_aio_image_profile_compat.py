@@ -254,6 +254,132 @@ def test_local_image_creation_uses_capability_and_preserves_mounts(monkeypatch, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("failure", [RuntimeError, OSError], ids=["probe-error", "network-error"])
+async def test_unknown_image_capability_does_not_block_generic_aio_creation_or_inject_key(monkeypatch, tmp_path, async_mode, failure):
+    provider, sandbox_id, calls, destroyed, user_file = _creation_provider(monkeypatch, tmp_path, supports_env=True)
+    provider._backend._environment = {"IMAGE_GENERATION_API_KEY": "synthetic-server-key"}
+    probes = []
+
+    def failed_probe(info):
+        probes.append(info.sandbox_id)
+        raise failure("synthetic capability failure")
+
+    async def ready(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(provider, "_probe_command_environment", failed_probe)
+    monkeypatch.setattr(provider_module, "wait_for_sandbox_ready_async", ready)
+
+    if async_mode:
+        assert await provider._create_sandbox_async("thread", sandbox_id, user_id="user") == sandbox_id
+    else:
+        assert provider._create_sandbox("thread", sandbox_id, user_id="user") == sandbox_id
+
+    assert len(probes) == 1
+    assert len(calls) == 2
+    assert calls[1][1] == sandbox_id
+    assert "extra_environment" not in calls[0][2]
+    final_env = calls[1][2]["extra_environment"]
+    assert final_env["IMAGE_GENERATION_API_KEY"] == ""
+    assert final_env["GEMINI_API_KEY"] == ""
+    assert final_env["MINIMAX_API_KEY"] == ""
+    assert "synthetic-secret" not in str(calls)
+    assert [item[0] for item in destroyed] == probes
+    assert user_file.read_text(encoding="utf-8") == "persistent plan"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("supports_env", [False, True], ids=["legacy", "modern"])
+async def test_local_image_capability_cache_only_skips_later_safe_probes(monkeypatch, tmp_path, async_mode, supports_env):
+    provider, _, calls, destroyed, _ = _creation_provider(monkeypatch, tmp_path, supports_env=supports_env)
+    provider._backend._image = "synthetic-aio:v1"
+    monkeypatch.setattr(provider, "_base_sandbox_id_for_thread", lambda thread, _user: f"base-{thread}")
+    probes = []
+    monkeypatch.setattr(provider, "_probe_command_environment", lambda info: probes.append(info.sandbox_id) or supports_env)
+
+    async def ready(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(provider_module, "wait_for_sandbox_ready_async", ready)
+
+    async def create(thread):
+        sandbox_id = provider._image_profile_sandbox_id(f"base-{thread}", "revision-1")
+        if async_mode:
+            assert await provider._create_sandbox_async(thread, sandbox_id, user_id="user") == sandbox_id
+        else:
+            assert provider._create_sandbox(thread, sandbox_id, user_id="user") == sandbox_id
+
+    await create("first")
+    await create("second")
+
+    if supports_env:
+        assert len(calls) == 3
+        assert len(destroyed) == 1
+        assert len(probes) == 1
+        assert calls[-1][1] == provider._image_profile_sandbox_id("base-second", "revision-1")
+        assert "extra_environment" not in calls[-1][2]
+        provider._backend._image = "synthetic-aio:v2"
+        await create("third")
+        assert len(calls) == 5
+        assert len(probes) == 2
+    else:
+        assert len(calls) == 4
+        assert len(destroyed) == 2
+        assert len(probes) == 2
+        assert calls[-1][2]["extra_environment"]["IMAGE_GENERATION_API_KEY"] == "synthetic-secret"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("failure", ["create", "rotation"])
+async def test_cached_local_capability_still_cleans_up_failed_final_container(monkeypatch, tmp_path, async_mode, failure):
+    provider, _, calls, destroyed, _ = _creation_provider(monkeypatch, tmp_path, supports_env=True)
+    provider._backend._image = "synthetic-aio:v1"
+    monkeypatch.setattr(provider, "_base_sandbox_id_for_thread", lambda thread, _user: f"base-{thread}")
+
+    async def ready(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(provider_module, "wait_for_sandbox_ready_async", ready)
+
+    async def create(thread):
+        sandbox_id = provider._image_profile_sandbox_id(f"base-{thread}", "revision-1")
+        if async_mode:
+            return await provider._create_sandbox_async(thread, sandbox_id, user_id="user")
+        return provider._create_sandbox(thread, sandbox_id, user_id="user")
+
+    await create("first")
+    final_id = provider._image_profile_sandbox_id("base-second", "revision-1")
+    if failure == "create":
+        original_create = provider._backend.create
+
+        def reject_final(thread_id, created_id, **kwargs):
+            info = original_create(thread_id, created_id, **kwargs)
+            if thread_id == "second":
+                raise SandboxCreationError("synthetic final failure", info=info)
+            return info
+
+        provider._backend.create = reject_final
+        expected_error = SandboxCreationError
+    else:
+        first_profile = SimpleNamespace(revision="revision-1", command_environment=lambda: {"IMAGE_GENERATION_API_KEY": "synthetic-secret"})
+        changed_profile = SimpleNamespace(revision="revision-2", command_environment=first_profile.command_environment)
+        profiles = iter((first_profile, changed_profile))
+        monkeypatch.setattr(provider, "_managed_image_profile", lambda: next(profiles))
+        expected_error = RuntimeError
+
+    with pytest.raises(expected_error):
+        await create("second")
+
+    assert len(calls) == 3
+    assert calls[-1][1] == final_id
+    assert "extra_environment" not in calls[-1][2]
+    assert [created_id for created_id, _ in destroyed][-1] == final_id
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("async_mode", [False, True])
 @pytest.mark.parametrize("failed_stage", ["probe", "final"])
 async def test_image_creation_rejection_cleans_up_the_failed_identity(monkeypatch, tmp_path, async_mode, failed_stage):
