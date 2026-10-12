@@ -16,6 +16,8 @@ B/C/BC, NAS, HTTP/WSS browser, lifecycle and same-schema rollback mains are acce
 
 Gateway 或 MCP 容器重建后，必须在现有 proxy 容器内执行 `nginx -t`，成功后执行 `nginx -s reload`，再检查严格 TLS 的 `/health/ready` 和正常 owner 会话，最后启动 worker。这里的静态 `proxy_pass` 在 Nginx 加载配置时解析容器地址；只重建应用、保留代理而不 reload 会继续连接旧 IP，产生 502。重载保持代理容器、证书和配置不变。升级前先 drain 并确认 ledger/原生 Run/物理任务均已收尾，停止 idle worker resident；不要依赖出站 daemon 在控制端不可达期间自动存活。恢复保持 drain，验证两端健康后才显式 resume。
 
+可复用同 schema 后端镜像更新入口见 [Jenkins 交付流程](ecs-native-release-ci.md)。新流程尚待开机后验证；旧固定 pin 任务仍只是历史证据。
+
 ## Images and private configuration
 
 Build one versioned backend role image for central Gateway, ordinary B MCP and

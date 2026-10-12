@@ -1,0 +1,73 @@
+// Configure a separate DeerFlow job from the user's fork/local source mirror.
+// The historical Shanghai acceptance job remains an immutable evidence source.
+pipeline {
+  agent any
+  options {
+    disableConcurrentBuilds()
+    timestamps()
+    timeout(time: 3, unit: 'HOURS')
+    skipDefaultCheckout(true)
+  }
+  parameters {
+    choice(name: 'PHASE', choices: ['build', 'transfer', 'deploy', 'smoke'], description: 'One explicit release phase; deploy keeps admission drained.')
+    string(name: 'SOURCE_COMMIT', defaultValue: '', description: 'Full reviewed 40-character Git commit. SCM must check out this commit.')
+    string(name: 'RELEASE_ID', defaultValue: '', description: 'Unique lowercase release ID; reuse the same ID across phases.')
+    string(name: 'BUILDER', defaultValue: 'deer-native-820d7a3429d9', description: 'Existing dedicated resource-limited builder, at most 1 CPU/3GiB.')
+  }
+  environment {
+    ECS_RELEASE_ROOT = '/data/jenkins-agent/deerflow/releases'
+  }
+  stages {
+    stage('Selected source') {
+      steps {
+        checkout scm
+        sh '''#!/bin/sh
+set -eu
+set +x
+python3 - <<'PY'
+import os,sys
+sys.path.insert(0,'scripts')
+from ecs_native_release import source_check,NAME
+source_check(os.environ['SOURCE_COMMIT'])
+if not NAME.fullmatch(os.environ['RELEASE_ID']): raise SystemExit('Explicit release ID required')
+PY
+'''
+      }
+    }
+    stage('Build and lock') {
+      when { expression { params.PHASE == 'build' } }
+      steps {
+        sh '''#!/bin/sh
+set -eu
+set +x
+python3 -m unittest discover -s tests -p test_ecs_native_release.py
+python3 scripts/ecs_native_release.py build --expected-commit "$SOURCE_COMMIT" \
+  --release-id "$RELEASE_ID" --output-root "$ECS_RELEASE_ROOT" --builder "$BUILDER"
+'''
+      }
+    }
+    stage('Transfer, guarded rollout or readiness') {
+      when { expression { params.PHASE != 'build' } }
+      steps {
+        withCredentials([
+          sshUserPrivateKey(credentialsId: 'shanghai-deploy-ssh', keyFileVariable: 'DEPLOY_KEY', usernameVariable: 'DEPLOY_USER'),
+          file(credentialsId: 'deerflow-shanghai-release-environment', variable: 'ECS_RELEASE_ENVIRONMENT'),
+          file(credentialsId: 'deerflow-shanghai-known-hosts', variable: 'ECS_RELEASE_KNOWN_HOSTS')
+        ]) {
+          sh '''#!/bin/sh
+set -eu
+set +x
+python3 scripts/ecs_native_release.py "$PHASE" --expected-commit "$SOURCE_COMMIT" \
+  --release-id "$RELEASE_ID" --output-root "$ECS_RELEASE_ROOT" \
+  --environment "$ECS_RELEASE_ENVIRONMENT"
+'''
+        }
+      }
+    }
+  }
+  post {
+    always {
+      echo 'Private artifacts and phase receipts remain under the release directory. Review them before recovery; the job never resumes admission or deletes historical data.'
+    }
+  }
+}

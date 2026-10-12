@@ -248,3 +248,7 @@ Historical user-fork Fleet intent is preserved and quarantines Gateway activatio
 never clear it or replay it to make startup succeed. See
 [the audited integration guide](docs/ecs-native-fork-integration.md) and full
 [path disposition](docs/ecs-native-fork-disposition.v1.json).
+
+## Native ECS release operations
+
+`examples/ecs-native/deploy/Jenkinsfile.native-release` invokes the trusted operator-only `scripts/ecs_native_release.py` / `ecs_native_release_host.py` entry for same-schema backend role rollouts. It binds clean Git source, image/archive digests, private config and Compose hashes; it keeps admission drained and records every phase. Do not expose this entry through Agent tools, replay partial deploys, or change historical Shanghai scripts to fit a new release. Historical inputs are inventoried in `docs/ecs-native-acceptance-inputs-2026-10-10.json`; current flow and verification boundaries are in `docs/ecs-native-release-ci.md`. The five standard-library guard cases live in `tests/test_ecs_native_release.py`; actual delivery validation belongs to the dedicated Jenkins/ECS environment.

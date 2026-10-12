@@ -2914,3 +2914,5 @@ from activation: historical Fleet intent is retained and cannot run automaticall
 
 Task6B native role Compose, private reference-only generation, durable operator drain
 and stopped-writer image selection are documented in [docs/ecs-native-deployment.md](docs/ecs-native-deployment.md). Shanghai B/C/BC, browser, lifecycle, final backend coverage and installed production acceptance are recorded in [the acceptance report](docs/ecs-native-shanghai-acceptance-2026-10-10.md), with a public immutable release lock and the cold-start/recovery guide.
+
+Native ECS pool operators: see the [repeatable Jenkins delivery procedure](docs/ecs-native-release-ci.md) for same-schema backend rollouts. This new delivery path is pending cloud verification; accepted application behavior remains recorded in the Shanghai acceptance report.
