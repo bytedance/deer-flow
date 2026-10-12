@@ -86,6 +86,7 @@ const prefix = "a".repeat(1024 * 1024);
 const fullContent = prefix + "\nComplete file tail\n";
 const revision = "a".repeat(64);
 const mockedFetch = rs.mocked(apiFetch);
+let resolvePendingSave: (() => void) | undefined;
 
 function Wrapper({ children }: PropsWithChildren) {
   const [queryClient] = useState(
@@ -155,6 +156,7 @@ beforeEach(() => {
       { headers: { "Content-Type": "application/json" } },
     ),
   );
+  resolvePendingSave = undefined;
 });
 
 afterEach(() => {
@@ -238,6 +240,54 @@ describe("ArtifactFileDetail complete editing baseline", () => {
     const event = new Event("beforeunload", { cancelable: true });
     window.dispatchEvent(event);
     expect(event.defaultPrevented).toBe(false);
+  });
+
+  it("keeps edits made after a save across a remount", async () => {
+    loadFull();
+    const { rerender } = renderDetail();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(source(), { target: { value: "first save" } });
+
+    mockedFetch.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolvePendingSave = () =>
+            resolve(
+              new Response(
+                JSON.stringify({
+                  path: filepath,
+                  sha256: "b".repeat(64),
+                  size: "first save".length,
+                }),
+                { headers: { "Content-Type": "application/json" } },
+              ),
+            );
+        }),
+    );
+    fireEvent.click(save());
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledOnce());
+
+    // Leaving the chat unmounts the detail while the original PUT is pending.
+    rerender(<div />);
+    rerender(detail());
+    fireEvent.change(source(), { target: { value: "newer edit" } });
+
+    resolvePendingSave?.();
+    await waitFor(() => expect(source().value).toBe("newer edit"));
+    expect(save().disabled).toBe(false);
+
+    const event = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+
+    fireEvent.click(save());
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledTimes(2));
+    expect(mockedFetch.mock.calls[1]?.[1]).toMatchObject({
+      body: JSON.stringify({
+        content: "newer edit",
+        expected_sha256: "b".repeat(64),
+      }),
+    });
   });
 
   it.each([
