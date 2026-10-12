@@ -42,7 +42,10 @@ So whenever anything was rewritten, :func:`rewrite_messages_tool_call_args`
 drops every ``resp_`` id from the model-bound copy and the adapter falls back
 to replaying the full rewritten history (the same request shape as
 ``use_previous_response_id=False``; per OpenAI's docs chained input tokens are
-billed either way, so replay costs no more).
+billed either way, so replay costs no more). A caller that rewrites one message
+with :func:`rewrite_tool_call_args` directly owns that invalidation itself and
+uses :func:`without_response_chain_id` — tool approval's ``edit`` does, on the
+latest AIMessage, so only that one id has to go.
 """
 
 from __future__ import annotations
@@ -99,7 +102,7 @@ def rewrite_messages_tool_call_args(messages: list[Any], replacement_for: Replac
         updated.append(patched)
     if not changed:
         return None
-    return [_without_response_chain_id(message) for message in updated]
+    return [without_response_chain_id(message) for message in updated]
 
 
 def _duplicated_call_ids(tool_calls: Sequence[Any]) -> set[str]:
@@ -174,8 +177,13 @@ def pair_tool_call_results(messages: Sequence[Any]) -> list[ToolCallOccurrence]:
     return occurrences
 
 
-def _without_response_chain_id(message: Any) -> Any:
-    """Drop an OpenAI ``resp_`` response id so the adapter replays history instead of chaining to it."""
+def without_response_chain_id(message: Any) -> Any:
+    """Drop an OpenAI ``resp_`` response id so the adapter replays history instead of chaining to it.
+
+    Returns ``message`` itself when it carries no ``resp_`` id. A caller that
+    rewrites a call outside :func:`rewrite_messages_tool_call_args` must apply
+    this to every AIMessage whose stored server-side copy no longer matches.
+    """
     if not isinstance(message, AIMessage):
         return message
     response_metadata = message.response_metadata or {}
