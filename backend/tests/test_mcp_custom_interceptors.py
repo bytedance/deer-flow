@@ -3,6 +3,7 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.mcp.tools import get_mcp_tools
 
 
@@ -14,9 +15,17 @@ def _make_patches(*, interceptor_paths=None):
     mock_client = MagicMock()
     mock_client.get_tools = AsyncMock(return_value=[])
 
-    extra = {}
+    config_payload = {
+        "mcpServers": {
+            "test-server": {
+                "type": "http",
+                "url": "https://example.test/mcp",
+            }
+        }
+    }
     if interceptor_paths is not None:
-        extra["mcpInterceptors"] = interceptor_paths
+        config_payload["mcpInterceptors"] = interceptor_paths
+    extensions_config = ExtensionsConfig.model_validate(config_payload)
 
     return {
         "client_cls": patch(
@@ -25,10 +34,7 @@ def _make_patches(*, interceptor_paths=None):
         ),
         "from_file": patch(
             "deerflow.config.extensions_config.ExtensionsConfig.from_file",
-            return_value=MagicMock(
-                model_extra=extra,
-                get_enabled_mcp_servers=MagicMock(return_value={}),
-            ),
+            return_value=extensions_config,
         ),
         "build_servers": patch(
             "deerflow.mcp.tools.build_servers_config",
