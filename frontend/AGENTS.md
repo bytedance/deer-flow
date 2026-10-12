@@ -75,6 +75,11 @@ Shared records use the `RetrievalSource` type (native RAGFlow retains
 fragments without disabling sanitizer clobber protection. Validate immutable
 tool messages through `createKnowledgeSourceReader` to reuse per-object parses.
 Cross-component field bounds live in `contracts/knowledge_sources.v1.json`.
+Completed `SubtaskCard` reports read shared evidence only from the matching
+`task` ToolMessage after its invocation in the current subagent group, selected
+by `findSubtaskResultMessage`. Prompts/earlier steps do not borrow final evidence.
+Remount report Markdown when validated source IDs change: Streamdown caches
+unchanged text blocks independently of renderer components.
 
 ```
 Frontend (Next.js) ──▶ LangGraph SDK ──▶ LangGraph Backend (lead_agent)

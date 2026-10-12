@@ -1331,6 +1331,8 @@ URLs remain absent; sources without a URL are readable as local evidence.
 Inline citations remain readable after Markdown sanitization, and supplied page
 numbers use the selected interface language. New providers use the shared
 envelope; existing RAGFlow citation histories remain supported.
+Expand a completed subtask card to inspect its report's forwarded knowledge
+sources, including when reopening a saved conversation.
 Existing web citations and the text-only Python `knowledge_search(query)` APIs
 remain supported. No knowledge management service or page is required.
 See [the knowledge contract guide](backend/docs/KNOWLEDGE.md).

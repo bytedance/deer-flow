@@ -92,7 +92,10 @@ import {
 } from "@/core/skills/usage";
 import type { Subtask } from "@/core/tasks";
 import { useUpdateSubtask } from "@/core/tasks/context";
-import { collectRenderedSubtasks } from "@/core/tasks/subtask-render";
+import {
+  collectRenderedSubtasks,
+  findSubtaskResultMessage,
+} from "@/core/tasks/subtask-render";
 import type { AgentThreadState } from "@/core/threads";
 import { cn } from "@/lib/utils";
 
@@ -1580,6 +1583,7 @@ export function MessageList({
                         runId={(message as { run_id?: string }).run_id}
                         isLoading={groupIsLoading}
                         fallbackTask={fallbackTask}
+                        resultMessage={findSubtaskResultMessage(group, taskId)}
                       />,
                     );
                   }
