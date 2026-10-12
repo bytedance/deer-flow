@@ -15,6 +15,7 @@ def parse_allowed_users[UserId: Hashable](
     channel_name: str,
     expected_id: str,
     valid_id_name: str = "user ID",
+    warn_on_scalar_separators: bool = False,
 ) -> frozenset[UserId] | None:
     """Return ``None`` for an unset/empty allowlist, or its valid user IDs.
 
@@ -22,9 +23,17 @@ def parse_allowed_users[UserId: Hashable](
     channel's coercer validates each entry. Invalid entries warn and are dropped,
     but a configured value with no valid entry returns an empty set and logs an
     error, so callers deny everyone instead of silently removing the restriction.
+    String-ID channels can opt into a scalar-separator warning without splitting
+    the ID; surrounding whitespace alone does not trigger it.
     """
     if allowed_users is None or (isinstance(allowed_users, str) and not allowed_users.strip()):
         return None
+    if warn_on_scalar_separators and isinstance(allowed_users, str) and ("," in allowed_users or any(char.isspace() for char in allowed_users.strip())):
+        logger.warning(
+            "[%s] allowed_users is a scalar string containing separators; treating it as one literal %s. Use a YAML list for multiple IDs",
+            channel_name,
+            valid_id_name,
+        )
     entries = list(allowed_users) if isinstance(allowed_users, (list, tuple, set, frozenset)) else [allowed_users]
     if not entries:
         return None

@@ -72,8 +72,6 @@ def _parse_open_id(entry: Any) -> str | None:
 
 def _parse_allowed_users(allowed_users: Any) -> frozenset[str] | None:
     """Parse OpenIDs without splitting a scalar string into its characters."""
-    if isinstance(allowed_users, str) and ("," in allowed_users or any(char.isspace() for char in allowed_users.strip())):
-        logger.warning("[qq] allowed_users is a scalar string containing separators; treating it as one literal OpenID. Use a YAML list for multiple IDs")
     return parse_allowed_users(
         allowed_users,
         parse_user_id=_parse_open_id,
@@ -81,6 +79,7 @@ def _parse_allowed_users(allowed_users: Any) -> frozenset[str] | None:
         channel_name="qq",
         expected_id="a QQ OpenID string, not a numeric QQ account number",
         valid_id_name="OpenID",
+        warn_on_scalar_separators=True,
     )
 
 
