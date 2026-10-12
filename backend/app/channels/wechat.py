@@ -193,14 +193,13 @@ def _parse_wechat_user_id(entry: Any) -> str | None:
 
 def _parse_allowed_users(allowed_users: Any) -> frozenset[str] | None:
     """Parse iLink IDs without splitting a scalar string into multiple IDs."""
-    if isinstance(allowed_users, str) and ("," in allowed_users or any(char.isspace() for char in allowed_users.strip())):
-        logger.warning("[WeChat] allowed_users is a scalar string containing separators; treating it as one literal user ID. Use a YAML list for multiple IDs")
     return parse_allowed_users(
         allowed_users,
         parse_user_id=_parse_wechat_user_id,
         logger=logger,
         channel_name="WeChat",
         expected_id="a valid iLink user ID",
+        warn_on_scalar_separators=True,
     )
 
 

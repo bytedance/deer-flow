@@ -1,10 +1,10 @@
 # AGENTS.md
 
-This file provides guidance to AI coding agents (Claude Code, Codex, and others) when working with the DeerFlow frontend. It is the source of truth; the sibling `CLAUDE.md` imports it via `@AGENTS.md`.
+This is the source of truth for DeerFlow frontend coding agents; the sibling `CLAUDE.md` imports it via `@AGENTS.md`.
 
 ## Project Overview
 
-DeerFlow Frontend is a Next.js 16 web interface for an AI agent system. It communicates with a LangGraph-based backend to provide thread-based AI conversations with streaming responses, artifacts, and a skills/tools system.
+DeerFlow's Next.js 16 frontend provides thread-based AI conversations with streaming responses, artifacts, skills, and tools through a LangGraph backend.
 
 **Stack**: Next.js 16, React 19, TypeScript 5.8, Tailwind CSS 4, pnpm 10.26.2. Requires Node.js 22+ and pnpm 10.26.2+.
 
@@ -36,7 +36,7 @@ upstream dependency chain resolves a patched version without it; regenerate
 | `pnpm typecheck` | TypeScript type check (`tsc --noEmit`)        |
 | `pnpm start`     | Start production server                       |
 
-Unit tests live under `tests/unit/` and mirror the `src/` layout (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Powered by Rstest; import source modules via the `@/` path alias.
+Rstest unit tests under `tests/unit/` mirror `src/` (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Import source modules via `@/`.
 
 Webpack is the default development bundler. Use `DEER_FLOW_DEV_BUNDLER=turbo` with `pnpm dev` to opt in to Turbopack when diagnosing a local Next.js bundler issue.
 
@@ -70,7 +70,7 @@ Frontend (Next.js) ──▶ LangGraph SDK ──▶ LangGraph Backend (lead_age
                                               └── Tools & Skills
 ```
 
-The frontend is a stateful chat application. Users create **threads** (conversations), send messages, set thread-scoped `/goal` completion conditions, and receive streamed AI responses. The backend orchestrates agents that can produce **artifacts** (files/code), **todos**, and goal state updates.
+Users create **threads** (conversations), send messages, set thread-scoped `/goal` completion conditions, and receive streamed responses, agent **artifacts** (files/code), **todos** and goal state updates.
 
 ### Source Layout (`src/`)
 
@@ -109,6 +109,18 @@ keep `name` for React identity, URLs, requests, and runtime `agent_name`.
 The 100-code-point budget uses `[...value.trim()].length`, matching Pydantic;
 do not use HTML `maxLength`, which counts UTF-16 code units instead.
 
+Custom Agent tool access is edited from the configured names returned by
+`GET /api/agent-tool-groups`. Preserve the `null` / `[]` / explicit-list
+contract (inherit all / disable all / allowlist), retain missing selected names
+as removable entries, and submit `tool_groups` only when the user changes it.
+Mark missing names unavailable only after a successful catalog load; loading
+and errors preserve neutral labels and removable selections.
+When a changed allowlist excludes `knowledge`, send `knowledge_scope: null` in
+the same update so a saved retrieval default cannot break run admission. Gate
+knowledge selection on both draft and persisted tool access: catalog reads
+authorize against the saved agent, so new access must be saved first. Restored
+tool selections remain unchanged and must not clear a knowledge default.
+
 Custom Agent portability uses the versioned `deerflow.custom-agent` JSON
 document through `core/agents/api.ts`. Keep file parsing client-side only for
 previewing the proposed local name; the Gateway is authoritative for schema,
@@ -127,6 +139,12 @@ from the filtered list so hidden tasks cannot remain actionable. Keep literal
 matching in `core/scheduled-tasks/search.ts`; clearing search retains other filters.
 
 Single-run schedule edits retain the mounted task's original `run_at` while its wall time and timezone match. The parent echoes edits through `initial`; retain a stable snapshot and reset the parent draft during render before remounting with a task key when switching tasks. Use the resolved timezone consistently for the snapshot and displayed wall time. Component and scheduled-task E2E tests cover DST folds and timestamp precision.
+
+The scheduled-task schedule input initializes Custom cron from the current
+preset and its current fields on every transition into the custom editor.
+Do not substitute a daily schedule or restore stale `parts.raw` after preset
+edits. Component tests cover emitted specs; browser tests pin unchanged
+schedules through the task form's PATCH payload on desktop and mobile.
 
 ## Environment
 

@@ -223,8 +223,9 @@ export function ScheduledTaskScheduleInput({
       if (next === "monthly" && merged.dayOfMonth == null) {
         merged.dayOfMonth = 1;
       }
-      if (next === "custom" && !merged.raw) {
-        merged.raw = serializeCron("daily", prev);
+      if (next === "custom" && preset !== "custom") {
+        // Open the current schedule, not a daily fallback or an older draft.
+        merged.raw = serializeCron(preset, prev);
       }
       return merged;
     });

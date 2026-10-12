@@ -271,7 +271,8 @@ class NotificationDeliveryWorker:
                 enriched = dict(delivery)
                 enriched["payload"] = {**(delivery.get("payload") or {}), "result_summary": summary}
         try:
-            await channel.send_notification(
+            await channel.send_notification_for_owner(
+                owner_user_id=delivery.get("owner_user_id") or "",
                 target=delivery.get("target") or "",
                 text_markdown=render_notification_text(enriched, default_locale=self._default_locale),
             )

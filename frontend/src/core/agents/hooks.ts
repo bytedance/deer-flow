@@ -7,6 +7,7 @@ import {
   fetchAgentsApiEnabled,
   getAgent,
   importAgentPackage,
+  listAgentToolGroups,
   listAgents,
   updateAgent,
 } from "./api";
@@ -62,6 +63,14 @@ export function useAgents() {
     queryFn: () => listAgents(),
   });
   return { agents: data ?? [], isLoading, error };
+}
+
+export function useAgentToolGroups() {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["agent-tool-groups"],
+    queryFn: () => listAgentToolGroups(),
+  });
+  return { toolGroups: data ?? [], isLoading, error };
 }
 
 export function useAgent(name: string | null | undefined) {
