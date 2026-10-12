@@ -429,6 +429,29 @@ class TestPathSafety:
 class TestFactory:
     """get_or_new_user_skill_storage factory behavior."""
 
+    def test_uses_configured_container_path(self, base_dir: Path, skills_root, config):
+        from deerflow.skills.storage import get_or_new_user_skill_storage
+
+        config.skills.container_path = "/custom/skills/root"
+        with patch("deerflow.config.paths.get_paths", return_value=Paths(base_dir=base_dir)):
+            with patch("deerflow.config.paths._paths", None):
+                storage = get_or_new_user_skill_storage("alice", app_config=config)
+
+        assert storage.get_container_root() == "/custom/skills/root"
+
+    def test_explicit_container_path_wins(self, base_dir: Path, skills_root, config):
+        from deerflow.skills.storage import get_or_new_user_skill_storage
+
+        with patch("deerflow.config.paths.get_paths", return_value=Paths(base_dir=base_dir)):
+            with patch("deerflow.config.paths._paths", None):
+                storage = get_or_new_user_skill_storage(
+                    "alice",
+                    app_config=config,
+                    container_path="/explicit/skills/root",
+                )
+
+        assert storage.get_container_root() == "/explicit/skills/root"
+
     def test_returns_same_instance_for_same_user(self, base_dir: Path, skills_root, config):
         with patch("deerflow.config.paths.get_paths", return_value=Paths(base_dir=base_dir)):
             with patch("deerflow.config.paths._paths", None):

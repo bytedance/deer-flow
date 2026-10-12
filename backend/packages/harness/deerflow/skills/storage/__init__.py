@@ -126,6 +126,7 @@ def get_or_new_user_skill_storage(user_id: str, **kwargs) -> SkillStorage:
     if app_config is None:
         app_config = get_app_config()
     kwargs["app_config"] = app_config
+    kwargs.setdefault("container_path", app_config.skills.container_path)
 
     # Always acquire lock so move_to_end is safe — makes this a true LRU
     # cache instead of FIFO. The overhead is negligible since dict ops are
