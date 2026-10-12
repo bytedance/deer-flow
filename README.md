@@ -792,6 +792,15 @@ report `Exit Code: 124`; unsuccessful health checks cannot reclaim a warm sandbo
 Health probes tolerate login-shell output around the `ok` line, and failures log
 the sandbox ID and probe output before replacing the sandbox.
 
+The optional OpenSandbox provider mirrors generated output files to local thread
+storage at turn completion for Gateway previews and downloads; see its
+[synchronization limits and failure behavior](backend/packages/harness/deerflow/community/opensandbox/README.md#lifecycle-and-contract).
+An invalid UTF-8 filename is skipped without blocking other outputs, and
+same-size content edits are still copied on release.
+Outputs with case- or Unicode-equivalent file or directory names are skipped
+before copying, and aliases of existing local paths are rejected, preserving
+previous complete copies.
+
 BoxLite shutdown rejects late VM registration and keeps its SDK loop open while
 in-flight acquisitions finish. If they cannot drain within five seconds,
 shutdown fails with resources still owned and can be retried.
@@ -960,7 +969,7 @@ channels:
     enabled: true
     app_id: $QQ_APP_ID
     client_secret: $QQ_CLIENT_SECRET
-    allowed_users: []  # QQ OpenIDs, not QQ account numbers
+    allowed_users: []  # QQ OpenIDs, not QQ account numbers; empty allows all; one ID is one entry
 
   wecom:
     enabled: true
@@ -2095,6 +2104,8 @@ Content-less sub-agent final messages report `No response generated` instead of 
 
 An ordinary `task` also receives a defensive snapshot of the dispatching run's current uploads. This lets eligible sub-agents use `list_uploaded_files` to find earlier-turn files without returning same-turn attachments as historical. Delayed or recovered `batch_task` workers leave this tool disabled because they have no valid turn-local upload boundary.
 
+Embedded Python uploads use the same captured content for the saved document and its Markdown conversion, even if the caller's source changes during upload.
+
 历史上传发现支持稳定续页：`list_uploaded_files` 默认每页 20 项、最多 100 项，
 将返回的 `next_cursor` 作为下一次调用的 `cursor`，保留相同过滤条件，直到末页不再
 返回游标。目录元数据或调用上下文变化时会明确要求重新枚举；详情见
@@ -2666,6 +2677,14 @@ client.clear_goal("thread-1")
 ```
 
 When continuing a thread, `values` still contains the full conversation state, while `messages-tuple` and `end.usage` cover only the current turn.
+
+Concurrent `upload_files()` calls preserve filenames absent at the start of each
+call by assigning numeric suffixes and returning the actual saved names. The same
+rule applies to new Markdown companions. Exact names already present retain
+replacement behavior. Convertible files use one private source capture through
+all filename retries and conversion, preserving the original permissions and
+timestamps. Detected staging-file substitution is rejected; staging cleanup
+failures are logged without masking the upload outcome.
 
 The HTTP Gateway accepts `values`, `messages-tuple`, `updates`, `debug`, `tasks`, `checkpoints`, and `custom` stream modes. Unsupported modes such as `messages` and `events`, unsupported non-default run options such as webhooks, delayed execution, or `multitask_strategy="enqueue"`, and undeclared SDK options such as checkpoint durability overrides return `422` before execution instead of being silently ignored or downgraded.
 
