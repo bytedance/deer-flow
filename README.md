@@ -969,7 +969,7 @@ channels:
     enabled: true
     app_id: $QQ_APP_ID
     client_secret: $QQ_CLIENT_SECRET
-    allowed_users: []  # QQ OpenIDs, not QQ account numbers
+    allowed_users: []  # QQ OpenIDs, not QQ account numbers; empty allows all; one ID is one entry
 
   wecom:
     enabled: true
