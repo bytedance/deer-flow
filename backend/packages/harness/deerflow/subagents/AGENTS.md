@@ -49,6 +49,14 @@ verdicts through queries and JSONL exports: absent criteria, checker errors,
 legacy rows, and failed executions are never implicitly accepted. Acceptance
 does not change retry policy.
 
+**Batch lease supervision**: `batch_lease.py` owns one drained heartbeat across tool
+assembly, execution and acceptance. Capture a fresh bounded claim owner each pass;
+exclude locally active IDs from recovery. Worker writes fence owner and active
+status in SQL, never by flushing a selected ORM item. Expiry recovery also compares
+the captured expiry. Keep PostgreSQL locks parent-first and status polling bounded
+by lease/3. `tests/test_batch_lease_lifecycle.py` covers real SQLite interleavings,
+threaded initialization, peer cancellation and renewal drain.
+
 **Built-in Agents**: `general-purpose` (all tools except `task`) and `bash` (command specialist)
 **Registry and managed definitions**: Runtime resolution is built-in → `config.yaml custom_agents` → enabled administrator-managed definitions, followed by explicit `subagents.agents.<name>` overrides. Managed definitions are deployment-wide, persist through the same `agent_storage.backend` selection as Custom Agent definitions, and remain stored but are excluded from runtime when a built-in or later-added config definition owns the same name. The default Lead Agent sees the whole enabled catalog. A Custom Agent's `allowed_subagents` is snapshotted into run metadata (`None` = all, `[]` = hard deny, list = allowlist) and must filter both prompt discovery and `task` execution; never reload caller policy from mutable agent config inside the tool.
 **Benefit-based routing policy**: Direct execution is the default. Permit `task` when parallel latency, specialist skill, or context isolation clearly outweighs startup, duplicate discovery, synthesis, state conflicts, and side effects. Parallel scopes need independent outputs and disjoint mutable state; use the fewest useful agents and reassess each batch. A bounded sequential subagent is allowed for strong specialist/context benefit. With a per-response limit of 1, prompts omit parallel and multi-batch benefits and allow only material specialist/context benefit. Keep `lead_agent/prompt.py`, the `task` description, and built-in roles aligned; see `tests/test_subagent_routing_prompt.py`, `tests/test_subagent_prompt_security.py`, and `tests/test_lead_agent_prompt.py`.

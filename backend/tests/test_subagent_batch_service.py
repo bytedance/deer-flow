@@ -257,8 +257,8 @@ async def test_execute_item_polls_completion_without_waiting_for_lease_renewal(m
             raise AssertionError("a task that completes between polls need not expose running")
 
         async def renew_item_lease(self, *_args, **_kwargs):
-            # Exactly one pre-launch revalidation is expected; the poll loop
-            # must not renew for a task that completes between polls.
+            # Renew before assembly and revalidate before dispatch; neither
+            # heartbeat nor polling should delay a task completing between polls.
             self.renews = getattr(self, "renews", 0) + 1
             return {"valid": True, "cancel_requested": False}
 
@@ -304,7 +304,7 @@ async def test_execute_item_polls_completion_without_waiting_for_lease_renewal(m
 
     assert repository.finalized is not None
     assert repository.finalized["result"] == "fast result"
-    assert repository.renews == 1
+    assert repository.renews == 2
 
 
 @pytest.mark.asyncio

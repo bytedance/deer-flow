@@ -14,6 +14,7 @@ from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.extensions import LoadedExtensions, get_loaded_extensions
 from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.subagents.batch_acceptance import check_batch_acceptance
+from deerflow.subagents.batch_lease import BatchItemLease
 from deerflow.subagents.batch_runtime import BatchSubmitRequest
 from deerflow.subagents.capacity import SubagentExecutionCapacity
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
@@ -157,18 +158,21 @@ class SubagentBatchService:
         available = max(0, self._runtime_config.max_running - len(self._executions))
         if available <= 0:
             return
+        # A process identity is not a fence for a later claim by that process.
+        claim_owner = f"{self._lease_owner[:80]}:{uuid.uuid4().hex}"
         items = await self._repository.claim_items(
             now=now,
-            lease_owner=self._lease_owner,
+            lease_owner=claim_owner,
             lease_seconds=self._config.lease_seconds,
             limit=available,
+            exclude_item_ids=tuple(self._executions),
         )
         for item in items:
             item_id = item["id"]
             if item_id in self._executions:
                 continue
             task = asyncio.create_task(
-                self._execute_item(item),
+                self._execute_item(item, lease_owner=claim_owner),
                 name=f"subagent-batch-item-{item_id}",
             )
             self._executions[item_id] = task
@@ -246,7 +250,12 @@ class SubagentBatchService:
         # what lets another worker own the HTTP control request safely.
         return batch
 
-    async def _execute_item(self, item: dict[str, Any]) -> None:
+    async def _execute_item(self, item: dict[str, Any], *, lease_owner: str | None = None) -> None:
+        async with BatchItemLease(self._repository, item_id=item["id"], owner=lease_owner or self._lease_owner, seconds=self._config.lease_seconds) as lease:
+            if lease.valid:
+                await self._execute_leased_item(item, lease)
+
+    async def _execute_leased_item(self, item: dict[str, Any], lease: BatchItemLease) -> None:
         item_id = item["id"]
         execution_id: str | None = None
         try:
@@ -284,13 +293,7 @@ class SubagentBatchService:
             # assembly blocked in the worker thread — the poll loop's checks
             # only start after execute_async(), so launching without this
             # check would run work the user already cancelled.
-            lease = await self._repository.renew_item_lease(
-                item_id,
-                lease_owner=self._lease_owner,
-                lease_seconds=self._config.lease_seconds,
-                now=datetime.now(UTC),
-            )
-            if not lease["valid"]:
+            if not await lease.renew():
                 logger.info(
                     "Durable batch item %s cancelled or lease lost during tool assembly; skipping launch",
                     item_id,
@@ -323,13 +326,7 @@ class SubagentBatchService:
             execution_id = executor.execute_async(prompt, task_id=item_id)
             self._execution_ids[item_id] = execution_id
             marked_running = False
-            renew_every = max(1.0, self._config.lease_seconds / 3)
-            status_poll_every = min(
-                self._config.poll_interval_seconds,
-                renew_every,
-            )
-            loop = asyncio.get_running_loop()
-            next_renew_at = loop.time() + renew_every
+            status_poll_every = min(self._config.poll_interval_seconds, max(1.0, self._config.lease_seconds / 3))
             while True:
                 result = get_background_task_result(execution_id)
                 if result is None:
@@ -337,40 +334,29 @@ class SubagentBatchService:
                 if result.status is SubagentStatus.RUNNING and not marked_running:
                     marked_running = await self._repository.mark_item_running(
                         item_id,
-                        lease_owner=self._lease_owner,
+                        lease_owner=lease.owner,
                         now=datetime.now(UTC),
                     )
                     if not marked_running:
                         request_cancel_background_task(execution_id)
                 if result.status.is_terminal:
                     break
-                now_monotonic = loop.time()
-                if now_monotonic >= next_renew_at:
-                    lease = await self._repository.renew_item_lease(
-                        item_id,
-                        lease_owner=self._lease_owner,
-                        lease_seconds=self._config.lease_seconds,
-                        now=datetime.now(UTC),
-                    )
-                    next_renew_at = loop.time() + renew_every
-                    if not lease["valid"]:
-                        request_cancel_background_task(execution_id)
+                if not lease.valid:
+                    request_cancel_background_task(execution_id)
                 try:
-                    until_renew = max(0.0, next_renew_at - loop.time())
-                    await asyncio.wait_for(
-                        self._stop.wait(),
-                        timeout=min(status_poll_every, until_renew),
-                    )
+                    await asyncio.wait_for(self._stop.wait(), timeout=status_poll_every)
                     if self._stop.is_set():
                         raise asyncio.CancelledError
                 except TimeoutError:
                     pass
 
+            if not lease.valid:
+                return
             raw_result = result.result or ""
             if getattr(result, "admission_failure", False):
                 await self._repository.requeue_item_after_admission_failure(
                     item_id,
-                    lease_owner=self._lease_owner,
+                    lease_owner=lease.owner,
                     error=result.error,
                     now=datetime.now(UTC),
                 )
@@ -386,7 +372,7 @@ class SubagentBatchService:
             acceptance_verdict = None
             if result.status is SubagentStatus.COMPLETED and item.get("acceptance_criteria"):
                 try:
-                    valid, acceptance_verdict = await self._check_acceptance_with_lease(item, result, app_config)
+                    valid, acceptance_verdict = await self._check_acceptance_with_lease(item, result, app_config, lease)
                     if not valid:
                         return
                 except Exception:
@@ -395,7 +381,7 @@ class SubagentBatchService:
                     logger.warning("Batch acceptance check failed; result remains unchecked (item_id=%s)", item_id, exc_info=True)
             await self._repository.finalize_item(
                 item_id,
-                lease_owner=self._lease_owner,
+                lease_owner=lease.owner,
                 succeeded=result.status is SubagentStatus.COMPLETED,
                 result=stored_result,
                 result_preview=preview,
@@ -421,7 +407,7 @@ class SubagentBatchService:
             )
             await self._repository.finalize_item(
                 item_id,
-                lease_owner=self._lease_owner,
+                lease_owner=lease.owner,
                 succeeded=False,
                 result=None,
                 result_preview=None,
@@ -438,19 +424,10 @@ class SubagentBatchService:
             if execution_id is not None:
                 cleanup_background_task(execution_id)
 
-    async def _check_acceptance_with_lease(self, item, result, app_config):
+    async def _check_acceptance_with_lease(self, item, result, app_config, lease: BatchItemLease):
         """Keep a completed execution leased until its advisory check drains."""
 
-        async def renew():
-            lease = await self._repository.renew_item_lease(
-                item["id"],
-                lease_owner=self._lease_owner,
-                lease_seconds=self._config.lease_seconds,
-                now=datetime.now(UTC),
-            )
-            return lease["valid"]
-
-        if not await renew():
+        if not await lease.renew():
             return False, None
         check = asyncio.create_task(
             check_batch_acceptance(
@@ -464,8 +441,8 @@ class SubagentBatchService:
             while True:
                 done, _ = await asyncio.wait({check}, timeout=max(1.0, self._config.lease_seconds / 3))
                 if done:
-                    return True, check.result()
-                if not await renew():
+                    return lease.valid, check.result()
+                if not lease.valid:
                     return False, None
         finally:
             if not check.done():
