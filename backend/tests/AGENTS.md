@@ -1,5 +1,13 @@
 # Backend Tests
 
+`test_client_upload_snapshot.py` keeps upload publication and conversion on the
+same private capture. Cover source edits/removal, both conversion branches,
+same-file rejection, metadata and cleanup; retain sandbox symlink defenses.
+Exercise both replacement and first-time publication; mutation hooks must actually
+run on both paths. Force collision retries while editing/removing the source and
+assert one source open, original metadata, preserved competing uploads, companion
+ownership and capture cleanup. Retain the real XLSX conversion coverage.
+
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
 Local nginx path fixtures convert MSYS output through the selected Git Bash's
@@ -42,10 +50,6 @@ retry reuse, so the rejection tests cannot pass by rejecting every custom store.
 Upload case-collision coverage uses separate HTTP requests and preserves both
 reported payloads. Observe real filename-claim inputs to pin the disk seed;
 case-insensitive hosts can otherwise mask a missing seed through link retries.
-
-Embedded upload source-parity regressions overwrite the caller's file before a
-converter reading that path consumes it. The test must reject conversion from
-the original path even when the upload copy still uses a private snapshot.
 
 Channel reload cancellation regressions must assert the worker returned the
 stale snapshot before checking that newer runtime config survived. Completion

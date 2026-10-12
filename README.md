@@ -178,6 +178,8 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
 
    Tavily web search and fetch contain malformed HTTP-success payloads the same way: a non-object payload, or a `results`/`failed_results` container that is not a list, returns the provider's format error, and non-object entries in an otherwise valid list are skipped in order. Missing, null, or empty results keep the existing response (`[]` for search, `Error: No results found` for fetch); missing or null search fields (`title`, `url`, `content`) normalize to empty text, and a non-string fetch `raw_content` is coerced to text before the truncation limit.
 
+   Sofya web search and fetch contain malformed HTTP-success payloads the same way: a non-object payload, a `results` container that is not a list, or a non-empty list with no object entries returns the provider's format error, while non-object entries in an otherwise valid list are skipped in order. Missing, null, or empty results keep the existing "No results found" response.
+
    Jina, Browserless, and InfoQuest web fetches resolve relative links and image sources using the requested page URL (or a usable HTML base URL), so returned Markdown includes complete destinations. Link resolution preserves the surrounding HTML source, including malformed-page formatting.
 
    Self-hosted Browserless, Crawl4AI, Firecrawl, and fastCRW fetch backends require outbound isolation from private, loopback, link-local, and cloud-metadata networks before setting `network_isolation_confirmed: true` on each tool. DeerFlow rejects private or unverifiable backends by default because those services handle redirects, DNS resolution, and subresources themselves. `allow_private_addresses` permits intentional internal target URLs and does not bypass the backend check. See [delegated fetch deployment](backend/docs/CONFIGURATION.md#delegated-fetch-backend-isolation); `make doctor` reports backend configurations that would be refused.
@@ -1109,6 +1111,8 @@ Scheduled-task result and lifecycle notices can also be pushed to a bound Feishu
 2. Set the message receiving mode to **Stream Mode** in the robot configuration page.
 3. Copy the `Client ID` and `Client Secret`, set `DINGTALK_CLIENT_ID` and `DINGTALK_CLIENT_SECRET` in `.env`, and enable the channel in `config.yaml`.
 4. *(Optional)* To enable streaming AI Card replies (typewriter effect), create an **AI Card** template on the [DingTalk Card Platform](https://open.dingtalk.com/document/dingstart/typewriter-effect-streaming-ai-card), then set `card_template_id` in `config.yaml` to the template ID. You also need to apply for the `Card.Streaming.Write` and `Card.Instance.Write` permissions.
+
+DingTalk's Markdown fallback displays tables as labeled blockquotes, preserving escaped pipes (`\|`) within cells and empty leading or trailing cells so values stay under the correct column labels.
 
 
 When DeerFlow runs in Docker Compose, IM channels execute inside the `gateway` container. In that case, do not point `channels.langgraph_url` or `channels.gateway_url` at `localhost`; use container service names such as `http://gateway:8001/api` and `http://gateway:8001`, or set `DEER_FLOW_CHANNELS_LANGGRAPH_URL` and `DEER_FLOW_CHANNELS_GATEWAY_URL`.
@@ -2089,6 +2093,8 @@ Content-less sub-agent final messages report `No response generated` instead of 
 
 An ordinary `task` also receives a defensive snapshot of the dispatching run's current uploads. This lets eligible sub-agents use `list_uploaded_files` to find earlier-turn files without returning same-turn attachments as historical. Delayed or recovered `batch_task` workers leave this tool disabled because they have no valid turn-local upload boundary.
 
+Embedded Python uploads use the same captured content for the saved document and its Markdown conversion, even if the caller's source changes during upload.
+
 历史上传发现支持稳定续页：`list_uploaded_files` 默认每页 20 项、最多 100 项，
 将返回的 `next_cursor` 作为下一次调用的 `cursor`，保留相同过滤条件，直到末页不再
 返回游标。目录元数据或调用上下文变化时会明确要求重新枚举；详情见
@@ -2660,6 +2666,14 @@ client.clear_goal("thread-1")
 ```
 
 When continuing a thread, `values` still contains the full conversation state, while `messages-tuple` and `end.usage` cover only the current turn.
+
+Concurrent `upload_files()` calls preserve filenames absent at the start of each
+call by assigning numeric suffixes and returning the actual saved names. The same
+rule applies to new Markdown companions. Exact names already present retain
+replacement behavior. Convertible files use one private source capture through
+all filename retries and conversion, preserving the original permissions and
+timestamps. Detected staging-file substitution is rejected; staging cleanup
+failures are logged without masking the upload outcome.
 
 The HTTP Gateway accepts `values`, `messages-tuple`, `updates`, `debug`, `tasks`, `checkpoints`, and `custom` stream modes. Unsupported modes such as `messages` and `events`, unsupported non-default run options such as webhooks, delayed execution, or `multitask_strategy="enqueue"`, and undeclared SDK options such as checkpoint durability overrides return `422` before execution instead of being silently ignored or downgraded.
 
