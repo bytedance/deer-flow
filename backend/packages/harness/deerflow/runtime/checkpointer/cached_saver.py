@@ -46,8 +46,22 @@ def _checkpoint_ref(tup: CheckpointTuple) -> tuple[str, str, str]:
 
 
 def _channel_writes(tup: CheckpointTuple, channel: str) -> list[PendingWrite]:
-    """Writes for one channel, oldest→newest (tuple storage order)."""
-    return [w for w in (tup.pending_writes or []) if w[1] == channel]
+    """Writes for one channel in the inner saver's canonical delta order.
+
+    ``get_delta_channel_history`` orders a checkpoint's writes by
+    ``(task_id, idx)`` (ascending). ``CheckpointTuple.pending_writes`` already
+    carries each task's writes in ``idx`` order, but across tasks it follows
+    *storage/completion* order, which the InMemorySaver backend leaves in task
+    arrival order rather than ``task_id`` order. Composing from that raw order
+    makes the cached history disagree with the inner saver on fan-out
+    supersteps (several parallel tasks writing one channel). A stable sort by
+    ``task_id`` restores the canonical ``(task_id, idx)`` order while preserving
+    each task's internal ``idx`` sequence; it is a no-op on backends that
+    already return writes ``ORDER BY task_id, idx`` (sqlite, postgres).
+    """
+    writes = [w for w in (tup.pending_writes or []) if w[1] == channel]
+    writes.sort(key=lambda w: w[0])
+    return writes
 
 
 class CachedHistorySaver(BaseCheckpointSaver):
