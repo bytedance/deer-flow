@@ -1681,6 +1681,149 @@ async def test_legacy_empty_notification_retry_is_consumed_on_claim(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_expired_notification_claim_is_consumed_when_the_event_resolved(tmp_path):
+    """Reclaiming an expired claim whose event resolved must not launch it.
+
+    Claim a real attention event, let the notification lease expire, resolve the
+    condition with a successful poll, then reclaim: the rebuilt snapshot is
+    empty, so the reclaim must consume it instead of launching an empty event.
+    """
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-reclaim", now=now)
+
+    claimed_poll = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    await repo.apply_snapshot(
+        "task-reclaim",
+        lease_owner="poller",
+        lease_token=claimed_poll[0]["lease_token"],
+        status="input_required",
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required={"prompt": "Approve?"},
+        next_poll_at=now,
+        polled_at=now,
+    )
+    first = await repo.claim_notification_work(
+        now=now,
+        lease_owner="notifier",
+        lease_seconds=60,
+        limit=1,
+        tracking_degraded_after_errors=3,
+    )
+    assert first[0]["dispatch_event"]["status"] == "input_required"
+
+    claimed_poll = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    await repo.apply_snapshot(
+        "task-reclaim",
+        lease_owner="poller",
+        lease_token=claimed_poll[0]["lease_token"],
+        status="working",
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        next_poll_at=now,
+        polled_at=now,
+    )
+
+    reclaim = await repo.claim_notification_work(
+        now=now + timedelta(seconds=61),
+        lease_owner="notifier",
+        lease_seconds=60,
+        limit=1,
+        tracking_degraded_after_errors=3,
+    )
+    assert reclaim == []
+
+    stored = await repo.get("task-reclaim", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+    assert stored is not None
+    assert stored["notification_status"] == "none"
+    assert stored["notified_version"] == stored["event_version"]
+    assert stored["dispatch_version"] is None
+    assert stored["dispatch_event"] is None
+    assert stored["notification_lease_owner"] is None
+
+
+@pytest.mark.asyncio
+async def test_identical_attention_event_after_consumed_snapshot_is_recorded(tmp_path):
+    """Consuming a resolved snapshot must not suppress an identical later event.
+
+    The degraded snapshot's content fingerprint must not survive consumption: if
+    the server degrades again with the same error string while no notification
+    was ever delivered, the event must be recorded and claimed again.
+    """
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-repeat", now=now)
+
+    async def fail_three_times() -> None:
+        for _ in range(3):
+            claimed = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=10)
+            await repo.release_claim(
+                "task-repeat",
+                lease_owner="poller",
+                lease_token=claimed[0]["lease_token"],
+                next_poll_at=now - timedelta(seconds=1),
+                error="temporary network failure",
+            )
+
+    await fail_three_times()
+    degraded = await repo.get("task-repeat", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+    assert degraded is not None
+    assert degraded["notification_status"] == "pending"
+    assert degraded["event_version"] == 1
+
+    # The task recovers before the notification is claimed; the snapshot is consumed.
+    claimed = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=10)
+    await repo.apply_snapshot(
+        "task-repeat",
+        lease_owner="poller",
+        lease_token=claimed[0]["lease_token"],
+        status="working",
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        next_poll_at=now - timedelta(seconds=1),
+        polled_at=now,
+    )
+    consumed = await repo.claim_notification_work(
+        now=datetime.now(UTC),
+        lease_owner="notifier",
+        lease_seconds=60,
+        limit=10,
+        tracking_degraded_after_errors=3,
+    )
+    assert consumed == []
+
+    # The identical failure recurs; the event must be recorded again, not
+    # suppressed by the consumed snapshot's fingerprint.
+    await fail_three_times()
+    again = await repo.get("task-repeat", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+    assert again is not None
+    assert again["notification_status"] == "pending"
+    assert again["event_version"] == 2
+
+    notifications = await repo.claim_notification_work(
+        now=datetime.now(UTC),
+        lease_owner="notifier",
+        lease_seconds=60,
+        limit=10,
+        tracking_degraded_after_errors=3,
+    )
+    assert len(notifications) == 1
+    assert notifications[0]["dispatch_event"]["tracking_degraded"] is True
+
+
+@pytest.mark.asyncio
 async def test_unexpected_notification_failure_releases_lease_without_changing_phase(tmp_path):
     repo = await _make_repo(tmp_path)
     now = datetime.now(UTC)

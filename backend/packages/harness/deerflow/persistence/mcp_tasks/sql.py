@@ -678,10 +678,20 @@ class McpTaskRepository:
                     # (for example tracking recovered, or an input_required prompt
                     # was answered), or the row carries an empty snapshot left by
                     # a pre-fix claim. Consume it instead of claiming an empty
-                    # notification; a later transition records a fresh pending
-                    # snapshot with a higher event version.
+                    # notification, and clear the content fingerprint so an
+                    # identical later event is recorded again rather than being
+                    # suppressed by a snapshot that was never delivered. A later
+                    # transition records a fresh pending snapshot with a higher
+                    # event version.
                     row.notified_version = row.event_version
+                    row.event_fingerprint = None
                     row.notification_status = "none"
+                    row.notification_error = None
+                    row.notification_attempt_count = 0
+                    row.dispatch_version = None
+                    row.dispatch_attempt = 0
+                    row.dispatch_event = None
+                    row.notification_run_id = None
                     row.notification_lease_owner = None
                     row.notification_lease_expires_at = None
                     row.notification_lease_token = None
