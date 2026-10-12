@@ -202,3 +202,36 @@ def test_custom_provider_without_limit_fails_closed(tmp_path, monkeypatch):
     result = _view_image_authorized(runtime, PATH, "call")
     assert "Error" in result.update["messages"][0].content
     assert calls == []
+
+
+@pytest.mark.parametrize("kind", ["aio", "e2b", "opensandbox", "tenki"])
+@pytest.mark.parametrize("max_bytes", [None, 100 * 1024 * 1024 + 1])
+def test_caller_cannot_raise_default_provider_ceiling(kind, max_bytes):
+    from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT
+
+    class OversizedChunk:
+        def __len__(self):
+            return DEFAULT_DOWNLOAD_LIMIT + 1
+
+    stream = Stream([OversizedChunk(), b"unread"])
+    with pytest.raises(OSError) as error:
+        provider(kind, stream).download_file(PATH, max_bytes=max_bytes)
+    assert error.value.errno == errno.EFBIG
+    assert str(DEFAULT_DOWNLOAD_LIMIT) in str(error.value)
+    assert stream.consumed == DEFAULT_DOWNLOAD_LIMIT + 1
+    assert stream.closed
+
+
+@pytest.mark.parametrize("max_bytes", [None, 100 * 1024 * 1024 + 1])
+def test_local_caller_cannot_raise_default_provider_ceiling(monkeypatch, max_bytes):
+    from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT
+
+    box = object.__new__(LocalSandbox)
+    box._resolve_path = lambda path: path
+    monkeypatch.setattr("os.path.getsize", lambda _: DEFAULT_DOWNLOAD_LIMIT + 1)
+    read = Mock()
+    monkeypatch.setattr("builtins.open", read)
+    with pytest.raises(OSError) as error:
+        box.download_file(PATH, max_bytes=max_bytes)
+    assert error.value.errno == errno.EFBIG
+    read.assert_not_called()

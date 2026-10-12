@@ -11,6 +11,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT as _MAX_DOWNLOAD_SIZE
 from deerflow.sandbox.download import download_limit, read_download_stream
 from deerflow.sandbox.read_file_contract import split_file_lines
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
@@ -27,7 +28,6 @@ logger = logging.getLogger(__name__)
 
 _TERMINAL_ERROR_NAMES = frozenset({"SandboxUnhealthyException"})
 _COMMAND_TTL_GRACE = timedelta(seconds=30)
-_MAX_DOWNLOAD_SIZE = 100 * 1024 * 1024
 
 
 def _exception_chain(error: BaseException):

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
-from deerflow.sandbox.download import download_limit
+from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT, download_limit
 from deerflow.sandbox.env_policy import build_sandbox_env
 from deerflow.sandbox.local.list_dir import list_dir
 from deerflow.sandbox.path_patterns import replace_output_path_matches
@@ -923,7 +923,7 @@ class LocalSandbox(Sandbox):
             raise type(e)(e.errno, e.strerror, path) from None
 
     def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
-        max_download_size = download_limit(max_bytes, 100 * 1024 * 1024)
+        max_download_size = download_limit(max_bytes, DEFAULT_DOWNLOAD_LIMIT)
         normalised = path.replace("\\", "/")
         stripped_path = normalised.lstrip("/")
         allowed_prefix = VIRTUAL_PATH_PREFIX.lstrip("/")

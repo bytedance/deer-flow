@@ -25,6 +25,7 @@ import threading
 from typing import TYPE_CHECKING, TypeVar
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT as _MAX_DOWNLOAD_SIZE
 from deerflow.sandbox.download import download_limit
 from deerflow.sandbox.read_file_contract import split_file_lines
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
@@ -41,7 +42,6 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-_MAX_DOWNLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
 # One base64 chunk stays well under Linux MAX_ARG_STRLEN (128 KiB per argv entry),
 # and 60000 is a multiple of 4 so each chunk is a self-contained base64 unit whose
 # decoded bytes concatenate losslessly.

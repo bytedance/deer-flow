@@ -4,6 +4,9 @@ import errno
 from collections.abc import Iterable
 from contextlib import suppress
 
+DEFAULT_DOWNLOAD_LIMIT = 100 * 1024 * 1024
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
+
 
 def download_limit(max_bytes: int | None, provider_limit: int) -> int:
     """A caller may tighten, but never raise, the provider's download ceiling."""

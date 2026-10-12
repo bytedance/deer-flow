@@ -10,6 +10,7 @@ from agent_sandbox import Sandbox as AioSandboxClient
 from agent_sandbox.core.api_error import ApiError
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT as _MAX_DOWNLOAD_SIZE
 from deerflow.sandbox.download import download_limit, read_download_stream
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
@@ -18,8 +19,6 @@ from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path_
 from .backend import sandbox_http_trust_env
 
 logger = logging.getLogger(__name__)
-
-_MAX_DOWNLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
 
 _ERROR_OBSERVATION_SIGNATURE = "'ErrorObservation' object has no attribute 'exit_code'"
 
@@ -1058,6 +1057,10 @@ class AioSandbox(Sandbox):
             logger.error("Refused download outside allowed directory: path=%s, allowed_prefix=%s", path, VIRTUAL_PATH_PREFIX)
             raise PermissionError(f"Access denied: path must be under '{VIRTUAL_PATH_PREFIX}': '{path}'")
 
+        # Keep the lock through iteration and stream cleanup: the SDK iterator
+        # opens its HTTP response lazily, and close() detaches this client under
+        # the same lock before closing its pooled connections. Request-level
+        # concurrency does not make a download safe against concurrent close.
         with self._lock:
             try:
                 stream = self._client.file.download_file(path=path)

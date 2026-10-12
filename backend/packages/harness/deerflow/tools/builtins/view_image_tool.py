@@ -12,6 +12,7 @@ from langgraph.types import Command
 
 from deerflow.agents.thread_state import ThreadDataState, ViewedImageData
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.download import MAX_IMAGE_BYTES as _MAX_IMAGE_BYTES
 from deerflow.tools.types import Runtime
 
 logger = logging.getLogger(__name__)
@@ -22,7 +23,6 @@ _ALLOWED_IMAGE_VIRTUAL_ROOTS = (
     f"{VIRTUAL_PATH_PREFIX}/outputs",
 )
 _ALLOWED_IMAGE_VIRTUAL_ROOTS_TEXT = ", ".join(_ALLOWED_IMAGE_VIRTUAL_ROOTS)
-_MAX_IMAGE_BYTES = 20 * 1024 * 1024
 _EXTENSION_TO_MIME = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",

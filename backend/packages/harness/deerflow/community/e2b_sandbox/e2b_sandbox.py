@@ -11,6 +11,7 @@ from e2b import CommandExitException, FileNotFoundException
 from e2b_code_interpreter import Sandbox as E2BClientSandbox
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT as _MAX_DOWNLOAD_SIZE
 from deerflow.sandbox.download import download_limit, read_download_stream
 from deerflow.sandbox.read_file_contract import split_file_lines
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
@@ -23,7 +24,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_MAX_DOWNLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
 
 # Where DeerFlow's ``/mnt/user-data`` virtual prefix is materialised inside
 # the e2b sandbox.  e2b code-interpreter templates default to ``/home/user``
