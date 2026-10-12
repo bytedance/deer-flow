@@ -49,6 +49,29 @@ def test_bounded_pipe_capture_without_fallback_replaces_non_utf8_bytes():
     assert "\u4f60\u597d" not in decoded
 
 
+def test_bounded_pipe_capture_trims_capture_cap_split_multibyte_tail():
+    """The byte cap can cut a multi-byte UTF-8 char in half; strict-decoding the
+    partial tail would fail the whole-buffer gate and cascade everything to the
+    locale fallback, so the trailing incomplete sequence is trimmed first."""
+    capture = _BoundedPipeCapture(limit_bytes=10, encoding="utf-8", fallback_encoding="cp936")
+    capture.append(b"abcdefgh")
+    # 2 bytes of the 6-byte "你好" fit under the cap, splitting 你 (e4 bd a0)
+    # after its continuation byte — a partial sequence at the buffer end.
+    capture.append("\u4f60\u597d".encode("utf-8"))
+
+    assert capture.read() == "abcdefgh\n... [output truncated after 10 of 14 bytes; remaining output discarded] ..."
+
+
+def test_bounded_pipe_capture_trims_partial_tail_left_by_timeout_kill():
+    """A child killed mid-write can leave an incomplete multi-byte sequence at
+    the end of the capture; trimming it keeps the valid prefix decodable."""
+    capture = _BoundedPipeCapture(encoding="utf-8", fallback_encoding="cp936")
+    capture.append(b"abc")
+    capture.append("\u4f60".encode("utf-8")[:-1])
+
+    assert capture.read() == "abc"
+
+
 def test_bounded_pipe_capture_applies_text_mode_newline_normalization_when_enabled():
     capture = _BoundedPipeCapture(normalize_newlines=True)
     capture.append(b"crlf\r\nbare-cr\rlf\n")
@@ -96,14 +119,17 @@ import deerflow.sandbox.local.local_sandbox as local_sandbox
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
 
 # Keep this regression effective even on an English or UTF-8 Windows runner.
-local_sandbox.locale.getpreferredencoding = lambda _: "cp936"
+local_sandbox.locale.getencoding = lambda: "cp936"
 LocalSandbox._get_shell = staticmethod(lambda: sys.argv[1])
 expected = "\u4f60\u597d \u65e5\u672c\u8a9e"
 command = f"Write-Output '{expected}'; [Console]::Error.WriteLine('{expected}'); exit 3"
 output = LocalSandbox("encoding-probe").execute_command(command, timeout=15)
 assert output == expected + "\n\nStd Error:\n" + expected + "\n\nExit Code: 3", ascii(output)
 """
-    env = {**os.environ, "PYTHONUTF8": "0"}
+    # Run the probe under Python UTF-8 mode on purpose: ``getpreferredencoding``
+    # would report ``"utf-8"`` there and silently disable the locale fallback,
+    # so a green run proves the fallback source is ``locale.getencoding()``.
+    env = {**os.environ, "PYTHONUTF8": "1"}
     result = subprocess.run(
         [sys.executable, "-c", probe, shell],
         capture_output=True,
@@ -130,13 +156,16 @@ import deerflow.sandbox.local.local_sandbox as local_sandbox
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
 
 # Keep this regression effective even on an English or UTF-8 Windows runner.
-local_sandbox.locale.getpreferredencoding = lambda _: "cp936"
+local_sandbox.locale.getencoding = lambda: "cp936"
 LocalSandbox._get_shell = staticmethod(lambda: sys.argv[1])
 expected = "\u4f60\u597d \u65e5\u672c\u8a9e"
 output = LocalSandbox("encoding-probe").execute_command(f"printf '%s\n' '{expected}'", timeout=15)
 assert output == expected + "\n", ascii(output)
 """
-    env = {**os.environ, "PYTHONUTF8": "0"}
+    # Run the probe under Python UTF-8 mode on purpose: ``getpreferredencoding``
+    # would report ``"utf-8"`` there and silently disable the locale fallback,
+    # so a green run proves the fallback source is ``locale.getencoding()``.
+    env = {**os.environ, "PYTHONUTF8": "1"}
     result = subprocess.run(
         [sys.executable, "-c", probe, shell],
         capture_output=True,
@@ -164,7 +193,7 @@ import deerflow.sandbox.local.local_sandbox as local_sandbox
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
 
 # Pin the fallback code page so the regression holds on non-zh-CN runners.
-local_sandbox.locale.getpreferredencoding = lambda _: "cp936"
+local_sandbox.locale.getencoding = lambda: "cp936"
 LocalSandbox._get_shell = staticmethod(lambda: sys.argv[1])
 expected = "\u4f60\u597d \u65e5\u672c\u8a9e"
 interpreter = sys.executable.replace("\\", "/")
@@ -174,7 +203,10 @@ command = f"'{interpreter}' -c \"print('{expected}')\""
 output = LocalSandbox("encoding-probe").execute_command(command, timeout=30, env={"PYTHONIOENCODING": "cp936"})
 assert output == expected + "\n", ascii(output)
 """
-    env = {**os.environ, "PYTHONUTF8": "0"}
+    # Run the probe under Python UTF-8 mode on purpose: ``getpreferredencoding``
+    # would report ``"utf-8"`` there and silently disable the locale fallback,
+    # so a green run proves the fallback source is ``locale.getencoding()``.
+    env = {**os.environ, "PYTHONUTF8": "1"}
     result = subprocess.run(
         [sys.executable, "-c", probe, shell],
         capture_output=True,
@@ -204,7 +236,7 @@ import deerflow.sandbox.local.local_sandbox as local_sandbox
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
 
 # Pin the fallback code page so the regression holds on non-zh-CN runners.
-local_sandbox.locale.getpreferredencoding = lambda _: "cp936"
+local_sandbox.locale.getencoding = lambda: "cp936"
 LocalSandbox._get_shell = staticmethod(lambda: sys.argv[1])
 expected = "\u4f60\u597d \u65e5\u672c\u8a9e"
 interpreter = sys.executable.replace("\\", "/")
@@ -214,7 +246,10 @@ command = f"& '{interpreter}' -c \"print('{expected}')\""
 output = LocalSandbox("encoding-probe").execute_command(command, timeout=30, env={"PYTHONIOENCODING": "cp936"})
 assert output == expected + "\n", ascii(output)
 """
-    env = {**os.environ, "PYTHONUTF8": "0"}
+    # Run the probe under Python UTF-8 mode on purpose: ``getpreferredencoding``
+    # would report ``"utf-8"`` there and silently disable the locale fallback,
+    # so a green run proves the fallback source is ``locale.getencoding()``.
+    env = {**os.environ, "PYTHONUTF8": "1"}
     result = subprocess.run(
         [sys.executable, "-c", probe, shell],
         capture_output=True,
@@ -381,7 +416,7 @@ def test_execute_command_uses_powershell_command_mode_on_windows(monkeypatch):
 
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
     monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": r"C:\Windows", "OPENAI_API_KEY": "should-not-leak"})
-    monkeypatch.setattr(local_sandbox.locale, "getpreferredencoding", lambda _: "cp936")
+    monkeypatch.setattr(local_sandbox.locale, "getencoding", lambda: "cp936")
     monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"))
     monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(fake_run))
 
@@ -419,7 +454,7 @@ def test_execute_command_forces_utf8_console_for_powershell_cjk_output(monkeypat
 
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
     monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": r"C:\Windows"})
-    monkeypatch.setattr(local_sandbox.locale, "getpreferredencoding", lambda _: "cp936")
+    monkeypatch.setattr(local_sandbox.locale, "getencoding", lambda: "cp936")
     monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: "pwsh"))
     monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(fake_run))
 
@@ -446,7 +481,7 @@ def test_execute_command_forces_utf8_decoding_with_locale_fallback_for_msys(monk
 
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
     monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": r"C:\Program Files\Git\bin"})
-    monkeypatch.setattr(local_sandbox.locale, "getpreferredencoding", lambda _: "cp936")
+    monkeypatch.setattr(local_sandbox.locale, "getencoding", lambda: "cp936")
     monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: r"C:\Program Files\Git\bin\sh.exe"))
     monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(fake_run))
 

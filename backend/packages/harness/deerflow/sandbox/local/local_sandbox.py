@@ -59,14 +59,31 @@ class _BoundedPipeCapture:
         children (``python.exe``, CLI shims) inherit the pipe and keep writing the
         host code page, which is not valid in the forced encoding. Rather than
         replacing every such byte with U+FFFD, retry the whole buffer with
-        ``fallback_encoding`` (the locale) when the primary decode fails.
+        ``fallback_encoding`` (the locale) when the primary decode fails. A
+        capture cut mid-character (capture-cap boundary or a timeout kill) ends
+        in a partial multi-byte sequence; the strict attempt is retried once
+        without that tail so one split character cannot cascade the whole
+        buffer to the fallback.
         """
         if self._fallback_encoding is None:
             return data.decode(self._encoding, errors="replace")
         try:
             return data.decode(self._encoding)
         except UnicodeDecodeError:
-            return data.decode(self._fallback_encoding, errors="replace")
+            pass
+        if self._encoding.replace("_", "-").lower() == "utf-8":
+            # A capture cut mid-character (capture-cap boundary or a timeout
+            # kill) ends in a partial multi-byte sequence. Retry the strict
+            # attempt without that tail so one split character cannot cascade
+            # the whole buffer to the fallback; complete non-UTF-8 buffers
+            # still fail the retried attempt and reach the fallback untouched.
+            trimmed = _trim_trailing_partial_utf8(data)
+            if len(trimmed) != len(data):
+                try:
+                    return trimmed.decode(self._encoding)
+                except UnicodeDecodeError:
+                    pass
+        return data.decode(self._fallback_encoding, errors="replace")
 
     def append(self, chunk: bytes) -> None:
         with self._lock:
@@ -94,6 +111,30 @@ class _BoundedPipeCapture:
             notice = f"\n... [output truncated after {kept_bytes} of {total_bytes} bytes; remaining output discarded] ..."
             output += notice
         return output
+
+
+def _trim_trailing_partial_utf8(data: bytes) -> bytes:
+    """Strip an incomplete multi-byte UTF-8 sequence from the end of ``data``.
+
+    A bounded capture can stop mid-character: the byte cap may cut between a
+    lead byte and its continuations, and a timeout kill can interrupt the
+    child mid-write. The result is only used as a retry after a failed strict
+    decode — a complete buffer that merely *ends* in a byte shaped like a bare
+    UTF-8 lead (for example the ``C3`` tail of a CP936 buffer) still fails the
+    retried strict attempt and reaches the locale fallback untouched.
+    """
+    for offset in range(min(len(data), 4)):
+        byte = data[len(data) - 1 - offset]
+        if byte < 0x80 or 0xC0 <= byte <= 0xC1 or byte > 0xF4:
+            # ASCII or an invalid byte: whatever precedes it is either complete
+            # or unrecoverable either way; stop without trimming.
+            break
+        if byte >= 0xC2:  # lead byte found
+            expected = 2 if byte < 0xE0 else (3 if byte < 0xF0 else 4)
+            if offset + 1 < expected:
+                return data[: len(data) - 1 - offset]
+            break
+    return data
 
 
 @dataclass(frozen=True)
@@ -591,7 +632,12 @@ class LocalSandbox(Sandbox):
                     timeout,
                     sandbox_env,
                     encoding="utf-8",
-                    fallback_encoding=locale.getpreferredencoding(False),
+                    # ``locale.getencoding()`` (3.11+, repo floor is 3.12)
+                    # deliberately ignores Python UTF-8 mode and returns the code
+                    # page the child's CRT actually used — ``getpreferredencoding``
+                    # would report ``"utf-8"`` on hosts running under
+                    # ``PYTHONUTF8=1``, silently making this fallback a no-op.
+                    fallback_encoding=locale.getencoding(),
                 )
             elif self._is_powershell(shell):
                 # PowerShell is pinned to UTF-8 by the preamble above, so its own
@@ -607,7 +653,12 @@ class LocalSandbox(Sandbox):
                     timeout,
                     sandbox_env,
                     encoding="utf-8",
-                    fallback_encoding=locale.getpreferredencoding(False),
+                    # ``locale.getencoding()`` (3.11+, repo floor is 3.12)
+                    # deliberately ignores Python UTF-8 mode and returns the code
+                    # page the child's CRT actually used — ``getpreferredencoding``
+                    # would report ``"utf-8"`` on hosts running under
+                    # ``PYTHONUTF8=1``, silently making this fallback a no-op.
+                    fallback_encoding=locale.getencoding(),
                 )
             else:
                 stdout, stderr, returncode, timed_out = self._run_windows_command(args, timeout, sandbox_env)
