@@ -114,7 +114,7 @@ class RedisCheckpointHistoryCache:
         stem = thread_key_stem(key_prefix, thread_id)
         # The configured namespace is a literal key prefix, not a Redis glob.
         pattern = "".join("\\" + char if char in "\\*?[]" else char for char in stem) + "*"
-        encoded_stem = stem.encode("utf-8")
+        # redis-py encodes SCAN results with the configured connection encoder.\n        # A fixed UTF-8 fence silently skips owned keys for other encodings.\n        encoded_stem = self._client.connection_pool.get_encoder().encode(stem)
         try:
             cursor = 0
             while True:
