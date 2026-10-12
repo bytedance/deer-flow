@@ -14,6 +14,7 @@ function copyTextWithExecCommand(text: string): boolean {
     throw new Error("Clipboard DOM fallback not available");
   }
 
+  const activeElement = document.activeElement;
   const textarea = document.createElement("textarea");
   textarea.value = text;
   textarea.setAttribute("readonly", "");
@@ -29,6 +30,7 @@ function copyTextWithExecCommand(text: string): boolean {
     textarea.select();
     copied = document.execCommand("copy");
   } finally {
+    const restoreFocus = document.activeElement === textarea;
     if (appended) {
       const parentNode = textarea.parentNode;
       if (typeof textarea.remove === "function") {
@@ -36,6 +38,13 @@ function copyTextWithExecCommand(text: string): boolean {
       } else if (typeof parentNode?.removeChild === "function") {
         parentNode.removeChild(textarea);
       }
+    }
+    if (
+      restoreFocus &&
+      activeElement instanceof HTMLElement &&
+      activeElement.isConnected
+    ) {
+      activeElement.focus({ preventScroll: true });
     }
   }
 
