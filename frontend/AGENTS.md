@@ -60,6 +60,7 @@ The tasks page (`app/workspace/scheduled-tasks/page.tsx`) only composes `compone
 `notification_group_connection_id` adds one Feishu group without changing personal
 notifications. The selector requires `features.scheduled_tasks.group_notifications`
 (absent = false); otherwise a saved target is preserved but explicitly clearable.
+While the capability query is pending, show loading without a clear control.
 Reuse `useChannelConnections`: offer connected Feishu `group` bindings with matching
 nonempty metadata chat/workspace IDs. Show workspace names; disable unnamed groups
 and never display raw IDs. Loading/errors preserve selections. PATCH omits unchanged

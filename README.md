@@ -2817,6 +2817,9 @@ group, use **Bind a Feishu group** to get a command, send it while mentioning th
 bot in that group, then refresh the list and select the group by name. The app
 needs bot-send permission and `im:chat:read` to display its group names.
 
+While the form checks group-notification support, it shows a loading hint and
+retains the saved selection.
+
 No group is selected automatically. Clearing the selection stops new group
 notices; changing it affects future notices, while already queued notices keep
 their original target. A disconnected binding never receives a waiting notice.

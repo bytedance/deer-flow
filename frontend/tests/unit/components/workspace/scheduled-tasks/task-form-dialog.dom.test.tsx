@@ -44,7 +44,7 @@ const {
   updateTask: rs.fn(),
   listConnections: rs.fn(async (): Promise<ChannelConnection[]> => []),
   connectProvider: rs.fn(),
-  groupNotifications: { value: true as boolean | undefined },
+  groupNotifications: { value: true as boolean | undefined, isLoading: false },
 }));
 
 rs.mock("@/core/scheduled-tasks/api", () => ({
@@ -62,6 +62,7 @@ rs.mock("@/core/channels/api", () => ({
 rs.mock("@/core/features/hooks", () => ({
   useScheduledTasksFeature: () => ({
     groupNotifications: groupNotifications.value,
+    isLoading: groupNotifications.isLoading,
   }),
 }));
 rs.mock("sonner", () => ({
@@ -78,6 +79,7 @@ afterEach(() => {
   listConnections.mockResolvedValue([]);
   connectProvider.mockReset();
   groupNotifications.value = true;
+  groupNotifications.isLoading = false;
   document.cookie = "locale=; max-age=0; path=/";
 });
 
@@ -122,7 +124,7 @@ function renderForm(
     defaultOptions: { queries: { retry: false } },
   });
   clients.push(client);
-  return render(
+  const tree = () => (
     <QueryClientProvider client={client}>
       <I18nProvider initialLocale={locale}>
         <TaskFormDialog
@@ -131,11 +133,100 @@ function renderForm(
           onOpenChange={rs.fn()}
         />
       </I18nProvider>
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
+  const view = render(tree());
+  return { ...view, rerenderForm: () => view.rerender(tree()) };
 }
 
 describe("TaskFormDialog", () => {
+  test("a pending capability preserves the saved group through a title edit and then shows the enabled selector", async () => {
+    groupNotifications.value = false;
+    groupNotifications.isLoading = true;
+    listConnections.mockResolvedValue([group()]);
+    updateTask.mockResolvedValue(task());
+    const view = renderForm({
+      mode: "edit",
+      task: task({ notification_group_connection_id: "group-binding" }),
+    });
+
+    expect(screen.getByText("Loading groups…")).toBeTruthy();
+    expect(
+      screen.queryByText(
+        "This task has a saved group destination, but group notifications are unavailable on this server.",
+      ),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Clear group notification" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("combobox", {
+        name: "Also notify a Feishu group (optional)",
+      }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Bind a Feishu group" }),
+    ).toBeNull();
+    expect(listConnections).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Title" }), {
+      target: { value: "Updated title" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() =>
+      expect(updateTask).toHaveBeenCalledWith("task-1", {
+        title: "Updated title",
+      }),
+    );
+
+    groupNotifications.value = true;
+    groupNotifications.isLoading = false;
+    view.rerenderForm();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("combobox", {
+          name: "Also notify a Feishu group (optional)",
+        }).textContent,
+      ).toBe("Planning team"),
+    );
+    expect(
+      screen.queryByRole("button", { name: "Clear group notification" }),
+    ).toBeNull();
+  });
+
+  test("a saved group can be explicitly cleared only after the capability resolves as disabled", async () => {
+    groupNotifications.value = false;
+    groupNotifications.isLoading = true;
+    updateTask.mockResolvedValue(task());
+    const view = renderForm({
+      mode: "edit",
+      task: task({ notification_group_connection_id: "group-binding" }),
+    });
+
+    expect(screen.getByText("Loading groups…")).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "Clear group notification" }),
+    ).toBeNull();
+    groupNotifications.isLoading = false;
+    view.rerenderForm();
+
+    expect(
+      screen.getByText(
+        "This task has a saved group destination, but group notifications are unavailable on this server.",
+      ),
+    ).toBeTruthy();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Clear group notification" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() =>
+      expect(updateTask).toHaveBeenCalledWith("task-1", {
+        notification_group_connection_id: null,
+      }),
+    );
+    expect(listConnections).not.toHaveBeenCalled();
+  });
+
   test.each([
     [
       "en-US",

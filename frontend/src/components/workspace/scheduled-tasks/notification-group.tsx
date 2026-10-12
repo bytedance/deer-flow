@@ -28,8 +28,15 @@ type NotificationGroupSelectProps = {
 
 /** Older Gateways ignore unknown fields: do not offer a destination they cannot save. */
 export function NotificationGroupSelect(props: NotificationGroupSelectProps) {
-  const { groupNotifications } = useScheduledTasksFeature();
+  const { groupNotifications, isLoading } = useScheduledTasksFeature();
   const { t } = useI18n();
+  if (isLoading) {
+    return (
+      <p role="status" className="text-muted-foreground text-sm">
+        {t.scheduledTasks.notificationGroup.loading}
+      </p>
+    );
+  }
   if (!groupNotifications && props.value) {
     return (
       <div className="flex flex-col gap-2">
