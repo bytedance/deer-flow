@@ -67,6 +67,13 @@ Remote links are not followed and linked local destinations are rejected.
 Mirrored names must also be portable host paths: traversal, backslashes, colons,
 Windows reserved components and components ending in a space or dot are skipped
 with a warning, including when the Gateway runs on Unix.
+The entire accepted listing is checked before any download for names that differ
+only by case or Unicode normalization, including directory components and records
+beyond the file limit. All outputs under an ambiguous component are skipped, on
+every host, so one remote report cannot overwrite another on a case-insensitive
+volume. A path that aliases a differently spelled existing local file or directory
+is also skipped; previous complete copies are preserved. Unambiguous outputs
+continue to be mirrored.
 Files deleted remotely are not removed from the local outputs directory.
 Non-UTF-8 filename records are skipped individually with a warning and still
 count against the file limit. Each release revisits retained outputs, including

@@ -548,6 +548,107 @@ def test_output_sync_refreshes_same_size_edits(output_sync_provider):
     assert (outputs / "report.txt").read_bytes() == b"later"
 
 
+@pytest.mark.parametrize(
+    "names",
+    [
+        ("Report.txt", "report.txt"),
+        ("Charts/report.txt", "charts/report.txt"),
+        ("Charts/first.txt", "charts/second.txt"),
+        ("nested/Report.txt", "nested/report.txt"),
+        ("Charts", "charts/report.txt"),
+        ("Résumé.txt", "résumé.txt"),
+        ("résumé.txt", "re\u0301sume\u0301.txt"),
+    ],
+)
+@pytest.mark.parametrize("reverse", [False, True])
+def test_output_sync_rejects_ambiguous_remote_names_before_copying(output_sync_provider, caplog, names, reverse):
+    provider, remote, sandbox_id, outputs = output_sync_provider
+    names = names[::-1] if reverse else names
+    remote.file_data.update({f"/mnt/user-data/outputs/{name}": f"content {index}".encode() for index, name in enumerate(names)})
+    remote.file_data["/mnt/user-data/outputs/safe.txt"] = b"unambiguous report"
+
+    provider.release(sandbox_id)
+
+    assert sorted(path.relative_to(outputs).as_posix() for path in outputs.rglob("*") if path.is_file()) == ["safe.txt"]
+    assert (outputs / "safe.txt").read_bytes() == b"unambiguous report"
+    assert remote.files.calls == [("read_bytes_stream", "/mnt/user-data/outputs/safe.txt")]
+    assert "ambiguous" in caplog.text
+    assert sandbox_id in provider._warm_pool
+
+
+def test_output_sync_collision_preflight_includes_records_beyond_file_limit(output_sync_provider, monkeypatch):
+    provider, remote, sandbox_id, outputs = output_sync_provider
+    remote.file_data.update(
+        {
+            "/mnt/user-data/outputs/Report.txt": b"first report",
+            "/mnt/user-data/outputs/safe.txt": b"safe report",
+            "/mnt/user-data/outputs/report.txt": b"different report",
+        }
+    )
+    monkeypatch.setattr(provider, "_MAX_SYNC_FILES", 2)
+
+    provider.release(sandbox_id)
+
+    assert sorted(path.name for path in outputs.iterdir()) == ["safe.txt"]
+    assert remote.files.calls == [("read_bytes_stream", "/mnt/user-data/outputs/safe.txt")]
+
+
+def test_output_sync_remote_collision_preserves_previous_copy(output_sync_provider):
+    provider, remote, sandbox_id, outputs = output_sync_provider
+    outputs.mkdir(parents=True)
+    (outputs / "Report.txt").write_bytes(b"previous complete report")
+    remote.file_data.update({"/mnt/user-data/outputs/Report.txt": b"new upper report", "/mnt/user-data/outputs/report.txt": b"new lower report"})
+
+    provider.release(sandbox_id)
+
+    assert (outputs / "Report.txt").read_bytes() == b"previous complete report"
+    assert sorted(path.name for path in outputs.iterdir()) == ["Report.txt"]
+    assert remote.files.calls == []
+
+
+@pytest.mark.parametrize("names", [("Report.txt", "report.txt"), ("Charts/old.txt", "charts/new.txt"), ("Résumé.txt", "résumé.txt"), ("résumé.txt", "re\u0301sume\u0301.txt")])
+def test_output_sync_preserves_existing_host_alias(output_sync_provider, names):
+    provider, remote, sandbox_id, outputs = output_sync_provider
+    existing, incoming = names
+    previous = outputs / existing
+    previous.parent.mkdir(parents=True)
+    previous.write_bytes(b"previous complete report")
+    remote.file_data[f"/mnt/user-data/outputs/{incoming}"] = b"different remote report"
+    remote.file_data["/mnt/user-data/outputs/safe.txt"] = b"safe report"
+
+    provider.release(sandbox_id)
+
+    assert previous.read_bytes() == b"previous complete report"
+    assert sorted(path.relative_to(outputs).as_posix() for path in outputs.rglob("*") if path.is_file()) == sorted([existing, "safe.txt"])
+    assert remote.files.calls == [("read_bytes_stream", "/mnt/user-data/outputs/safe.txt")]
+
+
+def test_output_sync_rejects_alias_planted_during_download(output_sync_provider, monkeypatch):
+    provider, remote, sandbox_id, outputs = output_sync_provider
+    remote.file_data["/mnt/user-data/outputs/Report.txt"] = b"remote report"
+    read_stream = remote.files.read_bytes_stream
+
+    def plant_alias(path):
+        (outputs / "report.txt").write_bytes(b"other complete report")
+        yield from read_stream(path)
+
+    monkeypatch.setattr(remote.files, "read_bytes_stream", plant_alias)
+    provider.release(sandbox_id)
+
+    assert (outputs / "report.txt").read_bytes() == b"other complete report"
+    assert sorted(path.name for path in outputs.iterdir()) == ["report.txt"]
+
+
+def test_output_sync_keeps_distinct_files_in_the_same_directory(output_sync_provider):
+    provider, remote, sandbox_id, outputs = output_sync_provider
+    remote.file_data.update({"/mnt/user-data/outputs/Charts/first.txt": b"first", "/mnt/user-data/outputs/Charts/second.txt": b"second"})
+
+    provider.release(sandbox_id)
+
+    assert (outputs / "Charts/first.txt").read_bytes() == b"first"
+    assert (outputs / "Charts/second.txt").read_bytes() == b"second"
+
+
 @pytest.mark.parametrize("name", ["con.txt", "PRN", "aux .log", "NUL.bin", "COM9", "lpt1.doc", "COM¹.txt", "LPT²", "CONIN$.txt", "CONOUT$"])
 def test_output_destination_rejects_reserved_components_without_deprecated_api(tmp_path, monkeypatch, name):
     from pathlib import PureWindowsPath

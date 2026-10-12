@@ -12,6 +12,10 @@ validation; failed head/encoder stages and truncated listings still fail closed.
 Native downloads enforce the remaining byte budget and cooperative deadline,
 closing the stream on failure. Publish via an exclusively created temporary file and
 atomic replacement; reject traversal and existing linked host destinations.
+Preflight the entire accepted listing for case-folded, NFC-equivalent component
+aliases before any download, including records beyond the transfer cap. Skip all
+paths under ambiguous components. Reject differently spelled local aliases both
+before transfer and before publication; preserve previous complete copies.
 Keep failed synchronization best effort, preserve prior complete copies, and
 do not remove remotely deleted files. Cover the real listing shell and release
 to Gateway artifact reader with offline transports in

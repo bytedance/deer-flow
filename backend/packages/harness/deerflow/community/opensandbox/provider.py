@@ -13,6 +13,7 @@ import stat
 import tempfile
 import threading
 import time
+import unicodedata
 import uuid
 from datetime import timedelta
 from functools import partial
@@ -407,19 +408,61 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             self._destroy_quietly(sandbox, context="released during shutdown")
 
     @staticmethod
-    def _output_destination(root: Path, remote_path: str) -> Path:
+    def _output_parts(remote_path: str) -> tuple[str, ...]:
         prefix = "/mnt/user-data/outputs/"
         if not remote_path.startswith(prefix) or "\\" in remote_path:
             raise ValueError("Output path is outside the outputs directory")
         parts = remote_path[len(prefix) :].split("/")
         if any(part in {"", ".", ".."} or ":" in part or part.partition(".")[0].rstrip(" ").upper() in _WINDOWS_RESERVED_NAMES or part.endswith((" ", ".")) for part in parts):
             raise ValueError("Unsafe output path")
+        return tuple(parts)
+
+    @staticmethod
+    def _output_name_key(name: str) -> str:
+        return unicodedata.normalize("NFC", name.casefold())
+
+    @classmethod
+    def _ambiguous_output_paths(cls, remote_paths: list[str | None]) -> set[str]:
+        # Component IDs keep this preflight linear in the bounded listing size,
+        # even for deeply nested names. A directory alias rejects all children.
+        components: dict[tuple[int, str], tuple[str, int]] = {}
+        ambiguous: set[int] = set()
+        path_nodes: dict[str, list[int]] = {}
+        for remote_path in remote_paths:
+            if remote_path is None:
+                continue
+            try:
+                parts = cls._output_parts(remote_path)
+            except ValueError:
+                continue
+            parent = 0
+            nodes = path_nodes.setdefault(remote_path, [])
+            for part in parts:
+                key = (parent, cls._output_name_key(part))
+                spelling, node = components.setdefault(key, (part, len(components) + 1))
+                if spelling != part:
+                    ambiguous.add(node)
+                nodes.append(node)
+                parent = node
+        return {path for path, nodes in path_nodes.items() if ambiguous.intersection(nodes)}
+
+    @classmethod
+    def _output_destination(cls, root: Path, remote_path: str) -> Path:
+        parts = cls._output_parts(remote_path)
         target = root.joinpath(*PurePosixPath(*parts).parts)
         # Reject links/junctions in existing parents, including the owner/thread
         # bucket. Resolving the root first would trust an escaped linked root.
         for component in reversed((target, *target.parents)):
             if component.is_symlink() or component.is_junction():
                 raise ValueError("Symlinked output destination")
+        parent = root
+        for part in parts:
+            if parent.is_dir():
+                key = cls._output_name_key(part)
+                with os.scandir(parent) as entries:
+                    if any(entry.name != part and cls._output_name_key(entry.name) == key for entry in entries):
+                        raise ValueError("Output destination aliases an existing path")
+            parent = parent / part
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists() and not stat.S_ISREG(target.stat().st_mode):
             raise ValueError("Output destination is not a regular file")
@@ -461,15 +504,25 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             raise OSError("OpenSandbox output listing was incomplete")
         if marker == "__DF_OUTPUT_SYNC__:1:0:0":
             logger.warning("OpenSandbox output listing had traversal errors; synchronizing complete records")
+        remote_paths: list[str | None] = []
+        for remote_record in filter(None, raw_listing.split(b"\0")):
+            try:
+                remote_paths.append(remote_record.decode("utf-8"))
+            except UnicodeDecodeError:
+                logger.warning("Skipping non-UTF-8 OpenSandbox output %r", remote_record)
+                remote_paths.append(None)
+        # Include records beyond the transfer cap: publishing the first of two
+        # aliases would otherwise expose its bytes through both artifact URLs.
+        ambiguous_paths = self._ambiguous_output_paths(remote_paths)
         total = 0
-        for index, remote_record in enumerate(filter(None, raw_listing.split(b"\0"))):
+        for index, remote_path in enumerate(remote_paths):
             if index >= self._MAX_SYNC_FILES or total >= self._MAX_SYNC_TOTAL_BYTES or time.monotonic() >= deadline:
                 logger.warning("OpenSandbox output synchronization stopped at its file, byte or time limit")
                 break
-            try:
-                remote_path = remote_record.decode("utf-8")
-            except UnicodeDecodeError:
-                logger.warning("Skipping non-UTF-8 OpenSandbox output %r", remote_record)
+            if remote_path is None:
+                continue
+            if remote_path in ambiguous_paths:
+                logger.warning("Skipping ambiguous OpenSandbox output %r", remote_path)
                 continue
             staged: Path | None = None
             transferring = False
