@@ -7,6 +7,8 @@ import posixpath
 import re
 import shlex
 import threading
+import time
+from contextlib import suppress
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -299,11 +301,30 @@ class OpenSandboxSandbox(Sandbox):
         self._file_op(lambda files: files.write_file(resolved, content, mode=644))
 
     def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
-        limit = download_limit(max_bytes, _MAX_DOWNLOAD_SIZE)
+        return self._download_file_bounded(path, max_bytes=download_limit(max_bytes, _MAX_DOWNLOAD_SIZE))
+
+    def _download_file_bounded(self, path: str, *, max_bytes: int, deadline: float | None = None) -> bytes:
+        """Use the native streaming transport with the release pass's remaining budget."""
         resolved = self._resolve_download_path(path)
 
         def read_bounded(files) -> bytes:
-            return read_download_stream(files.read_bytes_stream(resolved), limit, path)
+            stream = files.read_bytes_stream(resolved)
+            if deadline is None:
+                return read_download_stream(stream, max_bytes, path)
+
+            def timed_chunks():
+                try:
+                    for chunk in stream:
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError("OpenSandbox output synchronization timed out")
+                        yield chunk
+                finally:
+                    close = getattr(stream, "close", None)
+                    if callable(close):
+                        with suppress(Exception):
+                            close()
+
+            return read_download_stream(timed_chunks(), max_bytes, path)
 
         try:
             return self._file_op(read_bounded)
