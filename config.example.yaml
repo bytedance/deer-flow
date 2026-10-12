@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 59
+config_version: 60
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -2886,8 +2886,10 @@ mcp_tasks:
 # DEER_FLOW_MULTI_INSTANCE=1, which deploy tooling such as a Helm chart can
 # set from its replica count) startup requires database.backend: postgres, run_events.backend: db,
 # run_ownership.heartbeat_enabled: true and a Redis stream bridge, and refuses
-# an explicit sandbox.ownership.type: memory, process-local browser tools, and
-# scheduler.enabled: true without scheduler.multi_instance: true.
+# an explicit sandbox.ownership.type: memory, process-local browser tools,
+# scheduler.enabled: true without scheduler.multi_instance: true, and
+# channels.leader_lease.enabled: false while an IM channel other than GitHub
+# is enabled (see the IM Channels section below).
 # Restart required; apply the same value to every instance.
 deployment:
   multi_instance: false
@@ -3044,6 +3046,26 @@ run_ownership:
 #   # outer shutdown timeout remains the process-level bound for incomplete cleanup.
 #   shutdown_grace_period_seconds: 3
 #   #
+#   # Leader lease: with more than one Gateway instance, only one instance may
+#   # hold a provider's platform connection (Telegram rejects a second poller
+#   # with 409, Discord answers every message twice). The lease will be a row
+#   # per provider in the shared database, held by one instance and renewed on
+#   # a heartbeat; a crashed holder is replaced after lease_seconds +
+#   # grace_seconds, a cleanly stopped one within a heartbeat. The transport
+#   # ownership itself ships separately: in this version the section only drives
+#   # the startup gate, so keep ONE instance while channels are enabled.
+#   # Restart-required.
+#   leader_lease:
+#     # auto (default): on whenever the Gateway sees a multi-process signal
+#     # (GATEWAY_WORKERS / WEB_CONCURRENCY > 1, deployment.multi_instance: true
+#     # or DEER_FLOW_MULTI_INSTANCE=1), off on a single instance. true: always
+#     # on. false: never -- a multi-process deployment with an IM channel other
+#     # than GitHub enabled then refuses to start. auto/true are reserved until
+#     # the lease ships; they do not yet stop every instance from connecting.
+#     enabled: auto
+#     lease_seconds: 30   # validity of a held lease; renewed every lease_seconds // 3
+#     grace_seconds: 10   # extra time before a peer may take an expired lease
+#   #
 #   # Docker Compose note:
 #   # If channels run inside the gateway container, use container DNS names instead
 #   # of localhost, for example:
@@ -3067,7 +3089,7 @@ run_ownership:
 #     enabled: false
 #     app_id: $QQ_APP_ID
 #     client_secret: $QQ_CLIENT_SECRET
-#     allowed_users: []  # QQ OpenIDs, not numeric QQ account numbers; empty allows all
+#     allowed_users: []  # QQ OpenIDs, not numeric QQ account numbers; empty allows all; a single ID is one entry; unparseable non-empty lists fail closed
 #     sandbox: false    # REST sandbox host only; console sandbox membership is separate
 #
 #   feishu:

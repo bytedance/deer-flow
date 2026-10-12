@@ -1240,6 +1240,26 @@ class TestAdaptMarkdownForDingtalk:
 
 
 class TestConvertMarkdownTable:
+    @pytest.mark.parametrize(
+        ("header", "row", "expected"),
+        [
+            ("| Rule | Meaning |", r"| foo\|bar | alternative |", "> **Rule**: foo\\|bar\n> **Meaning**: alternative\n"),
+            (r"| Rule\|Pattern | Meaning |", "| regex | alternative |", "> **Rule\\|Pattern**: regex\n> **Meaning**: alternative\n"),
+            ("| Rule | Meaning |", "|| alternative |", "> **Rule**: \n> **Meaning**: alternative\n"),
+            ("| Rule | Meaning |", "| regex ||", "> **Rule**: regex\n> **Meaning**: \n"),
+            ("| Rule | Meaning |", r"| regex | value\|", "> **Rule**: regex\n> **Meaning**: value\\|\n"),
+            ("| Rule | Meaning |", r"| foo\|bar\|baz | alternative |", "> **Rule**: foo\\|bar\\|baz\n> **Meaning**: alternative\n"),
+        ],
+        ids=["escaped-body-pipe", "escaped-header-pipe", "leading-empty-cell", "trailing-empty-cell", "escaped-final-pipe", "multiple-escaped-pipes"],
+    )
+    def test_cell_boundaries_preserved(self, header, row, expected):
+        text = f"{header}\n|---|---|\n{row}"
+        assert _convert_markdown_table(text) == expected
+
+    def test_fallback_adapter_preserves_table_values(self):
+        text = "| Rule | Meaning |\n|---|---|\n| `foo\\|bar` | alternative |"
+        assert _adapt_markdown_for_dingtalk(text) == "> **Rule**: **foo\\|bar**\n> **Meaning**: alternative\n"
+
     def test_simple_table(self):
         text = "| Name | Age |\n|------|-----|\n| Alice | 30 |\n| Bob | 25 |"
         result = _convert_markdown_table(text)

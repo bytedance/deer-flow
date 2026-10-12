@@ -119,6 +119,28 @@ _HORIZONTAL_RULE_RE = re.compile(r"^-{3,}$", re.MULTILINE)
 _TABLE_SEPARATOR_RE = re.compile(r"^\|[-:| ]+\|$", re.MULTILINE)
 
 
+def _split_markdown_table_row(row: str) -> list[str]:
+    r"""Keep escaped pipes and empty cells when removing the outer borders.
+
+    Known boundary: the single-character lookbehind in the split pattern
+    cannot distinguish an escaped pipe (``\|``) from an escaped backslash
+    immediately followed by a real separator (``\\|``). A cell ending in a
+    literal backslash therefore absorbs the next cell: ``| foo\\ | bar |``
+    splits as one cell instead of two. GFM counts consecutive backslashes
+    for this reason; doing so is out of scope here — this helper is
+    intentionally not a general Markdown parser.
+    """
+    # ``(?<!\\)`` inspects only one preceding character, so the second
+    # backslash of ``\\|`` is mistaken for an escaping backslash and the
+    # pipe is kept whole. See the boundary note in the docstring above.
+    cells = re.split(r"(?<!\\)\|", row.strip())
+    if cells and cells[0] == "":
+        cells.pop(0)
+    if cells and cells[-1] == "":
+        cells.pop()
+    return [cell.strip() for cell in cells]
+
+
 def _convert_markdown_table(text: str) -> str:
     # DingTalk sampleMarkdown does not render pipe-delimited tables.
     lines = text.split("\n")
@@ -128,10 +150,10 @@ def _convert_markdown_table(text: str) -> str:
         line = lines[i]
         # Detect table: header row followed by separator row
         if i + 1 < len(lines) and line.strip().startswith("|") and _TABLE_SEPARATOR_RE.match(lines[i + 1].strip()):
-            headers = [h.strip() for h in line.strip().strip("|").split("|")]
+            headers = _split_markdown_table_row(line)
             i += 2  # skip header + separator
             while i < len(lines) and lines[i].strip().startswith("|"):
-                cells = [c.strip() for c in lines[i].strip().strip("|").split("|")]
+                cells = _split_markdown_table_row(lines[i])
                 for h, c in zip(headers, cells):
                     result.append(f"> **{h}**: {c}")
                 result.append("")
