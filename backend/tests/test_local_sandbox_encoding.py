@@ -1,4 +1,6 @@
 import builtins
+import ctypes
+import locale
 import os
 import shutil
 import subprocess
@@ -646,10 +648,10 @@ def test_execute_command_does_not_set_msys_env_for_non_msys_posix_shell_on_windo
 
 
 def test_execute_command_uses_cmd_command_mode_on_windows(monkeypatch):
-    calls: list[tuple[list[str], float, dict[str, str]]] = []
+    calls: list[tuple[list[str], float, dict[str, str], dict]] = []
 
-    def fake_run(args, timeout, env):
-        calls.append((args, timeout, env))
+    def fake_run(args, timeout, env, **kwargs):
+        calls.append((args, timeout, env, kwargs))
         return "ok", "", 0, False
 
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
@@ -667,5 +669,58 @@ def test_execute_command_uses_cmd_command_mode_on_windows(monkeypatch):
             [r"C:\Windows\System32\cmd.exe", "/c", "echo hello"],
             600,
             {"PATH": r"C:\Windows"},
+            # cmd.exe and its children write the host ANSI code page, so the
+            # cmd branch pins the pipe decoder to it explicitly.
+            {"encoding": locale.getencoding()},
         )
     ]
+
+
+def test_execute_command_cmd_branch_ignores_utf8_mode_for_default_encoding(monkeypatch):
+    """Under Python UTF-8 mode ``getpreferredencoding`` reports ``"utf-8"``
+    while cmd.exe keeps writing the ANSI code page; the cmd branch must pin
+    ``locale.getencoding()`` instead of following UTF-8 mode, or every
+    non-ASCII byte in cmd output collapses to U+FFFD."""
+    monkeypatch.setattr(local_sandbox.locale, "getpreferredencoding", lambda _: "utf-8")
+    monkeypatch.setattr(local_sandbox.locale, "getencoding", lambda: "cp936")
+
+    kwargs: dict = {}
+
+    def fake_run(args, timeout, env, **kw):
+        kwargs.update(kw)
+        return "ok", "", 0, False
+
+    monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": r"C:\Windows"})
+    monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: r"C:\Windows\System32\cmd.exe"))
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(fake_run))
+
+    LocalSandbox("t").execute_command("echo hello")
+
+    assert kwargs["encoding"] == "cp936"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Requires real Windows cmd.exe")
+def test_execute_command_cmd_branch_roundtrip_with_ansi_code_page(monkeypatch):
+    """Real cmd.exe roundtrip: on a host whose ANSI code page can encode the
+    probe (zh-CN = cp936), cmd output must survive the cmd branch's pinned
+    decoder instead of collapsing to U+FFFD under Python UTF-8 mode."""
+    ansi = locale.getencoding()
+    try:
+        "你好".encode(ansi)
+    except UnicodeEncodeError:
+        pytest.skip(f"ANSI code page {ansi} cannot encode the probe")
+    # cmd.exe writes pipe output using the console output code page, which
+    # is process-wide state that sibling tests can change (the PowerShell
+    # roundtrips pin it to UTF-8 for their own assertions), so the probe
+    # only asserts when the console still matches the ANSI page this
+    # branch decodes with.
+    console_cp = ctypes.windll.kernel32.GetConsoleOutputCP()
+    ansi_cp = int(ansi[2:]) if ansi.startswith("cp") and ansi[2:].isdigit() else None
+    if ansi_cp is None or console_cp != ansi_cp:
+        pytest.skip(f"console output CP {console_cp} does not match ANSI {ansi}")
+    monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: r"C:\Windows\System32\cmd.exe"))
+
+    output = LocalSandbox("t").execute_command("echo 你好")
+
+    assert "你好" in output

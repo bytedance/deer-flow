@@ -679,6 +679,22 @@ class LocalSandbox(Sandbox):
                     # ``PYTHONUTF8=1``, silently making this fallback a no-op.
                     fallback_encoding=locale.getencoding(),
                 )
+            elif self._is_cmd_shell(shell):
+                # cmd.exe and the children it spawns write the host ANSI code
+                # page, not UTF-8. The ``encoding=None`` default must keep
+                # mirroring Python's own ``text=True`` behavior (which follows
+                # UTF-8 mode), so the cmd.exe branch pins the pipe decoder to
+                # the ANSI code page explicitly instead — ``getencoding()``
+                # (3.11+, repo floor is 3.12) ignores UTF-8 mode, while
+                # ``getpreferredencoding`` would report ``"utf-8"`` under
+                # ``PYTHONUTF8=1`` (and per PEP 686 once that becomes the
+                # default) and replace every non-ASCII byte with U+FFFD.
+                stdout, stderr, returncode, timed_out = self._run_windows_command(
+                    args,
+                    timeout,
+                    sandbox_env,
+                    encoding=locale.getencoding(),
+                )
             else:
                 stdout, stderr, returncode, timed_out = self._run_windows_command(args, timeout, sandbox_env)
         else:
