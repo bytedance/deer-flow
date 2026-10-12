@@ -16,7 +16,7 @@ from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeVar
 
-from app.channels.base import Channel, ChannelStopTimeout
+from app.channels.base import Channel, ChannelStopTimeout, ChannelUnavailable
 from app.channels.commands import is_known_channel_command, strip_leading_mentions
 from app.channels.connection_identity import attach_connection_identity, lookup_thread_id
 from app.channels.feishu_card_interaction import (
@@ -431,6 +431,59 @@ class FeishuChannel(Channel):
             max_retries=_max_retries,
             log_prefix="[Feishu]",
         )
+
+    async def send_notification(self, *, target: str, text_markdown: str) -> None:
+        """Send a static card to a bound user's open ID and await its ACK."""
+        await self._send_notification_card(receive_id=target, receive_id_type="open_id", text_markdown=text_markdown)
+
+    async def send_notification_for_owner(self, *, owner_user_id: str | None, target: str, text_markdown: str) -> None:
+        """Prefer a verified private chat when direct user delivery is restricted."""
+        if self._connection_repo is not None and owner_user_id:
+            try:
+                connections = await self._connection_repo.list_connections(owner_user_id)
+            except Exception as exc:
+                raise ChannelUnavailable("Feishu notification binding lookup is unavailable") from exc
+            matching_binding = False
+            for connection in connections:
+                if connection.get("owner_user_id") != owner_user_id or connection.get("provider") != self.name or connection.get("status") != "connected" or connection.get("external_account_id") != target:
+                    continue
+                matching_binding = True
+                metadata = connection.get("metadata")
+                if not isinstance(metadata, dict) or metadata.get("chat_type") != "p2p":
+                    continue
+                chat_id = self._non_empty_str(metadata.get("chat_id"))
+                if chat_id and chat_id == connection.get("workspace_id"):
+                    await self._send_notification_card(receive_id=chat_id, receive_id_type="chat_id", text_markdown=text_markdown)
+                    return
+            if not matching_binding:
+                raise RuntimeError("Feishu notification identity is no longer connected")
+        # Legacy and group bindings do not prove that their chat is private.
+        await self.send_notification(target=target, text_markdown=text_markdown)
+
+    async def _send_notification_card(self, *, receive_id: str, receive_id_type: Literal["open_id", "chat_id"], text_markdown: str) -> None:
+        """Send once and wait for the SDK ACK.
+
+        The notification outbox owns retries. Transport failures park its row;
+        a platform rejection remains a counted delivery attempt.
+        """
+        if not self.is_running or not self._api_client:
+            raise ChannelUnavailable("Feishu channel is not running")
+
+        from requests.exceptions import ConnectionError as RequestsConnectionError
+        from requests.exceptions import Timeout as RequestsTimeout
+
+        request = (
+            self._CreateMessageRequest.builder()
+            .receive_id_type(receive_id_type)
+            .request_body(self._CreateMessageRequestBody.builder().receive_id(receive_id).msg_type("interactive").content(self._build_card_content(text_markdown)).build())
+            .build()
+        )
+        try:
+            response = await asyncio.to_thread(self._api_client.im.v1.message.create, request)
+        except (RequestsConnectionError, RequestsTimeout, ConnectionError, TimeoutError, OSError) as exc:
+            raise ChannelUnavailable("Feishu notification transport is unavailable") from exc
+        if not response.success():
+            raise RuntimeError(f"Feishu notification rejected: code={response.code}")
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if not self._api_client:
@@ -1626,7 +1679,7 @@ class FeishuChannel(Channel):
             workspace_id=inbound.chat_id,
         )
 
-    async def _bind_connection_from_connect_code(self, *, message_id: str, chat_id: str, user_id: str, code: str) -> bool:
+    async def _bind_connection_from_connect_code(self, *, message_id: str, chat_id: str, user_id: str, code: str, chat_type: str | None = None) -> bool:
         if self._connection_repo is None or not code:
             return False
 
@@ -1647,6 +1700,7 @@ class FeishuChannel(Channel):
             metadata={
                 "chat_id": chat_id,
                 "message_id": message_id,
+                "chat_type": chat_type,
             },
             status="connected",
         )
@@ -1767,6 +1821,7 @@ class FeishuChannel(Channel):
                             chat_id=chat_id,
                             user_id=sender_id,
                             code=connect_code,
+                            chat_type=parsed.chat_type,
                         ),
                         self._main_loop,
                         name="bind_connection",

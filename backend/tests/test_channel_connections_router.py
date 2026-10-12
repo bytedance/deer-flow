@@ -205,7 +205,7 @@ def test_get_providers_uses_existing_channels_config(tmp_path):
         "telegram": False,
         "slack": False,
         "discord": False,
-        "feishu": False,
+        "feishu": True,
         "dingtalk": False,
         "wechat": False,
         "wecom": True,
