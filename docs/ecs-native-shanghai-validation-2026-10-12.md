@@ -20,4 +20,10 @@ Controller：139.224.205.56 / 192.168.0.190；Worker01：47.117.93.194 / 192.168
 
 ## 当前边界
 
-以上证明原 e84 环境的开机后人工恢复与 5 个交付守卫，尚不代表新镜像 build/transfer/deploy/smoke 全部通过。接下来仅验证交付主干，再执行一个真实业务冒烟，不重跑此前完整 B/C/BC 矩阵。NAS 自动 bind、数据库时间点恢复仍未验收。远程 Git 发布仍暂停。
+以上证明原 e84 环境的开机后人工恢复与 5 个交付守卫，尚不代表新镜像 build/transfer/deploy/smoke 全部通过。应用户要求，先完成唯一真实销售 C→B→C 业务冒烟（见下文），新交付主干仍待验证；不重跑此前完整 B/C/BC 矩阵。NAS 自动 bind、数据库时间点恢复仍未验收。远程 Git 发布仍暂停。
+
+## 唯一真实业务链路已通过
+
+`deerflow-native-business-sales-20261012 #3 SUCCESS`，172.310秒。实际 DeepSeek→普通 MCP B→通知自动续跑 C，四行示例销售 CSV 汇总并原生交付；合计3400.00，认证 HTTP200与 NAS 逐字节一致。两个 Run成功、三个工作物理完成、B attempt=1。独立复核通过，最终 drain=true/unreleased=0，worker原容器/e84健康、500m/1GiB。#1/#2为模型提交前的验收脚本导入/标识长度失败，原日志保留；没有重复实际模型业务。
+
+详见 [销售汇总业务验收](ecs-native-business-sales-validation-2026-10-12.md)。独立回执SHA `ba772155d11c8856223ac816c085323163fab991ce792c07c3135fb2d06c1935`。后续剩余交付主干 build/transfer/deploy/smoke，远程 Git 发布仍暂停。

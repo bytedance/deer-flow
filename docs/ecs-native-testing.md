@@ -486,3 +486,8 @@ Root independently verified terminal SUCCESS, receipt SHA `96567c76e2015aaa0eab2
 
 
 Final environment checkpoint #61 FAILURE: actual complete blocking-I/O passed229 (29.98s), while default shards3/4 timed out with no full counts. Three existing contract failures were repaired without adding cases. The independent source-venv fixture and twelve whole files plus complete shards3/4 remain pending; failed and partial results are preserved. Exact source/receipt/log/cleanup evidence is in the [resume record](ecs-native-shanghai-resume-2026-10-10.md#environment-repair-61-failure--complete-blocking-io-pass-default-groups-incomplete). Installed roles remain52ce; full backend and production packaging acceptance is not claimed.
+
+
+## 2026-10-12 真实销售业务链路
+
+开机恢复后原 e84 环境的唯一销售 C→B→C 主干在 `deerflow-native-business-sales-20261012 #3` SUCCESS，172.310秒。四行示例 CSV 真实委托 B worker 汇总，原生通知触发 C 续跑，通过 read_file/present_files 交付，认证下载200且金额3400.00/文件字节独立核对正确。两个 native Run success、三项账本工作 completed/physical_stopped、B attempt=1；收尾 drain=true/unreleased=0。前两次失败均在业务提交前，脚本与日志保留。详见 [本轮业务验收](ecs-native-business-sales-validation-2026-10-12.md)；此结果不替代新镜像交付主干验证。
