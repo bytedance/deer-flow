@@ -411,7 +411,8 @@ async def test_publication_preserves_permissions(host):
 
 
 @pytest.mark.asyncio
-async def test_managed_reader_lazily_recovers_accepted_publication(host, monkeypatch):
+@pytest.mark.parametrize("reader", ["load_skills", "load_custom_skill_diagnostics"])
+async def test_managed_reader_lazily_recovers_accepted_publication(host, monkeypatch, reader):
     def interrupted(*_):
         raise RuntimeError("simulated exit")
 
@@ -420,7 +421,11 @@ async def test_managed_reader_lazily_recovers_accepted_publication(host, monkeyp
     await host.service.check(proposal_id=proposal.proposal_id)
     operation = await host.service.commit(proposal_id=proposal.proposal_id, idempotency_key="crash")
     host.storage.get_custom_skill_file("example").write_text(NEW, encoding="utf-8")
-    assert host.storage.load_skills()
+    result = getattr(host.storage, reader)()
+    if reader == "load_skills":
+        assert result
+    else:
+        assert result == []
     assert host.recovery.get_operation(operation.operation_id).publication == "APPLIED"
 
 

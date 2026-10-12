@@ -319,7 +319,8 @@ class BoxliteBox(Sandbox):
         matches: list[str] = []
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
-        for entry in output.text.splitlines():
+        # Records are LF-delimited; other splitlines() boundaries can be path characters.
+        for entry in output.text.split("\n"):
             # Do NOT strip: trailing whitespace can be part of the filename.
             if not entry or (entry != root and not entry.startswith(root_prefix)):
                 continue
@@ -373,7 +374,8 @@ class BoxliteBox(Sandbox):
         root_prefix = root if root == "/" else f"{root}/"
         matches: list[GrepMatch] = []
         truncated = output.truncated
-        for raw in output.text.splitlines():
+        # Keep non-LF separators inside filenames and matched text intact.
+        for raw in output.text.split("\n"):
             try:
                 file_path, line_no_str, line_text = raw.split(":", 2)
             except ValueError:

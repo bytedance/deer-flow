@@ -29,6 +29,8 @@ from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.connection_identity import lookup_thread_id
 from app.channels.dedupe_store import InboundDedupeStore, MemoryInboundDedupeStore
 from app.channels.message_bus import (
+    HUMAN_INPUT_REQUEST_METADATA_KEY,
+    HUMAN_INPUT_RESPONSE_METADATA_KEY,
     INBOUND_FILE_CONTENT_KEY,
     PENDING_CLARIFICATION_METADATA_KEY,
     InboundMessage,
@@ -46,6 +48,7 @@ from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, gene
 from app.gateway.github import run_policy as _github_run_policy  # noqa: F401
 from app.gateway.internal_auth import create_internal_auth_headers
 from app.gateway.path_utils import resolve_outputs_confined_path
+from deerflow.agents.human_input import read_human_input_response
 from deerflow.config.agents_config import list_custom_agents, load_agent_config
 from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime import END_SENTINEL, StreamBridge
@@ -147,7 +150,7 @@ BOUND_IDENTITY_UNAVAILABLE_MESSAGE = "Channel connection verification is tempora
 # GitHub). This is parity with every other IM channel's dedupe (same
 # mechanism, same TTL), not a channel-specific gap. True idempotency against
 # a late/manual redelivery would require persisting the dedupe key in
-# ``ChannelStore`` instead, which is not implemented here.
+# the database-backed ``ChannelStore`` instead, which is not implemented here.
 # Follow-up buffering for busy fire_and_forget threads (issue #4121 Slice 2).
 # A ConflictError on a channel opted into ChannelRunPolicy.buffer_followups_on_busy
 # buffers the triggering message per-thread instead of only logging it; a
@@ -754,6 +757,50 @@ def _has_current_turn_clarification(result: dict | list) -> bool:
     return False
 
 
+def _extract_human_input_payload(result: dict | list) -> dict[str, Any] | None:
+    """Return the clarification's structured ``human_input`` payload, if present.
+
+    The clarification middleware stashes it under the tool message's
+    ``artifact.human_input``. Only the current turn's trailing clarification
+    counts — a clarification answered earlier in the run must not leak into a
+    later final outbound.
+    """
+    for msg in reversed(_current_turn_messages(result)):
+        if msg.get("type") == "tool" and msg.get("name") == "ask_clarification":
+            artifact = msg.get("artifact")
+            if isinstance(artifact, dict):
+                payload = artifact.get("human_input")
+                if isinstance(payload, dict):
+                    return payload
+            return None
+        if msg.get("type") == "ai":
+            content = msg.get("content")
+            if isinstance(content, str) and content:
+                return None
+            if msg.get("tool_calls"):
+                return None
+    return None
+
+
+def _response_metadata_with_clarification(
+    result: dict | list,
+    base_metadata: dict[str, Any],
+    *,
+    pending_clarification: bool,
+) -> dict[str, Any]:
+    """``_response_metadata`` plus the clarification's structured payload.
+
+    Channels that render richer clarification affordances (e.g. Feishu button
+    cards) read the payload from metadata; channels that do not simply ignore it.
+    """
+    metadata = _response_metadata(base_metadata, pending_clarification=pending_clarification)
+    if pending_clarification:
+        payload = _extract_human_input_payload(result)
+        if payload is not None:
+            metadata[HUMAN_INPUT_REQUEST_METADATA_KEY] = payload
+    return metadata
+
+
 def _response_metadata(base_metadata: dict[str, Any], *, pending_clarification: bool = False) -> dict[str, Any]:
     metadata = _slim_metadata(base_metadata)
     if pending_clarification:
@@ -985,7 +1032,7 @@ def _extract_artifacts(result: dict | list) -> list[str]:
 
 
 def _is_hidden_human_control_message(msg: Mapping[str, Any]) -> bool:
-    """Return whether a human message is an internal control message hidden from UI."""
+    """Distinguish internal control messages from real hidden user answers."""
     if msg.get("type") != "human":
         return False
 
@@ -993,7 +1040,7 @@ def _is_hidden_human_control_message(msg: Mapping[str, Any]) -> bool:
     if not isinstance(additional_kwargs, Mapping):
         return False
 
-    return additional_kwargs.get("hide_from_ui") is True
+    return additional_kwargs.get("hide_from_ui") is True and read_human_input_response(additional_kwargs) is None
 
 
 def _format_artifact_text(artifacts: list[str]) -> str:
@@ -1011,6 +1058,23 @@ def _unknown_command_reply(command: str | None = None) -> str:
     if command:
         return f"Unknown command: /{command}. Available commands: {available}"
     return f"Unknown command. Available commands: {available}"
+
+
+def _human_input_message_with_channel_response(content: str, *, metadata: Mapping[str, Any], original_content: str | None = None, files: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """``_human_input_message`` plus a channel-synthesized human-input answer.
+
+    Card-driven channels (Feishu button clicks) carry the answer in inbound
+    metadata; it must land on the human message's additional_kwargs for the
+    Gateway's human_input protocol, hidden from transcripts like Web card
+    replies.
+    """
+    message = _human_input_message(content, original_content=original_content, files=files)
+    response = metadata.get(HUMAN_INPUT_RESPONSE_METADATA_KEY)
+    if isinstance(response, Mapping):
+        additional_kwargs = message.setdefault("additional_kwargs", {})
+        additional_kwargs[HUMAN_INPUT_RESPONSE_METADATA_KEY] = dict(response)
+        additional_kwargs["hide_from_ui"] = True
+    return message
 
 
 def _human_input_message(content: str, *, original_content: str | None = None, files: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -2452,7 +2516,7 @@ class ChannelManager:
             )
             return
 
-        self.store.set_thread_id(
+        await self.store.set_thread_id(
             msg.channel_name,
             msg.chat_id,
             thread_id,
@@ -2899,7 +2963,7 @@ class ChannelManager:
 
         original_text = msg.text
         uploaded = await _ingest_inbound_files(thread_id, msg, user_id=storage_user_id)
-        human_message = _human_input_message(msg.text, original_content=original_text, files=uploaded or None)
+        human_message = _human_input_message_with_channel_response(msg.text, metadata=msg.metadata, original_content=original_text, files=uploaded or None)
 
         if self._channel_supports_streaming(msg.channel_name):
             await self._handle_streaming_chat(
@@ -3022,7 +3086,7 @@ class ChannelManager:
             thread_ts=msg.thread_ts,
             connection_id=msg.connection_id,
             owner_user_id=msg.owner_user_id,
-            metadata=_response_metadata(msg.metadata, pending_clarification=pending_clarification),
+            metadata=_response_metadata_with_clarification(result, msg.metadata, pending_clarification=pending_clarification),
         )
         logger.info("[Manager] publishing outbound message to bus: channel=%s, chat_id=%s", msg.channel_name, msg.chat_id)
         await self.bus.publish_outbound(outbound)
@@ -3174,7 +3238,7 @@ class ChannelManager:
                     thread_ts=msg.thread_ts,
                     connection_id=msg.connection_id,
                     owner_user_id=msg.owner_user_id,
-                    metadata=_response_metadata(msg.metadata, pending_clarification=pending_clarification),
+                    metadata=_response_metadata_with_clarification(result, msg.metadata, pending_clarification=pending_clarification),
                 )
             )
             if stream_error is not None:

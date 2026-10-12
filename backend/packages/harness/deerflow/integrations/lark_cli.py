@@ -97,6 +97,14 @@ INTEGRATION_ID = "lark-cli"
 FALLBACK_LARK_CLI_VERSION = "v1.0.65"
 LARK_CLI_NPM_VERSION = FALLBACK_LARK_CLI_VERSION.removeprefix("v")
 LARK_CLI_NPM_PACKAGE = "@larksuite/cli"
+# ``lark-cli`` is a native binary (installed by the npm package's Node wrapper)
+# and npm itself always write UTF-8 to a pipe, so every capture of their output
+# must be decoded as UTF-8 rather than with the host locale. On a host whose ANSI
+# code page is not UTF-8 (cp936, cp1252) the locale decode silently mangles every
+# non-ASCII field -- ``auth status --json`` reports a CJK ``userName``, documents
+# titles come back garbled -- and can kill the pipe reader thread outright when a
+# byte sequence is invalid in the code page, leaving ``stdout`` as ``None``.
+LARK_CLI_SUBPROCESS_ENCODING = "utf-8"
 LARK_CLI_GITHUB_REPO = "larksuite/cli"
 LARK_CLI_LATEST_RELEASE_API = f"https://api.github.com/repos/{LARK_CLI_GITHUB_REPO}/releases/latest"
 LARK_CLI_SOURCE_ARCHIVE_ENV = "DEER_FLOW_LARK_CLI_SKILLS_ARCHIVE"
@@ -1240,14 +1248,35 @@ def _extract_lark_cli_runtime_binary(archive: bytes, destination: Path) -> None:
     if not candidate:
         raise ValueError("Lark CLI runtime archive does not contain a lark-cli executable.")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(candidate)
+    _publish_bytes_atomically(destination, candidate)
     destination.chmod(0o755)
+
+
+def _publish_bytes_atomically(path: Path, content: bytes) -> None:
+    """Publish *content* at *path* without exposing a partial file.
+
+    Flush and fsync a same-directory temporary file before ``os.replace``.
+    Callers own the final mode: runtime binaries and launchers use 0o755;
+    staged skill files and manifests become read-only through
+    ``make_skill_tree_sandbox_readable``. The parent directory is not fsynced,
+    so this helper alone does not guarantee publication survives power loss.
+    """
+    fd, temporary = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
 
 
 def _write_lark_cli_sandbox_launcher(staging: Path) -> None:
     launcher = staging / "bin" / "lark-cli"
     launcher.parent.mkdir(parents=True, exist_ok=True)
-    launcher.write_text(LARK_CLI_SANDBOX_LAUNCHER_SCRIPT, encoding="utf-8")
+    _publish_bytes_atomically(launcher, LARK_CLI_SANDBOX_LAUNCHER_SCRIPT.encode("utf-8"))
     launcher.chmod(0o755)
 
 
@@ -1534,6 +1563,8 @@ def _probe_lark_cli_at_path(path: str) -> LarkCliProbe:
             check=False,
             capture_output=True,
             text=True,
+            encoding=LARK_CLI_SUBPROCESS_ENCODING,
+            errors="replace",
             timeout=5,
         )
     except Exception as exc:  # noqa: BLE001 - probe boundary
@@ -1569,6 +1600,8 @@ def probe_lark_auth(user_id: str, *, verify: bool = False) -> LarkAuthProbe:
             check=False,
             capture_output=True,
             text=True,
+            encoding=LARK_CLI_SUBPROCESS_ENCODING,
+            errors="replace",
             timeout=8,
             env=lark_cli_env(user_id),
         )
@@ -2339,6 +2372,8 @@ def _install_managed_gateway_lark_cli(version: str) -> LarkCliProbe:
         check=False,
         capture_output=True,
         text=True,
+        encoding=LARK_CLI_SUBPROCESS_ENCODING,
+        errors="replace",
         timeout=LARK_CLI_NPM_INSTALL_TIMEOUT_SECONDS,
         env={**os.environ, "npm_config_update_notifier": "false"},
     )
@@ -2491,6 +2526,8 @@ def _run_lark_config_init(*, app_id: str, app_secret: str, brand: str, env: dict
             check=False,
             capture_output=True,
             text=True,
+            encoding=LARK_CLI_SUBPROCESS_ENCODING,
+            errors="replace",
             timeout=15,
             env=env,
         )
@@ -2593,6 +2630,8 @@ def _revoke_lark_auth_from_snapshot(snapshot: Path) -> None:
             check=False,
             capture_output=True,
             text=True,
+            encoding=LARK_CLI_SUBPROCESS_ENCODING,
+            errors="replace",
             timeout=15,
             env=_lark_cli_env_for_directories(config_dir=snapshot / "config", data_dir=data_dir),
         )
@@ -2619,6 +2658,8 @@ def _run_lark_cli_json(
                 check=False,
                 capture_output=True,
                 text=True,
+                encoding=LARK_CLI_SUBPROCESS_ENCODING,
+                errors="replace",
                 timeout=timeout,
                 env=lark_cli_env(user_id),
             )
@@ -2851,7 +2892,7 @@ def _install_lark_skills_from_archive(user_id: str, archive_path: Path, *, versi
 
 @contextmanager
 def _lark_install_lock(parent: Path):
-    """Serialize the cross-process atomic replacement of the global pack."""
+    """Serialize cross-process installers of the global pack."""
     with _exclusive_install_lock(parent / ".lark-cli.install.lock", _LARK_INSTALL_THREAD_LOCK):
         yield
 
@@ -2862,6 +2903,17 @@ def _install_lark_skills_from_archive_locked(
     *,
     version: str | None = None,
 ) -> tuple[tuple[str, ...], str]:
+    """Prepare a private skill tree and publish its body/manifest pair together.
+
+    The caller holds ``_lark_install_lock``. Extraction, validation, guidance,
+    manifest generation and permission changes all happen in staging; the
+    final ``staging_target.rename(target)`` is the publication boundary. An
+    existing target is moved to a backup first, then restored on an ordinary
+    publication error. Staging is discarded on success or failure.
+
+    Extraction writes and parent directories are not fsynced, so this is not
+    a power-loss durability guarantee for the complete tree.
+    """
     target = parent / INTEGRATION_ID
     staging_parent = Path(tempfile.mkdtemp(prefix=".installing-lark-cli-", dir=str(parent)))
     staging_target = staging_parent / INTEGRATION_ID
@@ -2997,7 +3049,7 @@ def _append_deerflow_lark_shared_guidance(root: Path) -> None:
 
 只有在用户明确说明已经完成授权后，才继续调用具体的 `lark-cli` 业务命令。
 """
-    skill_file.write_text(content.rstrip() + guidance + "\n", encoding="utf-8")
+    _publish_bytes_atomically(skill_file, (content.rstrip() + guidance + "\n").encode("utf-8"))
 
 
 def _write_manifest(root: Path, installed_skills: set[str], *, version: str | None, content_sha256: str) -> None:
@@ -3010,4 +3062,7 @@ def _write_manifest(root: Path, installed_skills: set[str], *, version: str | No
         "installed_at": datetime.now(UTC).isoformat(),
         "skills": sorted(installed_skills),
     }
-    (root / LARK_CLI_MANIFEST_FILE).write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _publish_bytes_atomically(
+        root / LARK_CLI_MANIFEST_FILE,
+        (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
+    )

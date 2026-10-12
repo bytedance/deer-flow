@@ -1,5 +1,9 @@
 # Router contracts
 
+Shared scheduled-task update validation preserves an unchanged future `once`
+instant on a live task inside `scheduler.min_once_delay_seconds`; new/changed
+instants and terminal reactivation still enforce the minimum delay.
+
 The MCP task list accepts optional `TaskStatus` and `active_only` query filters.
 Pass both to the repository before its limit; preserve `threads:read`, owner
 checks, current-thread incarnation scoping, and the unfiltered array response.
@@ -13,6 +17,12 @@ and import share `_persist_new_agent`, which uses `run_drained_write` so a
 cancelled request still drains the owned persistence worker.
 
 Skill mutation operation lists return `next_cursor: null` when `has_more` is false, including empty pages after a supplied `after_id`. The next cursor is the final returned operation only when a further page exists.
+
+Committed MCP reconciliation failures are logged once by
+`fail_mcp_reconciliation`, with only the underlying exception type.
+`_run_drained_mcp_apply` passes `_McpCommittedReconciliationError` as an expected
+error to `run_drained_write` to avoid a duplicate diagnostic. It still drains
+retired-pool cleanup outside the config locks and reports the fixed-detail 500.
 
 Custom-skill edit, delete and rollback hold the owning root's process mutex and
 `.custom.mutation.lock` sidecar across predecessor read, storage mutation and

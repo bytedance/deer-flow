@@ -35,13 +35,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 
 import deerflow.mcp.cache as cache_module
-from deerflow.config.extensions_config import ExtensionsConfig, atomic_write_extensions_config
+from app.gateway.routers import mcp as mcp_router
+from app.gateway.routers.mcp import McpServerStateUpdateRequest
+from deerflow.config.extensions_config import ExtensionsConfig, atomic_write_extensions_config, extensions_config_write_lock
 from deerflow.config.file_signature import get_config_signature
 from deerflow.mcp import session_pool as session_pool_module
 from deerflow.mcp.client import build_server_params, build_servers_config
@@ -671,6 +675,348 @@ async def test_repeated_identical_revision_does_not_retire_again(reconciler, mon
     assert log["exited"]["cmd-A"] == 1
 
 
+@pytest.mark.asyncio
+async def test_committed_response_failure_still_finishes_retired_pool(reconciler, monkeypatch, tmp_path):
+    """Response construction must not be able to strand a retired full-reset pool."""
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    log = _session_log()
+    await _initialize(monkeypatch, cfg, {"A": _stdio("cmd-A")}, log)
+
+    close_calls = []
+    real_close = pool.close_all_sync
+
+    def track_close():
+        close_calls.append(True)
+        real_close()
+
+    monkeypatch.setattr(pool, "close_all_sync", track_close)
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda _config_path=None: cfg)
+
+    async def _noop_admin(_request, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(mcp_router, "require_admin_user", _noop_admin)
+
+    def fail_response(*_args, **_kwargs):
+        raise RuntimeError("response boom")
+
+    monkeypatch.setattr(mcp_router, "_mcp_server_responses_from_raw", fail_response)
+
+    # The raw file already carries a changed interceptor chain. The Gateway
+    # write commits that exact revision, forcing a conservative full reset.
+    _write_config(cfg, {"A": _stdio("cmd-A")}, interceptors=["changed.interceptor"])
+
+    with pytest.raises(HTTPException) as exc_info:
+        await mcp_router.update_mcp_server_state(
+            request=None,
+            body=McpServerStateUpdateRequest(server_name="A", enabled=False),
+        )
+
+    assert exc_info.value.status_code == 500
+    assert "response boom" not in exc_info.value.detail
+    assert close_calls == [True]
+    assert pool._retired is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["reload", "prepare"])
+async def test_committed_reconciliation_failure_logs_once(reconciler, monkeypatch, tmp_path, caplog, failure_stage):
+    """The recovery layer owns the diagnostic even when the drained write fails."""
+    cfg = tmp_path / "extensions_config.json"
+    _write_config(cfg, {"remote": _http(enabled=False)})
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    pool.ensure_binding("remote", "old-fingerprint", domain="deployment")
+    close_calls = []
+    real_close = pool.close_all_sync
+
+    def record_close():
+        close_calls.append(extensions_config_write_lock.locked())
+        real_close()
+
+    async def noop_admin(_request, **_kwargs):
+        return None
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("sensitive-reconciliation-error")
+
+    monkeypatch.setattr(pool, "close_all_sync", record_close)
+    monkeypatch.setattr(mcp_router, "require_admin_user", noop_admin)
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda _config_path=None: cfg)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", lambda: None)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config" if failure_stage == "reload" else "prepare_mcp_reconciliation", fail)
+
+    with caplog.at_level(logging.WARNING), pytest.raises(HTTPException) as exc_info:
+        await mcp_router.update_mcp_server_state(
+            request=None,
+            body=McpServerStateUpdateRequest(server_name="remote", enabled=True),
+        )
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == "MCP configuration was saved, but local cache reconciliation failed; retry or restart DeerFlow before relying on the changed server."
+    assert json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]["remote"]["enabled"] is True
+    assert close_calls == [False]
+    assert [(record.name, record.levelno, record.getMessage()) for record in caplog.records] == [
+        (
+            cache_module.logger.name,
+            logging.WARNING,
+            "MCP committed transition could not be reconciled (RuntimeError); retiring local cache state conservatively",
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_committed_reload_failure_fences_before_config_lock_release(reconciler, monkeypatch, tmp_path):
+    """A post-write reload failure must still detach state before releasing the config lock."""
+    cfg = tmp_path / "extensions_config.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "remote": {
+                        "enabled": False,
+                        "type": "http",
+                        "url": "https://example.test/mcp",
+                    }
+                },
+                "skills": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    pool.ensure_binding("remote", "old-fingerprint", domain="deployment")
+
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda _config_path=None: cfg)
+
+    async def _noop_admin(_request, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(mcp_router, "require_admin_user", _noop_admin)
+
+    def fail_reload():
+        raise RuntimeError("reload boom")
+
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", fail_reload)
+
+    before_generation = cache_module._cache_generation
+    fallback_installed = threading.Event()
+    release_fallback = threading.Event()
+    real_fail = cache_module.fail_mcp_reconciliation
+
+    def fail_and_wait(exc):
+        pending = real_fail(exc)
+        fallback_installed.set()
+        assert release_fallback.wait(timeout=5)
+        return pending
+
+    monkeypatch.setattr(mcp_router, "fail_mcp_reconciliation", fail_and_wait)
+
+    task = asyncio.create_task(
+        mcp_router.update_mcp_server_state(
+            request=None,
+            body=McpServerStateUpdateRequest(server_name="remote", enabled=True),
+        )
+    )
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(task), timeout=1)
+        assert fallback_installed.is_set()
+        assert extensions_config_write_lock.locked() is True
+        assert cache_module._cache_generation > before_generation
+        assert cache_module._applied_mcp_revision is None
+        assert pool._retired is True
+    finally:
+        release_fallback.set()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await task
+    assert exc_info.value.status_code == 500
+    assert json.loads(cfg.read_text(encoding="utf-8"))["mcpServers"]["remote"]["enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_committed_handoff_failure_fences_before_config_lock_release(reconciler, monkeypatch, tmp_path):
+    """A post-write fallback reset must detach state while the config lock is still held."""
+    cfg = tmp_path / "extensions_config.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "remote": {
+                        "enabled": False,
+                        "type": "http",
+                        "url": "https://example.test/mcp",
+                    }
+                },
+                "skills": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda _config_path=None: cfg)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", lambda: None)
+
+    async def _noop_admin(_request, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(mcp_router, "require_admin_user", _noop_admin)
+    before_generation = cache_module._cache_generation
+    fallback_installed = threading.Event()
+    release_fallback = threading.Event()
+    real_fail = cache_module.fail_mcp_reconciliation
+
+    def fail_prepare(*_args, **_kwargs):
+        raise RuntimeError("prepare boom")
+
+    def fail_and_wait(exc):
+        pending = real_fail(exc)
+        fallback_installed.set()
+        assert release_fallback.wait(timeout=5)
+        return pending
+
+    monkeypatch.setattr(mcp_router, "prepare_mcp_reconciliation", fail_prepare)
+    monkeypatch.setattr(mcp_router, "fail_mcp_reconciliation", fail_and_wait)
+
+    task = asyncio.create_task(
+        mcp_router.update_mcp_server_state(
+            request=None,
+            body=McpServerStateUpdateRequest(server_name="remote", enabled=True),
+        )
+    )
+    try:
+        assert await asyncio.to_thread(fallback_installed.wait, 5)
+        assert extensions_config_write_lock.locked() is True
+        assert cache_module._cache_generation > before_generation
+        assert cache_module._applied_mcp_revision is None
+    finally:
+        release_fallback.set()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await task
+    assert exc_info.value.status_code == 500
+
+
+@pytest.mark.asyncio
+async def test_committed_delete_then_identical_readd_installs_a_new_epoch(reconciler, monkeypatch, tmp_path):
+    """The committed handoff must not coalesce a delete/readd back to one revision."""
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    log = _session_log()
+    servers = {"A": _stdio("cmd-A")}
+    await _initialize(monkeypatch, cfg, servers, log)
+
+    old_binding = _binding(pool, "A")
+    old_entry = _entry(pool, "A")
+    assert old_entry is not None
+    old_cm = log["cms"]["cmd-A"][0]
+    assert old_cm.closed is False
+    generation_before = cache_module._cache_generation
+
+    _write_config(cfg, {})
+    deleted = ExtensionsConfig.from_file(str(cfg))
+    cache_module.finish_mcp_reconciliation(cache_module.prepare_mcp_reconciliation(deleted, config_path=cfg))
+    await _wait_until(lambda: log["exited"].get("cmd-A") == 1)
+    assert old_cm.closed is True
+    assert cache_module._cache_generation > generation_before
+    assert cache_module._applied_mcp_revision is not None
+    assert cache_module._applied_mcp_revision.stdio_connections == {}
+    generation_after_delete = cache_module._cache_generation
+
+    _write_config(cfg, servers)
+    readded = ExtensionsConfig.from_file(str(cfg))
+    cache_module.finish_mcp_reconciliation(cache_module.prepare_mcp_reconciliation(readded, config_path=cfg))
+
+    new_binding = _binding(pool, "A")
+    assert new_binding.epoch > old_binding.epoch
+    assert cache_module._cache_generation > generation_after_delete
+    assert cache_module._applied_mcp_revision is not None
+    assert cache_module._applied_mcp_revision.stdio_connections["A"] == new_binding.fingerprint
+    with pytest.raises(StaleMCPBindingError):
+        await pool.get_session("A", "u:t", servers["A"], binding=old_binding)
+
+
+@pytest.mark.asyncio
+async def test_first_committed_revision_races_late_binding_creation(reconciler, tmp_path):
+    """An in-flight discovery keeps the fast path off and fences a late old binding."""
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    cache_module._initializing_generation = cache_module._cache_generation
+
+    _write_config(cfg, {"A": _stdio("cmd-A2")})
+    committed = ExtensionsConfig.from_file(str(cfg))
+    cache_module.finish_mcp_reconciliation(cache_module.prepare_mcp_reconciliation(committed, config_path=cfg))
+
+    assert _binding(pool, "A").fingerprint == _fingerprint({"A": _stdio("cmd-A2")}, "A")
+    with pytest.raises(StaleMCPBindingError):
+        pool.ensure_binding(
+            "A",
+            _fingerprint({"A": _stdio("cmd-A1")}, "A"),
+            domain="deployment",
+        )
+
+
+@pytest.mark.asyncio
+async def test_committed_handoff_tombstones_durable_only_binding_without_cache(reconciler, tmp_path):
+    """A pre-discovery durable binding is local state even when tools never published."""
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    pool.ensure_binding(
+        "A",
+        _fingerprint({"A": _stdio("cmd-A")}, "A"),
+        domain="deployment",
+    )
+    assert cache_module._cache_initialized is False
+    assert cache_module._mcp_tools_cache is None
+
+    _write_config(cfg, {})
+    committed = ExtensionsConfig.from_file(str(cfg))
+    cache_module.finish_mcp_reconciliation(cache_module.prepare_mcp_reconciliation(committed, config_path=cfg))
+
+    assert session_pool_module.get_session_pool() is pool
+    assert _binding(pool, "A").fingerprint is None
+
+
+@pytest.mark.asyncio
+async def test_committed_handoff_reconciles_every_changed_server_in_one_revision(reconciler, monkeypatch, tmp_path):
+    """A multi-server commit reconciles the whole effective diff, not just one name."""
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    log = _session_log()
+    await _initialize(
+        monkeypatch,
+        cfg,
+        {"A": _stdio("cmd-A1"), "B": _stdio("cmd-B1"), "C": _stdio("cmd-C1")},
+        log,
+    )
+
+    binding_a = _binding(pool, "A")
+    binding_b = _binding(pool, "B")
+    binding_c = _binding(pool, "C")
+    session_c = _entry(pool, "C")[0]
+    owner_c = _entry(pool, "C")[2]
+
+    _write_config(
+        cfg,
+        {"A": _stdio("cmd-A2"), "B": _stdio("cmd-B2"), "C": _stdio("cmd-C1")},
+    )
+    committed = ExtensionsConfig.from_file(str(cfg))
+    cache_module.finish_mcp_reconciliation(cache_module.prepare_mcp_reconciliation(committed, config_path=cfg))
+
+    assert _binding(pool, "A").epoch > binding_a.epoch
+    assert _binding(pool, "B").epoch > binding_b.epoch
+    assert _binding(pool, "C") is binding_c
+    assert _entry(pool, "C")[0] is session_c
+    assert _entry(pool, "C")[2] is owner_c
+
+
 # ---------------------------------------------------------------------------
 # Applied baseline and state machine
 # ---------------------------------------------------------------------------
@@ -893,11 +1239,11 @@ async def test_failed_reconciliation_does_not_commit_a_new_baseline(reconciler, 
     real_reconcile = pool.reconcile_bindings
     fail_next = {"armed": True}
 
-    def _maybe_fail(active, removed, *, domain="deployment"):
+    def _maybe_fail(active, removed, *, domain="deployment", retire_unlisted=False, force_rebind=()):
         if fail_next["armed"]:
             fail_next["armed"] = False
             raise RuntimeError("reconcile failed")
-        return real_reconcile(active, removed, domain=domain)
+        return real_reconcile(active, removed, domain=domain, retire_unlisted=retire_unlisted, force_rebind=force_rebind)
 
     monkeypatch.setattr(pool, "reconcile_bindings", _maybe_fail)
     _write_config(cfg, {"A": _stdio("cmd-A2")})
@@ -1053,11 +1399,11 @@ async def test_concurrent_reconcilers_serialize_read_and_apply(reconciler, monke
     release = threading.Event()
     calls: list[str] = []
 
-    def _slow_reconcile(active, removed, *, domain="deployment"):
+    def _slow_reconcile(active, removed, *, domain="deployment", retire_unlisted=False, force_rebind=()):
         calls.append("enter")
         entered.set()
         release.wait(timeout=5)
-        result = real_reconcile(active, removed, domain=domain)
+        result = real_reconcile(active, removed, domain=domain, retire_unlisted=retire_unlisted, force_rebind=force_rebind)
         calls.append("exit")
         return result
 
@@ -1208,6 +1554,33 @@ async def test_shared_reset_outranks_selective_reconciliation(reconciler, monkey
     assert cache_module._applied_mcp_revision is None
     assert cache_module._cache_initialized is False
     assert cache_module._mcp_config_snapshot is None
+
+
+@pytest.mark.asyncio
+async def test_committed_handoff_does_not_swallow_shared_reset(reconciler, monkeypatch, tmp_path):
+    """A committed writer cannot consume a shared reset that already happened."""
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    log = _session_log()
+    await _initialize(monkeypatch, cfg, {"A": _stdio("cmd-A1")}, log)
+
+    _write_remote_marker(cfg, "remote-worker-reset")
+    cache_module.reset_mcp_tools_cache()
+    assert session_pool_module.get_session_pool() is not pool
+    assert cache_module._applied_mcp_revision is None
+
+    _write_config(cfg, {"A": _stdio("cmd-A2")})
+    committed = ExtensionsConfig.from_file(str(cfg))
+    cache_module.finish_mcp_reconciliation(cache_module.prepare_mcp_reconciliation(committed, config_path=cfg))
+    handoff_pool = session_pool_module.get_session_pool()
+    assert handoff_pool is not pool
+    assert cache_module._applied_mcp_revision is not None
+
+    assert cache_module.refresh_mcp_cache_if_active() is True
+    assert session_pool_module.get_session_pool() is not handoff_pool
+    assert handoff_pool._retired is True
+    assert cache_module._applied_mcp_revision is None
 
 
 @pytest.mark.asyncio
@@ -1699,7 +2072,7 @@ async def test_first_claim_atomically_tombstones_a_concurrently_retained_server(
     real_reconcile = pool.reconcile_bindings
     interleaved = {"done": False, "binding": None}
 
-    def _reconcile_with_racing_retainer(active, removed, *, domain="deployment", retire_unlisted=False):
+    def _reconcile_with_racing_retainer(active, removed, *, domain="deployment", retire_unlisted=False, force_rebind=()):
         if not interleaved["done"]:
             interleaved["done"] = True
             # The durable caller slips in after the cache listed the retained
@@ -1712,6 +2085,8 @@ async def test_first_claim_atomically_tombstones_a_concurrently_retained_server(
         kwargs = {"domain": domain}
         if retire_unlisted:
             kwargs["retire_unlisted"] = True
+        if force_rebind:
+            kwargs["force_rebind"] = force_rebind
         return real_reconcile(active, removed, **kwargs)
 
     monkeypatch.setattr(pool, "reconcile_bindings", _reconcile_with_racing_retainer)
@@ -1816,7 +2191,15 @@ async def test_rejected_revision_installs_no_epoch_and_no_tombstone(reconciler, 
     published = await cache_module.initialize_mcp_tools()
     assert [tool.name for tool in published] == ["A"]
     assert cache_module._cache_initialized is True
-    assert _binding(pool, "A") is durable
+    # The first successful claim with no trusted applied baseline
+    # conservatively re-epochs every active deployment binding, because a
+    # same-fingerprint ABA is indistinguishable from a compatible rebind.
+    rebound = _binding(pool, "A")
+    assert rebound is not durable
+    assert rebound.epoch > durable.epoch
+    assert rebound.fingerprint == startup_fingerprint
+    with pytest.raises(StaleMCPBindingError):
+        await pool.get_session("A", "task:1", startup_connection, binding=durable)
     assert session_pool_module.get_session_pool() is pool
 
 
@@ -1982,3 +2365,104 @@ async def test_reader_waiting_for_discovery_still_cleans_a_retired_pool(reconcil
     assert pool._entries == {}
     assert pool._inflight == {}
     assert outcome.get("tools") == []
+
+
+def test_committed_cold_path_fences_binding_inserted_after_the_retained_check(reconciler, tmp_path):
+    """A durable bind that lands after the empty retained check must not be recorded as applied.
+
+    ``_plan_committed_mcp_reconciliation_locked`` observes the pool without
+    holding its lock, so a durable-task caller can install a binding between the
+    "no local state" check and the baseline write. The cold path must still run
+    the domain-scoped reconciliation before recording ``_applied_mcp_revision``,
+    or the inserted binding survives while the process claims to have applied a
+    revision whose epochs were never installed.
+    """
+    cfg = tmp_path / "extensions_config.json"
+    servers = {"A": _stdio("cmd-A")}
+    _write_config(cfg, servers)
+    candidate = ExtensionsConfig.from_file(str(cfg))
+
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    personal = pool.ensure_binding("A", "personal-fp", domain="personal")
+
+    real_retained = pool.retained_server_names
+    checked = threading.Event()
+    release = threading.Event()
+
+    def _retained(*, domain="deployment"):
+        # The check observes no deployment state, then the writer is parked
+        # before it acts on that observation.
+        observed = real_retained(domain=domain)
+        checked.set()
+        assert release.wait(timeout=5)
+        return observed
+
+    pool.retained_server_names = _retained  # type: ignore[method-assign]
+
+    injected: dict[str, object] = {}
+
+    def _durable_bind():
+        assert checked.wait(timeout=5)
+        injected["binding"] = pool.ensure_binding("A", _fingerprint(servers, "A"), domain="deployment")
+        release.set()
+
+    thread = threading.Thread(target=_durable_bind)
+    thread.start()
+    pending = None
+    try:
+        pending = cache_module.prepare_mcp_reconciliation(candidate, config_path=cfg)
+    finally:
+        thread.join(timeout=5)
+    if pending is not None:
+        cache_module.finish_mcp_reconciliation(pending)
+
+    assert thread.is_alive() is False
+    inserted = injected["binding"]
+    current = pool._bindings[("deployment", "A")]
+    # The concurrently inserted binding must be superseded before the baseline
+    # is recorded: it can never be reported as an installed epoch.
+    assert current is not inserted
+    assert current.epoch > inserted.epoch
+    assert cache_module._applied_mcp_revision is not None
+    # The deployment-only reconciliation must leave the personal domain alone.
+    assert pool._bindings[("personal", "A")] is personal
+
+
+@pytest.mark.asyncio
+async def test_tombstone_only_change_advances_applied_tokens(reconciler, monkeypatch, tmp_path):
+    """A history change that only moves a tombstone must advance the applied token map."""
+    from deerflow.mcp.lifecycle import LIFECYCLE_KEY, plan_mcp_lifecycle
+
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    log = _session_log()
+    servers = {"A": _stdio("cmd-A"), "B": _stdio("cmd-B")}
+    await _initialize(monkeypatch, cfg, servers, log)
+
+    # A controlled writer deletes A, recording a tombstone token.
+    raw_ab = {"mcpServers": servers, "skills": {}}
+    raw_b = {"mcpServers": {"B": _stdio("cmd-B")}, "skills": {}}
+    raw_b[LIFECYCLE_KEY] = plan_mcp_lifecycle(raw_ab, raw_b)
+    cfg.write_text(json.dumps(raw_b), encoding="utf-8")
+    assert cache_module.refresh_mcp_cache_if_active() is True
+    tombstone = cache_module._applied_mcp_revision.lifecycle_tokens["A"]
+
+    binding_b = _binding(pool, "B")
+    entry_b = _entry(pool, "B")
+
+    # W2 re-adds A then deletes it again: B is unchanged, but A's tombstone moves.
+    raw_ab2 = {"mcpServers": {"A": _stdio("cmd-A"), "B": _stdio("cmd-B")}, "skills": {}}
+    raw_ab2[LIFECYCLE_KEY] = plan_mcp_lifecycle(raw_b, raw_ab2)
+    raw_b2 = {"mcpServers": {"B": _stdio("cmd-B")}, "skills": {}}
+    raw_b2[LIFECYCLE_KEY] = plan_mcp_lifecycle(raw_ab2, raw_b2)
+    cfg.write_text(json.dumps(raw_b2), encoding="utf-8")
+    assert raw_b2[LIFECYCLE_KEY]["servers"]["A"] != tombstone
+
+    # No active server changed, so this is a no-op for sessions...
+    assert cache_module.refresh_mcp_cache_if_active() is False
+    assert _binding(pool, "B") is binding_b
+    assert _entry(pool, "B") is entry_b
+    # ...but the applied token map must not lag the consumed shared version.
+    assert cache_module._applied_mcp_revision.lifecycle_tokens["A"] == raw_b2[LIFECYCLE_KEY]["servers"]["A"]

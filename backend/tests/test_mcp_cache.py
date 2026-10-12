@@ -98,6 +98,11 @@ def cache_globals():
     cache_module._init_condition = threading.Condition(cache_module._init_lock)
     cache_module._initializing_generation = None
     cache_module._cache_generation = 0
+    # ``_has_mcp_reconciliation_state`` now also counts durable-only deployment
+    # bindings, so "never initialized" requires a fresh pool singleton too.
+    from deerflow.mcp.session_pool import reset_session_pool
+
+    reset_session_pool()
 
     try:
         yield
@@ -1126,7 +1131,7 @@ def test_initialization_without_a_readable_snapshot_discards_result(cache_global
         return ["loaded-tools"]
 
     monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_get_mcp_tools)
-    monkeypatch.setattr(cache_module, "_read_stable_mcp_snapshot", lambda path, signature: None)
+    monkeypatch.setattr(cache_module, "_read_stable_mcp_revision", lambda path, signature: None)
 
     result = asyncio.run(cache_module.initialize_mcp_tools())
 

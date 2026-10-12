@@ -51,6 +51,7 @@ def deploy_fixture(tmp_path: Path):
         # Keep the preflight independent of secret generation and optional extras.
         BETTER_AUTH_SECRET="test-better-auth-secret",
         DEER_FLOW_INTERNAL_AUTH_TOKEN="test-internal-auth-token",
+        DEER_FLOW_CREDENTIALS_KEY="test-credentials-key",
         UV_EXTRAS="redis",
     )
     return worktree, env, home, capture
@@ -76,8 +77,12 @@ def unwritable_home(deploy_fixture):
 
 
 @pytest.fixture(
-    params=[("BETTER_AUTH_SECRET", ".better-auth-secret"), ("DEER_FLOW_INTERNAL_AUTH_TOKEN", ".internal-auth-token")],
-    ids=["better-auth", "internal-auth"],
+    params=[
+        ("BETTER_AUTH_SECRET", ".better-auth-secret"),
+        ("DEER_FLOW_INTERNAL_AUTH_TOKEN", ".internal-auth-token"),
+        ("DEER_FLOW_CREDENTIALS_KEY", ".credentials_key"),
+    ],
+    ids=["better-auth", "internal-auth", "credentials-key"],
 )
 def persisted_secret(request, deploy_fixture):
     _, _, home, _ = deploy_fixture
@@ -150,6 +155,7 @@ def test_deploy_down_allows_unwritable_home(deploy_fixture, unwritable_home):
     _, env, _, capture = deploy_fixture
     env.pop("BETTER_AUTH_SECRET")
     env.pop("DEER_FLOW_INTERNAL_AUTH_TOKEN")
+    env.pop("DEER_FLOW_CREDENTIALS_KEY")
 
     result = _run_deploy(deploy_fixture, "down")
 
@@ -226,6 +232,7 @@ def test_deploy_down_allows_unreadable_persisted_secret(deploy_fixture, unreadab
     _, env, home, capture = deploy_fixture
     env.pop("BETTER_AUTH_SECRET")
     env.pop("DEER_FLOW_INTERNAL_AUTH_TOKEN")
+    env.pop("DEER_FLOW_CREDENTIALS_KEY")
 
     result = _run_deploy(deploy_fixture, "down")
 

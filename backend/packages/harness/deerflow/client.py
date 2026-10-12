@@ -53,6 +53,7 @@ from deerflow.config.extensions_config import (
 )
 from deerflow.config.paths import get_paths
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+from deerflow.mcp.lifecycle import LIFECYCLE_KEY, plan_mcp_lifecycle
 from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.models import create_chat_model
 from deerflow.models.reasoning import reasoning_capabilities_payload, resolve_reasoning_contract
@@ -1455,23 +1456,58 @@ class DeerFlowClient:
         Raises:
             ValueError: If the resulting config would not load; nothing is written.
             OSError: If the config file cannot be written.
+            RuntimeError: If the configuration was saved but local MCP reconciliation or
+                teardown failed. The configuration may already have changed on disk, so
+                callers must not assume the write failed and blindly retry.
         """
+        from deerflow.mcp.cache import (
+            fail_mcp_reconciliation,
+            finish_mcp_reconciliation,
+            prepare_mcp_reconciliation,
+        )
+
         config_path = ExtensionsConfig.resolve_config_path()
         if config_path is None:
             raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
 
+        pending = None
+        committed_failure = None
+        reloaded = None
         with extensions_config_write_lock, extensions_config_file_lock(config_path):
             # The singleton is process-local, so re-read the shared file under
             # the cross-process lock before merging the replacement MCP map.
             # Read it raw so sibling keys keep their $VAR placeholders.
-            config_data = read_raw_extensions_config(config_path)
-            config_data["mcpServers"] = mcp_servers
+            previous_raw = read_raw_extensions_config(config_path)
+            config_data = copy.deepcopy(previous_raw)
+            config_data["mcpServers"] = copy.deepcopy(mcp_servers)
+            config_data[LIFECYCLE_KEY] = plan_mcp_lifecycle(previous_raw, config_data)
 
-            validate_raw_extensions_config(config_data)
+            candidate = validate_raw_extensions_config(config_data)
             self._atomic_write_json(config_path, config_data)
-            reloaded = reload_extensions_config()
+            try:
+                reloaded = reload_extensions_config()
+                pending = prepare_mcp_reconciliation(candidate, config_path=config_path)
+            except Exception as exc:
+                # The file is already committed, so detach local state under the
+                # cache condition here and finish teardown after the locks are
+                # released; never report the write as a clean success.
+                committed_failure = (fail_mcp_reconciliation(exc), exc)
 
-        self.reset_agent()
+        try:
+            if committed_failure is not None:
+                failed_pending, _failure = committed_failure
+                finish_mcp_reconciliation(failed_pending)
+            else:
+                finish_mcp_reconciliation(pending)
+        finally:
+            # The config file is already committed, so an agent built from the
+            # previous MCP tool set must not survive this call even when local
+            # reconciliation or teardown raised.
+            self.reset_agent()
+
+        if committed_failure is not None:
+            _failed_pending, failure = committed_failure
+            raise RuntimeError("MCP configuration was saved, but local cache reconciliation failed; retry or restart DeerFlow before relying on the changed server.") from failure
         return {"mcp_servers": {name: server.model_dump() for name, server in reloaded.mcp_servers.items()}}
 
     # ------------------------------------------------------------------

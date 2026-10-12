@@ -261,7 +261,7 @@ def test_mention_free_channel_and_thread_follow_pass_without_mention():
     assert len(captured) == 1
 
     class FakeStore:
-        def get_thread_id(self, channel_name, chat_id, topic_id=None):
+        async def get_thread_id(self, channel_name, chat_id, topic_id=None):
             return "thread-1" if topic_id == "aa" * 32 else None
 
     ch2, captured2 = _started()
@@ -959,11 +959,11 @@ async def test_bound_pubkey_unmentioned_reply_follows_a_thread_the_manager_mappe
     from datetime import UTC, datetime, timedelta
 
     from app.channels.manager import ChannelManager
-    from app.channels.store import ChannelStore
+    from app.channels.store import JsonChannelStore
 
     repo = sql_connection_repo
     await repo.create_oauth_state(owner_user_id="owner-bound", provider="buzz", state="tok-bind", expires_at=datetime.now(UTC) + timedelta(minutes=10))
-    store = ChannelStore(tmp_path / "store.json")
+    store = JsonChannelStore(tmp_path / "store.json")
     ch, captured = _started(connection_repo=repo, channel_store=store)
     ch._transport = FakeTransport()
     manager = ChannelManager(bus=ch.bus, store=store, connection_repo=repo)
@@ -978,7 +978,7 @@ async def test_bound_pubkey_unmentioned_reply_follows_a_thread_the_manager_mappe
     connection_id = captured[0].connection_id
     assert connection_id
     await manager._store_thread_id(captured[0], "thread-1")
-    assert store.get_thread_id("buzz", CHANNEL, topic_id=root) is None  # the manager wrote the repo only
+    assert await store.get_thread_id("buzz", CHANNEL, topic_id=root) is None  # the manager wrote the repo only
 
     await dispatch(_event(sk=SK_OWNER, content="follow-up", mentions=(), reply_to=root, created_at=1700000300))
     assert len(captured) == 2
@@ -995,7 +995,7 @@ def test_bound_pubkey_thread_follow_ignores_a_json_mapping_the_manager_would_not
     the bind state, so "the bot stopped following my replies" stays triageable."""
 
     class JsonStoreWithMapping:
-        def get_thread_id(self, channel_name, chat_id, topic_id=None):
+        async def get_thread_id(self, channel_name, chat_id, topic_id=None):
             return "legacy-thread"
 
     repo = FakeConnectionRepo(states={"tok-bind": "owner-bound"})

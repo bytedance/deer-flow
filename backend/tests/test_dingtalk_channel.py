@@ -408,7 +408,7 @@ class TestOnChatbotMessage:
     def test_p2p_message_without_sender_is_dropped(self, sender_staff_id):
         """A P2P chat_id *is* the sender, so an empty one keys every user to one thread.
 
-        ``ChannelStore._key`` builds ``f"{channel}:{chat_id}"`` for a topic-less conversation,
+        ``binding_key`` builds ``f"{channel}:{chat_id}"`` for a topic-less conversation,
         so publishing this would put every senderless P2P message under the literal
         ``"dingtalk:"`` — one shared thread, one shared history, across users.
         """

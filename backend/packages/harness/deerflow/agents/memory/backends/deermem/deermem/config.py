@@ -143,7 +143,14 @@ class DeerMemConfig(BaseModel):
         default=30,
         ge=1,
         le=300,
-        description="Seconds to wait before processing queued updates (debounce).",
+        description="Per-conversation quiet period before queued extraction becomes eligible.",
+    )
+    max_wait_seconds: int = Field(
+        default=300,
+        ge=1,
+        description=(
+            "Maximum debounce deferral from a conversation's first pending update. Continuous same-key updates cannot postpone eligibility beyond this limit. Extraction remains serial: consumer backlog and LLM latency can delay completion."
+        ),
     )
     queue_max_depth: int = Field(
         default=1000,

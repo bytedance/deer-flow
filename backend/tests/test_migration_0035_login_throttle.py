@@ -21,7 +21,10 @@ from deerflow.persistence.login_throttle import LoginThrottleRow
 from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 
 REVISION = "0035_login_throttle"
-RUN_IDEMPOTENCY = "0036_run_idempotency_request"
+IDEMPOTENCY = "0036_run_idempotency_request"
+DOCUMENT_SUMMARIES = "0037_project_document_summaries"
+CHANNEL_BINDINGS = "0038_channel_thread_bindings"
+USER_DISABLED = "0039_user_disabled"
 PREVIOUS = "0034_run_event_seq_watermark"
 TABLE = "login_throttle"
 COLUMNS = {"ip", "fail_count", "locked_at", "lock_duration_seconds", "updated_at"}
@@ -34,7 +37,10 @@ async def test_0035_remains_in_the_single_migration_chain():
     assert len(script.get_heads()) == 1
     assert REVISION in {revision.revision for revision in script.walk_revisions()}
     assert script.get_revision(REVISION).down_revision == PREVIOUS
-    assert script.get_revision(RUN_IDEMPOTENCY).down_revision == REVISION
+    assert script.get_revision(IDEMPOTENCY).down_revision == REVISION
+    assert script.get_revision(DOCUMENT_SUMMARIES).down_revision == IDEMPOTENCY
+    assert script.get_revision(CHANNEL_BINDINGS).down_revision == DOCUMENT_SUMMARIES
+    assert script.get_revision(USER_DISABLED).down_revision == CHANNEL_BINDINGS
     # alembic_version.version_num is VARCHAR(32).
     assert len(REVISION) <= 32
 

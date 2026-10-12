@@ -190,7 +190,7 @@ results alone do not establish PostgreSQL lock behavior.
 
 Back up the application database and user skill directories together. Stop all
 writers, upgrade all Gateway/embedded writer processes and migrate through
-`0039_skill_mutations`, then restart before enabling mutation grants. Do not mix
+`0041_skill_mutations`, then restart before enabling mutation grants. Do not mix
 old and new writers on enrolled assets.
 
 Standalone SDK processes without a Gateway mutation runtime check persisted
@@ -200,7 +200,10 @@ and writes. Global enable-state writes are also rejected while any owner is
 enrolled, because they affect same-named custom skills. Removing the plugin
 does not remove this barrier. Unavailable enrollment checks fail closed with
 `UNAVAILABLE`; missing/legacy databases and unenrolled owners retain ordinary
-SDK access. Processes sharing a skill home must use the same application DB.
+SDK access. Owned custom-skill YAML diagnostics follow the same guard: Gateway
+reads first recover pending publications, and standalone SDK reads refuse enrolled
+owners without a mutation runtime. Processes sharing a skill home must use the same
+application DB.
 
 To stop automation, disable the plugin or remove mutation grants and restart;
 keep the upgraded host running so it can reconcile outstanding operations.

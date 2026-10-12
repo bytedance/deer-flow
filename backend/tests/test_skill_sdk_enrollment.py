@@ -92,6 +92,7 @@ else:
         "storage.write_custom_skill('example', 'SKILL.md', 'changed')",
         "storage.delete_custom_skill('example')",
         "client.get_skill('example')",
+        "storage.load_custom_skill_diagnostics()",
     ],
 )
 def test_fresh_sdk_refuses_enrolled_owner_without_gateway_runtime(sdk_home, action):
