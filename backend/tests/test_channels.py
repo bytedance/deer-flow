@@ -10670,7 +10670,7 @@ class TestSlackAllowedUsers:
         assert inbound.text == "/help"
         assert inbound.msg_type == InboundMessageType.COMMAND
 
-    def test_scalar_allowed_users_warns_and_matches_stringified_event_user_id(self, caplog):
+    def test_numeric_scalar_allowed_users_matches_stringified_event_user_id(self, caplog):
         from app.channels.slack import SlackChannel
 
         bus = MessageBus()
@@ -10697,10 +10697,71 @@ class TestSlackAllowedUsers:
         ):
             channel._handle_message_event(event)
 
-        assert "Slack allowed_users should be a list" in caplog.text
+        # A scalar is one entry under the shared allowlist contract, not a misconfiguration.
+        assert caplog.records == []
         channel._loop.call_soon_threadsafe.assert_called_once()
         inbound = bus.get_inbound_nowait()
         assert inbound.user_id == "123456"
+
+    @pytest.mark.parametrize(
+        ("allowed_users", "admitted"),
+        [([""], False), ({"U123456": True}, False), ([" U123456 "], True), (frozenset({"U123456"}), True)],
+        ids=["blank-entry", "mapping", "padded-entry", "frozenset"],
+    )
+    def test_allowlist_gate_uses_parsed_user_ids(self, allowed_users, admitted):
+        from app.channels.slack import SlackChannel
+
+        bus = MessageBus()
+        channel = SlackChannel(bus=bus, config={"allowed_users": allowed_users})
+        channel._loop = self._immediate_loop()
+        channel._add_reaction = MagicMock()
+        channel._send_running_reply = MagicMock()
+
+        event = {"user": "U123456", "text": "hello from slack", "channel": "C123", "ts": "1710000000.000100"}
+        with patch("app.channels.slack.asyncio.run_coroutine_threadsafe", side_effect=self._submit_coro):
+            channel._handle_message_event(event)
+
+        assert (not bus.inbound_queue.empty()) is admitted
+        assert channel._add_reaction.called is admitted
+
+    @pytest.mark.parametrize("allowed_users", [None, [], (), set(), frozenset(), "", " "])
+    def test_unset_or_empty_allowlist_allows_everyone_quietly(self, allowed_users, caplog):
+        from app.channels.slack import _parse_allowed_users
+
+        with caplog.at_level(logging.WARNING, logger="app.channels.slack"):
+            assert _parse_allowed_users(allowed_users) is None
+        assert caplog.records == []
+
+    def test_scalar_with_separators_stays_one_literal_id_and_warns(self, caplog):
+        from app.channels.slack import _parse_allowed_users
+
+        with caplog.at_level(logging.WARNING, logger="app.channels.slack"):
+            assert _parse_allowed_users("U123456,U654321") == {"U123456,U654321"}
+        assert "YAML list" in caplog.text
+
+    def test_invalid_entries_are_dropped_with_a_warning(self, caplog):
+        from app.channels.slack import _parse_allowed_users
+
+        with caplog.at_level(logging.WARNING, logger="app.channels.slack"):
+            assert _parse_allowed_users(["U123456", True, 4.2, None, "  "]) == {"U123456"}
+        assert "True" in caplog.text
+        assert "4.2" in caplog.text
+        assert not any(record.levelno == logging.ERROR for record in caplog.records)
+
+    @pytest.mark.parametrize(
+        "allowed_users",
+        [[""], ["", "  "], [None], [True], {"U123456": True}, {}, True, 4.2],
+        ids=["blank-entry", "blank-entries", "null-entry", "bool-entry", "mapping", "empty-mapping", "bool-scalar", "float-scalar"],
+    )
+    def test_allowlist_without_a_valid_user_id_denies_everyone(self, allowed_users, caplog):
+        # A mapping must not authorize its keys, and a list whose entries are
+        # all blank (e.g. ``[$SLACK_USER_ID]`` with the variable set to an
+        # empty string) must not turn into "allow all".
+        from app.channels.slack import _parse_allowed_users
+
+        with caplog.at_level(logging.ERROR, logger="app.channels.slack"):
+            assert _parse_allowed_users(allowed_users) == frozenset()
+        assert any(record.levelno == logging.ERROR for record in caplog.records)
 
     def test_raises_after_all_retries_exhausted(self):
         from app.channels.slack import SlackChannel

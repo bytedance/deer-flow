@@ -10,6 +10,7 @@ from typing import Any
 
 from markdown_to_mrkdwn import SlackMarkdownConverter
 
+from app.channels.allowed_users import parse_allowed_users
 from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
@@ -49,20 +50,32 @@ def _escape_slack_text(text: str) -> str:
     return re.sub(r"(?m)^&gt;", ">", escaped)
 
 
-def _normalize_allowed_users(allowed_users: Any) -> set[str]:
-    if allowed_users is None:
-        return set()
-    if isinstance(allowed_users, str):
-        values = [allowed_users]
-    elif isinstance(allowed_users, list | tuple | set):
-        values = allowed_users
-    else:
-        logger.warning(
-            "Slack allowed_users should be a list of Slack user IDs or a single Slack user ID string; treating %s as one string value",
-            type(allowed_users).__name__,
-        )
-        values = [allowed_users]
-    return {str(user_id) for user_id in values if str(user_id)}
+def _parse_slack_user_id(entry: Any) -> str | None:
+    """A Slack user ID from a non-blank string or an integer, else ``None``.
+
+    An unquoted YAML number keeps matching its string form, as before.
+    """
+    if isinstance(entry, bool):
+        # bool is an int subclass: ``true`` must not become the user "True".
+        return None
+    if isinstance(entry, int):
+        return str(entry)
+    if isinstance(entry, str):
+        return entry.strip() or None
+    return None
+
+
+def _parse_allowed_users(allowed_users: Any) -> frozenset[str] | None:
+    """Parse Slack user IDs with the shared fail-closed allowlist semantics."""
+    if isinstance(allowed_users, str) and ("," in allowed_users or any(char.isspace() for char in allowed_users.strip())):
+        logger.warning("[Slack] allowed_users is a scalar string containing separators; treating it as one literal user ID. Use a YAML list for multiple IDs")
+    return parse_allowed_users(
+        allowed_users,
+        parse_user_id=_parse_slack_user_id,
+        logger=logger,
+        channel_name="Slack",
+        expected_id="a Slack user ID such as U123456",
+    )
 
 
 def _strip_leading_slack_bot_mention(text: str, bot_user_id: str | None) -> str:
@@ -96,8 +109,8 @@ class SlackChannel(Channel):
         - ``bot_token``: Slack Bot User OAuth Token (xoxb-...).
         - ``app_token``: Slack App-Level Token (xapp-...) for Socket Mode.
         - ``allowed_users``: (optional) List of allowed Slack user IDs, or a
-          single Slack user ID string as shorthand. Empty = allow all. Other
-          scalar values are treated as a single string with a warning.
+          single Slack user ID as shorthand. Unset, empty or blank = allow
+          all. A non-empty value without a valid ID denies everyone.
     """
 
     def __init__(self, bus: MessageBus, config: dict[str, Any]) -> None:
@@ -106,7 +119,7 @@ class SlackChannel(Channel):
         self._socket_close_task: asyncio.Task[None] | None = None
         self._web_client = None
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._allowed_users = _normalize_allowed_users(config.get("allowed_users", []))
+        self._allowed_users = _parse_allowed_users(config.get("allowed_users"))
         self._web_client_factory = config.get("web_client_factory")
         self._connection_web_clients: dict[str, tuple[str, Any]] = {}
         configured_bot_user_id = config.get("bot_user_id")
@@ -398,7 +411,7 @@ class SlackChannel(Channel):
 
         # Check allowed users after connect-code handling so browser-initiated
         # binding can bootstrap a new external identity.
-        if self._allowed_users and user_id not in self._allowed_users:
+        if self._allowed_users is not None and user_id not in self._allowed_users:
             logger.debug("Ignoring message from non-allowed user: %s", user_id)
             return
 
