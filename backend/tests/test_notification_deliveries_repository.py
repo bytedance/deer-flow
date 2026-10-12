@@ -188,6 +188,11 @@ class TestNotificationDeliveryRepository:
 
         assert await repo.reset_stale_sending_rows(now=datetime.now(UTC) + timedelta(minutes=11), timeout=timedelta(minutes=10)) == 1
 
+        async with repo.session_factory() as session:
+            recovered = await session.get(NotificationDeliveryRow, stuck["id"])
+            assert recovered is not None
+            assert recovered.claim_token is None
+
         reclaimed = await repo.claim_due_deliveries(now=datetime.now(UTC) + timedelta(minutes=11), limit=1)
         assert [row["id"] for row in reclaimed] == [stuck["id"]]
 
@@ -196,7 +201,7 @@ class TestNotificationDeliveryRepository:
         await repo.enqueue(**_enqueue_kwargs(task_run_id="run-sent"))
         await repo.enqueue(**_enqueue_kwargs(task_run_id="run-pending"))
         claimed = await repo.claim_due_deliveries(now=datetime.now(UTC), limit=1)
-        await repo.mark_sent(claimed[0]["id"])
+        await repo.mark_sent(claimed[0]["id"], claim_token=claimed[0]["claim_token"])
 
         reset = await repo.reset_stale_sending_rows(now=datetime.now(UTC) + timedelta(hours=1), timeout=timedelta(minutes=10))
 
@@ -206,7 +211,8 @@ class TestNotificationDeliveryRepository:
     async def test_mark_sent_finalises_delivery(self, repo):
         delivery = await repo.enqueue(**_enqueue_kwargs())
 
-        updated = await repo.mark_sent(delivery["id"])
+        claimed = (await repo.claim_due_deliveries(now=datetime.now(UTC), limit=1))[0]
+        updated = await repo.mark_sent(delivery["id"], claim_token=claimed["claim_token"])
 
         assert updated["status"] == "sent"
         assert updated["sent_at"] is not None
@@ -216,7 +222,8 @@ class TestNotificationDeliveryRepository:
         delivery = await repo.enqueue(**_enqueue_kwargs())
         before = datetime.now(UTC)
 
-        updated = await repo.mark_failed(delivery["id"], error="wecom: rate limited")
+        claimed = (await repo.claim_due_deliveries(now=datetime.now(UTC), limit=1))[0]
+        updated = await repo.mark_failed(delivery["id"], claim_token=claimed["claim_token"], error="wecom: rate limited")
 
         assert updated["status"] == "pending"
         assert updated["attempts"] == 1
@@ -232,7 +239,8 @@ class TestNotificationDeliveryRepository:
         # disconnected the target): no backoff, no parking, budget untouched.
         delivery = await repo.enqueue(**_enqueue_kwargs())
 
-        updated = await repo.mark_failed(delivery["id"], error="target is no longer connected", terminal=True)
+        claimed = (await repo.claim_due_deliveries(now=datetime.now(UTC), limit=1))[0]
+        updated = await repo.mark_failed(delivery["id"], claim_token=claimed["claim_token"], error="target is no longer connected", terminal=True)
 
         assert updated["status"] == "failed"
         assert updated["attempts"] == 0
@@ -245,19 +253,69 @@ class TestNotificationDeliveryRepository:
         # A late write from a crash handler or a stale claimant must neither
         # reopen a finished row nor relabel it.
         dropped = await repo.enqueue(**_enqueue_kwargs())
-        await repo.mark_failed(dropped["id"], error="target is no longer connected", terminal=True)
-        after_late_failure = await repo.mark_failed(dropped["id"], error="delivery crashed before completion")
-        after_late_sent = await repo.mark_sent(dropped["id"])
+        dropped_claim = (await repo.claim_due_deliveries(now=datetime.now(UTC), limit=1))[0]
+        await repo.mark_failed(dropped["id"], claim_token=dropped_claim["claim_token"], error="target is no longer connected", terminal=True)
+        after_late_failure = await repo.mark_failed(dropped["id"], claim_token=dropped_claim["claim_token"], error="delivery crashed before completion")
+        after_late_sent = await repo.mark_sent(dropped["id"], claim_token=dropped_claim["claim_token"])
         assert after_late_failure["status"] == "failed"
         assert after_late_sent["status"] == "failed"
         assert after_late_sent["last_error"] == "target is no longer connected"
         assert after_late_sent["attempts"] == 0
 
         sent = await repo.enqueue(**_enqueue_kwargs(target="other-target"))
-        await repo.mark_sent(sent["id"])
-        after_late_failure = await repo.mark_failed(sent["id"], error="late failure", count_attempt=False)
+        sent_claim = (await repo.claim_due_deliveries(now=datetime.now(UTC), limit=1))[0]
+        await repo.mark_sent(sent["id"], claim_token=sent_claim["claim_token"])
+        after_late_failure = await repo.mark_failed(sent["id"], claim_token=sent_claim["claim_token"], error="late failure", count_attempt=False)
         assert after_late_failure["status"] == "sent"
         assert after_late_failure["last_error"] is None
+
+    @pytest.mark.anyio
+    async def test_stale_worker_cannot_finalize_delivery_after_reclaim(self, repo):
+        """A recovered delivery must reject writes from its previous claim.
+
+        Worker A claims the row, then its sending lease is recovered after a
+        timeout. Worker B claims the same row. A late failure from Worker A
+        must not rewrite B's active claim or consume another retry attempt.
+        """
+        claimed_a = await repo.enqueue(**_enqueue_kwargs())
+        first_claimed = await repo.claim_due_deliveries(now=datetime.now(UTC), limit=1)
+        assert first_claimed[0]["id"] == claimed_a["id"]
+
+        recovery_time = datetime.now(UTC) + timedelta(minutes=11)
+        assert (
+            await repo.reset_stale_sending_rows(
+                now=recovery_time,
+                timeout=timedelta(minutes=10),
+            )
+            == 1
+        )
+
+        second_claimed = await repo.claim_due_deliveries(now=recovery_time, limit=1)
+        assert second_claimed[0]["id"] == claimed_a["id"]
+
+        late_result = await repo.mark_failed(
+            first_claimed[0]["id"],
+            claim_token=first_claimed[0]["claim_token"],
+            error="late result from stale worker",
+        )
+
+        assert late_result["status"] == "sending"
+        assert late_result["attempts"] == 0
+        assert late_result["last_error"] is None
+        late_terminal = await repo.mark_failed(
+            first_claimed[0]["id"],
+            claim_token=first_claimed[0]["claim_token"],
+            error="late terminal result from stale worker",
+            terminal=True,
+        )
+        assert late_terminal["status"] == "sending"
+        assert late_terminal["last_error"] is None
+        late_sent = await repo.mark_sent(
+            first_claimed[0]["id"],
+            claim_token=first_claimed[0]["claim_token"],
+        )
+        assert late_sent["status"] == "sending"
+        assert late_sent["sent_at"] is None
         assert await repo.claim_due_deliveries(now=datetime.now(UTC) + timedelta(days=2), limit=10) == []
 
     @pytest.mark.anyio
@@ -268,7 +326,7 @@ class TestNotificationDeliveryRepository:
         for _ in range(delivery["max_attempts"]):
             claimed = await repo.claim_due_deliveries(now=datetime.now(UTC) + timedelta(days=1), limit=1)
             assert len(claimed) == 1
-            updated = await repo.mark_failed(claimed[0]["id"], error="boom")
+            updated = await repo.mark_failed(claimed[0]["id"], claim_token=claimed[0]["claim_token"], error="boom")
 
         assert updated["status"] == "failed"
         # A failed (exhausted) row is never claimed again.
@@ -281,7 +339,8 @@ class TestNotificationDeliveryRepository:
         delivery = await repo.enqueue(**_enqueue_kwargs())
         before = datetime.now(UTC)
 
-        updated = await repo.mark_failed(delivery["id"], error="channel 'wecom' is not running", count_attempt=False)
+        claimed = (await repo.claim_due_deliveries(now=datetime.now(UTC), limit=1))[0]
+        updated = await repo.mark_failed(delivery["id"], claim_token=claimed["claim_token"], error="channel 'wecom' is not running", count_attempt=False)
 
         assert updated["status"] == "pending"
         assert updated["attempts"] == 0
@@ -292,11 +351,13 @@ class TestNotificationDeliveryRepository:
         assert retry_at >= before + timedelta(minutes=10)
 
         for _ in range(_CHANNEL_PARK_MAX_ATTEMPTS - 1):
-            updated = await repo.mark_failed(updated["id"], error="channel still down", count_attempt=False)
+            claimed = (await repo.claim_due_deliveries(now=datetime.now(UTC) + timedelta(days=1), limit=1))[0]
+            updated = await repo.mark_failed(claimed["id"], claim_token=claimed["claim_token"], error="channel still down", count_attempt=False)
             assert updated["status"] == "pending"
             assert updated["attempts"] == 0
 
-        updated = await repo.mark_failed(updated["id"], error="channel still down", count_attempt=False)
+        claimed = (await repo.claim_due_deliveries(now=datetime.now(UTC) + timedelta(days=1), limit=1))[0]
+        updated = await repo.mark_failed(claimed["id"], claim_token=claimed["claim_token"], error="channel still down", count_attempt=False)
         assert updated["status"] == "failed"
         assert updated["attempts"] == 0
 
@@ -308,7 +369,8 @@ class TestNotificationDeliveryRepository:
             row.created_at = datetime.now(UTC) - _CHANNEL_PARK_MAX_AGE - timedelta(minutes=1)
             await session.commit()
 
-        updated = await repo.mark_failed(delivery["id"], error="channel 'wecom' is not running", count_attempt=False)
+        claimed = (await repo.claim_due_deliveries(now=datetime.now(UTC), limit=1))[0]
+        updated = await repo.mark_failed(delivery["id"], claim_token=claimed["claim_token"], error="channel 'wecom' is not running", count_attempt=False)
 
         assert updated["status"] == "failed"
         assert updated["attempts"] == 0

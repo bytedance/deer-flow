@@ -32,10 +32,10 @@ class InputHistory:
         if len(self._entries) > self._limit:
             self._entries = self._entries[-self._limit :]
 
-    def up(self, draft: str = "") -> str:
-        """Move one entry older. Returns the entry (or ``draft`` if empty)."""
+    def up(self, draft: str = "") -> str | None:
+        """Move one entry older; return None when history is empty."""
         if not self._entries:
-            return draft
+            return None
         if self._cursor is None:
             self._draft = draft
             self._cursor = len(self._entries) - 1
@@ -43,10 +43,10 @@ class InputHistory:
             self._cursor -= 1
         return self._entries[self._cursor]
 
-    def down(self) -> str:
-        """Move one entry newer. Past the newest entry, restores the draft."""
+    def down(self) -> str | None:
+        """Move newer or restore the draft; return None when not navigating."""
         if self._cursor is None:
-            return self._draft
+            return None
         if self._cursor < len(self._entries) - 1:
             self._cursor += 1
             return self._entries[self._cursor]

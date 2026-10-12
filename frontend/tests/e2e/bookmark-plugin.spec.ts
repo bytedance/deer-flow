@@ -201,7 +201,7 @@ for (const source of ["default", "custom-toolbar", "custom-sidebar"]) {
       });
     }
     await page
-      .getByRole("button", { name: "View 会话书签 / Bookmarks", exact: true })
+      .getByRole("button", { name: "View Bookmarks", exact: true })
       .click();
     await expect(
       page.getByRole("searchbox", { name: "Search bookmarks" }),
@@ -442,11 +442,76 @@ for (const locale of ["en-US", "zh-CN"]) {
         exact: true,
       }),
     ).toBeVisible();
+    await expect(page.getByRole("article")).toHaveCount(6);
+    await expect(
+      page.getByRole("button", {
+        name: zh ? "查看 会话书签" : "View Bookmarks",
+        exact: true,
+      }),
+    ).toBeVisible();
+    await page
+      .getByRole("button", {
+        name: zh ? "查看 Agent 团队" : "View Agent teams",
+        exact: true,
+      })
+      .click();
+    await expect(
+      page.getByRole("heading", {
+        name: zh ? "Agent 团队" : "Agent teams",
+        exact: true,
+      }),
+    ).toBeVisible();
     await expect(
       page.getByText(
-        zh ? "没有匹配的已安装扩展。" : "No matching installed extensions.",
+        zh
+          ? "此条目来自仓库扩展目录；实际安装和启用状态请由部署管理员确认。"
+          : "This entry comes from the repository extension catalog. Ask your deployment administrator to confirm its installation and activation status.",
         { exact: true },
       ),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("link", {
+        name: zh ? "查看安装说明" : "Installation guide",
+      }),
+    ).toHaveAttribute("href", /deerflow-extension-agent-teams#readme$/);
+    await page
+      .getByRole("button", {
+        name: zh ? "全部扩展" : "All extensions",
+        exact: true,
+      })
+      .click();
+    await page
+      .getByPlaceholder(
+        zh ? "按名称或用途搜索扩展" : "Search extensions by name or purpose",
+      )
+      .fill("jev-screening");
+    await expect(page.getByRole("article")).toHaveCount(1);
+    await page
+      .getByRole("button", {
+        name: zh ? "查看 内容风险提示" : "View Content risk warnings",
+        exact: true,
+      })
+      .click();
+    await expect(
+      page.getByRole("link", {
+        name: zh ? "查看安装说明" : "Installation guide",
+      }),
+    ).toHaveAttribute("href", /deerflow-extension-jev-screening#readme$/);
+    await page
+      .getByRole("button", {
+        name: zh ? "全部扩展" : "All extensions",
+        exact: true,
+      })
+      .click();
+    await page
+      .getByPlaceholder(
+        zh ? "按名称或用途搜索扩展" : "Search extensions by name or purpose",
+      )
+      .fill("no-such-extension");
+    await expect(
+      page.getByText(zh ? "没有匹配的扩展。" : "No matching extensions.", {
+        exact: true,
+      }),
     ).toBeVisible();
     await page.goto("/workspace/extensions/missing.plugin/library");
     await expect(
@@ -469,4 +534,21 @@ test("unregistered plugin pages stay unavailable", async ({ page }) => {
   await expect(
     page.getByRole("searchbox", { name: "Search bookmarks" }),
   ).toHaveCount(0);
+});
+
+test("catalog remains discoverable when runtime discovery fails", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  await page.route("**/api/plugins", (route) =>
+    route.fulfill({ status: 503, json: { detail: "Unavailable" } }),
+  );
+  await page.goto("/workspace/capabilities?tab=extensions");
+  await expect(
+    page.getByRole("alert").filter({ hasText: "Extensions unavailable." }),
+  ).toBeVisible();
+  await expect(page.getByRole("article")).toHaveCount(6);
+  await expect(
+    page.getByRole("article").filter({ hasText: "Catalog extension" }),
+  ).toHaveCount(6);
 });

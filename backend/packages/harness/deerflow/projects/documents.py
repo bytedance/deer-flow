@@ -13,8 +13,9 @@ Files are immutable and hash-qualified: ``stored_relpath`` (relative to
 ``users/{user_id}/projects/``) embeds the content hash and the row's own
 document ID, so rows never share bytes and a re-upload after trash lands in a
 fresh namespace (§6.2). Conversion is lazy: a convertible original is turned
-into ``derived/converted.md`` on first read, written through a temporary file
-and an atomic rename, and only when ``uploads.auto_convert_documents`` is on
+into ``derived/converted.md`` on first read, converted into ``.staging/``
+outside any database transaction and then atomically renamed into place under
+the document row lock, and only when ``uploads.auto_convert_documents`` is on
 (§6.4, §7.3).
 """
 
@@ -22,29 +23,29 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+import concurrent.futures
 import hashlib
 import logging
 import os
 import shutil
+import threading
 import uuid
 from collections import OrderedDict
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from deerflow.config.paths import Paths
-from deerflow.uploads.manager import is_upload_staging_file
+from deerflow.uploads.manager import normalize_filename
 from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
-from deerflow.utils.file_io import run_file_io
+from deerflow.utils.file_io import await_drained, run_file_io
 from deerflow.utils.text_detection import is_text_file_by_content
 
 if TYPE_CHECKING:
     from deerflow.persistence.projects import ProjectDocumentRepository
 
 logger = logging.getLogger(__name__)
-
-_MAX_FILENAME_BYTES = 255
 
 
 class ShelfUploadTooLargeError(Exception):
@@ -57,20 +58,13 @@ def validate_shelf_filename(name: str) -> str:
     The display filename occupies its own path component (no hash prefix or
     suffix), so it must be a bare, non-empty filename within the 255 UTF-8
     byte filesystem limit — path separators are rejected outright rather than
-    stripped (§6.5).
+    stripped (§6.5). New display names share upload staging-name validation,
+    including Win32 aliases; existing shelf rows are not revalidated on reads.
     """
     candidate = name.strip() if name else ""
-    if not candidate:
-        raise ValueError("Filename is empty")
     if "/" in candidate or "\\" in candidate:
         raise ValueError(f"Filename contains a path separator: {name!r}")
-    if candidate in {".", ".."}:
-        raise ValueError(f"Filename is unsafe: {name!r}")
-    if len(candidate.encode("utf-8")) > _MAX_FILENAME_BYTES:
-        raise ValueError(f"Filename exceeds {_MAX_FILENAME_BYTES} UTF-8 bytes")
-    if is_upload_staging_file(candidate):
-        raise ValueError(f"Filename uses reserved upload staging pattern: {name!r}")
-    return candidate
+    return normalize_filename(candidate)
 
 
 def shelf_relpath(project_id: str, sha256: str, document_id: str) -> str:
@@ -135,6 +129,11 @@ class StagedDocument:
     size_bytes: int
 
 
+def _new_staging_path(paths: Paths, *, user_id: str, project_id: str, prefix: str = "") -> Path:
+    """A fresh ``.staging/{prefix}{uuid}`` path for in-flight bytes; the sweep collects leftovers after 24 hours (§8.3)."""
+    return paths.project_documents_dir(user_id, project_id) / ".staging" / f"{prefix}{uuid.uuid4().hex}"
+
+
 def _open_staging(staging_dir: Path, staging_path: Path):
     """Worker-thread: create the staging directory and open the staging file."""
     staging_dir.mkdir(parents=True, exist_ok=True)
@@ -159,9 +158,8 @@ async def stage_document_bytes(paths: Paths, *, user_id: str, project_id: str, c
     (the route maps it to 413, mirroring the uploads router) and leaves no
     staging file behind.
     """
-    staging_dir = paths.project_documents_dir(user_id, project_id) / ".staging"
-    staging_path = staging_dir / uuid.uuid4().hex
-    handle = await run_file_io(_open_staging, staging_dir, staging_path)
+    staging_path = _new_staging_path(paths, user_id=user_id, project_id=project_id)
+    handle = await run_file_io(_open_staging, staging_path.parent, staging_path)
     digest = hashlib.sha256()
     size = 0
 
@@ -312,44 +310,96 @@ def _convert_in_thread(original: Path, output_path: Path) -> Path | None:
     return asyncio.run(convert_file_to_markdown(original, output_path=output_path))
 
 
-def _convert_and_publish(original: Path, derived: Path) -> bool:
-    """Worker-thread body: convert to a temp file, then atomically publish.
+#: First-read conversions in flight, keyed by ``(user_id, document_id,
+#: project_id)``. A conversion holds a bounded file-IO pool thread for its
+#: whole duration, so concurrent first reads of one document share it instead
+#: of each pinning a thread. The tool also runs on the isolated subagent loop,
+#: so this is a lock-guarded map of ``concurrent.futures.Future`` rather than
+#: a per-loop asyncio primitive. A ``None`` result means the leader was
+#: cancelled or raised: its followers retry and one of them leads.
+_inflight_conversions: dict[tuple[str, str, str], concurrent.futures.Future[tuple[Path | None, str | None] | None]] = {}
+_inflight_conversions_lock = threading.Lock()
 
-    The temp file lives beside the final path (same filesystem) so the
-    rename is atomic: readers only ever see a complete ``converted.md`` or
-    none at all. A conversion failure publishes nothing and removes the temp.
+
+async def _single_flight_conversion(key: tuple[str, str, str], convert: Callable[[], Awaitable[tuple[Path | None, str | None]]]) -> tuple[Path | None, str | None]:
+    """Run *convert* once per *key* across concurrent callers on any event loop."""
+    while True:
+        with _inflight_conversions_lock:
+            shared = _inflight_conversions.get(key)
+            leading = shared is None
+            if leading:
+                shared = _inflight_conversions[key] = concurrent.futures.Future()
+        if not leading:
+            # Shielded: a cancelled follower must not cancel the shared future
+            # the leader still has to resolve.
+            outcome = await asyncio.shield(asyncio.wrap_future(shared))
+            if outcome is not None:
+                return outcome
+            continue
+        outcome = None
+        try:
+            outcome = await convert()
+            return outcome
+        finally:
+            # Unregister before resolving, so a follower that retries after a
+            # ``None`` outcome cannot find this finished future again.
+            with _inflight_conversions_lock:
+                del _inflight_conversions[key]
+            shared.set_result(outcome)
+
+
+def _convert_to_staging(original: Path, staging_path: Path) -> bool:
+    """Worker-thread body: convert *original* into its ``.staging/`` file.
+
+    Runs outside any database transaction — a conversion can take seconds,
+    and SQLite's write lock is database-wide. The output stays outside the
+    document namespace until published, so a purge racing the conversion
+    never finds, or leaves behind, a partial file there. A conversion failure
+    returns ``False``; the caller removes the staging file either way.
     """
-    derived.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = derived.parent / f".{derived.name}.{uuid.uuid4().hex}.tmp"
+    staging_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        produced = _convert_in_thread(original, temp_path)
-        if produced is None:
-            return False
-        os.replace(produced, derived)
-        return True
+        return _convert_in_thread(original, staging_path) is not None
     except Exception:
         logger.warning("Failed to convert shelf document %s", original, exc_info=True)
-        temp_path.unlink(missing_ok=True)
         return False
-    finally:
-        temp_path.unlink(missing_ok=True)
+
+
+def _publish_converted(staging_path: Path, derived: Path) -> bool:
+    """Worker-thread body: atomically publish a staged conversion as ``derived/converted.md``.
+
+    ``.staging/`` and the namespace share the projects root, so the rename is
+    atomic: readers only ever see a complete ``converted.md`` or none at all.
+    """
+    try:
+        derived.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(staging_path, derived)
+        return True
+    except Exception:
+        logger.warning("Failed to publish converted shelf document %s", derived, exc_info=True)
+        return False
 
 
 async def ensure_converted_markdown(repo: ProjectDocumentRepository, paths: Paths, *, user_id: str, row: dict, auto_convert: bool) -> tuple[Path | None, str | None]:
     """Return ``(converted_path, None)`` or ``(None, reason)``, converting on first read.
 
-    Conversion runs — and ``derived/converted.md`` is published — while the
-    repository holds the document row lock, with ownership, shelf membership
-    and active state revalidated AFTER locking (§6.3): a trash/purge that
-    committed first makes this decline as ``content_missing`` without
-    converting or publishing anything, and one arriving during conversion
-    blocks on the row lock and then proceeds. The temp-file + atomic
-    ``os.replace`` publish stays inside the lock, so no partial converted
-    text is ever exposed. The published companion is valid for the lifetime
-    of the row's immutable original and never needs invalidation (§6.2,
-    §10.9). ``reason`` is one of ``"conversion_disabled"`` (auto-convert
-    off, §7.3), ``"content_missing"`` (row no longer live), or ``"binary"``
-    (not convertible, or the conversion itself failed).
+    The conversion runs into ``.staging/`` outside any database transaction;
+    only the publish holds the document row lock, with ownership, shelf
+    membership and active state revalidated AFTER locking (§6.3). A
+    trash/purge that committed before this read declines as
+    ``content_missing`` without converting; one that commits during the
+    conversion makes the locked revalidation decline, so the staged output is
+    discarded and nothing is published; one arriving during the publish
+    blocks on the row lock and then proceeds. The atomic ``os.replace``
+    publish exposes no partial converted text. Concurrent first reads of one
+    document share a single conversion (``_single_flight_conversion``); one
+    from another process may still convert again and publish identical
+    bytes. The published companion is
+    valid for the lifetime of the row's immutable original and never needs
+    invalidation (§6.2, §10.9). ``reason`` is one of
+    ``"conversion_disabled"`` (auto-convert off, §7.3), ``"content_missing"``
+    (row no longer live), or ``"binary"`` (not convertible, or the conversion
+    itself failed).
     """
     if not auto_convert:
         return None, "conversion_disabled"
@@ -358,18 +408,37 @@ async def ensure_converted_markdown(repo: ProjectDocumentRepository, paths: Path
         return None, "binary"
     if await run_file_io(derived.is_file):
         return derived, None
+    key = (user_id, row["id"], row["project_id"])
+    return await _single_flight_conversion(key, lambda: _convert_and_publish(repo, paths, user_id=user_id, row=row, original=original, derived=derived))
 
-    async def _convert(_locked_row: dict) -> bool:
-        # Re-check under the lock: a conversion that blocked on this row's
-        # lock may already have been published by the lock's previous holder.
-        if await run_file_io(derived.is_file):
-            return True
-        return await run_file_io(_convert_and_publish, original, derived)
 
-    locked = await repo.convert_under_live_lock(row["id"], project_id=row["project_id"], convert=_convert, user_id=user_id)
+async def _convert_and_publish(repo: ProjectDocumentRepository, paths: Paths, *, user_id: str, row: dict, original: Path, derived: Path) -> tuple[Path | None, str | None]:
+    """Convert into ``.staging/`` outside any transaction, then publish under the row lock (§6.3)."""
+    # Read-only probe: skips converting a row that is already gone. It decides
+    # nothing — the locked revalidation before the publish does (§15.5).
+    live = await repo.get(row["id"], user_id=user_id)
+    if live is None or live["project_id"] != row["project_id"]:
+        return None, "content_missing"
+
+    staging_path = _new_staging_path(paths, user_id=user_id, project_id=row["project_id"], prefix="convert-")
+    try:
+        # Drained: a cancelled read waits for the worker, so the cleanup below
+        # runs after its last write.
+        converted = await await_drained(run_file_io(_convert_to_staging, original, staging_path))
+
+        async def _publish(_locked_row: dict) -> bool:
+            if not converted:
+                return False
+            return await run_file_io(_publish_converted, staging_path, derived)
+
+        # Revalidate even after a failed conversion: a row purged meanwhile is
+        # ``content_missing``, not ``binary``.
+        locked = await repo.publish_under_live_lock(row["id"], project_id=row["project_id"], publish=_publish, user_id=user_id)
+    finally:
+        await run_file_io(_remove_staging, staging_path)
     if locked is None:
-        # Purged/trashed (or foreign) between the caller's read and the
-        # locked revalidation: decline without publishing anything (§6.3).
+        # Purged/trashed (or foreign) before the locked revalidation: the
+        # staged output was discarded, nothing published (§6.3).
         return None, "content_missing"
     _locked_row, published = locked
     return (derived, None) if published else (None, "binary")
@@ -415,6 +484,7 @@ _TEXT_READ_CHUNK = 65536
 #: an entry until LRU eviction — no invalidation hook needed.
 _CHAR_COUNT_CACHE: OrderedDict[tuple[str, str], int] = OrderedDict()
 _CHAR_COUNT_CACHE_MAX = 256
+_CHAR_COUNT_CACHE_LOCK = threading.Lock()
 
 
 def _read_text_window(path: Path, *, offset: int, limit: int) -> str:
@@ -459,14 +529,17 @@ def _count_text_chars(path: Path) -> int:
 def _cached_char_count(document_id: str, sha256: str, path: Path) -> int:
     """Worker-thread: character count of an immutable document, cached by content identity."""
     key = (document_id, sha256)
-    cached = _CHAR_COUNT_CACHE.get(key)
-    if cached is not None:
-        _CHAR_COUNT_CACHE.move_to_end(key)
-        return cached
+    with _CHAR_COUNT_CACHE_LOCK:
+        cached = _CHAR_COUNT_CACHE.get(key)
+        if cached is not None:
+            _CHAR_COUNT_CACHE.move_to_end(key)
+            return cached
+    # Only cache metadata is serialized; scans of unrelated files stay concurrent.
     total = _count_text_chars(path)
-    _CHAR_COUNT_CACHE[key] = total
-    while len(_CHAR_COUNT_CACHE) > _CHAR_COUNT_CACHE_MAX:
-        _CHAR_COUNT_CACHE.popitem(last=False)
+    with _CHAR_COUNT_CACHE_LOCK:
+        _CHAR_COUNT_CACHE[key] = total
+        while len(_CHAR_COUNT_CACHE) > _CHAR_COUNT_CACHE_MAX:
+            _CHAR_COUNT_CACHE.popitem(last=False)
     return total
 
 
@@ -557,7 +630,7 @@ async def stage_document_copy_for_attach(
     missing, foreign, trashed, or not on this project's shelf (the route
     maps it to 404); :class:`ShelfContentMissingError` maps to 409.
     """
-    staging_path = paths.project_documents_dir(user_id, project_id) / ".staging" / f"attach-{uuid.uuid4().hex}"
+    staging_path = _new_staging_path(paths, user_id=user_id, project_id=project_id, prefix="attach-")
 
     async def _copy(row: dict) -> Path:
         await run_file_io(_copy_original_under_lock, paths, staging_path, user_id=user_id, row=row)

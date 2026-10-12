@@ -2,7 +2,9 @@ import ipaddress
 import math
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
+
+from deerflow.config._boolean_guards import reject_boolean
 
 SandboxOwnershipType = Literal["memory", "redis"]
 SandboxOverflowPolicy = Literal["wait", "reject", "burst"]
@@ -39,10 +41,8 @@ class SandboxNetworkConfig(BaseModel):
 
     @field_validator("temporary_grant_ttl", mode="before")
     @classmethod
-    def _reject_boolean_temporary_grant_ttl(cls, value: object) -> object:
-        if isinstance(value, bool):
-            raise ValueError("must be an integer, not a boolean")
-        return value
+    def _reject_boolean_temporary_grant_ttl(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")
 
     proxy_image: str = Field(
         default="ghcr.io/bytedance/deer-flow-sandbox-network-proxy:latest",
@@ -123,10 +123,8 @@ class SandboxOwnershipConfig(BaseModel):
 
     @field_validator("renewal_interval_seconds", "ttl_multiplier", mode="before")
     @classmethod
-    def _reject_boolean_ownership_settings(cls, value: object) -> object:
-        if isinstance(value, bool):
-            raise ValueError("must be a number, not a boolean")
-        return value
+    def _reject_boolean_ownership_settings(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="a number")
 
     key_prefix: str = Field(
         default="deerflow:sandbox:owner",
@@ -176,13 +174,18 @@ class SandboxConfig(BaseModel):
         allow_host_bash: Enable host-side bash execution for LocalSandboxProvider.
             Dangerous and intended only for fully trusted local workflows.
 
-    AioSandboxProvider, BoxliteProvider, E2BSandboxProvider, and OpenSandboxProvider shared options:
+    AioSandboxProvider, BoxliteProvider, E2BSandboxProvider, OpenSandboxProvider, and
+    LocalSandboxProvider shared options:
         image: Sandbox image to use (Docker/AIO, BoxLite OCI, or OpenSandbox image)
         replicas: Positive provider capacity. E2B shares it across Gateway
             workers when ownership uses Redis; other modes/providers keep
             process-local accounting.
         idle_timeout: Idle timeout in seconds before released warm sandboxes/VMs are stopped (default: 600 = 10 minutes). Set to 0 to disable.
-        environment: Environment variables to inject into the sandbox (values starting with $ are resolved from host env)
+        environment: Environment variables to inject into the sandbox (values starting with $ are
+            resolved from host env when config is loaded; providers use them verbatim). Injected
+            entries bypass the env-policy scrubber as operator-authorized values;
+            LocalSandboxProvider masks injected credentials from bash tool output and command
+            errors while preserving benign configuration values.
 
     BoxliteProvider specific options:
         health_check_skip_seconds: Optional reclaim-time skip window in seconds for recently released warm VMs. Default behavior is 0.0 = always validate before reuse.
@@ -267,10 +270,8 @@ class SandboxConfig(BaseModel):
         mode="before",
     )
     @classmethod
-    def _reject_boolean_numeric_settings(cls, value: object) -> object:
-        if isinstance(value, bool):
-            raise ValueError("must be a number, not a boolean")
-        return value
+    def _reject_boolean_numeric_settings(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="a number")
 
     health_check_skip_seconds: float | None = Field(
         default=None,
@@ -295,7 +296,7 @@ class SandboxConfig(BaseModel):
     )
     environment: dict[str, str] = Field(
         default_factory=dict,
-        description="Environment variables to inject into the sandbox container. Values starting with $ will be resolved from host environment variables.",
+        description="Environment variables to inject into sandbox commands (including the local provider). Values starting with $ will be resolved from host environment variables when config is loaded.",
     )
     network: SandboxNetworkConfig = Field(
         default_factory=SandboxNetworkConfig,

@@ -51,7 +51,7 @@ async def _drain(bus: MessageBus) -> list[InboundMessage]:
 async def test_fanout_redelivery_progresses_beyond_queue_sized_prefix(base_dir: Path) -> None:
     """A redelivery must not keep failing on the same queue-sized prefix."""
     from app.channels.manager import ChannelManager
-    from app.channels.store import ChannelStore
+    from app.channels.store import JsonChannelStore
 
     agent_names = {"alpha", "bravo", "charlie"}
     for name in agent_names:
@@ -75,7 +75,7 @@ async def test_fanout_redelivery_progresses_beyond_queue_sized_prefix(base_dir: 
     bus = MessageBus(inbound_queue_maxsize=1)
     manager = ChannelManager(
         bus=bus,
-        store=ChannelStore(path=base_dir / "fanout-store.json"),
+        store=JsonChannelStore(path=base_dir / "fanout-store.json"),
         max_concurrency=1,
     )
     handled: list[str] = []
@@ -1240,9 +1240,9 @@ async def test_dedupe_identity_distinguishes_same_agent_name_across_users(base_d
     # differ: neither user's message is treated as a duplicate of the
     # other inside the same ChannelManager dedupe window.
     from app.channels.manager import ChannelManager
-    from app.channels.store import ChannelStore
+    from app.channels.store import JsonChannelStore
 
-    manager = ChannelManager(bus=MessageBus(), store=ChannelStore(path=base_dir / "dedupe-store.json"))
+    manager = ChannelManager(bus=MessageBus(), store=JsonChannelStore(path=base_dir / "dedupe-store.json"))
     assert await manager._is_duplicate_inbound(by_owner["alice"]) is False
     assert await manager._is_duplicate_inbound(by_owner["bob"]) is False
 
@@ -1265,7 +1265,7 @@ async def test_missing_delivery_header_leaves_dedupe_open(base_dir: Path) -> Non
     (willem-bd, PR #4104 review).
     """
     from app.channels.manager import ChannelManager
-    from app.channels.store import ChannelStore
+    from app.channels.store import JsonChannelStore
 
     bus = MessageBus()
     _write_agent(base_dir, "default", "reviewer", {"name": "reviewer", "github": {"bindings": [{"repo": "a/b", "triggers": {"pull_request": {"actions": ["opened"]}}}]}})
@@ -1275,7 +1275,7 @@ async def test_missing_delivery_header_leaves_dedupe_open(base_dir: Path) -> Non
         "repository": {"full_name": "a/b"},
         "sender": {"login": "u"},
     }
-    manager = ChannelManager(bus=MessageBus(), store=ChannelStore(path=base_dir / "dedupe-store.json"))
+    manager = ChannelManager(bus=MessageBus(), store=JsonChannelStore(path=base_dir / "dedupe-store.json"))
 
     await fanout_event(bus, "pull_request", "", payload)
     (first,) = await _drain(bus)

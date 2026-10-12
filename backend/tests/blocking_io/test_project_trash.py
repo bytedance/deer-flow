@@ -21,7 +21,10 @@ from deerflow.projects.documents import add_staged_document, converted_markdown_
 from deerflow.projects.trash import make_purge_file_remover, purge_all_trashed, restore_document, run_trash_retention_sweep
 from deerflow.utils.file_io import run_file_io as _real_run_file_io
 
-pytestmark = [pytest.mark.asyncio, pytest.mark.allow_blocking_io]
+pytestmark = [
+    pytest.mark.asyncio,
+    pytest.mark.allow_blocking_io,
+]
 
 _USER = "u1"
 

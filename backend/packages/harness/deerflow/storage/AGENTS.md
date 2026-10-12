@@ -21,6 +21,14 @@ Replaced stores stay open for callers that already hold them and are closed by
 `reset_blob_store()`; changing a root requires preserving existing blob refs
 and coordinating deployment instances.
 
+`view_image_tool` is the first migrated producer: it persists validated image
+bytes as `kind="viewed-image"`, checkpoints the JSON-safe ref beside
+`actual_path`, and treats any store initialization or write failure as a failed
+tool call rather than claiming cross-instance durability. `ViewImageMiddleware` accepts a
+ref only when its kind, digest, size and content type agree with the separately
+recorded image metadata; reads are blob-first and retain the existing
+sandbox/host compatibility path as fallback after any store failure.
+
 `ToolOutputBudgetMiddleware` is a migrated producer for host-externalized
 results. It persists exact UTF-8 bytes as `kind="tool-output"`, checkpoints a
 versioned ref beside the virtual path, and restores the file atomically under

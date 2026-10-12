@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable
 from typing import Annotated, Any
@@ -62,12 +63,14 @@ async def _catalog_result[Result](operation: Awaitable[Result]) -> Result:
         raise HTTPException(status_code=502, detail="RAGFlow request failed.") from None
 
 
-def _scope_catalog(config: AppConfig, agent_name: str):
+async def _scope_catalog(config: AppConfig, agent_name: str):
     knowledge_base = config.knowledge_base
     agent_config = None
     if agent_name != "lead_agent":
         try:
-            agent_config = load_agent_config(
+            # The agent store reads files or makes a sync DB round trip.
+            agent_config = await asyncio.to_thread(
+                load_agent_config,
                 agent_name,
                 user_id=get_effective_user_id(),
             )
@@ -118,7 +121,7 @@ async def list_retrieval_catalog_datasets(
     config: AppConfig = Depends(get_config),
 ) -> dict[str, Any]:
     """Return only datasets that the operator permits this agent to retrieve."""
-    settings = _scope_catalog(config, agent_name)
+    settings = await _scope_catalog(config, agent_name)
     client = _build_retrieval_client(settings)
     datasets, error = await _catalog_result(
         resolve_ragflow_datasets(client, settings),
@@ -164,7 +167,7 @@ async def list_retrieval_catalog_documents(
     config: AppConfig = Depends(get_config),
 ) -> dict[str, Any]:
     """Return a normalized, read-only document page inside operator scope."""
-    settings = _scope_catalog(config, agent_name)
+    settings = await _scope_catalog(config, agent_name)
     if settings.datasets is not None and dataset_id not in set(settings.datasets):
         raise HTTPException(status_code=404, detail="Knowledge base not found.")
     client = _build_retrieval_client(settings)

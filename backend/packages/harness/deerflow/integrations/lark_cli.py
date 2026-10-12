@@ -64,6 +64,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 from collections.abc import Callable, Iterator
+from concurrent.futures import Future
 from contextlib import contextmanager
 from ctypes import wintypes
 from dataclasses import dataclass
@@ -96,6 +97,14 @@ INTEGRATION_ID = "lark-cli"
 FALLBACK_LARK_CLI_VERSION = "v1.0.65"
 LARK_CLI_NPM_VERSION = FALLBACK_LARK_CLI_VERSION.removeprefix("v")
 LARK_CLI_NPM_PACKAGE = "@larksuite/cli"
+# ``lark-cli`` is a native binary (installed by the npm package's Node wrapper)
+# and npm itself always write UTF-8 to a pipe, so every capture of their output
+# must be decoded as UTF-8 rather than with the host locale. On a host whose ANSI
+# code page is not UTF-8 (cp936, cp1252) the locale decode silently mangles every
+# non-ASCII field -- ``auth status --json`` reports a CJK ``userName``, documents
+# titles come back garbled -- and can kill the pipe reader thread outright when a
+# byte sequence is invalid in the code page, leaving ``stdout`` as ``None``.
+LARK_CLI_SUBPROCESS_ENCODING = "utf-8"
 LARK_CLI_GITHUB_REPO = "larksuite/cli"
 LARK_CLI_LATEST_RELEASE_API = f"https://api.github.com/repos/{LARK_CLI_GITHUB_REPO}/releases/latest"
 LARK_CLI_SOURCE_ARCHIVE_ENV = "DEER_FLOW_LARK_CLI_SKILLS_ARCHIVE"
@@ -1239,14 +1248,35 @@ def _extract_lark_cli_runtime_binary(archive: bytes, destination: Path) -> None:
     if not candidate:
         raise ValueError("Lark CLI runtime archive does not contain a lark-cli executable.")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_bytes(candidate)
+    _publish_bytes_atomically(destination, candidate)
     destination.chmod(0o755)
+
+
+def _publish_bytes_atomically(path: Path, content: bytes) -> None:
+    """Publish *content* at *path* without exposing a partial file.
+
+    Flush and fsync a same-directory temporary file before ``os.replace``.
+    Callers own the final mode: runtime binaries and launchers use 0o755;
+    staged skill files and manifests become read-only through
+    ``make_skill_tree_sandbox_readable``. The parent directory is not fsynced,
+    so this helper alone does not guarantee publication survives power loss.
+    """
+    fd, temporary = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
 
 
 def _write_lark_cli_sandbox_launcher(staging: Path) -> None:
     launcher = staging / "bin" / "lark-cli"
     launcher.parent.mkdir(parents=True, exist_ok=True)
-    launcher.write_text(LARK_CLI_SANDBOX_LAUNCHER_SCRIPT, encoding="utf-8")
+    _publish_bytes_atomically(launcher, LARK_CLI_SANDBOX_LAUNCHER_SCRIPT.encode("utf-8"))
     launcher.chmod(0o755)
 
 
@@ -1533,6 +1563,8 @@ def _probe_lark_cli_at_path(path: str) -> LarkCliProbe:
             check=False,
             capture_output=True,
             text=True,
+            encoding=LARK_CLI_SUBPROCESS_ENCODING,
+            errors="replace",
             timeout=5,
         )
     except Exception as exc:  # noqa: BLE001 - probe boundary
@@ -1568,6 +1600,8 @@ def probe_lark_auth(user_id: str, *, verify: bool = False) -> LarkAuthProbe:
             check=False,
             capture_output=True,
             text=True,
+            encoding=LARK_CLI_SUBPROCESS_ENCODING,
+            errors="replace",
             timeout=8,
             env=lark_cli_env(user_id),
         )
@@ -1666,59 +1700,154 @@ def _resolve_sandbox_runtime_readiness(
     return "gateway-download", True, None, True
 
 
+# Machine-readable marker the provisioner attaches to a lark
+# provisioning-config conflict (409/503) so the Gateway drops its cached
+# broker capability observation. Keep in sync with docker/provisioner/app.py.
+PROVISIONER_CAPABILITY_REFRESH_HEADER = "X-DeerFlow-Capability-Refresh"
+PROVISIONER_CAPABILITY_REFRESH_LARK_BROKER = "lark-broker"
 LARK_BROKER_MODE_TTL_SECONDS = 60
 # Negative results (broker not active) are cached longer than positive ones: a
 # non-broker remote-provisioner deployment stays non-broker for the life of the
 # process far more often than it flips on, so this keeps the hot bash path from
 # re-probing every minute. A positive result still refreshes on the shorter TTL.
 LARK_BROKER_MODE_NEGATIVE_TTL_SECONDS = 300
-# Tight probe budget on the per-bash-call hot path: unlike the Settings status
-# probe (5s, user is waiting on a page), this runs inline before a sandbox
-# lark-cli command, so a slow/unreachable provisioner must not add seconds of
-# latency to every first-call-per-TTL for non-broker deployments.
+# Tight admission probe budget, separate from the Settings status probe (5s).
+# Command execution uses the sandbox's attested mode and never probes here.
 LARK_BROKER_MODE_PROBE_TIMEOUT_SECONDS = 1.5
-# Guards the cache attribute on sandbox_lark_broker_active against concurrent
-# bash invocations so the correctness story doesn't rely on idempotent races.
+LARK_BROKER_MODE_PROBE_RETRY_SECONDS = 1.5
+# Only cache/flight bookkeeping holds this lock; HTTP and waiting never do.
 _LARK_BROKER_MODE_CACHE_LOCK = threading.Lock()
+_LARK_BROKER_MODE_PROBES: dict[tuple[str, str], Future[bool]] = {}
 
 
-def sandbox_lark_broker_active(config: AppConfig | None = None) -> bool:
+@dataclass(frozen=True)
+class _LarkBrokerModeCacheEntry:
+    active: bool | None
+    confirmed_at: float
+    retry_after: float = 0.0
+
+
+class LarkBrokerCapabilityUnknownError(RuntimeError):
+    """The provisioner's broker capability could not be confirmed.
+
+    Raised instead of guessing: only a confirmed observation may select
+    credential placement. Callers holding a stronger, Pod-level attestation may
+    catch this and defer the deployment-level decision; everything else fails
+    closed.
+    """
+
+
+def _known_broker_requirement(active: bool | None) -> bool:
+    if active is True:
+        return True
+    raise LarkBrokerCapabilityUnknownError("Provisioner Lark broker capability is unknown; refusing to mount credentials in the sandbox")
+
+
+def _fresh_broker_observation(cached: _LarkBrokerModeCacheEntry, now: float, observed_mode: bool | None) -> bool | None:
+    """Return the still-trustworthy cached observation, or None when a new probe is required.
+
+    A contradictory ``observed_mode`` never receives the cached value: the
+    in-flight or next probe must confirm which mode the provisioner actually runs.
+    """
+    if now < cached.retry_after:
+        return _known_broker_requirement(cached.active)
+    ttl = LARK_BROKER_MODE_TTL_SECONDS if cached.active else LARK_BROKER_MODE_NEGATIVE_TTL_SECONDS
+    if not cached.retry_after and now - cached.confirmed_at < ttl and (observed_mode is None or observed_mode is cached.active):
+        return cached.active
+    return None
+
+
+def sandbox_lark_broker_active(config: AppConfig | None = None, *, observed_mode: bool | None = None) -> bool:
     """Whether sandbox ``lark-cli`` runs in broker mode (Pattern B).
 
-    Cached with a short TTL because it is consulted on every ``lark-cli`` bash
-    call and reads the provisioner capability over HTTP. Broker mode requires a
-    remote provisioner that reports a configured broker image; any other config
-    (local AIO, init-container binary mode, unreachable provisioner) is False, so
-    the caller falls back to the credential-mount overlay.
-
-    The probe uses a tight timeout and negatives are cached longer than positives
-    so a non-broker remote-provisioner deployment does not pay a latency penalty
-    on the bash hot path.
+    Only confirmed capabilities may select credential placement. An unavailable
+    or malformed response is unknown, never a negative observation. Keep a known
+    broker requirement through outages; without one, fail closed. A confirmed
+    non-broker observation is likewise only trusted inside its TTL: once it goes
+    stale, or while a refresh is backing off after a probe failure, admission
+    raises instead of trusting a negative that would mount credentials on a pod
+    whose mode is no longer verified. Execution uses the mode reported for the
+    actual sandbox, rather than probing again. An attested ``observed_mode``
+    contradicting a cached observation forces one shared refresh before
+    admission decides whether the Pod needs replacement.
     """
     if config is None:
-        try:
-            from deerflow.config.app_config import get_app_config
+        from deerflow.config.app_config import get_app_config
 
-            config = get_app_config()
-        except Exception:  # noqa: BLE001 - degrade to non-broker overlay
-            return False
+        config = get_app_config()
 
-    now = time.monotonic()
+    if not (_uses_aio_sandbox(config) and _uses_remote_provisioner(config)):
+        return False
+
+    cache_key = (_sandbox_config_value(config, "provisioner_url").rstrip("/"), _sandbox_config_value(config, "provisioner_api_key"))
+    probe_owner = False
     with _LARK_BROKER_MODE_CACHE_LOCK:
-        cached = getattr(sandbox_lark_broker_active, "_cache", None)
+        cache = getattr(sandbox_lark_broker_active, "_cache", {})
+        sandbox_lark_broker_active._cache = cache  # type: ignore[attr-defined]
+        cached = cache.get(cache_key)
+        flight = _LARK_BROKER_MODE_PROBES.get(cache_key)
+        if flight is None:
+            now = time.monotonic()
+            if cached is not None:
+                fresh = _fresh_broker_observation(cached, now, observed_mode)
+                if fresh is not None:
+                    return fresh
+            flight = Future()
+            _LARK_BROKER_MODE_PROBES[cache_key] = flight
+            probe_owner = True
+
+    if not probe_owner:
         if cached is not None:
-            ts, value = cached
-            ttl = LARK_BROKER_MODE_TTL_SECONDS if value else LARK_BROKER_MODE_NEGATIVE_TTL_SECONDS
-            if now - ts < ttl:
-                return value
+            # A probe another caller started does not invalidate this caller's
+            # still-fresh observation; only a contradictory attestation waits.
+            fresh = _fresh_broker_observation(cached, time.monotonic(), observed_mode)
+            if fresh is not None:
+                return fresh
+        return flight.result()
 
-    active = False
-    if _uses_aio_sandbox(config) and _uses_remote_provisioner(config):
+    try:
+        # One flight per endpoint/auth identity shares success AND failure.
+        # It also orders observations without blocking unrelated endpoints.
         caps = _probe_provisioner_capabilities(config, timeout=LARK_BROKER_MODE_PROBE_TIMEOUT_SECONDS)
-        active = bool(caps and caps["lark_cli_broker_image"])
+        active = caps.get("lark_cli_broker_image") if isinstance(caps, dict) else None
+        now = time.monotonic()
+        if isinstance(active, bool):
+            entry = _LarkBrokerModeCacheEntry(active, now)
+        else:
+            # Backoff is separate from confirmation freshness: failure never
+            # authorizes False or extends a previous observation's TTL.
+            entry = _LarkBrokerModeCacheEntry(
+                cached.active if cached is not None else None,
+                cached.confirmed_at if cached is not None else 0.0,
+                retry_after=now + LARK_BROKER_MODE_PROBE_RETRY_SECONDS,
+            )
+        with _LARK_BROKER_MODE_CACHE_LOCK:
+            cache[cache_key] = entry
+        flight.set_result(active if isinstance(active, bool) else _known_broker_requirement(entry.active))
+    except BaseException as exc:
+        # Publish every outcome so waiters cannot be stranded by an exception.
+        flight.set_exception(exc)
+    finally:
+        with _LARK_BROKER_MODE_CACHE_LOCK:
+            _LARK_BROKER_MODE_PROBES.pop(cache_key, None)
+    return flight.result()
+
+
+def invalidate_cached_lark_broker_mode(provisioner_url: str, api_key: str | None = None) -> None:
+    """Drop the cached broker-mode observation for one provisioner identity.
+
+    The provisioner marks a lark provisioning-config conflict (409/503) with
+    ``PROVISIONER_CAPABILITY_REFRESH_HEADER`` so a deployment change (e.g. the
+    broker image being added or removed) takes effect on the next acquire
+    instead of living out the cache TTL — up to 300s for a confirmed
+    non-broker. Only the cached observation is dropped; an in-flight probe is
+    left alone and repopulates the cache with a fresh observation.
+    """
+    key = (provisioner_url.rstrip("/"), (api_key or "").strip())
     with _LARK_BROKER_MODE_CACHE_LOCK:
-        sandbox_lark_broker_active._cache = (now, active)  # type: ignore[attr-defined]
-    return active
+        cache = getattr(sandbox_lark_broker_active, "_cache", None)
+        if cache:
+            cache.pop(key, None)
 
 
 @dataclass(frozen=True)
@@ -1964,9 +2093,8 @@ def _probe_provisioner_capabilities(config: AppConfig, *, timeout: float = 5.0) 
 
     Returns the capability dict when the provisioner answers, or None when it
     can't be reached. Used both for the status readiness signal and to select
-    broker vs. binary mode on the bash hot path; failures degrade to "not
-    ready"/"not broker" rather than raising. ``timeout`` is caller-tunable so the
-    per-bash-call probe can use a tighter budget than the Settings status probe.
+    broker vs. binary mode when provisioning. Failures mean unknown; status
+    callers can report "not ready", while provisioning must fail closed.
     """
     base = _sandbox_config_value(config, "provisioner_url")
     if not base:
@@ -1978,11 +2106,11 @@ def _probe_provisioner_capabilities(config: AppConfig, *, timeout: float = 5.0) 
         request = urllib.request.Request(url, headers={"User-Agent": "deer-flow", **headers})
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
-        if not isinstance(payload, dict):
+        if not isinstance(payload, dict) or any(not isinstance(payload.get(key), bool) for key in ("lark_cli_init_image", "lark_cli_broker_image")):
             return None
         return {
-            "lark_cli_init_image": bool(payload.get("lark_cli_init_image")),
-            "lark_cli_broker_image": bool(payload.get("lark_cli_broker_image")),
+            "lark_cli_init_image": payload["lark_cli_init_image"],
+            "lark_cli_broker_image": payload["lark_cli_broker_image"],
         }
     except Exception:
         return None
@@ -2244,6 +2372,8 @@ def _install_managed_gateway_lark_cli(version: str) -> LarkCliProbe:
         check=False,
         capture_output=True,
         text=True,
+        encoding=LARK_CLI_SUBPROCESS_ENCODING,
+        errors="replace",
         timeout=LARK_CLI_NPM_INSTALL_TIMEOUT_SECONDS,
         env={**os.environ, "npm_config_update_notifier": "false"},
     )
@@ -2396,6 +2526,8 @@ def _run_lark_config_init(*, app_id: str, app_secret: str, brand: str, env: dict
             check=False,
             capture_output=True,
             text=True,
+            encoding=LARK_CLI_SUBPROCESS_ENCODING,
+            errors="replace",
             timeout=15,
             env=env,
         )
@@ -2498,6 +2630,8 @@ def _revoke_lark_auth_from_snapshot(snapshot: Path) -> None:
             check=False,
             capture_output=True,
             text=True,
+            encoding=LARK_CLI_SUBPROCESS_ENCODING,
+            errors="replace",
             timeout=15,
             env=_lark_cli_env_for_directories(config_dir=snapshot / "config", data_dir=data_dir),
         )
@@ -2524,6 +2658,8 @@ def _run_lark_cli_json(
                 check=False,
                 capture_output=True,
                 text=True,
+                encoding=LARK_CLI_SUBPROCESS_ENCODING,
+                errors="replace",
                 timeout=timeout,
                 env=lark_cli_env(user_id),
             )
@@ -2756,7 +2892,7 @@ def _install_lark_skills_from_archive(user_id: str, archive_path: Path, *, versi
 
 @contextmanager
 def _lark_install_lock(parent: Path):
-    """Serialize the cross-process atomic replacement of the global pack."""
+    """Serialize cross-process installers of the global pack."""
     with _exclusive_install_lock(parent / ".lark-cli.install.lock", _LARK_INSTALL_THREAD_LOCK):
         yield
 
@@ -2767,6 +2903,17 @@ def _install_lark_skills_from_archive_locked(
     *,
     version: str | None = None,
 ) -> tuple[tuple[str, ...], str]:
+    """Prepare a private skill tree and publish its body/manifest pair together.
+
+    The caller holds ``_lark_install_lock``. Extraction, validation, guidance,
+    manifest generation and permission changes all happen in staging; the
+    final ``staging_target.rename(target)`` is the publication boundary. An
+    existing target is moved to a backup first, then restored on an ordinary
+    publication error. Staging is discarded on success or failure.
+
+    Extraction writes and parent directories are not fsynced, so this is not
+    a power-loss durability guarantee for the complete tree.
+    """
     target = parent / INTEGRATION_ID
     staging_parent = Path(tempfile.mkdtemp(prefix=".installing-lark-cli-", dir=str(parent)))
     staging_target = staging_parent / INTEGRATION_ID
@@ -2902,7 +3049,7 @@ def _append_deerflow_lark_shared_guidance(root: Path) -> None:
 
 只有在用户明确说明已经完成授权后，才继续调用具体的 `lark-cli` 业务命令。
 """
-    skill_file.write_text(content.rstrip() + guidance + "\n", encoding="utf-8")
+    _publish_bytes_atomically(skill_file, (content.rstrip() + guidance + "\n").encode("utf-8"))
 
 
 def _write_manifest(root: Path, installed_skills: set[str], *, version: str | None, content_sha256: str) -> None:
@@ -2915,4 +3062,7 @@ def _write_manifest(root: Path, installed_skills: set[str], *, version: str | No
         "installed_at": datetime.now(UTC).isoformat(),
         "skills": sorted(installed_skills),
     }
-    (root / LARK_CLI_MANIFEST_FILE).write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _publish_bytes_atomically(
+        root / LARK_CLI_MANIFEST_FILE,
+        (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
+    )

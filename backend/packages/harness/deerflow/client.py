@@ -53,6 +53,7 @@ from deerflow.config.extensions_config import (
 )
 from deerflow.config.paths import get_paths
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+from deerflow.mcp.lifecycle import LIFECYCLE_KEY, plan_mcp_lifecycle
 from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.models import create_chat_model
 from deerflow.models.reasoning import reasoning_capabilities_payload, resolve_reasoning_contract
@@ -757,57 +758,51 @@ class DeerFlowClient:
             pass
         return {"goal": None}
 
-    def list_threads(self, limit: int = 10) -> dict:
+    def list_threads(self, limit: int = 10, *, sort_by: Literal["created_at", "updated_at"] = "created_at") -> dict:
         """List the recent N threads.
+
+        ``limit`` counts threads, not checkpoints, and only each returned
+        thread's first and latest checkpoints are loaded (see
+        :mod:`deerflow.runtime.checkpointer.thread_spans`).
 
         Args:
             limit: Maximum number of threads to return. Default is 10.
+            sort_by: ``"created_at"`` (default) orders by each thread's first
+                checkpoint, ``"updated_at"`` by its latest. Both follow
+                checkpoint write order, which the reported ``ts`` values can
+                lag: a goal write keeps the previous checkpoint's ``ts``.
 
         Returns:
             Dict with "thread_list" key containing list of thread info dicts,
-            sorted by thread creation time descending.
+            newest first by ``sort_by``.
         """
+        from deerflow.runtime.checkpointer.thread_spans import list_thread_spans
+
+        if sort_by not in ("created_at", "updated_at"):
+            raise ValueError(f"sort_by must be 'created_at' or 'updated_at', got {sort_by!r}")
         checkpointer = self._get_thread_checkpointer()
+        spans = list_thread_spans(checkpointer, order_by="first" if sort_by == "created_at" else "latest", limit=limit)
 
-        thread_info_map = {}
+        def _checkpoint(thread_id: str, checkpoint_id: str):
+            return checkpointer.get_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": "", "checkpoint_id": checkpoint_id}})
 
-        for cp in checkpointer.list(config=None, limit=limit):
-            cfg = cp.config.get("configurable", {})
-            thread_id = cfg.get("thread_id")
-            if not thread_id:
+        threads = []
+        for span in spans:
+            latest = _checkpoint(span.thread_id, span.latest_checkpoint_id)
+            if latest is None:
                 continue
-
-            ts = cp.checkpoint.get("ts")
-            checkpoint_id = cfg.get("checkpoint_id")
-
-            if thread_id not in thread_info_map:
-                channel_values = cp.checkpoint.get("channel_values", {})
-                thread_info_map[thread_id] = {
-                    "thread_id": thread_id,
-                    "created_at": ts,
-                    "updated_at": ts,
-                    "latest_checkpoint_id": checkpoint_id,
-                    "title": channel_values.get("title"),
+            first = latest if span.first_checkpoint_id == span.latest_checkpoint_id else _checkpoint(span.thread_id, span.first_checkpoint_id)
+            threads.append(
+                {
+                    "thread_id": span.thread_id,
+                    "created_at": first.checkpoint.get("ts") if first is not None else None,
+                    "updated_at": latest.checkpoint.get("ts"),
+                    "latest_checkpoint_id": span.latest_checkpoint_id,
+                    "title": latest.checkpoint.get("channel_values", {}).get("title"),
                 }
-            else:
-                # Explicitly compare timestamps to ensure accuracy when iterating over unordered namespaces.
-                # Treat None as "missing" and only compare when existing values are non-None.
-                if ts is not None:
-                    current_created = thread_info_map[thread_id]["created_at"]
-                    if current_created is None or ts < current_created:
-                        thread_info_map[thread_id]["created_at"] = ts
+            )
 
-                    current_updated = thread_info_map[thread_id]["updated_at"]
-                    if current_updated is None or ts > current_updated:
-                        thread_info_map[thread_id]["updated_at"] = ts
-                        thread_info_map[thread_id]["latest_checkpoint_id"] = checkpoint_id
-                        channel_values = cp.checkpoint.get("channel_values", {})
-                        thread_info_map[thread_id]["title"] = channel_values.get("title")
-
-        threads = list(thread_info_map.values())
-        threads.sort(key=lambda x: x.get("created_at") or "", reverse=True)
-
-        return {"thread_list": threads[:limit]}
+        return {"thread_list": threads}
 
     def get_thread(self, thread_id: str) -> dict:
         """Get the complete materialized checkpoint history for a thread."""
@@ -1461,23 +1456,58 @@ class DeerFlowClient:
         Raises:
             ValueError: If the resulting config would not load; nothing is written.
             OSError: If the config file cannot be written.
+            RuntimeError: If the configuration was saved but local MCP reconciliation or
+                teardown failed. The configuration may already have changed on disk, so
+                callers must not assume the write failed and blindly retry.
         """
+        from deerflow.mcp.cache import (
+            fail_mcp_reconciliation,
+            finish_mcp_reconciliation,
+            prepare_mcp_reconciliation,
+        )
+
         config_path = ExtensionsConfig.resolve_config_path()
         if config_path is None:
             raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
 
+        pending = None
+        committed_failure = None
+        reloaded = None
         with extensions_config_write_lock, extensions_config_file_lock(config_path):
             # The singleton is process-local, so re-read the shared file under
             # the cross-process lock before merging the replacement MCP map.
             # Read it raw so sibling keys keep their $VAR placeholders.
-            config_data = read_raw_extensions_config(config_path)
-            config_data["mcpServers"] = mcp_servers
+            previous_raw = read_raw_extensions_config(config_path)
+            config_data = copy.deepcopy(previous_raw)
+            config_data["mcpServers"] = copy.deepcopy(mcp_servers)
+            config_data[LIFECYCLE_KEY] = plan_mcp_lifecycle(previous_raw, config_data)
 
-            validate_raw_extensions_config(config_data)
+            candidate = validate_raw_extensions_config(config_data)
             self._atomic_write_json(config_path, config_data)
-            reloaded = reload_extensions_config()
+            try:
+                reloaded = reload_extensions_config()
+                pending = prepare_mcp_reconciliation(candidate, config_path=config_path)
+            except Exception as exc:
+                # The file is already committed, so detach local state under the
+                # cache condition here and finish teardown after the locks are
+                # released; never report the write as a clean success.
+                committed_failure = (fail_mcp_reconciliation(exc), exc)
 
-        self.reset_agent()
+        try:
+            if committed_failure is not None:
+                failed_pending, _failure = committed_failure
+                finish_mcp_reconciliation(failed_pending)
+            else:
+                finish_mcp_reconciliation(pending)
+        finally:
+            # The config file is already committed, so an agent built from the
+            # previous MCP tool set must not survive this call even when local
+            # reconciliation or teardown raised.
+            self.reset_agent()
+
+        if committed_failure is not None:
+            _failed_pending, failure = committed_failure
+            raise RuntimeError("MCP configuration was saved, but local cache reconciliation failed; retry or restart DeerFlow before relying on the changed server.") from failure
         return {"mcp_servers": {name: server.model_dump() for name, server in reloaded.mcp_servers.items()}}
 
     # ------------------------------------------------------------------

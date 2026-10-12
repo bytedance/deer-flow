@@ -435,12 +435,14 @@ test.describe("Chat workspace", () => {
     await textarea.fill("Send this immediately");
     await textarea.press("Enter");
 
+    // The attachment is still uploading, so the send is not dispatched yet:
+    // the draft stays stored, and a reload or a failed upload cannot lose it.
     await page.waitForTimeout(500);
     expect(
       await page.evaluate(() =>
         Object.values(window.sessionStorage).join("\n"),
       ),
-    ).not.toContain("Send this immediately");
+    ).toContain("Send this immediately");
 
     releaseUpload();
     await expect
@@ -449,6 +451,15 @@ test.describe("Chat workspace", () => {
     await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
       timeout: 10_000,
     });
+
+    // Dispatch retired the draft, and nothing scheduled before it may write
+    // the accepted text back.
+    await page.waitForTimeout(500);
+    expect(
+      await page.evaluate(() =>
+        Object.values(window.sessionStorage).join("\n"),
+      ),
+    ).not.toContain("Send this immediately");
 
     // A new user edit must still save, even when it repeats the accepted text.
     await page

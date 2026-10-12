@@ -1,10 +1,13 @@
 """SQL repository for the scheduled-task notification delivery outbox.
 
-The completion hook calls :meth:`NotificationDeliveryRepository.enqueue`
-(idempotent), and the delivery worker uses ``claim_due_deliveries`` /
+The scheduler's finalization observer calls
+:meth:`NotificationDeliveryRepository.enqueue_in_session` (idempotent, inside
+the outcome's transaction), and the delivery worker uses ``claim_due_deliveries`` /
 ``mark_sent`` / ``mark_failed``. Claim flips rows ``pending -> sending``
-inside one transaction guarded by ``status = 'pending'``, so concurrent
-workers (multi-pod deployments) cannot double-send the same row.
+inside one transaction guarded by ``status = 'pending'`` and stamps a fresh
+``claim_token``. Completion writes that carry the token are conditionally
+updated only while that claim owns the row, fencing stale workers after
+reconciliation.
 """
 
 from __future__ import annotations
@@ -15,6 +18,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -108,6 +113,59 @@ class NotificationDeliveryRepository:
                 raise
             return self._to_dict(existing)
 
+    async def enqueue_in_session(
+        self,
+        session: AsyncSession,
+        *,
+        task_id: str,
+        task_run_id: str,
+        event: str,
+        provider: str,
+        target: str,
+        owner_user_id: str,
+        payload: dict[str, Any] | None = None,
+        run_id: str | None = None,
+        available_at: datetime | None = None,
+        max_attempts: int = 5,
+    ) -> dict[str, Any]:
+        """Stage an idempotent delivery without committing its caller's work.
+
+        Occurrence finalization uses the same transaction for the task change
+        and its notification obligation. Conflict handling must not roll back
+        that transaction or open a second writer while it holds the parent lock.
+        """
+        dialect = session.get_bind().dialect.name
+        if dialect not in {"sqlite", "postgresql"}:
+            raise ValueError(f"Unsupported notification database dialect: {dialect}")
+        insert = sqlite_insert if dialect == "sqlite" else pg_insert
+        values = {
+            "id": self._new_id(),
+            "task_id": task_id,
+            "task_run_id": task_run_id,
+            "run_id": run_id,
+            "event": event,
+            "provider": provider,
+            "target": target,
+            "owner_user_id": owner_user_id,
+            "payload_json": dict(payload or {}),
+            "max_attempts": max_attempts,
+        }
+        if available_at is not None:
+            values["available_at"] = available_at
+        statement = insert(NotificationDeliveryRow).values(**values).on_conflict_do_nothing(index_elements=["task_run_id", "event", "provider", "target"])
+        await session.execute(statement)
+        row = await session.scalar(
+            select(NotificationDeliveryRow).where(
+                NotificationDeliveryRow.task_run_id == task_run_id,
+                NotificationDeliveryRow.event == event,
+                NotificationDeliveryRow.provider == provider,
+                NotificationDeliveryRow.target == target,
+            )
+        )
+        if row is None:
+            raise RuntimeError("Notification insert produced no delivery row")
+        return self._to_dict(row)
+
     async def _find_by_idempotency_key(
         self,
         *,
@@ -136,6 +194,8 @@ class NotificationDeliveryRepository:
         re-SELECT would also match rows a concurrent worker flipped in the
         same window and hand them out twice -- the multi-pod double-send the
         docstring above rules out.
+
+        Each claim stamps a token that completion methods use for fencing.
         """
         if limit <= 0:
             return []
@@ -165,7 +225,7 @@ class NotificationDeliveryRepository:
                             NotificationDeliveryRow.id.in_(due_ids),
                             NotificationDeliveryRow.status == "pending",
                         )
-                        .values(status="sending", updated_at=now)
+                        .values(status="sending", claim_token=uuid.uuid4().hex, updated_at=now)
                         .returning(NotificationDeliveryRow)
                     )
                 )
@@ -194,12 +254,12 @@ class NotificationDeliveryRepository:
                     NotificationDeliveryRow.status == "sending",
                     NotificationDeliveryRow.updated_at <= cutoff,
                 )
-                .values(status="pending", updated_at=now)
+                .values(status="pending", claim_token=None, updated_at=now)
             )
             await session.commit()
             return result.rowcount
 
-    async def mark_sent(self, delivery_id: str) -> dict[str, Any]:
+    async def mark_sent(self, delivery_id: str, *, claim_token: str | None = None) -> dict[str, Any]:
         async with self.session_factory() as session:
             row = await session.get(NotificationDeliveryRow, delivery_id)
             if row is None:
@@ -210,11 +270,99 @@ class NotificationDeliveryRepository:
                 # must not reopen or relabel it.
                 logger.info("notification delivery %s is already %s; ignoring late mark_sent", delivery_id, row.status)
                 return self._to_dict(row)
+            if claim_token is not None:
+                finalized = await self._fenced_completion(
+                    session,
+                    delivery_id,
+                    claim_token,
+                    values={"status": "sent", "sent_at": datetime.now(UTC), "claim_token": None},
+                )
+                if finalized is None:
+                    return await self._fenced_out_row(session, delivery_id, claim_token, "mark_sent")
+                await session.commit()
+                return self._to_dict(finalized)
             row.status = "sent"
+            row.claim_token = None
             row.sent_at = datetime.now(UTC)
             await session.commit()
             await session.refresh(row)
             return self._to_dict(row)
+
+    @staticmethod
+    async def _fenced_completion(
+        session: AsyncSession,
+        delivery_id: str,
+        claim_token: str,
+        *,
+        values: dict[str, Any],
+    ) -> NotificationDeliveryRow | None:
+        """Apply a completion only while the token still owns ``sending``."""
+        values = {**values, "updated_at": datetime.now(UTC)}
+        result = await session.execute(
+            update(NotificationDeliveryRow)
+            .where(
+                NotificationDeliveryRow.id == delivery_id,
+                NotificationDeliveryRow.status == "sending",
+                NotificationDeliveryRow.claim_token == claim_token,
+            )
+            .values(**values)
+            .returning(NotificationDeliveryRow)
+        )
+        return result.scalars().first()
+
+    async def _fenced_out_row(
+        self,
+        session: AsyncSession,
+        delivery_id: str,
+        claim_token: str,
+        operation: str,
+    ) -> dict[str, Any]:
+        logger.info(
+            "notification delivery %s is no longer owned by claim %s; ignoring late %s",
+            delivery_id,
+            claim_token[:8],
+            operation,
+        )
+        await session.rollback()
+        current = await session.get(NotificationDeliveryRow, delivery_id)
+        if current is None:
+            raise LookupError(f"notification delivery {delivery_id} not found")
+        return self._to_dict(current)
+
+    @staticmethod
+    def _failure_outcome(
+        row: NotificationDeliveryRow,
+        *,
+        error: str | None,
+        count_attempt: bool,
+        terminal: bool,
+        now: datetime,
+    ) -> dict[str, Any]:
+        values: dict[str, Any] = {"last_error": error, "claim_token": None, "updated_at": now}
+        if terminal:
+            values["status"] = "failed"
+        elif not count_attempt:
+            created_at = row.created_at
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=UTC)
+            park_expired = (now - created_at) >= _CHANNEL_PARK_MAX_AGE or row.parked_attempts >= _CHANNEL_PARK_MAX_ATTEMPTS
+            if park_expired:
+                values["status"] = "failed"
+                values["last_error"] = error or "channel did not return before parking limit"
+            else:
+                values["parked_attempts"] = row.parked_attempts + 1
+                values["status"] = "pending"
+                values["available_at"] = now + timedelta(seconds=_CHANNEL_DOWN_RETRY_SECONDS)
+        else:
+            attempts = row.attempts + 1
+            values["attempts"] = attempts
+            if attempts >= row.max_attempts:
+                values["status"] = "failed"
+            else:
+                delay = min(_RETRY_BASE_SECONDS * 2 ** (attempts - 1), _RETRY_MAX_SECONDS)
+                values["status"] = "pending"
+                values["available_at"] = now + timedelta(seconds=delay)
+        return values
 
     async def mark_failed(
         self,
@@ -223,6 +371,7 @@ class NotificationDeliveryRepository:
         error: str | None = None,
         count_attempt: bool = True,
         terminal: bool = False,
+        claim_token: str | None = None,
     ) -> dict[str, Any]:
         """Record a failed attempt; reschedule with backoff while retries
         remain, otherwise finalize the row as ``failed``.
@@ -250,30 +399,16 @@ class NotificationDeliveryRepository:
                 # pending and send it later after all.
                 logger.info("notification delivery %s is already %s; ignoring late mark_failed", delivery_id, row.status)
                 return self._to_dict(row)
-            row.last_error = error
-            if terminal:
-                row.status = "failed"
-            elif not count_attempt:
-                now = datetime.now(UTC)
-                created_at = row.created_at
-                if created_at.tzinfo is None:
-                    created_at = created_at.replace(tzinfo=UTC)
-                park_expired = (now - created_at) >= _CHANNEL_PARK_MAX_AGE or row.parked_attempts >= _CHANNEL_PARK_MAX_ATTEMPTS
-                if park_expired:
-                    row.status = "failed"
-                    row.last_error = error or "channel did not return before parking limit"
-                else:
-                    row.parked_attempts += 1
-                    row.status = "pending"
-                    row.available_at = now + timedelta(seconds=_CHANNEL_DOWN_RETRY_SECONDS)
-            else:
-                row.attempts += 1
-                if row.attempts >= row.max_attempts:
-                    row.status = "failed"
-                else:
-                    delay = min(_RETRY_BASE_SECONDS * 2 ** (row.attempts - 1), _RETRY_MAX_SECONDS)
-                    row.status = "pending"
-                    row.available_at = datetime.now(UTC) + timedelta(seconds=delay)
+            now = datetime.now(UTC)
+            values = self._failure_outcome(row, error=error, count_attempt=count_attempt, terminal=terminal, now=now)
+            if claim_token is not None:
+                updated = await self._fenced_completion(session, delivery_id, claim_token, values=values)
+                if updated is None:
+                    return await self._fenced_out_row(session, delivery_id, claim_token, "mark_failed")
+                await session.commit()
+                return self._to_dict(updated)
+            for name, value in values.items():
+                setattr(row, name, value)
             await session.commit()
             await session.refresh(row)
             return self._to_dict(row)

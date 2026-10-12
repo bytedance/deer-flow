@@ -15,7 +15,9 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
+
+from deerflow.config._boolean_guards import reject_boolean
 
 
 class RunEventsConfig(BaseModel):
@@ -31,10 +33,8 @@ class RunEventsConfig(BaseModel):
 
     @field_validator("max_trace_content", mode="before")
     @classmethod
-    def _reject_boolean_max_trace_content(cls, value: object) -> object:
-        if isinstance(value, bool):
-            raise ValueError("must be an integer, not a boolean")
-        return value
+    def _reject_boolean_max_trace_content(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")
 
     track_token_usage: bool = Field(
         default=True,

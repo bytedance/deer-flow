@@ -218,6 +218,7 @@ class RunEventStore(abc.ABC):
         limit: int = 50,
         before_seq: int | None = None,
         after_seq: int | None = None,
+        user_id: str | None | _AutoSentinel = AUTO,
     ) -> list[dict]:
         """Return displayable messages (category=message) for a specific run, ordered by seq ascending.
 
@@ -228,6 +229,8 @@ class RunEventStore(abc.ABC):
 
         When both cursors are supplied, return the first ``limit`` records in
         the exclusive window ``after_seq < seq < before_seq`` (ascending).
+        ``user_id`` follows the same explicit-caller semantics as
+        :meth:`list_messages`.
         """
 
     @abc.abstractmethod

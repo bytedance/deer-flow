@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from deerflow.runtime.user_context import AUTO, _AutoSentinel
+
 from .types import WORKSPACE_CHANGES_EVENT_TYPE, WORKSPACE_CHANGES_METADATA_KEY
 
 EMPTY_SUMMARY = {
@@ -22,12 +24,14 @@ async def get_workspace_changes_response(
     *,
     include_files: bool = True,
     include_diff: bool = True,
+    user_id: str | None | _AutoSentinel = AUTO,
 ) -> dict[str, Any]:
     events = await event_store.list_events(
         thread_id,
         run_id,
         event_types=[WORKSPACE_CHANGES_EVENT_TYPE],
         limit=10,
+        user_id=user_id,
     )
     if not events:
         return _empty_response()

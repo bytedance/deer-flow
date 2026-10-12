@@ -623,6 +623,59 @@ def test_denied_subcommand_matches_through_leading_flags(tmp_path: Path) -> None
     assert result.exit_code == 126
 
 
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--profile", "work", "config", "show"],
+        ["config", "--profile", "work", "show"],
+        ["--profile", "work", "config", "--profile", "work", "show", "--json"],
+    ],
+)
+def test_denied_subcommand_matches_through_separate_option_values(tmp_path: Path, args: list[str]) -> None:
+    # ``--profile`` is lark-cli's root value flag; lark-cli 1.0.65 runs
+    # ``config show`` for every shape above. The broker cannot tell which
+    # options take a value, so a value passed as its own token must not hide the
+    # denied path, whether it sits before the path or between its tokens.
+    config = BrokerConfig(
+        lark_cli_path=_fake_lark_cli(tmp_path),
+        config_dir="c",
+        data_dir="d",
+        deny_subcommands=(("config", "show"),),
+    )
+    result = run_lark_cli(config, args, b"")
+    assert result.exit_code == 126
+    assert result.stdout == b""
+
+
+def test_denied_subcommand_requires_rule_tokens_in_order() -> None:
+    deny = (("config", "show"),)
+    assert lark_broker._denied_subcommand(deny, ["show", "config"]) is None
+    assert lark_broker._denied_subcommand(deny, ["config", "list"]) is None
+
+
+def test_exec_endpoint_refuses_denied_subcommand_behind_option_value(tmp_path: Path) -> None:
+    config = BrokerConfig(
+        lark_cli_path=_fake_lark_cli(tmp_path),
+        config_dir="c",
+        data_dir="d",
+        port=0,
+        deny_subcommands=(("config", "show"),),
+    )
+    server = serve(config)
+    import threading
+
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, body = _post_exec(*server.server_address[:2], {"args": ["--profile", "work", "config", "show"]})
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+    assert status == 200
+    assert body["exit_code"] == 126
+    assert body["stdout_b64"] == ""
+
+
 @_skip_windows
 def test_allowed_subcommand_still_runs_with_denylist(tmp_path: Path) -> None:
     config = BrokerConfig(

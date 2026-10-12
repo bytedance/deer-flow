@@ -171,27 +171,60 @@ def _remote_provider(sandbox: MagicMock | None = None) -> tuple[MagicMock, Magic
 
 class TestFromThread:
     @pytest.mark.parametrize("explicit_name", [False, True])
-    def test_reserved_staging_name_rejected_on_shelf_upload(self, tmp_path, explicit_name):
+    @pytest.mark.parametrize("filename", [".upload-notes.part", ".upload-notes.part.", ".upload-notes.part.. ", ".UPLOAD-NOTES.PART", ".Upload-NoTeS.Part ."])
+    def test_reserved_staging_name_rejected_on_shelf_upload(self, tmp_path, explicit_name, filename):
         app = _build_app(tmp_path)
         with TestClient(app) as client:
             pid = _create_project(client)["id"]
-            kwargs = {"data": {"name": ".upload-notes.part"}} if explicit_name else {}
-            response = client.post(f"/api/projects/{pid}/documents", files={"file": ("notes.txt" if explicit_name else ".upload-notes.part", b"user document")}, **kwargs)
+            kwargs = {"data": {"name": filename}} if explicit_name else {}
+            with patch.object(project_documents, "stage_document_bytes", new_callable=AsyncMock, wraps=project_documents.stage_document_bytes) as stage:
+                response = client.post(f"/api/projects/{pid}/documents", files={"file": ("notes.txt" if explicit_name else filename, b"user document")}, **kwargs)
             assert response.status_code == 400
             assert "reserved upload staging" in response.json()["detail"]
+            stage.assert_not_awaited()
             assert client.get(f"/api/projects/{pid}/documents").json()["total"] == 0
 
-    def test_reserved_staging_shelf_rename_rejected_before_promotion(self, tmp_path):
+    @pytest.mark.parametrize("filename", [".upload-notes.part", ".upload-notes.part.", ".upload-notes.part.. ", ".UPLOAD-NOTES.PART", ".Upload-NoTeS.Part ."])
+    def test_reserved_staging_shelf_rename_rejected_before_promotion(self, tmp_path, filename):
         app = _build_app(tmp_path)
         with TestClient(app) as client:
             pid = _create_project(client)["id"]
             _seed_thread(app, "thread-1")
             source = _thread_file("thread-1", "output", "notes.txt", b"user document")
-            response = _promote(client, pid, thread_id="thread-1", kind="output", name="notes.txt", shelf_name=".upload-notes.part")
+            with (
+                patch.object(project_documents, "_resolve_thread_source", wraps=project_documents._resolve_thread_source) as resolve_source,
+                patch.object(project_documents, "stage_document_bytes", new_callable=AsyncMock, wraps=project_documents.stage_document_bytes) as stage,
+            ):
+                response = _promote(client, pid, thread_id="thread-1", kind="output", name="notes.txt", shelf_name=filename)
             assert response.status_code == 400
             assert "reserved upload staging" in response.json()["detail"]
+            resolve_source.assert_not_called()
+            stage.assert_not_awaited()
             assert source.read_bytes() == b"user document"
             assert client.get(f"/api/projects/{pid}/documents").json()["total"] == 0
+
+    @pytest.mark.parametrize("filename", ["report\x00.txt", "CON.txt", "com³.txt", "report.txt."])
+    def test_invalid_explicit_name_rejected_before_shelf_upload(self, tmp_path, filename):
+        app = _build_app(tmp_path)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            pid = _create_project(client)["id"]
+            response = client.post(f"/api/projects/{pid}/documents", files={"file": ("safe.txt", b"user document")}, data={"name": filename})
+            assert response.status_code == 400
+            assert client.get(f"/api/projects/{pid}/documents").json()["total"] == 0
+            assert not (get_paths().project_documents_dir(_USER, pid) / ".staging").exists()
+
+    @pytest.mark.parametrize("filename", ["report\x00.txt", "CON.txt", "com³.txt", "report.txt."])
+    def test_invalid_explicit_name_rejected_before_shelf_promotion(self, tmp_path, filename):
+        app = _build_app(tmp_path)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            pid = _create_project(client)["id"]
+            _seed_thread(app, "thread-1")
+            source = _thread_file("thread-1", "output", "notes.txt", b"user document")
+            response = _promote(client, pid, thread_id="thread-1", kind="output", name="notes.txt", shelf_name=filename)
+            assert response.status_code == 400
+            assert source.read_bytes() == b"user document"
+            assert client.get(f"/api/projects/{pid}/documents").json()["total"] == 0
+            assert not (get_paths().project_documents_dir(_USER, pid) / ".staging").exists()
 
     def test_promote_upload_with_default_name_records_provenance(self, tmp_path):
         app = _build_app(tmp_path)
@@ -345,20 +378,25 @@ class TestFromThread:
 
 
 class TestAttach:
-    def test_legacy_reserved_name_reports_client_error_and_preserves_shelf(self, tmp_path):
+    @pytest.mark.parametrize("filename", [".upload-notes.part", ".upload-notes.part.", ".UPLOAD-NOTES.PART", ".Upload-NoTeS.Part ."])
+    def test_legacy_reserved_name_reports_client_error_and_preserves_shelf(self, tmp_path, filename):
         app = _build_app(tmp_path)
         provider = _mounted_provider()
         with TestClient(app) as client, patch.object(uploads, "get_sandbox_provider", return_value=provider):
             pid = _create_project(client)["id"]
             # Seed a document accepted before reserved-name validation existed.
-            with patch.object(project_documents, "validate_shelf_filename", return_value=".upload-notes.part"):
-                doc = client.post(f"/api/projects/{pid}/documents", files={"file": ("notes.txt", b"legacy document")}, data={"name": ".upload-notes.part"}).json()["document"]
+            with patch.object(project_documents, "validate_shelf_filename", return_value=filename):
+                doc = client.post(f"/api/projects/{pid}/documents", files={"file": ("notes.txt", b"legacy document")}, data={"name": filename}).json()["document"]
             _seed_thread(app, "thread-1")
             response = _attach(client, pid, doc["id"], "thread-1")
             assert response.status_code == 400
             assert "reserved upload staging" in response.json()["detail"]
-            assert not (_thread_uploads("thread-1") / ".upload-notes.part").exists()
-            assert client.get(f"/api/projects/{pid}/documents/{doc['id']}/content?download=true").content == b"legacy document"
+            assert not (_thread_uploads("thread-1") / filename).exists()
+            content = client.get(f"/api/projects/{pid}/documents/{doc['id']}/content?download=true")
+            assert content.status_code == 200
+            assert content.content == b"legacy document"
+            listed = client.get(f"/api/projects/{pid}/documents").json()["documents"]
+            assert listed[0]["name"] == filename
 
     def test_attach_mounted_provider_copies_without_sync(self, tmp_path):
         app = _build_app(tmp_path)

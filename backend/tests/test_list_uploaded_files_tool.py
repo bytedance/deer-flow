@@ -286,6 +286,24 @@ class TestListUploadedFiles:
         assert "outline" not in files["report.pdf"]
         assert files["report.md"]["outline"] == [{"title": "User replacement with different size", "line": 1}]
 
+    def test_same_size_source_edit_exposes_companion_and_drops_stale_outline(self, tmp_path):
+        uploads_dir = _uploads_dir(tmp_path)
+        original = uploads_dir / "report.pdf"
+        companion = uploads_dir / "report.md"
+        original.write_bytes(b"%PDF ORIGINAL A")
+        companion.write_text("# Original A\n", encoding="utf-8")
+        register_companion(original, companion)
+        before = original.stat()
+        original.write_bytes(b"%PDF REPLACED B")
+        os.utime(original, ns=(before.st_atime_ns, before.st_mtime_ns + 2_000_000_000))
+
+        result = _list_uploaded_files_impl(include_outline=True, runtime=_runtime(), _paths=_paths(tmp_path))
+
+        files = {f["filename"]: f for f in result["files"]}
+        assert set(files) == {"report.pdf", "report.md"}
+        assert "outline" not in files["report.pdf"]
+        assert files["report.md"]["outline"] == [{"title": "Original A", "line": 1}]
+
     def test_cross_turn_state_clear_does_not_exclude_historical_file(self, tmp_path):
         """Two-turn regression: file uploaded in turn 1 must appear in turn 2.
 

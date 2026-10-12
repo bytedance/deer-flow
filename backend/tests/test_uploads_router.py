@@ -3,6 +3,8 @@ import errno
 import os
 import stat
 import threading
+import time
+from datetime import timedelta
 from io import BytesIO
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
@@ -14,10 +16,12 @@ from fastapi import HTTPException, UploadFile
 from fastapi.testclient import TestClient
 
 from app.gateway import upload_ingestion
+from app.gateway.auth.models import User
 from app.gateway.deps import get_config
 from app.gateway.routers import uploads
 from deerflow.sandbox.lease import get_sandbox_lease_manager
 from deerflow.uploads.companions import resolve_companion
+from deerflow.uploads.manager import cleanup_stale_upload_staging_files
 
 
 class ChunkedUpload:
@@ -136,6 +140,46 @@ def test_upload_files_auto_renames_duplicate_form_filenames(tmp_path):
     assert result.files[1].original_filename == "data.txt"
     assert (thread_uploads_dir / "data.txt").read_bytes() == b"first"
     assert (thread_uploads_dir / "data_1.txt").read_bytes() == b"second"
+
+
+def test_upload_files_deduplicates_case_variants_across_requests(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir()
+    user = User(email="upload-test@example.com")
+    app = make_authed_test_app(user_factory=lambda: user, bind_current_user=True)
+    app.include_router(uploads.router)
+    app.dependency_overrides[get_config] = lambda: SimpleNamespace()
+
+    claims = []
+    real_claim = uploads.claim_unique_filename
+
+    def capture_claim(name, seen):
+        claims.append((name, set(seen)))
+        return real_claim(name, seen)
+
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()),
+        patch.object(uploads, "claim_unique_filename", side_effect=capture_claim),
+        TestClient(app) as client,
+    ):
+        first = client.post("/api/threads/thread-local/uploads", files={"files": ("Report.txt", b"first")})
+        assert first.status_code == 200
+        assert first.json()["success"] is True
+        assert [entry["filename"] for entry in first.json()["files"]] == ["Report.txt"]
+
+        second = client.post("/api/threads/thread-local/uploads", files={"files": ("report.txt", b"second")})
+
+    assert second.status_code == 200
+    assert second.json()["success"] is True
+    assert [entry["filename"] for entry in second.json()["files"]] == ["report_1.txt"]
+    assert second.json()["files"][0]["original_filename"] == "report.txt"
+    assert (thread_uploads_dir / first.json()["files"][0]["filename"]).read_bytes() == b"first"
+    assert (thread_uploads_dir / second.json()["files"][0]["filename"]).read_bytes() == b"second"
+    assert {path.name for path in thread_uploads_dir.iterdir()} == {"Report.txt", "report_1.txt"}
+    # On case-insensitive hosts the link retry can hide a missing disk seed.
+    # Observe the real claim inputs so this invariant is checked on every host.
+    assert claims == [("Report.txt", set()), ("report.txt", {"Report.txt"})]
 
 
 def test_upload_files_deduplicates_max_length_filenames_without_failing_the_batch(tmp_path):
@@ -747,13 +791,14 @@ def test_upload_files_in_flight_upload_is_invisible_to_listings(tmp_path):
 
 def test_orphaned_staging_part_is_hidden_from_listings_and_swept(tmp_path):
     """A crashed upload leaves only a hidden ``.upload-*.part`` file: the
-    listing never exposes it and the startup cleanup removes it."""
-    from deerflow.uploads.manager import cleanup_stale_upload_staging_files
-
+    listing never exposes it and, once it is older than the in-flight guard,
+    the startup cleanup removes it."""
     thread_uploads_dir = tmp_path / "threads" / "t1" / "user-data" / "uploads"
     thread_uploads_dir.mkdir(parents=True)
     orphan = thread_uploads_dir / ".upload-crashed.part"
     orphan.write_bytes(b"partial")
+    stale = time.time() - timedelta(days=2).total_seconds()
+    os.utime(orphan, (stale, stale))
     visible = thread_uploads_dir / "kept.txt"
     visible.write_bytes(b"kept")
 
@@ -762,6 +807,93 @@ def test_orphaned_staging_part_is_hidden_from_listings_and_swept(tmp_path):
     assert cleanup_stale_upload_staging_files(tmp_path) == 1
     assert not orphan.exists()
     assert visible.read_bytes() == b"kept"
+
+
+def test_startup_cleanup_reclaims_a_published_staging_alias_immediately(tmp_path):
+    """A Gateway that dies after the commit's ``os.link`` but before the staged
+    name is removed leaves ``notes.txt`` and its ``.upload-*.part`` alias on one
+    inode. The next startup must reclaim the alias at once: left in place, the
+    destination fails the multi-link check on its next replacement upload."""
+    from deerflow.uploads.manager import validate_upload_destination
+
+    thread_uploads_dir = tmp_path / "threads" / "thread-local" / "user-data" / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    provider = _mounted_provider()
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        # The crash: the staged name is never removed after the link publishes the bytes.
+        patch.object(uploads, "_remove_staged_file"),
+    ):
+        file = ChunkedUpload("notes.txt", [b"hello"])
+        result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-local", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    assert result.success is True
+    names = sorted(p.name for p in thread_uploads_dir.iterdir())
+    assert names[-1] == "notes.txt" and len(names) == 2 and names[0].startswith(".upload-") and names[0].endswith(".part")
+    assert os.lstat(thread_uploads_dir / "notes.txt").st_nlink == 2
+    with pytest.raises(ValueError, match="multiple links"):
+        validate_upload_destination(thread_uploads_dir, "notes.txt")
+
+    assert cleanup_stale_upload_staging_files(tmp_path) == 1
+
+    assert [p.name for p in thread_uploads_dir.iterdir()] == ["notes.txt"]
+    assert (thread_uploads_dir / "notes.txt").read_bytes() == b"hello"
+    assert validate_upload_destination(thread_uploads_dir, "notes.txt") == thread_uploads_dir / "notes.txt"
+
+
+def test_startup_cleanup_keeps_an_in_flight_upload_on_a_shared_volume(tmp_path):
+    """Several Gateway replicas can share one home volume. A replica starting
+    while another one is still writing a ``.upload-*.part`` must not sweep it:
+    that upload would lose its staged bytes at the atomic link and fail."""
+    thread_uploads_dir = tmp_path / "threads" / "thread-local" / "user-data" / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = _mounted_provider()
+    real_write = uploads._write_upload_chunk
+    write_started = threading.Event()
+    release_write = threading.Event()
+
+    def gated_write(upload_temp, chunk) -> None:
+        write_started.set()
+        assert release_write.wait(timeout=10)
+        real_write(upload_temp, chunk)
+
+    results = []
+
+    def run_upload() -> None:
+        file = ChunkedUpload("notes.txt", [b"hello"])
+        try:
+            results.append(asyncio.run(call_unwrapped(uploads.upload_files, "thread-local", request=MagicMock(), files=[file], config=SimpleNamespace())))
+        except BaseException as exc:  # noqa: BLE001 - surfaced through the assertions below
+            results.append(exc)
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "_write_upload_chunk", side_effect=gated_write),
+    ):
+        upload_thread = threading.Thread(target=run_upload)
+        upload_thread.start()
+        assert write_started.wait(timeout=10)
+        staged = [p.name for p in thread_uploads_dir.iterdir()]
+        assert len(staged) == 1 and staged[0].startswith(".upload-") and staged[0].endswith(".part")
+
+        # Another replica starts up mid-upload and runs its staging sweep.
+        assert cleanup_stale_upload_staging_files(tmp_path) == 0
+        assert [p.name for p in thread_uploads_dir.iterdir()] == staged
+
+        release_write.set()
+        upload_thread.join(timeout=15)
+
+    assert not upload_thread.is_alive()
+    assert not isinstance(results[0], BaseException), results[0]
+    assert results[0].success is True
+    assert (thread_uploads_dir / "notes.txt").read_bytes() == b"hello"
+    assert [p.name for p in thread_uploads_dir.iterdir()] == ["notes.txt"]
 
 
 def test_upload_files_rejects_oversized_single_file_and_removes_partial_file(tmp_path):
@@ -833,10 +965,13 @@ def test_upload_files_does_not_sync_non_local_sandbox_when_total_size_exceeds_li
     assert exc_info.value.status_code == 413
     provider.acquire.assert_not_called()
     provider.acquire_async.assert_awaited_once_with("thread-aio", user_id="owner-upload")
-    assert provider.get.call_count == 2
     assert all(call.args == ("aio-1",) for call in provider.get.call_args_list)
+    sandbox.release_command_scope.assert_called_once()
+    assert get_sandbox_lease_manager(provider).binding_for(sandbox.release_command_scope.call_args.args[0]) is None
     provider.release.assert_called_once_with("aio-1")
     sandbox.update_file.assert_not_called()
+    assert not (thread_uploads_dir / "first.txt").exists()
+    assert not (thread_uploads_dir / "second.txt").exists()
 
 
 def test_upload_files_does_not_sync_non_local_sandbox_when_conversion_fails(tmp_path):
@@ -864,8 +999,9 @@ def test_upload_files_does_not_sync_non_local_sandbox_when_conversion_fails(tmp_
     assert exc_info.value.status_code == 500
     provider.acquire.assert_not_called()
     provider.acquire_async.assert_awaited_once_with("thread-aio", user_id="owner-upload")
-    assert provider.get.call_count == 2
     assert all(call.args == ("aio-1",) for call in provider.get.call_args_list)
+    sandbox.release_command_scope.assert_called_once()
+    assert get_sandbox_lease_manager(provider).binding_for(sandbox.release_command_scope.call_args.args[0]) is None
     provider.release.assert_called_once_with("aio-1")
     sandbox.update_file.assert_not_called()
     assert not (thread_uploads_dir / "report.pdf").exists()

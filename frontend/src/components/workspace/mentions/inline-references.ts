@@ -1,16 +1,21 @@
 import type { ConversationReference } from "@/core/conversation-references";
+import {
+  extensionMentionId,
+  parseExtensionMention,
+} from "@/core/extensions/mentions";
 
 export const MAX_EXPLICIT_SKILLS = 16;
 
 export type InlineReference = {
-  kind: "skill" | "file" | "conversation";
+  kind: "skill" | "file" | "conversation" | "extension";
   id: string;
   label: string;
   start: number;
   end: number;
 };
 
-const pattern = /@\[([^\]]*)\]\(ref:(skill|file|conversation):([^)]*)\)/g;
+const pattern =
+  /@\[([^\]]*)\]\(ref:(skill|file|conversation|extension):([^)]*)\)/g;
 
 export function referenceToken(
   kind: InlineReference["kind"],
@@ -99,6 +104,31 @@ export function referenceCaret(root: HTMLElement): number | null {
   return readReferenceEditor(before.cloneContents()).length;
 }
 
+/** Select the adjacent object so native deletion also retains browser undo. */
+export function selectReferenceForDeletion(
+  root: HTMLElement,
+  key: "Backspace" | "Delete",
+): boolean {
+  const caret = referenceCaret(root);
+  if (caret === null) return false;
+  for (const token of root.querySelectorAll<HTMLElement>("[data-reference]")) {
+    const before = document.createRange();
+    before.selectNodeContents(root);
+    before.setEndBefore(token);
+    const start = readReferenceEditor(before.cloneContents()).length;
+    const boundary =
+      key === "Backspace" ? start + token.dataset.reference!.length : start;
+    if (caret !== boundary) continue;
+    const range = document.createRange();
+    range.selectNode(token);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    return true;
+  }
+  return false;
+}
+
 export function focusReferenceAt(root: HTMLElement, offset: number) {
   root.focus();
   const range = document.createRange();
@@ -137,18 +167,28 @@ export function renderReferenceEditor(root: HTMLElement, text: string) {
         ? "project-attachment-chip"
         : ref.kind === "conversation"
           ? "conversation-reference-chip"
-          : "inline-skill-reference";
+          : ref.kind === "extension"
+            ? "extension-mention-chip"
+            : "inline-skill-reference";
     token.className =
       "inline-flex items-baseline gap-1 align-baseline font-medium select-all " +
       (ref.kind === "skill"
         ? "text-blue-600 dark:text-blue-400"
         : ref.kind === "file"
           ? "text-rose-600 dark:text-rose-400"
-          : "text-violet-600 dark:text-violet-400");
+          : ref.kind === "extension"
+            ? "text-teal-600 dark:text-teal-400"
+            : "text-violet-600 dark:text-violet-400");
     const icon = document.createElement("span");
     icon.setAttribute("aria-hidden", "true");
     icon.textContent =
-      ref.kind === "skill" ? "✦" : ref.kind === "file" ? "▤" : "◉";
+      ref.kind === "skill"
+        ? "✦"
+        : ref.kind === "file"
+          ? "▤"
+          : ref.kind === "extension"
+            ? "◈"
+            : "◉";
     token.append(icon, document.createTextNode(ref.label));
     token.setAttribute("aria-label", `@${ref.label}`);
     fragment.append(token);
@@ -207,4 +247,20 @@ export function reconcileConversationReferences(
       text = text.slice(0, ref.start) + `@${ref.label}` + text.slice(ref.end);
   }
   return { text, references: [...references.values()] };
+}
+
+/** Only references still present in the draft are submitted. */
+export function extensionMentionMetadata(text: string) {
+  const references = new Map<
+    string,
+    NonNullable<ReturnType<typeof parseExtensionMention>>
+  >();
+  for (const ref of inlineReferences(text)) {
+    if (ref.kind !== "extension") continue;
+    const mention = parseExtensionMention(ref.id, ref.label);
+    if (mention) references.set(extensionMentionId(mention), mention);
+  }
+  return references.size
+    ? { extension_mentions: [...references.values()] }
+    : {};
 }

@@ -22,6 +22,7 @@ Covered behavior:
 """
 
 import base64
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -32,12 +33,14 @@ from langchain.agents.middleware.types import ModelRequest
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
+from support.symlinks import symlink_or_skip
 
 from deerflow.agents.middlewares.view_image_middleware import (
     _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
     ViewImageMiddleware,
 )
 from deerflow.config.paths import Paths
+from deerflow.storage import BlobRef
 
 
 def _view_image_call(call_id: str = "call_1", path: str = "/mnt/user-data/uploads/img.png") -> dict:
@@ -93,6 +96,42 @@ def _authorized_host_view(tmp_path, monkeypatch):
     outputs.mkdir(parents=True)
     virtual_path = "/mnt/user-data/outputs/img.png"
     return virtual_path, _make_viewed_image(outputs)
+
+
+def _blob_backed_request(monkeypatch):
+    from deerflow.authz import sandbox_authz
+
+    image_bytes = b"\x89PNG\r\n\x1a\nshared-model-image"
+    ref = BlobRef(
+        sha256=hashlib.sha256(image_bytes).hexdigest(),
+        size=len(image_bytes),
+        kind="viewed-image",
+        content_type="image/png",
+    )
+
+    class SharedStore:
+        def get_bytes(self, requested: BlobRef) -> bytes:
+            assert requested == ref
+            return image_bytes
+
+    monkeypatch.setattr("deerflow.storage.get_blob_store_if_enabled", lambda: SharedStore())
+    monkeypatch.setattr(sandbox_authz, "authorize_sandbox_execution", lambda **kwargs: None)
+    virtual_path = "/mnt/user-data/outputs/shared.png"
+    assistant = AIMessage(content="", tool_calls=[_view_image_call("c1", virtual_path)])
+    request = _model_request(
+        [assistant, ToolMessage(content="ok", tool_call_id="c1")],
+        {
+            virtual_path: {
+                "mime_type": "image/png",
+                "size": len(image_bytes),
+                "actual_path": "Z:/writer-only/shared.png",
+                "sha256": ref.sha256,
+                "blob_ref": ref.model_dump(exclude_none=True),
+            }
+        },
+    )
+    request.runtime.context = {"user_id": "user-test", "thread_id": "thread-test"}
+    return request, "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii")
 
 
 class TestGetLastAssistantMessage:
@@ -235,6 +274,167 @@ class TestCreateImageDetailsMessage:
         assert "image/png" in blocks[1]["text"]
         assert blocks[2]["type"] == "image_url"
         assert blocks[2]["image_url"]["url"].startswith("data:image/png;base64,")
+
+    def test_resolves_blob_ref_when_writer_host_copy_is_absent(self, tmp_path, monkeypatch):
+        image_bytes = b"\x89PNG\r\n\x1a\nshared-image"
+        ref = BlobRef(
+            sha256=hashlib.sha256(image_bytes).hexdigest(),
+            size=len(image_bytes),
+            kind="viewed-image",
+            content_type="image/png",
+        )
+        reads: list[BlobRef] = []
+
+        class SharedStore:
+            def get_bytes(self, requested: BlobRef) -> bytes:
+                reads.append(requested)
+                return image_bytes
+
+        monkeypatch.setattr("deerflow.storage.get_blob_store_if_enabled", lambda: SharedStore())
+        state = {
+            "viewed_images": {
+                "/mnt/user-data/outputs/shared.png": {
+                    "mime_type": "image/png",
+                    "size": len(image_bytes),
+                    "actual_path": str(tmp_path / "writer-only" / "shared.png"),
+                    "sha256": ref.sha256,
+                    "blob_ref": ref.model_dump(exclude_none=True),
+                }
+            }
+        }
+
+        blocks = ViewImageMiddleware()._create_image_details_message(state)
+
+        image_blocks = [block for block in blocks if isinstance(block, dict) and block.get("type") == "image_url"]
+        assert len(image_blocks) == 1
+        assert image_blocks[0]["image_url"]["url"] == "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii")
+        assert reads == [ref]
+
+    def test_blob_store_factory_failure_falls_back_to_validated_host_copy(self, tmp_path, monkeypatch):
+        image_bytes = b"\x89PNG\r\n\x1a\nlocal-fallback"
+        img_path = tmp_path / "fallback.png"
+        img_path.write_bytes(image_bytes)
+        ref = BlobRef(
+            sha256=hashlib.sha256(image_bytes).hexdigest(),
+            size=len(image_bytes),
+            kind="viewed-image",
+            content_type="image/png",
+        )
+
+        def fail_to_resolve_store():
+            raise ValueError("misconfigured backend")
+
+        monkeypatch.setattr("deerflow.storage.get_blob_store_if_enabled", fail_to_resolve_store)
+        state = {
+            "viewed_images": {
+                "/mnt/user-data/outputs/fallback.png": {
+                    "mime_type": "image/png",
+                    "size": len(image_bytes),
+                    "actual_path": str(img_path),
+                    "sha256": ref.sha256,
+                    "blob_ref": ref.model_dump(exclude_none=True),
+                }
+            }
+        }
+
+        blocks = ViewImageMiddleware()._create_image_details_message(
+            state,
+            host_path_allowed=lambda _virtual, actual: actual == str(img_path),
+        )
+
+        image_blocks = [block for block in blocks if isinstance(block, dict) and block.get("type") == "image_url"]
+        assert len(image_blocks) == 1
+        assert image_blocks[0]["image_url"]["url"] == "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii")
+
+    def test_raw_blob_read_failure_falls_back_to_validated_host_copy(self, tmp_path, monkeypatch):
+        image_bytes = b"\x89PNG\r\n\x1a\nlocal-fallback"
+        img_path = tmp_path / "fallback.png"
+        img_path.write_bytes(image_bytes)
+        ref = BlobRef(
+            sha256=hashlib.sha256(image_bytes).hexdigest(),
+            size=len(image_bytes),
+            kind="viewed-image",
+            content_type="image/png",
+        )
+
+        class FailingStore:
+            def get_bytes(self, requested: BlobRef) -> bytes:
+                raise RuntimeError("raw SDK failure")
+
+        monkeypatch.setattr("deerflow.storage.get_blob_store_if_enabled", lambda: FailingStore())
+        state = {
+            "viewed_images": {
+                "/mnt/user-data/outputs/fallback.png": {
+                    "mime_type": "image/png",
+                    "size": len(image_bytes),
+                    "actual_path": str(img_path),
+                    "sha256": ref.sha256,
+                    "blob_ref": ref.model_dump(exclude_none=True),
+                }
+            }
+        }
+
+        blocks = ViewImageMiddleware()._create_image_details_message(
+            state,
+            host_path_allowed=lambda _virtual, actual: actual == str(img_path),
+        )
+
+        image_blocks = [block for block in blocks if isinstance(block, dict) and block.get("type") == "image_url"]
+        assert len(image_blocks) == 1
+        assert image_blocks[0]["image_url"]["url"] == "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii")
+
+    def test_malformed_blob_ref_falls_back_to_validated_host_copy(self, tmp_path):
+        image_bytes = b"\x89PNG\r\n\x1a\nlocal-fallback"
+        img_path = tmp_path / "fallback.png"
+        img_path.write_bytes(image_bytes)
+        state = {
+            "viewed_images": {
+                "/mnt/user-data/outputs/fallback.png": {
+                    "mime_type": "image/png",
+                    "size": len(image_bytes),
+                    "actual_path": str(img_path),
+                    "sha256": hashlib.sha256(image_bytes).hexdigest(),
+                    "blob_ref": {"sha256": "not-a-digest", "size": len(image_bytes), "kind": "viewed-image"},
+                }
+            }
+        }
+
+        blocks = ViewImageMiddleware()._create_image_details_message(
+            state,
+            host_path_allowed=lambda _virtual, actual: actual == str(img_path),
+        )
+
+        assert any(isinstance(block, dict) and block.get("type") == "image_url" for block in blocks)
+
+    def test_blob_ref_must_match_checkpoint_metadata_before_read(self, tmp_path, monkeypatch):
+        image_bytes = b"\x89PNG\r\n\x1a\nshared-image"
+        ref = BlobRef(
+            sha256=hashlib.sha256(image_bytes).hexdigest(),
+            size=len(image_bytes),
+            kind="viewed-image",
+            content_type="image/png",
+        )
+
+        class StoreMustNotBeRead:
+            def get_bytes(self, requested: BlobRef) -> bytes:
+                raise AssertionError(f"unexpected blob read: {requested}")
+
+        monkeypatch.setattr("deerflow.storage.get_blob_store_if_enabled", lambda: StoreMustNotBeRead())
+        state = {
+            "viewed_images": {
+                "/mnt/user-data/outputs/shared.png": {
+                    "mime_type": "image/png",
+                    "size": len(image_bytes) + 1,
+                    "actual_path": str(tmp_path / "missing.png"),
+                    "sha256": ref.sha256,
+                    "blob_ref": ref.model_dump(exclude_none=True),
+                }
+            }
+        }
+
+        blocks = ViewImageMiddleware()._create_image_details_message(state)
+
+        assert all(not (isinstance(block, dict) and block.get("type") == "image_url") for block in blocks)
 
     def test_builds_blocks_for_multiple_images(self, tmp_path):
         mw = ViewImageMiddleware()
@@ -497,6 +697,17 @@ class TestInject:
 
 
 class TestWrapModelCall:
+    def test_blob_backed_image_reaches_sync_model_without_writer_disk(self, monkeypatch):
+        request, expected = _blob_backed_request(monkeypatch)
+        seen: list[ModelRequest] = []
+
+        ViewImageMiddleware().wrap_model_call(
+            request,
+            lambda prepared: seen.append(prepared) or AIMessage(content="ok"),
+        )
+
+        assert _image_urls(seen[0]) == [expected]
+
     def test_handler_receives_the_image_context_message(self, tmp_path):
         mw = ViewImageMiddleware()
         assistant = AIMessage(content="", tool_calls=[_view_image_call("c1")])
@@ -542,6 +753,26 @@ class TestWrapModelCall:
 
         assert result.content == "I can see the image."
         assert len(_image_context_messages(seen[0].messages)) == 1
+
+    @pytest.mark.anyio
+    async def test_blob_backed_image_reaches_async_model_without_writer_disk(self, monkeypatch):
+        from deerflow.authz import sandbox_authz
+
+        request, expected = _blob_backed_request(monkeypatch)
+        seen: list[ModelRequest] = []
+
+        async def authorize(**kwargs):
+            return None
+
+        monkeypatch.setattr(sandbox_authz, "authorize_sandbox_execution_async", authorize)
+
+        async def handler(prepared: ModelRequest) -> AIMessage:
+            seen.append(prepared)
+            return AIMessage(content="ok")
+
+        await ViewImageMiddleware().awrap_model_call(request, handler)
+
+        assert _image_urls(seen[0]) == [expected]
 
 
 class TestGraphIntegration:
@@ -672,7 +903,7 @@ def test_host_image_copy_is_scoped_to_current_user_and_thread(tmp_path, monkeypa
 
     alias_path = paths.sandbox_outputs_dir("thread-a", user_id="user-a") / "canary.png"
     alias_path.parent.mkdir(parents=True)
-    alias_path.symlink_to(owner_path)
+    symlink_or_skip(alias_path, owner_path)
     assert model_payloads("user-a", "thread-a", alias_path) == []
 
 

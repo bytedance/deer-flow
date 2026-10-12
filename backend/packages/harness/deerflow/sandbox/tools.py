@@ -26,6 +26,7 @@ from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.runtime.secret_context import read_active_secrets
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.sandbox.env_policy import is_blocked_env_name
 from deerflow.sandbox.exceptions import (
     SandboxError,
     SandboxNotFoundError,
@@ -53,6 +54,7 @@ from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provi
 from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.tools.types import Runtime
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.host_paths import windows_incompatible_segment
 
 logger = logging.getLogger(__name__)
@@ -1606,7 +1608,7 @@ async def _rollback_failed_sandbox_lookup_async(
         if owner_id is not None:
             await get_sandbox_lease_manager(provider).release_async(owner_id)
         else:
-            await asyncio.to_thread(provider.release, sandbox_id)
+            await await_drained(asyncio.to_thread(provider.release, sandbox_id))
     except Exception:
         logger.warning(
             "Failed to roll back sandbox after async post-acquire lookup failure: %s",
@@ -2350,7 +2352,7 @@ def _github_env_from_runtime(runtime: Runtime) -> dict[str, str] | None:
 _LARK_CLI_COMMAND_RE = re.compile(r"(?<![A-Za-z0-9_.-])lark-cli(?![A-Za-z0-9_.-])")
 
 
-def _lark_cli_env_from_runtime(runtime: Runtime, command: str, *, sandbox_paths: bool) -> dict[str, str] | None:
+def _lark_cli_env_from_runtime(runtime: Runtime, command: str, *, sandbox_paths: bool, sandbox: Sandbox | None = None) -> dict[str, str] | None:
     """Expose Settings-page Lark auth to sandbox ``lark-cli`` commands.
 
     Settings authorizes ``lark-cli`` under DeerFlow's per-user integration
@@ -2366,14 +2368,12 @@ def _lark_cli_env_from_runtime(runtime: Runtime, command: str, *, sandbox_paths:
     """
     if not _LARK_CLI_COMMAND_RE.search(command):
         return None
-    try:
-        from deerflow.integrations.lark_cli import lark_cli_env_overlay, sandbox_lark_broker_active
+    from deerflow.integrations.lark_cli import lark_cli_env_overlay
 
-        broker = sandbox_paths and sandbox_lark_broker_active()
-        return lark_cli_env_overlay(resolve_runtime_user_id(runtime), sandbox_paths=sandbox_paths, broker=broker)
-    except Exception:
-        logger.warning("Could not build Lark CLI env overlay; running command without managed auth", exc_info=True)
-        return None
+    broker = getattr(sandbox, "lark_cli_broker", None) if sandbox_paths else False
+    if broker is None:
+        raise RuntimeError("Sandbox Lark broker mode is unverified; refusing to execute lark-cli")
+    return lark_cli_env_overlay(resolve_runtime_user_id(runtime), sandbox_paths=sandbox_paths, broker=broker)
 
 
 @tool("bash", parse_docstring=True)
@@ -2399,6 +2399,7 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
         command: The bash command to execute. Always use absolute paths for files and directories.
         description: Optional short explanation of this command shown in the UI.
     """
+    redaction_env = None
     try:
         sandbox = ensure_sandbox_initialized(runtime)
         # Request-scoped secrets resolved for the active skill (#3861), plus a
@@ -2409,12 +2410,18 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
         identity_prefix = _channel_identity_prefix(runtime)
         user_prefix = _user_identity_prefix(runtime)
         github_env = _github_env_from_runtime(runtime)
-        lark_cli_env = _lark_cli_env_from_runtime(runtime, command, sandbox_paths=not is_local_sandbox(runtime))
+        lark_cli_env = _lark_cli_env_from_runtime(runtime, command, sandbox_paths=not is_local_sandbox(runtime), sandbox=sandbox)
         if github_env:
             injected_env = {**(injected_env or {}), **github_env}
         if lark_cli_env:
             injected_env = {**(injected_env or {}), **lark_cli_env}
+        redaction_env = injected_env
         if is_local_sandbox(runtime):
+            # Match the credential-name policy used for inherited host env.
+            # Keep benign operator settings readable and redact effective
+            # credentials before execution, including any exception output.
+            redaction_env = {name: value for name, value in (getattr(sandbox, "environment", None) or {}).items() if is_blocked_env_name(name)}
+            redaction_env.update(injected_env or {})
             if not is_host_bash_allowed():
                 return f"Error: {LOCAL_HOST_BASH_DISABLED_MESSAGE}"
             ensure_thread_directories_exist(runtime)
@@ -2454,7 +2461,7 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
                 timeout=command_timeout,
             )
             return _truncate_bash_output(
-                mask_secret_values(mask_local_paths_in_output(output, thread_data), injected_env),
+                mask_secret_values(mask_local_paths_in_output(output, thread_data), redaction_env),
                 max_chars,
             )
         ensure_thread_directories_exist(runtime)
@@ -2480,11 +2487,11 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
             max_chars,
         )
     except SandboxError as e:
-        return f"Error: {e}"
+        return mask_secret_values(f"Error: {e}", redaction_env)
     except PermissionError as e:
-        return f"Error: {e}"
+        return mask_secret_values(f"Error: {e}", redaction_env)
     except Exception as e:
-        return f"Error: Unexpected error executing command: {_sanitize_error(e, runtime)}"
+        return mask_secret_values(f"Error: Unexpected error executing command: {_sanitize_error(e, runtime)}", redaction_env)
 
 
 async def _bash_tool_async(runtime: Runtime, command: str, description: str = "") -> str:
@@ -2984,6 +2991,27 @@ async def _write_file_tool_async(
 write_file_tool.coroutine = _write_file_tool_async
 
 
+def _to_crlf(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\n", "\r\n")
+
+
+def _match_line_endings(content: str, old_str: str, new_str: str) -> tuple[str, str]:
+    """Spell ``old_str`` and ``new_str`` with the CRLF line endings ``content`` uses.
+
+    Full reads return line endings as stored, but the model tends to write
+    ``\\n`` (and ranged reads join lines with ``\\n``), so a multi-line
+    ``old_str`` would never match a CRLF file and inserted lines would be LF.
+    A CRLF-only file takes both strings in CRLF; a mixed file does so only
+    when the LF spelling is absent and the CRLF one is present.
+    """
+    if "\r\n" not in content:
+        return old_str, new_str
+    crlf_old = _to_crlf(old_str)
+    if content.count("\r\n") == content.count("\n") or (old_str not in content and crlf_old in content):
+        return crlf_old, _to_crlf(new_str)
+    return old_str, new_str
+
+
 @tool("str_replace", parse_docstring=True)
 def str_replace_tool(
     runtime: Runtime,
@@ -3022,6 +3050,7 @@ def str_replace_tool(
                 # A no-op edit. str.replace("", new_str) would insert new_str at
                 # every character boundary, so this cannot fall through.
                 return "OK"
+            old_str, new_str = _match_line_endings(content, old_str, new_str)
             if not content or old_str not in content:
                 return f"Error: String to replace not found in file: {requested_path}"
             if replace_all:

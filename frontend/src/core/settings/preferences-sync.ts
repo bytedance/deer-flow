@@ -11,6 +11,9 @@ const fields = {
     .max(32)
     .regex(/^[A-Za-z0-9_.-]+$/)
     .nullable(),
+  // The web UI language. Not a local setting: the Gateway reads it to word
+  // scheduled-task IM notices in the language the user reads DeerFlow in.
+  locale: z.enum(["en-US", "zh-CN"]).nullable(),
 };
 const schema = z.object(fields).partial();
 export type Preferences = z.infer<typeof schema>;

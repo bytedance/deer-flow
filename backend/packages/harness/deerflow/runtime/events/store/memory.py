@@ -164,7 +164,7 @@ class MemoryRunEventStore(RunEventStore):
             run_events = [e for e in run_events if e.get("seq", 0) > after_seq]
         return run_events[:limit]
 
-    async def list_messages_by_run(self, thread_id, run_id, *, limit=50, before_seq=None, after_seq=None):
+    async def list_messages_by_run(self, thread_id, run_id, *, limit=50, before_seq=None, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):
         # Per-run, messages-only, seq-sorted: the seq window is a contiguous
         # slice located with bisect (O(log m_run)) over only this run's
         # messages, instead of re-scanning the whole thread's event log.

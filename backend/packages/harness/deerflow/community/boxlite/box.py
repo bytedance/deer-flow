@@ -25,10 +25,11 @@ import threading
 from typing import TYPE_CHECKING, TypeVar
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.read_file_contract import split_file_lines
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
-from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
+from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path_under_root, truncate_line
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -230,7 +231,7 @@ class BoxliteBox(Sandbox):
         content = r.stdout or ""
         if start_line is None and end_line is None:
             return content
-        lines = content.splitlines()
+        lines = split_file_lines(content)
         # Clamp like LocalSandbox.read_file: a negative start would otherwise
         # wrap around through Python's negative-index slicing.
         start = max(start_line or 1, 1)
@@ -318,11 +319,12 @@ class BoxliteBox(Sandbox):
         matches: list[str] = []
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
-        for entry in output.text.splitlines():
+        # Records are LF-delimited; other splitlines() boundaries can be path characters.
+        for entry in output.text.split("\n"):
             # Do NOT strip: trailing whitespace can be part of the filename.
             if not entry or (entry != root and not entry.startswith(root_prefix)):
                 continue
-            if should_ignore_path(entry):
+            if should_ignore_path_under_root(entry, root):
                 continue
             rel_path = entry[len(root) :].lstrip("/")
             if not rel_path:
@@ -372,7 +374,8 @@ class BoxliteBox(Sandbox):
         root_prefix = root if root == "/" else f"{root}/"
         matches: list[GrepMatch] = []
         truncated = output.truncated
-        for raw in output.text.splitlines():
+        # Keep non-LF separators inside filenames and matched text intact.
+        for raw in output.text.split("\n"):
             try:
                 file_path, line_no_str, line_text = raw.split(":", 2)
             except ValueError:
@@ -381,7 +384,7 @@ class BoxliteBox(Sandbox):
                 line_number = int(line_no_str)
             except ValueError:
                 continue
-            if should_ignore_path(file_path):
+            if should_ignore_path_under_root(file_path, root):
                 continue
             if glob is not None:
                 # Match the caller's real directory scope: a pattern like

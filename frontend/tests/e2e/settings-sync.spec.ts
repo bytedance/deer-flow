@@ -35,6 +35,8 @@ test("account notification setting survives clearing browser storage", async ({
           model_name: null,
           mode: null,
           reasoning_effort: null,
+          // The UI language is already saved, so only the toggle is sent.
+          locale: "en-US",
         },
       });
     }

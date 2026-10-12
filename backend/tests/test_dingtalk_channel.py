@@ -408,7 +408,7 @@ class TestOnChatbotMessage:
     def test_p2p_message_without_sender_is_dropped(self, sender_staff_id):
         """A P2P chat_id *is* the sender, so an empty one keys every user to one thread.
 
-        ``ChannelStore._key`` builds ``f"{channel}:{chat_id}"`` for a topic-less conversation,
+        ``binding_key`` builds ``f"{channel}:{chat_id}"`` for a topic-less conversation,
         so publishing this would put every senderless P2P message under the literal
         ``"dingtalk:"`` — one shared thread, one shared history, across users.
         """
@@ -1772,6 +1772,22 @@ class TestCardMode:
 
 
 class TestStop:
+    def test_stop_retains_live_stream_thread_after_join_timeout(self):
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={})
+            thread = MagicMock()
+            thread.is_alive.return_value = True
+            channel._thread = thread
+            channel._running = True
+
+            with pytest.raises(RuntimeError, match="still running after stop timeout"):
+                await channel.stop()
+
+            thread.join.assert_called_once_with(timeout=5)
+            assert channel._thread is thread
+
+        _run(go())
+
     def test_stop_joins_stream_thread_off_the_event_loop(self):
         async def go():
             channel = DingTalkChannel(MessageBus(), config={})
@@ -1835,10 +1851,13 @@ def _patch_uploads(monkeypatch, uploads_dir, *, sandbox_id="local", sandbox=None
     async def _acquire_async(thread_id, user_id=None):
         return sandbox_id
 
-    monkeypatch.setattr(
-        "app.channels.dingtalk.get_sandbox_provider",
-        lambda: SimpleNamespace(acquire_async=_acquire_async, get=lambda sid: sandbox),
+    provider = SimpleNamespace(
+        uses_thread_data_mounts=sandbox_id == "local" or sandbox_id.startswith("local:"),
+        acquire_async=_acquire_async,
+        get=lambda sid: sandbox,
+        release=lambda sid: None,
     )
+    monkeypatch.setattr("app.channels.dingtalk.get_sandbox_provider", lambda: provider)
 
 
 class TestExtractFiles:

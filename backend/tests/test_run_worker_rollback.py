@@ -1626,6 +1626,77 @@ async def test_run_agent_marks_rollback_unusable_when_capture_fails():
 
 
 @pytest.mark.anyio
+async def test_run_agent_cancel_before_snapshot_capture_does_not_delete_thread(monkeypatch):
+    """A rollback cancel before the pre-run capture must not wipe the thread.
+
+    The worker has already transitioned to ``running`` but has not captured a
+    rollback point yet, so ``rollback_point`` is None. That must never be
+    mistaken for "the thread had no pre-run checkpoint" — the only case where
+    rollback resets the thread to empty state.
+    """
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    checkpointer = FakeCheckpointer()
+
+    async def _cancel_before_capture(*_args, **_kwargs):
+        record.abort_action = "rollback"
+        record.abort_event.set()
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker.aensure_checkpoint_mode_compatible",
+        _cancel_before_capture,
+    )
+
+    await run_agent(
+        _lease_test_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=checkpointer),
+        agent_factory=lambda **_kwargs: SimpleNamespace(),
+        graph_input={},
+        config={},
+    )
+
+    checkpointer.adelete_thread.assert_not_awaited()
+    assert record.status == RunStatus.error
+    assert record.error == "Rolled back by user"
+
+
+@pytest.mark.anyio
+async def test_run_agent_cancel_during_snapshot_capture_does_not_delete_thread():
+    """Cancellation raised inside the capture await still disables rollback.
+
+    ``_capture_rollback_point`` is an await chain; a ``CancelledError`` raised
+    there is a ``BaseException`` that the capture's ``except Exception`` does
+    not catch, so no rollback point exists afterwards.
+    """
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    checkpointer = FakeCheckpointer()
+
+    class CancelledCaptureAgent:
+        async def aget_state(self, _config):
+            record.abort_action = "rollback"
+            record.abort_event.set()
+            raise asyncio.CancelledError()
+
+    await run_agent(
+        _lease_test_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=checkpointer),
+        agent_factory=lambda **_kwargs: CancelledCaptureAgent(),
+        graph_input={},
+        config={},
+    )
+
+    checkpointer.adelete_thread.assert_not_awaited()
+    assert record.status == RunStatus.error
+    assert record.error == "Rolled back by user"
+
+
+@pytest.mark.anyio
 async def test_run_agent_overrides_spoofed_pre_existing_message_ids_without_snapshot():
     run_manager = RunManager()
     record = await run_manager.create("thread-1")

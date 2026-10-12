@@ -13,8 +13,8 @@ Docker provides a consistent, isolated environment with all dependencies pre-con
 #### Prerequisites
 
 - Docker Desktop or Docker Engine
-- Docker Compose **v2.24 or newer** (check with `docker compose version`). The dev
-  Compose file marks its `env_file` entries optional using the long-form
+- Docker Compose **v2.24 or newer** (check with `docker compose version`). Both
+  Compose files mark their `env_file` entries optional using the long-form
   `path`/`required` syntax; older clients reject it with
   `services.gateway.env_file.0 must be a string`. `make docker-start` verifies the
   version and tells you to upgrade — direct `docker compose` callers get that raw
@@ -333,9 +333,12 @@ before review.
 ## Testing
 
 ```bash
-# Default backend tests (excludes live and blocking-I/O tests)
+# Default backend tests (four parallel shards; excludes live and blocking-I/O tests)
 cd backend
 make test
+
+# Run the same shards sequentially
+make test TEST_JOBS=1
 
 # Strict blocking-I/O tests
 make test-blocking-io

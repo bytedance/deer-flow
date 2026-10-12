@@ -52,7 +52,7 @@ from app.channels import buzz_nostr
 from app.channels.base import Channel
 from app.channels.buzz_seen_events import BuzzSeenEventStore
 from app.channels.commands import is_known_channel_command
-from app.channels.connection_identity import attach_connection_identity
+from app.channels.connection_identity import attach_connection_identity, lookup_thread_id
 from app.channels.message_bus import InboundMessage, InboundMessageType, InboundQueueFullError, MessageBus, OutboundMessage
 
 logger = logging.getLogger(__name__)
@@ -1316,12 +1316,6 @@ class BuzzChannel(Channel):
         # and returned above, so this gate only ever sees ordinary chat text.
         thread_root = self._thread_root(ev)
         mentioned = self._keys.pubkey_hex in buzz_nostr.tag_values(ev, "p")
-        store = self.config.get("channel_store")
-        engaged_thread = bool(thread_root and store is not None and store.get_thread_id(self.name, channel_id, topic_id=thread_root))
-        allowed_without_mention = (not self._require_mention) or channel_id in self._mention_free or self._is_dm(channel_id) or engaged_thread
-        if not mentioned and not allowed_without_mention:
-            return
-
         if mentioned:
             text = self._strip_own_mention(text)
 
@@ -1329,7 +1323,22 @@ class BuzzChannel(Channel):
         inbound: InboundMessage = self._make_inbound(chat_id=channel_id, user_id=author, text=text, msg_type=msg_type, thread_ts=thread_root, metadata={"event_id": str(ev.get("id", ""))})
         inbound.topic_id = thread_root
         inbound.workspace_id = self._workspace_id
+        # Resolved before the mention gate, not after: the manager maps a bound
+        # author's threads in the connection repository only, so the thread-follow
+        # check below can find them only through the resolved connection_id.
         inbound = await self._attach_connection_identity(inbound)
+
+        allowed_without_mention = (not self._require_mention) or channel_id in self._mention_free or self._is_dm(channel_id)
+        if not mentioned and not allowed_without_mention:
+            engaged_thread = bool(thread_root and await lookup_thread_id(inbound, repo=self._connection_repo, store=self.config.get("channel_store")))
+            if not engaged_thread:
+                # Logged like the allowlist drop above: "the bot stopped following my
+                # replies" must be triageable as require_mention working vs a lost
+                # bind or a missing thread mapping.
+                channel_name = self._channel_meta.get(channel_id, {}).get("name") or "<unnamed>"
+                logger.debug("[buzz] dropped unmentioned chat event in channel %s (%s): thread=%s not engaged (bound=%s)", channel_name, channel_id, thread_root, bool(inbound.connection_id))
+                return
+
         self._last_requester[(channel_id, thread_root)] = author
         await self._publish(inbound)
         # Only a fully accepted-and-published event advances the cursor, and only
