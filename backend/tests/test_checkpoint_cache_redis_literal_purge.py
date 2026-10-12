@@ -54,3 +54,20 @@ async def test_purge_does_not_unlink_empty_filtered_page():
     cache._client.scan.return_value = (0, [b"other:t1:history"])
     await cache.adelete_thread("owned", "t1")
     cache._client.unlink.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_purge_uses_client_encoding_for_byte_key_fence():
+    """A non-UTF-8 Redis client must still unlink its own non-ASCII keys."""
+    cache = RedisCheckpointHistoryCache.__new__(RedisCheckpointHistoryCache)
+    client = AsyncMock()
+    cache._client = client
+    client.connection_pool.get_encoder.return_value.encode.side_effect = lambda value: value.encode("latin-1")
+    owned = make_history_key("café", "t1", "", "c1", "messages").encode("latin-1")
+    sibling = make_history_key("café", "t10", "", "c1", "messages").encode("latin-1")
+    client.scan.return_value = (0, [owned, sibling])
+
+    await cache.adelete_thread("café", "t1")
+
+    client.scan.assert_awaited_once_with(cursor=0, match="café:t1:*", count=500)
+    client.unlink.assert_awaited_once_with(owned)
