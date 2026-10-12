@@ -117,6 +117,25 @@ def test_timing_config_requires_positive_finite_values():
     assert channel._retry_delay == 0.25
 
 
+def test_qrcode_status_uses_dedicated_request_timeout():
+    from app.channels.wechat import WechatChannel
+
+    async def go():
+        channel = WechatChannel(bus=MessageBus(), config={"bot_token": "test-token"})
+        request = AsyncMock(return_value={"status": "wait"})
+        channel._request_public_get_json = request  # type: ignore[method-assign]
+
+        await channel.request_login_status("qr-token")
+
+        request.assert_awaited_once_with(
+            "/ilink/bot/get_qrcode_status",
+            params={"qrcode": "qr-token"},
+            timeout=WechatChannel.DEFAULT_QRCODE_STATUS_TIMEOUT,
+        )
+
+    _run(go())
+
+
 def test_handle_update_publishes_private_chat_message():
     from app.channels.wechat import WechatChannel
 

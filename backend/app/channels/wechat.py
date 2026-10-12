@@ -227,6 +227,7 @@ class WechatChannel(Channel):
     DEFAULT_QRCODE_POLL_INTERVAL = 2.0
     DEFAULT_QRCODE_POLL_TIMEOUT = 180.0
     DEFAULT_QRCODE_BOT_TYPE = 3
+    DEFAULT_QRCODE_STATUS_TIMEOUT = 30.0
     DEFAULT_API_TIMEOUT = 15.0
     DEFAULT_CONFIG_TIMEOUT = 10.0
     DEFAULT_CDN_TIMEOUT = 30.0
@@ -836,7 +837,11 @@ class WechatChannel(Channel):
         params = {"qrcode": qrcode}
         if verify_code:
             params["verify_code"] = verify_code
-        return await self._request_public_get_json("/ilink/bot/get_qrcode_status", params=params, timeout=timeout)
+        return await self._request_public_get_json(
+            "/ilink/bot/get_qrcode_status",
+            params=params,
+            timeout=self.DEFAULT_QRCODE_STATUS_TIMEOUT if timeout is None else timeout,
+        )
 
     async def _save_auth_state_drained(
         self,
