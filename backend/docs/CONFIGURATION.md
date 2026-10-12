@@ -593,6 +593,7 @@ Notes:
 - The declaration also drives the `agent_storage.backend: file` divergence warning, the inbound webhook dedupe warning, and the WeChat QR-login guard, which otherwise only look at the worker count.
 - With the default DeerMem backend, the declaration also warns when the derived SQLite retrieval index sits inside the shared `storage_path` (the default `{storage_path}/.retrieval`). Set `memory.backend_config.retrieval_index_path` to an instance-local directory (relative values resolve against `storage_path`): SQLite WAL is unsupported on network filesystems, and the index is rebuilt from the Markdown facts at startup and re-synced per user scope after a peer writes.
 - A declared multi-instance deployment that enables a feature storing credentials (today `channel_connections.enabled: true`) also needs one shared `DEER_FLOW_CREDENTIALS_KEY`; see [Credentials encryption key](#credentials-encryption-key-deer_flow_credentials_key).
+- IM channels: the gate refuses `channels.leader_lease.enabled: false` while a provider other than GitHub is enabled (under `channels.*`, or connectable from the web UI through `channel_connections.<provider>.enabled`), because every instance would otherwise open the platform connection with the same bot credentials; see [IM channel leader lease](#im-channel-leader-lease-channelsleader_lease).
 - Restart-required: the gate runs once at startup. Restart all Gateway instances together after changing it.
 
 #### Local two-Gateway harness
@@ -630,6 +631,24 @@ These still need a manual pass:
 - change an MCP filesystem server's args on A: B's local-bash allowlist follows;
 - edit a skill on A: B's system-prompt skills section changes within 30 s;
 - the IM channel gates (one leader per platform, failover after killing the leader, runtime-config changes), once channel leader election lands; run them with `DEERFLOW_MI_KEEP_CHANNELS=1`.
+
+### IM channel leader lease (`channels.leader_lease`)
+
+```yaml
+channels:
+  leader_lease:
+    enabled: auto      # auto | true | false
+    lease_seconds: 30
+    grace_seconds: 10
+```
+
+Every IM channel except GitHub connects outbound to its platform (Telegram long polling, Discord / Slack / Feishu / DingTalk WebSockets). With more than one Gateway instance each one would open that connection with the same bot credentials: Telegram rejects the second poller with `409 Conflict`, Discord delivers every message to every session so the user is answered twice, and the per-process `ChannelManager` state (the `/model` cache, GitHub follow-up buffers) diverges. The leader lease arbitrates this: one row per provider in the shared database, held by one instance and renewed on a heartbeat, so only the holder starts that provider's transport. GitHub is webhook-driven and needs no lease.
+
+- `enabled: auto` (default) follows the multi-process signal: on with `GATEWAY_WORKERS` / `WEB_CONCURRENCY > 1`, `deployment.multi_instance: true` or `DEER_FLOW_MULTI_INSTANCE=1`, off on a single instance, which then never writes lease rows and behaves as before. `true` always arbitrates; `false` never does, and the multi-process startup gate refuses `false` while an IM channel other than GitHub is enabled (the refusal names the providers and the rollback).
+- `lease_seconds` (≥ 3, default 30) is how long a held lease stays valid without renewal; the holder renews every `lease_seconds // 3` seconds. `grace_seconds` (≥ 0, default 10) is the extra time after expiry before a peer may take the lease, absorbing a slow renewal. Worst-case failover after a crash is `lease_seconds + grace_seconds`; a cleanly stopped holder releases immediately, so a peer takes over within one heartbeat.
+- The block is validated on every topology: an unknown key, a non-mapping value, `enabled` outside `auto | true | false`, `lease_seconds < 3` or `grace_seconds < 0` stop startup with the dotted path in the message.
+- Restart-required (`channels.leader_lease` in the reload-boundary registry): the gate evaluates it once and `ChannelService` captures it at construction. Change it on every instance and restart them together.
+- The lease-backed transport ownership itself (the `channel_leases` table, the supervising loop and the leader reported by `GET /api/channels/providers`) ships separately; until it lands, keep one instance while channels are enabled. This section fixes the configuration contract and the gate so that rollout needs no further config change.
 
 ### Credentials encryption key (`DEER_FLOW_CREDENTIALS_KEY`)
 

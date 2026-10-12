@@ -953,3 +953,107 @@ async def test_langgraph_runtime_enforces_the_credentials_key_before_persistence
 
     init_engine_from_config.assert_not_called()
     make_stream_bridge.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# IM channel leader lease clause (channels.leader_lease)
+# ---------------------------------------------------------------------------
+
+
+def _channels_cluster(*, leader_lease=None, channels=None, connections=None, **overrides):
+    """A fully shared Postgres deployment plus the channel-facing config a gate double needs.
+
+    ``channels`` is the raw ``channels`` mapping that lives in ``AppConfig.model_extra``;
+    ``connections`` is the ``channel_connections`` section.
+    """
+    from deerflow.config.channel_connections_config import ChannelConnectionsConfig
+
+    config = _cluster_ready(**overrides)
+    section = dict(channels or {})
+    if leader_lease is not None:
+        section["leader_lease"] = leader_lease
+    config.model_extra = {"channels": section} if section else {}
+    config.channel_connections = ChannelConnectionsConfig.model_validate(connections) if connections is not None else ChannelConnectionsConfig()
+    return config
+
+
+def test_multi_worker_rejects_disabled_leader_lease_with_an_enabled_channel(monkeypatch):
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    config = _channels_cluster(leader_lease={"enabled": False}, channels={"telegram": {"enabled": True, "bot_token": "x"}, "discord": {"enabled": True}, "slack": {"enabled": False}})
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_postgres_for_multi_worker(config)
+    msg = str(exc_info.value)
+    assert "GATEWAY_WORKERS=2" in msg
+    assert "channels.leader_lease.enabled=false" in msg
+    assert "discord, telegram" in msg  # sorted, only the enabled ones
+    assert "slack" not in msg
+    assert "409" in msg
+    assert "Set GATEWAY_WORKERS=1" in msg
+
+
+@pytest.mark.parametrize("leader_lease", [None, {}, {"enabled": "auto"}, {"enabled": True}, {"enabled": True, "lease_seconds": 15, "grace_seconds": 5}])
+def test_multi_worker_accepts_auto_or_enabled_leader_lease_with_channels(monkeypatch, leader_lease):
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    _enforce_postgres_for_multi_worker(_channels_cluster(leader_lease=leader_lease, channels={"telegram": {"enabled": True}}))
+
+
+def test_multi_worker_accepts_disabled_leader_lease_without_enabled_channels(monkeypatch):
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    _enforce_postgres_for_multi_worker(_channels_cluster(leader_lease={"enabled": False}))
+    _enforce_postgres_for_multi_worker(_channels_cluster(leader_lease={"enabled": False}, channels={"telegram": {"enabled": False, "bot_token": "x"}, "langgraph_url": "http://gw:8001/api", "session": {"assistant_id": "lead_agent"}}))
+
+
+def test_github_is_webhook_driven_and_needs_no_leader_lease(monkeypatch):
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    _enforce_postgres_for_multi_worker(_channels_cluster(leader_lease={"enabled": False}, channels={"github": {"enabled": True}}))
+
+
+def test_declared_multi_instance_rejects_disabled_leader_lease_for_ui_connectable_providers():
+    """channel_connections providers get credentials at runtime, so they count even without a channels block."""
+    config = _channels_cluster(
+        deployment_multi_instance=True,
+        leader_lease={"enabled": False},
+        connections={"enabled": True, "telegram": {"enabled": True, "bot_username": "bot"}, "slack": {"enabled": False}},
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_postgres_for_multi_worker(config)
+    msg = str(exc_info.value)
+    assert "deployment.multi_instance=true" in msg
+    assert "IM channels telegram are enabled" in msg
+    assert "deployment.multi_instance=false and run a single Gateway instance" in msg
+    assert "channel_connections.<provider>.enabled=false" in msg
+
+
+def test_disabled_channel_connections_master_switch_does_not_count_providers():
+    config = _channels_cluster(deployment_multi_instance=True, leader_lease={"enabled": False}, connections={"enabled": False, "telegram": {"enabled": True}})
+    _enforce_postgres_for_multi_worker(config)
+
+
+def test_single_instance_ignores_a_disabled_leader_lease():
+    """Without a multi-process signal the clause is inert, like every other clause of the gate."""
+    _enforce_postgres_for_multi_worker(_channels_cluster(leader_lease={"enabled": False}, channels={"telegram": {"enabled": True}}))
+
+
+@pytest.mark.parametrize("block", [{"enabled": "maybe"}, {"lease_seconds": 0}, {"grace_seconds": -1}, {"enable": False}, "auto"])
+def test_malformed_leader_lease_is_refused_on_every_topology(block):
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_postgres_for_multi_worker(_channels_cluster(leader_lease=block))
+    assert "channels.leader_lease" in str(exc_info.value)
+
+
+def test_leader_lease_clause_runs_after_the_postgres_clause(monkeypatch):
+    """The lease needs the shared database; a SQLite deployment is told about Postgres first."""
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    config = _channels_cluster(leader_lease={"enabled": False}, channels={"telegram": {"enabled": True}})
+    config.database = DatabaseConfig(backend="sqlite")
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_postgres_for_multi_worker(config)
+    msg = str(exc_info.value)
+    assert "postgres" in msg.lower()
+    assert "leader_lease" not in msg
+
+
+def test_gate_doubles_without_channel_attributes_still_pass(monkeypatch):
+    """The existing SimpleNamespace doubles carry neither model_extra nor channel_connections."""
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    _enforce_postgres_for_multi_worker(_cluster_ready())

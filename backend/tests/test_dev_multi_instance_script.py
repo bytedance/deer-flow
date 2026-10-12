@@ -703,3 +703,14 @@ def test_up_replaces_its_own_stale_containers_with_their_volumes(stubbed_harness
     assert "docker rm -f -v deerflow-mi-redis" in log[:first_run]
     labelled = [line for line in log if line.startswith("docker run")]
     assert all(f"--label deerflow.harness.state-dir={state}" in line for line in labelled), labelled
+
+
+def test_overlay_leaves_the_channel_leader_lease_block_alone():
+    """``channels.leader_lease`` is settings (``enabled: auto``), not a bot to disable."""
+    config, notes = _overlay({"channels": {"leader_lease": {"enabled": "auto", "lease_seconds": 15}, "telegram": {"enabled": True}}})
+
+    assert config["channels"]["leader_lease"] == {"enabled": "auto", "lease_seconds": 15}
+    assert config["channels"]["telegram"]["enabled"] is False
+    joined = "\n".join(notes)
+    assert "telegram" in joined
+    assert "leader_lease" not in joined

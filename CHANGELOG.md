@@ -587,6 +587,18 @@ This release closes that milestone with **439 merged pull requests**.
 
 #### Channels
 
+- **channels:** New `channels.leader_lease` section (`enabled: auto|true|false`,
+  `lease_seconds`, `grace_seconds`; startup-only) for the per-provider leader
+  lease that gives one Gateway instance each IM platform connection. The
+  multi-process startup gate now refuses `enabled: false` while an IM channel
+  other than GitHub is enabled under `channels.*` or connectable through
+  `channel_connections`, naming the providers and the rollback, and a malformed
+  block is refused on every topology. `auto` follows the multi-process signal, so
+  a single instance is unchanged. `ChannelService` no longer treats the block as
+  a provider, and the two-Gateway harness leaves it alone. `config_version` 60;
+  the Helm chart and docs drop the comment-only "keep 1 replica" guidance in
+  favour of the gate.
+
 - **channels:** WeChat can be connected by scanning a QR code from the web UI.
   The connection dialog in the sidebar and Settings gains QR login with
   progress, pairing-code input, expiry and retry states, and a "Scan again"

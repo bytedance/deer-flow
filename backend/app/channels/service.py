@@ -6,7 +6,7 @@ import asyncio
 import logging
 import math
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -15,6 +15,7 @@ from app.channels.manager import DEFAULT_CHANNEL_MAX_CONCURRENCY, DEFAULT_CHANNE
 from app.channels.message_bus import DEFAULT_INBOUND_QUEUE_MAXSIZE, MessageBus
 from app.channels.runtime_config_store import merge_runtime_channel_configs
 from app.channels.store import ChannelStore, SqlChannelStore, resolve_channel_store
+from deerflow.config.channel_leader_lease_config import CHANNEL_LEADER_LEASE_KEY, ChannelLeaderLeaseConfig, channel_leader_lease_config
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,35 @@ _CHANNELS_GATEWAY_URL_ENV = "DEER_FLOW_CHANNELS_GATEWAY_URL"
 def _channel_has_credentials(name: str, channel_config: dict[str, Any]) -> bool:
     cred_keys = _CHANNEL_CREDENTIAL_KEYS.get(name, [])
     return any(not isinstance(channel_config.get(key), bool) and channel_config.get(key) is not None and str(channel_config[key]).strip() for key in cred_keys)
+
+
+def enabled_transport_providers(app_config: Any) -> list[str]:
+    """Return the providers whose platform connection this deployment may open.
+
+    These are the channels the leader lease arbitrates: every registered
+    provider that is ``enabled`` under ``channels.*`` in config.yaml, plus every
+    provider a user may connect from the web UI (``channel_connections.<p>.enabled``
+    with ``channel_connections.enabled``), whose credentials arrive at runtime
+    and start the transport without a restart. GitHub is excluded: it receives
+    webhooks pushed to whichever instance the load balancer picks and opens no
+    platform connection of its own. ``model_extra`` / ``channel_connections``
+    may be absent on config doubles; both then contribute nothing.
+    """
+    names: set[str] = set()
+    extra = getattr(app_config, "model_extra", None) or {}
+    channels = extra.get("channels") if isinstance(extra, Mapping) else None
+    if isinstance(channels, Mapping):
+        for name, block in channels.items():
+            if name in _CHANNEL_REGISTRY and isinstance(block, Mapping) and block.get("enabled", False):
+                names.add(name)
+    connections = getattr(app_config, "channel_connections", None)
+    if connections is not None and getattr(connections, "enabled", False):
+        for name in _CHANNEL_REGISTRY:
+            provider = getattr(connections, name, None)
+            if provider is not None and getattr(provider, "enabled", False):
+                names.add(name)
+    names.discard("github")
+    return sorted(names)
 
 
 def _resolve_service_url(config: dict[str, Any], config_key: str, env_key: str, default: str) -> str:
@@ -132,6 +162,11 @@ class ChannelService:
         store: ChannelStore | None = None,
     ) -> None:
         config = dict(channels_config or {})
+        # ``channels.leader_lease`` is a settings block, not a provider: take it
+        # out before the per-provider loops below and in ensure_ready_channels
+        # see it. The startup gate has already validated it; a direct caller
+        # (tests, embedded use) gets the same ValueError on a bad block.
+        self.leader_lease: ChannelLeaderLeaseConfig = channel_leader_lease_config({CHANNEL_LEADER_LEASE_KEY: config.pop(CHANNEL_LEADER_LEASE_KEY, None)})
         inbound_queue_maxsize = _resolve_positive_int(config, "inbound_queue_maxsize", DEFAULT_INBOUND_QUEUE_MAXSIZE)
         max_concurrency = _resolve_positive_int(config, "max_concurrency", DEFAULT_CHANNEL_MAX_CONCURRENCY)
         shutdown_grace_period_seconds = _resolve_non_negative_float(config, "shutdown_grace_period_seconds", DEFAULT_CHANNEL_SHUTDOWN_GRACE_PERIOD_SECONDS)
@@ -248,7 +283,7 @@ class ChannelService:
         """Start or restart enabled configured channels that are not ready."""
         ready_status: dict[str, bool] = {}
         for name, channel_config in self._config.items():
-            if not isinstance(channel_config, dict):
+            if not isinstance(channel_config, dict) or name not in _CHANNEL_REGISTRY:
                 continue
             if not channel_config.get("enabled", False):
                 if _channel_has_credentials(name, channel_config):

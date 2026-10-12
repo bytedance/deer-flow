@@ -160,7 +160,9 @@ def build_multi_instance_config(
 
     channels = config.get("channels")
     if not keep_channels and isinstance(channels, dict):
-        disabled = sorted(name for name, value in channels.items() if isinstance(value, dict) and value.get("enabled"))
+        # ``leader_lease`` is a settings block whose ``enabled`` may be "auto"; the
+        # provider blocks are the only ones that connect a bot.
+        disabled = sorted(name for name, value in channels.items() if name != "leader_lease" and isinstance(value, dict) and value.get("enabled"))
         for name in disabled:
             channels[name]["enabled"] = False
         if disabled:
