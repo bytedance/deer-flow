@@ -4462,7 +4462,7 @@
   （`GET /api/threads/{thread_id}/subagent-batches/{batch_id}/items`，批次运行时工作区
   每 2 秒轮询一次）不再为了只返回预览而载入每个条目的完整报告、证据 JSON 和提示词。
   默认 `max_result_chars` 下，一页 100 个条目约占用 34 MB，并阻塞事件循环约 70 ms
-  （`limit=500` 时为 170 MB 和 300 ms）；现在不到 1 MB。响应内容不变。
+  （`limit=500` 时为 170 MB 和 300 ms）；现在不到 1 MB。响应内容不变。([#6781])
 
 ### 安全
 
@@ -9301,3 +9301,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6702]: https://github.com/bytedance/deer-flow/pull/6702
 [#6706]: https://github.com/bytedance/deer-flow/pull/6706
 [#6746]: https://github.com/bytedance/deer-flow/pull/6746
+[#6781]: https://github.com/bytedance/deer-flow/pull/6781
