@@ -70,6 +70,11 @@ messages. `#knowledge-source-ID` links resolve to `KnowledgeCitation` and an
 expandable source panel with actual excerpts. Missing URLs/pages remain absent.
 Web citations and old history remain compatible. Never infer evidence from
 assistant labels or numbered legacy text.
+Shared records use the `RetrievalSource` type (native RAGFlow retains
+`KnowledgeSource`). Accept raw and `#user-content-knowledge-source-ID`
+fragments without disabling sanitizer clobber protection. Validate immutable
+tool messages through `createKnowledgeSourceReader` to reuse per-object parses.
+Cross-component field bounds live in `contracts/knowledge_sources.v1.json`.
 
 ```
 Frontend (Next.js) ──▶ LangGraph SDK ──▶ LangGraph Backend (lead_agent)

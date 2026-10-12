@@ -1,7 +1,10 @@
 import type { AnchorHTMLAttributes, ComponentProps } from "react";
 
 import { resolveMarkdownArtifactURL } from "@/core/artifacts/utils";
-import type { KnowledgeSource } from "@/core/citations/sources";
+import {
+  retrievalSourceId,
+  type RetrievalSource,
+} from "@/core/citations/sources";
 import { knowledgeSourceId } from "@/core/knowledge/sources";
 import { cn } from "@/lib/utils";
 
@@ -90,16 +93,15 @@ function isExternalUrl(href: string | undefined): boolean {
  */
 export function createMarkdownLinkComponent(
   threadId?: string,
-  knowledgeSources: readonly KnowledgeSource[] = [],
+  knowledgeSources: readonly RetrievalSource[] = [],
 ) {
   return function MarkdownLink({
     href,
     ...props
   }: AnchorHTMLAttributes<HTMLAnchorElement>) {
-    if (href?.startsWith("#knowledge-source-")) {
-      const source = knowledgeSources.find(
-        (item) => href === `#knowledge-source-${item.id}`,
-      );
+    if (/^#(?:user-content-)?knowledge-source-/.test(href ?? "")) {
+      const id = retrievalSourceId(href);
+      const source = knowledgeSources.find((item) => item.id === id);
       return source ? (
         <KnowledgeCitation source={source} />
       ) : (

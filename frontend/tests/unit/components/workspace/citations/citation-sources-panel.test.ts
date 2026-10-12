@@ -45,6 +45,7 @@ describe("CitationSourcesPanel", () => {
         provider: "lightrag",
         title: "Guide",
         excerpt: "Actual retrieved text.",
+        page: 3,
       },
     };
     const html = renderPanel([evidenceSource], "en-US");
@@ -52,6 +53,8 @@ describe("CitationSourcesPanel", () => {
     expect(html).toContain("lightrag");
     expect(html).not.toContain("href=");
     expect(html).not.toContain("p. 1");
+    expect(html).toContain("Pages 3");
+    expect(renderPanel([evidenceSource], "zh-CN")).toContain("第 3 页");
   });
   it("renders nothing when there are no sources", () => {
     expect(renderPanel([], "en-US")).toBe("");

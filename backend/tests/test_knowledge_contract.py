@@ -1,10 +1,33 @@
 """Provider-independent evidence and budget regressions (offline)."""
 
+import json
+from pathlib import Path
+
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 from pydantic import ValidationError
 
 from deerflow.knowledge import KnowledgeSource, RetrievalHit, RetrievalResult, format_result, sources_from_messages
+
+
+def test_source_schema_matches_cross_component_contract():
+    from jsonschema import Draft202012Validator
+
+    from deerflow.knowledge.sources import ARTIFACT_VERSION
+
+    schema = json.loads((Path(__file__).parents[2] / "contracts/knowledge_sources.v1.json").read_text(encoding="utf-8"))
+    Draft202012Validator.check_schema(schema)
+    properties = schema["$defs"]["source"]["properties"]
+    model = KnowledgeSource.model_json_schema(mode="serialization")["properties"]
+    for name in ("provider", "title", "excerpt"):
+        assert model[name]["maxLength"] == properties[name]["maxLength"]
+        assert model[name]["minLength"] == properties[name]["minLength"]
+    assert model["dataset_name"]["anyOf"][0]["maxLength"] == properties["dataset_name"]["maxLength"]
+    assert model["page"]["anyOf"][0]["maximum"] == properties["page"]["maximum"]
+    assert ARTIFACT_VERSION == schema["properties"]["knowledge_sources_version"]["const"]
+    source = KnowledgeSource(provider="demo", title="Guide", excerpt="evidence")
+    _, artifact = format_result(RetrievalResult(hits=[RetrievalHit(content=source.excerpt, source=source)]))
+    Draft202012Validator(schema).validate(artifact)
 
 
 def test_sources_require_real_evidence_and_optional_locators() -> None:

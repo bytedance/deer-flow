@@ -10,10 +10,10 @@ export type CitationSource = {
   domain: string;
   count: number;
   occurrences: CitationOccurrence[];
-  knowledge?: KnowledgeSource;
+  knowledge?: RetrievalSource;
 };
 
-export type KnowledgeSource = {
+export type RetrievalSource = {
   id: string;
   provider: string;
   title: string;
@@ -23,14 +23,41 @@ export type KnowledgeSource = {
   page?: number;
 };
 
+/** Sanitization prefixes fragment destinations to prevent DOM clobbering. */
+export function retrievalSourceId(href: string | undefined): string | null {
+  return (
+    /^#(?:user-content-)?knowledge-source-([a-f0-9]{32})$/.exec(
+      href ?? "",
+    )?.[1] ?? null
+  );
+}
+
+/** SDK message objects are immutable; cache per object without retaining history. */
+export function createKnowledgeSourceReader() {
+  const cache = new WeakMap<object, RetrievalSource[]>();
+  return (message: object): RetrievalSource[] => {
+    let sources = cache.get(message);
+    if (!sources) {
+      sources = readKnowledgeSources([message]);
+      cache.set(message, sources);
+    }
+    return sources;
+  };
+}
+
 const KNOWLEDGE_REFERENCE_RE =
   /(?<!!)\[citation:\s*((?:\\.|[^\]\\])+?)\]\((#knowledge-source-[a-f0-9]{32})\)/gi;
+
+function exceedsTextLimit(text: string, limit: number): boolean {
+  // JSON Schema/Pydantic count code points; avoid allocating for short text.
+  return text.length > limit && [...text].length > limit;
+}
 
 /** Sources are accepted only from evidence-bearing tool artifacts, including replay. */
 export function readKnowledgeSources(
   messages: readonly unknown[],
-): KnowledgeSource[] {
-  const sources = new Map<string, KnowledgeSource>();
+): RetrievalSource[] {
+  const sources = new Map<string, RetrievalSource>();
   for (const value of messages) {
     if (!value || typeof value !== "object") continue;
     const message = value as Record<string, unknown>;
@@ -50,12 +77,16 @@ export function readKnowledgeSources(
         !/^[a-f0-9]{32}$/.test(source.id) ||
         typeof source.provider !== "string" ||
         !source.provider.trim() ||
+        exceedsTextLimit(source.provider, 100) ||
         typeof source.title !== "string" ||
         !source.title.trim() ||
-        source.title.length > 500 ||
+        exceedsTextLimit(source.title, 500) ||
         typeof source.excerpt !== "string" ||
         !source.excerpt.trim() ||
-        source.excerpt.length > 100_000
+        exceedsTextLimit(source.excerpt, 100_000) ||
+        (source.dataset_name !== undefined &&
+          (typeof source.dataset_name !== "string" ||
+            exceedsTextLimit(source.dataset_name, 500)))
       )
         continue;
       if (
@@ -103,7 +134,7 @@ const GENERIC_CITATION_TITLES = new Set(["source", "来源"]);
 
 export function extractCitationSources(
   markdown: string,
-  knowledgeSources: readonly KnowledgeSource[] = [],
+  knowledgeSources: readonly RetrievalSource[] = [],
 ): CitationSource[] {
   if (!markdown) {
     return [];

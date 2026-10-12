@@ -111,8 +111,8 @@ def format_result(result: RetrievalResult, *, max_chars_per_chunk: int = 800, ma
 def sources_from_messages(messages: Iterable[Any]) -> list[KnowledgeSource]:
     """Accept native and serialized ToolMessages, never assistant claims.
 
-    This same scan is used on every child values frame, so bounded accumulation
-    survives compaction. History replay deduplicates by evidence identity.
+    Child values accumulation scans changed message suffixes and retains bounded
+    evidence across compaction. Replay deduplicates by evidence identity.
     """
     sources: dict[str, KnowledgeSource] = {}
     for message in messages:

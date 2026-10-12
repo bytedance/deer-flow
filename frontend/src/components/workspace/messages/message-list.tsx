@@ -28,8 +28,8 @@ import { Button } from "@/components/ui/button";
 import { KnowledgeSourcesProvider } from "@/components/workspace/citations/knowledge-source";
 import { extractArtifactsFromThread } from "@/core/artifacts/utils";
 import {
-  readKnowledgeSources,
-  type KnowledgeSource,
+  createKnowledgeSourceReader,
+  type RetrievalSource,
 } from "@/core/citations/sources";
 import { useI18n } from "@/core/i18n/hooks";
 import { getArtifactArchiveCandidatesByGroupIndex } from "@/core/messages/artifact-archive";
@@ -387,14 +387,15 @@ export function MessageList({
     useState<SelectionToolbarState | null>(null);
   const messages = thread.messages;
   const previousKnowledgeSnapshotsRef = useRef(
-    new Map<string | Message, KnowledgeSource[]>(),
+    new Map<string | Message, RetrievalSource[]>(),
   );
+  const readMessageKnowledgeSources = useMemo(createKnowledgeSourceReader, []);
   const knowledgeSourcesByMessage = useMemo(() => {
-    const byMessage = new Map<Message, KnowledgeSource[]>();
-    const nextSnapshots = new Map<string | Message, KnowledgeSource[]>();
-    const evidence = new Map<string, KnowledgeSource>();
+    const byMessage = new Map<Message, RetrievalSource[]>();
+    const nextSnapshots = new Map<string | Message, RetrievalSource[]>();
+    const evidence = new Map<string, RetrievalSource>();
     for (const message of messages) {
-      for (const source of readKnowledgeSources([message]))
+      for (const source of readMessageKnowledgeSources(message))
         evidence.set(source.id, source);
       if (message.type === "ai") {
         const key = message.id ?? message;
@@ -411,7 +412,7 @@ export function MessageList({
     }
     previousKnowledgeSnapshotsRef.current = nextSnapshots;
     return byMessage;
-  }, [messages]);
+  }, [messages, readMessageKnowledgeSources]);
   const groupedMessages = useStableMessageGroups(messages, thread.isLoading);
   // Schedule event lines sit at the end of the turn they followed.
   const placedTaskEvents = useMemo(

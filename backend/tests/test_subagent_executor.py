@@ -71,6 +71,22 @@ def test_knowledge_sources_survive_compaction_and_terminal_publication(_setup_ex
     assert len(result.knowledge_sources) == 1
 
 
+def test_knowledge_accumulator_scans_only_changed_tail(_setup_executor_classes, monkeypatch):
+    import deerflow.knowledge as knowledge
+
+    classes = _setup_executor_classes
+    scanned = []
+    monkeypatch.setattr(knowledge, "sources_from_messages", lambda messages: scanned.append(list(messages)) or [])
+    result = classes["SubagentResult"](task_id="task", trace_id="trace", status=classes["SubagentStatus"].RUNNING)
+    first, second, compacted = {"type": "ai", "content": "first"}, {"type": "ai", "content": "second"}, {"type": "ai", "content": "summary"}
+    result.update_knowledge_sources([first])
+    result.update_knowledge_sources([first, second])
+    result.update_knowledge_sources([first, second])
+    result.update_knowledge_sources([compacted])
+    result.update_knowledge_sources(None)
+    assert scanned == [[first], [second], [compacted]]
+
+
 def _default_app_config():
     return SimpleNamespace(
         tool_search=SimpleNamespace(enabled=False),

@@ -37,7 +37,7 @@ import {
   resolveMessageImageURL,
 } from "@/core/artifacts/utils";
 import {
-  type KnowledgeSource,
+  type RetrievalSource,
   extractCitationSources,
 } from "@/core/citations/sources";
 import { readConversationReferences } from "@/core/conversation-references";
@@ -162,7 +162,7 @@ export function MessageListItem({
   isLoading?: boolean;
   threadId: string;
   artifactPaths?: readonly string[];
-  knowledgeSources?: readonly KnowledgeSource[];
+  knowledgeSources?: readonly RetrievalSource[];
   feedback?: FeedbackData | null;
   runId?: string;
   showCopyButton?: boolean;
@@ -426,7 +426,7 @@ function MessageContent_({
   isLoading?: boolean;
   threadId: string;
   artifactPaths: readonly string[];
-  knowledgeSources?: readonly KnowledgeSource[];
+  knowledgeSources?: readonly RetrievalSource[];
   runId?: string;
   showWorkspaceChanges?: boolean;
   durationSeconds?: number;

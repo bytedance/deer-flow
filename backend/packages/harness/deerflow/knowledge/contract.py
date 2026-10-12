@@ -36,7 +36,7 @@ class KnowledgeSource(BaseModel):
     excerpt: str = Field(min_length=1, max_length=100_000)
     dataset_name: str | None = Field(default=None, max_length=500)
     url: HttpUrl | None = None
-    page: int | None = Field(default=None, gt=0, strict=True)
+    page: int | None = Field(default=None, gt=0, le=9_007_199_254_740_991, strict=True)
 
     @field_validator("url")
     @classmethod

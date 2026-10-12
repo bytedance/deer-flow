@@ -39,6 +39,15 @@ handle, and actual excerpt in tool content. Backend readers recompute source IDs
 Assistant labels do not establish evidence. Gateway run input and checkpoint
 writes strip the reserved source keys from caller artifacts.
 
+The reserved envelope keys are the shared reader's trust boundary, not the
+tool name. Server-side producers that write these keys become evidence
+authorities and must supply validated retrieval evidence; naming a tool
+`knowledge_search` grants no authority to caller artifacts. This allows new
+provider tools without extending a name allowlist. Native RAGFlow readers
+continue to apply their existing tool-name allowlist.
+The wire schema lives at `contracts/knowledge_sources.v1.json`; backend and
+frontend tests pin the version, field bounds, and source IDs to that schema.
+
 Complete RAGFlow responses retain the native version-one
 `knowledge_sources: {version, sources}` snapshots and `#knowledge-ID` links
 already supported by the Gateway, frontend, ordinary tasks, and durable batch
@@ -50,11 +59,22 @@ after replay. When a task cites both formats, native RAGFlow snapshots stay in
 Gateway strips all three keys from untrusted writes. Budget pruning must not
 overwrite a native snapshot with shared records.
 
+The shared envelope is the intended default for new provider integrations.
+Convergence should happen at adapter output boundaries: migrate newly produced
+RAGFlow evidence to the shared form once native scope, budgets, delegation and
+durable batch forwarding have equivalent coverage. Keep native readers for
+persisted citations and exports; do not rewrite historical IDs or fabricate
+missing locators. Removing native writers/readers requires a separate migration
+proposal and compatibility tests, not a full migration in phase 1.
+
 The frontend resolves citations against preceding tool messages in loaded thread
 history, displaying provider, title, excerpt, and only supplied locators. Absent
 evidence stays unresolved until loaded. Historical web citations retain their
 existing display. Old numbered knowledge text lacks structured evidence, so
 replay never invents metadata for it. Direct Python text APIs keep their format.
+Inline shared references accept both the raw `#knowledge-source-ID` and the
+sanitized `#user-content-knowledge-source-ID`; the sanitizer's DOM-clobbering
+protection stays enabled. Missing or malformed references render inert labels.
 
 `format_result` budgets chunk text and source evidence together: a cited hit
 that cannot fit is omitted as a whole. Results display at most 100 hits, matching
@@ -66,6 +86,10 @@ terminal publication, surviving compaction. Ordinary `task` forwards only
 sources whose handles appear in the child report, with a bounded evidence
 appendix. Existing native RAGFlow durable batch forwarding is retained;
 shared-contract durable batch forwarding is outside this phase.
+The accumulator scans only the changed history suffix, restarting at changed
+prefixes after compaction; null messages are treated as empty frames. The
+frontend caches validation by immutable message object in a WeakMap, so repeated
+stream updates do not rescan unchanged tool excerpts.
 
 ## Adapters and capabilities
 

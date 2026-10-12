@@ -4,10 +4,11 @@ import {
   HoverCardContent,
   HoverCardTrigger,
 } from "@/components/ui/hover-card";
-import type { KnowledgeSource } from "@/core/citations/sources";
+import type { RetrievalSource } from "@/core/citations/sources";
+import { useI18n } from "@/core/i18n/hooks";
 
 /** Local evidence is readable even when the provider returned no public URL. */
-export function KnowledgeCitation({ source }: { source: KnowledgeSource }) {
+export function KnowledgeCitation({ source }: { source: RetrievalSource }) {
   return (
     <HoverCard closeDelay={0} openDelay={0}>
       <HoverCardTrigger asChild>
@@ -31,14 +32,17 @@ export function KnowledgeCitation({ source }: { source: KnowledgeSource }) {
   );
 }
 
-export function KnowledgeEvidence({ source }: { source: KnowledgeSource }) {
+export function KnowledgeEvidence({ source }: { source: RetrievalSource }) {
+  const { t } = useI18n();
   return (
     <div className="space-y-2 break-words">
       <p className="font-medium">{source.title}</p>
       <p className="text-muted-foreground">
         {source.provider}
         {source.dataset_name ? ` / ${source.dataset_name}` : ""}
-        {source.page ? ` · p. ${source.page}` : ""}
+        {source.page
+          ? ` · ${t.citations.sourcePages(String(source.page))}`
+          : ""}
       </p>
       <blockquote className="border-border border-l-2 pl-2 whitespace-pre-wrap">
         {source.excerpt}
