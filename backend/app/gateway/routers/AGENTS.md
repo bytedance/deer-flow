@@ -16,6 +16,11 @@ create-only: collisions return 409, never overwrite or upsert. Ordinary creation
 and import share `_persist_new_agent`, which uses `run_drained_write` so a
 cancelled request still drains the owned persistence worker.
 
+Custom Agent update guards apply legacy shared-file checks only when the
+resolved store is `FileAgentStore`, including the `update_agent` tool. DB
+imports retain source files for rollback; those files cannot veto SQL updates.
+Keep store resolution and filesystem checks off-loop in the HTTP route.
+
 Committed MCP reconciliation failures are logged once by
 `fail_mcp_reconciliation`, with only the underlying exception type.
 `_run_drained_mcp_apply` passes `_McpCommittedReconciliationError` as an expected

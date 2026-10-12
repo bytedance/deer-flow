@@ -2018,6 +2018,11 @@ the stable English `name`. API callers can pass `display_name` to agent creation
 or update requests; an omitted update preserves it and `null` clears it. The
 same optional field is supported in the agent's `config.yaml`.
 
+Custom Agents migrated to `agent_storage.backend: db` remain editable through
+Agent settings and `update_agent` while the importer retains their old files
+for rollback. See [Agent Storage](backend/docs/CONFIGURATION.md#agent-storage)
+for the migration procedure.
+
 Custom Agents can also be moved between DeerFlow users or deployments from the
 Agents gallery. **Export Agent** downloads a versioned
 `*.deerflow-agent.json` package containing the portable definition and
@@ -2271,6 +2276,8 @@ Markdown conversions appear as standalone files in the agent's historical listin
 On Windows, `st_ctime_ns` may represent creation time; a same-size rewrite that
 restores the original `mtime` can evade validation. Timestamp checks are
 conservative metadata validation, not a guarantee of content equality.
+
+Sandbox image downloads enforce the 20 MiB vision limit while reading, including model-context rereads. Oversized streams stop at the first over-limit chunk. Custom sandbox providers must accept and enforce the `download_file(..., max_bytes=...)` keyword; older implementations fail the image read instead of falling back to an unrestricted download.
 
 Image bytes loaded for a vision-model call are transient: DeerFlow removes the hidden base64 message after the model consumes it so later checkpoints do not keep duplicating that payload.
 

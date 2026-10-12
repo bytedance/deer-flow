@@ -26,6 +26,7 @@ from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import get_paths
 from deerflow.knowledge_scope import KnowledgeScope, canonicalize_knowledge_scope
 from deerflow.persistence.agents import AgentDeleteOutcome, AgentExistsError, get_agent_store
+from deerflow.persistence.agents.file import FileAgentStore
 from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
@@ -532,15 +533,18 @@ async def update_agent(name: str, body: AgentUpdateRequest, request: Request) ->
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
 
     def _is_legacy_only_layout() -> bool:
+        # The DB importer retains legacy source files for rollback. They say
+        # nothing about the ownership of the active SQL definition.
+        if not isinstance(get_agent_store(), FileAgentStore):
+            return False
         # Require config.yaml, not bare directory existence — a per-user agent
         # directory can exist containing only memory.json (written the first
         # time this user chats with a legacy shared agent, before this route
         # is ever called). Bare .exists() would miss that case and let this
         # fall through to a silent fork of a brand-new config.yaml/SOUL.md
         # into the memory-only directory instead of blocking (mirrors
-        # resolve_agent_dir's guard, see #3390). The db backend has no legacy
-        # shared layout, so this file-only guard is a no-op there. The .exists()
-        # probes are filesystem IO, so they run off the event loop.
+        # resolve_agent_dir's guard, see #3390). Store resolution and the
+        # filesystem probes both run off the event loop.
         paths = get_paths()
         agent_dir = paths.user_agent_dir(user_id, name)
         legacy_dir = paths.agent_dir(name)
