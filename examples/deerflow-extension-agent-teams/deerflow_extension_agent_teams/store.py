@@ -24,7 +24,8 @@ class Store:
             db.execute("CREATE TABLE IF NOT EXISTS teams (id TEXT PRIMARY KEY, owner TEXT NOT NULL, data TEXT NOT NULL, has_pending_jobs INTEGER NOT NULL DEFAULT 0)")
             if "has_pending_jobs" not in {row[1] for row in db.execute("PRAGMA table_info(teams)")}:
                 db.execute("ALTER TABLE teams ADD COLUMN has_pending_jobs INTEGER NOT NULL DEFAULT 0")
-                for team_id, data in db.execute("SELECT id, data FROM teams"):
+                rows = db.execute("SELECT id, data FROM teams").fetchall()
+                for team_id, data in rows:
                     db.execute("UPDATE teams SET has_pending_jobs=? WHERE id=?", (has_pending_jobs(json.loads(data)), team_id))
             db.execute("CREATE INDEX IF NOT EXISTS teams_pending_jobs ON teams(has_pending_jobs) WHERE has_pending_jobs=1")
 

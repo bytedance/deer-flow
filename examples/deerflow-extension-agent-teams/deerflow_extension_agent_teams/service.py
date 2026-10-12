@@ -81,7 +81,7 @@ class Teams:
         self.scheduling_lock = asyncio.Lock()
         self.workers = {}
         self.in_flight = set()
-        self.last_owner = None
+        self.owner_rotation = deque()
         self.task = None
         self.process_lock = None
         self.available = False
@@ -453,25 +453,25 @@ class Teams:
                     groups.setdefault(key, []).append(job["id"])
                 else:
                     pending.setdefault(key[0], deque()).append((key, job["id"]))
-            owners = list(pending)
-            if self.last_owner in owners:
-                after = owners.index(self.last_owner) + 1
-                owners = owners[after:] + owners[:after]
-            owners = deque(owners)
+            # Carry the unfinished round, even when the last admitted owner has
+            # no pending job left. Drop unavailable queues and append newcomers.
+            owners = deque(owner for owner in self.owner_rotation if owner in pending)
+            retained = set(owners)
+            owners.extend(owner for owner in pending if owner not in retained)
             while owners and len(charged) < 8:
                 owner = owners.popleft()
                 key, job_id = pending[owner].popleft()
                 entry = (key, job_id)
                 charged.add(entry)
                 groups.setdefault(key, []).append(job_id)
-                self.last_owner = owner
                 if pending[owner]:
                     owners.append(owner)
+            self.owner_rotation = owners
             tasks = []
             for key, job_ids in groups.items():
-                entries = {(key, job_id) for job_id in job_ids}
-                attempted.update(entries)
-                self.in_flight.update(entries)
+                reservations = {(key, job_id) for job_id in job_ids}
+                attempted.update(reservations)
+                self.in_flight.update(reservations)
                 task = asyncio.create_task(self.work_team(key, job_ids, self.handles[key]))
                 self.workers[key] = task
                 tasks.append(task)

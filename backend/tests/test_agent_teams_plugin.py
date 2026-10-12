@@ -1152,6 +1152,74 @@ async def test_owner_rotation_survives_one_slot_at_a_time(plugin):
 
 
 @pytest.mark.asyncio
+async def test_owner_rotation_finishes_the_round_after_single_job_owners_leave_pending(plugin):
+    _, actions, service = plugin
+    runs = Runs()
+    owners = {}
+    for owner, members in [("alice", 8), *((f"owner-{i}", 2) for i in range(1, 17))]:
+        team = await scheduling_team(actions, runs, owner, owner, members)
+        for member in team["members"][: 8 if owner == "alice" else 1]:
+            owners[member["thread_id"]] = owner
+            await scheduling_send(actions, runs, owner, team, member, "first")
+    await service.tick()
+    assert {owners[thread] for thread, _ in runs.starts} == {"alice", *(f"owner-{i}" for i in range(1, 8))}
+    admitted = []
+    for _ in range(10):
+        first = next(run for run in runs.runs.values() if run.status == "running")
+        runs.finish(first.run_id)
+        before = len(runs.starts)
+        await service.tick()
+        assert len(runs.starts) == before + 1
+        admitted.append(owners[runs.starts[-1][0]])
+        assert sum(run.status == "running" for run in runs.runs.values()) == 8
+    assert admitted == [*(f"owner-{i}" for i in range(8, 17)), "alice"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_waiting_owner", [False, True])
+async def test_owner_rotation_appends_new_owners_and_drops_cancelled_queues(plugin, cancel_waiting_owner):
+    _, actions, service = plugin
+    runs = Runs()
+    owners, waiting = {}, None
+    for owner, members in [("alice", 8), *((f"owner-{i}", 2) for i in range(1, 9))]:
+        team = await scheduling_team(actions, runs, owner, owner, members)
+        for member in team["members"][: 8 if owner == "alice" else 1]:
+            owners[member["thread_id"]] = owner
+            sent = await scheduling_send(actions, runs, owner, team, member, "first")
+            if owner == "owner-8":
+                waiting = (team, sent)
+    await service.tick()
+    late = await scheduling_team(actions, runs, "late", "late")
+    owners[late["members"][0]["thread_id"]] = "late"
+    await scheduling_send(actions, runs, "late", late, late["members"][0], "first")
+    if cancel_waiting_owner:
+        team, sent = waiting
+        await actions["cancel"]({"team_id": team["id"], "job_id": sent["id"]}, context(runs, "owner-8"))
+        await actions["delete"]({"team_id": team["id"]}, context(runs, "owner-8"))
+    admitted = []
+    for _ in range(4):
+        first = next(run for run in runs.runs.values() if run.status == "running")
+        runs.finish(first.run_id)
+        before = len(runs.starts)
+        await service.tick()
+        assert len(runs.starts) == before + 1
+        admitted.append(owners[runs.starts[-1][0]])
+        assert sum(run.status == "running" for run in runs.runs.values()) == 8
+    assert admitted == (["alice", "late", "alice", "alice"] if cancel_waiting_owner else ["owner-8", "alice", "late", "alice"])
+    # With only Alice's backlog left, spare slots must remain usable.
+    for run in list(runs.runs.values()):
+        if run.status == "running":
+            runs.finish(run.run_id)
+    await service.tick()
+    assert len(runs.starts) == (16 if cancel_waiting_owner else 17)
+    for run in list(runs.runs.values()):
+        if run.status == "running":
+            runs.finish(run.run_id)
+    await service.tick()
+    assert not any(run.status == "running" for run in runs.runs.values())
+
+
+@pytest.mark.asyncio
 async def test_background_loop_keeps_cancelling_other_teams_while_one_call_stalls(plugin, monkeypatch):
     _, actions, service = plugin
     runs = Runs()
@@ -1541,6 +1609,45 @@ def test_pending_projection_backfills_legacy_rows_and_uses_an_index(plugin, tmp_
     # Reopening must use the projection instead of re-decoding legacy history.
     again = Store(path)
     assert again.scheduling_snapshots() == snapshots
+
+
+def test_legacy_backfill_finishes_reading_before_updating_the_scanned_table(plugin, tmp_path, monkeypatch):
+    import sqlite3
+    from contextlib import closing
+
+    from deerflow_extension_agent_teams.store import Store
+
+    class BackfillCursor(sqlite3.Cursor):
+        def fetchall(self):
+            rows = super().fetchall()
+            self.connection.scanning = False
+            return rows
+
+        def __next__(self):
+            try:
+                return super().__next__()
+            except StopIteration:
+                self.connection.scanning = False
+                raise
+
+    class BackfillConnection(sqlite3.Connection):
+        scanning = False
+
+        def execute(self, sql, parameters=()):
+            if sql.startswith("UPDATE teams"):
+                assert not self.scanning, "Updating teams before its SELECT has finished"
+            cursor = self.cursor(BackfillCursor).execute(sql, parameters)
+            if sql == "SELECT id, data FROM teams":
+                self.scanning = True
+            return cursor
+
+    path = tmp_path / "legacy-scan.sqlite"
+    with closing(sqlite3.connect(path)) as db, db:
+        db.execute("CREATE TABLE teams (id TEXT PRIMARY KEY, owner TEXT NOT NULL, data TEXT NOT NULL)")
+        for index in range(100):
+            db.execute("INSERT INTO teams VALUES (?,?,?)", (str(index), "alice", json.dumps({"jobs": [{"status": "completed" if index % 2 else "queued"}], "padding": "x" * 4000})))
+    monkeypatch.setattr(Store, "connection", lambda store: sqlite3.connect(store.path, factory=BackfillConnection))
+    assert set(Store(path).scheduling_snapshots()) == {("alice", str(i)) for i in range(0, 100, 2)}
 
 
 def test_failed_projection_backfill_rolls_back_schema_and_rows(plugin, tmp_path):

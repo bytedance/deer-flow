@@ -92,9 +92,10 @@ own teams. Sharing a host conversation does **not** share its team's private dat
   access on every call. PAT/internal callers without this capability cannot run teams.
 - Admissions are bounded to eight active plugin jobs across this database.
   New requests and pending answers rotate by owner, one admission attempt per
-  owner per round. The cursor carries over between passes, so one released slot
-  does not always return to the first owner. Spare capacity can be used by any
-  queued owner; existing runs are not preempted when another owner joins.
+  owner per round. The unfinished round carries over between passes, including
+  when a served owner's queue becomes empty. Unavailable queues drop out and new
+  owners join the tail. Spare capacity can be used by any queued owner; existing
+  runs are not preempted when another owner joins.
 - Each team has its own execution/control lock and background worker. Slow host
   calls in one team do not hold another team's create, send, cancel, resume,
   delete or reconnect operations, nor stop its background polling. Operations
@@ -113,9 +114,10 @@ own teams. Sharing a host conversation does **not** share its team's private dat
   to reconcile them. Cancelling an unstarted answer does not admit it.
 - Each planning pass uses one indexed batch query for teams with unfinished jobs.
   Completed history is not decoded. The plugin database adds a pending-job flag
-  and index, backfills legacy rows transactionally at initialization, and updates
-  the flag with each team mutation. The projection includes waiting-input jobs
-  for conversation ordering even though those jobs do not occupy active slots.
+  and index, reads legacy rows completely before transactionally backfilling
+  them at initialization, and updates the flag with each team mutation. The
+  projection includes waiting-input jobs for conversation ordering even though
+  those jobs do not occupy active slots.
 - Each owner can have 20 teams. A team accepts at most 100 requests, with separate
   space for up to 100 result receipts (200 total job entries); a handoff chain
   accepts at most 12 requests. Start a new user request for another chain, or a
@@ -169,10 +171,12 @@ serialization, interrupts, cancellation, restart/reconnect (including incomplete
 creation), request capacity independent of receipts, ambiguous admission, and
 lifecycle locking. Event-gated scheduling regressions also cover cross-team control
 isolation, continued background cancellation, owner rotation with single-slot
-release, overlapping ticks, pending answers, shared-source receipts, worker
+release and mixed backlogs, exhausted/cancelled queues and new owners, overlapping
+ticks, pending answers, shared-source receipts, worker
 shutdown and durable slots across restart. Storage regressions cover indexed batch
-reads, terminal-history exclusion, legacy backfill/rollback and projection updates
-when queuing, cancelling, finishing or creating receipts. Host-run transport is controlled for deterministic tests.
+reads, terminal-history exclusion, complete legacy reads before backfill, rollback
+and projection updates when queuing, cancelling, finishing or creating receipts.
+Host-run transport is controlled for deterministic tests.
 Clarification tests execute the host's real tool and middleware in an Agent graph,
 including repeated questions, peer/mention/result-receipt paths, lost response
 acknowledgements and restart. Response regressions cover the 7,999/8,000/8,001-byte
