@@ -246,6 +246,9 @@ class TelegramChannel(Channel):
         if cleanup_future is not None and not telegram_loop_running:
             # Its owner loop is gone, so nothing can finish this cleanup.
             logger.warning("[Telegram] Telegram loop stopped before its resource cleanup finished; the download bot's HTTPX clients may not have been closed")
+            with self._shutdown_resources_lock:
+                if self._shutdown_resources_future is cleanup_future:
+                    self._shutdown_resources_future = None
             cleanup_future = None
         if cleanup_future is not None:
             try:

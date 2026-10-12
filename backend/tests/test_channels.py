@@ -11354,6 +11354,58 @@ class TestTelegramInboundMessages:
 
         _run(go())
 
+    @pytest.mark.parametrize("owner_loop", ["missing", "stopped", "closed"])
+    def test_stop_releases_abandoned_cleanup_generation(self, caplog, owner_loop):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "test-token"})
+            telegram_loop = asyncio.new_event_loop() if owner_loop != "missing" else None
+            if owner_loop == "closed":
+                telegram_loop.close()
+            cleanup_future: Future[None] = Future()
+            ch._tg_loop = telegram_loop
+            ch._shutdown_resources_future = cleanup_future
+            ch._download_bot = SimpleNamespace(shutdown=AsyncMock())
+            try:
+                with caplog.at_level(logging.WARNING, logger="app.channels.telegram"):
+                    await ch.stop()
+                    await ch.stop()
+
+                assert ch._shutdown_resources_future is None
+                assert caplog.text.count("Telegram loop stopped before its resource cleanup finished") == 1
+                # Dropping an abandoned generation is not evidence that its
+                # loop-owned clients were closed, nor a reason to cancel it.
+                ch._download_bot.shutdown.assert_not_awaited()
+                assert not cleanup_future.done()
+            finally:
+                if telegram_loop is not None and not telegram_loop.is_closed():
+                    telegram_loop.close()
+
+        _run(go())
+
+    def test_stop_abandons_only_the_matching_cleanup_generation(self, monkeypatch):
+        from app.channels import telegram as telegram_module
+
+        async def go():
+            ch = telegram_module.TelegramChannel(bus=MessageBus(), config={"bot_token": "test-token"})
+            abandoned: Future[None] = Future()
+            replacement: Future[None] = Future()
+            ch._shutdown_resources_future = abandoned
+
+            def replace_generation_before_release(*args, **kwargs):
+                with ch._shutdown_resources_lock:
+                    ch._shutdown_resources_future = replacement
+
+            monkeypatch.setattr(telegram_module.logger, "warning", replace_generation_before_release)
+            await ch.stop()
+
+            assert ch._shutdown_resources_future is replacement
+            assert not abandoned.done()
+            assert not replacement.done()
+
+        _run(go())
+
     def test_cancelled_stop_keeps_owned_cleanup_and_retry_converges(self):
         """A cancelled stop must not cancel the cleanup the Telegram loop owns."""
         from app.channels.telegram import TelegramChannel
