@@ -178,6 +178,8 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
 
    Tavily web search and fetch contain malformed HTTP-success payloads the same way: a non-object payload, or a `results`/`failed_results` container that is not a list, returns the provider's format error, and non-object entries in an otherwise valid list are skipped in order. Missing, null, or empty results keep the existing response (`[]` for search, `Error: No results found` for fetch); missing or null search fields (`title`, `url`, `content`) normalize to empty text, and a non-string fetch `raw_content` is coerced to text before the truncation limit.
 
+   Sofya web search and fetch contain malformed HTTP-success payloads the same way: a non-object payload, a `results` container that is not a list, or a non-empty list with no object entries returns the provider's format error, while non-object entries in an otherwise valid list are skipped in order. Missing, null, or empty results keep the existing "No results found" response.
+
    Jina, Browserless, and InfoQuest web fetches resolve relative links and image sources using the requested page URL (or a usable HTML base URL), so returned Markdown includes complete destinations. Link resolution preserves the surrounding HTML source, including malformed-page formatting.
 
    Self-hosted Browserless, Crawl4AI, Firecrawl, and fastCRW fetch backends require outbound isolation from private, loopback, link-local, and cloud-metadata networks before setting `network_isolation_confirmed: true` on each tool. DeerFlow rejects private or unverifiable backends by default because those services handle redirects, DNS resolution, and subresources themselves. `allow_private_addresses` permits intentional internal target URLs and does not bypass the backend check. See [delegated fetch deployment](backend/docs/CONFIGURATION.md#delegated-fetch-backend-isolation); `make doctor` reports backend configurations that would be refused.
@@ -1082,6 +1084,8 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 5. The bot supports inbound text, image, and file messages. Inbound attachment downloads are limited to 20 MB per attachment.
 6. _(Optional)_ Interactive clarification cards: set `card_interaction_enabled: true` under `channels.feishu` to let the agent's option-based clarifications render as clickable button cards, preserving any background context before the question. Then, in the developer console, open **Callback Configuration** (回调配置 — a separate tab from **Event Subscriptions**), subscribe to `card.action.trigger` in **Long Connection** mode, and publish a new app version. A click resolves the clarification exactly like typing the choice; only the user who triggered the clarification can operate its card. Button answers are saved in the conversation history, and subsequent clarifications continue in the same thread.
 
+Scheduled-task result and lifecycle notices can also be pushed to a bound Feishu/Lark user, without a new inbound message. They use the same notification outbox and localized summaries as WeCom. The app must be able to send to that user; see [Feishu scheduled-task notifications](backend/docs/IM_CHANNEL_CONNECTIONS.md#feishu-scheduled-task-notifications).
+
 **WeChat Setup**
 
 1. Enable the `wechat` channel in `config.yaml`.
@@ -1107,6 +1111,8 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 2. Set the message receiving mode to **Stream Mode** in the robot configuration page.
 3. Copy the `Client ID` and `Client Secret`, set `DINGTALK_CLIENT_ID` and `DINGTALK_CLIENT_SECRET` in `.env`, and enable the channel in `config.yaml`.
 4. *(Optional)* To enable streaming AI Card replies (typewriter effect), create an **AI Card** template on the [DingTalk Card Platform](https://open.dingtalk.com/document/dingstart/typewriter-effect-streaming-ai-card), then set `card_template_id` in `config.yaml` to the template ID. You also need to apply for the `Card.Streaming.Write` and `Card.Instance.Write` permissions.
+
+DingTalk's Markdown fallback displays tables as labeled blockquotes, preserving escaped pipes (`\|`) within cells and empty leading or trailing cells so values stay under the correct column labels.
 
 
 When DeerFlow runs in Docker Compose, IM channels execute inside the `gateway` container. In that case, do not point `channels.langgraph_url` or `channels.gateway_url` at `localhost`; use container service names such as `http://gateway:8001/api` and `http://gateway:8001`, or set `DEER_FLOW_CHANNELS_LANGGRAPH_URL` and `DEER_FLOW_CHANNELS_GATEWAY_URL`.
@@ -1657,6 +1663,15 @@ changed, or cleared, including unscoped runs accepted before this feature.
 This default applies to Gateway-hosted custom-agent turns; direct harness/client
 integrations continue to supply their own execution scope.
 
+In Agent settings, **Tool access** can inherit every configured tool group,
+allow selected groups, or disable all groups. Saved groups stay visible and
+removable while the catalog loads or fails to load. A saved group is marked
+unavailable only when a successful catalog load confirms it is missing.
+Saving a selection that removes `knowledge` also clears the saved default
+knowledge selection. When enabling knowledge access for an agent that
+previously lacked it, save the tool access first, then reopen settings to
+choose its default knowledge bases.
+
 The `knowledge_base` block is provider-neutral and only controls whether the
 knowledge capability and selector are enabled. RAGFlow connection, dataset
 allowlist, and retrieval parameters (`base_url`, `api_key`, `datasets`,
@@ -2018,6 +2033,11 @@ the stable English `name`. API callers can pass `display_name` to agent creation
 or update requests; an omitted update preserves it and `null` clears it. The
 same optional field is supported in the agent's `config.yaml`.
 
+Custom Agents migrated to `agent_storage.backend: db` remain editable through
+Agent settings and `update_agent` while the importer retains their old files
+for rollback. See [Agent Storage](backend/docs/CONFIGURATION.md#agent-storage)
+for the migration procedure.
+
 Custom Agents can also be moved between DeerFlow users or deployments from the
 Agents gallery. **Export Agent** downloads a versioned
 `*.deerflow-agent.json` package containing the portable definition and
@@ -2039,6 +2059,9 @@ ID, so a later user turn can reuse an ID without replacing earlier work or
 losing that turn's per-run delegation count.
 
 The lead agent can spawn sub-agents on the fly — each with its own scoped context, tools, and termination conditions — when delegation has clear net benefit from real parallel latency, specialist capability, or context isolation. It keeps interdependent scopes and overlapping side effects out of parallel dispatch; a bounded sequential chain can still run in one sub-agent when specialist or context-isolation benefit clearly wins. The lead uses the fewest useful sub-agents and re-evaluates later batches instead of fanning out solely because a task is large or multi-step. Sub-agents report back structured results, and the lead agent verifies and synthesizes them into a coherent output. Deterministic tool receipts cover both direct tool messages and state-updating `Command` results such as delegated `task` responses; when the receipt ledger reaches its context budget, it retains the newest actions and their original receipt IDs. Operators can disable this provenance layer with `verification.receipts_enabled: false`. Their configured skills are resolved from the same user-scoped catalog as the lead agent, so user-owned custom skills remain available without exposing another user's version. Their internal AI and tool messages stay scoped to the delegated graph instead of entering the parent chat stream. Reloaded thread history enforces the same boundary: callback-captured sub-agent AI responses remain available in run-event diagnostics but are excluded from the parent transcript, while the parent `task` result remains attached to its subtask card. Long-running sub-agents compact older history when summarization is enabled and re-inject the summary as guarded, hidden durable context before continuing, so recent assistant/tool activity remains grounded in the task. Their system instructions, including the role and report contract, survive compaction; if only those instructions and the current request would be summarized, compaction is skipped. Provider/model request failures are reported as failed sub-agent tasks rather than successful results, so the lead agent and Web UI can react to them correctly. Concurrent parent runs also receive independent server-side sub-agent execution IDs, so a provider that reuses a tool-call ID cannot make one run poll, cancel, or clean up another run's background task. Collapsed sub-agent cards show the effective model and, when the provider returns usage metadata, a cumulative token total that updates after each completed sub-agent LLM call and persists after a reload. When token usage tracking is enabled, completed sub-agent usage is attributed back to the dispatching step from that run's terminal tool-message metadata rather than a process-global provider-ID cache.
+
+Sub-agent cards keep unrecognized structured task statuses in progress. Accompanying
+result text does not turn an unknown status into success or failure.
 
 Cancelled or timed-out background sub-agent executions retain provider-reported token usage from completed model calls, including responses received before their next progress update. Final usage delivery to the parent run does not count earlier progress snapshots twice.
 
@@ -2271,6 +2294,8 @@ Markdown conversions appear as standalone files in the agent's historical listin
 On Windows, `st_ctime_ns` may represent creation time; a same-size rewrite that
 restores the original `mtime` can evade validation. Timestamp checks are
 conservative metadata validation, not a guarantee of content equality.
+
+Sandbox image downloads enforce the 20 MiB vision limit while reading, including model-context rereads. Oversized streams stop at the first over-limit chunk. Custom sandbox providers must accept and enforce the `download_file(..., max_bytes=...)` keyword; older implementations fail the image read instead of falling back to an unrestricted download.
 
 Image bytes loaded for a vision-model call are transient: DeerFlow removes the hidden base64 message after the model consumes it so later checkpoints do not keep duplicating that payload.
 
@@ -2779,6 +2804,8 @@ Current MVP limits:
 - No channel or GitHub dispatch targets (result push above is not a dispatch target)
 
 Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigger uses the same scheduled-task resource and execution path.
+
+In the task form, switching an hourly, daily, weekly, or monthly schedule to **Custom cron** starts from its current timing, including selected weekdays or day of the month. Switching back to Custom cron after preset edits uses those edits rather than an older expression.
 
 ### Lifecycle, safety caps and stop conditions
 

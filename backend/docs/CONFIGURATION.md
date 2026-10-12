@@ -566,7 +566,7 @@ Notes:
 - Manual trigger uses the same scheduled-task resource and run lifecycle.
 - Scheduled task definitions and task-run history are persisted in the application database.
 - With `channel_connections.enabled: true`, the scheduler sends IM notices ("scheduled task updates") to the task owner's connected identities. A delivery worker (same poll cadence as the scheduler) pushes them.
-  - **Which apps:** only providers whose channel implements proactive push get notices; today that is WeCom (`proactive_notifications` in `app/channels/capabilities.py`, also returned by `GET /api/channels/providers`, where Settings shows "sent here" or "not available for this app yet"). Other providers get no outbox rows at all, and rows queued for them before the upgrade end once as `failed` without retries.
+  - **Which apps:** only providers whose channel implements proactive push get notices; today those are WeCom and Feishu/Lark (`proactive_notifications` in `app/channels/capabilities.py`, also returned by `GET /api/channels/providers`, where Settings shows "sent here" or "not available for this app yet"). Other providers get no outbox rows at all, and rows queued for them before the upgrade end once as `failed` without retries.
   - **Events:** `run_completed`, `run_failed`, `run_unmet` (goal missed), `task_paused` (automatic pause after three missed goals), `task_stopped` (paused by the agent because its stop condition was met) and `task_finished` (all `max_runs` done or `end_at` reached).
   - **One message per occurrence:** when one occurrence produces several events, only the first of `task_stopped` > `task_paused` > `task_finished` > `run_failed` > `run_unmet` > `run_completed` is sent, and that message still says how the last run went ("The last run failed." / "didn't meet the goal"). A one-time task sends only its run's outcome, never a separate `task_finished`.
   - **Transactional:** notices are queued by the finalization observer in the same database transaction that records the outcome and are deduplicated per occurrence (or per end time for a task that ends between runs), so an occurrence finalized by crash or lease recovery notifies exactly once. Plain manual "run now" trials and interrupted runs stay silent; a trial that pauses or finishes the task still sends that notice. Occurrences that end without a finished run (launch error, queue timeout, interrupted by a restart) stay silent.
@@ -683,6 +683,10 @@ uv run --no-sync --project backend python backend/scripts/migrate_agents_to_db.p
 ```
 
 The importer is idempotent (already-present agents are skipped) and leaves the source files untouched, so reverting `agent_storage.backend` to `file` is a clean rollback. Agent *memory* (`memory.json`) is unaffected by this switch.
+
+With `backend: db`, retained legacy files do not block HTTP or `update_agent`
+updates to the imported SQL definitions. With `backend: file`, shared legacy
+agents still require the user-isolation migration before they can be updated.
 
 ### Tools
 

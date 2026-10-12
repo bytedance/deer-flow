@@ -1713,7 +1713,7 @@ stripped from client-supplied messages and state updates.
 **IM notices ("scheduled task updates").** With `channel_connections.enabled`,
 each item of `GET /api/channels/providers` carries
 `proactive_notifications` (bool): whether scheduled-task updates are pushed to
-that app. Only providers with proactive push (WeCom today) get notices; the
+that app. Only providers with proactive push (WeCom and Feishu/Lark today) get notices; the
 others get none, and Settings says so. An occurrence sends at most one message,
 in the owner's `locale` preference (see Account Preferences), else
 `channel_connections.notification_locale`. Notices carry no IDs and no links;

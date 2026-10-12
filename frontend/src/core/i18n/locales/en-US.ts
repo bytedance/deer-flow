@@ -1360,12 +1360,20 @@ export const enUS: Translations = {
       "Display name must be at most 100 Unicode code points.",
     settingsDisplayNameHint:
       "Supports Unicode. Leave blank to use the agent identifier",
+    settingsToolGroups: "Tool access",
+    settingsToolGroupsHint:
+      "Restrict which configured tool groups this agent and its delegated tasks may use.",
+    settingsToolGroupsAll: "Use every configured tool group",
+    settingsToolGroupsLoadFailed: "Tool groups could not be loaded.",
+    settingsToolGroupUnavailable: "unavailable",
     settingsDescription:
       "Choose a display name and model defaults for this agent. Model changes take effect on the next message.",
     settingsKnowledge: "Default knowledge",
     settingsKnowledgeHint:
       "New conversations use this knowledge scope. Individual messages can override it. Selecting all knowledge bases removes the binding.",
     settingsKnowledgeReset: "Use all knowledge bases",
+    settingsKnowledgeSaveToolAccess:
+      "Save tool access before choosing default knowledge bases.",
     settingsModel: "Default model",
     settingsModelDefault: "Use global default",
     settingsTemperature: "Temperature",
@@ -1812,7 +1820,8 @@ export const enUS: Translations = {
       title: "User management",
       description:
         "Suspend or restore sign-in for accounts on this deployment. A disabled account is rejected by every authentication surface; its active sessions end immediately.",
-      adminOnly: "Only administrators can manage users.",
+      adminOnly:
+        "Only administrators can manage users. This feature is unavailable in demos.",
       loading: "Loading users…",
       failed: "Failed to load users.",
       reload: "Reload",

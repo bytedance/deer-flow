@@ -1274,12 +1274,18 @@ export const zhCN: Translations = {
     settingsDisplayName: "显示名称",
     settingsDisplayNameTooLong: "显示名称不能超过 100 个 Unicode 码点。",
     settingsDisplayNameHint: "支持中文等 Unicode 字符，留空时使用智能体标识",
+    settingsToolGroups: "工具权限",
+    settingsToolGroupsHint: "限制该智能体及其委派任务可以使用的已配置工具组。",
+    settingsToolGroupsAll: "使用全部已配置工具组",
+    settingsToolGroupsLoadFailed: "无法加载工具组。",
+    settingsToolGroupUnavailable: "不可用",
     settingsDescription:
       "为该智能体设置显示名称和默认模型，模型修改在下一条消息生效。",
     settingsKnowledge: "默认知识库",
     settingsKnowledgeHint:
       "新对话默认使用此知识库范围，单条消息可以临时覆盖。选择全部知识库可解除绑定。",
     settingsKnowledgeReset: "使用全部知识库",
+    settingsKnowledgeSaveToolAccess: "请先保存工具权限，再选择默认知识库。",
     settingsModel: "默认模型",
     settingsModelDefault: "使用全局默认",
     settingsTemperature: "温度",
@@ -1706,7 +1712,7 @@ export const zhCN: Translations = {
       title: "用户管理",
       description:
         "停用或恢复本部署中的账号登录。被停用的账号在所有认证入口都会被拒绝，其现有会话立即失效。",
-      adminOnly: "只有管理员可以管理用户。",
+      adminOnly: "只有管理员可以管理用户，演示模式不支持此功能。",
       loading: "正在加载用户…",
       failed: "用户列表加载失败。",
       reload: "重新加载",

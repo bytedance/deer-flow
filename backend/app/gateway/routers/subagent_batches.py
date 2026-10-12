@@ -18,6 +18,10 @@ from deerflow.utils.thread_id import ThreadId
 
 router = APIRouter(prefix="/api/threads/{thread_id}/subagent-batches", tags=["subagent-batches"])
 _ITEM_STATUSES = {"pending", "queued", "leased", "running", "succeeded", "failed", "cancelled"}
+# A full row holds up to max_result_chars of report plus as much evidence JSON:
+# 2M characters at the config ceiling. Export loads one page into memory (and
+# decodes its JSON on the event loop) before streaming it, so keep pages small.
+_RESULTS_EXPORT_PAGE_SIZE = 10
 
 
 async def _user_id(request: Request) -> str:
@@ -114,7 +118,7 @@ async def export_batch_results(thread_id: ThreadId, batch_id: str, request: Requ
                 batch_id,
                 user_id=user_id,
                 offset=offset,
-                limit=500,
+                limit=_RESULTS_EXPORT_PAGE_SIZE,
                 include_result=True,
             )
             if not page:

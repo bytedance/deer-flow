@@ -109,6 +109,18 @@ keep `name` for React identity, URLs, requests, and runtime `agent_name`.
 The 100-code-point budget uses `[...value.trim()].length`, matching Pydantic;
 do not use HTML `maxLength`, which counts UTF-16 code units instead.
 
+Custom Agent tool access is edited from the configured names returned by
+`GET /api/agent-tool-groups`. Preserve the `null` / `[]` / explicit-list
+contract (inherit all / disable all / allowlist), retain missing selected names
+as removable entries, and submit `tool_groups` only when the user changes it.
+Mark missing names unavailable only after a successful catalog load; loading
+and errors preserve neutral labels and removable selections.
+When a changed allowlist excludes `knowledge`, send `knowledge_scope: null` in
+the same update so a saved retrieval default cannot break run admission. Gate
+knowledge selection on both draft and persisted tool access: catalog reads
+authorize against the saved agent, so new access must be saved first. Restored
+tool selections remain unchanged and must not clear a knowledge default.
+
 Custom Agent portability uses the versioned `deerflow.custom-agent` JSON
 document through `core/agents/api.ts`. Keep file parsing client-side only for
 previewing the proposed local name; the Gateway is authoritative for schema,
@@ -127,6 +139,12 @@ from the filtered list so hidden tasks cannot remain actionable. Keep literal
 matching in `core/scheduled-tasks/search.ts`; clearing search retains other filters.
 
 Single-run schedule edits retain the mounted task's original `run_at` while its wall time and timezone match. The parent echoes edits through `initial`; retain a stable snapshot and reset the parent draft during render before remounting with a task key when switching tasks. Use the resolved timezone consistently for the snapshot and displayed wall time. Component and scheduled-task E2E tests cover DST folds and timestamp precision.
+
+The scheduled-task schedule input initializes Custom cron from the current
+preset and its current fields on every transition into the custom editor.
+Do not substitute a daily schedule or restore stale `parts.raw` after preset
+edits. Component tests cover emitted specs; browser tests pin unchanged
+schedules through the task form's PATCH payload on desktop and mobile.
 
 ## Environment
 
@@ -306,7 +324,11 @@ accounts through `core/auth/admin-users.ts` → `/api/v1/admin/users`. The page
 reuses `userSchema` for rows — both endpoints parse against it, so a
 malformed payload fails the load instead of rendering a phantom row
 (`disabled` optional — absent means not disabled) — and PATCHes only
-`{disabled}`; role stays a read-only column. The Gateway's rejection detail
+`{disabled}`; role stays a read-only column. Like model management, the page
+also gates on `isStaticWebsiteOnly()` (the demo user is nominally an admin,
+but there is no Gateway to query), and the settings dialog falls back to the
+first nav section when a deep link or stale store activates a section the
+current user's nav does not offer. The Gateway's rejection detail
 (last-active-admin 409) renders verbatim. A session
 that turns out to be disabled maps `account_disabled` (see `AUTH_ERROR_CODES`)
 to a login redirect with a stated reason (login surface only — sign-up keeps
