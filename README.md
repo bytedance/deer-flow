@@ -2058,9 +2058,11 @@ invalid criteria, unavailable workspace access, or exhausted read budgets return
 `UNVERIFIED`. A large file can satisfy the check when its complete header fits the
 budget. Reads use the same authorized, scoped transport as JSON checks below:
 50,001 bytes maximum; remote reads have a 5-second command timeout (10 seconds for
-the provider call). Local reads and parsing check a cooperative 5-second deadline;
-this does not interrupt an in-progress filesystem call. Concurrent writes are not
-an atomic snapshot. This does not validate data types, row counts, or business meaning.
+the provider call). Local reads and parsing share a cooperative 5-second deadline;
+remote parsing has its own 5-second deadline starting after the read returns.
+These checks do not interrupt an in-progress filesystem or parser call. Concurrent
+writes are not an atomic snapshot. This does not validate data types, row counts,
+or business meaning.
 
 To request JSON syntax validation, explicitly set a `task` or `batch_task` item's
 `acceptance_criteria` to `["file:../outputs/report.json json-valid"]`. Checks cover only

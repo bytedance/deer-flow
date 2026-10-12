@@ -541,8 +541,9 @@ def _parse_csv_columns(criterion: str) -> list[str] | None:
 def _check_csv_header(base: AcceptanceLeaf, runtime: Any, resolved: str, thread_data: Mapping[str, Any] | None, probed_size: int, columns: list[str]) -> AcceptanceLeaf:
     """Check only the first CSV record from a bounded prefix, never the data rows."""
     from deerflow.sandbox.exceptions import SandboxError, SandboxFileNotFoundError
+    from deerflow.sandbox.tools import is_local_sandbox
 
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 5 if is_local_sandbox(runtime) else None
     try:
         content = _read_bounded_file_content(runtime, resolved, thread_data, deadline=deadline)
     except (FileNotFoundError, SandboxFileNotFoundError):
@@ -552,6 +553,9 @@ def _check_csv_header(base: AcceptanceLeaf, runtime: Any, resolved: str, thread_
     except (OSError, SandboxError):
         base["detail"] = "bounded CSV read failed"
         return base
+    # Remote transport owns its timeouts; start the parser budget after it returns.
+    if deadline is None:
+        deadline = time.monotonic() + 5
     if time.monotonic() >= deadline:
         base["detail"] = "CSV header deadline exceeded"
         return base
@@ -577,8 +581,11 @@ def _check_csv_header(base: AcceptanceLeaf, runtime: Any, resolved: str, thread_
         return base
     consumed = text[: stream.tell()]
     header_bytes = len(consumed.encode("utf-8", errors="surrogateescape")) + (3 if content.startswith(b"\xef\xbb\xbf") else 0)
-    if header_bytes > _FILE_CONTENT_READ_CAP_BYTES or (not complete and not consumed.endswith(("\r", "\n"))):
+    if not complete and not consumed.endswith(("\r", "\n")):
         base["detail"] = "CSV header incomplete within the read cap"
+        return base
+    if header_bytes > _FILE_CONTENT_READ_CAP_BYTES:
+        base["detail"] = f"CSV header exceeds the {_FILE_CONTENT_READ_CAP_BYTES}-byte read budget"
         return base
     if time.monotonic() >= deadline:
         base["detail"] = "CSV header deadline exceeded"
@@ -593,7 +600,8 @@ def _check_csv_header(base: AcceptanceLeaf, runtime: Any, resolved: str, thread_
     if not header or any(not column for column in header) or len(set(header)) != len(header):
         base["detail"] = "CSV header is empty or contains empty or duplicate column names"
     elif not set(columns).issubset(header):
-        base["detail"] = "CSV header is missing required columns"
+        missing = sorted(set(columns) - set(header))
+        base["detail"] = f"CSV header is missing required columns: {json.dumps(missing, ensure_ascii=False)}"
     else:
         base["holds"] = True
         base["detail"] = "CSV header contains required columns; data rows not validated"

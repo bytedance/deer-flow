@@ -220,3 +220,70 @@ def test_header_without_newline_at_exact_cap_holds(check_csv):
 
 def test_required_columns_allow_reordering(check_csv):
     assert check_csv(b"extra,name,id\n")["all_hold"] is True
+
+
+@pytest.mark.parametrize("parse_seconds,holds", [(0, True), (6, False)])
+def test_remote_read_latency_does_not_consume_parser_deadline(monkeypatch, tmp_path, parse_seconds, holds):
+    import base64
+
+    clock = Mock(return_value=0)
+    monkeypatch.setattr(checks.time, "monotonic", clock)
+    sandbox = Mock()
+
+    def delayed_read(*args, **kwargs):
+        clock.return_value = 6
+        return "JSON\n" + base64.b64encode(b"id,name\n\n000").decode() + "\nEND\n"
+
+    sandbox.execute_command.side_effect = delayed_read
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+    reader = checks.csv.reader
+
+    def delayed_parse(*args, **kwargs):
+        header = next(reader(*args, **kwargs))
+        clock.return_value += parse_seconds
+        return iter([header])
+
+    monkeypatch.setattr(checks.csv, "reader", delayed_parse)
+    verdict = checks.check_acceptance_criteria(
+        ['file:report.csv csv-columns:["id","name"]'],
+        runtime=SimpleNamespace(state=None),
+        thread_data={"workspace_path": str(tmp_path)},
+        size_prober=lambda *args: 8,
+    )
+    leaf = verdict["leaves"][0]
+    assert (leaf["checked"], leaf["holds"]) == (holds, holds)
+    if not holds:
+        assert leaf["detail"] == "CSV header deadline exceeded"
+    command = sandbox.execute_command.call_args
+    assert command.kwargs["timeout"] == 10
+    assert "/usr/bin/timeout 5" in command.args[0]
+    sandbox.read_file.assert_not_called()
+
+
+@pytest.mark.parametrize("columns", [["z", "id", "a"], ['a"b', "line\nbreak", " id "]], ids=["ordered", "escaped"])
+def test_missing_columns_detail_names_exact_columns(check_csv, columns):
+    leaf = check_csv(b"id,name\n", columns)["leaves"][0]
+    assert (leaf["checked"], leaf["holds"]) == (True, False)
+    missing = sorted(set(columns) - {"id", "name"})
+    assert leaf["detail"] == f"CSV header is missing required columns: {json.dumps(missing)}"
+
+
+def test_missing_columns_detail_remains_bounded(check_csv):
+    leaf = check_csv(b"id,name\n", ["a" * 100, "b" * 100])["leaves"][0]
+    assert (leaf["checked"], leaf["holds"]) == (True, False)
+    assert len(leaf["detail"]) == 160
+    assert leaf["detail"].endswith("...")
+
+
+@pytest.mark.parametrize("suffix", [b"\n", b"", b"\n" + b"1" * 60_000], ids=["complete", "eof", "large-body"])
+def test_over_budget_header_detail_is_distinct(check_csv, suffix):
+    content = b"id,name," + b"x" * (50_001 - 8 - (1 if suffix.startswith(b"\n") else 0)) + suffix
+    leaf = check_csv(content)["leaves"][0]
+    assert (leaf["checked"], leaf["holds"]) == (False, False)
+    assert leaf["detail"] == "CSV header exceeds the 50000-byte read budget"
+
+
+def test_truncated_header_detail_remains_incomplete(check_csv):
+    leaf = check_csv(b"id,name," + b"x" * 60_000)["leaves"][0]
+    assert (leaf["checked"], leaf["holds"]) == (False, False)
+    assert leaf["detail"] == "CSV header incomplete within the read cap"
