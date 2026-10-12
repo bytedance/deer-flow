@@ -319,15 +319,18 @@ async def test_active_budget_retains_real_and_ambiguous_admissions(plugin, monke
             raise TimeoutError("admitted but acknowledgement lost")
 
         monkeypatch.setattr(runs, "start", uncertain)
+    first_admissions = None
     for _ in range(2):
         await service.tick()
         assert len(runs.starts) == 8
-        assert jobs[-1]["id"] not in runs.runs
-        for job in jobs[:8]:
+        if first_admissions is None:
+            first_admissions = set(runs.runs)
+        assert set(runs.runs) == first_admissions
+        for job in jobs:
             stored = await service.db("get", job["owner"], job["team_id"])
-            assert all(item["input"] is not None for item in stored["jobs"])
-    healthy = await service.db("get", "bob", jobs[-1]["team_id"])
-    assert healthy["jobs"][0]["status"] == "queued" and healthy["jobs"][0]["input"] is None
+            saved = next(item for item in stored["jobs"] if item["id"] == job["id"])
+            assert (saved["input"] is not None) == (job["id"] in first_admissions)
+    assert jobs[-1]["id"] in first_admissions  # Bob receives a fair admission.
 
 
 @pytest.mark.asyncio
@@ -1048,3 +1051,382 @@ async def test_malformed_unicode_response_uses_the_friendly_validation_error(plu
     job = (await service.db("get", "alice", team["id"]))["jobs"][0]
     assert job["status"] == "waiting_input"
     assert job["resume"] is None
+
+
+async def scheduling_team(actions, runs, owner, key, members=2):
+    return await actions["create"]({"request_id": key, "name": key, "goal": "Check scheduling", "members": [{"name": f"Member {i}", "agent": "researcher"} for i in range(members)]}, context(runs, owner))
+
+
+async def scheduling_send(actions, runs, owner, team, member, key):
+    return await actions["send"]({"team_id": team["id"], "member_id": member["id"], "text": "Check", "request_id": key + member["id"]}, context(runs, owner))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["create", "send", "connect", "cancel", "resume", "delete"])
+async def test_slow_team_does_not_block_another_teams_control(plugin, monkeypatch, operation):
+    _, actions, service = plugin
+    runs = Runs()
+    slow = await scheduling_team(actions, runs, "alice", "Slow")
+    healthy = await scheduling_team(actions, runs, "bob", "Healthy")
+    slow_job = await scheduling_send(actions, runs, "alice", slow, slow["members"][0], "slow")
+    healthy_job = None
+    if operation in ("cancel", "resume"):
+        healthy_job = await scheduling_send(actions, runs, "bob", healthy, healthy["members"][0], "healthy")
+    await service.tick()
+    if operation == "resume":
+        runs.finish(healthy_job["id"], interrupted=True)
+        await service.tick()
+    entered, release = asyncio.Event(), asyncio.Event()
+    get = runs.get
+
+    async def stalled(**kwargs):
+        if kwargs["thread_id"] == slow["members"][0]["thread_id"]:
+            entered.set()
+            await release.wait()
+        return await get(**kwargs)
+
+    monkeypatch.setattr(runs, "get", stalled)
+    tick = asyncio.create_task(service.tick())
+    control = None
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        if operation == "create":
+            control = asyncio.create_task(scheduling_team(actions, runs, "bob", "New"))
+        elif operation == "send":
+            control = asyncio.create_task(scheduling_send(actions, runs, "bob", healthy, healthy["members"][1], "second"))
+        else:
+            payload = {"team_id": healthy["id"]}
+            if healthy_job:
+                payload["job_id"] = healthy_job["id"]
+            if operation == "resume":
+                payload.update(response={"approved": True}, request_id="answer")
+            control = asyncio.create_task(actions[operation](payload, context(runs, "bob")))
+        await asyncio.wait_for(asyncio.shield(control), 2)
+        assert not release.is_set()
+        assert runs.runs[slow_job["id"]].status == "running"
+    finally:
+        release.set()
+        await tick
+        if control:
+            await control
+
+
+@pytest.mark.asyncio
+async def test_new_admissions_are_round_robin_by_owner_not_team_count(plugin):
+    _, actions, service = plugin
+    runs = Runs()
+    owners = {}
+    for owner, count, members in (("alice", 4, 2), ("bob", 1, 8)):
+        for index in range(count):
+            team = await scheduling_team(actions, runs, owner, f"{owner}-{index}", members)
+            for member in team["members"]:
+                owners[member["thread_id"]] = owner
+                await scheduling_send(actions, runs, owner, team, member, "first")
+    await service.tick()
+    started = [owners[thread] for thread, _ in runs.starts]
+    assert len(started) == 8
+    assert started.count("alice") == started.count("bob") == 4
+
+
+@pytest.mark.asyncio
+async def test_owner_rotation_survives_one_slot_at_a_time(plugin):
+    _, actions, service = plugin
+    runs = Runs()
+    owners = {}
+    for owner in ("alice", "bob"):
+        team = await scheduling_team(actions, runs, owner, owner, 8)
+        for member in team["members"]:
+            owners[member["thread_id"]] = owner
+            await scheduling_send(actions, runs, owner, team, member, "first")
+    await service.tick()
+    admitted = []
+    for _ in range(4):
+        first = next(run for run in runs.runs.values() if run.status == "running")
+        runs.finish(first.run_id)
+        before = len(runs.starts)
+        await service.tick()
+        assert len(runs.starts) == before + 1
+        admitted.append(owners[runs.starts[-1][0]])
+        assert sum(run.status == "running" for run in runs.runs.values()) == 8
+    assert admitted == ["alice", "bob", "alice", "bob"]
+
+
+@pytest.mark.asyncio
+async def test_background_loop_keeps_cancelling_other_teams_while_one_call_stalls(plugin, monkeypatch):
+    _, actions, service = plugin
+    runs = Runs()
+    slow = await scheduling_team(actions, runs, "alice", "Slow")
+    healthy = await scheduling_team(actions, runs, "bob", "Healthy")
+    await scheduling_send(actions, runs, "alice", slow, slow["members"][0], "slow")
+    sent = await scheduling_send(actions, runs, "bob", healthy, healthy["members"][0], "healthy")
+    entered, healthy_running, cancelled, release = (asyncio.Event() for _ in range(4))
+    get, cancel = runs.get, runs.cancel
+
+    async def stalled(**kwargs):
+        if kwargs["thread_id"] == slow["members"][0]["thread_id"]:
+            entered.set()
+            await release.wait()
+        else:
+            healthy_running.set()
+        return await get(**kwargs)
+
+    async def record_cancel(**kwargs):
+        await cancel(**kwargs)
+        cancelled.set()
+
+    monkeypatch.setattr(runs, "get", stalled)
+    monkeypatch.setattr(runs, "cancel", record_cancel)
+    await service.start(None)
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        await asyncio.wait_for(healthy_running.wait(), 3)
+        await asyncio.wait_for(actions["cancel"]({"team_id": healthy["id"], "job_id": sent["id"]}, context(runs, "bob")), 2)
+        await asyncio.wait_for(cancelled.wait(), 3)
+        assert not release.is_set()
+        # Shutdown cancels and drains gated workers; it never needs the host gate.
+        await asyncio.wait_for(service.stop(), 3)
+        assert not service.workers and not service.in_flight
+        assert not service.available and service.process_lock is None
+    finally:
+        release.set()
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_overlapping_ticks_keep_pre_freeze_reservations_within_eight(plugin, monkeypatch):
+    _, actions, service = plugin
+    runs = Runs()
+    for index in range(9):
+        owner = f"owner-{index}"
+        team = await scheduling_team(actions, runs, owner, owner)
+        await scheduling_send(actions, runs, owner, team, team["members"][0], "first")
+    entered, release = asyncio.Event(), asyncio.Event()
+    get_state = runs.get_state
+
+    async def gated(**kwargs):
+        entered.set()
+        await release.wait()
+        return await get_state(**kwargs)
+
+    monkeypatch.setattr(runs, "get_state", gated)
+    first = asyncio.create_task(service.tick())
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        await asyncio.wait_for(asyncio.gather(*(service.tick() for _ in range(3))), 2)
+        assert not runs.starts  # No input has frozen; reservations still own slots.
+    finally:
+        release.set()
+        await first
+    assert len(runs.starts) == 8
+    assert not service.in_flight and not service.workers
+
+
+@pytest.mark.asyncio
+async def test_more_than_eight_owners_rotate_into_the_next_free_slot(plugin):
+    _, actions, service = plugin
+    runs = Runs()
+    jobs = []
+    for index in range(9):
+        owner = f"owner-{index}"
+        team = await scheduling_team(actions, runs, owner, owner)
+        jobs.append(await scheduling_send(actions, runs, owner, team, team["members"][0], "first"))
+    await service.tick()
+    assert set(runs.runs) == {job["id"] for job in jobs[:8]}
+    runs.finish(jobs[0]["id"])
+    await service.tick()
+    assert jobs[-1]["id"] in runs.runs
+    assert sum(run.status == "running" for run in runs.runs.values()) == 8
+
+
+@pytest.mark.asyncio
+async def test_pending_resumes_wait_for_slots_and_cancel_without_admitting_an_answer(plugin):
+    _, actions, service = plugin
+    runs = Runs()
+    parked = await scheduling_team(actions, runs, "alice", "Parked")
+    sent = await scheduling_send(actions, runs, "alice", parked, parked["members"][0], "park")
+    await service.tick()
+    runs.finish(sent["id"], interrupted=True)
+    await service.tick()
+    busy = await scheduling_team(actions, runs, "bob", "Busy", 8)
+    for member in busy["members"]:
+        await scheduling_send(actions, runs, "bob", busy, member, "busy")
+    await service.tick()
+    assert sum(run.status == "running" for run in runs.runs.values()) == 8
+    payload = {"team_id": parked["id"], "job_id": sent["id"], "response": {"approved": True}, "request_id": "answer"}
+    await actions["resume"](payload, context(runs, "alice"))
+    await service.tick()
+    assert len(runs.runs) == 9  # The finished interrupted run plus eight busy runs.
+    assert (await service.db("get", "alice", parked["id"]))["jobs"][0]["status"] == "resuming"
+    await actions["cancel"]({"team_id": parked["id"], "job_id": sent["id"]}, context(runs, "alice"))
+    await service.tick()
+    assert len(runs.runs) == 9
+    assert (await service.db("get", "alice", parked["id"]))["jobs"][0]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_frozen_slots_survive_disconnection_and_service_restart(plugin, monkeypatch):
+    from deerflow_extension_agent_teams.service import Teams
+
+    _, actions, service = plugin
+    runs = Runs()
+    team = await scheduling_team(actions, runs, "alice", "Busy", 8)
+    for member in team["members"]:
+        await scheduling_send(actions, runs, "alice", team, member, "busy")
+    await service.tick()
+    runs.denied = True
+    await service.tick()
+    assert not service.handles and len(runs.starts) == 8
+    replacement = Teams(service.store.path)
+    healthy_runs = Runs()
+    # The real start loads the durable slot owners even before they reconnect.
+    await replacement.start(None)
+    try:
+        healthy = await scheduling_team({"create": replacement.create}, healthy_runs, "bob", "Healthy")
+        await scheduling_send({"send": replacement.send}, healthy_runs, "bob", healthy, healthy["members"][0], "new")
+        await replacement.tick()
+        assert not healthy_runs.starts
+        runs.denied = False
+        await replacement.connect({"team_id": team["id"]}, context(runs))
+        for run in list(runs.runs.values()):
+            runs.finish(run.run_id)
+        await replacement.tick()
+        await replacement.tick()
+        assert len(healthy_runs.starts) == 1
+    finally:
+        await replacement.stop()
+
+
+@pytest.mark.asyncio
+async def test_receipts_for_a_shared_source_are_serialized_across_teams(plugin):
+    from deerflow_extension_agent_teams.service import identity
+
+    _, actions, service = plugin
+    runs = Runs()
+    await runs.create_thread(assistant_id="lead_agent", thread_id="shared", metadata={})
+    requests = []
+    for owner in ("alice", "bob"):
+        team = await scheduling_team(actions, runs, owner, owner)
+        sent = await service.db("change", owner, team["id"], lambda t: service.enqueue(t, member_id=t["members"][0]["id"], content="Check", request_id="shared-request", source="shared"))
+        requests.append((owner, team, sent))
+    await service.tick()
+    for _, _, job in requests:
+        runs.finish(job["id"])
+    await service.tick()
+    await service.tick()
+    receipts = []
+    for owner, team, request in requests:
+        stored = await service.db("get", owner, team["id"])
+        receipt = next(j for j in stored["jobs"] if j["id"] == identity(request["id"], "receipt"))
+        receipts.append((receipt["created_at"], owner, team, receipt))
+    receipts.sort(key=lambda entry: entry[0])
+    first, later = receipts
+    assert first[3]["id"] in runs.runs and later[3]["id"] not in runs.runs
+    assert later[3]["input"] is None  # No competing admission/checkpoint on the source.
+    runs.finish(first[3]["id"])
+    await service.tick()
+    await service.tick()
+    assert later[3]["id"] in runs.runs
+    assert sum(thread == "shared" for thread, _ in runs.starts) == 2
+
+
+@pytest.mark.asyncio
+async def test_startup_snapshot_failure_releases_the_process_lock(plugin, monkeypatch):
+    from deerflow_extension_agent_teams.service import Teams
+
+    _, _, service = plugin
+    db = service.db
+
+    async def fail_keys(method, *args):
+        if method == "keys":
+            raise OSError("snapshot failed")
+        return await db(method, *args)
+
+    monkeypatch.setattr(service, "db", fail_keys)
+    with pytest.raises(OSError, match="snapshot failed"):
+        await service.start(None)
+    assert service.process_lock is None and not service.task
+    second = Teams(service.store.path)
+    await second.start(None)
+    await second.stop()
+
+
+@pytest.mark.asyncio
+async def test_first_unfinished_thread_occupant_does_not_depend_on_timestamps(plugin):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    member = team["members"][0]
+    first = await scheduling_send(actions, runs, "alice", team, member, "first")
+    later = await scheduling_send(actions, runs, "alice", team, member, "later")
+    await service.db("change", "alice", team["id"], lambda t: t["jobs"][1].pop("created_at"))
+    await service.tick()
+    assert first["id"] in runs.runs and later["id"] not in runs.runs
+
+
+@pytest.mark.asyncio
+async def test_cancel_and_delete_before_worker_admission_release_only_that_reservation(plugin, monkeypatch):
+    _, actions, service = plugin
+    runs = Runs()
+    jobs = []
+    for index in range(9):
+        owner = f"owner-{index}"
+        team = await scheduling_team(actions, runs, owner, owner)
+        sent = await scheduling_send(actions, runs, owner, team, team["members"][0], "first")
+        jobs.append((owner, team, sent))
+    entered, release = asyncio.Event(), asyncio.Event()
+    work_team = service.work_team
+    ready = 0
+
+    async def gated(*args):
+        nonlocal ready
+        ready += 1
+        if ready == 8:
+            entered.set()
+        await release.wait()
+        await work_team(*args)
+
+    monkeypatch.setattr(service, "work_team", gated)
+    tick = asyncio.create_task(service.tick())
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        owner, team, sent = jobs[0]
+        await actions["cancel"]({"team_id": team["id"], "job_id": sent["id"]}, context(runs, owner))
+        await actions["delete"]({"team_id": team["id"]}, context(runs, owner))
+        assert not runs.starts
+    finally:
+        release.set()
+        await tick
+    assert sent["id"] not in runs.runs
+    assert len(runs.starts) == 8 and jobs[-1][2]["id"] in runs.runs
+    assert not service.workers and not service.in_flight
+
+
+@pytest.mark.asyncio
+async def test_resume_with_lost_ack_keeps_its_slot_before_any_new_owner_admission(plugin, monkeypatch):
+    _, actions, service = plugin
+    runs = Runs()
+    parked = await scheduling_team(actions, runs, "alice", "Parked")
+    sent = await scheduling_send(actions, runs, "alice", parked, parked["members"][0], "park")
+    await service.tick()
+    runs.finish(sent["id"], interrupted=True)
+    await service.tick()
+    busy = await scheduling_team(actions, runs, "bob", "Busy", 8)
+    for member in busy["members"][:7]:
+        await scheduling_send(actions, runs, "bob", busy, member, "busy")
+    await service.tick()
+    start = runs.resume
+
+    async def lost_ack(**kwargs):
+        await start(**kwargs)
+        raise TimeoutError("resume admitted; acknowledgement lost")
+
+    monkeypatch.setattr(runs, "resume", lost_ack)
+    await actions["resume"]({"team_id": parked["id"], "job_id": sent["id"], "response": {"approved": True}, "request_id": "answer"}, context(runs, "alice"))
+    await service.tick()
+    stored = (await service.db("get", "alice", parked["id"]))["jobs"][0]
+    assert stored["resume"]["started"]
+    later = await scheduling_team(actions, runs, "carol", "Later")
+    queued = await scheduling_send(actions, runs, "carol", later, later["members"][0], "new")
+    await service.tick()
+    assert queued["id"] not in runs.runs
+    assert sum(run.status == "running" for run in runs.runs.values()) == 8

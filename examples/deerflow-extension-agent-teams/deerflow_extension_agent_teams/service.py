@@ -5,9 +5,11 @@ import hashlib
 import json
 import sqlite3
 import uuid
+from collections import deque
 from collections.abc import Mapping
 from contextlib import suppress
 from datetime import UTC, datetime
+from weakref import WeakValueDictionary
 
 from deerflow_extension_api import AgentRunError
 from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
@@ -76,7 +78,12 @@ class Teams:
     def __init__(self, path):
         self.store = Store(path)
         self.handles = {}
-        self.lock = asyncio.Lock()
+        self.locks = WeakValueDictionary()
+        self.scheduling_lock = asyncio.Lock()
+        self.known = {}
+        self.workers = {}
+        self.in_flight = set()
+        self.last_owner = None
         self.task = None
         self.process_lock = None
         self.available = False
@@ -97,6 +104,12 @@ class Teams:
             return db
 
         self.process_lock = await asyncio.to_thread(acquire)
+        try:
+            self.known.update(dict.fromkeys(await self.db("keys"), True))
+        except BaseException:
+            await asyncio.to_thread(self.process_lock.close)
+            self.process_lock = None
+            raise
         self.available = True
         self.task = asyncio.create_task(self.loop())
 
@@ -106,7 +119,9 @@ class Teams:
             self.task.cancel()
             with suppress(asyncio.CancelledError, Exception):
                 await self.task
+        await self.cancel_workers()
         self.handles.clear()
+        self.known.clear()
         if self.process_lock:
             await asyncio.to_thread(self.process_lock.close)
             self.process_lock = None
@@ -114,18 +129,33 @@ class Teams:
     async def loop(self):
         try:
             while True:
-                await self.tick()
+                await self.tick(wait=False)
                 await asyncio.sleep(1)
         finally:
             self.available = False
+            await self.cancel_workers()
             self.handles.clear()
+
+    def team_lock(self, owner, team_id):
+        # Waiters/holders retain the lock; deleted teams do not leak lock entries.
+        return self.locks.setdefault((owner, team_id), asyncio.Lock())
+
+    async def cancel_workers(self):
+        workers = list(self.workers.values())
+        for worker in workers:
+            worker.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+        self.workers.clear()
+        self.in_flight.clear()
 
     def bind(self, context, team_id):
         if not self.available:
             raise ValueError("Team service unavailable; check Gateway startup diagnostics")
         if context.agent_runs is None:
             raise ValueError("Full Agent control requires an authenticated Gateway session")
-        self.handles[(context.principal.user_id, team_id)] = context.agent_runs
+        key = (context.principal.user_id, team_id)
+        self.handles[key] = context.agent_runs
+        self.known[key] = True
 
     async def create(self, payload, context):
         fields(payload, "request_id name goal members")
@@ -141,7 +171,7 @@ class Teams:
             raise ValueError("Member names must be distinct")
         owner = context.principal.user_id
         team_id = identity(owner, text(payload, "request_id", 128))
-        async with self.lock:
+        async with self.team_lock(owner, team_id):
             self.bind(context, team_id)
             try:
                 team = await self.db("create", owner, {"id": team_id, "name": name, "goal": goal, "members": roster, "messages": [], "jobs": [], "ready": False})
@@ -207,8 +237,9 @@ class Teams:
 
     async def connect(self, payload, context):
         fields(payload, "team_id")
-        async with self.lock:
-            team = await self.db("get", context.principal.user_id, text(payload, "team_id", 64))
+        owner, team_id = context.principal.user_id, text(payload, "team_id", 64)
+        async with self.team_lock(owner, team_id):
+            team = await self.db("get", owner, team_id)
             if context.agent_runs is None:
                 raise ValueError("Agent control unavailable")
             for member in team["members"]:
@@ -255,7 +286,7 @@ class Teams:
         owner, team_id = context.principal.user_id, text(payload, "team_id", 64)
         member_id, content, key = text(payload, "member_id", 64), text(payload, "text"), text(payload, "request_id", 128)
         source = getattr(context, "thread_id", None)
-        async with self.lock:
+        async with self.team_lock(owner, team_id):
             team = await self.db("get", owner, team_id)
             if source and source not in {m["thread_id"] for m in team["members"]}:
                 raise ValueError("Only team member conversations can send peer requests")
@@ -295,18 +326,19 @@ class Teams:
             # Gateway stamps user_id from its authenticated principal before
             # running middleware. Never derive team ownership from a mention or
             # from thread sharing: a shared conversation does not share a team.
-            team = await self.db("get", owner, team_id)
-            member = next((m for m in team["members"] if m["id"] == member_id), None)
-            if member is None or member["thread_id"] == source:
-                continue
-            runs = handle.for_plugin(NAMESPACE)
-            # Structured references and labels are untrusted. The host capability
-            # must authorize BOTH conversations before the plugin uses the owner.
-            await runs.get_state(thread_id=source)
-            await runs.create_thread(assistant_id=member["agent"], thread_id=member["thread_id"], metadata={})
-            content = text({"text": message.content}, "text")
-            async with self.lock:
+            async with self.team_lock(owner, team_id):
+                team = await self.db("get", owner, team_id)
+                member = next((m for m in team["members"] if m["id"] == member_id), None)
+                if member is None or member["thread_id"] == source:
+                    continue
+                runs = handle.for_plugin(NAMESPACE)
+                # Structured references and labels are untrusted. The host capability
+                # must authorize BOTH conversations before the plugin uses the owner.
+                await runs.get_state(thread_id=source)
+                await runs.create_thread(assistant_id=member["agent"], thread_id=member["thread_id"], metadata={})
+                content = text({"text": message.content}, "text")
                 self.handles[(owner, team_id)] = runs
+                self.known[(owner, team_id)] = True
                 await self.db("change", owner, team_id, lambda t: self.enqueue(t, member_id=member_id, content=content, request_id=f"mention:{message.id}:{member_id}", source=source))
                 queued += 1
         if not queued:
@@ -331,7 +363,7 @@ class Teams:
 
     async def control(self, payload, context, *, cancel):
         owner, team_id, job_id = context.principal.user_id, text(payload, "team_id", 64), text(payload, "job_id", 64)
-        async with self.lock:
+        async with self.team_lock(owner, team_id):
             team = await self.db("get", owner, team_id)
             self.bind(context, team_id)
             current = next((j for j in team["jobs"] if j["id"] == job_id), None)
@@ -362,9 +394,11 @@ class Teams:
                     raise ValueError("Request unavailable")
                 if cancel:
                     if job["status"] not in TERMINAL:
+                        if job["resume"] and not job["resume"].get("started", True):
+                            job["resume"] = None
                         job["status"] = "cancelling" if job["input"] else "cancelled"
                 elif job["status"] == "waiting_input":
-                    job["resume"] = {"response": payload["response"], "key": identity(job_id, text(payload, "request_id", 128))}
+                    job["resume"] = {"response": payload["response"], "key": identity(job_id, text(payload, "request_id", 128)), "started": False}
                     if response_input:
                         job["resume"].update(input=response_input, key=identity(job_id, clarification["request_id"], payload["request_id"]))
                     job["status"] = "resuming"
@@ -377,55 +411,129 @@ class Teams:
     async def delete(self, payload, context):
         fields(payload, "team_id")
         owner, team_id = context.principal.user_id, text(payload, "team_id", 64)
-        async with self.lock:
+        async with self.team_lock(owner, team_id):
             team = await self.db("get", owner, team_id)
             if any(j["status"] not in TERMINAL for j in team["jobs"]):
                 raise ValueError("Cancel or complete pending requests first")
             await self.db("delete", owner, team_id)
             self.handles.pop((owner, team_id), None)
+            self.known.pop((owner, team_id), None)
         return {"deleted": True}
 
-    async def tick(self):
-        async with self.lock:
-            active = 0
-            for owner, team_id in self.handles:
-                current = await self.db("get", owner, team_id)
-                active += sum(j["status"] in ("running", "resuming", "cancelling") or (j["status"] == "queued" and j["input"] is not None) for j in current["jobs"])
-            for (owner, team_id), runs in list(self.handles.items()):
-                team = await self.db("get", owner, team_id)
+    @staticmethod
+    def charged(job):
+        if job["status"] in TERMINAL or job["status"] == "waiting_input":
+            return False
+        if job["status"] == "resuming" and job["resume"] and not job["resume"].get("started", True):
+            return False
+        return job["input"] is not None
+
+    async def plan(self, attempted, eligible):
+        # Only SQLite snapshots and slot bookkeeping live under this lock.
+        # Host calls run in independent workers, serialized by team.
+        async with self.scheduling_lock:
+            teams = {}
+            for key in list(self.known):
+                try:
+                    teams[key] = await self.db("get", *key)
+                except ValueError:
+                    continue  # A terminal team was deleted during this pass.
+            heads, entries = {}, []
+            for key, team in teams.items():
                 occupied = set()
                 for job in team["jobs"]:
                     if job["status"] in TERMINAL or job["thread_id"] in occupied:
                         continue
                     occupied.add(job["thread_id"])
-                    reserved = job["status"] == "queued" and job["input"] is None
-                    if reserved:
-                        if active >= 8:
-                            continue
-                        active += 1
-                    try:
-                        async with asyncio.timeout(10):
-                            await self.advance(owner, team, job, runs)
-                    except AgentRunError as exc:
-                        if exc.status_code in (403, 503):
-                            self.handles.pop((owner, team_id), None)
+                    entries.append((job.get("created_at") or "", key, job))
+            entries.sort(key=lambda entry: entry[0])
+            for _, key, job in entries:
+                # Receipts can target a conversation shared across teams/owners.
+                heads.setdefault(job["thread_id"], (key, job["id"]))
+            if eligible is None:
+                eligible = set(heads.values())
+            charged = {(key, j["id"]) for key, t in teams.items() for j in t["jobs"] if self.charged(j)} | self.in_flight
+            groups, pending = {}, {}
+            for _, key, job in entries:
+                entry = (key, job["id"])
+                if entry not in eligible or entry in attempted or heads[job["thread_id"]] != entry or job["status"] == "waiting_input":
+                    continue
+                if key not in self.handles or key in self.workers or self.team_lock(*key).locked():
+                    continue
+                if entry in charged:
+                    groups.setdefault(key, []).append(job["id"])
+                else:
+                    pending.setdefault(key[0], deque()).append((key, job["id"]))
+            owners = list(pending)
+            if self.last_owner in owners:
+                after = owners.index(self.last_owner) + 1
+                owners = owners[after:] + owners[:after]
+            owners = deque(owners)
+            while owners and len(charged) < 8:
+                owner = owners.popleft()
+                key, job_id = pending[owner].popleft()
+                entry = (key, job_id)
+                charged.add(entry)
+                groups.setdefault(key, []).append(job_id)
+                self.last_owner = owner
+                if pending[owner]:
+                    owners.append(owner)
+            tasks = []
+            for key, job_ids in groups.items():
+                entries = {(key, job_id) for job_id in job_ids}
+                attempted.update(entries)
+                self.in_flight.update(entries)
+                task = asyncio.create_task(self.work_team(key, job_ids, self.handles[key]))
+                self.workers[key] = task
+                tasks.append(task)
+            return tasks, eligible
+
+    async def tick(self, *, wait=True):
+        # Tests/manual ticks drain this pass. The service loop never waits for a
+        # slow team's worker before it can poll another team again.
+        attempted, eligible = set(), None
+        while True:
+            tasks, eligible = await self.plan(attempted, eligible)
+            if not tasks or not wait:
+                return
+            await asyncio.gather(*tasks)
+
+    async def work_team(self, key, job_ids, runs):
+        owner, team_id = key
+        try:
+            for job_id in job_ids:
+                try:
+                    async with self.team_lock(*key):
+                        if not self.available or self.handles.get(key) is not runs:
                             break
-                        if exc.status_code != 409:
-                            await self.finish(owner, team, job, "failed", "Agent unavailable or request rejected")
-                    except (TimeoutError, OSError):
-                        # Retain the frozen input and key: the host may have
-                        # accepted the request before the transport failed.
-                        continue
-                    except Exception:
-                        # An unknown host error may follow successful admission.
-                        # Disconnect rather than releasing the member's slot.
-                        self.handles.pop((owner, team_id), None)
-                        break
-                    finally:
-                        # A conversation wait did not attempt admission. Frozen
-                        # inputs retain the slot, including unknown outcomes.
-                        if reserved and job["input"] is None:
-                            active -= 1
+                        team = await self.db("get", *key)
+                        job = next(j for j in team["jobs"] if j["id"] == job_id)
+                        if job["status"] in TERMINAL:
+                            continue
+                        try:
+                            async with asyncio.timeout(10):
+                                await self.advance(owner, team, job, runs)
+                        except AgentRunError as exc:
+                            if exc.status_code in (403, 503):
+                                self.handles.pop(key, None)
+                                break
+                            if exc.status_code != 409:
+                                await self.finish(owner, team, job, "failed", "Agent unavailable or request rejected")
+                        except (TimeoutError, OSError):
+                            pass  # Frozen input/key retain the slot and ownership.
+                        except Exception:
+                            self.handles.pop(key, None)
+                            break
+                finally:
+                    async with self.scheduling_lock:
+                        self.in_flight.discard((key, job_id))
+        except Exception:
+            # Persistence/read failures disconnect only this worker's team.
+            self.handles.pop(key, None)
+        finally:
+            async with self.scheduling_lock:
+                self.in_flight.difference_update((key, job_id) for job_id in job_ids)
+                self.workers.pop(key, None)
 
     async def save_job(self, owner, team_id, job):
         def update(team):
@@ -466,6 +574,10 @@ class Teams:
                 job["status"] = "running"
             await self.save_job(owner, team["id"], job)
         if job["status"] == "resuming" or (job["status"] == "cancelling" and job["resume"]):
+            # A pending answer acquires a slot before attempting admission. An
+            # unknown acknowledgement must remain charged across reconnects.
+            job["resume"]["started"] = True
+            await self.save_job(owner, team["id"], job)
             continuation = job["resume"].get("input")
             if continuation:
                 state = await runs.get_state(thread_id=thread)

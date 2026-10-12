@@ -18,6 +18,11 @@ class Store:
     def connection(self):
         return sqlite3.connect(self.path, timeout=5)
 
+    def keys(self):
+        # Service-only bookkeeping: disconnected frozen jobs still own slots.
+        with closing(self.connection()) as db:
+            return list(db.execute("SELECT owner, id FROM teams ORDER BY rowid"))
+
     def list(self, owner):
         with closing(self.connection()) as db:
             return [json.loads(row[0]) for row in db.execute("SELECT data FROM teams WHERE owner=? ORDER BY rowid DESC", (owner,))]

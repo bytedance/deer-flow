@@ -15,9 +15,18 @@ Unknown admission outcomes must retain ownership of the pending job. Never
 automatically approve interruptions, infer success from a terminal run alone, or
 serialize a host capability. Only an authenticated action or native mention
 rebinds after restart.
-Release a new job's temporary active-budget reservation only if its input remains
-unfrozen after advancement; conversation waits must not block unrelated teams.
-Keep frozen inputs charged even when admission acknowledgement is lost.
+Use team-scoped locks for every execution/control mutation, including native
+mentions; hold the scheduling lock only for snapshot/slot bookkeeping, never for
+host calls. Background ticks launch independent team workers and shutdown drains
+all workers. Preserve first-unfinished order within each thread, including source
+receipts shared across teams; legacy timestamps must not reorder a team's queue.
+Rotate new admission attempts by owner, carrying the cursor between passes.
+Reserve before dispatch, and count in-flight reservations as well as durable
+frozen jobs against eight slots. Unfrozen waits release their reservation; frozen
+jobs remain charged through disconnection and startup, even without a capability.
+Pending answers wait for a slot; persist resume.started before attempting them,
+and keep uncertain admissions charged. Legacy resumes without the marker are
+conservatively charged. Cancelling an unstarted answer never admits it.
 
 Reconnect ensures every member thread before persisting readiness, serialized
 with deletion and task updates. Count only requests toward the 100-request cap;
