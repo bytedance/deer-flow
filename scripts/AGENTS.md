@@ -25,11 +25,13 @@ path variables and compare storage defaults with the launcher's actual shell blo
 
 ## Dependency Check Diagnostics
 
-`check.py` captures tool output as UTF-8 with replacement for malformed bytes,
-independently of the host locale. Its Python pnpm runner inherits the environment
-with `PYTHONIOENCODING=utf-8:backslashreplace`, matching the capture encoding.
-Keep Unicode failure diagnostics and exit status available to `make check`.
-Real subprocess regressions live in `backend/tests/test_check_script.py`.
+`check_extension.py` checks wheels with Gateway's asset validator.
+Tests: `backend/tests/test_extension_check_script.py`.
+
+`check.py` decodes captured output as UTF-8 with replacement and runs pnpm with
+`PYTHONIOENCODING=utf-8:backslashreplace`. Preserve Unicode diagnostics and exit
+status in `make check`, independently of the host locale.
+Tests: `backend/tests/test_check_script.py`.
 
 ## Manual Claude OAuth Export
 
