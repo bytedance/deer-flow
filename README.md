@@ -226,22 +226,29 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
    DeerFlow disables Console cost estimates when currencies are mixed rather
    than presenting an invalid aggregate.
 
-   Administrators can also open **Settings → Models** to add, edit, test, and
-   enable/disable shared OpenAI-compatible Chat Completions models without editing
-   `config.yaml`. Enter a unique name, base URL, model ID, and optional API key;
-   saving refreshes the chat model list. Connection testing sends a short streaming
-   tool-call request and may incur provider charges. It does not save the draft or
-   verify image support; set image support and token limits from provider documentation.
-   Official DeepSeek models at `https://api.deepseek.com` or
-   `https://api.deepseek.com/v1` (default HTTPS port) automatically use DeerFlow's
-   DeepSeek adapter, preserving reasoning content across tool calls and honoring
-   output token limits. Chat uses the selected thinking mode; the connection test
-   temporarily disables thinking because DeepSeek rejects forced tool selection
-   in thinking mode. The test checks streaming tool connectivity, not every agent
-   workflow or thinking-mode behavior. Existing saved DeepSeek profiles receive
-   this adapter without re-entering credentials. DeepSeek-specific settings for
-   third-party proxies, other native adapters, and advanced reasoning settings
-   remain YAML-configured.
+   Administrators can open **Settings → Models** to select a provider and enter
+   only its **API Key** and **model ID**. Endpoints, authentication and adapters are
+   backend presets for OpenAI, Anthropic, DeepSeek, Alibaba Cloud Bailian/Qwen,
+   Volcengine/Doubao, Moonshot/Kimi, Zhipu/Z.AI and MiniMax. Region and plan-specific
+   entries are explicitly distinguished. Arbitrary model IDs are accepted; internal
+   names are generated automatically and remain stable when a model ID changes.
+   Newly saved models are enabled and immediately refresh existing chat and Agent
+   model selectors, without editing YAML or restarting the Gateway.
+
+   **Custom OpenAI-compatible** still supports existing/custom base URLs and
+   unauthenticated endpoints. **Advanced settings** retains display name, token
+   limits and vision overrides; unknown IDs do not receive invented capabilities.
+   Leave the key blank on edit to retain it for the same connection. Switching
+   provider or custom endpoint requires a new key, and preset models must be
+   disabled before clearing their key. YAML models remain read-only.
+
+   Connection testing uses the same model factory and protocol as chat, sends a
+   bounded streaming tool-call request and never saves the draft. It may incur
+   provider charges and does not verify every agent, vision or thinking workflow.
+   Official DeepSeek custom endpoints retain their existing adapter; a proxy does
+   not become DeepSeek merely because of its model ID. See the
+   [Web model registration reference](backend/docs/CONFIGURATION.md#models-registered-through-the-web)
+   for presets, compatibility, extension instructions and backup requirements.
 
    DeepSeek regression tests run offline with the normal backend suite. To verify
    the real provider explicitly, set `DEEPSEEK_TEST_API_KEY` in your environment

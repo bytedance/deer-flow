@@ -245,3 +245,7 @@ Skill listing authorization mirrors the models pattern: `routers/skills.py` rout
 Batch workers pin `app.state.extensions`; never persist snapshots.
 
 Personal MCP uses owner-only files/calls; platform MCP stays shared.
+
+### Web model provider presets
+
+Managed model routes now include admin-only GET `/api/managed-models/providers`. Preset request validation rejects routing overrides and redacts input objects; POST `/test` uses the existing model factory for native and compatible protocols. All encrypted storage/client construction stays off-loop. Keep provider-switch key retention and revision checks identical for test and save.

@@ -1679,8 +1679,8 @@ export const zhCN: Translations = {
       enable: "启用",
       disable: "停用",
       formDescription:
-        "接入 OpenAI 兼容接口。测试将发送简短的流式工具调用请求，可能产生模型调用费用。",
-      provider: "接口类型",
+        "选择厂商并填写 API Key 和模型 ID。测试将发送简短的流式工具调用请求，可能产生模型调用费用。",
+      provider: "模型厂商",
       name: "唯一名称",
       displayName: "显示名称",
       endpoint: "接口基础地址",
@@ -1701,6 +1701,22 @@ export const zhCN: Translations = {
         "接口已响应，但未返回工具调用，请检查模型的工具调用能力。",
       connection_failed:
         "连接测试失败，请检查接口地址、凭据、模型 ID 以及流式输出和工具调用支持。",
+      customProvider: "自定义 OpenAI-compatible",
+      apiKey: "API Key",
+      advanced: "高级设置",
+      providerDefault: "厂商默认值",
+      requiredKey: "填写此厂商的 API Key",
+      providerChanged: "已切换连接，请重新填写 API Key；不会复用原连接的密钥。",
+      missing_api_key:
+        "此厂商需要 API Key。请填写密钥，或先停用模型再清除密钥。",
+      authentication_failed:
+        "认证失败，请检查 API Key 是否属于所选厂商、地域或套餐。",
+      response_limit: "测试响应超出输出限制。",
+      revisionConflict:
+        "模型已变更或名称已被占用。请重新加载列表并打开编辑器；当前草稿已保留。",
+      keyOrCapabilities:
+        "请检查 API Key 和能力覆盖配置。清除预设模型密钥前须先停用模型。",
+      invalidModel: "模型配置无效，请检查厂商、模型 ID 和高级设置。",
     },
     users: {
       title: "用户管理",

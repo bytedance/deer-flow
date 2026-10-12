@@ -388,3 +388,7 @@ locked during attachment. Deleting an object removes its context; undo restores
 references already attached to the draft. Labels grant no read authority. IME,
 caret, thread changes and attachment fences apply to editor and picker. The `@`
 and attachment buttons share the picker.
+
+### Web model provider presets
+
+Settings → Models obtains provider form metadata from the admin-only backend `/api/managed-models/providers`; do not copy endpoints, protocols or adapter maps into the UI. New models need only provider, API key and arbitrary model ID, with server-generated stable names. Custom endpoint fields and legacy edits stay supported. Provider/endpoint changes clear test results and saved-key reuse; omitted keys retain only the same connection. Capability overrides belong in Advanced settings. Successful saves/toggles invalidate both managed-model queries and MODELS_QUERY_KEY so existing chat/Agent selectors refresh. Keep locale text and administrator/static-mode restrictions aligned.

@@ -1785,7 +1785,7 @@ export const enUS: Translations = {
       enable: "Enable",
       disable: "Disable",
       formDescription:
-        "Connect an OpenAI-compatible endpoint. Testing sends a short streaming tool-call request and may incur provider charges.",
+        "Choose a provider and enter its API key and model ID. Testing sends a short streaming tool-call request and may incur provider charges.",
       provider: "Provider",
       name: "Unique name",
       displayName: "Display name",
@@ -1807,6 +1807,24 @@ export const enUS: Translations = {
         "The endpoint responded, but did not return a tool call. Check the model’s tool support.",
       connection_failed:
         "Connection test failed. Check the endpoint, credentials, model ID and streaming/tool support.",
+      customProvider: "Custom OpenAI-compatible",
+      apiKey: "API Key",
+      advanced: "Advanced settings",
+      providerDefault: "Provider default",
+      requiredKey: "Enter the provider API key",
+      providerChanged:
+        "Connection changed. Enter a new API key; the saved key will not be reused.",
+      missing_api_key:
+        "This provider requires an API key. Enter a key, or disable the model before clearing its key.",
+      authentication_failed:
+        "Authentication failed. Check the API key and the provider region or plan.",
+      response_limit: "The test response exceeded its safe output limit.",
+      revisionConflict:
+        "The model changed or its name is reserved. Reload the list and reopen the editor. Your draft has been kept.",
+      keyOrCapabilities:
+        "Check the API key and capability overrides. Preset models must be disabled before removing their key.",
+      invalidModel:
+        "Invalid model configuration. Check the provider, model ID and advanced settings.",
     },
     users: {
       title: "User management",

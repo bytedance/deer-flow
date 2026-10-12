@@ -203,22 +203,31 @@ returned AppConfig: runtime-scoped and explicitly injected configurations remain
 authoritative. `_managed_model_names` is private source metadata, not provider kwargs.
 Direct `AppConfig.from_file()` continues to read only operator configuration.
 
-`config/managed_model_providers.py` owns endpoint detection and provider defaults.
-Managed profiles normally use `langchain_openai:ChatOpenAI`. Official HTTPS
-`api.deepseek.com` endpoints (default port, root or `/v1` path) instead resolve to
-`PatchedChatDeepSeek` with explicit thinking on/off settings and reasoning-effort
-support. Resolve from the parsed endpoint, never a model-name substring; proxies,
-lookalike hosts and other paths retain the generic contract. This is derived runtime
-configuration: no catalog migration or new API fields. The native `api_base` field
-preserves the administrator's endpoint; the adapter preserves `reasoning_content`
-and sends `max_tokens` rather than OpenAI's `max_completion_tokens`.
+`config/managed_model_providers.py` is the sole registry for provider IDs, labels,
+endpoints, protocols, authentication parameter mappings, adapters and request
+defaults. Capability rules match exact verified model IDs; unknown preset IDs
+have an unsupported-thinking contract, no vision and no inferred context window.
+Preset drafts cannot supply endpoints or adapter paths. Legacy custom
+`openai-compatible` records retain endpoint-based official DeepSeek detection;
+never infer that adapter from a model-name substring. Reads do not migrate the
+catalog. New names are allocated under the existing catalog lock with bounded
+ASCII slugs and random suffixes; edits preserve names and references.
 
-Full updates require the current revision; omission means create, an omitted API
-key retains the saved key and an empty string clears it. Never serialize SecretStr
-masking as a saved key. Read APIs return `has_api_key`, never a credential.
-The Gateway probe constructs the resolved class off-loop and applies the profile's
-`when_thinking_disabled` settings to its bounded forced-tool request. It does not
-repeat provider selection or persist the probe override.
-Tests: `test_managed_models.py`, `test_managed_deepseek.py` (real SDK serialization
-with an HTTP double), opt-in `test_managed_deepseek_live.py`, and
+The admin-only `/api/managed-models/providers` exposes form metadata, not routing.
+Full updates require the current revision. Omitted keys are retained only for
+an unchanged provider/custom endpoint, an empty string clears the key and password
+masks are rejected. Presets must have a key while enabled; disable before clearing.
+Responses return `has_api_key`, never credentials, and request validation must
+not echo sensitive input dictionaries. Keep the existing storage/lock/signature
+mechanisms rather than adding a key store or writing YAML.
+
+The Gateway probe uses `create_chat_model` with a fresh explicit AppConfig,
+tracing off, bounded timeout/output and retries disabled. It uses the same
+provider settings/reasoning transforms as chat. Disable optional thinking for
+short probes; required thinking and unknown third-party models use automatic
+tool choice. MiniMax's existing adapter normalizes the OpenAI SDK's
+`max_completion_tokens` into MiniMax's documented `max_tokens` for both paths.
+Tests: `test_managed_models.py`, `test_managed_deepseek.py`,
+`test_managed_provider_presets.py` (real vendor SDKs with HTTP doubles), opt-in
+`test_managed_deepseek_live.py` / `test_managed_presets_live.py`, and
 `tests/blocking_io/test_managed_models.py`.
