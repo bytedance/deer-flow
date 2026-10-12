@@ -71,6 +71,66 @@ afterEach(() => {
   copyDataCalls.mockClear();
 });
 
+describe("MessageListItem edit shortcuts during IME composition", () => {
+  function openEditor() {
+    const onEditAndRegenerate = rs.fn(async () => true);
+    const view = render(
+      withI18n(
+        <MessageListItem
+          message={makeMessage("human")}
+          threadId="thread-1"
+          canEdit
+          onEditAndRegenerate={onEditAndRegenerate}
+        />,
+      ),
+    );
+    fireEvent.click(
+      view.getByRole("button", { name: enUS.common.editAndRerun }),
+    );
+    const editor = view.getByRole("textbox");
+    fireEvent.change(editor, { target: { value: "unfinished draft" } });
+    return { view, editor, onEditAndRegenerate };
+  }
+
+  it.each([
+    { key: "Escape", isComposing: true },
+    { key: "Escape", keyCode: 229 },
+    { key: "Enter", ctrlKey: true, isComposing: true },
+    { key: "Enter", ctrlKey: true, keyCode: 229 },
+    { key: "Enter", metaKey: true, isComposing: true },
+    { key: "Enter", metaKey: true, keyCode: 229 },
+  ])("leaves the draft and composing key untouched: %j", async (event) => {
+    const { view, editor, onEditAndRegenerate } = openEditor();
+    await act(async () => {
+      expect(fireEvent.keyDown(editor, event)).toBe(true);
+    });
+    expect(view.getByRole("textbox")).toBe(editor);
+    expect(view.getByDisplayValue("unfinished draft")).toBe(editor);
+    expect(onEditAndRegenerate).not.toHaveBeenCalled();
+  });
+
+  it("still cancels with Escape outside composition", () => {
+    const { view, editor, onEditAndRegenerate } = openEditor();
+    fireEvent.keyDown(editor, { key: "Escape" });
+    expect(view.queryByRole("textbox")).toBeNull();
+    expect(onEditAndRegenerate).not.toHaveBeenCalled();
+  });
+
+  it.each([{ ctrlKey: true }, { metaKey: true }])(
+    "still submits with modified Enter outside composition: %j",
+    async (modifier) => {
+      const { view, editor, onEditAndRegenerate } = openEditor();
+      await act(async () => {
+        fireEvent.keyDown(editor, { key: "Enter", ...modifier });
+      });
+      expect(onEditAndRegenerate).toHaveBeenCalledExactlyOnceWith(
+        "unfinished draft",
+      );
+      expect(view.queryByRole("textbox")).toBeNull();
+    },
+  );
+});
+
 describe("MessageListItem copy-data derivation guard", () => {
   it("derives no copy data for an assistant row that never renders the toolbar", () => {
     const message = makeMessage("ai");
