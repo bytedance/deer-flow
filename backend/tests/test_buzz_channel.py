@@ -63,6 +63,41 @@ def test_config_parsing_normalizes_allowlist_and_defaults():
     assert ch._relay_url == "wss://buzz.example.com"
 
 
+def test_config_mention_free_channel_accepts_a_single_id():
+    """One UUID, quoted or unquoted, is one entry -- not the characters of it.
+
+    A scalar was iterated as if it were a list, so the exemption matched nothing:
+    the channel the operator just made mention-free kept requiring a mention, which
+    looks exactly like a deaf bot. Discord documents and parses the same shape.
+    """
+    assert _channel(mention_free_channels=CHANNEL)._mention_free == frozenset({CHANNEL})
+    assert _channel(mention_free_channels=f"  {CHANNEL}  ")._mention_free == frozenset({CHANNEL})
+    assert CHANNEL in _channel(mention_free_channels=CHANNEL)._mention_free
+
+
+def test_config_mention_free_channel_accepts_a_non_string_scalar():
+    """An unquoted value YAML typed as a number must not abort channel setup."""
+    assert _channel(mention_free_channels=136852)._mention_free == frozenset({"136852"})
+
+
+def test_config_mention_free_channel_empty_shapes_mean_no_exemption():
+    for value in (None, "", "   ", [], frozenset()):
+        assert _channel(mention_free_channels=value)._mention_free == frozenset()
+
+
+def test_config_mention_free_channel_keeps_list_entries_verbatim():
+    ch = _channel(mention_free_channels=[CHANNEL, f" {CHANNEL_B} ", ""])
+    assert ch._mention_free == frozenset({CHANNEL, CHANNEL_B})
+
+
+def test_config_mention_free_channel_scalar_with_separators_warns(caplog):
+    """A comma/space-joined scalar is one literal id, and says so rather than going quiet."""
+    with caplog.at_level(logging.WARNING, logger="app.channels.buzz"):
+        ch = _channel(mention_free_channels=f"{CHANNEL}, {CHANNEL_B}")
+    assert ch._mention_free == frozenset({f"{CHANNEL}, {CHANNEL_B}"})
+    assert "treating it as one literal channel id" in caplog.text
+
+
 def test_config_rejects_non_websocket_relay_url():
     with pytest.raises(ValueError):
         _channel(relay_url="https://buzz.example.com")
