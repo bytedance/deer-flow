@@ -1824,6 +1824,145 @@ async def test_identical_attention_event_after_consumed_snapshot_is_recorded(tmp
 
 
 @pytest.mark.asyncio
+async def test_interleaved_consume_preserves_a_concurrently_recorded_completion(tmp_path, monkeypatch):
+    """A consume racing a newer event must not acknowledge that event (SQLite).
+
+    SQLite has no ``SELECT FOR UPDATE``, so a real completion recorded after the
+    claim's read but before its write must survive: the consume is fenced on the
+    event version it actually read, and the newer completion stays claimable.
+    """
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="interleaved-consume", now=now)
+
+    # Record the degraded snapshot, then let the task recover so the snapshot is
+    # resolved but still pending when the claim tries to consume it.
+    for _ in range(3):
+        claimed = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=10)
+        await repo.release_claim(
+            "interleaved-consume",
+            lease_owner="poller",
+            lease_token=claimed[0]["lease_token"],
+            next_poll_at=now - timedelta(seconds=1),
+            error="temporary network failure",
+        )
+    claimed = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=10)
+    await repo.apply_snapshot(
+        "interleaved-consume",
+        lease_owner="poller",
+        lease_token=claimed[0]["lease_token"],
+        status="working",
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        next_poll_at=now,
+        polled_at=now,
+    )
+
+    claim_kwargs = {"lease_owner": "notifier", "lease_seconds": 60, "limit": 1, "tracking_degraded_after_errors": 3}
+    async with _pause_claim_mutation(monkeypatch, repo.claim_notification_work(now=datetime.now(UTC), **claim_kwargs)) as (pending, resume):
+        # Record a real completion while the consume is paused after its SELECT.
+        poll = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+        assert await repo.apply_snapshot(
+            "interleaved-consume",
+            lease_owner="poller",
+            lease_token=poll[0]["lease_token"],
+            status="completed",
+            result={"done": True},
+            result_preview=None,
+            result_truncated=False,
+            result_artifact=None,
+            error=None,
+            input_required=None,
+            next_poll_at=None,
+            polled_at=now,
+        )
+        resume.set()
+        consumed = await asyncio.wait_for(pending, timeout=5)
+
+    # The paused claim consumed nothing; the completion stays claimable.
+    assert consumed == []
+    stored = await repo.get("interleaved-consume", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+    assert stored is not None
+    assert stored["notification_status"] == "pending"
+    assert stored["event_version"] == 2
+    assert stored["notified_version"] == 0
+
+    notifications = await repo.claim_notification_work(now=datetime.now(UTC), **claim_kwargs)
+    assert len(notifications) == 1
+    assert notifications[0]["dispatch_event"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_status", ["launching", "dispatched"])
+@pytest.mark.parametrize("newer_event", [True, False], ids=["newer-event", "no-newer-event"])
+async def test_legacy_empty_dispatch_respects_a_newer_event(tmp_path, legacy_status, newer_event):
+    """A legacy empty dispatch must not swallow a newer completion.
+
+    Pre-fix workers could leave a launching/dispatched row whose dispatch event
+    is gone. If a real completion was recorded afterwards, it must be claimed;
+    only an empty generation with nothing newer may be consumed.
+    """
+    from sqlalchemy import update as sql_update
+
+    from deerflow.persistence.mcp_tasks.model import McpTaskRow
+
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="legacy-newer", now=now)
+
+    async with repo._sf() as session:
+        await session.execute(
+            sql_update(McpTaskRow)
+            .where(McpTaskRow.id == "legacy-newer")
+            .values(
+                notification_status=legacy_status,
+                event_version=1,
+                notified_version=0,
+                dispatch_version=1,
+                dispatch_event=None,
+                notification_run_id="legacy-empty-run",
+                next_notification_at=now,
+            )
+        )
+        await session.commit()
+
+    if newer_event:
+        poll = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+        assert await repo.apply_snapshot(
+            "legacy-newer",
+            lease_owner="poller",
+            lease_token=poll[0]["lease_token"],
+            status="completed",
+            result={"done": True},
+            result_preview=None,
+            result_truncated=False,
+            result_artifact=None,
+            error=None,
+            input_required=None,
+            next_poll_at=None,
+            polled_at=now,
+        )
+
+    claim_kwargs = {"lease_owner": "notifier", "lease_seconds": 60, "limit": 1, "tracking_degraded_after_errors": 3}
+    notifications = await repo.claim_notification_work(now=datetime.now(UTC), **claim_kwargs)
+
+    stored = await repo.get("legacy-newer", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+    assert stored is not None
+    if newer_event:
+        assert len(notifications) == 1
+        assert notifications[0]["dispatch_event"]["status"] == "completed"
+        assert notifications[0]["dispatch_version"] == 2
+    else:
+        assert notifications == []
+        assert stored["notification_status"] == "none"
+        assert stored["notified_version"] == stored["event_version"]
+
+
+@pytest.mark.asyncio
 async def test_unexpected_notification_failure_releases_lease_without_changing_phase(tmp_path):
     repo = await _make_repo(tmp_path)
     now = datetime.now(UTC)
