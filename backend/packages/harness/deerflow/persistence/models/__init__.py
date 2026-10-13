@@ -67,3 +67,6 @@ __all__ = [
     "UserRow",
     "WebhookDeliveryRow",
 ]
+
+# Tenant control-plane tables belong to the native application schema.
+from deerflow.persistence.workspaces import model as workspace_models  # noqa: F401, E402

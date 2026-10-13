@@ -1,6 +1,6 @@
 {
   "status": "partial",
-  "work_package": "M0",
+  "work_package": "M1",
   "base_commit": "1a199c6d",
   "job": "deerflow-tenant-contract-m0",
   "red": {
@@ -25,8 +25,9 @@
     "contracts/workspace_scope.v1.json": "c106de2a9f5a0d62b173719854096fef653233dd81ef2116ac664058162cb1ba"
   },
   "remaining": [
-    "M0 real SQL/HTTP fixture depends on M1/M2 schema and membership resolver; resource assertions depend on M3",
-    "M1 through M11 remain unimplemented"
+    "M0 real SQL/HTTP fixture depends on M1/M2; resource assertions depend on M3",
+    "M1 personal backfill, executor schema, offline migration commands and PostgreSQL verification",
+    "M2 through M11 remain unimplemented"
   ],
   "static_checks": [
     "ruff check with backend/ruff.toml passed",
@@ -47,5 +48,22 @@
       "tests_passed": 26
     },
     "scope": "In-process immutable identity, actor binding and external config scrubbing. Not HTTP membership authorization."
+  },
+  "native_schema": {
+    "revision": "0036_tenant_workspaces",
+    "red": {
+      "build": 5,
+      "result": "FAILURE",
+      "archive_sha256": "bb3a3efc1a69537b373cc690d87fea60088edec8fdf975f82929b67e5d22f416",
+      "reason": "tenant schema has not been introduced"
+    },
+    "green": {
+      "build": 6,
+      "result": "SUCCESS",
+      "archive_sha256": "52db3a8a78d94308fb69a173e2b5baceba3e22293230f19779be889315f21e6b",
+      "tests_passed": 1,
+      "backend": "isolated SQLite inside Shanghai Jenkins container"
+    },
+    "scope": "Real Alembic 0035 upgrade with seeded user and owned/orphan threads; DDL does not assign workspace ownership or mark email verified. PostgreSQL, empty hybrid bootstrap and controlled backfill still pending."
   }
 }

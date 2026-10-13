@@ -13,6 +13,8 @@ from deerflow.persistence.base import Base
 class RunRow(Base):
     __tablename__ = "runs"
 
+    workspace_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+
     run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     thread_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     assistant_id: Mapped[str | None] = mapped_column(String(128))

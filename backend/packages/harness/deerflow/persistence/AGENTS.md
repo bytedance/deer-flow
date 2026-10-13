@@ -26,3 +26,14 @@ Scheduled-task lifecycle rules live in one place each. `ScheduledTaskRepository.
 The per-owner run cap `scheduler.max_concurrent_runs_per_user` is effective `min(per_user, max_concurrent_runs)` (0 = off) and is checked in `claim_queued_run` right after the global count, under the same budget lock. `list_queued_runs` ranks same-thread FIFO heads per owner (`ROW_NUMBER() OVER (PARTITION BY owner)`) and orders the batch by that rank, so the drain is owner-fair even with the cap off; owners at their cap drop out before the batch limit, and orphan rows (task deleted while queued) are never held back by the cap. Scheduled-task repository boundaries coerce serialized timestamps before SQL `DateTime` binding.
 
 Recovery locks task/run pairs in task-id/run-id order and restores `run_id`, `started_at` and live errors before releasing launch claims. Launch/failure/timeout updates use one parent-first transaction to prevent interleaved claims. Queue timeout fails the occurrence and advances scheduled work to prevent immediate requeue.
+
+## Tenant schema foundation
+
+`0036_tenant_workspaces` appends to the audited `0035` join. Native tenant
+control-plane tables live in `workspaces/model.py` and register with shared
+Base.metadata. Resource workspace_id columns remain nullable during explicit
+legacy backfill. DDL never guesses owners or marks email verified. An existing
+channel_connections.workspace_id is a provider workspace identifier, not the
+DeerFlow tenant; do not reuse it as tenant authority. This schema alone does not
+enable tenant access. Controlled backfill, both database receipts and admission
+coverage remain required before multi-tenant activation.

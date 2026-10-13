@@ -192,3 +192,9 @@ deletion or downgrade exists. The fresh hybrid ORM bootstrap need not create the
 unused historical table/column; a real Alembic fresh upgrade does create them.
 Both have no intent to replay. Executor metadata belongs in a dedicated database
 and private Alembic chain, never `Base.metadata`. See the root integration guide.
+
+The tenant foundation appends `0036_tenant_workspaces` after `0035`; it adds
+control-plane tables and nullable native resource scope, plus unverified email
+and account status fields. No automatic ownership backfill is performed. The
+executor still has its separate schema chain; native DDL is not proof that the
+two-database tenant rollout is ready. Downgrade refuses destructive scope loss.

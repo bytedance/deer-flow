@@ -33,6 +33,8 @@ from deerflow.persistence.base import Base
 class ProjectRow(Base):
     __tablename__ = "projects"
 
+    workspace_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(64), index=True)
     name: Mapped[str] = mapped_column(String(128))
@@ -49,6 +51,8 @@ class ProjectRow(Base):
 
 class ProjectDocumentRow(Base):
     __tablename__ = "project_documents"
+
+    workspace_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     project_id: Mapped[str] = mapped_column(String(64), index=True)

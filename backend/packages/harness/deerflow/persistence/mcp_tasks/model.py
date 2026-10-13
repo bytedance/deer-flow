@@ -17,6 +17,8 @@ from deerflow.persistence.base import Base
 class McpTaskRow(Base):
     __tablename__ = "mcp_tasks"
 
+    workspace_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(64), index=True)
     thread_id: Mapped[str] = mapped_column(String(64), index=True)
