@@ -206,3 +206,7 @@ or an explicitly injected AppConfig. See `../models/AGENTS.md` for storage and r
 boundaries. `managed_model_providers.py` derives provider defaults from validated
 endpoints; `ManagedModel.runtime_config()` combines them with profile fields.
 `AppConfig.from_file()` remains YAML-only.
+
+### Web model provider presets
+
+Managed model provider presets live only in `managed_model_providers.py`. `managed_models.py` reads legacy custom encrypted records compatibly and converts presets into ModelConfig without changing YAML, previous snapshots or injected configurations. See the managed-model section in `../models/AGENTS.md` and the Web registration section of `backend/docs/CONFIGURATION.md`.

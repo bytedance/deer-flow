@@ -22,6 +22,7 @@ import httpx
 from langchain.tools import tool
 
 from deerflow.community.search_time_range import SearchTimeRange
+from deerflow.community.url_safety import safe_public_result_url as _safe_public_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -214,44 +215,6 @@ def _is_url_present(value: object) -> bool:
     must stay empty rather than collapse onto its counterpart).
     """
     return isinstance(value, str) and bool(value.strip())
-
-
-def _safe_public_url(value: object) -> str:
-    """Return ``value`` only if it is a safe, public http(s) URL, else "".
-
-    This is a best-effort SSRF guard that rejects non-http(s) schemes,
-    ``localhost``, and private/non-global IP literals (including obfuscated
-    decimal/hex/octal encodings). It only inspects the URL string and cannot
-    catch public hostnames that resolve to internal IPs (e.g. DNS rebinding);
-    any consumer that actually downloads these URLs must re-validate the
-    resolved IP at fetch time.
-    """
-    if not isinstance(value, str):
-        return ""
-    url = value.strip()
-    try:
-        parsed = urlparse(url)
-    except ValueError:
-        return ""
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
-        return ""
-
-    # Strip a single trailing dot (FQDN root label). ``localhost.`` and
-    # ``127.0.0.1.`` resolve to loopback on common resolvers but would
-    # otherwise slip past the localhost/IP checks below.
-    host = parsed.hostname.lower().rstrip(".")
-    if not host:
-        return ""
-    if host == "localhost" or host.endswith(".localhost"):
-        return ""
-
-    try:
-        ip = ip_address(host)
-    except ValueError:
-        ip = _decode_ipv4(host)
-        if ip is None:
-            return url
-    return url if ip.is_global else ""
 
 
 def _retry_options(config) -> dict:

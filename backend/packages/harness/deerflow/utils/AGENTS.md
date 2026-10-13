@@ -1,3 +1,12 @@
+### Atomic Byte Publication
+
+`atomic_write.publish_bytes_atomically` owns browser screenshot and Browserless
+capture/fetch publication. It writes and fsyncs a hidden exclusive sibling before
+`os.replace`, cleaning it on failure. New files use `0666` filtered by the host
+umask; replacements preserve existing permission bits before publication. Never
+read the process umask by changing it in this threaded runtime. Behavioral tests
+for both tool imports live in `tests/test_browser_outputs_atomic.py`.
+
 ### Model Retry Hints
 
 `retry_after.py::bounded_retry_after_ms` shares the 24-hour provider-hint ceiling
