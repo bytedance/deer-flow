@@ -2920,3 +2920,5 @@ Native ECS pool operators: see the [repeatable Jenkins delivery procedure](docs/
 Native ECS release builds can opt into the Dockerfile's existing fixed, SHA-checked wheel transport mirror with `--locked-artifact-mirror` (Jenkins `LOCKED_ARTIFACT_MIRROR`). The selected flag is included in private build-input metadata and its verified image digest label; dependency metadata and runtime configuration stay unchanged.
 
 Tenant development: the [offline metadata attribution procedure](docs/tenant-workspaces-migration.md) documents plan/apply/verify and private paired receipts. It does not enable tenant access or replace the schema-aware rollout and isolation acceptance gates.
+
+The [workspace HTTP adapter contracts](docs/tenant-workspaces-api.md) describe the current tenant control-plane foundation and outstanding Gateway, resource isolation and release gates.

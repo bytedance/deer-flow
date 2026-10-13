@@ -9,7 +9,7 @@
 **Tech Stack:** FastAPI/Python、SQLAlchemy/Alembic/PostgreSQL、Redis、Next.js/React、现有MCP/Skill、Docker/NAS、上海Jenkins。
 
 设计依据：[统一设计](../specs/2026-10-13-tenant-workspaces-design.md)。OpenSpec：`openspec/changes/tenant-workspaces-self-service/`。
-基线48d5c3de。实施已进入M1；合同、迁移和离线归属基础已有定向验证，但各工作包的完整验收仍未完成。实际源码与Jenkins证据见 `docs/tenant-workspaces-progress.json`，不以计划条目代替验收。
+基线48d5c3de。实施已进入M2的HTTP基础；合同、迁移和离线归属基础已有定向验证，但各工作包的完整验收仍未完成。实际源码与Jenkins证据见 `docs/tenant-workspaces-progress.json`，不以计划条目代替验收。
 
 ## 顺序、检查点与边界
 
@@ -120,6 +120,8 @@ python -m pytest tests/test_workspace_migration.py -q
 ```
 
 预期：对应主干通过；若无法证明上述验收结果则保留未完成，不能用mock成功替代物理执行或真实鉴权。
+
+M1 integration dependency: schema, explicit attribution, guarded phase receipts and async workspace storage precede M2. Original deployment-data inventory, physical drain/backup collectors and NAS/release verification need the M10 generation; retain those acceptance gates rather than claim foundation tests prove the deployed migration. M0 live fixture integration likewise closes with M2/M3. Functional foundations continue in dependency order while cross-package acceptance stays unchecked.
 
 ### M2：统一空间授权、成员与管理员开通API
 
@@ -456,7 +458,7 @@ openspec validate tenant-workspaces-self-service --strict
 
 M0—M11全部有证据；管理员开通和自助注册同版可用；真实研究与一次更新完成；重点越权/撤权/恢复通过；发布后的版本、schema、文件归属一致。公开注册开关由操作者显式启用。付费/SSO新集成/复杂角色/生产容量承诺不计入本次。
 
-本轮仅完成文档和OpenSpec验证，不标任何实现为完成。用户审阅后，按本计划从M0顺序实施。
+实施进展与定向验收写入 `docs/tenant-workspaces-progress.json`。只有整个工作包的验收证据齐备才勾选对应任务；已有基础提交不等于完整交付。
 
 ## 实施工作量与拆分规则
 

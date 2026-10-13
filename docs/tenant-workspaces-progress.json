@@ -1,6 +1,6 @@
 {
   "status": "partial",
-  "work_package": "M1",
+  "work_package": "M2",
   "base_commit": "1a199c6d",
   "job": "deerflow-tenant-contract-m0",
   "red": {
@@ -253,5 +253,46 @@
       "backend/tests/test_workspace_repository.py": "2b1afcf141cdcf68e815455e7e6eb0f5a421a49e15c87bae092e2a3c62bebdc9"
     },
     "limits": "Repository foundation only. Gateway actor authentication, credential scope intersection, recent reauthentication, invitations, browser clients, live resource/background authorization, revocation effects and schema-aware release still pending. Internal add_member is not a public invite endpoint."
+  },
+  "workspace_http_foundation": {
+    "red": {
+      "job": "deerflow-tenant-contract-m0",
+      "build": 16,
+      "result": "FAILURE",
+      "archive_sha256": "9c11483dcedb2364277131ae16ae468566954e171f7e77cf1315f807e9a58351",
+      "reason": "managed workspace HTTP surface absent",
+      "failed": 1,
+      "skipped": 1
+    },
+    "permission_contract_check": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 9,
+      "result": "FAILURE",
+      "archive_sha256": "0057234ffef5b68e69f41ff786f704b17a4c169383de86b42120759b5cf1fb19",
+      "tests_passed": 3,
+      "failed": 1,
+      "reason": "two real HTTP mains passed; disabled-permission expectation lacked new workspace permissions"
+    },
+    "green": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 10,
+      "result": "SUCCESS",
+      "archive_sha256": "b25a33255e133a9c0d395e81ce4b6175c271e08a2f11bf38e4fa35be822fbbb6",
+      "tests_passed": 4,
+      "duration_seconds": 17.85,
+      "warnings": "One dependency deprecation from FastAPI TestClient import in existing permission test module; own HTTP main uses AsyncClient."
+    },
+    "scope": "One isolated ASGI main per SQLite/PostgreSQL plus two affected native permission tests. Real native JWT, SQL user repository, RBAC and CSRF. Administrator provisioning, personal fallback, team creation, no admin membership bypass, client actor rejection, same-user cross-space actual project-row denial, native permission intersection, stale policy refusal. Configuration and native repository caches are bound to fixture infrastructure; authentication/authorization decisions are not mocked.",
+    "cleanup": "Exact owned-label containers/networks for terminal builds 9 and 10 empty",
+    "source_sha256": {
+      "backend/app/gateway/workspaces/service.py": "595b825672870b0cf56578107807ef5494670572bab4e7f7aef3e0914f646a4b",
+      "backend/app/gateway/workspaces/dependencies.py": "f78ab288b8c358cb5642d16938950fc98678dcb7d7e1de5c7261f81159165e9f",
+      "backend/app/gateway/routers/workspaces.py": "56853c736b762c36c8264dc567a53f5ffd795d50e33ecb4eafab80f9ba6879d5",
+      "backend/app/gateway/routers/admin_workspaces.py": "c895bd658360ff4ed2bfce89d96557bcdc19818676b44970a147221a0b99b79b",
+      "backend/app/gateway/authz.py": "5c0eef4512aa3fcbf67529decce9e6095b8ebb6868227af8c4d17ff75a633d44",
+      "backend/tests/test_workspace_http.py": "3aba38564992ae837dd64936bcab6ccbdac8a386d341ca4df54a17c3f7f79182",
+      "backend/tests/test_authorization_route_permissions.py": "6be59a12f4c21b03543e6eb6d79ce4f0adc460b6fc2375be4a20a35e3a26b3a6"
+    },
+    "limits": "Adapters not registered or initialized by shipped Gateway yet. No tenant activation. Full startup/config, member-management/reauth transfer, resource lists/files/runtime/backgrounds, PAT/IM, client flows and release remain pending. Proof endpoint is test composition against a real SQL project row, not full production project API acceptance."
   }
 }

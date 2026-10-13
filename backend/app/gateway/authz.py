@@ -63,6 +63,10 @@ logger = logging.getLogger(__name__)
 class Permissions:
     """Permission constants for resource:action format."""
 
+    # Workspace control plane (resource ACL remains a separate intersection).
+    WORKSPACES_READ = "workspaces:read"
+    WORKSPACES_WRITE = "workspaces:write"
+
     # Threads
     THREADS_READ = "threads:read"
     THREADS_WRITE = "threads:write"
@@ -159,6 +163,8 @@ def require_cancel_permission_if(request: Request, can_cancel: bool) -> None:
 
 
 _ALL_PERMISSIONS: list[str] = [
+    Permissions.WORKSPACES_READ,
+    Permissions.WORKSPACES_WRITE,
     Permissions.THREADS_READ,
     Permissions.THREADS_WRITE,
     Permissions.THREADS_DELETE,

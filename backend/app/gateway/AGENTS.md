@@ -277,3 +277,15 @@ See `docs/tenant-entrypoint-inventory.md` at the repository root.
 and task-local binding. Shape/actor validation is not membership authorization;
 only trusted admission may bind it after live database checks. Transport requires
 separate authentication, version checks and reauthorization.
+
+`workspaces/service.py` resolves immutable workspace identity from live native
+SQL and intersects membership/version, native credential permissions and the
+resource ACL. Platform-admin status cannot bypass it. Browser management
+`workspaces/dependencies.py` requires the native session source and matching
+AuthContext; selector headers never identify the actor. PAT/internal bindings
+remain separate work. New routers are currently isolated adapters, not registered
+or initialized by shipped Gateway; missing workspace_service fails 503.
+Persistent async writes drain with await_drained; no synchronous write worker is
+created for the native async repository. See docs/tenant-workspaces-api.md and
+actual JWT/RBAC/CSRF tests. Resource filtering, request/task binding, publication
+locks, startup gates and complete entrypoint coverage remain mandatory.
