@@ -346,3 +346,23 @@ This uses seeded Run rows; native Run admission/activity feeds, independent
 mid-commit cancellation faults, thread deletion cleanup, lifecycle writes,
 frontend and physical rollout remain unaccepted. Scoped marker cleanup currently
 refuses until integrated into the thread lifecycle. Activation remains closed.
+
+## Native Run read isolation (partial M3)
+
+RunRepository now captures workspace_required from native bootstrap. Trusted
+task-local scope filters individual/idempotency reads, activity cursor/feed,
+thread history and keyset pages, timestamp lookups, edit/regeneration sources,
+batch reads and token reduction. SQL requires matching Run workspace, original
+owner and a compatible owner-private ThreadMeta parent, including live membership
+and project-parent consistency, before ordering, limits or reduction. Bound
+user_id=None and missing required scope are refused, including empty batch input.
+Legacy unbound mode retains owner/global query behavior.
+
+Jenkins #42 reproduced same-user foreign-space disclosure in both databases.
+#43 passed 8 checks in 21.74s: actual SQLite/PostgreSQL reads, invalid/null parent
+exclusion, pagination, selected cursors, source/batch/token filtering and actual
+persisted policy withdrawal, existing read-marker mains and four affected native
+compatibility regressions. Archive/source hashes are in tenant-workspaces-progress.json.
+This proves repository reads, not HTTP activity/stream admission, scoped Run
+creation/reservations, worker cancellation/recovery, frontend switching or deployed
+multi-tenancy. Compiled activation remains false; M3 and M4 remain incomplete.

@@ -909,5 +909,41 @@
     },
     "self_review": "Workspace -> native actor -> private thread lock, filtered max run position, native monotonic marker and workspace clock increment in one transaction. Version read joins live membership in the same SELECT. Operator flag captured at bootstrap; async HTTP write drains with native helper. Native marker/user-clock keys and historical migration ancestors unchanged. Current paired offline ownership receipts require 0038/e0002.",
     "limits": "Seeded actual RunRow data, not scoped native Run admission or full activity/feed acceptance. Controlled mid-commit request-cancellation and concurrent revocation faults not independently proven. Scoped marker cleanup is refused until thread deletion lifecycle integration; M8 close/purge must cover new clocks. State/goal writes, branch/delete/compact, history backfill, Run/background/client, physical mounts and paired deployment remain required. Compiled activation stays false; no deployment."
+  },
+  "native_run_reads": {
+    "base_commit": "d9bbf16c",
+    "job": "deerflow-tenant-m1-postgres",
+    "red": {
+      "build": 42,
+      "result": "FAILURE",
+      "tests_failed": 2,
+      "elapsed_seconds": 15.91,
+      "archive_sha256": "6180271a3e0c5248d57b164b665550848ca888d2d091770f802c138a4ee31392",
+      "reason": "same user can read a Run belonging to the other workspace"
+    },
+    "green": {
+      "build": 43,
+      "result": "SUCCESS",
+      "tests_passed": 8,
+      "elapsed_seconds": 21.74,
+      "archive_sha256": "d81b63bd8d2c153312ecd0753b0a07e6418cd9e7c1372d95029ab91a1dfed075",
+      "command": "python -m pytest tests/test_workspace_run_reads.py tests/test_workspace_thread_reads.py tests/test_run_repository.py::TestRunRepository::test_put_and_get tests/test_run_repository.py::TestRunRepository::test_list_by_thread_keyset_cursor tests/test_run_repository.py::TestRunRepository::test_owner_none_returns_all tests/test_run_repository.py::TestRunRepository::test_aggregate_tokens_by_thread_counts_completed_runs_only -q --tb=short --no-showlocals"
+    },
+    "source_sha256": {
+      "backend/packages/harness/deerflow/persistence/run/sql.py": "3885ce58eb80d3ef2aa984f9ad5fcc3a6d094f3bd9f95da451fbe14849fe0874",
+      "backend/app/gateway/deps.py": "9f13164b4c65cdfbcb8d2be7982dc70cb19e16981c048bc1e3a9cb17ccc7a415",
+      "backend/tests/test_workspace_run_reads.py": "180926ef5f5178288b4cb5047bf25804db1d91b45c7b74861b0076f9898b98a1"
+    },
+    "scope": "Actual SQLite/PostgreSQL native Run repository reads, matching private parents, limits/cursors/source/batch/token reduction, persisted policy withdrawal; read markers and four legacy native query regressions.",
+    "remaining": "Run creation and operation reservations/cleanup, HTTP feeds/streams, worker lifecycle/recovery, frontend, physical deployment. Compiled activation remains false.",
+    "cleanup": {
+      "builds": [
+        42,
+        43
+      ],
+      "containers": [],
+      "networks": [],
+      "verified": "Each build ownership label independently inspected on Jenkins"
+    }
   }
 }

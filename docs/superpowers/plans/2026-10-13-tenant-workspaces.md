@@ -521,3 +521,5 @@ M3 删除检查点：#34 RED 复现撤权后响应拒绝但文件已删除；#35
 M3 会话读取检查点：#38 验证原生编译图在持久化 SQLite checkpoint 关闭/重开后读取个人与团队状态、历史、目标及详情，并在跨空间或 SQL incarnation 改变时拒绝（6 passed，30.28s）；#36/#37 RED 保留。下一项为已读标记、状态/目标写入与分支/删除/压缩生命周期，再继续 Run/后台和客户端。Postgres checkpointer、跨进程/重启及 delta 验收仍需后续证据。
 
 M3 已读标记检查点：#40 完成空间独立时钟、Run/私有父会话过滤、撤权不写标记、重复读取无变化、旧库升级保留和新回执 CLI（12 passed，54.07s）；#41 对最终异步 HTTP 排空改动复验（2 passed，30.34s）。原生当前 schema 0038，executor e0002；历史版本与回执不重写。下一项继续状态/目标写入与分支/删除/压缩；删除标记清理、活动流、Run、前端和物理发布仍需验收。
+
+M3 native Run reads: #42 RED reproduced foreign-space disclosure in SQLite/PostgreSQL; #43 GREEN (8 passed, 21.74s). Native reads/cursors/keyset/source/batch/token reduction use matching private Run/thread workspace and live policy; required scope is captured at bootstrap. Actual withdrawal and four legacy read behaviors verified. Admission/reservations, HTTP feeds/streams, background recovery and frontend remain incomplete; M3 stays unchecked.

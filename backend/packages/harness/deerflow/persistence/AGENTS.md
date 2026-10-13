@@ -125,3 +125,10 @@ membership SELECT; missing required scope is refused. Scoped delete_by_thread
 is refused pending thread lifecycle integration, never blind all-viewer cleanup.
 Current offline native/executor ownership receipts require 0038/e0002; physical
 paired rollout, activity/run feeds and lifecycle acceptance remain required.
+
+RunRepository read scope consumes trusted task-local context and the operator
+workspace_required setting captured at bootstrap. Its SQL combines Run owner/space
+with the compatible private ThreadMeta predicate before pagination, cursor lookup
+or token reduction. Scope validation precedes empty batch returns. Default unbound
+legacy mode is preserved. Run admission, operation cleanup, global worker recovery
+and HTTP feeds are not yet integrated; do not infer activation from read tests.

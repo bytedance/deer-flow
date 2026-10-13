@@ -16,6 +16,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.run.model import RunChangeClockRow, RunRow
+from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
+from deerflow.persistence.workspaces.scope import resolve_resource_scope
 from deerflow.runtime.run_origin import origin_kind_of
 from deerflow.runtime.runs.store.base import (
     LeaseRenewal,
@@ -47,11 +50,23 @@ class RunRepository(RunStore):
     async def find_by_idempotency_key(self, key: str, *, user_id: str, thread_id: str) -> dict[str, Any] | None:
         """Owner-scoped recovery of an admission whose acknowledgement was lost."""
         async with self._sf() as session:
-            row = await session.scalar(select(RunRow).where(RunRow.idempotency_key == key, RunRow.user_id == user_id, RunRow.thread_id == thread_id))
+            row = await session.scalar(self._read_scope(select(RunRow).where(RunRow.idempotency_key == key, RunRow.thread_id == thread_id), user_id))
             return self._row_to_dict(row) if row is not None else None
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, workspace_required=False) -> None:
         self._sf = session_factory
+        self._workspace_required = workspace_required
+
+    def _read_scope(self, stmt, user_id):
+        context = resolve_resource_scope(None, user_id, required=self._workspace_required)
+        if user_id is not None:
+            stmt = stmt.where(RunRow.user_id == user_id)
+        if context is not None:
+            # Filter before cursors, limits or reduction. A matching run alone
+            # cannot authorize an incompatible or missing private thread parent.
+            parent = ThreadMetaRepository._owned_scope(select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id == RunRow.thread_id), user_id, context).correlate(RunRow).exists()
+            stmt = stmt.where(RunRow.workspace_id == context.workspace_id, parent)
+        return stmt
 
     @staticmethod
     async def _next_change_seq(session: AsyncSession) -> int:
@@ -192,12 +207,8 @@ class RunRepository(RunStore):
     ):
         resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.get")
         async with self._sf() as session:
-            row = await session.get(RunRow, run_id)
-            if row is None:
-                return None
-            if resolved_user_id is not None and row.user_id != resolved_user_id:
-                return None
-            return self._row_to_dict(row)
+            row = await session.scalar(self._read_scope(select(RunRow).where(RunRow.run_id == run_id), resolved_user_id))
+            return self._row_to_dict(row) if row is not None else None
 
     async def list_changed(
         self,
@@ -215,8 +226,7 @@ class RunRepository(RunStore):
                 and_(RunRow.change_seq == after_change_seq, RunRow.run_id > after_run_id),
             ),
         )
-        if resolved_user_id is not None:
-            stmt = stmt.where(RunRow.user_id == resolved_user_id)
+        stmt = self._read_scope(stmt, resolved_user_id)
         stmt = stmt.order_by(RunRow.change_seq.asc(), RunRow.run_id.asc()).limit(limit)
         async with self._sf() as session:
             result = await session.execute(stmt)
@@ -228,7 +238,7 @@ class RunRepository(RunStore):
         Seeds the activity feed cursor: one backward seek on
         ``ix_runs_user_change_seq``. ``user_id`` is always an explicit owner id.
         """
-        stmt = select(RunRow.change_seq, RunRow.run_id).where(RunRow.user_id == user_id).order_by(RunRow.change_seq.desc(), RunRow.run_id.desc()).limit(1)
+        stmt = self._read_scope(select(RunRow.change_seq, RunRow.run_id), user_id).order_by(RunRow.change_seq.desc(), RunRow.run_id.desc()).limit(1)
         async with self._sf() as session:
             row = (await session.execute(stmt)).first()
         return (int(row.change_seq), str(row.run_id)) if row is not None else None
@@ -244,8 +254,7 @@ class RunRepository(RunStore):
     ):
         resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.list_by_thread")
         stmt = select(RunRow).where(RunRow.thread_id == thread_id, RunRow.operation_kind == "run")
-        if resolved_user_id is not None:
-            stmt = stmt.where(RunRow.user_id == resolved_user_id)
+        stmt = self._read_scope(stmt, resolved_user_id)
         if before_created_at and before_run_id:
             cursor_dt = datetime.fromisoformat(normalize_run_created_at_iso(before_created_at))
             if cursor_dt.tzinfo is None:
@@ -270,7 +279,7 @@ class RunRepository(RunStore):
     async def list_by_thread_created_at(self, thread_id, *, user_id, created_at):
         timestamp = datetime.fromisoformat(canonical_run_created_at(created_at))
         async with self._sf() as session:
-            result = await session.execute(select(RunRow).where(RunRow.thread_id == thread_id, RunRow.user_id == user_id, RunRow.created_at == timestamp))
+            result = await session.execute(self._read_scope(select(RunRow).where(RunRow.thread_id == thread_id, RunRow.created_at == timestamp), user_id))
             return [self._row_to_dict(row) for row in result.scalars()]
 
     async def list_successful_regenerate_sources(
@@ -288,8 +297,7 @@ class RunRepository(RunStore):
             source.is_not(None),
             source != "",
         )
-        if resolved_user_id is not None:
-            stmt = stmt.where(RunRow.user_id == resolved_user_id)
+        stmt = self._read_scope(stmt, resolved_user_id)
         async with self._sf() as session:
             result = await session.execute(stmt)
             return {value for value in result.scalars() if isinstance(value, str) and value}
@@ -309,8 +317,7 @@ class RunRepository(RunStore):
             source.is_not(None),
             source != "",
         )
-        if resolved_user_id is not None:
-            stmt = stmt.where(RunRow.user_id == resolved_user_id)
+        stmt = self._read_scope(stmt, resolved_user_id)
         stmt = stmt.order_by(RunRow.created_at.asc())
         async with self._sf() as session:
             result = await session.execute(stmt)
@@ -323,12 +330,11 @@ class RunRepository(RunStore):
         *,
         user_id: str | None | _AutoSentinel = AUTO,
     ):
-        if not run_ids:
-            return {}
         resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.get_many_by_thread")
         stmt = select(RunRow).where(RunRow.thread_id == thread_id, RunRow.operation_kind == "run", RunRow.run_id.in_(run_ids))
-        if resolved_user_id is not None:
-            stmt = stmt.where(RunRow.user_id == resolved_user_id)
+        stmt = self._read_scope(stmt, resolved_user_id)
+        if not run_ids:
+            return {}
         async with self._sf() as session:
             result = await session.execute(stmt)
             return {row.run_id: self._row_to_dict(row) for row in result.scalars()}
@@ -642,8 +648,7 @@ class RunRepository(RunStore):
             RunRow.middleware_tokens,
             RunRow.token_usage_by_model,
         ).where(_thread, _run_operation, _completed)
-        if resolved_user_id is not None:
-            stmt = stmt.where(RunRow.user_id == resolved_user_id)
+        stmt = self._read_scope(stmt, resolved_user_id)
 
         async with self._sf() as session:
             rows = (await session.execute(stmt)).all()
