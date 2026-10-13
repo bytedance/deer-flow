@@ -45,6 +45,7 @@ import os
 import posixpath
 import shlex
 import signal
+import stat
 import threading
 import time
 import uuid
@@ -122,6 +123,10 @@ _MOUNT_PASS_DEADLINE_SECONDS = 120
 
 class _E2BMaintenanceShutdownTimeout(RuntimeError):
     """A bounded maintenance-worker join did not prove worker termination."""
+
+
+class _ThreadResourceRestoreError(RuntimeError):
+    """A fresh VM cannot be used until persisted thread files are restored."""
 
 
 # Recursive skill projection replacement must never target an operating-system
@@ -1354,6 +1359,10 @@ class E2BSandboxProvider(SandboxProvider):
         mount_result: MountUploadResult | None = None
         try:
             mount_result = self._apply_mounts(client, user_id=user_id, thread_id=thread_id)
+        except _ThreadResourceRestoreError:
+            remote_destroyed = self._discard_unusable_sandbox(client, sandbox_id)
+            self._complete_reserved_remote_op(sandbox_id, remote_destroyed=remote_destroyed)
+            raise
         except Exception as e:
             logger.warning("Failed to apply some mounts to e2b sandbox %s: %s", sandbox_id, e)
 
@@ -2020,21 +2029,23 @@ class E2BSandboxProvider(SandboxProvider):
             self._bootstrap_sandbox_paths(client)
         except Exception as e:
             logger.exception("Failed to bootstrap e2b sandbox %s. Discarding the unusable sandbox.", sandbox_id)
-            remote_destroyed = False
-            if self._claim_ownership(sandbox_id, for_destroy=True):
-                kill_error = self._kill_client(client)
-                remote_destroyed = kill_error is None
-                if kill_error:
-                    logger.warning("Failed to kill e2b sandbox %s after bootstrap failure: %s", sandbox_id, kill_error)
-                self._release_ownership(sandbox_id)
-            else:
-                logger.info(
-                    "Not killing E2B sandbox %s after bootstrap failure because a peer owns it",
-                    sandbox_id,
-                )
-            self._safe_close_client(client)
+            remote_destroyed = self._discard_unusable_sandbox(client, sandbox_id)
             return e, remote_destroyed
         return None, True
+
+    def _discard_unusable_sandbox(self, client: E2BClientSandbox, sandbox_id: str) -> bool:
+        """Clean up failed initialization using the existing ownership fence."""
+        remote_destroyed = False
+        if self._claim_ownership(sandbox_id, for_destroy=True):
+            kill_error = self._kill_client(client)
+            remote_destroyed = kill_error is None
+            if kill_error:
+                logger.warning("Failed to kill e2b sandbox %s after initialization failure: %s", sandbox_id, kill_error)
+            self._release_ownership(sandbox_id)
+        else:
+            logger.info("Not killing E2B sandbox %s after initialization failure because a peer owns it", sandbox_id)
+        self._safe_close_client(client)
+        return remote_destroyed
 
     def _bootstrap_sandbox_paths(self, client: E2BClientSandbox) -> None:
         """Materialise DeerFlow's virtual path layout inside the e2b VM.
@@ -2146,6 +2157,35 @@ class E2BSandboxProvider(SandboxProvider):
             logger.warning("Could not ensure skills projection for user %s: %s", user_id, exc, exc_info=True)
             return []
 
+    def _restore_thread_resources(self, client: E2BClientSandbox, *, thread_id: str, user_id: str, budget: _MountUploadBudget) -> None:
+        """Hydrate only fresh VMs from Gateway-visible, owner-scoped paths."""
+        from deerflow.config.paths import get_paths
+
+        paths = get_paths()
+        home_dir = self._config["home_dir"].rstrip("/") or DEFAULT_E2B_HOME_DIR
+        sources = [
+            (paths.sandbox_work_dir(thread_id, user_id=user_id), "workspace", False),
+            (paths.sandbox_uploads_dir(thread_id, user_id=user_id), "uploads", False),
+            (paths.sandbox_outputs_dir(thread_id, user_id=user_id), "outputs", False),
+            (paths.acp_workspace_dir(thread_id, user_id=user_id), "acp-workspace", True),
+        ]
+        for source, subdir, read_only in sources:
+            budget.check_deadline()
+            # Reject linked roots/ancestors: a thread resource must never read
+            # another owner's directory or arbitrary Gateway files.
+            for part in (source, *source.parents):
+                if part == paths.base_dir:
+                    break
+                if part.is_symlink():
+                    raise ValueError("Thread resource directory must not be a symlink")
+            try:
+                mode = source.stat().st_mode
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISDIR(mode):
+                raise ValueError("Thread resource path must be a directory")
+            self._upload_tree(client, source, f"{home_dir}/{subdir}", read_only, budget=budget, thread_resource=True)
+
     def _apply_mounts(
         self,
         client: E2BClientSandbox,
@@ -2174,6 +2214,13 @@ class E2BSandboxProvider(SandboxProvider):
             )
 
         effective_user_id = user_id or get_effective_user_id()
+        # Required files go first and share the creation upload budget with
+        # optional skills/mounts. Never hand out a partially restored VM.
+        if thread_id is not None:
+            try:
+                self._restore_thread_resources(client, thread_id=thread_id, user_id=effective_user_id, budget=budget)
+            except Exception as exc:
+                raise _ThreadResourceRestoreError("Failed to restore persisted thread resources to e2b sandbox") from exc
         projection_mounts = self._skill_projection_mounts(effective_user_id, thread_id) if thread_id is not None else self._skill_projection_mounts(effective_user_id)
         configured_mounts = self._config.get("mounts") or []
         skills_root = self._config["skills_container_path"]
@@ -2626,6 +2673,7 @@ class E2BSandboxProvider(SandboxProvider):
         read_only: bool,
         *,
         budget: _MountUploadBudget | None = None,
+        thread_resource: bool = False,
     ) -> None:
         """Recursively upload ``src`` into ``dest_dir`` inside the sandbox."""
         started_at = time.monotonic()
@@ -2649,6 +2697,24 @@ class E2BSandboxProvider(SandboxProvider):
 
         if source_is_file:
             add_file(src, f"{dest_dir}/{src.name}")
+        elif thread_resource:
+            from deerflow.uploads.manager import is_upload_staging_file
+
+            def scan_error(error: OSError) -> None:
+                raise error
+
+            for directory, dirnames, filenames in os.walk(src, followlinks=False, onerror=scan_error):
+                if budget is not None:
+                    budget.check_deadline()
+                parent = Path(directory)
+                dirnames[:] = [name for name in dirnames if not (parent / name).is_symlink()]
+                for name in filenames:
+                    path = parent / name
+                    if is_upload_staging_file(name) or name.endswith(".e2bsync.tmp"):
+                        continue
+                    if not stat.S_ISREG(path.lstat().st_mode):
+                        continue
+                    add_file(path, f"{dest_dir}/{path.relative_to(src).as_posix()}")
         else:
             for path in src.rglob("*"):
                 if budget is not None:
@@ -2674,7 +2740,16 @@ class E2BSandboxProvider(SandboxProvider):
                             make_dir(parent)
                 except Exception:
                     pass
-                with path.open("rb") as fh:
+                if thread_resource:
+                    if path.is_symlink() or not path.resolve().is_relative_to(src.resolve()):
+                        raise ValueError("Thread resource changed to a symlink during upload")
+                    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
+                    stream = os.fdopen(fd, "rb")
+                else:
+                    stream = path.open("rb")
+                with stream as fh:
+                    if thread_resource and not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+                        raise ValueError("Thread resource is no longer a regular file")
                     actual_size = os.fstat(fh.fileno()).st_size
                     if actual_size != expected_size:
                         raise ValueError(f"Mount file {path} changed during upload preflight")

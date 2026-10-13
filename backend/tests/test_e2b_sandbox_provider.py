@@ -3391,6 +3391,212 @@ def _setup_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(paths_mod, "get_paths", lambda: Paths(base_dir=tmp_path), raising=False)
 
 
+@pytest.mark.parametrize("home_dir", ["/home/user", "/home/custom"])
+@pytest.mark.parametrize("async_acquire", [False, True])
+def test_recreated_sandbox_restores_saved_thread_files(monkeypatch, tmp_path, home_dir, async_acquire):
+    """A second turn must read saved bytes after the first VM expires."""
+    _setup_paths(monkeypatch, tmp_path)
+    provider = _make_provider()
+    provider._config["home_dir"] = home_dir
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda *args: [])
+    sdk = _install_fake_sdk(monkeypatch, provider)
+    clients = []
+
+    def create(**kwargs):
+        client = FakeClient(sandbox_id=f"vm-{len(clients)}")
+        clients.append(client)
+        return client
+
+    sdk.create_factory = create
+
+    def acquire():
+        if async_acquire:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                provider._acquire_executor = executor
+                return asyncio.run(provider.acquire_async("t1", user_id="u1"))
+        return provider.acquire("t1", user_id="u1")
+
+    paths = Paths(base_dir=tmp_path)
+    paths.ensure_thread_dirs("t1", user_id="u1")
+    (paths.sandbox_uploads_dir("t1", user_id="u1") / "input.bin").write_bytes(b"\x00\xff")
+    (paths.acp_workspace_dir("t1", user_id="u1") / "result.md").write_text("ACP result", encoding="utf-8")
+    # Neither another owner nor another thread may supply the restored bytes.
+    for user_id, thread_id in [("u2", "t1"), ("u1", "t2")]:
+        paths.ensure_thread_dirs(thread_id, user_id=user_id)
+        (paths.sandbox_outputs_dir(thread_id, user_id=user_id) / "private.txt").write_text("private", encoding="utf-8")
+
+    first_id = acquire()
+    first = provider.get(first_id)
+    contents = {"outputs/test.md": "# Saved output\n", "workspace/nested/test.md": "# Saved work\n"}
+    for relative, content in contents.items():
+        first.write_file(f"/mnt/user-data/{relative}", content)
+    listing = "".join(f"{len(content.encode())}\t2.000000000\t{home_dir}/{relative}\x00" for relative, content in contents.items())
+    clients[0].commands._responses.append(SimpleNamespace(stdout=listing, stderr="", exit_code=0))
+    provider.release(first_id)
+    for relative, content in contents.items():
+        assert (paths.thread_dir("t1", user_id="u1") / "user-data" / relative).read_text(encoding="utf-8") == content
+
+    def expired(*args, **kwargs):
+        raise RuntimeError(FakeCommandsAPI.NOT_FOUND_MSG)
+
+    sdk.connect_factory = expired
+    second_id = acquire()
+    assert second_id != first_id
+    second = provider.get(second_id)
+    for relative, content in contents.items():
+        assert second.read_file(f"/mnt/user-data/{relative}") == content
+    assert clients[1].files.store[f"{home_dir}/uploads/input.bin"] == b"\x00\xff"
+    assert clients[1].files.store[f"{home_dir}/acp-workspace/result.md"] == b"ACP result"
+    assert not any("private.txt" in path for path in clients[1].files.store)
+    assert second.mount_upload_result.completed_files == 4
+    provider.shutdown()
+
+
+@pytest.mark.parametrize("reuse", ["active", "warm", "discovered"])
+def test_thread_restore_does_not_overwrite_live_sandbox(monkeypatch, tmp_path, reuse):
+    _setup_paths(monkeypatch, tmp_path)
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda *args: [])
+    sdk = _install_fake_sdk(monkeypatch, provider)
+    paths = Paths(base_dir=tmp_path)
+    paths.ensure_thread_dirs("t1", user_id="u1")
+    (paths.sandbox_outputs_dir("t1", user_id="u1") / "test.md").write_text("stale", encoding="utf-8")
+    client = FakeClient(files=FakeFilesAPI({"/home/user/outputs/test.md": b"newer"}))
+    sdk.connect_factory = lambda *args, **kwargs: client
+    if reuse == "active":
+        provider._sandboxes[client.sandbox_id] = _make_sandbox(client, sandbox_id=client.sandbox_id)
+        provider._thread_sandboxes[provider._thread_key("t1", "u1")] = client.sandbox_id
+    elif reuse == "warm":
+        provider._warm_pool[client.sandbox_id] = (provider._stable_seed("t1", "u1"), time.time())
+    else:
+        sdk.list_return = [_info(client.sandbox_id, "u1", "t1")]
+    sandbox_id = provider.acquire("t1", user_id="u1")
+    assert provider.get(sandbox_id).read_file("/mnt/user-data/outputs/test.md") == "newer"
+    assert client.files.write_calls == []
+    provider.shutdown()
+
+
+@pytest.mark.parametrize("failure", ["write", "file_limit", "byte_limit", "deadline"])
+def test_thread_restore_failure_discards_unusable_sandbox(monkeypatch, tmp_path, failure):
+    _setup_paths(monkeypatch, tmp_path)
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda *args: [])
+    sdk = _install_fake_sdk(monkeypatch, provider)
+    client = FakeClient()
+    sdk.create_factory = lambda **kwargs: client
+    paths = Paths(base_dir=tmp_path)
+    paths.ensure_thread_dirs("t1", user_id="u1")
+    saved = paths.sandbox_outputs_dir("t1", user_id="u1") / "test.md"
+    saved.write_bytes(b"saved")
+    if failure == "write":
+        monkeypatch.setattr(client.files, "write", MagicMock(side_effect=OSError("upload failed")))
+    elif failure == "file_limit":
+        monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_FILES", 0)
+    elif failure == "byte_limit":
+        monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_TOTAL_BYTES", 1)
+    else:
+        provider._config["mount_upload_deadline_seconds"] = 0
+    with pytest.raises(RuntimeError, match="restore.*thread"):
+        provider.acquire("t1", user_id="u1")
+    assert client.killed and client.closed
+    assert not provider._sandboxes
+    assert not provider._thread_sandboxes
+    assert not provider._remote_ops_in_progress
+    assert provider._reserved_slots == 0
+    assert saved.read_bytes() == b"saved"
+    provider.shutdown()
+
+
+def test_thread_restore_skips_links_and_unpublished_files(monkeypatch, tmp_path):
+    from support.symlinks import symlink_or_skip
+
+    _setup_paths(monkeypatch, tmp_path)
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda *args: [])
+    paths = Paths(base_dir=tmp_path)
+    paths.ensure_thread_dirs("t1", user_id="u1")
+    uploads = paths.sandbox_uploads_dir("t1", user_id="u1")
+    (uploads / "ready.txt").write_bytes(b"ready")
+    (uploads / ".upload-inflight.part").write_bytes(b"partial")
+    (uploads / "result.e2bsync.tmp").write_bytes(b"partial")
+    outside = tmp_path / "private"
+    outside.mkdir()
+    (outside / "secret.txt").write_bytes(b"secret")
+    symlink_or_skip(uploads / "linked.txt", outside / "secret.txt")
+    symlink_or_skip(uploads / "linked-dir", outside, target_is_directory=True)
+    client = FakeClient()
+
+    result = provider._apply_mounts(client, user_id="u1", thread_id="t1")
+
+    assert client.files.write_calls == [("/home/user/uploads/ready.txt", b"ready")]
+    assert result.completed_files == 1
+
+
+@pytest.mark.parametrize("root", ["user", "thread", "workspace"])
+def test_thread_restore_rejects_linked_resource_roots(monkeypatch, tmp_path, root):
+    from support.symlinks import symlink_or_skip
+
+    _setup_paths(monkeypatch, tmp_path)
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda *args: [])
+    sdk = _install_fake_sdk(monkeypatch, provider)
+    client = FakeClient()
+    sdk.create_factory = lambda **kwargs: client
+    paths = Paths(base_dir=tmp_path)
+    roots = {
+        "user": paths.user_dir("u1"),
+        "thread": paths.thread_dir("t1", user_id="u1"),
+        "workspace": paths.sandbox_work_dir("t1", user_id="u1"),
+    }
+    source = roots[root]
+    source.parent.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "private"
+    outside.mkdir()
+    symlink_or_skip(source, outside, target_is_directory=True)
+    with pytest.raises(RuntimeError, match="restore.*thread"):
+        provider.acquire("t1", user_id="u1")
+    assert client.files.write_calls == []
+    assert client.killed and client.closed
+    provider.shutdown()
+
+
+def test_thread_restore_shares_budget_with_optional_mounts(monkeypatch, tmp_path):
+    _setup_paths(monkeypatch, tmp_path)
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_FILES", 1)
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda *args: [])
+    paths = Paths(base_dir=tmp_path)
+    paths.ensure_thread_dirs("t1", user_id="u1")
+    (paths.sandbox_outputs_dir("t1", user_id="u1") / "saved.txt").write_bytes(b"saved")
+    optional = tmp_path / "optional.txt"
+    optional.write_bytes(b"optional")
+    provider._config["mounts"] = [SimpleNamespace(host_path=str(optional), container_path="/mnt/extra", read_only=False)]
+    client = FakeClient()
+
+    result = provider._apply_mounts(client, user_id="u1", thread_id="t1")
+
+    assert client.files.write_calls == [("/home/user/outputs/saved.txt", b"saved")]
+    assert result.truncated
+    assert result.completed_files == 1
+
+
+def test_thread_restore_scan_error_is_not_an_empty_directory(monkeypatch, tmp_path):
+    _setup_paths(monkeypatch, tmp_path)
+    provider = _make_provider()
+    paths = Paths(base_dir=tmp_path)
+    paths.ensure_thread_dirs("t1", user_id="u1")
+
+    def unreadable(source, *, followlinks, onerror):
+        onerror(PermissionError("unreadable directory"))
+        return iter(())
+
+    monkeypatch.setattr(os, "walk", unreadable)
+    with pytest.raises(RuntimeError, match="restore.*thread"):
+        provider._apply_mounts(FakeClient(), user_id="u1", thread_id="t1")
+
+
 def test_sync_outputs_to_host_writes_new_files(monkeypatch, tmp_path):
     p = _make_provider()
     _setup_paths(monkeypatch, tmp_path)

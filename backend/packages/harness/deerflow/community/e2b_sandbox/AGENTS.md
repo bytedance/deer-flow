@@ -1,5 +1,19 @@
 # E2B lifecycle
 
+Fresh VM creation restores owner/thread-scoped workspace, uploads, outputs and
+ACP files from Gateway-visible `Paths` directories before registering the VM.
+Do not use `host_*` paths: those address the Docker host, not Gateway storage.
+Restoration is required and shares the creation upload budget with optional
+skills and mounts. Errors discard the VM through ownership-fenced cleanup and
+retain capacity if destruction is unconfirmed. Active, warm and discovered VM
+reuse must never replay persisted files over live contents.
+Reject symlinked resource roots/ancestors; skip nested symlinks, special files,
+upload staging files and output-sync temporary files. Directory scan failures
+must propagate rather than masquerading as empty directories. Release sync is
+still copy-only; deletion reconciliation is a separate contract.
+Regressions: `tests/test_e2b_sandbox_provider.py` exercises release, expiry and
+recreation using saved bytes, plus isolation, reuse and failed restoration.
+
 Reconciliation floors active-client TTL renewals at the SDK's default timeout
 and twice the sum of the configured reconciliation interval and pass budget
 (subject to the E2B timeout cap). Release still uses the configured idle timeout.
