@@ -343,8 +343,9 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         source sandbox id when applicable) is stored in ``viewed_images``,
         avoiding large duplicate payloads across every checkpoint (see #4138).
 
-        Entries are admitted oldest-first while they fit ``max_injected_images``
-        and ``max_injected_total_chars`` (see #6825); an entry over budget keeps
+        Content blocks are emitted oldest-first, but budget admission itself
+        runs newest-first (reversed insertion order) so the most recently
+        viewed images survive the caps (see #6825); an entry over budget keeps
         its text bullet plus a placeholder instead of its base64 payload.
 
         Args:

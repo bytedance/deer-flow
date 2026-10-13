@@ -39,6 +39,7 @@ from deerflow.agents.middlewares.view_image_middleware import (
     _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
     ViewImageMiddleware,
 )
+from deerflow.agents.thread_state import merge_viewed_images
 from deerflow.config.paths import Paths
 from deerflow.storage import BlobRef
 
@@ -1089,3 +1090,37 @@ def test_injection_budget_skips_reads_for_omitted_entries(tmp_path):
 
     assert len([b for b in blocks if isinstance(b, dict) and b.get("type") == "image_url"]) == 1
     assert len(calls) == 1
+
+
+def test_reviewing_omitted_image_rescues_it_from_budget(tmp_path):
+    """Re-viewing an omitted image must move it to the newest slot so the
+    placeholder's recovery advice actually works (see #6829 review)."""
+    viewed_images = {}
+    for i in range(4):
+        viewed_images[f"/mnt/user-data/outputs/img_{i}.png"] = _make_viewed_image(tmp_path, f"img_{i}.png", data=bytes([i]) + b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+
+    mw = ViewImageMiddleware(max_injected_images=2)
+
+    def host_ok(_, actual):
+        return Path(actual).is_relative_to(tmp_path)
+
+    blocks = mw._create_image_details_message({"viewed_images": viewed_images}, host_path_allowed=host_ok)
+    injected = [b for b in blocks if isinstance(b, dict) and b.get("type") == "image_url"]
+    assert len(injected) == 2  # img_2, img_3 admitted; img_0/img_1 omitted
+
+    # The model follows the placeholder advice and re-views img_0; the reducer
+    # re-inserts the updated key at the end, making it the newest entry.
+    updated = merge_viewed_images(
+        viewed_images,
+        {"/mnt/user-data/outputs/img_0.png": _make_viewed_image(tmp_path, "img_0.png", data=bytes([0]) + b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)},
+    )
+    assert list(updated.keys())[-1] == "/mnt/user-data/outputs/img_0.png"
+
+    blocks = mw._create_image_details_message({"viewed_images": updated}, host_path_allowed=host_ok)
+    urls = [b["image_url"]["url"] for b in blocks if isinstance(b, dict) and b.get("type") == "image_url"]
+    assert len(urls) == 2
+    # Render order is oldest-first, so the admitted slots are img_3 then the
+    # re-viewed img_0; img_1/img_2 stay omitted.
+    payloads = [base64.b64decode(url.split(",", 1)[1]) for url in urls]
+    assert payloads[0].startswith(bytes([3]))
+    assert payloads[1].startswith(bytes([0]))
