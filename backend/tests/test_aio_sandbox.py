@@ -2901,6 +2901,77 @@ class TestDownloadFile:
 class TestClose:
     """Verify AioSandbox.close() tears down the host-side HTTP client (#2872)."""
 
+    def test_close_waits_for_download_stream_cleanup(self, sandbox):
+        reading = threading.Event()
+        allow_read = threading.Event()
+        closing = threading.Event()
+        stream_closed = threading.Event()
+        close_observed_cleanup = []
+        outcomes = []
+
+        class ObservedLock:
+            def __init__(self):
+                self.lock = threading.Lock()
+                self.waited_for_reader = False
+
+            def __enter__(self):
+                if threading.current_thread().name == "download-close":
+                    if self.lock.acquire(blocking=False):
+                        closing.set()
+                        return
+                    self.waited_for_reader = True
+                    closing.set()
+                self.lock.acquire()
+
+            def __exit__(self, *args):
+                self.lock.release()
+
+        def stream():
+            try:
+                reading.set()
+                assert allow_read.wait(timeout=5)
+                yield b"data"
+            finally:
+                stream_closed.set()
+
+        def close_client():
+            close_observed_cleanup.append(stream_closed.is_set())
+
+        http_client = MagicMock(spec=["close"])
+        http_client.close.side_effect = close_client
+        sandbox._client._client_wrapper = SimpleNamespace(httpx_client=SimpleNamespace(httpx_client=http_client))
+        sandbox._client.file.download_file.return_value = stream()
+        sandbox._lock = ObservedLock()
+
+        def download():
+            try:
+                outcomes.append(sandbox.download_file("/mnt/user-data/outputs/image.png", max_bytes=4))
+            except BaseException as error:
+                outcomes.append(error)
+
+        reader = threading.Thread(target=download)
+        closer = threading.Thread(target=sandbox.close, name="download-close")
+        reader.start()
+        try:
+            assert reading.wait(timeout=5)
+            closer.start()
+            assert closing.wait(timeout=5)
+            assert sandbox._lock.waited_for_reader
+            http_client.close.assert_not_called()
+            assert not stream_closed.is_set()
+        finally:
+            allow_read.set()
+            reader.join(timeout=5)
+            if closer.ident is not None:
+                closer.join(timeout=5)
+        assert not reader.is_alive()
+        assert not closer.is_alive()
+        assert outcomes == [b"data"]
+        assert stream_closed.is_set()
+        assert close_observed_cleanup == [True]
+        http_client.close.assert_called_once_with()
+        assert sandbox._client is None
+
     def test_close_calls_real_nested_httpx_client(self, sandbox):
         """close() must close the real httpx.Client at the bottom of the chain.
 

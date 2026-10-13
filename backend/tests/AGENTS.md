@@ -1,5 +1,13 @@
 # Backend Tests
 
+`test_client_upload_snapshot.py` keeps upload publication and conversion on the
+same private capture. Cover source edits/removal, both conversion branches,
+same-file rejection, metadata and cleanup; retain sandbox symlink defenses.
+Exercise both replacement and first-time publication; mutation hooks must actually
+run on both paths. Force collision retries while editing/removing the source and
+assert one source open, original metadata, preserved competing uploads, companion
+ownership and capture cleanup. Retain the real XLSX conversion coverage.
+
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
 Local nginx path fixtures convert MSYS output through the selected Git Bash's
@@ -266,3 +274,7 @@ Writable-directory cases remain portable.
 of an existing entry on failure. A cleanup failure must preserve the original
 publish exception, including interruption. Import the scanner during fixture
 setup, after the autouse fixtures initialize runtime, to avoid the package cycle.
+
+### Web model provider presets
+
+`test_managed_provider_presets.py` covers encrypted compatibility, auto IDs, key switching, snapshot isolation and native/compatible protocols. Its HTTP double is below actual LangChain/vendor SDK serialization; do not replace these adapters with successful stubs. `test_managed_presets_live.py` requires explicit opt-in and vendor credentials, and remains skipped in CI.

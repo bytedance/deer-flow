@@ -35,10 +35,10 @@ def test_every_entry_declares_both_flags_as_bools():
         assert all(isinstance(value, bool) for value in entry.values()), provider
 
 
-def test_only_wecom_pushes_proactively_today():
-    assert {provider for provider, entry in CHANNEL_CAPABILITIES.items() if entry["proactive_notifications"]} == {"wecom"}
+def test_wecom_and_feishu_push_proactively():
+    assert {provider for provider, entry in CHANNEL_CAPABILITIES.items() if entry["proactive_notifications"]} == {"wecom", "feishu"}
     assert supports_proactive_notifications("wecom") is True
-    assert supports_proactive_notifications("feishu") is False
+    assert supports_proactive_notifications("feishu") is True
 
 
 @pytest.mark.parametrize("provider", ["", "unknown", "WeCom", None, 1])

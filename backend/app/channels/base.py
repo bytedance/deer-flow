@@ -149,6 +149,22 @@ class Channel(ABC):
             raise ChannelUnavailable(f"channel '{self.name}' is not running")
         raise NotImplementedError(f"channel '{self.name}' does not support proactive notifications")
 
+    async def send_notification_for_owner(self, *, owner_user_id: str | None, target: str, text_markdown: str) -> None:
+        """Deliver to an already-verified identity, with owner context for routing.
+
+        Providers may resolve a private conversation from that owner's current
+        bindings. The outbox target remains the external account identity.
+        """
+        await self.send_notification(target=target, text_markdown=text_markdown)
+
+    async def send_group_notification_for_owner(self, *, owner_user_id: str | None, target: str, text_markdown: str) -> None:
+        """Push to an explicitly selected group binding, never a personal fallback.
+
+        ``target`` is the owner's connection ID, not a provider chat ID.
+        Providers must revalidate that binding before sending to its group.
+        """
+        raise NotImplementedError(f"channel '{self.name}' does not support group notifications")
+
     # -- helpers -----------------------------------------------------------
 
     async def _send_with_retry(

@@ -18,7 +18,7 @@ CHANNEL_CAPABILITIES: dict[str, dict[str, bool]] = {
     "buzz": {"supports_streaming": True, "proactive_notifications": False},
     "dingtalk": {"supports_streaming": False, "proactive_notifications": False},
     "discord": {"supports_streaming": False, "proactive_notifications": False},
-    "feishu": {"supports_streaming": True, "proactive_notifications": False},
+    "feishu": {"supports_streaming": True, "proactive_notifications": True},
     "github": {"supports_streaming": False, "proactive_notifications": False},
     "qq": {"supports_streaming": False, "proactive_notifications": False},
     "slack": {"supports_streaming": False, "proactive_notifications": False},

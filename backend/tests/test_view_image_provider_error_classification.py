@@ -26,7 +26,7 @@ class _HttpMissingSandbox:
     def __init__(self) -> None:
         self.downloads: list[str] = []
 
-    def download_file(self, path: str) -> bytes:
+    def download_file(self, path: str, *, max_bytes: int | None = None) -> bytes:
         self.downloads.append(path)
         try:
             raise _HttpNotFoundError("not found")

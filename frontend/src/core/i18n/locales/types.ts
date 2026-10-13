@@ -835,6 +835,33 @@ export interface Translations {
       removeCapBlocked: string;
       submit: string;
     };
+    notificationGroup: {
+      savedUnavailable: string;
+      clearSaved: string;
+      bind: string;
+      refresh: string;
+      bindInstructions: string;
+      generating: string;
+      bindFailed: string;
+      command: string;
+      expiresAt: string;
+      copy: string;
+      copied: string;
+      copyFailed: string;
+      newCode: string;
+      close: string;
+      label: string;
+      detailLabel: string;
+      none: string;
+      personalHint: string;
+      emptyHint: string;
+      loading: string;
+      unavailable: string;
+      unavailableHint: string;
+      unnamed: string;
+      unnamedHint: string;
+      loadFailed: string;
+    };
     form: {
       createTitle: string;
       editTitle: string;
@@ -995,6 +1022,7 @@ export interface Translations {
       invalidGoal: string;
       goalRequiresFreshThread: string;
       invalidStopCondition: string;
+      invalidNotificationGroup: string;
       invalidMaxRuns: string;
       endAtInPast: string;
       endAtBeforeFirstRun: string;
@@ -1119,10 +1147,16 @@ export interface Translations {
     settingsDisplayName: string;
     settingsDisplayNameTooLong: string;
     settingsDisplayNameHint: string;
+    settingsToolGroups: string;
+    settingsToolGroupsHint: string;
+    settingsToolGroupsAll: string;
+    settingsToolGroupsLoadFailed: string;
+    settingsToolGroupUnavailable: string;
     settingsDescription: string;
     settingsKnowledge: string;
     settingsKnowledgeHint: string;
     settingsKnowledgeReset: string;
+    settingsKnowledgeSaveToolAccess: string;
     settingsModel: string;
     settingsModelDefault: string;
     settingsTemperature: string;
@@ -1530,6 +1564,18 @@ export interface Translations {
       success: string;
       tool_call_missing: string;
       connection_failed: string;
+      customProvider: string;
+      apiKey: string;
+      advanced: string;
+      providerDefault: string;
+      requiredKey: string;
+      providerChanged: string;
+      missing_api_key: string;
+      authentication_failed: string;
+      response_limit: string;
+      revisionConflict: string;
+      keyOrCapabilities: string;
+      invalidModel: string;
     };
     users: {
       title: string;
