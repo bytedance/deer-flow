@@ -5823,6 +5823,14 @@ This release closes that milestone with **621 merged pull requests**.
   the trailing `-07` as a UTC offset and displayed UTC midnight instead: 08:00 in
   `Asia/Shanghai`, and the previous evening west of UTC, in the task list,
   detail, chat card and the edit form's prefilled time. ([#6692])
+- **subagents:** A durable batch worker that stops supervising a subagent
+  still in flight now cancels it and removes its registry entry once it stops.
+  Before, stopping the batch service in a long-lived process (an SDK
+  `SubagentRuntime` stop) left every in-flight `SubagentResult`, transcript
+  included, in the process-wide registry for good, and a repository error while
+  polling failed or requeued the item but left its subagent running
+  unsupervised, so a retry could run the same item twice. An entry that never
+  stops is removed once the item's lease has passed.
 - **gateway:** The subagent batch JSONL export
   (`GET /api/threads/{thread_id}/subagent-batches/{batch_id}/results.jsonl`)
   now reads stored results 10 rows at a time instead of 500. Each row can hold

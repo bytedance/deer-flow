@@ -4,6 +4,7 @@ import asyncio
 import logging
 import socket
 import uuid
+from concurrent.futures import Future
 from datetime import UTC, datetime
 from typing import Any
 
@@ -21,12 +22,18 @@ from deerflow.subagents.executor import (
     SubagentExecutor,
     SubagentStatus,
     cleanup_background_task,
+    force_cleanup_background_task,
     get_background_task_result,
     request_cancel_background_task,
+    run_on_isolated_subagent_loop,
 )
 from deerflow.utils.assembly_io import run_assembly
 
 logger = logging.getLogger(__name__)
+
+# Strong references to scheduled registry releases: an event loop keeps only
+# weak references to its tasks.
+_pending_releases: set[Future[None]] = set()
 
 
 def _usage(records: list[dict[str, Any]] | None) -> dict[str, int] | None:
@@ -37,6 +44,23 @@ def _usage(records: list[dict[str, Any]] | None) -> dict[str, int] | None:
         "output_tokens": sum(int(row.get("output_tokens") or 0) for row in records),
         "total_tokens": sum(int(row.get("total_tokens") or 0) for row in records),
     }
+
+
+async def _release_when_terminal(execution_id: str, *, poll_seconds: float, max_wait_seconds: float) -> None:
+    """Remove an abandoned execution's registry entry once it stops."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max_wait_seconds
+    while (result := get_background_task_result(execution_id)) is not None:
+        if result.status.is_terminal:
+            cleanup_background_task(execution_id)
+            return
+        if loop.time() >= deadline:
+            # Cancellation is cooperative, so a run can ignore it. The worker
+            # held the only copy of this id and the lease has moved on.
+            logger.warning("Abandoned batch execution %s still %s after %.0fs; removing it from the registry", execution_id, result.status.value, max_wait_seconds)
+            force_cleanup_background_task(execution_id)
+            return
+        await asyncio.sleep(poll_seconds)
 
 
 class SubagentBatchService:
@@ -409,8 +433,6 @@ class SubagentBatchService:
                 result_artifact=result_artifact,
             )
         except asyncio.CancelledError:
-            if execution_id is not None:
-                request_cancel_background_task(execution_id)
             # Do not finalize on process shutdown. The durable lease expires and
             # another worker reclaims the same stable item key.
             raise
@@ -436,7 +458,36 @@ class SubagentBatchService:
             self._execution_ids.pop(item_id, None)
             self._item_batches.pop(item_id, None)
             if execution_id is not None:
-                cleanup_background_task(execution_id)
+                self._release_execution(execution_id)
+
+    def _release_execution(self, execution_id: str) -> None:
+        """Remove a finished execution, or cancel one nothing supervises now.
+
+        Cancellation and polling errors leave this worker while the subagent is
+        still running, and the registry only removes terminal entries, so the
+        removal waits on the subagent loop for the run to stop. Waiting past
+        the lease is pointless: another worker has reclaimed the item by then.
+        """
+        result = get_background_task_result(execution_id)
+        if result is None:
+            return
+        if result.status.is_terminal:
+            cleanup_background_task(execution_id)
+            return
+        request_cancel_background_task(execution_id)
+        release = _release_when_terminal(
+            execution_id,
+            poll_seconds=self._config.poll_interval_seconds,
+            max_wait_seconds=self._config.lease_seconds,
+        )
+        try:
+            pending = run_on_isolated_subagent_loop(release)
+        except Exception:
+            release.close()
+            logger.warning("Could not schedule registry release for batch execution %s", execution_id, exc_info=True)
+            return
+        _pending_releases.add(pending)
+        pending.add_done_callback(_pending_releases.discard)
 
     async def _check_acceptance_with_lease(self, item, result, app_config):
         """Keep a completed execution leased until its advisory check drains."""
