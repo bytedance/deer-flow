@@ -7,3 +7,7 @@ Private targets contain only operator selectors and fingerprints, not credential
 Save each step immediately and refuse whole-rollout replay after any partial evidence. Preserve preselection ops snapshots and all failure history. Schema migration, first initialization, UI rollout and point-in-time restore remain separate reviewed operations.
 
 The two Shanghai machines are off. Static checks can run now; five guard tests and an actual release main must run on Jenkins after recovery. Do not infer cloud acceptance from preparation.
+
+## Restricted network build inputs
+
+Reuse the Dockerfile's existing APT_MIRROR argument through an optional validated plain DNS hostname; keep an exclusive private build-inputs.json and verify its digest in the image label before export. Do not change dependency locks, schema or runtime behavior. Docker-container BuildKit does not inherit host daemon mirrors; prepare a reviewed mirror on the dedicated builder only. Jenkins process-group abort can interrupt finally cleanup, so confirm terminal job state and the original builder CID before manually stopping it, retaining cache.

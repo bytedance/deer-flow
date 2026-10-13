@@ -112,6 +112,20 @@ class DeliveryGuards(unittest.TestCase):
             self.assertEqual(len(list(directory.glob("deploy-0*.json"))), 3)
 
     def test_private_inputs_reject_symlink_and_public_mode(self):
+        mirror_args = getattr(release, "apt_mirror_args", lambda value: [])
+        self.assertEqual(mirror_args(""), [])
+        self.assertEqual(
+            mirror_args("mirrors.tuna.tsinghua.edu.cn"),
+            ["--build-arg", "APT_MIRROR=mirrors.tuna.tsinghua.edu.cn"],
+        )
+        for invalid in [
+            "https://mirror.example",
+            "user:password@mirror.example",
+            "a/../b",
+            "bad..example",
+        ]:
+            with self.subTest(mirror=invalid), self.assertRaises(ValueError):
+                mirror_args(invalid)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory).resolve() / "input.json"
             path.write_text(json.dumps(self.lock()))

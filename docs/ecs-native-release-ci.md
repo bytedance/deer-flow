@@ -49,3 +49,14 @@ controller 更新只 force-recreate Gateway/MCP；PG、Redis、前端和现有�
 先确认两台机器的新公网 IP 和既有私网身份，恢复 NAS/bind/marker，使用既有 e84 镜像按当前部署指南恢复，保持 drain。然后检查新的 Jenkins 源码输入、builder 和私有环境清单，依次验证新流水线四阶段。先跑交付主干，成功后只选一个真实业务工作流冒烟；不用重跑已经通过的全部测试矩阵。5 个守卫用例已经在 Jenkins #3 通过，原 e84 冷恢复已通过；正式构建/传输/更新与业务冒烟继续顺序验证。
 
 本次静态证据：Ruff check/format、三个 Python 文件语法编译、示例 JSON、三个 Jenkins shell 段的 sh -n、OpenSpec 严格校验及 67 个历史输入 SHA 一致性均通过。随后 5 个守卫用例已在 Jenkins #3 通过，prepared-checkout 流水线通过实际 Jenkins Groovy 校验；原 e84 恢复仍不能当作新镜像交付成功。
+
+
+## 受限网络的构建配置
+
+2026-10-13 实测：宿主机 daemon 的镜像加速源不会自动传给 docker-container BuildKit。Docker Hub 直连超时，必须在 DeerFlow 专属 builder 的 buildkitd.toml 配置已有受信加速源；不要为此修改其他项目的 daemon/context。当前仅为停止中的原 builder 添加 docker.io mirror `docker.m.daocloud.io`，身份、缓存、1CPU/3GiB限额保留，配置SHA `209dc1f2a8bc843048f73f5168d1c9d5f533e6046cd96a39c5d2662cfaf9b640`。首次新建 builder 也应通过 --buildkitd-config 指向保存的配置；已有 container 的配置文件保留在 /etc/buildkit/buildkitd.toml，重建 container 时需重新准备。
+
+Dockerfile 已有 APT_MIRROR 参数。交付入口现在接受 --apt-mirror，Jenkins 同名 APT_MIRROR 参数可填 mirrors.tuna.tsinghua.edu.cn；留空保留原默认。仅接受 DNS 主机名，不接受 URL、路径或凭据。此次同一256KiB索引样本中，Debian直连16.38秒，已用清华源1.66秒；这里只透传现有机制，不改运行时代码、依赖锁或系统发行版。其作用是已有 builder 阶段的包镜像选择，并不改变 Dockerfile 未消费该参数的步骤。
+
+每个新 release 的 build-inputs.json 记录选定值，摘要写入镜像 org.deerflow.native.build_inputs_sha256 label 并在导出前核对，最终镜像包/ID仍由 release.json 锁定。失败和停止的目录不覆盖，重试使用新的 release ID。保持原5个守卫，只扩展输入验证断言；不增加完整矩阵或模型运行。
+
+Jenkins 任务中断会终止整个进程组，可能在 Python finally 的 docker stop 完成前再次终止清理进程。2026-10-13 #2 ABORTED 后 builder 仍运行，已在确认任务终态与原 CID 后手工停止，缓存保留；不能把 finally/SIGTERM 支持当成 Jenkins ABORTED 必然已清理。中断后始终按回执复核并只停止原确切 builder，再开始下一次构建。

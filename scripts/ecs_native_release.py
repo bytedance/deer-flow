@@ -130,8 +130,22 @@ def owned_builder(name):
             raise RuntimeError("Owned builder STOP not confirmed")
 
 
+def apt_mirror_args(value):
+    if not value:
+        return []
+    label = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
+    if (
+        len(value) > 253
+        or "." not in value
+        or any(not label.fullmatch(part) for part in value.split("."))
+    ):
+        raise ValueError("APT mirror requires a plain DNS hostname without credentials")
+    return ["--build-arg", "APT_MIRROR=" + value]
+
+
 def build(args):
     source_check(args.expected_commit)
+    mirror_options = apt_mirror_args(args.apt_mirror)
     if not NAME.fullmatch(args.release_id):
         raise ValueError("Fixed release ID required")
     parent = output_directory(args.output_root)
@@ -163,6 +177,17 @@ def build(args):
     prior = subprocess.run(["docker", "image", "inspect", tag], capture_output=True)
     if prior.returncode == 0:
         raise ValueError("Release tag already exists; select a new release ID")
+    inputs_path = directory / "build-inputs.json"
+    exclusive_json(
+        inputs_path,
+        {
+            "format_version": 1,
+            "target": "native-role",
+            "uv_extras": "postgres,browser",
+            "apt_mirror": args.apt_mirror,
+        },
+    )
+    inputs_sha = digest(inputs_path)
     log = directory / "build.log"
     fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "wb") as stream, owned_builder(args.builder):
@@ -180,6 +205,9 @@ def build(args):
                 "native-role",
                 "--build-arg",
                 "UV_EXTRAS=postgres,browser",
+                *mirror_options,
+                "--label",
+                "org.deerflow.native.build_inputs_sha256=" + inputs_sha,
                 "--label",
                 "org.opencontainers.image.revision=" + args.expected_commit,
                 "-f",
@@ -201,6 +229,7 @@ def build(args):
         or image["Architecture"] != "amd64"
         or image["Os"] != "linux"
         or labels.get("org.opencontainers.image.revision") != args.expected_commit
+        or labels.get("org.deerflow.native.build_inputs_sha256") != inputs_sha
         or labels.get("org.deerflow.native.native_revision") != NATIVE_REVISION
         or labels.get("org.deerflow.native.executor_revision") != EXECUTOR_REVISION
     ):
@@ -470,6 +499,11 @@ def main():
     parser.add_argument("--expected-commit", required=True)
     parser.add_argument("--output-root", required=True)
     parser.add_argument("--builder")
+    parser.add_argument(
+        "--apt-mirror",
+        default="",
+        help="Optional reviewed plain DNS hostname; forwards the existing Dockerfile APT_MIRROR argument",
+    )
     parser.add_argument("--environment")
     args = parser.parse_args()
     try:

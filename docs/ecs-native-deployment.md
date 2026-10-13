@@ -1,12 +1,12 @@
 # 原生 ECS 工作池部署与恢复
 
-更新：2026-10-12。两台 ECS 已开机，经 Jenkins deerflow-native-recovery #2 恢复原 e84 容器与手工 NAS bind。公网地址按本次用户信息更新，私网身份及原 host key 已核对，保持 drain。2026-10-10 验收仍作为独立历史记录。这里是操作指南；此前构建过程保存在 [部署历史](ecs-native-deployment-history-2026-10-10.md)，实际运行证据见 [测试文档](ecs-native-testing.md) 和 [恢复记录](ecs-native-shanghai-resume-2026-10-10.md)。旧固定 source566/5dda 的 Shanghai build/transfer/bootstrap 脚本是历史验收输入，不能作为当前源码的冷部署入口。
+更新：2026-10-13。两台 ECS 再次开机，经 Jenkins deerflow-native-recovery-20261013 #1 恢复原 e84 容器与手工 NAS bind。公网地址按本次用户信息更新，私网身份及原 host key 已核对，保持 drain。2026-10-10 验收仍作为独立历史记录。这里是操作指南；此前构建过程保存在 [部署历史](ecs-native-deployment-history-2026-10-10.md)，实际运行证据见 [测试文档](ecs-native-testing.md) 和 [恢复记录](ecs-native-shanghai-resume-2026-10-10.md)。旧固定 source566/5dda 的 Shanghai build/transfer/bootstrap 脚本是历史验收输入，不能作为当前源码的冷部署入口。
 
 | 资源 | 当前地址 / 约束 |
 | --- | --- |
-| Controller | `139.224.205.56` / `192.168.0.190`，2c8g |
-| Worker01 | `47.117.93.194` / `192.168.0.189`，2c4g；不发布公网服务端口 |
-| Jenkins | `106.14.210.163`；仅 `deerflow-shanghai-test` 管理这次验收 |
+| Controller | `101.132.36.217` / `192.168.0.190`，2c8g |
+| Worker01 | `139.196.37.75` / `192.168.0.189`，2c4g；不发布公网服务端口 |
+| Jenkins | `106.14.210.163`；历史 deerflow-shanghai-test 保留；新交付使用独立 deerflow-native-release |
 | NAS | `031sp6l7o6sh4hzha32-jow11.cn-shanghai.nas.aliyuncs.com:/` |
 | 命名空间 | `task6b-native-820d7a3429d9`，两端 bind 到 `/srv/deerflow-native-test` |
 
