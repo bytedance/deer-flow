@@ -11,8 +11,8 @@ Answer details use `workspace/message-details` descriptors; skill run scoping
 is documented in `docs/skill-usage-ui.md`.
 
 Encode raw paths preserving literal percent escapes. Decode Markdown destinations
-once; match image names to raw paths. Preview images use file/thread/mock context;
-preserve sanitization and key Streamdown by preview identity.
+once; match image names to raw paths. Preserve sanitization; key Streamdown by
+file/thread/mock context plus scroll key.
 File-type detection uses the basename so extensionless `Dockerfile` and
 `Makefile` artifacts remain recognizable under nested or dotted directories.
 HTML preview base detection skips DOM construction without case-insensitive `base`

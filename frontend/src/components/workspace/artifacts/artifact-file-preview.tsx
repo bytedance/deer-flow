@@ -252,7 +252,7 @@ export function ArtifactFilePreview({
       <div className="size-full overflow-auto px-4 py-3">
         <SafeStreamdown
           // Streamdown memoizes blocks by content, not the image URL resolver.
-          key={`${scrollKey}:${isMock ? "mock" : "live"}`}
+          key={JSON.stringify([scrollKey, filepath, threadId, Boolean(isMock)])}
           className="min-w-0"
           {...artifactMarkdownPlugins}
           urlTransform={transformUrl}

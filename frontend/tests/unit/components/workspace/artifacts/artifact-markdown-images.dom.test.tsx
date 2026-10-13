@@ -6,13 +6,18 @@ import { I18nProvider } from "@/core/i18n/context";
 
 afterEach(cleanup);
 
-function preview(filepath: string, threadId: string, isMock = false) {
+function preview(
+  filepath: string,
+  threadId: string,
+  isMock = false,
+  scrollKey = `${threadId}:${filepath}`,
+) {
   return (
     <I18nProvider initialLocale="en-US">
       <ArtifactFilePreview
         content="![Chart](chart.png)"
         language="markdown"
-        scrollKey={`${threadId}:${filepath}`}
+        scrollKey={scrollKey}
         artifact={{ filepath, threadId, isMock }}
       />
     </I18nProvider>
@@ -57,6 +62,53 @@ describe("Markdown artifact images", () => {
       ),
     );
   });
+
+  it.each([
+    {
+      name: "file path",
+      filepath: "/mnt/user-data/outputs/two/report.md",
+      threadId: "first",
+      isMock: false,
+      expected:
+        "/api/threads/first/artifacts/mnt/user-data/outputs/two/chart.png",
+    },
+    {
+      name: "thread",
+      filepath: "/mnt/user-data/outputs/one/report.md",
+      threadId: "second",
+      isMock: false,
+      expected:
+        "/api/threads/second/artifacts/mnt/user-data/outputs/one/chart.png",
+    },
+    {
+      name: "mock mode",
+      filepath: "/mnt/user-data/outputs/one/report.md",
+      threadId: "first",
+      isMock: true,
+      expected:
+        "/mock/api/threads/first/artifacts/mnt/user-data/outputs/one/chart.png",
+    },
+  ])(
+    "updates image destinations when $name changes with a constant scroll key",
+    async ({ filepath, threadId, isMock, expected }) => {
+      const scrollKey = "stable-preview";
+      const { rerender } = render(
+        preview(
+          "/mnt/user-data/outputs/one/report.md",
+          "first",
+          false,
+          scrollKey,
+        ),
+      );
+      expect((await screen.findByAltText("Chart")).getAttribute("src")).toBe(
+        "/api/threads/first/artifacts/mnt/user-data/outputs/one/chart.png",
+      );
+      rerender(preview(filepath, threadId, isMock, scrollKey));
+      await waitFor(() =>
+        expect(screen.getByAltText("Chart").getAttribute("src")).toBe(expected),
+      );
+    },
+  );
 
   it.each([false, true])(
     "keeps sanitization with artifact context: %s",
