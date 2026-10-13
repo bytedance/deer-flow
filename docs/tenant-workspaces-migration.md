@@ -6,7 +6,7 @@ acceptance remain pending. Historical `0035/e0001` release receipts are immutabl
 
 ## Scope and prerequisites
 
-`scripts/tenant_migration.py` operates only on native `0037_project_visibility`
+`scripts/tenant_migration.py` operates only on native `0038_workspace_read_clocks`
 and independent executor `e0002_workspace_scope` databases. It never performs
 DDL, starts workers, enables registration, resumes admission, releases physical
 capacity or changes account verification. M10 must collect actual drain,
@@ -113,12 +113,21 @@ Exact source digests and Jenkins results are in
 [implementation progress](tenant-workspaces-progress.json).
 
 
-Current schema refinement: `0037_project_visibility` follows the unchanged
+Project visibility refinement: `0037_project_visibility` follows the unchanged
 `0036_tenant_workspaces`; existing projects receive private visibility, never an
-automatic team grant. Native startup and both sides of the offline ownership
-export agree on this revision. Previous 0036 phase receipts remain historical
+automatic team grant. At that checkpoint, native startup and both sides of the offline ownership
+export agreed on 0037. The current 0038 requirement is recorded below. Previous 0036 phase receipts remain historical
 and cannot be reused for the new generation. The executor stays at e0002.
 Jenkins #23 verified real 0035-to-current upgrades on both databases plus paired
 attribution; #24 verified the actual plan/apply/verify CLI and synthetic receipt
 requirements on both. These are consumer/DDL proofs, not cloud drain, restored
 production backups, NAS mapping or deployed tenant release acceptance.
+
+Current native head is `0038_workspace_read_clocks`, appended after unchanged
+0037. It adds `workspace_thread_read_versions` keyed by `(workspace_id,user_id)`
+with a BIGINT zero-default clock. Native per-user clocks/markers and shipped
+ancestors are unchanged. DDL does not copy a global clock into team spaces or
+attribute ownership. New workspace clocks begin at zero and advance only with
+a scoped marker change. Native backfill/export and independent executor import
+now require the reviewed 0038 revision; old receipts remain immutable and cannot
+stand in for a matching new generation. Executor e0002 is unchanged.

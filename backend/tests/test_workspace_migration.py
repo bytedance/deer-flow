@@ -47,6 +47,7 @@ async def test_workspace_schema_upgrade_preserves_legacy_data(tmp_path, backend)
             )
             await conn.execute(text("INSERT INTO threads_meta (thread_id,user_id,status,metadata_json,created_at,updated_at) VALUES ('thread-owned','owner','idle','{}',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"))
             await conn.execute(text("INSERT INTO threads_meta (thread_id,user_id,status,metadata_json,created_at,updated_at) VALUES ('thread-orphan',NULL,'idle','{}',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"))
+            await conn.execute(text("INSERT INTO thread_read_versions (user_id,version) VALUES ('owner',23)"))
         await asyncio.to_thread(bootstrap._upgrade, cfg, "head")
         async with engine.connect() as conn:
             tables = await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
@@ -69,6 +70,9 @@ async def test_workspace_schema_upgrade_preserves_legacy_data(tmp_path, backend)
             rows = (await conn.execute(text("SELECT thread_id,user_id,workspace_id FROM threads_meta ORDER BY thread_id"))).all()
             assert rows == [("thread-orphan", None, None), ("thread-owned", "owner", None)]
             assert (await conn.execute(text("SELECT COUNT(*) FROM workspaces"))).scalar_one() == 0, "DDL must not invent tenant ownership"
+            assert "workspace_thread_read_versions" in tables, "workspace read clock schema is missing"
+            assert (await conn.execute(text("SELECT version FROM thread_read_versions WHERE user_id='owner'"))).scalar_one() == 23
+            assert (await conn.execute(text("SELECT COUNT(*) FROM workspace_thread_read_versions"))).scalar_one() == 0, "DDL must not invent workspace clock attribution"
             assert (await conn.execute(text("SELECT user_id,workspace_id,visibility FROM projects WHERE id='legacy-project'"))).one() == ("owner", None, "private")
             assert any(item["name"] == "ck_project_visibility" for item in await conn.run_sync(lambda sync: inspect(sync).get_check_constraints("projects")))
         await asyncio.to_thread(bootstrap._upgrade, cfg, "head")

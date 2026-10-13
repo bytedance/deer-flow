@@ -37,8 +37,10 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
     from deerflow.config.paths import Paths
     from deerflow.persistence.projects import ProjectDocumentRepository, ProjectRepository
     from deerflow.persistence.projects.model import ProjectDocumentRow, ProjectRow
+    from deerflow.persistence.run.model import RunRow
     from deerflow.persistence.thread_meta import ThreadMetaRepository
     from deerflow.persistence.thread_meta.model import ThreadMetaRow
+    from deerflow.persistence.thread_reads import ThreadReadRepository
     from deerflow.persistence.user.model import UserRow
     from deerflow.persistence.workspaces.sql import WorkspaceRepository
     from deerflow.runtime.events.store.memory import MemoryRunEventStore
@@ -108,13 +110,14 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                     allowed = await super().check_access(thread_id, user_id, require_existing=require_existing)
                     workspace_id = delete_revocation.pop("workspace_id", None)
                     if allowed and workspace_id is not None:
-                        # Actual persisted withdrawal between owner admission and filesystem mutation.
+                        # Actual persisted withdrawal between owner admission and resource mutation.
                         async with sf() as session:
                             await session.execute(sa.text("UPDATE workspaces SET policy_version=policy_version+1 WHERE id=:id"), {"id": workspace_id})
                             await session.commit()
                     return allowed
 
             app.state.thread_store = RevokingThreadRepository(sf, workspace_required=True)
+            app.state.thread_read_repo = ThreadReadRepository(sf, workspace_required=True)
             app.state.checkpointer = ReplacingCheckpointSaver(checkpoint_connection)
             await app.state.checkpointer.setup()
             app.state.run_event_store = MemoryRunEventStore()
@@ -244,6 +247,24 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                 assert stale_state.status_code == 404, "prepared state outlived its admitted thread incarnation"
                 assert b"team checkpoint sentinel" not in stale_state.content
                 assert (await client.get("/api/threads/team-research-thread/state", headers=team_headers)).status_code == 200
+                async with sf() as session:
+                    session.add(RunRow(run_id="team-read-http", thread_id="team-research-thread", workspace_id=team, user_id=identities["alice"], status="success", change_seq=10, origin_kind="schedule"))
+                    await session.commit()
+                read = await client.post("/api/threads/team-research-thread/read", headers=team_headers)
+                assert read.status_code == 200 and read.json()["read_version"] == 1, read.text
+                repeat = await client.post("/api/threads/team-research-thread/read", headers=team_headers)
+                assert repeat.status_code == 200 and repeat.json()["read_version"] == 1
+                personal_read = await client.post("/api/threads/personal-research-thread/read")
+                assert personal_read.status_code == 200 and personal_read.json()["read_version"] == 0, personal_read.text
+                assert (await client.post("/api/threads/team-research-thread/read")).status_code == 404
+                async with sf() as session:
+                    await session.execute(sa.update(RunRow).where(RunRow.run_id == "team-read-http").values(change_seq=11))
+                    await session.commit()
+                delete_revocation["workspace_id"] = team
+                assert (await client.post("/api/threads/team-research-thread/read", headers=team_headers)).status_code == 404
+                async with sf() as session:
+                    position = await session.scalar(sa.text("SELECT seen_change_seq FROM thread_read_markers WHERE user_id=:user AND thread_id='team-research-thread'"), {"user": identities["alice"]})
+                    assert position == 10, "withdrawn read admission mutated the marker"
                 thread_upload = await client.post("/api/threads/team-research-thread/uploads", headers=team_headers, files={"files": ("team.txt", b"private thread source", "text/plain")})
                 assert thread_upload.status_code == 200, thread_upload.text
                 private_upload = await client.post("/api/threads/personal-research-thread/uploads", files={"files": ("team.txt", b"personal different bytes", "text/plain")})

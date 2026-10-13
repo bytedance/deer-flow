@@ -375,3 +375,10 @@ IO. Native full/delta accessor behavior remains unchanged. Durable SQLite reopen
 and actual compiled-graph reads are verified; Postgres checkpointer/recovery,
 read markers, writes/branch/delete/compact and history background backfill still
 need scoped integration and evidence before tenant activation.
+
+POST /threads/{id}/read binds workspace_resource_scope before native owner
+checks. Native bootstrap constructs ThreadReadRepository with the frozen
+workspaces.enabled flag. Scoped marker writes recheck live private thread
+access in the SQL mutation transaction; counters are per workspace/viewer and
+repeat reads write nothing. Thread activity and Run change feeds still need
+scoped integration; this does not activate multi-tenancy.

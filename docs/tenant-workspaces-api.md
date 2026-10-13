@@ -199,10 +199,10 @@ recoverable. Cross-workspace/null-owner children refuse deletion. Thread child
 handling retains the current private-owner restriction until M3 thread integration;
 shared project membership alone never permits reading another user's chat.
 
-The native current head is `0037_project_visibility`, appended after unchanged
+The project sharing revision is `0037_project_visibility`, appended after unchanged
 `0036_tenant_workspaces`. The new non-null default/check constraint keeps
 historical projects private. Startup, native backfill and executor export
-consumption require this same native revision; old phase receipts are not reused.
+consumption now require current `0038_workspace_read_clocks`; old phase receipts are not reused.
 Executor schema remains `e0002_workspace_scope`. Tenant activation is still
 compiled off; the old `0035/e0001` deployment/release lock remains immutable.
 
@@ -322,3 +322,27 @@ cross-process/reboot recovery, delta-mode acceptance or real model execution.
 Read clocks, goal/state writes, branches/deletion/compaction, run-history
 background backfill, Run/background events, frontend and physical migration
 remain required. Compiled tenant activation is still closed.
+
+## Workspace read markers and clocks (partial M3)
+
+POST /threads/{id}/read binds trusted space before native owner checks. The
+repository filters unread runs/max change positions by matching private thread
+and run workspace. Marking read locks workspace, actor and thread and checks
+live membership before updating the original monotonic marker. Only a changed
+marker increments workspace_thread_read_versions, keyed by (workspace_id,user_id);
+a team read never changes the personal-space clock. The original per-user clock
+and marker primary keys remain unchanged for legacy mode. Version reads use a
+single live membership SELECT, and HTTP async mutations use await_drained.
+
+Jenkins #39 reproduced missing SQL/HTTP/schema boundaries. #40 passed 12 checks
+in 54.07s on real SQLite/PostgreSQL: independent clocks, matching run parents,
+repeat-read no-op, withdrawn SQL/HTTP writes retaining markers, actual old-data
+upgrades preserving legacy version 23, two native behaviors and paired CLI.
+#41 rechecked the only subsequent code change (HTTP async drain) through both
+real authenticated HTTP mains: 2 passed, 30.34s. Native head is now 0038; the
+executor stays e0002 and past release/phase receipts stay immutable.
+
+This uses seeded Run rows; native Run admission/activity feeds, independent
+mid-commit cancellation faults, thread deletion cleanup, lifecycle writes,
+frontend and physical rollout remain unaccepted. Scoped marker cleanup currently
+refuses until integrated into the thread lifecycle. Activation remains closed.

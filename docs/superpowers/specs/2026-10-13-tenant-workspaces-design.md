@@ -136,3 +136,12 @@ B/C签名加入workspace_id及协议版本，Run/MCP/task/affinity/NAS路径归�
 管理员开通与客户自助均是本次必交付，不拆成两个上线承诺。按总计划M0→M11推进，不同时改全部子系统。业务代码优先MCP/Skill/扩展，空间资源授权属于核心合同，必须用可选、显式、可测试接口接入；不能用monkeypatch、全局替换user_id或新增平行Agent来规避改动。
 
 本需求已包含历史授权的实施与定向验证记录；这些记录不等于完整交付。用户确认先整理计划、随后按顺序推进；后续“完成上述计划”目标已继续实施和上海定向验证。完整交付及发布须满足 M0–M11 门禁。
+
+实施库表细化（M3 已读时钟）：新增原生 schema 0038 的
+`workspace_thread_read_versions(workspace_id VARCHAR(36), user_id VARCHAR(64),
+version BIGINT NOT NULL DEFAULT 0)`，主键为 `(workspace_id,user_id)`。
+保留原生 `thread_read_markers(user_id,thread_id)` 主键及单调最大序号规则；
+标记的空间权限派生自不可跨空间移动的私有线程，不另造会话或 Run 权威。
+空间时钟只随该空间实际标记变化递增，原生用户全局时钟不复制为团队计数。
+读取位置只纳入与可信空间及私有父线程一致的 Run；标记写入与撤权共用
+workspace→actor→thread 锁顺序。线程删除中的标记清理和活动流仍需后续贯通。

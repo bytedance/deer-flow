@@ -2936,3 +2936,5 @@ Workspace thread download links now retain their space locator and recheck acces
 Workspace upload deletion now rechecks live access before removing bytes. The [deletion checkpoint](docs/tenant-workspaces-api.md#thread-upload-deletion-partial-m3) records withdrawal and native file safety verification; full tenant activation remains blocked.
 
 Workspace conversation detail, state, history and goal reads now recheck private ownership and lifecycle identity around checkpoint reads. The [persistent checkpoint read checkpoint](docs/tenant-workspaces-api.md#persistent-thread-checkpoint-reads-partial-m3) records SQLite reopen through the native compiled graph and remaining runtime/client requirements. Tenant activation stays blocked.
+
+Workspace read markers now use independent per-space viewer clocks and matching private Run/thread scope. The [read-clock checkpoint](docs/tenant-workspaces-api.md#workspace-read-markers-and-clocks-partial-m3) records real database/HTTP and old-data upgrade validation. Current native schema is 0038; tenant deployment remains blocked.

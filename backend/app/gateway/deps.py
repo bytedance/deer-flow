@@ -750,7 +750,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             )
             app.state.scheduled_task_event_repo = ScheduledTaskEventRepository(sf)
             # Per-user unread state and the activity feed's read clock.
-            app.state.thread_read_repo = ThreadReadRepository(sf)
+            app.state.thread_read_repo = ThreadReadRepository(sf, workspace_required=config.workspaces.enabled)
             app.state.mcp_task_repo = McpTaskRepository(sf)
             app.state.subagent_batch_repo = SubagentBatchRepository(sf)
         else:

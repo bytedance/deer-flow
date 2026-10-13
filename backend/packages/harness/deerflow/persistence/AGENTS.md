@@ -93,7 +93,7 @@ reconciliation must not treat a scoped invisible row as proof of rollback or
 remove bytes that a committed row may still own. Thread, conversion and retention integration remain M3/M8 work.
 
 
-Current native head `0037_project_visibility` appends after unchanged 0036.
+Project sharing revision `0037_project_visibility` appends after unchanged 0036.
 Project.visibility is non-null, private by default, with a two-value CHECK in
 both ORM and migration. Shared SQL scopes use a live team predicate; write
 predicates additionally require owner/admin. Documents inherit parent-project
@@ -113,3 +113,15 @@ ThreadMetaRepository.publish_under_live_lock fences only short file operations
 under workspace/actor/thread locks. Callers must not put model or network work in
 that callback. Controlled withdrawal/cancellation and physical mount checks remain
 required; isolated byte-level mains do not close those gates.
+
+Current native head is 0038_workspace_read_clocks; workspace_thread_read_versions
+uses (workspace_id,user_id) PK and a non-null BIGINT zero-default version. Legacy
+per-user clocks/marker PKs stay unchanged. ThreadReadRepository captures the
+operator workspace_required flag, consumes trusted scope and filters run rows
+by matching owner-private thread/workspace before unread/max-position queries.
+Marker mutation locks workspace -> actor -> thread and updates its workspace
+clock only when the native monotonic marker moves. Version reads use one live
+membership SELECT; missing required scope is refused. Scoped delete_by_thread
+is refused pending thread lifecycle integration, never blind all-viewer cleanup.
+Current offline native/executor ownership receipts require 0038/e0002; physical
+paired rollout, activity/run feeds and lifecycle acceptance remain required.

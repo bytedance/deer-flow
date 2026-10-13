@@ -200,8 +200,16 @@ executor still has its separate schema chain; native DDL is not proof that the
 two-database tenant rollout is ready. Downgrade refuses destructive scope loss.
 
 
-`0037_project_visibility` is the current child of unchanged 0036. It adds
+`0037_project_visibility` is the project-sharing child of unchanged 0036. It adds
 non-null private-default projects.visibility and ck_project_visibility in an
 Alembic batch so legacy projects do not become shared. ORM fresh bootstrap has
 the same default/constraint. Destructive downgrade refuses; restore the matched
 backup generation instead. Old source ancestry/release receipts are unchanged.
+
+0038_workspace_read_clocks is the current head after unchanged 0037. It creates
+only workspace_thread_read_versions (workspace_id,user_id primary key; version
+BIGINT non-null default 0), without modifying or copying legacy read counters
+or inventing workspace ownership. ORM fresh bootstrap registers the same table.
+Downgrade refuses discarding workspace clock data; restore a matched generation.
+Native backfill/export and executor import require this current revision while
+executor schema remains e0002. Historical deployment receipts are unchanged.

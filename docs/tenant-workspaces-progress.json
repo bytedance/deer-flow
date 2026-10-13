@@ -842,5 +842,72 @@
     },
     "self_review": "private_thread_read binds scope before native permissions, requires persistent private SQL thread with nonempty incarnation, rechecks live membership and scoped row/incarnation after read without holding writer locks over graph assembly/checkpointer IO. Existing full/delta accessor semantics remain unchanged.",
     "limits": "Durable SQLite checkpoint reopen with both native metadata dialects; not PostgreSQL checkpointer, cross-process/reboot recovery, delta mode or deployed acceptance. Seeded real HumanMessage and native goal, no live model calls; run-history backfill/event lookup and AI duration writes not established. Read clocks, checkpoint/goal writes, branch/delete/compact, Run/background, frontend, physical mounts and paired release remain required. Tenant activation compiled false."
+  },
+  "workspace_thread_read_clocks": {
+    "base_commit": "8d4140a2",
+    "native_revision": "0038_workspace_read_clocks",
+    "executor_revision": "e0002_workspace_scope",
+    "red": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 39,
+      "result": "FAILURE",
+      "archive_sha256": "b456b8c3e4d8c731cd89c86dae302359e8c8af62983ce730db01d4f9b1a600cf",
+      "artifact": "m3-read-clock-red.log",
+      "failed": 6,
+      "duration_seconds": 32.63,
+      "reason": "SQL unread query includes personal-space run in team scope; HTTP owner check lacks scope; workspace clock table is absent on both upgrade dialects"
+    },
+    "green": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 40,
+      "result": "SUCCESS",
+      "archive_sha256": "904166934a9e7841ea93cd22863ba6adc69e776c8d391581e98770a5782aa911",
+      "artifact": "m3-read-clock-green.log",
+      "passed": 12,
+      "duration_seconds": 54.07,
+      "command": "python -m pytest tests/test_workspace_thread_reads.py tests/test_workspace_http.py tests/test_workspace_migration.py::test_workspace_schema_upgrade_preserves_legacy_data tests/test_thread_reads_repository.py::test_server_origin_run_is_unread_until_read_and_again_after_a_new_run tests/test_thread_reads_repository.py::test_mark_read_on_an_already_read_thread_writes_nothing tests/test_tenant_migration_cli.py::test_paired_cli_requires_evidence_and_both_phase_receipts -q --tb=short --no-showlocals"
+    },
+    "final_http": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 41,
+      "result": "SUCCESS",
+      "archive_sha256": "3c8b802151277da89c7e54decc790970369222c02595e797a538d30a80ad8bd5",
+      "artifact": "m3-read-clock-drained.log",
+      "passed": 2,
+      "duration_seconds": 30.34,
+      "command": "python -m pytest tests/test_workspace_http.py -q --tb=short --no-showlocals",
+      "change_since_40": "Only HTTP mark-read wraps async repository transaction with native await_drained; all 11 other runtime/test files are byte-identical to #40 archive"
+    },
+    "scope": "Real SQLite/PostgreSQL SQL and native JWT/RBAC/CSRF HTTP: missing required scope refuses; unread and highest-position queries filter matching private thread/run workspace and exclude null/foreign parents; independent team/personal counters and repeat-read no-op; persisted policy withdrawal preserves marker in SQL and between actual owner admission/HTTP mutation. Real 0035-to-head Alembic upgrades retain legacy version 23 and create empty workspace clock without ownership attribution. Two legacy repository behaviors and actual paired CLI run on both dialects. Existing compiled graph/file/transfer main remains exercised.",
+    "source_sha256": {
+      "backend/app/gateway/deps.py": "37ec4c41e84a66bd16679f1d7313c7c9cb88b720260af425d1041bf5a2492e54",
+      "backend/app/gateway/routers/threads.py": "efdc408a8d68be54f350730bcd53d49ad0743bed73be09df8e2207c7f10951c4",
+      "backend/packages/harness/deerflow/persistence/models/__init__.py": "b608c860b2fac7db630c1498983ce113deedcf00a233b7794d07aa5bb5b3d133",
+      "backend/packages/harness/deerflow/persistence/thread_reads/model.py": "8cf1c4344e3191133b1c3c57d52acc3d03c057101cf85f128a50c7de6487dc9b",
+      "backend/packages/harness/deerflow/persistence/thread_reads/sql.py": "93b37c46b55a4a46469bbdbdf93ecee49a496f56c0d4eab79ac311599c1c0e16",
+      "backend/packages/harness/deerflow/persistence/migrations/versions/0038_workspace_read_clocks.py": "a818d012363d8ba2bea8778d55a1ed89ae394e5b0beae0c53da6420cac1c43dd",
+      "backend/packages/harness/deerflow/persistence/workspaces/backfill.py": "05499e8ab5d4c0fb5008fa8eee1d60ccc597808de4006fdd50c6a30f5f9fe8ff",
+      "backend/packages/ecs-executor/ecs_executor/tenant_backfill.py": "16cffbc168a2243d167d41671a876703b08adb6a179afd344923cbd1035f6dee",
+      "backend/tests/test_workspace_thread_reads.py": "c1bbfcaebecb1fc17e4426064f260ead5cb6acecc93e540a47d9a9d2af8cf480",
+      "backend/tests/test_workspace_http.py": "5d050872971d58e1a77dbfd128d3657ac07f9e65201c5be6231bf24c658867a8",
+      "backend/tests/test_workspace_migration.py": "99e71135283906f7d3a6a86f3f637526acdc4b4e6cfaecab2dc7d90263dbe0e8",
+      "backend/tests/test_workspace_executor_migration.py": "c814cd5fa1075781518e3096e7645e6541c4b617f4d008e125f8673352bfc392"
+    },
+    "cleanup": {
+      "39": {
+        "containers": [],
+        "networks": []
+      },
+      "40": {
+        "containers": [],
+        "networks": []
+      },
+      "41": {
+        "containers": [],
+        "networks": []
+      }
+    },
+    "self_review": "Workspace -> native actor -> private thread lock, filtered max run position, native monotonic marker and workspace clock increment in one transaction. Version read joins live membership in the same SELECT. Operator flag captured at bootstrap; async HTTP write drains with native helper. Native marker/user-clock keys and historical migration ancestors unchanged. Current paired offline ownership receipts require 0038/e0002.",
+    "limits": "Seeded actual RunRow data, not scoped native Run admission or full activity/feed acceptance. Controlled mid-commit request-cancellation and concurrent revocation faults not independently proven. Scoped marker cleanup is refused until thread deletion lifecycle integration; M8 close/purge must cover new clocks. State/goal writes, branch/delete/compact, history backfill, Run/background/client, physical mounts and paired deployment remain required. Compiled activation stays false; no deployment."
   }
 }

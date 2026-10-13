@@ -1316,6 +1316,7 @@ async def _unread_thread_ids(request: Request, thread_ids: list[str]) -> set[str
 
 
 @router.post("/{thread_id}/read", response_model=ThreadReadResponse)
+@workspace_resource_scope()
 @require_permission("threads", "read", owner_check=True, require_existing=True)
 async def mark_thread_read(thread_id: ThreadId, request: Request) -> ThreadReadResponse:
     """Mark the thread read for the caller (per user, monotonic across devices).
@@ -1327,7 +1328,7 @@ async def mark_thread_read(thread_id: ThreadId, request: Request) -> ThreadReadR
     if repo is None:
         raise HTTPException(status_code=503, detail="Thread read state is not available")
     user_id = str(get_effective_user_id())
-    await repo.mark_read(user_id=user_id, thread_id=thread_id)
+    await await_drained(repo.mark_read(user_id=user_id, thread_id=thread_id))
     return ThreadReadResponse(unread=False, read_version=await repo.read_version(user_id=user_id))
 
 
