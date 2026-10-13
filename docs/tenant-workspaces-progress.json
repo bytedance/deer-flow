@@ -1,0 +1,36 @@
+{
+  "status": "partial",
+  "work_package": "M0",
+  "base_commit": "1a199c6d",
+  "job": "deerflow-tenant-contract-m0",
+  "red": {
+    "build": 1,
+    "result": "FAILURE",
+    "archive_sha256": "2d25c09e36c10664893e2a739c01f6b88998a0c139b2ab0c60237e7c987fec8d",
+    "reason": "external workspace identity survived admission",
+    "tests_failed": 1
+  },
+  "green": {
+    "build": 2,
+    "result": "SUCCESS",
+    "archive_sha256": "55607b789dde4c49268e2beeabf7a6a3e3e855120bfe4f105d1c5fca13da8663",
+    "tests_passed": 23,
+    "command": "python -m pytest tests/test_workspace_contract.py tests/test_gateway_services.py::TestInjectAuthenticatedUserContextAuthz -q --tb=short --no-showlocals"
+  },
+  "runtime": "Shanghai Jenkins, existing final-test-tools-52ce image; isolated container, network none, CPU 1, memory 2GiB; no deployment or model calls",
+  "source_sha256": {
+    "backend/app/gateway/services.py": "cfc070534bd80c8fe8811f74d812c0e2055bcf31548e5f148f1a254f8fcc49a9",
+    "backend/tests/test_workspace_contract.py": "f412fc59d0d4b1ec3bf69607b93db91ae2577aa0b3ccee560ba86270aa93cbda"
+  },
+  "remaining": [
+    "WorkspaceContext and public JSON contract",
+    "Trusted context validation",
+    "SQL/HTTP workspace fixture after M1/M2; resource isolation after M3",
+    "M1 through M11 remain unimplemented"
+  ],
+  "static_checks": [
+    "ruff check with backend/ruff.toml passed",
+    "git diff --check passed"
+  ],
+  "format_note": "Local ruff 0.15.12 reformats pre-existing services.py beyond this patch even with repository ruff.toml; unrelated generated formatting discarded. Version-matched cloud format gate remains to be run."
+}

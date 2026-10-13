@@ -266,3 +266,9 @@ with a disposition link; no disabled-feature bypass or local fallback exists.
 Native central dispatch requires the dedicated executor database's current revision
 and shape; startup never calls `create_all`. Workers require the same schema
 capability over their existing authenticated outbound channel.
+
+Workspace identity (`workspace_id`, `workspace_context`, `membership_version`,
+`policy_version`) is server-owned. Native run admission clears client values
+from both context and configurable, including unauthenticated early returns.
+This reservation does not yet enable multi-tenant membership authorization.
+See `docs/tenant-entrypoint-inventory.md` at the repository root.
