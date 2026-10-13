@@ -217,23 +217,28 @@ def _install_discovery(
     create_sessions: bool = True,
     hooks: dict | None = None,
 ):
-    """Replace ``tools.get_mcp_tools`` with a deterministic stand-in.
+    """Replace the grouped and flat discovery entry points with deterministic stand-ins.
 
     It mirrors the real discovery prologue (``build_servers_config`` +
     ``ensure_binding`` before the first awaited session creation) so the cache
     layer is exercised against the same ordering discovery itself guarantees.
+    The grouped fake honours ``server_names`` selection, so T3 per-server reuse
+    is exercised exactly as the initializer drives it.
     """
     from deerflow.mcp import tools as tools_module
 
-    async def _fake_get_mcp_tools(*, extensions_config, session_pool=None):
+    async def _run(*, extensions_config, server_names, session_pool):
         pool = session_pool if session_pool is not None else session_pool_module.get_session_pool()
         servers = build_servers_config(extensions_config)
+        selected = [name for name in servers if server_names is None or name in set(server_names)]
         if hooks is not None:
             hooks["servers"] = servers
+            hooks.setdefault("selected", []).append(tuple(selected))
         if before_bindings is not None:
             await before_bindings(servers, pool)
         bindings = {}
-        for name, connection in servers.items():
+        for name in selected:
+            connection = servers[name]
             if connection.get("transport", "stdio") == "stdio":
                 bindings[name] = pool.ensure_binding(
                     name,
@@ -246,16 +251,26 @@ def _install_discovery(
             await after_bindings(servers, pool, bindings)
         if fail_after_bindings:
             raise RuntimeError("discovery failed after binding install")
-        if not create_sessions:
-            return []
-        sessions = {}
-        for name, binding in bindings.items():
-            sessions[name] = await pool.get_session(name, "u:t", servers[name], binding=binding)
-        if hooks is not None:
-            hooks["sessions"] = sessions
-        return [_FakeTool(name) for name in servers]
+        tool_list: dict[str, _FakeTool] = {}
+        if create_sessions:
+            sessions = {}
+            for name in selected:
+                if name in bindings:
+                    sessions[name] = await pool.get_session(name, "u:t", servers[name], binding=bindings[name])
+                tool_list[name] = _FakeTool(name)
+            if hooks is not None:
+                hooks["sessions"] = sessions
+        return {name: ServerDiscoveryResult(tools=((tool_list[name],) if name in tool_list else ()), pool=pool, binding=bindings.get(name)) for name in selected}
+
+    async def _fake_get_mcp_tools(*, extensions_config, session_pool=None):
+        groups = await _run(extensions_config=extensions_config, server_names=None, session_pool=session_pool)
+        return [tool for name in groups for tool in groups[name].tools]
+
+    async def _fake_get_mcp_tools_by_server(*, extensions_config, server_names=None, session_pool=None, personal_user_id=None):
+        return await _run(extensions_config=extensions_config, server_names=server_names, session_pool=session_pool)
 
     monkeypatch.setattr(tools_module, "get_mcp_tools", _fake_get_mcp_tools)
+    monkeypatch.setattr(tools_module, "get_mcp_tools_by_server", _fake_get_mcp_tools_by_server)
 
 
 def _write_remote_marker(config_path: Path, generation: str) -> Path:
@@ -1692,7 +1707,7 @@ async def test_discovery_failure_does_not_lock_the_generation_claim(reconciler, 
     async def _boom(**_kwargs):
         raise RuntimeError("discovery failed")
 
-    monkeypatch.setattr(tools_module, "get_mcp_tools", _boom)
+    monkeypatch.setattr(tools_module, "get_mcp_tools_by_server", _boom)
     with pytest.raises(RuntimeError):
         await cache_module.initialize_mcp_tools()
 
@@ -1719,7 +1734,7 @@ async def test_stale_binding_error_without_supersession_is_not_swallowed(reconci
     async def _conflict(**_kwargs):
         raise StaleMCPBindingError("A")
 
-    monkeypatch.setattr(tools_module, "get_mcp_tools", _conflict)
+    monkeypatch.setattr(tools_module, "get_mcp_tools_by_server", _conflict)
 
     with pytest.raises(StaleMCPBindingError):
         await cache_module.initialize_mcp_tools()
@@ -2766,3 +2781,28 @@ def test_reconciliation_state_counts_server_entries_without_baseline(reconciler)
     )
 
     assert cache_module._has_mcp_reconciliation_state() is True
+
+
+@pytest.mark.asyncio
+async def test_t3_metadata_change_reuses_b_and_keeps_a_session(reconciler, monkeypatch, tmp_path):
+    """A metadata-only change rebuilds A but keeps A's stdio session and reuses B."""
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    log = _session_log()
+    await _initialize(monkeypatch, cfg, {"A": _stdio("cmd-A"), "B": _stdio("cmd-B")}, log)
+
+    tool_b = cache_module._server_tool_cache["B"].result.tools[0]
+    binding_a = _binding(pool, "A")
+    session_a = _entry(pool, "A")[0]
+
+    _write_config(cfg, {"A": _stdio("cmd-A", description="renamed"), "B": _stdio("cmd-B")})
+    assert cache_module.refresh_mcp_cache_if_active() is True
+    tools = await cache_module.initialize_mcp_tools()
+
+    assert [tool.name for tool in tools] == ["A", "B"]
+    assert cache_module._server_tool_cache["B"].result.tools[0] is tool_b
+    assert _binding(pool, "A") is binding_a
+    assert _entry(pool, "A")[0] is session_a
+    assert log["created"]["cmd-A"] == 1  # A's stdio process was not respawned
+    assert session_pool_module.get_session_pool() is pool
