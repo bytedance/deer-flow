@@ -10,6 +10,13 @@ ownership and capture cleanup. Retain the real XLSX conversion coverage.
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+`.github/workflows/backend-windows-live-policy.yml` runs the child-env contract and all
+four live-test collection policy cases on Windows/Python 3.12, weekly, manually,
+and for relevant PR changes. These children only collect live tests. Keep the
+make-dependent checks in the default suite. The workflow-selection regression
+in `test_client_live_policy.py` collects the configured pytest nodes and pins
+all five policy checks, so a partial name filter cannot silently omit cases.
+
 Local nginx path fixtures convert MSYS output through the selected Git Bash's
 PATH and decode both renderer and converter output as UTF-8. POSIX Git-layout
 stubs exercise Windows-style locale decoding and missing/failed/empty converters;
