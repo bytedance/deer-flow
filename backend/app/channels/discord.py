@@ -11,6 +11,7 @@ from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
 
+from app.channels.allowed_users import parse_channel_ids
 from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
@@ -81,10 +82,7 @@ def _parse_allowed_channels(allowed_channels: Any) -> frozenset[str]:
     the entries are kept verbatim rather than validated — an unreadable ID just
     never matches, which leaves ``mention_only`` in force (fail-closed).
     """
-    if allowed_channels is None or (isinstance(allowed_channels, str) and not allowed_channels.strip()):
-        return frozenset()
-    entries = list(allowed_channels) if isinstance(allowed_channels, list | tuple | set) else [allowed_channels]
-    return frozenset(text for text in (str(entry).strip() for entry in entries) if text)
+    return parse_channel_ids(allowed_channels, logger=logger, channel_name="Discord", key_name="allowed_channels")
 
 
 class DiscordChannel(Channel):
