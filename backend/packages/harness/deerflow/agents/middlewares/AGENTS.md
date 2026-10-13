@@ -128,7 +128,7 @@ Before changing a later authorization phase, read the [authorization RFC](../../
    Capture/retain delegations by `(run_id, tool_call_id)`. Later-run replies cannot close older orphans; missing run IDs match conservatively.
 32. **LoopDetectionMiddleware** - `loop_detection.enabled`: detects repeated tool-call loops. Hard stops clear structured/raw/content-block calls, force a final text answer, and stamp `loop_capped` via `consume_stop_reason` (#3875 Phase 2, matching `TokenBudgetMiddleware`). Persist first warned-state transitions per call hash/tool-frequency burst and hard stops as `middleware:loop_detection`, with `is_subagent`/optional `agent_id`; omit arguments, message content, results and argument-derived hashes. Ordinary task subagents use dedicated recorder keys via a parent-loop proxy; never pass `RunJournal` into their isolated loop. Durable batch subagents have no parent journal and persist no transitions.
    New user runs reset budgets/history; same-run goal continuations share it.
-   Warnings permit a final save with one read-before-write recovery retry. Never invite a looping/stopped tool back into the save path; use an available alternative or report the unsaved result. Recovery calls retain ordinary loop limits; hard-stop texts and tool stripping stay unchanged.
+   Warnings allow a final save and one read-before-write retry through non-looping tools; otherwise report unsaved results. Hard stops never permit saves.
    Isolate sibling warnings and keep lifecycle hooks topology-stable. Before changing this guard, read
    [Loop detection lifecycle](../../../../../docs/LOOP_DETECTION.md) for
    fallback identity, cleanup/LRU/reset, severity ordering, and test invariants.
