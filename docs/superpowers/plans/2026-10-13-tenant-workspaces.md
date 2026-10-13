@@ -513,3 +513,5 @@ M3 private thread checkpoint: Jenkins #25 failed on missing persisted workspace 
 M3 metadata HTTP checkpoint: #27 failed at missing trusted scope on both databases; #28 passed 7 checks in 30.21s for actual native-auth thread metadata and project listing, SQL thread main and three native regressions. Persistent checkpoints, full thread lifecycle/files, Run/background and client integration remain pending. Full M3 acceptance stays unchecked.
 
 M3 file transfer checkpoint: #29 RED at missing upload scope; #30 found a document-get signature error; #31 passed scoped actual-byte upload/attachment/promotion and two native transfer mains (6 passed, 30.99s). Source hashes and limits are in progress JSON. Artifact/query/before-send, deletion/withdrawal races, full lifecycle and physical remote mounts remain requirements; M3 stays unchecked.
+
+M3 下载检查点：Jenkins #33 在 SQLite/PostgreSQL 实际 HTTP 主干和三项原生回归通过（5 passed，27.51s）。上传链接携带空间定位，文件/ZIP 成员在响应准备后撤权时拒绝发送；#32 RED 保留。下一项为文件删除撤权竞态，再继续完整线程生命周期与客户端；M3 不勾完成。

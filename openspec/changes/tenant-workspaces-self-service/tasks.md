@@ -22,3 +22,5 @@ M3 thread repository checkpoint: #25 RED (NULL scope, both databases), #26 GREEN
 M3 metadata HTTP checkpoint: #27 RED (missing trusted HTTP scope), #28 GREEN (7 passed, 30.21s). Actual authenticated creation/search/PATCH/move and own-only project thread listing now use the scoped SQL repository. Full state/lifecycle/files, Run/background and frontend remain requirements; M3 stays unchecked.
 
 M3 thread file checkpoint: #31 passed real scoped upload, source-preserving copy/promotion, member shared-source attachment, SQL thread main and two legacy transfer checks (6 passed, 30.99s). #29/#30 failure history retained. Before-send artifacts, deletion/withdrawal, lifecycle/client and physical mounts remain unaccepted; parent M3 stays unchecked.
+
+M3 artifact GET checkpoint: #32 RED missing upload link locator; #33 GREEN (5 passed, 27.51s) real SQLite/PostgreSQL downloads, ZIP preview, Range, conflicting/default selector and private-owner denial, plus prepared-response policy revocation. Native Range/download regressions retained. Deletion/withdrawal, continuous-stream/token reset, PUT, lifecycle/client and physical mounts remain required; M3 stays unchecked.

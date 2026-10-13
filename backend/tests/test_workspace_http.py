@@ -3,6 +3,7 @@
 import asyncio
 import importlib
 import importlib.util
+import zipfile
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -26,7 +27,7 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
     from app.gateway.auth_middleware import AuthMiddleware
     from app.gateway.csrf_middleware import CSRFMiddleware
-    from app.gateway.routers import project_documents, projects, threads, uploads
+    from app.gateway.routers import artifacts, project_documents, projects, threads, uploads
     from deerflow.config import app_config
     from deerflow.config import paths as paths_module
     from deerflow.config.app_config import AppConfig
@@ -85,6 +86,7 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
             app.state.project_document_repo = ProjectDocumentRepository(sf)
             app.include_router(routes.router)
             app.include_router(admin_routes.router)
+            app.include_router(artifacts.router)
             app.include_router(uploads.router)
             app.include_router(threads.router)
             app.include_router(projects.router)
@@ -112,6 +114,14 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
             @app.get("/api/workspace-delayed-file/{project_id}/{document_id}")
             async def delayed_file(request: Request, project_id: str, document_id: str):
                 response = await project_documents.get_project_document_content(project_id=project_id, document_id=document_id, request=request, download=True, workspace_id=None)
+                async with sf() as session:
+                    await session.execute(sa.text("UPDATE workspaces SET policy_version=policy_version+1 WHERE id=:id"), {"id": request.headers["X-Deerflow-Workspace"]})
+                    await session.commit()
+                return response
+
+            @app.get("/api/workspace-delayed-artifact/{thread_id}/{path:path}")
+            async def delayed_artifact(request: Request, thread_id: str, path: str):
+                response = await artifacts.get_artifact(thread_id=thread_id, path=path, request=request, download=False)
                 async with sf() as session:
                     await session.execute(sa.text("UPDATE workspaces SET policy_version=policy_version+1 WHERE id=:id"), {"id": request.headers["X-Deerflow-Workspace"]})
                     await session.commit()
@@ -173,6 +183,26 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                 personal_root = tmp_path / "files" / "workspaces" / personal / "users" / identities["alice"] / "threads" / "personal-research-thread" / "user-data" / "uploads"
                 assert (team_root / "team.txt").read_bytes() == b"private thread source"
                 assert (personal_root / "team.txt").read_bytes() == b"personal different bytes"
+                artifact_url = thread_upload.json()["files"][0]["artifact_url"]
+                assert "workspace_id=" + team in artifact_url, "thread file links lose their trusted workspace locator"
+                downloaded = await client.get(artifact_url)
+                assert downloaded.status_code == 200 and downloaded.content == b"private thread source"
+                assert downloaded.headers["cache-control"] == "private, no-store"
+                ranged = await client.get(artifact_url, headers={"Range": "bytes=0-6"})
+                assert ranged.status_code == 206 and ranged.content == b"private"
+                assert (await client.get(artifact_url, headers={"X-Deerflow-Workspace": personal})).status_code == 404
+                assert (await client.get(artifact_url.split("?", 1)[0])).status_code == 404
+                with zipfile.ZipFile(team_root / "notes.skill", "w") as archive:
+                    archive.writestr("SKILL.md", b"# private pack")
+                skill_path = "mnt/user-data/uploads/notes.skill/SKILL.md"
+                skill_url = "/api/threads/team-research-thread/artifacts/" + skill_path + "?workspace_id=" + team
+                packed = await client.get(skill_url)
+                assert packed.status_code == 200 and packed.content == b"# private pack"
+                assert packed.headers["cache-control"] == "private, no-store"
+                delayed = await client.get("/api/workspace-delayed-artifact/team-research-thread/mnt/user-data/uploads/team.txt", headers=team_headers)
+                assert delayed.status_code == 404 and b"private thread source" not in delayed.content
+                delayed = await client.get("/api/workspace-delayed-artifact/team-research-thread/" + skill_path, headers=team_headers)
+                assert delayed.status_code == 404 and b"# private pack" not in delayed.content
                 assert (await client.get("/api/threads/team-research-thread/uploads/list")).status_code == 404
                 assert (await client.post("/api/threads/team-research-thread/uploads", files={"files": ("foreign.txt", b"foreign write", "text/plain")})).status_code == 404
                 assert [r["thread_id"] for r in (await client.post("/api/threads/search", headers=team_headers, json={"limit": 1})).json()] == ["team-research-thread"]
@@ -295,6 +325,7 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                 assert (await client.get("/api/projects/" + shared_project, headers=team_headers)).status_code == 200
                 peer_thread = await client.post("/api/threads", headers=team_headers, json={"thread_id": "bob-shared-research", "project_id": shared_project})
                 assert peer_thread.status_code == 200, peer_thread.text
+                assert (await client.get(artifact_url)).status_code == 404
                 shared_attached = await client.post(shared_docs + "/" + shared_document + "/attach-to-thread/bob-shared-research", headers=team_headers)
                 assert shared_attached.status_code == 200, shared_attached.text
                 peer_upload = tmp_path / "files" / "workspaces" / team / "users" / identities["bob"] / "threads" / "bob-shared-research" / "user-data" / "uploads" / "shared.txt"

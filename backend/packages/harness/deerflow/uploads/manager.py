@@ -14,6 +14,7 @@ from datetime import timedelta
 from pathlib import Path
 from urllib.parse import quote
 
+from deerflow.authz.workspace import get_current_workspace
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.host_paths import windows_incompatible_segment
@@ -530,12 +531,17 @@ def delete_file_safe(base_dir: Path, filename: str) -> dict:
     return {"success": True, "message": f"Deleted {filename}"}
 
 
+def _workspace_artifact_url(url: str) -> str:
+    context = get_current_workspace()
+    return url if context is None else url + "?workspace_id=" + quote(context.workspace_id, safe="")
+
+
 def upload_artifact_url(thread_id: str, filename: str) -> str:
     """Build the artifact URL for a file in a thread's uploads directory.
 
     *filename* is percent-encoded so that spaces, ``#``, ``?`` etc. are safe.
     """
-    return f"/api/threads/{thread_id}/artifacts{VIRTUAL_PATH_PREFIX}/uploads/{quote(filename, safe='')}"
+    return _workspace_artifact_url(f"/api/threads/{thread_id}/artifacts{VIRTUAL_PATH_PREFIX}/uploads/{quote(filename, safe='')}")
 
 
 def upload_virtual_path(filename: str) -> str:
@@ -548,7 +554,7 @@ def output_artifact_url(thread_id: str, filename: str) -> str:
 
     *filename* is percent-encoded so that spaces, ``#``, ``?`` etc. are safe.
     """
-    return f"/api/threads/{thread_id}/artifacts{VIRTUAL_PATH_PREFIX}/outputs/{quote(filename, safe='')}"
+    return _workspace_artifact_url(f"/api/threads/{thread_id}/artifacts{VIRTUAL_PATH_PREFIX}/outputs/{quote(filename, safe='')}")
 
 
 def output_virtual_path(filename: str) -> str:

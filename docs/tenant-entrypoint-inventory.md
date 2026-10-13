@@ -71,3 +71,5 @@ This inventory is not isolation evidence. Each work package must record implemen
 Thread repository checkpoint: Jenkins #26 verifies SQL filtering before pagination, live membership and private ownership with shared project parents. Thread metadata HTTP now binds trusted scope before owner checks; #28 verifies creation/search/PATCH/move and own-only project listing. SQL success does not prove HTTP/SSE/WSS/checkpoint or filesystem coverage.
 
 Thread file checkpoint #31: actual scoped upload, shelf attachment and promotion byte-level main on both databases, plus legacy transfer regression. Short file publication uses live thread SQL fencing; scoped shelf copy and provenance use matching parent/source checks. Artifact ASGI/query, deletion/withdrawal races, full lifecycle and physical NAS/remote mounts remain required.
+
+Thread artifact GET checkpoint #33: real returned URLs, file/ZIP bytes, selector conflicts and before-send policy revocation on SQLite/PostgreSQL; native Range/download regressions retained. PUT, deletion/withdrawal, continuous streaming, token-reset and lifecycle/client/physical mount acceptance remain required.

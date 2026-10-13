@@ -50,11 +50,12 @@ def workspace_resource_scope(*, allow_query_selector=False):
 
         @wraps(function)
         async def scoped(*args, **kwargs):
-            bound = signature.bind(*args, **kwargs)
-            request = bound.arguments["request"]
-            service = getattr(request.app.state, "workspace_service", None)
+            bound = signature.bind_partial(*args, **kwargs)
+            request = bound.arguments.get("request")
+            state = getattr(getattr(request, "app", None), "state", None)
+            service = getattr(state, "workspace_service", None)
             if service is None:
-                if getattr(request.app.state, "workspace_mode_enabled", False):
+                if getattr(state, "workspace_mode_enabled", False):
                     raise HTTPException(status_code=503, detail="Workspace services are not activated")
                 return await function(*args, **kwargs)
             selector = request.query_params.get("workspace_id") if allow_query_selector else None

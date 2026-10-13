@@ -695,5 +695,51 @@
     },
     "self_review": "Short original/derived upload link publication and sandbox-readable chmod are drained under workspace/actor/thread SQL lock. Shelf copy uses current parent/document scope; attachment rechecks source under publication scope; promotion validates original thread under destination project transaction. Long network synchronization is not held inside SQL transactions.",
     "limits": "Isolated filesystem/native mounted-provider fixture, not physical NAS/AIO/remote sandbox acceptance. Artifact URL/query integration and before-send artifact authorization, upload deletion revocation races, full thread lifecycle/checkpoint/run/background, conversion/retention, frontend and paired release remain required. Controlled mid-transfer revocation/cancellation faults still require focused evidence. Tenant activation remains compiled false."
+  },
+  "workspace_thread_artifact_read": {
+    "base_commit": "1eab3ddc",
+    "red": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 32,
+      "result": "FAILURE",
+      "archive_sha256": "8aa95721569d1b39c19939909ca694b41871276eaf5046f4fe4b0cb6b10df003",
+      "artifact": "m3-artifact-read-red.log",
+      "failed": 2,
+      "duration_seconds": 19.84,
+      "reason": "Native upload links omit selected workspace locator on both databases"
+    },
+    "green": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 33,
+      "result": "SUCCESS",
+      "archive_sha256": "78ca35c475140b9f9fcc28137b266306e6b6e9037a2a10ee9befcaf99d3bab6b",
+      "artifact": "m3-artifact-read-green.log",
+      "passed": 5,
+      "duration_seconds": 27.51,
+      "warnings": [
+        "Existing Starlette TestClient/httpx deprecation warning"
+      ],
+      "command": "python -m pytest tests/test_workspace_http.py tests/test_artifacts_router.py::test_get_artifact_text_preview_supports_bounded_range_requests tests/test_artifacts_router.py::test_get_skill_archive_preview_supports_bounded_range_requests tests/test_artifacts_router.py::test_get_artifact_download_false_does_not_force_attachment -q --tb=short --no-showlocals"
+    },
+    "scope": "Real JWT/RBAC/CSRF and SQLite/PostgreSQL: returned upload URL retrieves correct private bytes without custom header, Range 206, conflicting/default-personal selector denial, actual skill ZIP member preview, other-member private-file denial. Prepared file and ZIP responses return 404 after actual SQL workspace policy changes before ASGI sends headers. Three affected native artifact regressions retain Range and download behavior.",
+    "source_sha256": {
+      "backend/app/gateway/routers/artifacts.py": "c044071a9f4100c6679c697ad7d3616de8da05542cbf90a39da6fa28a3e8b895",
+      "backend/app/gateway/workspaces/dependencies.py": "e8cdf4a7db11e0bcf61feda682e2f30aea52cb14f95a9aec8370ca71b926c117",
+      "backend/app/gateway/workspaces/file_response.py": "d1ee40f5e3b3c92225d3c42163540f2923ddea24219f7ec5aef6b081d7353e96",
+      "backend/packages/harness/deerflow/uploads/manager.py": "165308b6cbcd869b8b567a746236fca1d2ec21629ffb84b71eed91a5a9e8f376",
+      "backend/tests/test_workspace_http.py": "cd6c961b3a9188b017117f2d485330948977c5a8afda69140d5b2a4486fe2c24"
+    },
+    "cleanup": {
+      "32": {
+        "containers": [],
+        "networks": []
+      },
+      "33": {
+        "containers": [],
+        "networks": []
+      }
+    },
+    "self_review": "Wrapper delegates unchanged native responses, propagates private/no-store headers and FastAPI background tasks, and rechecks live workspace plus SQL private thread/incarnation before sending. Query UUID is a locator, never credential or authority.",
+    "limits": "Isolated native LocalSandboxProvider/files; no physical NAS/AIO proof. Thread incarnation comparison implemented but recreation race not yet independently fault-tested. Credential token-version reset, continuous stream revocation, artifact PUT, upload deletion races, full thread/checkpoint/run/background, frontend and paired release remain required. Tenant activation stays compiled false."
   }
 }

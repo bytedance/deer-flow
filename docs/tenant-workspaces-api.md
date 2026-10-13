@@ -265,3 +265,21 @@ it is not evidence for physical NAS/AIO mounts or remote sandbox synchronization
 Artifact link/query handling, before-send artifact checks, deletion/revocation
 races, controlled mid-transfer cancellation/revocation, full thread lifecycle,
 checkpoint/run and browser integration remain required. Activation remains blocked.
+
+## Thread artifact downloads (partial M3)
+
+Upload/output links include the selected workspace UUID as a query locator. It is
+not a credential: live native session, workspace membership, private thread owner
+and native read permission remain required. Conflicting header/query selectors
+return 404. GET binds scope before native owner checks and prepares the existing
+file/archive response; a wrapper rebinds captured scope and rechecks live membership
+and the SQL thread incarnation before ASGI sends headers. Responses are private,
+no-store, and preserve native MIME, download, Range and background-task behavior.
+
+Jenkins #32 reproduced missing link scope; #33 passed the actual SQLite/PostgreSQL
+HTTP main plus three native Range/download regressions (5 passed, 27.51s). The
+main reads real file/ZIP bytes and changes persisted policy after preparation to
+verify no private bytes are sent. This does not prove continuous-stream withdrawal,
+credential-reset revocation, recreation faults, artifact writes, physical mounts
+or full browser/runtime integration. Upload deletion and full thread lifecycle
+remain required; compiled tenant activation stays closed.

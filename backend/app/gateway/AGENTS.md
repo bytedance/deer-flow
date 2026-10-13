@@ -351,3 +351,11 @@ checks source thread ownership/workspace while holding the workspace and project
 locks. Legacy native permission requirements remain. Artifact ASGI/query integration,
 delete/withdrawal races, non-mounted synchronization and physical NAS evidence are
 still required before tenant activation.
+
+Artifact GET binds workspace scope before native owner checks; only explicit file
+navigation accepts query workspace_id. Upload/output URLs carry that locator.
+WorkspaceThreadResponse revalidates membership and scoped private SQL thread
+incarnation before ASGI headers, then delegates native file/ZIP/Range behavior
+and FastAPI background tasks. Scoped responses are private/no-store. This is a
+before-send fence, not continuous-stream or credential-reset revocation. Artifact
+PUT, deletion races and full runtime/client coverage remain activation gates.
