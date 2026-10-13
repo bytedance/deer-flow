@@ -1,10 +1,10 @@
 import builtins
 import ctypes
-import locale
 import os
 import shutil
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 from support.shell import require_posix_sh
@@ -647,6 +647,11 @@ def test_execute_command_does_not_set_msys_env_for_non_msys_posix_shell_on_windo
     assert "MSYS_NO_PATHCONV" not in calls[0][2]
 
 
+def _mock_cmd_code_pages(monkeypatch, console_cp, oem_cp):
+    kernel32 = SimpleNamespace(GetConsoleOutputCP=lambda: console_cp, GetOEMCP=lambda: oem_cp)
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *args, **kwargs: kernel32, raising=False)
+
+
 def test_execute_command_uses_cmd_command_mode_on_windows(monkeypatch):
     calls: list[tuple[list[str], float, dict[str, str], dict]] = []
 
@@ -658,6 +663,7 @@ def test_execute_command_uses_cmd_command_mode_on_windows(monkeypatch):
     monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": r"C:\Windows", "GITHUB_TOKEN": "should-not-leak"})
     monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: r"C:\Windows\System32\cmd.exe"))
     monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(fake_run))
+    _mock_cmd_code_pages(monkeypatch, 850, 437)
 
     output = LocalSandbox("t").execute_command("echo hello")
 
@@ -669,20 +675,16 @@ def test_execute_command_uses_cmd_command_mode_on_windows(monkeypatch):
             [r"C:\Windows\System32\cmd.exe", "/c", "echo hello"],
             600,
             {"PATH": r"C:\Windows"},
-            # cmd.exe and its children write the host ANSI code page, so the
-            # cmd branch pins the pipe decoder to it explicitly.
-            {"encoding": locale.getencoding()},
+            {"encoding": "cp850"},
         )
     ]
 
 
-def test_execute_command_cmd_branch_ignores_utf8_mode_for_default_encoding(monkeypatch):
-    """Under Python UTF-8 mode ``getpreferredencoding`` reports ``"utf-8"``
-    while cmd.exe keeps writing the ANSI code page; the cmd branch must pin
-    ``locale.getencoding()`` instead of following UTF-8 mode, or every
-    non-ASCII byte in cmd output collapses to U+FFFD."""
+def test_execute_command_cmd_branch_ignores_utf8_mode_for_console_encoding(monkeypatch):
+    """Select the console page independently of Python UTF-8 mode and ANSI."""
     monkeypatch.setattr(local_sandbox.locale, "getpreferredencoding", lambda _: "utf-8")
-    monkeypatch.setattr(local_sandbox.locale, "getencoding", lambda: "cp936")
+    monkeypatch.setattr(local_sandbox.locale, "getencoding", lambda: "cp1252")
+    _mock_cmd_code_pages(monkeypatch, 936, 437)
 
     kwargs: dict = {}
 
@@ -700,27 +702,109 @@ def test_execute_command_cmd_branch_ignores_utf8_mode_for_default_encoding(monke
     assert kwargs["encoding"] == "cp936"
 
 
+@pytest.mark.parametrize(
+    "console_cp,oem_cp,pipe_encoding,probe",
+    [(437, 850, "cp437", "café"), (850, 437, "cp850", "café £"), (65001, 437, "utf-8", "你好 日本語"), (0, 850, "cp850", "café £"), (0, 0, "cp1252", "café")],
+    ids=["oem-437", "oem-850", "utf8-console", "no-console", "ansi-fallback"],
+)
+def test_execute_command_cmd_decodes_console_code_page(monkeypatch, console_cp, oem_cp, pipe_encoding, probe):
+    """Decode real stdout/stderr pipes with differing console and ANSI pages."""
+    _mock_cmd_code_pages(monkeypatch, console_cp, oem_cp)
+    monkeypatch.setattr(local_sandbox.locale, "getencoding", lambda: "cp1252")
+    monkeypatch.setattr(local_sandbox.locale, "getpreferredencoding", lambda _: "utf-8")
+    if os.name != "nt":
+        monkeypatch.setattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0, raising=False)
+    run_windows_command = LocalSandbox._run_windows_command
+    payload = (probe + "\r\n").encode(pipe_encoding)
+    script = f"import os; p=bytes.fromhex('{payload.hex()}'); os.write(1,p); os.write(2,p); raise SystemExit(3)"
+
+    def run_pipe_probe(args, timeout, env, **kwargs):
+        return run_windows_command([sys.executable, "-c", script], timeout, env, **kwargs)
+
+    monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: "cmd.exe"))
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(run_pipe_probe))
+
+    output = LocalSandbox("t").execute_command("echo probe", timeout=10)
+
+    assert output == f"{probe}\n\nStd Error:\n{probe}\n\nExit Code: 3"
+
+
+def test_execute_command_cmd_rechecks_console_page_between_commands(monkeypatch):
+    pages = iter([437, 65001])
+    kernel32 = SimpleNamespace(GetConsoleOutputCP=lambda: next(pages), GetOEMCP=lambda: 437)
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *args, **kwargs: kernel32, raising=False)
+    monkeypatch.setattr(local_sandbox.locale, "getencoding", lambda: "cp1252")
+    monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: "cmd.exe"))
+    payloads = iter(["café".encode("cp437"), "你好".encode()])
+
+    def fake_run(args, timeout, env, **kwargs):
+        capture = _BoundedPipeCapture(**kwargs)
+        capture.append(next(payloads))
+        return capture.read(), "", 0, False
+
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(fake_run))
+    sandbox = LocalSandbox("t")
+
+    assert sandbox.execute_command("echo café") == "café"
+    assert sandbox.execute_command("echo 你好") == "你好"
+
+
+def test_execute_command_cmd_falls_back_when_windows_api_is_unavailable(monkeypatch):
+    def unavailable(*args, **kwargs):
+        raise OSError("kernel32 unavailable")
+
+    monkeypatch.setattr(ctypes, "WinDLL", unavailable, raising=False)
+    monkeypatch.setattr(local_sandbox.locale, "getencoding", lambda: "cp1252")
+    monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: "cmd.exe"))
+    kwargs = {}
+
+    def fake_run(args, timeout, env, **kw):
+        kwargs.update(kw)
+        return "ok", "", 0, False
+
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(fake_run))
+
+    assert LocalSandbox("t").execute_command("echo hello") == "ok"
+    assert kwargs["encoding"] == "cp1252"
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Requires real Windows cmd.exe")
-def test_execute_command_cmd_branch_roundtrip_with_ansi_code_page(monkeypatch):
-    """Real cmd.exe roundtrip: on a host whose ANSI code page can encode the
-    probe (zh-CN = cp936), cmd output must survive the cmd branch's pinned
-    decoder instead of collapsing to U+FFFD under Python UTF-8 mode."""
-    ansi = locale.getencoding()
-    try:
-        "你好".encode(ansi)
-    except UnicodeEncodeError:
-        pytest.skip(f"ANSI code page {ansi} cannot encode the probe")
-    # cmd.exe writes pipe output using the console output code page, which
-    # is process-wide state that sibling tests can change (the PowerShell
-    # roundtrips pin it to UTF-8 for their own assertions), so the probe
-    # only asserts when the console still matches the ANSI page this
-    # branch decodes with.
-    console_cp = ctypes.windll.kernel32.GetConsoleOutputCP()
-    ansi_cp = int(ansi[2:]) if ansi.startswith("cp") and ansi[2:].isdigit() else None
-    if ansi_cp is None or console_cp != ansi_cp:
-        pytest.skip(f"console output CP {console_cp} does not match ANSI {ansi}")
-    monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: r"C:\Windows\System32\cmd.exe"))
+@pytest.mark.parametrize("code_page", [437, 850, 936, 65001])
+def test_execute_command_cmd_branch_roundtrip_with_console_code_page(code_page):
+    """Use a private console so changing its page cannot affect sibling tests."""
+    probe = r"""
+import ctypes
+import os
+import sys
+import deerflow.sandbox.local.local_sandbox as local_sandbox
+from deerflow.sandbox.local.local_sandbox import LocalSandbox
 
-    output = LocalSandbox("t").execute_command("echo 你好")
-
-    assert "你好" in output
+code_page = int(sys.argv[1])
+assert ctypes.windll.kernel32.SetConsoleOutputCP(code_page)
+# Make ANSI and console encoding differ even on a zh-CN or UTF-8 runner.
+local_sandbox.locale.getencoding = lambda: "cp1252"
+shell = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "cmd.exe")
+LocalSandbox._get_shell = staticmethod(lambda: shell)
+expected = "caf\u00e9" if code_page in (437, 850) else "\u4f60\u597d \u65e5\u672c\u8a9e"
+output = LocalSandbox("cmd-encoding-probe").execute_command(f"echo {expected}", timeout=15)
+assert output == expected + "\n", ascii(output)
+"""
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    result = subprocess.run(
+        [sys.executable, "-c", probe, str(code_page)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env={**os.environ, "PYTHONUTF8": "1"},
+        creationflags=subprocess.CREATE_NEW_CONSOLE,
+        startupinfo=startupinfo,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
