@@ -602,11 +602,9 @@ class TestMultipleMounts:
         monkeypatch.setattr("deerflow.sandbox.local.local_sandbox.LocalSandbox._run_windows_command", staticmethod(capture_windows))
 
         sandbox.execute_command("cat /mnt/data/test.txt")
-        # Verify the command received the resolved local path. POSIX passes a
-        # [shell, "-c", command] list; the Windows runners pass the command
-        # string itself, so assert on the joined text.
-        command = captured.get("command", "")
-        text = " ".join(command) if isinstance(command, list) else str(command)
+        # Verify the command received the resolved local path. Both runners
+        # receive the argv list, so join it before asserting.
+        text = " ".join(captured.get("command", []))
         assert str(data_dir.as_posix()) in text
 
     def test_reverse_resolve_path_does_not_match_partial_prefix(self, tmp_path):
