@@ -32,6 +32,8 @@ __all__ = [
 def make_thread_store(
     session_factory: async_sessionmaker[AsyncSession] | None,
     store: BaseStore | None = None,
+    *,
+    workspace_required: bool = False,
 ) -> ThreadMetaStore:
     """Create the appropriate ThreadMetaStore based on available backends.
 
@@ -39,7 +41,9 @@ def make_thread_store(
     otherwise falls back to the in-memory LangGraph Store implementation.
     """
     if session_factory is not None:
-        return ThreadMetaRepository(session_factory)
+        return ThreadMetaRepository(session_factory, workspace_required=workspace_required)
+    if workspace_required:
+        raise ValueError("workspace thread storage requires SQL persistence")
     if store is None:
         raise ValueError("make_thread_store requires either a session_factory (SQL) or a store (memory)")
     return MemoryThreadMetaStore(store)

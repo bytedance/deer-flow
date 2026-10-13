@@ -7,13 +7,15 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import case, column, select, table, text, update
+from sqlalchemy import case, column, or_, select, table, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm.attributes import flag_modified
 
 from deerflow.persistence.json_compat import json_match
 from deerflow.persistence.thread_meta.base import PROJECT_FILTER_UNSET, THREAD_ARCHIVED_METADATA_KEY, THREAD_PINNED_METADATA_KEY, THREAD_PROJECT_METADATA_KEY, InvalidMetadataFilterError, ThreadMetaStore, _ProjectFilterUnset
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.persistence.workspaces.scope import live_workspace_predicate, lock_resource_scope, resolve_resource_scope
+from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso
 
@@ -21,8 +23,46 @@ logger = logging.getLogger(__name__)
 
 
 class ThreadMetaRepository(ThreadMetaStore):
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, workspace_required: bool = False) -> None:
         self._sf = session_factory
+        self._workspace_required = workspace_required
+
+    def _scope(self, user_id, *, integrated=True):
+        context = resolve_resource_scope(None, user_id, required=self._workspace_required)
+        if context is not None and not integrated:
+            raise WorkspaceAccessDenied("thread ownership maintenance is unavailable in workspace scope")
+        return context
+
+    @staticmethod
+    def _owned_scope(stmt, user_id, context):
+        if user_id is not None:
+            stmt = stmt.where(ThreadMetaRow.user_id == user_id)
+        if context is not None:
+            from deerflow.persistence.projects.model import ProjectRow
+
+            parent = select(ProjectRow.id).where(ProjectRow.id == ThreadMetaRow.project_id, ProjectRow.workspace_id == context.workspace_id).correlate(ThreadMetaRow).exists()
+            stmt = stmt.where(ThreadMetaRow.workspace_id == context.workspace_id, live_workspace_predicate(context), or_(ThreadMetaRow.project_id.is_(None), parent))
+        return stmt
+
+    @staticmethod
+    async def _begin_write(session, context):
+        if context is not None:
+            await lock_resource_scope(session, context)
+        elif session.get_bind().dialect.name == "sqlite":
+            await session.execute(text("BEGIN IMMEDIATE"))
+
+    async def _locked_row(self, session, thread_id, user_id, context):
+        await self._begin_write(session, context)
+        return await session.scalar(self._owned_scope(select(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id), user_id, context).with_for_update())
+
+    @staticmethod
+    async def _project_available(session, project_id, user_id, context):
+        from deerflow.persistence.projects.model import ProjectRow
+        from deerflow.persistence.projects.sql import ProjectRepository
+
+        stmt = select(ProjectRow.id).where(ProjectRow.id == project_id, ProjectRow.status == "active")
+        stmt = ProjectRepository._owned_scope(stmt, user_id, context)
+        return await session.scalar(stmt.with_for_update()) is not None
 
     @staticmethod
     def _row_to_dict(row: ThreadMetaRow) -> dict[str, Any]:
@@ -52,36 +92,21 @@ class ThreadMetaRepository(ThreadMetaStore):
         # Auto-resolve user_id from contextvar when AUTO; explicit None
         # creates an orphan row (used by migration scripts).
         resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.create")
+        context = self._scope(resolved_user_id)
         now = datetime.now(UTC)
         async with self._sf() as session:
-            if session.get_bind().dialect.name == "sqlite":
-                await session.execute(text("BEGIN IMMEDIATE"))
+            await self._begin_write(session, context)
             if project_id is not None:
                 from deerflow.persistence.projects import ProjectNotAssignableError
-                from deerflow.persistence.projects.model import ProjectRow
 
-                # Lock the project row (FOR UPDATE on Postgres; the clause
-                # renders nothing on SQLite) so a concurrent
-                # ProjectRepository.delete — which holds the same lock across
-                # its membership-clear and DELETE — either commits first (this
-                # read then finds no row) or waits for this transaction.
-                # RFC v2 §14.14: no dangling ``threads_meta.project_id``.
-                locked = await session.scalar(
-                    select(ProjectRow.id)
-                    .where(
-                        ProjectRow.id == project_id,
-                        ProjectRow.user_id == resolved_user_id,
-                        ProjectRow.status == "active",
-                    )
-                    .with_for_update()
-                )
-                if locked is None:
+                if not await self._project_available(session, project_id, resolved_user_id, context):
                     raise ProjectNotAssignableError(project_id)
             row = ThreadMetaRow(
                 thread_id=thread_id,
                 incarnation=uuid.uuid4().hex,
                 assistant_id=assistant_id,
                 user_id=resolved_user_id,
+                workspace_id=context.workspace_id if context is not None else None,
                 display_name=display_name,
                 status="idle",
                 metadata_json=metadata or {},
@@ -95,6 +120,7 @@ class ThreadMetaRepository(ThreadMetaStore):
             return self._row_to_dict(row)
 
     async def claim_unowned(self, thread_id: str, owner: str) -> bool:
+        self._scope(owner, integrated=False)
         claim_target = table(
             ThreadMetaRow.__tablename__,
             column(ThreadMetaRow.thread_id.key),
@@ -120,33 +146,11 @@ class ThreadMetaRepository(ThreadMetaStore):
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> bool:
         resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.set_project")
-        from deerflow.persistence.projects.model import ProjectRow
-
+        context = self._scope(resolved_user_id)
         async with self._sf() as session:
-            if session.get_bind().dialect.name == "sqlite":
-                # Read-then-write transaction: take the write lock up front
-                # (create() precedent) so a concurrent writer cannot
-                # interleave between the project check and the UPDATE.
-                await session.execute(text("BEGIN IMMEDIATE"))
-            if project_id is not None:
-                # Lock the project row (FOR UPDATE on Postgres; the clause
-                # renders nothing on SQLite) so a concurrent
-                # ProjectRepository.delete — which holds the same lock across
-                # its membership-clear and DELETE — either commits first (this
-                # read then finds no row) or waits for this transaction.
-                # RFC v2 §14.14: no dangling ``threads_meta.project_id``.
-                locked = await session.scalar(
-                    select(ProjectRow.id)
-                    .where(
-                        ProjectRow.id == project_id,
-                        ProjectRow.user_id == resolved_user_id,
-                        ProjectRow.status == "active",
-                    )
-                    .with_for_update()
-                )
-                if locked is None:
-                    await session.commit()
-                    return False
+            await self._begin_write(session, context)
+            if project_id is not None and not await self._project_available(session, project_id, resolved_user_id, context):
+                return False
             stmt = (
                 update(ThreadMetaRow)
                 .where(ThreadMetaRow.thread_id == thread_id)
@@ -157,8 +161,7 @@ class ThreadMetaRepository(ThreadMetaStore):
                     updated_at=ThreadMetaRow.__table__.c.updated_at,
                 )
             )
-            if resolved_user_id is not None:
-                stmt = stmt.where(ThreadMetaRow.user_id == resolved_user_id)
+            stmt = self._owned_scope(stmt, resolved_user_id, context)
             result = await session.execute(stmt)
             await session.commit()
             return result.rowcount > 0
@@ -170,12 +173,10 @@ class ThreadMetaRepository(ThreadMetaStore):
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> dict | None:
         resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.get")
+        context = self._scope(resolved_user_id)
         async with self._sf() as session:
-            row = await session.get(ThreadMetaRow, thread_id)
+            row = await session.scalar(self._owned_scope(select(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id), resolved_user_id, context))
             if row is None:
-                return None
-            # Enforce owner filter unless explicitly bypassed (user_id=None).
-            if resolved_user_id is not None and row.user_id != resolved_user_id:
                 return None
             return self._row_to_dict(row)
 
@@ -201,7 +202,10 @@ class ThreadMetaRepository(ThreadMetaStore):
           delete-idempotence cross-user gap where the row vanishing
           made every other user appear to "own" it.
         """
+        context = self._scope(user_id)
         async with self._sf() as session:
+            if context is not None:
+                return await session.scalar(self._owned_scope(select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id == thread_id), user_id, context)) is not None
             row = await session.get(ThreadMetaRow, thread_id)
             if row is None:
                 return not require_existing
@@ -226,6 +230,7 @@ class ThreadMetaRepository(ThreadMetaStore):
         context. Pass ``user_id=None`` to bypass (migration/CLI).
         """
         resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.search")
+        context = self._scope(resolved_user_id)
         pinned_order = case(
             (json_match(ThreadMetaRow.metadata_json, THREAD_PINNED_METADATA_KEY, True), 1),
             else_=0,
@@ -235,8 +240,7 @@ class ThreadMetaRepository(ThreadMetaStore):
             ThreadMetaRow.updated_at.desc(),
             ThreadMetaRow.thread_id.desc(),
         )
-        if resolved_user_id is not None:
-            stmt = stmt.where(ThreadMetaRow.user_id == resolved_user_id)
+        stmt = self._owned_scope(stmt, resolved_user_id, context)
         if status:
             stmt = stmt.where(ThreadMetaRow.status == status)
 
@@ -271,13 +275,6 @@ class ThreadMetaRepository(ThreadMetaStore):
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
 
-    async def _check_ownership(self, session: AsyncSession, thread_id: str, resolved_user_id: str | None) -> bool:
-        """Return True if the row exists and is owned (or filter bypassed)."""
-        if resolved_user_id is None:
-            return True  # explicit bypass
-        row = await session.get(ThreadMetaRow, thread_id)
-        return row is not None and row.user_id == resolved_user_id
-
     async def update_display_name(
         self,
         thread_id: str,
@@ -288,13 +285,9 @@ class ThreadMetaRepository(ThreadMetaStore):
     ) -> None:
         """Update the display name and remove caller-selected stale metadata atomically."""
         resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.update_display_name")
+        context = self._scope(resolved_user_id)
         async with self._sf() as session:
-            if session.get_bind().dialect.name == "sqlite":
-                await session.execute(text("BEGIN IMMEDIATE"))
-                row = await session.get(ThreadMetaRow, thread_id)
-            else:
-                result = await session.execute(select(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id).with_for_update())
-                row = result.scalar_one_or_none()
+            row = await self._locked_row(session, thread_id, resolved_user_id, context)
             if row is None or (resolved_user_id is not None and row.user_id != resolved_user_id):
                 return
             row.display_name = display_name
@@ -313,10 +306,13 @@ class ThreadMetaRepository(ThreadMetaStore):
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> None:
         resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.update_status")
+        context = self._scope(resolved_user_id)
         async with self._sf() as session:
-            if not await self._check_ownership(session, thread_id, resolved_user_id):
+            row = await self._locked_row(session, thread_id, resolved_user_id, context)
+            if row is None:
                 return
-            await session.execute(update(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id).values(status=status, updated_at=datetime.now(UTC)))
+            row.status = status
+            row.updated_at = datetime.now(UTC)
             await session.commit()
 
     async def update_metadata(
@@ -339,17 +335,9 @@ class ThreadMetaRepository(ThreadMetaStore):
         preserve recency ordering for metadata-only changes such as pin/unpin.
         """
         resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.update_metadata")
+        context = self._scope(resolved_user_id)
         async with self._sf() as session:
-            if session.get_bind().dialect.name == "sqlite":
-                # A deferred SQLite transaction does not reserve the writer
-                # until the UPDATE, which is too late for a read-modify-write
-                # merge. BEGIN IMMEDIATE serializes writers before the read,
-                # including writers in other processes using the same file.
-                await session.execute(text("BEGIN IMMEDIATE"))
-                row = await session.get(ThreadMetaRow, thread_id)
-            else:
-                result = await session.execute(select(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id).with_for_update())
-                row = result.scalar_one_or_none()
+            row = await self._locked_row(session, thread_id, resolved_user_id, context)
             if row is None:
                 return
             if resolved_user_id is not None and row.user_id != resolved_user_id:
@@ -376,12 +364,9 @@ class ThreadMetaRepository(ThreadMetaStore):
     ) -> None:
         """Move a thread metadata row to ``owner_user_id``."""
         resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.update_owner")
+        context = self._scope(resolved_user_id, integrated=False)
         async with self._sf() as session:
-            if session.get_bind().dialect.name == "sqlite":
-                await session.execute(text("BEGIN IMMEDIATE"))
-                row = await session.get(ThreadMetaRow, thread_id)
-            else:
-                row = (await session.execute(select(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id).with_for_update())).scalar_one_or_none()
+            row = await self._locked_row(session, thread_id, resolved_user_id, context)
             if row is None or (resolved_user_id is not None and row.user_id != resolved_user_id):
                 return
             row.user_id = owner_user_id
@@ -395,12 +380,9 @@ class ThreadMetaRepository(ThreadMetaStore):
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> None:
         resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.delete")
+        context = self._scope(resolved_user_id)
         async with self._sf() as session:
-            if session.get_bind().dialect.name == "sqlite":
-                await session.execute(text("BEGIN IMMEDIATE"))
-                row = await session.get(ThreadMetaRow, thread_id)
-            else:
-                row = (await session.execute(select(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id).with_for_update())).scalar_one_or_none()
+            row = await self._locked_row(session, thread_id, resolved_user_id, context)
             if row is None or (resolved_user_id is not None and row.user_id != resolved_user_id):
                 return
             await session.delete(row)

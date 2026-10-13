@@ -16,3 +16,5 @@ Status: partial M0/M1/M2/M3 foundations verified, including member controls, cre
 - [ ] 12. M11 — 集中边界验收、文档与发布结论。验收：两种开户入口及同一业务能力均通过，没有未覆盖的租户入口；失败历史保留；具备邮件配置、隔离和迁移证据后才允许公开注册。
 
 Detailed steps: `../../../docs/superpowers/plans/2026-10-13-tenant-workspaces.md`.
+
+M3 thread repository checkpoint: #25 RED (NULL scope, both databases), #26 GREEN (7 passed, 29.58s). Owner-private thread SQL and shared-project association are verified. HTTP admission, checkpoint/run/files and frontend remain incomplete; parent M3 stays unchecked.

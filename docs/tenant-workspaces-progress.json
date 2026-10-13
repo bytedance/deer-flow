@@ -547,5 +547,46 @@
     },
     "self_review": "Shared ACL predicates are SQL filters before materialization/counts; matching parent controls documents; roles checked under workspace/actor lock and rechecked on mutations; actual authors preserved. Private thread content is not granted by project sharing. Legacy generation receipts/release locks are not silently reused.",
     "limits": "API/SQL/file sharing foundation only. Thread/run stores and attachments, frontend controls/cache/SSE/WSS, scoped conversion/retention, credential/background scope, quota and physical NAS/release/restore still require integration. Complete tenant activation remains compiled false."
+  },
+  "workspace_private_threads": {
+    "base_commit": "8f36177f",
+    "red": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 25,
+      "result": "FAILURE",
+      "archive_sha256": "b1f838acc6389dccdb92d1aaa14e43890bbb534eb7a968a673c88ef85ab20121",
+      "artifact": "m3-threads-postgres-red.log",
+      "failed": 2,
+      "duration_seconds": 15.92,
+      "reason": "Both databases persisted NULL workspace on native thread create"
+    },
+    "green": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 26,
+      "result": "SUCCESS",
+      "archive_sha256": "6527f4f9c8baad5d317559ea8643d5b4b0bb25d8951264abd1dca369786ce183",
+      "artifact": "m3-threads-postgres-green.log",
+      "passed": 7,
+      "duration_seconds": 29.58
+    },
+    "scope": "Real SQLite/PostgreSQL native thread create/get/search/access and mutations, owner-private conversations referencing shared projects, compatible project deletion detaches each private thread, stale policy denies access/write, required scope refuses absence. Existing native-auth project/file HTTP main and three legacy thread regressions retained.",
+    "source_sha256": {
+      "backend/app/gateway/deps.py": "2e056575c7d21374f3062f3d24239ed271d673ccf89b8b8bc17d459ad5c89d14",
+      "backend/packages/harness/deerflow/persistence/thread_meta/sql.py": "0d42c947a695cd9494165b60868bf57e1bca1574212a29902b2daa08721976bc",
+      "backend/packages/harness/deerflow/persistence/thread_meta/__init__.py": "72a12418fa4e5bd618f9d10059d60231a57c33be39223f0ceb259faf496947f1",
+      "backend/packages/harness/deerflow/persistence/projects/sql.py": "5ca436098b17616f4df07ebba85c479d3ae3bdd7bb0daec6df03a302f17bd7f6",
+      "backend/tests/test_workspace_threads.py": "86cf4244c3e38dec23a1f4fbd5aafa5fe7482c8f7a6020d72a4e378cb16f112a"
+    },
+    "limits": "Repository foundation only. Thread HTTP owner-check admission ordering, artifacts/uploads/checkpoint/run, shared project thread listing, frontend/cache/streams, background scope and release gates remain required. Tenant activation stays compiled false.",
+    "cleanup": {
+      "25": {
+        "containers": [],
+        "networks": []
+      },
+      "26": {
+        "containers": [],
+        "networks": []
+      }
+    }
   }
 }

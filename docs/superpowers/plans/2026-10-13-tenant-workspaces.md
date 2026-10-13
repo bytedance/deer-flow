@@ -507,3 +507,5 @@ M0—M11全部有证据；管理员开通和自助注册同版可用；真实研
 这是跨认证、持久化、执行、文件和前端的产品改动，不能按“加注册页”的小功能估算。M0完成入口与数据清单后，再按实际改动量更新各项工期；当前不承诺固定上线日期。M3/M7/M9/M10分别提供可演示的检查点，但只有M11通过才算统一需求交付完成。
 
 工作包不是一次大提交。M1按新表/资源归属/回填/两库协议拆小步；M3按repository/REST/流式文件/前端切换拆小步；M4按准入/claim/撤权/续跑拆小步。每个小步先明确一个可失败的行为和精确修改文件，再最小实现、定向验证、提交。不得在细化过程中把管理员或客户自助移出本次范围。
+
+M3 private thread checkpoint: Jenkins #25 failed on missing persisted workspace in both databases. #26 passed the SQLite/PostgreSQL owner-private thread repository main, existing project/file HTTP main and three legacy thread checks (7 passed, 29.58s). Source hashes and limits are recorded in progress JSON. Thread HTTP admission, file references/checkpoint/run and client integration remain pending; no parent work-package acceptance is complete.

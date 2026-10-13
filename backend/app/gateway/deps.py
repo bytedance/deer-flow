@@ -726,7 +726,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         from deerflow.persistence.thread_meta import make_thread_store
 
-        app.state.thread_store = make_thread_store(sf, app.state.store)
+        app.state.thread_store = make_thread_store(sf, app.state.store, workspace_required=config.workspaces.enabled)
         if sf is not None:
             from deerflow.persistence.mcp_tasks import McpTaskRepository
             from deerflow.persistence.projects import ProjectDocumentRepository, ProjectRepository

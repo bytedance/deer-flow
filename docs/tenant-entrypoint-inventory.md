@@ -67,3 +67,5 @@ All content access requires native permissions intersected with active workspace
 ## Evidence
 
 This inventory is not isolation evidence. Each work package must record implementation location, source revision and Shanghai Jenkins results. M11 audits every entry again. Unknown extension routes require explicit classification and authorization before tenant access; installed code is not automatically covered.
+
+Thread repository checkpoint: Jenkins #26 verifies SQL filtering before pagination, live membership and private ownership with shared project parents. Thread HTTP admission must still bind trusted scope before owner-check decorators; project thread listing remains refused until that adapter is integrated. SQL success does not prove HTTP/SSE/WSS/checkpoint or filesystem coverage.

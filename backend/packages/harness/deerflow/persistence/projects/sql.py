@@ -220,9 +220,6 @@ class ProjectRepository:
                 if context is not None:
                     for child in (ProjectDocumentRow, ThreadMetaRow):
                         invalid = [child.workspace_id.is_(None), child.workspace_id != context.workspace_id, child.user_id.is_(None)]
-                        if child is ThreadMetaRow:
-                            # Threads remain private; shared-thread membership integration is separate.
-                            invalid.append(child.user_id != locked.user_id)
                         incompatible = (
                             select(literal(1))
                             .select_from(child)

@@ -102,3 +102,5 @@ Scoped project delete trashes all compatible authors' document rows atomically;
 foreign/null-scope children still refuse. Native backfill and independent
 executor export consumption both require the current native head. Keep past
 receipts immutable; e0002 executor schema is unchanged.
+
+ThreadMetaRepository accepts workspace_required and consumes trusted task-local scope. Reads and pagination combine original owner, selected workspace, live membership and parent-workspace consistency. Private thread history remains owner-private when its project visibility changes; project source access must separately use current ProjectRepository ACL. Association locks workspace -> actor -> project; row mutations lock workspace -> actor -> thread. Workspace mode refuses orphan claiming, owner reassignment and user_id=None bypass. make_thread_store cannot fall back to memory when scope is required. Gateway admission must bind scope before native owner checks; remaining runtime/background coverage is not implied by this repository foundation.
