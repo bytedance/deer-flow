@@ -231,11 +231,17 @@ def _hash_tool_calls(tool_calls: list[dict]) -> str:
 # it was asked to persist: a subagent whose task names an output file would
 # otherwise stop *all* tool calls, including the write that delivers its
 # result, and finish as "completed" with nothing on disk. So the wrap-up
-# explicitly allows one last save through a file-writing tool before the
-# final answer. The hard-stop path below is unchanged (it strips tool calls).
+# allows a bounded save/read/retry before the final answer, without reusing
+# a looping writer or bypassing the read-before-write gate. The hard-stop
+# path below is unchanged (it strips tool calls).
 _WRAP_UP_INSTRUCTIONS = (
     "If your task asks you to save results to a file, first write what you have collected so far to that file "
-    "with a file-writing tool (for example write_file), then stop calling tools and produce your final answer. "
+    "with a file-writing tool (for example write_file, unless it is the looping tool). "
+    "If the writer is itself looping, use a different available file-writing tool. "
+    "If a save is blocked by a read-before-write check, read the target file and retry the save once. "
+    "Do not use a tool that this warning tells you to stop, or repeat a failed save loop. "
+    "If no permitted save path is available or the retry fails, include the collected results in your final answer "
+    "and state that the file was not saved. Then stop calling tools and produce your final answer. "
     "If you cannot complete the task, summarize what you accomplished so far."
 )
 
