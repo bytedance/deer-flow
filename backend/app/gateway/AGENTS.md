@@ -289,3 +289,9 @@ Persistent async writes drain with await_drained; no synchronous write worker is
 created for the native async repository. See docs/tenant-workspaces-api.md and
 actual JWT/RBAC/CSRF tests. Resource filtering, request/task binding, publication
 locks, startup gates and complete entrypoint coverage remain mandatory.
+
+Member-control adapters enforce owner/admin/member transitions through locked
+SQL writes with expected server scope versions. Ownership transfer uses native
+local-password verification and compares persisted credential/token versions
+before commit. SSO proof, invitations and revoke effects are still required.
+These adapters remain unregistered by the shipped Gateway.

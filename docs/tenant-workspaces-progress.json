@@ -25,9 +25,10 @@
     "contracts/workspace_scope.v1.json": "c106de2a9f5a0d62b173719854096fef653233dd81ef2116ac664058162cb1ba"
   },
   "remaining": [
-    "M0 real SQL/HTTP fixture depends on M1/M2; resource assertions depend on M3",
-    "M1 executor ledger attribution and guarded migration CLI",
-    "M2 through M11 remain unimplemented"
+    "M0 live SQL/HTTP resource fixture integration with M2/M3",
+    "M1 original deployment-data inventory and physical maintenance/restore evidence with M10",
+    "M2 Gateway lifecycle/configuration wiring and complete management acceptance",
+    "M3 through M11 remain pending"
   ],
   "static_checks": [
     "ruff check with backend/ruff.toml passed",
@@ -294,5 +295,42 @@
       "backend/tests/test_authorization_route_permissions.py": "6be59a12f4c21b03543e6eb6d79ce4f0adc460b6fc2375be4a20a35e3a26b3a6"
     },
     "limits": "Adapters not registered or initialized by shipped Gateway yet. No tenant activation. Full startup/config, member-management/reauth transfer, resource lists/files/runtime/backgrounds, PAT/IM, client flows and release remain pending. Proof endpoint is test composition against a real SQL project row, not full production project API acceptance."
+  },
+  "workspace_member_control": {
+    "red": {
+      "job": "deerflow-tenant-contract-m0",
+      "build": 17,
+      "result": "FAILURE",
+      "archive_sha256": "e5fc16ed69dbf9e8303f8110e248b008477748b8d3ba87b35dfe8b52a4ca0676",
+      "failed": 1,
+      "skipped": 1,
+      "reason": "member listing route missing after real native authentication and team creation"
+    },
+    "integration_failure": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 11,
+      "result": "FAILURE",
+      "archive_sha256": "77273f75a07031114dd45338a2017fb106a67e6f069bb2d1749047882fa3e481",
+      "failed": 2,
+      "tests_passed": 2,
+      "duration_seconds": 23.97,
+      "reason": "old foreign-user assertion expected 404 after that user became valid owner; preceding removed-member denial passed"
+    },
+    "green": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 12,
+      "result": "SUCCESS",
+      "archive_sha256": "efb7b7abd8adc485750c3775d335c9e33675bae5bd07cae2a345e92ca123fdb2",
+      "tests_passed": 4,
+      "duration_seconds": 24.47
+    },
+    "scope": "One HTTP main and one repository main per real SQLite/PostgreSQL. Native JWT, CSRF, RBAC and SQL; member listing/roles/removal, stale member context, local-password owner transfer, last-owner protection, current owner access and removed actor denial. Existing concurrent-transfer repository proof rerun. Fixture activation uses internal add_member, not a public invitation.",
+    "cleanup": "Exact owned-label containers/networks for terminal builds 11 and 12 empty",
+    "source_sha256": {
+      "backend/app/gateway/routers/workspaces.py": "7174f1483eea5311f5a50486656d3c5b10b3f52f6ff065c477a0af37881dc10f",
+      "backend/packages/harness/deerflow/persistence/workspaces/sql.py": "9fb128b23b18309588d356200744ad9b8df063b75b104f1c9e308dd72716cc91",
+      "backend/tests/test_workspace_http.py": "9c6be069186366898be9daefdbcf41e24d2a284762d71767d3352d7bc2858385"
+    },
+    "limits": "No shipped Gateway registration/initialization or tenant activation. SSO step-up, invitations, live resource/file/background isolation, revoke effects and full release gates remain pending. No tenant deployment or public registration."
   }
 }

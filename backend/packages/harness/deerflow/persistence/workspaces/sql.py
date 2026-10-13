@@ -15,6 +15,7 @@ from uuid import uuid4, uuid5
 from sqlalchemy import and_, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from deerflow.authz.workspace import WorkspaceContext
 from deerflow.persistence.user.model import UserRow
 from deerflow.persistence.workspaces.backfill import _PERSONAL_NAMESPACE
 from deerflow.persistence.workspaces.model import WorkspaceMembershipRow, WorkspaceOperationOutboxRow, WorkspaceQuotaRow, WorkspaceRow
@@ -138,7 +139,7 @@ class WorkspaceRepository:
             rows = (await session.execute(self._membership_query(user_id).order_by(WorkspaceRow.created_at, WorkspaceRow.id))).all()
             return [self._view(workspace, member) for workspace, member in rows]
 
-    async def _locked_team(self, session, workspace_id, actor_user_id):
+    async def _locked_team(self, session, workspace_id, actor_user_id, expected_context=None):
         await self._begin_write(session)
         workspace = await session.scalar(select(WorkspaceRow).where(WorkspaceRow.id == workspace_id).with_for_update())
         if workspace is None or workspace.kind != "team" or workspace.status != "active":
@@ -147,6 +148,15 @@ class WorkspaceRepository:
         actor = await session.get(WorkspaceMembershipRow, (workspace_id, actor_user_id))
         if actor is None or actor.status != "active":
             raise WorkspaceAccessDenied("active team membership required")
+        if expected_context is not None:
+            if (
+                type(expected_context) is not WorkspaceContext
+                or expected_context.workspace_id != workspace_id
+                or expected_context.actor_user_id != actor_user_id
+                or expected_context.policy_version != workspace.policy_version
+                or expected_context.membership_version != actor.version
+            ):
+                raise WorkspaceAccessDenied("workspace context changed before membership write")
         return workspace, actor
 
     async def add_member(self, workspace_id, actor_user_id, user_id, *, role):
@@ -170,11 +180,11 @@ class WorkspaceRepository:
             await session.commit()
             return member.to_dict()
 
-    async def change_role(self, workspace_id, actor_user_id, user_id, *, role):
+    async def change_role(self, workspace_id, actor_user_id, user_id, *, role, expected_context=None):
         if role not in ("admin", "member"):
             raise ValueError("member role must be admin or member")
         async with self._sf() as session:
-            _, actor = await self._locked_team(session, workspace_id, actor_user_id)
+            _, actor = await self._locked_team(session, workspace_id, actor_user_id, expected_context)
             member = await session.get(WorkspaceMembershipRow, (workspace_id, user_id))
             if actor.role != "owner" or member is None or member.status != "active" or member.role == "owner":
                 raise WorkspaceAccessDenied("role transition is not permitted")
@@ -183,9 +193,9 @@ class WorkspaceRepository:
             await session.commit()
             return member.to_dict()
 
-    async def remove_member(self, workspace_id, actor_user_id, user_id):
+    async def remove_member(self, workspace_id, actor_user_id, user_id, *, expected_context=None):
         async with self._sf() as session:
-            _, actor = await self._locked_team(session, workspace_id, actor_user_id)
+            _, actor = await self._locked_team(session, workspace_id, actor_user_id, expected_context)
             member = await session.get(WorkspaceMembershipRow, (workspace_id, user_id))
             if member is None or member.status != "active":
                 raise WorkspaceAccessDenied("active target membership required")
@@ -196,9 +206,13 @@ class WorkspaceRepository:
             await session.commit()
             return member.to_dict()
 
-    async def transfer_owner(self, workspace_id, actor_user_id, user_id):
+    async def transfer_owner(self, workspace_id, actor_user_id, user_id, *, expected_context=None, expected_token_version=None, expected_password_hash=None):
         async with self._sf() as session:
-            _, actor = await self._locked_team(session, workspace_id, actor_user_id)
+            _, actor = await self._locked_team(session, workspace_id, actor_user_id, expected_context)
+            if expected_token_version is not None or expected_password_hash is not None:
+                credentials = (await session.execute(select(UserRow.token_version, UserRow.password_hash).where(UserRow.id == actor_user_id))).one()
+                if credentials != (expected_token_version, expected_password_hash):
+                    raise WorkspaceAccessDenied("reauthentication credentials changed before transfer")
             await self._user(session, user_id)
             target = await session.get(WorkspaceMembershipRow, (workspace_id, user_id))
             if actor.role != "owner" or user_id == actor_user_id or target is None or target.status != "active":
@@ -210,3 +224,16 @@ class WorkspaceRepository:
             target.role, target.version = "owner", target.version + 1
             await session.commit()
             return target.to_dict()
+
+    async def list_active_members(self, workspace_id, actor_user_id):
+        # Recheck actor and workspace in the same SELECT as member disclosure.
+        access = self._membership_query(actor_user_id).where(WorkspaceRow.id == workspace_id).correlate(None).exists()
+        query = (
+            select(WorkspaceMembershipRow)
+            .join(UserRow, UserRow.id == WorkspaceMembershipRow.user_id)
+            .where(WorkspaceMembershipRow.workspace_id == workspace_id, WorkspaceMembershipRow.status == "active", UserRow.account_status == "active", UserRow.email_verified_at.is_not(None), access)
+            .order_by(WorkspaceMembershipRow.user_id)
+        )
+        async with self._sf() as session:
+            members = (await session.execute(query)).scalars().all()
+            return [{"user_id": member.user_id, "role": member.role, "version": member.version} for member in members]

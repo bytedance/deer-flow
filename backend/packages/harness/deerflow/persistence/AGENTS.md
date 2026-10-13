@@ -66,4 +66,8 @@ workspace/member/account state in SQL and do not confer platform-admin bypass.
 This repository is not yet Gateway wiring: callers must authenticate actors,
 apply native credential scopes and enforce recent reauthentication for transfer.
 Internal add_member is for managed/invitation services, not a public invite bypass.
-Pending HTTP entrypoints and revocation effects remain separate acceptance gates.
+HTTP control callers supply an expected immutable context; writes compare its
+actor, workspace and live versions under the workspace lock. Password-proved
+transfer additionally checks persisted token version/password hash. Member
+disclosure applies actor access in the same SELECT. Gateway lifecycle wiring,
+invitations and revocation effects remain acceptance gates.

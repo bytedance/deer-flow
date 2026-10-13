@@ -19,6 +19,7 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
     from app.gateway.auth import config as auth_config
     from app.gateway.auth import create_access_token
     from app.gateway.auth.local_provider import LocalAuthProvider
+    from app.gateway.auth.password import hash_password
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
     from app.gateway.auth_middleware import AuthMiddleware
     from app.gateway.csrf_middleware import CSRFMiddleware
@@ -33,9 +34,10 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
         assert importlib.util.find_spec(name.rsplit(".", 1)[0]) is not None and importlib.util.find_spec(name) is not None, "managed workspace HTTP surface is not implemented"
     service_module, dependencies, routes, admin_routes = [importlib.import_module(name) for name in names]
     identities = {name: str(uuid4()) for name in ("admin", "alice", "bob")}
+    password_hash = hash_password("synthetic-native-transfer-password")
     with native_engine.begin() as conn:
         for name, user_id in identities.items():
-            conn.execute(sa.insert(UserRow).values(id=user_id, email=name + "@example.com", email_verified_at=datetime.now(UTC), system_role="admin" if name == "admin" else "user"))
+            conn.execute(sa.insert(UserRow).values(id=user_id, email=name + "@example.com", password_hash=password_hash, email_verified_at=datetime.now(UTC), system_role="admin" if name == "admin" else "user"))
     configuration = AppConfig.model_validate(
         {
             "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
@@ -109,13 +111,47 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                 assert team_response.status_code == 200, team_response.text
                 team = team_response.json()["id"]
                 assert (await client.post("/api/workspaces", json={**team_payload, "actor_user_id": identities["bob"]})).status_code == 422
+                team_headers = {"X-Deerflow-Workspace": team}
+                members_url = "/api/workspaces/" + team + "/members"
+                members = await client.get(members_url, headers=team_headers)
+                assert members.status_code == 200, members.text
+                assert [member["user_id"] for member in members.json()] == [identities["alice"]]
+                as_user("bob")
+                assert (await client.get("/api/workspaces/current", headers=team_headers)).status_code == 404
+                as_user("alice")
+                await service.repository.add_member(team, identities["alice"], identities["bob"], role="member")
+                bob_context = await service.resolve_context(identities["bob"], team)
+                as_user("bob")
+                assert (await client.patch(members_url + "/" + identities["alice"], json={"role": "admin"}, headers=team_headers)).status_code == 403
+                as_user("alice")
+                assert (await client.patch(members_url + "/" + identities["bob"], json={"role": "admin"}, headers=team_headers)).status_code == 200
+                with pytest.raises(HTTPException) as stale_member:
+                    await service.revalidate(bob_context)
+                assert stale_member.value.status_code == 404
+                as_user("bob")
+                assert (await client.delete(members_url + "/" + identities["alice"], headers=team_headers)).status_code == 403
+                as_user("alice")
+                transfer_url = "/api/workspaces/" + team + "/ownership-transfer"
+                transfer = {"new_owner_user_id": identities["bob"], "reauth_password": "wrong-password"}
+                assert (await client.post(transfer_url, json=transfer, headers=team_headers)).status_code == 401
+                transfer["reauth_password"] = "synthetic-native-transfer-password"
+                transferred = await client.post(transfer_url, json=transfer, headers=team_headers)
+                assert transferred.status_code == 200, transferred.text
+                assert transfer["reauth_password"] not in transferred.text
+                as_user("bob")
+                assert (await client.post("/api/workspaces/" + team + "/leave", headers=team_headers)).status_code == 409
+                members = (await client.get(members_url, headers=team_headers)).json()
+                assert [member["user_id"] for member in members if member["role"] == "owner"] == [identities["bob"]]
+                assert (await client.delete(members_url + "/" + identities["alice"], headers=team_headers)).status_code == 200
+                as_user("alice")
+                assert (await client.get("/api/workspaces/current", headers=team_headers)).status_code == 404
                 async with sf() as session:
                     session.add(ProjectRow(id="proof", user_id=identities["alice"], workspace_id=personal, name="private source"))
                     await session.commit()
                 assert (await client.get("/api/workspace-proof/proof", headers={"X-Deerflow-Workspace": personal})).status_code == 200
                 assert (await client.get("/api/workspace-proof/proof", headers={"X-Deerflow-Workspace": team})).status_code == 404
                 as_user("bob")
-                assert (await client.get("/api/workspaces/current", headers={"X-Deerflow-Workspace": team})).status_code == 404
+                assert (await client.get("/api/workspaces/current", headers=team_headers)).status_code == 200
                 async with sf() as session:
                     await session.execute(sa.update(UserRow).where(UserRow.id == identities["alice"]).values(system_role="limited"))
                     await session.commit()
