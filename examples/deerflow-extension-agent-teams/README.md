@@ -80,6 +80,47 @@ same database; it cannot dispatch through its actions or middleware.
 A new authenticated native mention can also reconnect its team. Existing queued
 jobs then continue under that caller's current delegated capability.
 
+## Find earlier team evidence
+
+Members have three read-only tools in addition to the short `read_team_context`:
+
+- `read_team_history`: page through retained shared messages, newest first.
+  Optional `member_id`, `job_id` and literal case-insensitive `query` filters
+  apply before pagination. The shared record retains at most 100 messages.
+- `search_team_results`: find finished requests by the same filters, searching
+  both task text and the stored answer. Results follow newest-first request
+  creation order and include completed, failed and cancelled requests; result
+  receipts are excluded to avoid listing a delivery as another member task.
+- `read_team_result`: read one request or receipt by `job_id`. It returns member,
+  requester, status, parent task, timestamps, and `conversation` thread/run IDs,
+  with a short request excerpt and the retained answer. Source IDs are references;
+  the host's ordinary conversation permissions remain authoritative.
+
+For example, a reviewer can search `{"team_id":"...","query":"release evidence"}`
+with `search_team_results`, then pass a returned `job_id` to `read_team_result`.
+The result remains available after leaving the recent eight-message context or
+the shared record, provided its bounded answer was saved in the task ledger.
+Reads work after service restart without reconnecting or starting Agent runs.
+Only the owning user's current member conversations may call these tools.
+
+Pages default to eight records and accept `limit` from 1 to 20. Follow
+`next_cursor` with the same tool and filters; page size may change. Cursors anchor
+to record identity, so newer arrivals do not shift an existing page. Pages are
+live, not immutable snapshots: newly completed older requests may appear on later
+result pages. If an anchor leaves retained history, `cursor_expired=true` returns
+an empty page; restart the query explicitly. Changed filters reject the cursor.
+
+Each response is limited to 24,000 UTF-8 JSON bytes, including metadata and
+escaping, so a page may contain fewer than `limit` records. Search summaries have
+500-byte request/result excerpts; history text and individual answers have a
+6,000-byte limit. `truncated=true` marks shortened text. New answers also preserve
+whether the original collected answer was truncated; legacy answers report
+`result.truncated=null` when that provenance is unknown. `result.available=false`
+distinguishes unfinished work, cancellation without an answer, and a legacy
+answer no longer retained. Inspect the source conversation for further evidence.
+These tools expose retained task data, not hidden reasoning, execution inputs,
+approval responses, attachment bytes or an unbounded transcript archive.
+
 Deleting a finished team removes its plugin records, not its Agent conversations.
 Cancel/finish all queued, running and interrupted jobs first. Each user has their
 own teams. Sharing a host conversation does **not** share its team's private data.
@@ -176,6 +217,10 @@ ticks, pending answers, shared-source receipts, worker
 shutdown and durable slots across restart. Storage regressions cover indexed batch
 reads, terminal-history exclusion, complete legacy reads before backfill, rollback
 and projection updates when queuing, cancelling, finishing or creating receipts.
+History tests cover filtered cursor pagination under new arrivals, expired anchors,
+output byte budgets with escaping and Unicode, old answers after record rotation
+and restart, legacy unavailable/truncation states, owner/member isolation, and
+real ToolNode retrieval followed by another peer handoff.
 Host-run transport is controlled for deterministic tests.
 Clarification tests execute the host's real tool and middleware in an Agent graph,
 including repeated questions, peer/mention/result-receipt paths, lost response

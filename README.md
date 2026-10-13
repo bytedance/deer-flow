@@ -1050,6 +1050,7 @@ Notes:
 - IM channel workers call Gateway's LangGraph-compatible API internally and automatically attach process-local internal auth plus the CSRF cookie/header pair required for thread and run creation.
 - Inbound work is bounded to `inbound_queue_maxsize` pending messages plus `max_concurrency` active workers. When capacity is exhausted, socket/polling providers drop new messages before sending DeerFlow's working acknowledgment and emit a rate-limited warning. Buzz leaves its replay cursor unchanged and reconnects for relay replay; GitHub webhooks return `503`, marking the delivery failed for manual/API redelivery. Shutdown closes admission immediately, keeps channel transports available while accepted messages drain for up to `shutdown_grace_period_seconds`, then cancels and awaits active handlers before closing provider resources; the Gateway's outer timeout can cancel an incomplete shutdown without detaching those resources.
 - Telegram shutdown retains ongoing cleanup across a timeout or cancellation so a retry can finish it. If the Telegram loop has already stopped, shutdown warns that download clients may remain open and releases the abandoned cleanup state; later stops do not repeat that warning.
+- Slack stop waits up to five seconds for an in-flight Socket Mode connection and its cleanup. If cleanup is still pending, the previous instance stays tracked and a restart can be retried after it finishes. SDK cleanup failures report their original error and remain retryable.
 - Feishu/Lark now queues rapid follow-up messages per mapped DeerFlow `thread_id` instead of immediately surfacing the generic busy reply, and topic replies keep a per-message card with a compact source-message preview across queued/running/final patches.
 - Streaming IM channels treat backend `error` events like transport failures and follow the same reply and retry path. The channel logs the error type and message for diagnosis.
 
@@ -1402,6 +1403,12 @@ names and base URLs readable.
 
 For `LocalSandboxProvider`, this is a managed tool-path boundary rather than host filesystem isolation. Explicit per-Agent skill policies are accepted only while host bash is disabled (the default), because a host subprocess can address canonical paths without using the provider's virtual-path mappings. Use Docker/AIO, the Kubernetes provisioner, or E2B when the filesystem boundary must remain enforceable alongside shell access.
 
+On Windows, the local sandbox's `cmd.exe` fallback decodes builtin output using
+the console output code page, including UTF-8 after `chcp 65001`, independently
+of Python's UTF-8 mode. If no console page is available, it uses the system OEM
+page, with ANSI as a last resort. Native programs can choose a different output
+encoding; configure those programs to match the console page when needed.
+
 Managed integrations install shared read-only skill packs without mixing them
 into custom skills. The Lark/Feishu CLI integration is available under
 `Capability Center → Plugins → Lark / Feishu`; an administrator installs or
@@ -1520,7 +1527,7 @@ Public-skill CI waivers are exact, expiring exceptions in `.github/skill-review-
 
 Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, rendered web capture, file operations, bash execution — and supports custom tools via MCP servers and Python functions. The bundled DDG, Brave, Tavily, SearXNG, and Serper search providers accept an optional `time_range` of `day`, `week`, `month`, or `year`; omitting it preserves existing search behavior. For DDG recency searches, DeerFlow excludes DDGS backends that ignore time limits. Swap anything. Add anything.
 
-For DDG web search and DDG image search, `max_results` in `config.yaml` can be a positive integer or an environment-variable reference such as `max_results: $DDG_MAX_RESULTS` with `DDG_MAX_RESULTS=5`. The configured value takes precedence over the tool call's `max_results` argument. Invalid values (for example, `abc`, an empty string, or `3.5`), zero, and negative counts produce a warning and fall back to the default of 5 results.
+For DDG web search and DDG image search, `max_results` in `config.yaml` can be a positive integer or an environment-variable reference such as `max_results: $DDG_MAX_RESULTS` with `DDG_MAX_RESULTS=5`. The configured value takes precedence over the tool call's `max_results` argument. Invalid values (for example, `abc`, an empty string, or `3.5`), zero, and negative counts produce a warning and fall back to the default of 5 results. DDG, Brave, and Serper image search share one result-URL screen that omits non-HTTP(S), localhost, cloud-metadata hostnames, and non-public address literals, including multicast and IPv6 spellings embedding private IPv4 addresses. The screen does not resolve DNS; downloaders must validate the resolved address when connecting. A result with neither a safe full image URL nor a safe thumbnail is omitted.
 
 Stdio MCP servers can set `cwd` in `extensions_config.json` when their entrypoint
 or data files depend on a specific working directory. The setting applies to
@@ -2090,6 +2097,26 @@ For `tests_passed:go test ./...`, packages marked `[no test files]` or `[no test
 
 For file acceptance criteria, an empty regular file in the shared workspace can satisfy `file:<path> exists` and `file_written:<path>`, including on remote sandboxes. It fails `file:<path> non-empty` with a deterministic empty-file result.
 
+To require CSV header columns, set a `task` or `batch_task` item's criterion to
+`file:../outputs/report.csv csv-columns:["id","name"]`. The JSON array must contain
+unique, nonempty, UTF-8-encodable column names. Names match exactly (case and
+whitespace included), in any order; extra columns are allowed. Checks read only a bounded prefix and parse
+the first comma-separated logical record, supporting double-quoted fields, doubled
+quotes, embedded newlines, and an optional UTF-8 BOM. Data rows are not validated.
+Empty files, missing required columns, malformed or invalid UTF-8 headers, and
+empty or duplicate header names return `does not hold`. Headers over **50,000 bytes**, incomplete reads,
+invalid criteria, unavailable workspace access, or exhausted read budgets return
+`UNVERIFIED`. A large file can satisfy the check when its complete header fits the
+budget. A definite syntax error within that header remains a checked negative
+regardless of later data rows; truncated quoting remains `UNVERIFIED`.
+Reads use the same authorized, scoped transport as JSON checks below:
+50,001 bytes maximum; remote reads have a 5-second command timeout (10 seconds for
+the provider call). Local reads and parsing share a cooperative 5-second deadline;
+remote parsing has its own 5-second deadline starting after the read returns.
+These checks do not interrupt an in-progress filesystem or parser call. Concurrent
+writes are not an atomic snapshot. This does not validate data types, row counts,
+or business meaning.
+
 To request JSON syntax validation, explicitly set a `task` or `batch_task` item's
 `acceptance_criteria` to `["file:../outputs/report.json json-valid"]`. Checks cover only
 complete UTF-8 JSON files within the shared workspace, up to **50,000 bytes**.
@@ -2326,6 +2353,15 @@ After each run, DeerFlow records a workspace change summary for the run-owned `w
 
 Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. When a completed response successfully presents between 2 and 50 files, its final file card also offers one ZIP download. Archive membership comes from the terminal delivery receipt rather than browser-supplied paths, and the ZIP contains the current file versions, which may have changed since the response. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes. Source previews also recognize extensionless `Dockerfile` and `Makefile` artifacts by their file names. Unknown file types, including names such as `constructor` and `__proto__`, retain the download fallback.
 
+Unsaved artifact edits survive switching chats, workspace pages, or visiting the
+home page and returning in the same browser tab. Drafts stay in memory for the
+current account until saved or discarded; changing accounts or signing out clears them.
+Public showcase visits and unavailable Gateway auth probes retain hidden drafts
+until authentication is known. Recovering as another account or confirming logout
+clears the retained content.
+Refreshing or closing the tab warns while any chat has unsaved edits. Draft file
+contents are not stored in browser storage and do not survive a reload.
+
 Artifact content revisions refresh when an output file is atomically replaced,
 even if its size and modification time are preserved. Refreshing the preview
 then provides the new revision for saving; an older preview still requires a reload.
@@ -2432,6 +2468,11 @@ This is the difference between a chatbot with tool access and an agent with an a
 ```
 
 ### Agentic Browser Control
+
+Browser screenshots and Browserless capture/fetch outputs are published only
+after the complete file is written. New files use the host's normal creation
+permissions (typically `0644`), and replacements preserve existing permissions,
+so sandbox code can read captures when those permissions allow it.
 
 Browser dependency auto-detection accepts `name`, `group`, and `use` in any
 order within a tool entry, with either indented or indentless YAML lists.
