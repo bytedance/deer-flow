@@ -86,9 +86,9 @@ def page(team, payload, validate_text, *, results=False):
         searchable = record["text"] + ("\n" + (stored_result(team, record) or "") if results else "")
         if query and query not in searchable.casefold():
             continue
+        anchor = token(record_job_id, record["kind"])
         if results:
             item = job_record(team, record)
-            anchor = token(record_job_id, record["kind"])
         else:
             content, cut = excerpt(record["text"], 6000)
             job = jobs.get(record_job_id)
@@ -102,7 +102,6 @@ def page(team, payload, validate_text, *, results=False):
                 "truncated": True if cut else (job.get("result_truncated") if job else None) if record["kind"] in TERMINAL else False,
                 "conversation": {"thread_id": job["thread_id"] if job else record.get("source_thread"), "run_id": record.get("run_id")},
             }
-            anchor = token(record_job_id, record["kind"])
         rows.append((anchor, item))
     response = {
         "team_id": team["id"],
