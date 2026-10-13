@@ -367,7 +367,7 @@ class Paths:
         return self.thread_dir(thread_id, user_id=user_id) / "user-data" / "outputs"
 
     def user_projects_dir(self, user_id: str) -> Path:
-        """Host path root for one user's project shelves: ``users/{user_id}/projects/``."""
+        """Project root in the trusted workspace; legacy calls use the user root."""
         _validate_user_id(user_id)
         context = get_current_workspace()
         if context is not None:

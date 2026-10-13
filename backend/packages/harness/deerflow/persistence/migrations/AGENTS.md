@@ -29,7 +29,7 @@ The empty-DB path keeps using `create_all` because `Base.metadata` is the only a
 `0028_parked_attempts` → `0029_scheduler_agent_tasks` →
 `0030_notification_claim_tokens` → `0031_scheduled_streak_boundary` →
 `0032_activity_and_task_events` → `0033_batch_result_artifact` → `0034_run_event_seq_watermark`
-(current head). The preference
+(upstream segment; the integrated head is documented below). The preference
 revision adds a separate owner/key table with a cascading users foreign key and
 does not alter users; the project-documents revision adds a new owner-scoped
 shelf table, and the MCP lease-token revision adds two nullable token columns to
@@ -198,3 +198,10 @@ control-plane tables and nullable native resource scope, plus unverified email
 and account status fields. No automatic ownership backfill is performed. The
 executor still has its separate schema chain; native DDL is not proof that the
 two-database tenant rollout is ready. Downgrade refuses destructive scope loss.
+
+
+`0037_project_visibility` is the current child of unchanged 0036. It adds
+non-null private-default projects.visibility and ck_project_visibility in an
+Alembic batch so legacy projects do not become shared. ORM fresh bootstrap has
+the same default/constraint. Destructive downgrade refuses; restore the matched
+backup generation instead. Old source ancestry/release receipts are unchanged.

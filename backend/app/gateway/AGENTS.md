@@ -310,8 +310,9 @@ the native permission decorators. Create/patch bodies reject unknown ownership
 fields. Persistent writes use await_drained; denied scope becomes 404. Until its
 thread store is scoped, the project thread-list route returns 503 when workspace
 services are active. Native startup sets workspace_mode_enabled once and creates
-the SQL project repository with its matching workspace_required setting. File,
-shared ACL, cache and background coverage remain required before activation.
+the SQL project repository with its matching workspace_required setting. Full thread/file,
+cache and background coverage remain required before activation. The project
+file and shared ACL checkpoints are documented below.
 
 
 Project document routes bind live native-session workspace context after native
@@ -321,3 +322,12 @@ rebinds the captured context and checks live document/parent access before ASGI
 headers; scoped file responses are private/no-store. Upload publication and trash
 drain owned async writes. Thread promotion/attach remain explicitly refused until
 the thread store/path integration lands. No request can activate workspace mode.
+
+
+Projects accept explicit private/workspace visibility. Private content uses the
+native creator; shared reads require selected active team membership and native
+project permission, while shared writes require owner/admin. HTTP preflight uses
+WorkspaceService's same permission intersection; SQL repeats live role checks
+inside the mutation lock. Shelf ACLs inherit their actual parent, preserving real
+uploader IDs. Personal/unscoped shared publication is refused. Project visibility
+does not grant thread content access; thread listing/attachments remain gated.

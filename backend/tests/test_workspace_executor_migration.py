@@ -157,7 +157,7 @@ def test_paired_attribution_preserves_payloads_and_unknown_physical_work(executo
         workspace = conn.execute(sa.text("SELECT workspace_id FROM threads_meta WHERE thread_id='thread'")).scalar_one()
         assert conn.execute(sa.text("SELECT workspace_id FROM runs WHERE run_id='run'")).scalar_one() == workspace
     bindings = {
-        "native_revision": "0036_tenant_workspaces",
+        "native_revision": "0037_project_visibility",
         "threads": [{"user_id": "owner", "thread_id": "thread", "incarnation": "epoch", "workspace_id": workspace}],
         "runs": [{"user_id": "owner", "thread_id": "thread", "incarnation": "epoch", "run_id": "run", "workspace_id": workspace}],
     }

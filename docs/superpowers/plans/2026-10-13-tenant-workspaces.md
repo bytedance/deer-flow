@@ -9,11 +9,11 @@
 **Tech Stack:** FastAPI/Python、SQLAlchemy/Alembic/PostgreSQL、Redis、Next.js/React、现有MCP/Skill、Docker/NAS、上海Jenkins。
 
 设计依据：[统一设计](../specs/2026-10-13-tenant-workspaces-design.md)。OpenSpec：`openspec/changes/tenant-workspaces-self-service/`。
-基线48d5c3de。实施已进入M3的项目CRUD与私有资料空间隔离；合同、迁移和离线归属基础已有定向验证，但各工作包的完整验收仍未完成。实际源码与Jenkins证据见 `docs/tenant-workspaces-progress.json`，不以计划条目代替验收。
+基线48d5c3de。实施已进入M3的项目CRUD、私有与显式共享资料空间隔离；合同、迁移和离线归属基础已有定向验证，但各工作包的完整验收仍未完成。实际源码与Jenkins证据见 `docs/tenant-workspaces-progress.json`，不以计划条目代替验收。
 
 ## 用户确认后的执行顺序与可审阅交付
 
-用户确认将“管理员管理租户”和“客户自助注册、管理团队”合为同一需求，按依赖顺序实施。两种开户入口共用账号、空间、成员和授权服务；阶段划分用于控制开发顺序，不代表只交付管理员版本。本次回复先整理计划，不启动新的构建、部署或业务代码修改。
+用户确认将“管理员管理租户”和“客户自助注册、管理团队”合为同一需求，按依赖顺序实施。两种开户入口共用账号、空间、成员和授权服务；阶段划分用于控制开发顺序，不代表只交付管理员版本。计划确认回复先整理文档；后续“完成上述计划”目标继续授权顺序实施和上海定向验证，部署仍须满足 M10–M11 门禁。
 
 | 顺序 | 工作包 | 可审阅交付 | 进入下一阶段的依据 |
 | --- | --- | --- | --- |
@@ -25,7 +25,7 @@
 
 阶段主干验证通过后推进后续功能；跨工作包的最终验收仍保持未完成，直到依赖证据齐备。先验证真实主干，再补必要边界检查，不用测试数量衡量进度。
 
-当前记录显示 M0–M2 有部分基础实现，M3 的私有项目 CRUD 已有定向验证；私有资料上传、列表、下载和删除已在隔离环境获得真实文件证据（Jenkins #21）；共享权限、线程与客户端贯通仍未验收。下一项继续 M3 的共享资料、线程与空间切换；已有基础通过不等于完整 M3 完成。
+当前记录显示 M0–M2 有部分基础实现，M3 的私有项目 CRUD 已有定向验证；私有资料上传、列表、下载和删除已在隔离环境获得真实文件证据（Jenkins #21）；共享资料 API 与旧数据私有迁移已通过 Jenkins #23，匹配版本的离线 CLI 通过 #24；线程与客户端贯通仍未验收。下一项继续 M3 的线程归属、资料转存和空间切换；已有基础通过不等于完整 M3 完成。
 
 ## 顺序、检查点与边界
 
@@ -223,6 +223,16 @@ response preparation, plus two legacy shelf regressions (4 passed, 22.68s). Exac
 archives/source hashes live in the progress JSON. Scope-aware thread attachment,
 shared ACLs, conversion/maintenance, frontend/cache and NAS/release gates remain
 required; do not check the parent M3 package yet.
+
+M3 shared file checkpoint: Jenkins #22 rejected the explicit sharing request on
+both databases. #23 passed the native-auth shared file main (member read/write
+denial, admin upload retaining creator, shared deletion across authors), both
+legacy private-default upgrades, startup and paired-attribution generation checks,
+unchanged ancestry and two native mains (11 passed, 40.55s). #24 separately passed
+the actual offline paired CLI main on both databases (2 passed, 25.66s). Current
+native head is 0037_project_visibility; executor remains e0002_workspace_scope.
+Thread attachment/conversion/maintenance, client/cache, physical files/NAS and
+release evidence remain required. Parent M3 acceptance stays unchecked.
 
 ### M4：B/C、Scheduler、通知和撤权贯通
 

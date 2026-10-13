@@ -6,7 +6,7 @@ acceptance remain pending. Historical `0035/e0001` release receipts are immutabl
 
 ## Scope and prerequisites
 
-`scripts/tenant_migration.py` operates only on native `0036_tenant_workspaces`
+`scripts/tenant_migration.py` operates only on native `0037_project_visibility`
 and independent executor `e0002_workspace_scope` databases. It never performs
 DDL, starts workers, enables registration, resumes admission, releases physical
 capacity or changes account verification. M10 must collect actual drain,
@@ -111,3 +111,14 @@ before writes, phase ordering, incomplete verification, repeat execution,
 quarantine retention, evidence tampering, and actual CLI plan invocation.
 Exact source digests and Jenkins results are in
 [implementation progress](tenant-workspaces-progress.json).
+
+
+Current schema refinement: `0037_project_visibility` follows the unchanged
+`0036_tenant_workspaces`; existing projects receive private visibility, never an
+automatic team grant. Native startup and both sides of the offline ownership
+export agree on this revision. Previous 0036 phase receipts remain historical
+and cannot be reused for the new generation. The executor stays at e0002.
+Jenkins #23 verified real 0035-to-current upgrades on both databases plus paired
+attribution; #24 verified the actual plan/apply/verify CLI and synthetic receipt
+requirements on both. These are consumer/DDL proofs, not cloud drain, restored
+production backups, NAS mapping or deployed tenant release acceptance.

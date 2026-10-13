@@ -5,8 +5,9 @@ external identity; ``name``/``presentation`` are display attributes — renaming
 touches exactly this row and never affects membership (threads reference
 ``threads_meta.project_id``). ``instructions`` is user-authored project
 context; Phase 1 stores and PATCHes it, Phase 2 injects it. There is
-deliberately no ``memory_mode``/sharing/agent-config column: no consumer
-exists in Phase 1/2 (RFC v2 §3, §4.1).
+no ``memory_mode``/agent-config column. Tenant projects add explicit
+``visibility`` (private/workspace); document ACLs inherit this project boundary
+while user_id retains the real creator. Threads remain owner-private.
 
 ``ProjectDocumentRow``: one row per project shelf document. ``stored_relpath``
 is a server-generated content address relative to ``users/{user_id}/projects/``
@@ -24,7 +25,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, DateTime, Integer, String, Text
+from sqlalchemy import JSON, CheckConstraint, DateTime, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -32,6 +33,9 @@ from deerflow.persistence.base import Base
 
 class ProjectRow(Base):
     __tablename__ = "projects"
+    __table_args__ = (CheckConstraint("visibility IN ('private', 'workspace')", name="ck_project_visibility"),)
+
+    visibility: Mapped[str] = mapped_column(String(16), default="private", server_default="private")
 
     workspace_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
 

@@ -12,7 +12,7 @@ from deerflow.persistence.workspaces.sql import workspace_repository
 # background/credential isolation and paired rollout are still being integrated.
 # Change only with their complete M3-M11 implementation and release evidence.
 _WORKSPACE_RUNTIME_INTEGRATED = False
-_NATIVE_WORKSPACE_SCHEMA = "0036_tenant_workspaces"
+_NATIVE_WORKSPACE_SCHEMA = "0037_project_visibility"
 
 
 async def validate_workspace_bootstrap(config, session_factory):

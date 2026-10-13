@@ -12,6 +12,7 @@ from app.gateway.workspaces.dependencies import resolve_workspace_context
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.projects_config import ProjectsConfig
 from deerflow.persistence.projects import ProjectRepository
+from deerflow.persistence.workspaces.scope import WorkspaceRoleDenied
 from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.runtime.secret_context import redact_metadata_secrets
 from deerflow.utils.file_io import await_drained
@@ -29,6 +30,7 @@ class ProjectResponse(BaseModel):
     instructions: str
     presentation: dict
     status: str
+    visibility: Literal["private", "workspace"] = "private"
     created_at: str
     updated_at: str
 
@@ -38,6 +40,7 @@ class ProjectCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=128)
     instructions: str = ""
     presentation: dict = Field(default_factory=dict)
+    visibility: Literal["private", "workspace"] = "private"
 
 
 class ProjectPatchRequest(BaseModel):
@@ -45,6 +48,7 @@ class ProjectPatchRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=128)
     instructions: str | None = None
     presentation: dict | None = None
+    visibility: Literal["private", "workspace"] | None = None
 
 
 class ProjectListResponse(BaseModel):
@@ -88,6 +92,7 @@ def _to_response(row: dict) -> ProjectResponse:
         instructions=row.get("instructions", ""),
         presentation=row.get("presentation") or {},
         status=row["status"],
+        visibility=row.get("visibility", "private"),
         created_at=row.get("created_at", ""),
         updated_at=row.get("updated_at", ""),
     )
@@ -104,12 +109,23 @@ async def _project_call(request, method, *args, **kwargs):
     if service is not None:
         if not isinstance(repo, ProjectRepository):
             raise HTTPException(status_code=503, detail="Workspace projects require persistent SQL")
-        kwargs["workspace_context"] = await resolve_workspace_context(request)
+        context = await resolve_workspace_context(request)
+        kwargs["workspace_context"] = context
+        if method in ("patch", "set_status", "delete"):
+            existing = await repo.get(args[0], workspace_context=context)
+            if existing is None:
+                raise _not_found()
+            action = "delete" if method == "delete" else "write"
+            await service.authorize_resource(
+                context, request.state.auth, resource_workspace_id=existing["workspace_id"], owner_user_id=existing["user_id"], visibility=existing["visibility"], action=action, native_permission="projects:" + action
+            )
     elif getattr(request.app.state, "workspace_mode_enabled", False):
         raise HTTPException(status_code=503, detail="Workspace authorization is unavailable")
     try:
         operation = getattr(repo, method)(*args, **kwargs)
         return await await_drained(operation) if method in ("create", "patch", "set_status", "delete") else await operation
+    except WorkspaceRoleDenied:
+        raise HTTPException(status_code=403, detail="Shared projects require an active team owner or admin") from None
     except WorkspaceAccessDenied:
         raise _not_found() from None
 
@@ -139,7 +155,7 @@ def _validate_instructions_length(instructions: str | None) -> None:
 @require_permission("projects", "write")
 async def create_project(body: ProjectCreateRequest, request: Request) -> ProjectResponse:
     _validate_instructions_length(body.instructions)
-    return _to_response(await _project_call(request, "create", name=body.name, instructions=body.instructions, presentation=body.presentation))
+    return _to_response(await _project_call(request, "create", name=body.name, instructions=body.instructions, presentation=body.presentation, visibility=body.visibility))
 
 
 @router.get("", response_model=ProjectListResponse)
@@ -176,7 +192,7 @@ async def get_project(project_id: str, request: Request) -> ProjectResponse:
 @require_permission("projects", "write")
 async def patch_project(project_id: str, body: ProjectPatchRequest, request: Request) -> ProjectResponse:
     _validate_instructions_length(body.instructions)
-    row = await _project_call(request, "patch", project_id, name=body.name, instructions=body.instructions, presentation=body.presentation)
+    row = await _project_call(request, "patch", project_id, name=body.name, instructions=body.instructions, presentation=body.presentation, visibility=body.visibility)
     if row is None:
         raise _not_found()
     return _to_response(row)

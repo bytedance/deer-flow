@@ -21,13 +21,13 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
+from sqlalchemy import and_, func, literal, or_, select, text, update
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import func, literal, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.projects.model import ProjectDocumentRow, ProjectRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
-from deerflow.persistence.workspaces.scope import live_workspace_predicate, lock_resource_scope, resolve_resource_scope
+from deerflow.persistence.workspaces.scope import live_workspace_predicate, lock_resource_scope, require_shared_write, resolve_resource_scope, shared_workspace_predicate
 from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.file_io import await_drained
@@ -54,12 +54,15 @@ class ProjectRepository:
         self._workspace_required = workspace_required
 
     @staticmethod
-    def _owned_scope(statement, user_id, context):
-        if user_id is not None:
-            statement = statement.where(ProjectRow.user_id == user_id)
-        if context is not None:
-            statement = statement.where(ProjectRow.workspace_id == context.workspace_id, live_workspace_predicate(context))
-        return statement
+    def _owned_scope(statement, user_id, context, *, action="read"):
+        if context is None:
+            statement = statement.where(ProjectRow.visibility == "private")
+            if user_id is not None:
+                statement = statement.where(ProjectRow.user_id == user_id)
+            return statement
+        private = and_(ProjectRow.visibility == "private", ProjectRow.user_id == context.actor_user_id)
+        shared = and_(ProjectRow.visibility == "workspace", shared_workspace_predicate(context, write=action != "read"))
+        return statement.where(ProjectRow.workspace_id == context.workspace_id, live_workspace_predicate(context), or_(private, shared))
 
     @staticmethod
     def _row_to_dict(row: ProjectRow) -> dict[str, Any]:
@@ -76,11 +79,14 @@ class ProjectRepository:
         name: str,
         instructions: str = "",
         presentation: dict | None = None,
+        visibility: str = "private",
         user_id: str | None | _AutoSentinel = AUTO,
         workspace_context=None,
     ) -> dict:
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectRepository.create")
         context = resolve_resource_scope(workspace_context, resolved_user_id, required=self._workspace_required)
+        if visibility not in ("private", "workspace"):
+            raise ValueError("Invalid project visibility")
         now = datetime.now(UTC)
         row = ProjectRow(
             id=uuid.uuid4().hex,
@@ -90,12 +96,15 @@ class ProjectRepository:
             instructions=instructions,
             presentation=presentation or {},
             status="active",
+            visibility=visibility,
             created_at=now,
             updated_at=now,
         )
         async with self._sf() as session:
             if context is not None:
                 await lock_resource_scope(session, context)
+            if visibility == "workspace":
+                await require_shared_write(session, context)
             session.add(row)
             await session.commit()
             await session.refresh(row)
@@ -134,6 +143,7 @@ class ProjectRepository:
         name: str | None = None,
         instructions: str | None = None,
         presentation: dict | None = None,
+        visibility: str | None = None,
         user_id: str | None | _AutoSentinel = AUTO,
         workspace_context=None,
     ) -> dict | None:
@@ -142,9 +152,15 @@ class ProjectRepository:
         async with self._sf() as session:
             if context is not None:
                 await lock_resource_scope(session, context)
-            row = await session.scalar(self._owned_scope(select(ProjectRow).where(ProjectRow.id == project_id), resolved_user_id, context))
+            row = await session.scalar(self._owned_scope(select(ProjectRow).where(ProjectRow.id == project_id), resolved_user_id, context, action="write"))
             if row is None:
                 return None
+            if visibility is not None:
+                if visibility not in ("private", "workspace"):
+                    raise ValueError("Invalid project visibility")
+                if visibility == "workspace":
+                    await require_shared_write(session, context)
+                row.visibility = visibility
             if name is not None:
                 row.name = name
             if instructions is not None:
@@ -169,7 +185,7 @@ class ProjectRepository:
         async with self._sf() as session:
             if context is not None:
                 await lock_resource_scope(session, context)
-            row = await session.scalar(self._owned_scope(select(ProjectRow).where(ProjectRow.id == project_id), resolved_user_id, context))
+            row = await session.scalar(self._owned_scope(select(ProjectRow).where(ProjectRow.id == project_id), resolved_user_id, context, action="write"))
             if row is None:
                 return None
             row.status = status
@@ -197,18 +213,22 @@ class ProjectRepository:
                 # re-reads the row as gone — no dangling ``threads_meta.project_id``
                 # (RFC v2 §14.14). Missing/foreign rows keep the False result.
                 lock_stmt = select(ProjectRow).where(ProjectRow.id == project_id)
-                lock_stmt = self._owned_scope(lock_stmt, resolved_user_id, context)
+                lock_stmt = self._owned_scope(lock_stmt, resolved_user_id, context, action="delete")
                 locked = (await session.execute(lock_stmt.with_for_update())).scalar_one_or_none()
                 if locked is None:
                     return False
                 if context is not None:
                     for child in (ProjectDocumentRow, ThreadMetaRow):
+                        invalid = [child.workspace_id.is_(None), child.workspace_id != context.workspace_id, child.user_id.is_(None)]
+                        if child is ThreadMetaRow:
+                            # Threads remain private; shared-thread membership integration is separate.
+                            invalid.append(child.user_id != locked.user_id)
                         incompatible = (
                             select(literal(1))
                             .select_from(child)
                             .where(
                                 child.project_id == project_id,
-                                or_(child.workspace_id.is_(None), child.workspace_id != context.workspace_id, child.user_id.is_(None), child.user_id != resolved_user_id),
+                                or_(*invalid),
                             )
                             .limit(1)
                         )
@@ -217,8 +237,11 @@ class ProjectRepository:
                 # §8.1 statement 2: every active shelf row moves to trash in
                 # the same transaction and lock — never an active row pointing
                 # at a deleted project. No filesystem work.
-                await ProjectDocumentRepository.trash_all_for_project(session, project_id, project_name=locked.name, user_id=resolved_user_id)
-                if resolved_user_id is not None:
+                await ProjectDocumentRepository.trash_all_for_project(session, project_id, project_name=locked.name, user_id=None if context is not None else resolved_user_id)
+                if context is not None:
+                    await session.execute(update(ThreadMetaRow).where(ThreadMetaRow.project_id == project_id, ThreadMetaRow.workspace_id == context.workspace_id).values(project_id=None, updated_at=ThreadMetaRow.__table__.c.updated_at))
+                    result = await session.execute(self._owned_scope(sa_delete(ProjectRow).where(ProjectRow.id == project_id), resolved_user_id, context, action="delete"))
+                elif resolved_user_id is not None:
                     await session.execute(update(ThreadMetaRow).where(ThreadMetaRow.project_id == project_id, ThreadMetaRow.user_id == resolved_user_id).values(project_id=None, updated_at=ThreadMetaRow.__table__.c.updated_at))
                     result = await session.execute(sa_delete(ProjectRow).where(ProjectRow.id == project_id, ProjectRow.user_id == resolved_user_id))
                 else:
@@ -250,15 +273,16 @@ class ProjectDocumentRepository:
         return context
 
     @staticmethod
-    def _owned_scope(statement, user_id, context, *, include_trashed=False):
-        if user_id is not None:
-            statement = statement.where(ProjectDocumentRow.user_id == user_id)
-        if context is not None:
-            parent = select(ProjectRow.id).where(ProjectRow.id == ProjectDocumentRow.project_id, ProjectRow.workspace_id == context.workspace_id, ProjectRow.user_id == context.actor_user_id).correlate(ProjectDocumentRow).exists()
-            if include_trashed:
-                parent = or_(ProjectDocumentRow.trashed_at.is_not(None), parent)
-            statement = statement.where(ProjectDocumentRow.workspace_id == context.workspace_id, live_workspace_predicate(context), parent)
-        return statement
+    def _owned_scope(statement, user_id, context, *, include_trashed=False, action="read"):
+        if context is None:
+            if user_id is not None:
+                statement = statement.where(ProjectDocumentRow.user_id == user_id)
+            return statement
+        parent_query = ProjectRepository._owned_scope(select(ProjectRow.id).where(ProjectRow.id == ProjectDocumentRow.project_id), user_id, context, action=action)
+        parent = parent_query.correlate(ProjectDocumentRow).exists()
+        if include_trashed:
+            parent = or_(and_(ProjectDocumentRow.trashed_at.is_not(None), ProjectDocumentRow.user_id == context.actor_user_id), parent)
+        return statement.where(ProjectDocumentRow.workspace_id == context.workspace_id, live_workspace_predicate(context), parent)
 
     @staticmethod
     def _row_to_dict(row: ProjectDocumentRow) -> dict[str, Any]:
@@ -281,7 +305,7 @@ class ProjectDocumentRepository:
     async def _lock_active_project(session: AsyncSession, project_id: str, resolved_user_id: str | None, context=None) -> ProjectRow | None:
         """Lock the owned ``status='active'`` project row inside the transaction."""
         stmt = select(ProjectRow).where(ProjectRow.id == project_id, ProjectRow.status == "active")
-        stmt = ProjectRepository._owned_scope(stmt, resolved_user_id, context)
+        stmt = ProjectRepository._owned_scope(stmt, resolved_user_id, context, action="write")
         return (await session.execute(stmt.with_for_update())).scalar_one_or_none()
 
     async def insert_active(
@@ -451,8 +475,8 @@ class ProjectDocumentRepository:
                 await self._begin_immediate_if_sqlite(session)
             # Route to the owning project: the authoritative validation is the
             # locked re-read below, so this unlocked probe leaks nothing.
-            probe = await session.scalar(self._owned_scope(select(ProjectDocumentRow).where(ProjectDocumentRow.id == document_id), resolved_user_id, context))
-            if probe is None or (project_id is not None and probe.project_id != project_id) or (resolved_user_id is not None and probe.user_id != resolved_user_id):
+            probe = await session.scalar(self._owned_scope(select(ProjectDocumentRow).where(ProjectDocumentRow.id == document_id), resolved_user_id, context, action="delete"))
+            if probe is None or (project_id is not None and probe.project_id != project_id) or (context is None and resolved_user_id is not None and probe.user_id != resolved_user_id):
                 await session.rollback()
                 return False
             expected_project_id = project_id if project_id is not None else probe.project_id
@@ -460,8 +484,8 @@ class ProjectDocumentRepository:
             if locked_project is None:
                 await session.rollback()
                 return False
-            locked = (await session.execute(self._owned_scope(select(ProjectDocumentRow).where(ProjectDocumentRow.id == document_id), resolved_user_id, context).with_for_update())).scalar_one_or_none()
-            if locked is None or locked.project_id != expected_project_id or (resolved_user_id is not None and locked.user_id != resolved_user_id):
+            locked = (await session.execute(self._owned_scope(select(ProjectDocumentRow).where(ProjectDocumentRow.id == document_id), resolved_user_id, context, action="delete").with_for_update())).scalar_one_or_none()
+            if locked is None or locked.project_id != expected_project_id or (context is None and resolved_user_id is not None and locked.user_id != resolved_user_id):
                 await session.rollback()
                 return False
             stmt = (
@@ -476,7 +500,7 @@ class ProjectDocumentRepository:
                     trash_origin={"project_id": locked_project.id, "project_name": locked_project.name},
                 )
             )
-            stmt = self._owned_scope(stmt, resolved_user_id, context)
+            stmt = self._owned_scope(stmt, resolved_user_id, context, action="delete")
             result = await session.execute(stmt)
             await session.commit()
             return result.rowcount > 0

@@ -215,6 +215,38 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                 assert (await client.get("/api/workspaces/current", headers=team_headers)).status_code == 404
                 as_user("alice")
                 await service.repository.add_member(team, identities["alice"], identities["bob"], role="member")
+                shared = await client.post("/api/projects", headers=team_headers, json={"name": "Shared research", "visibility": "workspace"})
+                assert shared.status_code == 201, shared.text
+                shared_project = shared.json()["id"]
+                assert shared.json()["visibility"] == "workspace"
+                private = await client.post("/api/projects", headers=team_headers, json={"name": "Private team draft"})
+                assert private.status_code == 201, private.text
+                private_project = private.json()["id"]
+                shared_docs = "/api/projects/" + shared_project + "/documents"
+                uploaded = await client.post(shared_docs, headers=team_headers, files={"file": ("shared.txt", b"team published source", "text/plain")})
+                assert uploaded.status_code == 201, uploaded.text
+                shared_document = uploaded.json()["document"]["id"]
+                shared_content = shared_docs + "/" + shared_document + "/content"
+                as_user("bob")
+                assert (await client.get("/api/projects/" + private_project, headers=team_headers)).status_code == 404
+                assert (await client.get("/api/projects/" + shared_project, headers=team_headers)).status_code == 200
+                listed = (await client.get("/api/projects", headers=team_headers)).json()["projects"]
+                assert [row["id"] for row in listed] == [shared_project]
+                page = (await client.get(shared_docs, headers=team_headers)).json()
+                assert page["total"] == 1 and page["documents"][0]["id"] == shared_document
+                content = await client.get(shared_content, headers=team_headers)
+                assert content.status_code == 200 and content.content == b"team published source"
+                assert (await client.get(shared_content)).status_code == 404
+                assert (await client.post(shared_docs, headers=team_headers, files={"file": ("forbidden.txt", b"member edit", "text/plain")})).status_code == 403
+                assert (await client.patch("/api/projects/" + shared_project, headers=team_headers, json={"name": "Member edit"})).status_code == 403
+                assert (await client.post("/api/projects", headers=team_headers, json={"name": "Member publish", "visibility": "workspace"})).status_code == 403
+                as_user("alice")
+                assert (await client.post("/api/projects", json={"name": "Personal shared", "visibility": "workspace"})).status_code == 403
+                published = await client.patch("/api/projects/" + private_project, headers=team_headers, json={"visibility": "workspace"})
+                assert published.status_code == 200 and published.json()["visibility"] == "workspace"
+                as_user("bob")
+                assert (await client.get("/api/projects/" + private_project, headers=team_headers)).status_code == 200
+                as_user("alice")
                 bob_context = await service.resolve_context(identities["bob"], team)
                 as_user("bob")
                 assert (await client.patch(members_url + "/" + identities["alice"], json={"role": "admin"}, headers=team_headers)).status_code == 403
@@ -224,6 +256,20 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                     await service.revalidate(bob_context)
                 assert stale_member.value.status_code == 404
                 as_user("bob")
+                uploaded = await client.post(shared_docs, headers=team_headers, files={"file": ("admin.txt", b"admin published source", "text/plain")})
+                assert uploaded.status_code == 201, uploaded.text
+                admin_document = uploaded.json()["document"]["id"]
+                async with sf() as session:
+                    persisted = await session.get(ProjectDocumentRow, admin_document)
+                    assert persisted.user_id == identities["bob"] and persisted.workspace_id == team
+                as_user("alice")
+                content = await client.get(shared_docs + "/" + admin_document + "/content", headers=team_headers)
+                assert content.status_code == 200 and content.content == b"admin published source"
+                as_user("bob")
+                assert (await client.delete("/api/projects/" + shared_project, headers=team_headers)).status_code == 204
+                async with sf() as session:
+                    assert (await session.get(ProjectDocumentRow, shared_document)).trashed_at is not None
+                    assert (await session.get(ProjectDocumentRow, admin_document)).trashed_at is not None
                 assert (await client.delete(members_url + "/" + identities["alice"], headers=team_headers)).status_code == 403
                 as_user("alice")
                 transfer_url = "/api/workspaces/" + team + "/ownership-transfer"

@@ -2,7 +2,7 @@
 
 Status: static inventory with partial runtime evidence. Controls below remain requirements unless explicitly verified. Public tenant signup stays disabled.
 
-Private project CRUD now has actual JWT/RBAC/CSRF and native SQL evidence for SQLite/PostgreSQL (Jenkins #19); project thread listing is refused in workspace mode until its store is scoped. Private project documents now have real upload/list/download/trash and before-send revocation evidence (#21). Shared ACLs, thread files/NAS and other resource entrypoints remain pending. See `docs/tenant-workspaces-progress.json` for exact source hashes and limits.
+Private project CRUD now has actual JWT/RBAC/CSRF and native SQL evidence for SQLite/PostgreSQL (Jenkins #19); project thread listing is refused in workspace mode until its store is scoped. Private project documents now have real upload/list/download/trash and before-send revocation evidence (#21). Explicit project/document sharing has actual native-auth and file evidence (#23); thread files/NAS, client caches and other resource entrypoints remain pending. See `docs/tenant-workspaces-progress.json` for exact source hashes and limits.
 
 All content access requires native permissions intersected with active workspace membership and resource ACL. Workspace selectors are locators, never authority. Background work restores scope from its persisted resource or explicitly bound connection.
 

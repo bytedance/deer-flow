@@ -127,11 +127,16 @@ def _is_inline_viewable_mime_type(media_type: str) -> bool:
     return media_type.startswith("text/") or media_type == "application/pdf" or media_type.startswith(_INLINE_VIEWABLE_MIME_PREFIXES)
 
 
-async def _require_project(request: Request, project_id: str) -> dict:
+async def _require_project(request: Request, project_id: str, *, action="read") -> dict:
     """Owned project row in any status (archived keeps read access, §8.4), else 404."""
     row = await get_project_repo(request).get(project_id)
     if row is None:
         raise _not_found()
+    context = get_current_workspace()
+    if context is not None:
+        await request.app.state.workspace_service.authorize_resource(
+            context, request.state.auth, resource_workspace_id=row["workspace_id"], owner_user_id=row["user_id"], visibility=row["visibility"], action=action, native_permission="projects:" + action
+        )
     return row
 
 
@@ -185,7 +190,7 @@ async def upload_project_document(
     separator-bearing, or over 255 UTF-8 bytes). Size reuses
     ``uploads.max_file_size`` (413, mirroring the uploads router).
     """
-    project = await _require_project(request, project_id)
+    project = await _require_project(request, project_id, action="write")
     if project["status"] != "active":
         raise _not_found()
     try:
@@ -521,6 +526,6 @@ async def delete_project_document(project_id: str, document_id: str, request: Re
     Archived shelves reject the write inside the repository's locked
     transaction, so they surface as the same fail-closed 404 (§8.4).
     """
-    await _require_project(request, project_id)
+    await _require_project(request, project_id, action="delete")
     if not await await_drained(get_project_document_repo(request).trash(document_id, project_id=project_id)):
         raise _not_found()

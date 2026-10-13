@@ -42,6 +42,9 @@ async def test_workspace_schema_upgrade_preserves_legacy_data(tmp_path, backend)
         await asyncio.to_thread(bootstrap._upgrade, cfg, "0035_native_fork_compatibility")
         async with engine.begin() as conn:
             await conn.execute(text("INSERT INTO users (id,email,system_role,created_at,needs_setup,token_version) VALUES ('owner','owner@example.invalid','user',CURRENT_TIMESTAMP,FALSE,0)"))
+            await conn.execute(
+                text("INSERT INTO projects (id,user_id,name,instructions,presentation,status,created_at,updated_at) VALUES ('legacy-project','owner','Existing private source','','{}','active',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)")
+            )
             await conn.execute(text("INSERT INTO threads_meta (thread_id,user_id,status,metadata_json,created_at,updated_at) VALUES ('thread-owned','owner','idle','{}',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"))
             await conn.execute(text("INSERT INTO threads_meta (thread_id,user_id,status,metadata_json,created_at,updated_at) VALUES ('thread-orphan',NULL,'idle','{}',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"))
         await asyncio.to_thread(bootstrap._upgrade, cfg, "head")
@@ -66,6 +69,8 @@ async def test_workspace_schema_upgrade_preserves_legacy_data(tmp_path, backend)
             rows = (await conn.execute(text("SELECT thread_id,user_id,workspace_id FROM threads_meta ORDER BY thread_id"))).all()
             assert rows == [("thread-orphan", None, None), ("thread-owned", "owner", None)]
             assert (await conn.execute(text("SELECT COUNT(*) FROM workspaces"))).scalar_one() == 0, "DDL must not invent tenant ownership"
+            assert (await conn.execute(text("SELECT user_id,workspace_id,visibility FROM projects WHERE id='legacy-project'"))).one() == ("owner", None, "private")
+            assert any(item["name"] == "ck_project_visibility" for item in await conn.run_sync(lambda sync: inspect(sync).get_check_constraints("projects")))
         await asyncio.to_thread(bootstrap._upgrade, cfg, "head")
         async with engine.connect() as conn:
             assert (await conn.execute(text("SELECT COUNT(*) FROM threads_meta"))).scalar_one() == 2

@@ -16,7 +16,7 @@ from sqlalchemy.engine import Connection
 
 from deerflow.persistence.workspaces.model import WorkspaceMembershipRow, WorkspaceQuotaRow, WorkspaceRow
 
-BACKFILL_REVISION = "0036_tenant_workspaces"
+BACKFILL_REVISION = "0037_project_visibility"
 _PERSONAL_NAMESPACE = UUID("d8d9bd22-337d-46db-91c5-b5bb8d04f5b6")
 # Topological order: references can only acquire a scope after their parents.
 _RESOURCE_KEYS = (

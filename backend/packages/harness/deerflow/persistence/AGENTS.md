@@ -77,17 +77,28 @@ invitations and revocation effects remain acceptance gates.
 predicates and fences writes with workspace -> native actor -> resource locking
 (SQLite BEGIN IMMEDIATE first). ProjectRepository accepts a trusted explicit or
 task-local WorkspaceContext; workspace_required instances refuse missing scope.
-All scoped project reads retain native owner filtering and selected workspace,
+Private project reads retain native owner filtering and selected workspace,
 and write checks happen within their mutation transaction. Delete refuses any
 incompatible document/thread child before trash or unlink statements. Default
-legacy mode retains existing ownership behavior. Shared project ACLs and scoped
-document/thread repositories still need implementation; no activation is implied.
+legacy mode retains existing ownership behavior. Shared project/document progress is recorded below; scoped threads and background
+coverage still need implementation. No activation is implied.
 
 
 ProjectDocumentRepository scopes insert/dedup/list/count/snapshot/get/trash by
-native owner, workspace, live versions and matching project. Mutations use the
+project ACL, workspace, live versions and matching project. Mutations use the
 same workspace -> actor -> project -> document order. Required scope is captured
 at native bootstrap. Scoped conversion/copy and trash maintenance are refused
 until integrated, including absent scope on required repositories. Commit-error
 reconciliation must not treat a scoped invisible row as proof of rollback or
-remove bytes that a committed row may still own. Shared ACLs remain M3 work.
+remove bytes that a committed row may still own. Thread, conversion and retention integration remain M3/M8 work.
+
+
+Current native head `0037_project_visibility` appends after unchanged 0036.
+Project.visibility is non-null, private by default, with a two-value CHECK in
+both ORM and migration. Shared SQL scopes use a live team predicate; write
+predicates additionally require owner/admin. Documents inherit parent-project
+ACLs instead of treating uploader identity as a separate shared-data grant.
+Scoped project delete trashes all compatible authors' document rows atomically;
+foreign/null-scope children still refuse. Native backfill and independent
+executor export consumption both require the current native head. Keep past
+receipts immutable; e0002 executor schema is unchanged.

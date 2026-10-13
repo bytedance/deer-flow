@@ -35,6 +35,11 @@ The system SHALL scope queries before pagination and isolate file paths, retriev
 - **WHEN** a client supplies a dataset identifier or connection from another workspace
 - **THEN** the server SHALL reject it before provider access and SHALL not include foreign facts in model context
 
+#### Scenario: Explicit team project publication
+- **WHEN** a team owner or admin explicitly publishes a project with workspace visibility
+- **THEN** live members with native read permission SHALL read its documents; ordinary members SHALL NOT modify shared materials, and other workspaces SHALL NOT authorize those IDs
+- **AND** document authors SHALL retain their native user identity while their access inherits the parent project's current ACL; sharing SHALL NOT grant private conversation access
+
 ### Requirement: Durable execution and revocation
 The system SHALL persist and authenticate workspace scope across native Run, MCP, Scheduler, B/C assignments, browser sessions, output publication, continuations and notifications. Current authorization SHALL be revalidated and unknown physical work SHALL retain reservations.
 

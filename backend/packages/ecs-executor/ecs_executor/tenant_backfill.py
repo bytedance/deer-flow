@@ -16,7 +16,7 @@ from sqlalchemy import MetaData, Table, select, text, update
 from ecs_executor.job_store import _JOBS
 from ecs_executor.schema import SCHEMA_REVISION, _validate
 
-NATIVE_REVISION = "0036_tenant_workspaces"
+NATIVE_REVISION = "0037_project_visibility"
 _IDENTITY_FIELDS = ("user_id", "thread_id", "incarnation")
 
 

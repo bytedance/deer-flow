@@ -6,9 +6,9 @@ repository and RBAC provider. They are now registered by the shipped Gateway;
 workspace admission is resolved once at native database bootstrap. The default
 service is inactive. No tenant deployment or public registration has been performed.
 Full resource isolation is not complete. The project CRUD integration below
-is verified separately. Private project document upload/list/content/trash now has
-real file evidence; shared data, thread files and background entrypoints still
-need integration.
+is verified separately. Private and explicitly shared project documents now have
+real file evidence. Thread files, client integration and background entrypoints
+still need integration.
 
 ## Implemented adapter contracts
 
@@ -96,8 +96,8 @@ project/file routes. Exact Jenkins artifacts and source hashes are retained in
 The production project router now passes a server-resolved workspace context to
 the native SQL repository when workspace services are present. Create persists
 the selected workspace while retaining the real native user ID. List/get/patch,
-archive/restore and delete combine private project ownership, selected workspace
-and live account/membership/policy versions in SQL. Filtering happens before
+archive/restore and delete combine private project ownership or explicit shared
+project ACL, selected workspace and live account/membership/policy versions in SQL. Filtering happens before
 materializing the list, not after returning another space's rows. Missing headers
 select only the personal space. Client ownership/workspace fields are rejected.
 
@@ -108,8 +108,9 @@ Persistent HTTP mutations drain before request cancellation completes. A reposit
 created with workspace_required=True refuses calls without explicit or trusted
 task-local scope; Gateway derives this requirement from its startup snapshot.
 
-Current projects remain native-owner private. Explicit shared project/document
-ACLs, upload/download paths and frontend switching are still required M3 work.
+Projects default to native-owner private. Explicit workspace visibility is now
+implemented as described below; no platform-admin bypass or tenant activation
+is implied.
 The project thread-list endpoint returns 503 in workspace mode until thread-store
 filtering is integrated. It retains existing behavior in legacy mode. PAT handling
 and background caller bindings remain M4 work. None of this opens the compiled
@@ -129,8 +130,8 @@ for upload, list/count, inline content/download and individual trash. Native
 project permissions remain required. Upload preflight checks the project before
 staging; the mutation locks workspace, native actor and active project before
 placement/insert. Rows retain the actual user and persist the selected workspace.
-Reads and counts filter workspace, native owner, live account/member/policy and
-matching parent project in SQL. Unscoped rows are not exposed in scoped mode.
+Reads and counts filter workspace, inherited project ACL, live account/member/policy
+and matching parent project in SQL. Unscoped rows are not exposed in scoped mode.
 
 Trusted task-local scope is propagated by the existing file-I/O workers. Shelf
 bytes use `workspaces/{workspace_id}/projects/{stored_relpath}/original/{name}`;
@@ -156,7 +157,7 @@ Thread promotion/attachment currently return 503 under a bound workspace.
 Conversion publication, trash recovery/purge and retention inventory also
 refuse scoped or required-but-missing calls until integrated. These temporary
 refusals are tracked work, not an accepted substitute for the full requirement.
-Explicit shared ACLs, threads/runs, frontend switching/cache, background scope,
+Threads/runs, frontend switching/cache, background scope,
 quota accounting and release evidence remain pending; activation stays blocked.
 
 Jenkins #20 observed the actual missing row workspace on SQLite/PostgreSQL.
@@ -166,3 +167,46 @@ selectors/parents, permission change between response preparation and send,
 wrong-space trash and post-trash refusal. Two affected legacy roundtrip/dedup
 checks passed as well (4 passed in 22.68s). Exact source hashes and archived
 log names are in the progress JSON. No NAS or deployed tenant acceptance is implied.
+
+
+## Explicit shared projects and documents (partial M3)
+
+POST/PATCH `/api/projects` accepts `visibility: private | workspace`; omission
+keeps a new project private, and omitted/null PATCH preserves its visibility.
+Sharing requires a live team owner/admin plus native project write permission.
+Personal spaces and legacy unscoped calls cannot publish shared projects.
+Ordinary team members can create their own private projects, but cannot publish
+or modify shared projects. SQL repeats the role check under the workspace lock.
+
+Private projects are visible only to their creator. Explicit shared projects are
+readable by live members of the selected team, and editable/deletable only by its
+owner/admin with matching native permission. Project lists filter this ACL in
+SQL; the native platform admin has no content bypass. Resource author identity
+is never replaced with a tenant or the current reader.
+
+Project shelf documents inherit their parent project's current ACL. Their
+`user_id` is the real uploader, not a separate grant overriding project access.
+This permits an admin to upload into another creator's shared project and all
+members to read the published bytes. Parent workspace and document workspace
+must match. Changing a project back to private restricts its published shelf to
+the project creator; it does not grant access to any private thread or memory.
+The captured file response rechecks the current parent ACL before sending.
+
+Deleting a shared project trashes all its compatible document rows in the same
+transaction, regardless of which authorized admin uploaded them; bytes remain
+recoverable. Cross-workspace/null-owner children refuse deletion. Thread child
+handling retains the current private-owner restriction until M3 thread integration;
+shared project membership alone never permits reading another user's chat.
+
+The native current head is `0037_project_visibility`, appended after unchanged
+`0036_tenant_workspaces`. The new non-null default/check constraint keeps
+historical projects private. Startup, native backfill and executor export
+consumption require this same native revision; old phase receipts are not reused.
+Executor schema remains `e0002_workspace_scope`. Tenant activation is still
+compiled off; the old `0035/e0001` deployment/release lock remains immutable.
+
+Jenkins #22 reproduced rejected sharing requests on both databases. #23 passed
+the same actual HTTP/SQL/file main, both real old-data upgrades, startup refusal,
+paired attribution, immutable revision ancestry and two affected native mains
+(11 passed, 40.55s). Browser shared-data controls, thread/run scope, conversion,
+retention, quota accounting and physical migration/release remain required.

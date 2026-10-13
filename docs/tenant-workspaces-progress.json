@@ -28,7 +28,7 @@
     "M0 real resource/file fixture integration with M3",
     "M1 original deployment-data inventory and physical maintenance/restore evidence with M10",
     "M2 full scoped Gateway activation and SSO/invitation management acceptance",
-    "M3 shared ACLs, threads/runs, scoped conversion/maintenance, client switching and physical file/NAS integration",
+    "M3 threads/runs and attachments, scoped conversion/maintenance, client switching and physical file/NAS integration",
     "M4 through M11 remain pending"
   ],
   "static_checks": [
@@ -477,5 +477,75 @@
     },
     "limits": "Private shelf integration only. Thread promotion/attach and scoped conversion/trash maintenance currently refuse until their planned integrations. Shared ACLs, thread/run resources, client switching/cache, PAT/IM/background scope, physical NAS and paired release remain pending. Compiled activation gate remains false.",
     "self_review": "Native actor remains unchanged; live predicates before SQL materialization; matching parent; write lock order workspace/actor/project/document; bound ContextVar reset on route/response exit; worker context retained; scoped liveness misses cannot delete possibly committed files. Before-send check does not retract bytes already delivered."
+  },
+  "current_native_revision": "0037_project_visibility",
+  "current_executor_revision": "e0002_workspace_scope",
+  "workspace_shared_project_files": {
+    "base_commit": "08d3dae9",
+    "red": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 22,
+      "result": "FAILURE",
+      "archive_sha256": "ad3b5856e9dc8acadbb192d24b1908fdb4d0edce4ade9476c300e77f462ea8b0",
+      "artifact": "m3-shared-postgres-red.log",
+      "failed": 2,
+      "duration_seconds": 20.57,
+      "reason": "actual project API rejected explicit workspace visibility on both databases"
+    },
+    "green": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 23,
+      "result": "SUCCESS",
+      "archive_sha256": "6745d559c6a100050d8f269730e073be1a6308ee29c7377276ceb174a580c8a5",
+      "artifact": "m3-shared-postgres-green.log",
+      "passed": 11,
+      "duration_seconds": 40.55,
+      "command": "python -m pytest tests/test_workspace_http.py tests/test_workspace_migration.py::test_workspace_schema_upgrade_preserves_legacy_data tests/test_workspace_startup.py tests/test_workspace_executor_migration.py::test_paired_attribution_preserves_payloads_and_unknown_physical_work tests/test_ecs_schema_compatibility.py::test_integrated_graph_retains_shipped_ancestry tests/test_projects_router.py::test_create_list_get_project tests/test_project_documents_router.py::TestRoundTrip::test_upload_list_content_delete_round_trip -q --tb=short --no-showlocals",
+      "warning": "Existing legacy TestClient dependency deprecation; actual native-auth main uses AsyncClient."
+    },
+    "cli": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 24,
+      "result": "SUCCESS",
+      "archive_sha256": "6745d559c6a100050d8f269730e073be1a6308ee29c7377276ceb174a580c8a5",
+      "artifact": "m3-shared-cli-green.log",
+      "passed": 2,
+      "duration_seconds": 25.66,
+      "command": "python -m pytest tests/test_tenant_migration_cli.py::test_paired_cli_requires_evidence_and_both_phase_receipts -q --tb=short --no-showlocals",
+      "limit": "Synthetic maintenance receipt consumer proof, not physical drain/backup restoration."
+    },
+    "scope": "Production JWT/RBAC/CSRF/SQL/file main per SQLite/PostgreSQL: explicit shared create, member project/file list/count/read bytes, private project refusal, missing workspace denial, shared upload/edit/create denial for member, personal-space shared create denial, explicit private-project publication, admin upload retains real native creator and workspace, other creator reads uploaded bytes, admin deletes shared project and all compatible author documents are trashed. Existing private file and control main retained. Both real old-data upgrades preserve private projects, native startup remains refused, paired attribution/current export revisions match and ancestry remains unchanged.",
+    "cleanup": {
+      "22": {
+        "containers": [],
+        "networks": []
+      },
+      "23": {
+        "containers": [],
+        "networks": []
+      },
+      "24": {
+        "containers": [],
+        "networks": []
+      }
+    },
+    "source_sha256": {
+      "backend/app/gateway/routers/project_documents.py": "8ac6f617ab5ee35b73e5cedb811f0efe13aa848721c44c96d0bc2f38a3fed270",
+      "backend/app/gateway/routers/projects.py": "86f2abc39e8bacccb23a8f6322cd61f1009f635c61397791a741ffee1e069b78",
+      "backend/app/gateway/workspaces/startup.py": "bb96876ad6d202dcfc2db17242c6b9ef39f3db630dbe1d684f43a564ca1a0e6f",
+      "backend/packages/ecs-executor/ecs_executor/tenant_backfill.py": "8feca2c58f71ac2f95f53889dca786256ea47ec07ded1a08fdc1935c6698f434",
+      "backend/packages/harness/deerflow/config/paths.py": "4e3ed03110b59284d86fd34a448ee23fae6c1c207e684aef008d5cafbc278183",
+      "backend/packages/harness/deerflow/persistence/projects/model.py": "a4d22d53b9b334151b7af197c55663bbba244e65a781bbcecbfb19728731ca4b",
+      "backend/packages/harness/deerflow/persistence/projects/sql.py": "c166ecf3a07cebd07b68de18ac66a93e5d8f21fbcbd22a0308d056ebca4aa71d",
+      "backend/packages/harness/deerflow/persistence/workspaces/backfill.py": "3dc9c0324e64f504a5b509a18db6e05b40b6c47b9b2b43f19e14501e68669eb6",
+      "backend/packages/harness/deerflow/persistence/workspaces/scope.py": "50294cd154afb401147dcc2bb33a23314ee4e8e01864ab2fde87710a71da694d",
+      "backend/tests/test_ecs_schema_compatibility.py": "7ced4b1abde901f518c815c924006c6d941303623cc12a31bb07c91f49efe6b3",
+      "backend/tests/test_workspace_executor_migration.py": "d9da17513829c2ed40d2f91b01f06f1cf101b251840bea18358fe5c7b16f3211",
+      "backend/tests/test_workspace_http.py": "5d098bd39e6685052e2d56e6c27e13e995d668f79f3642af51be5fd506aae47d",
+      "backend/tests/test_workspace_migration.py": "c6c89c98d46f57da4db0ae4048f3f005fccf1c1de967db1746236c36cd31d72a",
+      "backend/packages/harness/deerflow/persistence/migrations/versions/0037_project_visibility.py": "22d6edb423484e4022fa0bc612bf6c32e00092b87e7c4243f302c8396e590857"
+    },
+    "self_review": "Shared ACL predicates are SQL filters before materialization/counts; matching parent controls documents; roles checked under workspace/actor lock and rechecked on mutations; actual authors preserved. Private thread content is not granted by project sharing. Legacy generation receipts/release locks are not silently reused.",
+    "limits": "API/SQL/file sharing foundation only. Thread/run stores and attachments, frontend controls/cache/SSE/WSS, scoped conversion/retention, credential/background scope, quota and physical NAS/release/restore still require integration. Complete tenant activation remains compiled false."
   }
 }
