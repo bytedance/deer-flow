@@ -136,6 +136,33 @@ def test_qrcode_status_uses_dedicated_request_timeout():
     _run(go())
 
 
+def test_qrcode_poll_request_timeout_is_bounded_by_remaining_deadline(monkeypatch):
+    from app.channels import wechat as wechat_module
+    from app.channels.wechat import WechatChannel
+
+    async def go():
+        channel = WechatChannel(
+            bus=MessageBus(),
+            config={"bot_token": "test-token", "qrcode_poll_timeout": 10},
+        )
+        channel.request_login_qrcode = AsyncMock(return_value={"qrcode": "qr-token"})  # type: ignore[method-assign]
+        channel.request_login_status = AsyncMock(  # type: ignore[method-assign]
+            return_value={"status": "confirmed", "bot_token": "bound-token"}
+        )
+        channel._save_auth_state_drained = AsyncMock(return_value={"status": "confirmed"})  # type: ignore[method-assign]
+
+        monotonic_values = iter([0.0, 9.0])
+        monkeypatch.setattr(wechat_module.time, "monotonic", lambda: next(monotonic_values))
+
+        result = await channel._bind_via_qrcode()
+
+        assert result == {"status": "confirmed"}
+        channel.request_login_status.assert_awaited_once_with("qr-token", timeout=1.0)
+        assert WechatChannel.DEFAULT_QRCODE_STATUS_TIMEOUT == 30.0
+
+    _run(go())
+
+
 def test_handle_update_publishes_private_chat_message():
     from app.channels.wechat import WechatChannel
 

@@ -228,6 +228,8 @@ class WechatChannel(Channel):
     DEFAULT_QRCODE_POLL_TIMEOUT = 180.0
     DEFAULT_QRCODE_BOT_TYPE = 3
     DEFAULT_QRCODE_STATUS_TIMEOUT = 30.0
+    # Browser QR login allows a small cushion over the channel polling timeout.
+    DEFAULT_QRCODE_ADMIN_STATUS_TIMEOUT = DEFAULT_QRCODE_STATUS_TIMEOUT + 5.0
     DEFAULT_API_TIMEOUT = 15.0
     DEFAULT_CONFIG_TIMEOUT = 10.0
     DEFAULT_CDN_TIMEOUT = 30.0
@@ -887,8 +889,14 @@ class WechatChannel(Channel):
         )
 
         deadline = time.monotonic() + max(self._qrcode_poll_timeout, 1.0)
-        while time.monotonic() < deadline:
-            status_data = await self.request_login_status(qrcode)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            status_data = await self.request_login_status(
+                qrcode,
+                timeout=min(remaining, self.DEFAULT_QRCODE_STATUS_TIMEOUT),
+            )
             status = str(status_data.get("status") or "").strip().lower()
             if status == "confirmed":
                 token = str(status_data.get("bot_token") or "").strip()
