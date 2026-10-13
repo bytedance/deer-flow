@@ -85,7 +85,12 @@ class InfoQuestClient:
             # Try to parse response as JSON and extract reader_result
             try:
                 response_data = json.loads(response.text)
+                if not isinstance(response_data, dict):
+                    logger.warning("InfoQuest returned unexpected response type: %s for URL: %s", type(response_data).__name__, url)
+                    return "Error: InfoQuest returned an unexpected response format"
                 # Extract reader_result if it exists
+                # Preserve primary-field precedence: a malformed primary result must
+                # remain visible rather than being masked by secondary content.
                 if "reader_result" in response_data:
                     logger.debug("Successfully extracted reader_result from JSON response")
                     content_field = "reader_result"
@@ -100,9 +105,10 @@ class InfoQuestClient:
                 if content_field is not None:
                     content = response_data[content_field]
                     if not isinstance(content, str):
-                        logger.warning("InfoQuest returned unexpected %s type: %s", content_field, type(content).__name__)
+                        logger.warning("InfoQuest returned unexpected %s type: %s for URL: %s", content_field, type(content).__name__, url)
                         return "Error: InfoQuest returned an unexpected response format"
                     if not content.strip():
+                        logger.debug("InfoQuest returned empty %s for URL: %s", content_field, url)
                         return "Error: no result found"
                     return content
             except json.JSONDecodeError:

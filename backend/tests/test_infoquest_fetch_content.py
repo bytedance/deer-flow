@@ -1,6 +1,7 @@
 """Exercise InfoQuest fetch decoding through the real client and public tool."""
 
 import json
+import logging
 from types import SimpleNamespace
 
 import httpx
@@ -47,7 +48,7 @@ async def test_fetch_tool_contains_non_text_content(responses, caplog, field, va
     assert result == "Error: InfoQuest returned an unexpected response format"
     assert len(requests) == 1
     assert json.loads(requests[0].content) == {"url": _URL, "format": "HTML"}
-    assert f"InfoQuest returned unexpected {field} type: {type(value).__name__}" in caplog.text
+    assert f"InfoQuest returned unexpected {field} type: {type(value).__name__} for URL: {_URL}" in caplog.text
     assert "provider-payload" not in caplog.text
     assert "synthetic-test-key" not in caplog.text
 
@@ -55,11 +56,27 @@ async def test_fetch_tool_contains_non_text_content(responses, caplog, field, va
 @pytest.mark.anyio
 @pytest.mark.parametrize("field", ["reader_result", "content"])
 @pytest.mark.parametrize("value", ["", " \t\n"])
-async def test_fetch_tool_reports_empty_extracted_content(responses, field, value):
+async def test_fetch_tool_reports_empty_extracted_content(responses, caplog, field, value):
+    caplog.set_level(logging.DEBUG, logger=infoquest_client.__name__)
     queued, _ = responses
     queued.append(httpx.Response(200, json={field: value}))
 
     assert await tools.web_fetch_tool.ainvoke({"url": _URL}) == "Error: no result found"
+    assert f"InfoQuest returned empty {field} for URL: {_URL}" in caplog.text
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("payload", [None, False, 0, 1.5, "provider-payload", "reader_result", [], ["content"]])
+async def test_fetch_tool_rejects_non_object_json(responses, caplog, payload):
+    queued, requests = responses
+    # Explicit serialization is needed because httpx treats json=None as no body.
+    queued.append(httpx.Response(200, text=json.dumps(payload)))
+
+    assert await tools.web_fetch_tool.ainvoke({"url": _URL}) == "Error: InfoQuest returned an unexpected response format"
+    assert len(requests) == 1
+    assert f"InfoQuest returned unexpected response type: {type(payload).__name__} for URL: {_URL}" in caplog.text
+    assert "provider-payload" not in caplog.text
+    assert "synthetic-test-key" not in caplog.text
 
 
 @pytest.mark.anyio
