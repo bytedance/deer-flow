@@ -358,6 +358,41 @@ class TestTokenUsageMiddleware:
 
 
 class TestBuildTodoActions:
+    @pytest.mark.parametrize(
+        "previous, updated, expected",
+        [
+            (
+                [("A", "pending"), ("A", "completed"), ("A", "in_progress")],
+                [("A", "pending"), ("A", "in_progress"), ("A", "completed")],
+                [("todo_start", "A"), ("todo_complete", "A")],
+            ),
+            (
+                [("A", "pending"), ("B", "completed"), ("A", "completed")],
+                [("renamed", "pending"), ("A", "pending")],
+                [("todo_update", "renamed"), ("todo_update", "A"), ("todo_remove", "B")],
+            ),
+            (
+                [("A", "pending"), ("A", "completed"), ("B", "pending")],
+                [("A", "pending")],
+                [("todo_remove", "A"), ("todo_remove", "B")],
+            ),
+            (
+                [("A", "pending"), ("B", "pending")],
+                [("A", "in_progress"), ("A", "completed")],
+                [("todo_start", "A"), ("todo_complete", "A"), ("todo_remove", "B")],
+            ),
+        ],
+        ids=["duplicate-fifo", "skip-positionally-matched", "unmatched-removals", "exhausted-content"],
+    )
+    def test_duplicate_matching_preserves_order_and_inputs(self, previous, updated, expected):
+        """Same-content matches stay FIFO even when fallback consumed a head."""
+        previous_todos = [{"content": content, "status": status} for content, status in previous]
+        next_todos = [{"content": content, "status": status} for content, status in updated]
+
+        assert _build_todo_actions(previous_todos, next_todos) == [{"kind": kind, "content": content} for kind, content in expected]
+        assert previous_todos == [{"content": content, "status": status} for content, status in previous]
+        assert next_todos == [{"content": content, "status": status} for content, status in updated]
+
     def test_duplicate_content_emits_todo_remove(self):
         """When next_todos has duplicate content entries that exhaust previous_by_content,
         the positional fallback must not consume an unrelated previous todo as matched.

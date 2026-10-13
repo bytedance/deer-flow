@@ -79,7 +79,8 @@ def _build_todo_actions(previous_todos: list[Todo], next_todos: list[Todo]) -> l
     previous_by_content: dict[str, list[tuple[int, Todo]]] = defaultdict(list)
     matched_previous_indices: set[int] = set()
 
-    for index, todo in enumerate(previous_todos):
+    for index in range(len(previous_todos) - 1, -1, -1):
+        todo = previous_todos[index]
         content = todo.get("content")
         if isinstance(content, str) and content:
             previous_by_content[content].append((index, todo))
@@ -94,10 +95,10 @@ def _build_todo_actions(previous_todos: list[Todo], next_todos: list[Todo]) -> l
         previous_match: Todo | None = None
         content_matches = previous_by_content.get(content)
         if content_matches:
-            while content_matches and content_matches[0][0] in matched_previous_indices:
-                content_matches.pop(0)
+            while content_matches and content_matches[-1][0] in matched_previous_indices:
+                content_matches.pop()
             if content_matches:
-                previous_index, previous_match = content_matches.pop(0)
+                previous_index, previous_match = content_matches.pop()
                 matched_previous_indices.add(previous_index)
 
         if previous_match is None and content not in previous_by_content and index < len(previous_todos) and index not in matched_previous_indices:
