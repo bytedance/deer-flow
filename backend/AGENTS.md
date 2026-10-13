@@ -64,10 +64,13 @@ Every code change must keep docs accurate and current: update `README.md` for
 user-facing behavior and the relevant `AGENTS.md` for development changes.
 `CLAUDE.md` imports `AGENTS.md`; do not edit the shim.
 
-DDG `image_search` screens returned image and thumbnail URLs with
+DDG, Brave, and Serper `image_search` screen returned image and thumbnail URLs with
 `community.url_safety.safe_public_result_url`. This pure string check does not
 resolve hostnames; any later downloader must enforce its own connection-time
-address policy. Regression coverage is in `tests/test_ddg_image_search_urls.py`.
+address policy. The screen reuses `is_blocked_address` for literal and embedded
+IPv4 addresses, including multicast/reserved forms. Shared regression coverage
+is in `tests/test_image_result_url_safety.py`; DDG tool coverage is in
+`tests/test_ddg_image_search_urls.py`.
 
 ### Backend Benchmarks
 

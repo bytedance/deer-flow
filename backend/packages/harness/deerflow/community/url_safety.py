@@ -42,9 +42,9 @@ def safe_public_result_url(value: object) -> str:
             embedded = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
         if embedded is None and 1 < int(address) < 1 << 32:
             embedded = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
-        if embedded is not None and not embedded.is_global:
+        if embedded is not None and is_blocked_address(embedded):
             return ""
-    return url if address.is_global else ""
+    return "" if is_blocked_address(address) else url
 
 
 def _decode_result_ipv4(host: str) -> ipaddress.IPv4Address | None:

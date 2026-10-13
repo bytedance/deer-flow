@@ -141,9 +141,10 @@ async def image_search_tool(
         thumbnail_url = safe_public_result_url(row.get("thumbnail"))
         if not image_url and not thumbnail_url:
             continue
+        title = row.get("title")
         normalized_results.append(
             {
-                "title": row.get("title") if isinstance(row.get("title"), str) else "",
+                "title": title if isinstance(title, str) else "",
                 "image_url": image_url,
                 "thumbnail_url": thumbnail_url,
             }
