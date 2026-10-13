@@ -70,6 +70,7 @@ import { isTaskBusy, type ScheduledTask } from "@/core/scheduled-tasks/types";
 import { cn } from "@/lib/utils";
 
 import { DeleteTaskDialog } from "./delete-task-dialog";
+import { NotificationGroupSummary } from "./notification-group";
 import { RenewLimitsDialog } from "./renew-limits-dialog";
 import { RunRow } from "./run-row";
 import {
@@ -529,6 +530,14 @@ export function TaskDetail({
           </p>
         )}
       </Section>
+
+      {task.notification_group_connection_id && (
+        <Section label={st.notificationGroup.detailLabel}>
+          <NotificationGroupSummary
+            connectionId={task.notification_group_connection_id}
+          />
+        </Section>
+      )}
 
       <Section label={st.detail.stopsWhen}>
         <p data-testid="scheduled-task-stops-when">

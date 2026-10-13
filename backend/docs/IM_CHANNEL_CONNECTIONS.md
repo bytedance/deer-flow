@@ -474,6 +474,39 @@ can retry an ambiguously acknowledged send; it does not promise exactly-once
 messages at the provider. Record whether domestic Feishu or international Lark
 was actually exercised.
 
+### Feishu group notifications
+
+Tasks may explicitly select one additional connected Feishu group. Personal
+notifications keep their existing recipients. The task stores the chosen
+`notification_group_connection_id`; a group notice stores that connection ID as
+its outbox target with `payload.target_type="group"`. It never infers a group
+destination from all of the owner's bindings.
+
+Add the app bot to a test or work group, grant `im:chat:read` for the group-name
+lookup, and publish the app changes. In the task form choose **Bind a Feishu
+group**, mention the bot and send the displayed `/connect` command in that
+group, then refresh and select its name. Name lookup failure does not discard
+the binding, but unnamed groups cannot be newly selected in the form: check
+the read permission and bind again. API selection and each delivery verify the
+task owner, connection ID, connected status, and recorded group/chat identity.
+The provider sends to that verified `chat_id`; a lost binding cannot fall back
+to another group or a private chat. A bot removed from the group produces a
+normal platform rejection handled by the existing retry budget.
+
+Omitting the field in PATCH preserves it; `null` clears it. Destination-only
+edits do not re-arm completed tasks or change the run budget. The destination
+is fixed when each notification is enqueued; later task edits affect future
+notices, and unbinding still blocks pending ones. Migration `0040` adds a nullable
+reference with no backfill. Upgrade Gateway workers and the frontend together;
+the form uses `/api/features.scheduled_tasks.group_notifications` to hide new
+selection on older Gateways. The conversation scheduling tool does not set
+group targets in this version.
+
+Real-provider acceptance should confirm that a selected task appears in the
+specified group, an unselected task remains private, and removing the bot or
+revoking its binding prevents a successful group send. Record the account and
+tenant setup actually used; the outbox remains at-least-once.
+
 ### QQ WebSocket setup (MVP)
 
 QQ uses an outbound WebSocket connection for events and the QQ Open Platform

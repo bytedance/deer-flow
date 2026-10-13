@@ -20,6 +20,7 @@ from typing import Any
 
 from app.channels.base import ChannelUnavailable
 from app.channels.capabilities import supports_proactive_notifications
+from app.channels.notification_groups import is_feishu_notification_group
 from app.scheduler.notification_text import DEFAULT_NOTIFICATION_LOCALE, redact_egress_text, render_notification_text, wants_result_summary
 
 __all__ = ["NotificationDeliveryWorker", "redact_egress_text", "render_notification_text"]
@@ -186,6 +187,7 @@ class NotificationDeliveryWorker:
         owner_user_id = delivery.get("owner_user_id")
         provider = delivery.get("provider")
         target = delivery.get("target")
+        is_group = (delivery.get("payload") or {}).get("target_type") == "group"
         if not owner_user_id or not provider or not target:
             return None
         try:
@@ -212,6 +214,14 @@ class NotificationDeliveryWorker:
             row_owner = connection.get("owner_user_id")
             if row_owner is not None and row_owner != owner_user_id:
                 continue
+            if is_group:
+                if (
+                    row_owner == owner_user_id
+                    and connection.get("id") == target
+                    and is_feishu_notification_group(provider=connection.get("provider"), status=connection.get("status"), workspace_id=connection.get("workspace_id"), metadata=connection.get("metadata"))
+                ):
+                    return True
+                continue
             if connection.get("provider") == provider and connection.get("external_account_id") == target and connection.get("status") == "connected":
                 return True
         return False
@@ -219,6 +229,10 @@ class NotificationDeliveryWorker:
     async def _deliver(self, delivery: dict[str, Any]) -> None:
         delivery_id = delivery["id"]
         provider = delivery.get("provider") or ""
+        target_type = (delivery.get("payload") or {}).get("target_type")
+        if target_type not in (None, "group") or (target_type == "group" and provider != "feishu"):
+            await self._delivery_repo.mark_failed(delivery_id, claim_token=delivery.get("claim_token"), error="unsupported notification target type", terminal=True)
+            return
         if not supports_proactive_notifications(provider):
             # The scheduler enqueues only for providers with proactive push;
             # a row for any other provider predates that rule. It can never
@@ -230,7 +244,7 @@ class NotificationDeliveryWorker:
                 terminal=True,
             )
             return
-        if self._resolve_connections is not None:
+        if self._resolve_connections is not None or target_type == "group":
             # Re-check the binding at delivery time, before anything else: a
             # target the owner has disconnected since enqueue must never
             # receive the push, however long the row waited, and it must not
@@ -271,7 +285,8 @@ class NotificationDeliveryWorker:
                 enriched = dict(delivery)
                 enriched["payload"] = {**(delivery.get("payload") or {}), "result_summary": summary}
         try:
-            await channel.send_notification_for_owner(
+            send = channel.send_group_notification_for_owner if target_type == "group" else channel.send_notification_for_owner
+            await send(
                 owner_user_id=delivery.get("owner_user_id") or "",
                 target=delivery.get("target") or "",
                 text_markdown=render_notification_text(enriched, default_locale=self._default_locale),

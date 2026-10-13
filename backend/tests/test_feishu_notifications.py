@@ -19,7 +19,7 @@ from app.channels.message_bus import MessageBus
 
 @pytest.fixture
 def channel():
-    from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
+    from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody, GetChatRequest
 
     instance = FeishuChannel(MessageBus(), {})
     instance._running = True
@@ -27,6 +27,7 @@ def channel():
     instance._thread.is_alive.return_value = True
     instance._CreateMessageRequest = CreateMessageRequest
     instance._CreateMessageRequestBody = CreateMessageRequestBody
+    instance._GetChatRequest = GetChatRequest
     instance._api_client = MagicMock()
     instance._api_client.im.v1.message.create.return_value = SimpleNamespace(success=lambda: True)
     return instance
@@ -42,6 +43,83 @@ def _private_binding(**overrides):
         "metadata": {"chat_id": "oc_private", "chat_type": "p2p"},
         **overrides,
     }
+
+
+def _group_binding(**overrides):
+    return _private_binding(id="group-binding", workspace_id="oc_group", metadata={"chat_id": "oc_group", "chat_type": "group"}, **overrides)
+
+
+@pytest.mark.asyncio
+async def test_base_group_notification_is_unsupported_and_never_falls_back(channel):
+    channel.send_notification = AsyncMock()
+    with pytest.raises(NotImplementedError):
+        await Channel.send_group_notification_for_owner(channel, owner_user_id="owner-1", target="group-binding", text_markdown="Done")
+    channel.send_notification.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_group_notification_uses_selected_binding_and_group_chat(channel):
+    channel._connection_repo = SimpleNamespace(list_connections=AsyncMock(return_value=[_private_binding(), _group_binding()]))
+    await channel.send_group_notification_for_owner(owner_user_id="owner-1", target="group-binding", text_markdown="Done")
+    channel._connection_repo.list_connections.assert_awaited_once_with("owner-1")
+    create = channel._api_client.im.v1.message.create
+    create.assert_called_once()
+    request = create.call_args.args[0]
+    assert request.receive_id_type == "chat_id"
+    assert request.request_body.receive_id == "oc_group"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"id": "different-binding"},
+        {"owner_user_id": "another-owner"},
+        {"provider": "wecom"},
+        {"status": "revoked"},
+        {"workspace_id": "oc_other"},
+        {"metadata": {"chat_id": "oc_group", "chat_type": "p2p"}},
+        {"metadata": {"chat_id": "oc_group"}},
+    ],
+)
+async def test_group_notification_refuses_invalid_binding_without_private_fallback(channel, overrides):
+    binding = {**_group_binding(), **overrides}
+    channel._connection_repo = SimpleNamespace(list_connections=AsyncMock(return_value=[binding]))
+    with pytest.raises(RuntimeError, match="no longer connected"):
+        await channel.send_group_notification_for_owner(owner_user_id="owner-1", target="group-binding", text_markdown="Done")
+    channel._api_client.im.v1.message.create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_group_notification_binding_lookup_failure_parks(channel):
+    channel._connection_repo = SimpleNamespace(list_connections=AsyncMock(side_effect=OSError("private database detail")))
+    with pytest.raises(ChannelUnavailable):
+        await channel.send_group_notification_for_owner(owner_user_id="owner-1", target="group-binding", text_markdown="Done")
+    channel._api_client.im.v1.message.create.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["success", "rejected", "exception"])
+async def test_group_binding_reads_name_offloop_without_blocking_binding_on_failure(channel, outcome):
+    channel._connection_repo = SimpleNamespace(consume_oauth_state=AsyncMock(return_value={"owner_user_id": "owner-1"}), upsert_connection=AsyncMock())
+    channel._reply_card = AsyncMock()
+    loop_thread = threading.get_ident()
+    worker_threads = []
+
+    def get_name(request):
+        worker_threads.append(threading.get_ident())
+        assert request.chat_id == "oc_group"
+        if outcome == "exception":
+            raise OSError("private transport detail")
+        return SimpleNamespace(success=lambda: outcome == "success", code=0 if outcome == "success" else 99991672, data=SimpleNamespace(name="Release team"))
+
+    channel._api_client.im.v1.chat.get.side_effect = get_name
+    assert await channel._bind_connection_from_connect_code(message_id="om_bind", chat_id="oc_group", user_id="ou_bound_user", code="connect-code", chat_type="group")
+    binding = channel._connection_repo.upsert_connection.call_args.kwargs
+    assert worker_threads and worker_threads != [loop_thread]
+    assert binding.get("workspace_name") == ("Release team" if outcome == "success" else None)
+    assert binding["metadata"]["chat_type"] == "group"
+    assert binding["metadata"]["chat_id"] == "oc_group"
 
 
 @pytest.mark.asyncio
