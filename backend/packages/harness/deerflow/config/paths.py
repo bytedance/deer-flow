@@ -5,6 +5,7 @@ import re
 import shutil
 from pathlib import Path, PureWindowsPath
 
+from deerflow.authz.workspace import get_current_workspace
 from deerflow.config.runtime_paths import runtime_home
 from deerflow.utils.host_paths import extended_length_path
 from deerflow.utils.thread_id import validate_thread_id
@@ -367,6 +368,12 @@ class Paths:
 
     def user_projects_dir(self, user_id: str) -> Path:
         """Host path root for one user's project shelves: ``users/{user_id}/projects/``."""
+        _validate_user_id(user_id)
+        context = get_current_workspace()
+        if context is not None:
+            if context.actor_user_id != user_id:
+                raise ValueError("Workspace actor does not match project path owner")
+            return extended_length_path(self.base_dir / "workspaces" / context.workspace_id / "projects")
         return extended_length_path(self.user_dir(user_id) / "projects")
 
     def user_project_dir(self, user_id: str, project_id: str) -> Path:

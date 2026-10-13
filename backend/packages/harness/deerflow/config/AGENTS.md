@@ -191,3 +191,11 @@ it once; runtime YAML edits cannot disable existing authorization. Any team data
 prevents restarting that database in legacy mode. This build still rejects tenant
 activation while resource/background/release integration is incomplete; YAML is
 not a substitute for implemented scope coverage.
+
+
+A trusted task-local WorkspaceContext selects `Paths.user_projects_dir` under
+`workspaces/{workspace_id}/projects`; its real actor must match the user argument.
+Existing file-I/O worker context propagation preserves this selection. Calls
+without a scope keep the legacy user root. Path selection is not authorization:
+resource SQL and HTTP publication checks remain mandatory. Thread paths and
+least-authorized sandbox/NAS mounts still need their own integration.

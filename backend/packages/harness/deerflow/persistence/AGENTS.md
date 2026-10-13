@@ -82,3 +82,12 @@ and write checks happen within their mutation transaction. Delete refuses any
 incompatible document/thread child before trash or unlink statements. Default
 legacy mode retains existing ownership behavior. Shared project ACLs and scoped
 document/thread repositories still need implementation; no activation is implied.
+
+
+ProjectDocumentRepository scopes insert/dedup/list/count/snapshot/get/trash by
+native owner, workspace, live versions and matching project. Mutations use the
+same workspace -> actor -> project -> document order. Required scope is captured
+at native bootstrap. Scoped conversion/copy and trash maintenance are refused
+until integrated, including absent scope on required repositories. Commit-error
+reconciliation must not treat a scoped invisible row as proof of rollback or
+remove bytes that a committed row may still own. Shared ACLs remain M3 work.

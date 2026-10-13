@@ -739,7 +739,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             from deerflow.persistence.thread_reads import ThreadReadRepository
 
             app.state.project_repo = ProjectRepository(sf, workspace_required=config.workspaces.enabled)
-            app.state.project_document_repo = ProjectDocumentRepository(sf)
+            app.state.project_document_repo = ProjectDocumentRepository(sf, workspace_required=config.workspaces.enabled)
             app.state.scheduled_task_repo = ScheduledTaskRepository(
                 sf,
                 run_repository=app.state.run_store,

@@ -239,8 +239,26 @@ class ProjectDocumentRepository:
     separate check-then-act read (Phase-2 spec §6.3, §15.5).
     """
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, workspace_required: bool = False) -> None:
         self._sf = session_factory
+        self._workspace_required = workspace_required
+
+    def _scope(self, user_id, *, integrated=True):
+        context = resolve_resource_scope(None, user_id, required=self._workspace_required)
+        if context is not None and not integrated:
+            raise WorkspaceAccessDenied("This document operation is not workspace integrated")
+        return context
+
+    @staticmethod
+    def _owned_scope(statement, user_id, context, *, include_trashed=False):
+        if user_id is not None:
+            statement = statement.where(ProjectDocumentRow.user_id == user_id)
+        if context is not None:
+            parent = select(ProjectRow.id).where(ProjectRow.id == ProjectDocumentRow.project_id, ProjectRow.workspace_id == context.workspace_id, ProjectRow.user_id == context.actor_user_id).correlate(ProjectDocumentRow).exists()
+            if include_trashed:
+                parent = or_(ProjectDocumentRow.trashed_at.is_not(None), parent)
+            statement = statement.where(ProjectDocumentRow.workspace_id == context.workspace_id, live_workspace_predicate(context), parent)
+        return statement
 
     @staticmethod
     def _row_to_dict(row: ProjectDocumentRow) -> dict[str, Any]:
@@ -260,11 +278,10 @@ class ProjectDocumentRepository:
             await session.execute(text("BEGIN IMMEDIATE"))
 
     @staticmethod
-    async def _lock_active_project(session: AsyncSession, project_id: str, resolved_user_id: str | None) -> ProjectRow | None:
+    async def _lock_active_project(session: AsyncSession, project_id: str, resolved_user_id: str | None, context=None) -> ProjectRow | None:
         """Lock the owned ``status='active'`` project row inside the transaction."""
         stmt = select(ProjectRow).where(ProjectRow.id == project_id, ProjectRow.status == "active")
-        if resolved_user_id is not None:
-            stmt = stmt.where(ProjectRow.user_id == resolved_user_id)
+        stmt = ProjectRepository._owned_scope(stmt, resolved_user_id, context)
         return (await session.execute(stmt.with_for_update())).scalar_one_or_none()
 
     async def insert_active(
@@ -295,9 +312,15 @@ class ProjectDocumentRepository:
         hit by ``row["id"] != document_id``.
         """
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectDocumentRepository.insert_active")
+        context = self._scope(resolved_user_id)
+        if context is not None and source_thread_id is not None:
+            raise WorkspaceAccessDenied("Thread provenance is not workspace integrated")
         async with self._sf() as session:
-            await self._begin_immediate_if_sqlite(session)
-            if await self._lock_active_project(session, project_id, resolved_user_id) is None:
+            if context is not None:
+                await lock_resource_scope(session, context)
+            else:
+                await self._begin_immediate_if_sqlite(session)
+            if await self._lock_active_project(session, project_id, resolved_user_id, context) is None:
                 await session.rollback()
                 return None
             dedup_stmt = select(ProjectDocumentRow).where(
@@ -305,8 +328,7 @@ class ProjectDocumentRepository:
                 ProjectDocumentRow.sha256 == sha256,
                 ProjectDocumentRow.trashed_at.is_(None),
             )
-            if resolved_user_id is not None:
-                dedup_stmt = dedup_stmt.where(ProjectDocumentRow.user_id == resolved_user_id)
+            dedup_stmt = self._owned_scope(dedup_stmt, resolved_user_id, context)
             existing = (await session.execute(dedup_stmt)).scalars().first()
             if existing is not None:
                 await session.commit()
@@ -320,6 +342,7 @@ class ProjectDocumentRepository:
                 id=document_id,
                 project_id=project_id,
                 user_id=resolved_user_id,
+                workspace_id=context.workspace_id if context is not None else None,
                 name=name,
                 stored_relpath=relpath,
                 sha256=sha256,
@@ -338,13 +361,13 @@ class ProjectDocumentRepository:
     async def find_active_by_sha256(self, project_id: str, sha256: str, *, user_id: str | None | _AutoSentinel = AUTO) -> dict | None:
         """Return the active row with this content address, or ``None`` (dedup probe)."""
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectDocumentRepository.find_active_by_sha256")
+        context = self._scope(resolved_user_id)
         stmt = select(ProjectDocumentRow).where(
             ProjectDocumentRow.project_id == project_id,
             ProjectDocumentRow.sha256 == sha256,
             ProjectDocumentRow.trashed_at.is_(None),
         )
-        if resolved_user_id is not None:
-            stmt = stmt.where(ProjectDocumentRow.user_id == resolved_user_id)
+        stmt = self._owned_scope(stmt, resolved_user_id, context)
         async with self._sf() as session:
             row = (await session.execute(stmt)).scalars().first()
             return self._row_to_dict(row) if row is not None else None
@@ -352,18 +375,18 @@ class ProjectDocumentRepository:
     async def list_active(self, project_id: str, *, limit: int, offset: int, user_id: str | None | _AutoSentinel = AUTO) -> list[dict]:
         """Active shelf rows in index order: ``updated_at DESC, id ASC`` (§10.10)."""
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectDocumentRepository.list_active")
+        context = self._scope(resolved_user_id)
         stmt = select(ProjectDocumentRow).where(ProjectDocumentRow.project_id == project_id, ProjectDocumentRow.trashed_at.is_(None)).order_by(ProjectDocumentRow.updated_at.desc(), ProjectDocumentRow.id.asc()).limit(limit).offset(offset)
-        if resolved_user_id is not None:
-            stmt = stmt.where(ProjectDocumentRow.user_id == resolved_user_id)
+        stmt = self._owned_scope(stmt, resolved_user_id, context)
         async with self._sf() as session:
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
 
     async def count_active(self, project_id: str, *, user_id: str | None | _AutoSentinel = AUTO) -> int:
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectDocumentRepository.count_active")
+        context = self._scope(resolved_user_id)
         stmt = select(func.count()).select_from(ProjectDocumentRow).where(ProjectDocumentRow.project_id == project_id, ProjectDocumentRow.trashed_at.is_(None))
-        if resolved_user_id is not None:
-            stmt = stmt.where(ProjectDocumentRow.user_id == resolved_user_id)
+        stmt = self._owned_scope(stmt, resolved_user_id, context)
         async with self._sf() as session:
             return int((await session.execute(stmt)).scalar_one())
 
@@ -376,14 +399,14 @@ class ProjectDocumentRepository:
         the extra row only to decide truncation — it is never rendered.
         """
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectDocumentRepository.shelf_snapshot")
+        context = self._scope(resolved_user_id)
         stmt = (
             select(ProjectDocumentRow, func.count().over().label("total"))
             .where(ProjectDocumentRow.project_id == project_id, ProjectDocumentRow.trashed_at.is_(None))
             .order_by(ProjectDocumentRow.updated_at.desc(), ProjectDocumentRow.id.asc())
             .limit(limit)
         )
-        if resolved_user_id is not None:
-            stmt = stmt.where(ProjectDocumentRow.user_id == resolved_user_id)
+        stmt = self._owned_scope(stmt, resolved_user_id, context)
         async with self._sf() as session:
             result = await session.execute(stmt)
             pairs = result.all()
@@ -392,17 +415,16 @@ class ProjectDocumentRepository:
             return rows, total
 
     async def get(self, document_id: str, *, include_trashed: bool = False, user_id: str | None | _AutoSentinel = AUTO) -> dict | None:
-        """Return one owned row, or ``None`` (missing/foreign; trashed unless included)."""
+        """Read only the native owner's selected, live scope and consistent parent."""
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectDocumentRepository.get")
+        context = self._scope(resolved_user_id)
+        stmt = select(ProjectDocumentRow).where(ProjectDocumentRow.id == document_id)
+        if not include_trashed:
+            stmt = stmt.where(ProjectDocumentRow.trashed_at.is_(None))
+        stmt = self._owned_scope(stmt, resolved_user_id, context, include_trashed=include_trashed)
         async with self._sf() as session:
-            row = await session.get(ProjectDocumentRow, document_id)
-            if row is None:
-                return None
-            if resolved_user_id is not None and row.user_id != resolved_user_id:
-                return None
-            if row.trashed_at is not None and not include_trashed:
-                return None
-            return self._row_to_dict(row)
+            row = await session.scalar(stmt)
+            return self._row_to_dict(row) if row is not None else None
 
     async def trash(self, document_id: str, *, project_id: str | None = None, user_id: str | None | _AutoSentinel = AUTO) -> bool:
         """Move one owned document to trash; ``False`` ⇒ 404 (§6.3 trash).
@@ -421,20 +443,24 @@ class ProjectDocumentRepository:
         on the expected id. When omitted, the document's own project is used.
         """
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectDocumentRepository.trash")
+        context = self._scope(resolved_user_id)
         async with self._sf() as session:
-            await self._begin_immediate_if_sqlite(session)
+            if context is not None:
+                await lock_resource_scope(session, context)
+            else:
+                await self._begin_immediate_if_sqlite(session)
             # Route to the owning project: the authoritative validation is the
             # locked re-read below, so this unlocked probe leaks nothing.
-            probe = await session.get(ProjectDocumentRow, document_id)
+            probe = await session.scalar(self._owned_scope(select(ProjectDocumentRow).where(ProjectDocumentRow.id == document_id), resolved_user_id, context))
             if probe is None or (project_id is not None and probe.project_id != project_id) or (resolved_user_id is not None and probe.user_id != resolved_user_id):
                 await session.rollback()
                 return False
             expected_project_id = project_id if project_id is not None else probe.project_id
-            locked_project = await self._lock_active_project(session, expected_project_id, resolved_user_id)
+            locked_project = await self._lock_active_project(session, expected_project_id, resolved_user_id, context)
             if locked_project is None:
                 await session.rollback()
                 return False
-            locked = (await session.execute(select(ProjectDocumentRow).where(ProjectDocumentRow.id == document_id).with_for_update())).scalar_one_or_none()
+            locked = (await session.execute(self._owned_scope(select(ProjectDocumentRow).where(ProjectDocumentRow.id == document_id), resolved_user_id, context).with_for_update())).scalar_one_or_none()
             if locked is None or locked.project_id != expected_project_id or (resolved_user_id is not None and locked.user_id != resolved_user_id):
                 await session.rollback()
                 return False
@@ -450,8 +476,7 @@ class ProjectDocumentRepository:
                     trash_origin={"project_id": locked_project.id, "project_name": locked_project.name},
                 )
             )
-            if resolved_user_id is not None:
-                stmt = stmt.where(ProjectDocumentRow.user_id == resolved_user_id)
+            stmt = self._owned_scope(stmt, resolved_user_id, context)
             result = await session.execute(stmt)
             await session.commit()
             return result.rowcount > 0
@@ -504,6 +529,7 @@ class ProjectDocumentRepository:
         is released.
         """
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectDocumentRepository.stage_live_copy")
+        self._scope(resolved_user_id, integrated=False)
         async with self._sf() as session:
             await self._begin_immediate_if_sqlite(session)
             locked = (await session.execute(select(ProjectDocumentRow).where(ProjectDocumentRow.id == document_id).with_for_update())).scalar_one_or_none()
@@ -547,6 +573,7 @@ class ProjectDocumentRepository:
         this, never inside *publish*.
         """
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectDocumentRepository.publish_under_live_lock")
+        self._scope(resolved_user_id, integrated=False)
         async with self._sf() as session:
             await self._begin_immediate_if_sqlite(session)
             locked = (await session.execute(select(ProjectDocumentRow).where(ProjectDocumentRow.id == document_id).with_for_update())).scalar_one_or_none()
@@ -563,6 +590,7 @@ class ProjectDocumentRepository:
     async def list_trashed(self, *, limit: int, offset: int, user_id: str | None | _AutoSentinel = AUTO) -> list[dict]:
         """Trashed rows, most recently trashed first (trash listing, §6.5)."""
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectDocumentRepository.list_trashed")
+        self._scope(resolved_user_id, integrated=False)
         stmt = select(ProjectDocumentRow).where(ProjectDocumentRow.trashed_at.is_not(None)).order_by(ProjectDocumentRow.trashed_at.desc(), ProjectDocumentRow.id.asc()).limit(limit).offset(offset)
         if resolved_user_id is not None:
             stmt = stmt.where(ProjectDocumentRow.user_id == resolved_user_id)
@@ -572,6 +600,7 @@ class ProjectDocumentRepository:
 
     async def count_trashed(self, *, user_id: str | None | _AutoSentinel = AUTO) -> int:
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectDocumentRepository.count_trashed")
+        self._scope(resolved_user_id, integrated=False)
         stmt = select(func.count()).select_from(ProjectDocumentRow).where(ProjectDocumentRow.trashed_at.is_not(None))
         if resolved_user_id is not None:
             stmt = stmt.where(ProjectDocumentRow.user_id == resolved_user_id)
@@ -586,6 +615,7 @@ class ProjectDocumentRepository:
         selection (the retention sweep's).
         """
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectDocumentRepository.list_all_trashed")
+        self._scope(resolved_user_id, integrated=False)
         stmt = select(ProjectDocumentRow).where(ProjectDocumentRow.trashed_at.is_not(None)).order_by(ProjectDocumentRow.trashed_at.asc(), ProjectDocumentRow.id.asc())
         if resolved_user_id is not None:
             stmt = stmt.where(ProjectDocumentRow.user_id == resolved_user_id)
@@ -603,6 +633,7 @@ class ProjectDocumentRepository:
         deleting anything.
         """
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectDocumentRepository.list_all_for_sweep")
+        self._scope(resolved_user_id, integrated=False)
         stmt = select(ProjectDocumentRow).order_by(ProjectDocumentRow.id.asc())
         if resolved_user_id is not None:
             stmt = stmt.where(ProjectDocumentRow.user_id == resolved_user_id)
@@ -637,6 +668,7 @@ class ProjectDocumentRepository:
         projects-root-relative, so the bytes stay valid (§10.6).
         """
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectDocumentRepository.restore")
+        self._scope(resolved_user_id, integrated=False)
         async with self._sf() as session:
             await self._begin_immediate_if_sqlite(session)
             locked_project = await self._lock_active_project(session, target_project_id, resolved_user_id)
@@ -707,6 +739,7 @@ class ProjectDocumentRepository:
         anything (§6.1).
         """
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectDocumentRepository.purge_candidates")
+        self._scope(resolved_user_id, integrated=False)
         cutoff = (now or datetime.now(UTC)) - timedelta(days=retention_days)
         stmt = select(ProjectDocumentRow).where(ProjectDocumentRow.trashed_at.is_not(None), ProjectDocumentRow.trashed_at <= cutoff).order_by(ProjectDocumentRow.trashed_at.asc(), ProjectDocumentRow.id.asc())
         if resolved_user_id is not None:
@@ -743,6 +776,7 @@ class ProjectDocumentRepository:
         unguarded row deletion exists.
         """
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectDocumentRepository.purge")
+        self._scope(resolved_user_id, integrated=False)
         async with self._sf() as session:
             await self._begin_immediate_if_sqlite(session)
             lock_stmt = select(ProjectDocumentRow).where(ProjectDocumentRow.id == document_id)

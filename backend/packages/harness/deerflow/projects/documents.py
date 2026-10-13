@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from deerflow.authz.workspace import get_current_workspace
 from deerflow.config.paths import Paths
 from deerflow.uploads.manager import normalize_filename
 from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
@@ -275,7 +276,9 @@ async def add_staged_document(
                 exc_info=True,
             )
         else:
-            row_provably_absent = committed is None
+            # A scoped miss can mean revocation, not rollback. Preserve any
+            # possibly committed namespace for scope-aware reconciliation.
+            row_provably_absent = committed is None and get_current_workspace() is None
         if committed is not None:
             if committed.get("trashed_at") is None:
                 logger.warning("Shelf insert of %s raised after commit; the row is live — keeping its namespace and reporting success", document_id)

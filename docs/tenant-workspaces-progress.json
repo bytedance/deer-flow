@@ -28,7 +28,7 @@
     "M0 real resource/file fixture integration with M3",
     "M1 original deployment-data inventory and physical maintenance/restore evidence with M10",
     "M2 full scoped Gateway activation and SSO/invitation management acceptance",
-    "M3 documents/files, shared ACLs, threads/runs and client switching",
+    "M3 shared ACLs, threads/runs, scoped conversion/maintenance, client switching and physical file/NAS integration",
     "M4 through M11 remain pending"
   ],
   "static_checks": [
@@ -430,5 +430,52 @@
       "backend/tests/test_workspace_http.py": "1d4355db8f87f3bb18a5feb273c3c7239a2206fc2521d7c08d73247c099a11a5"
     },
     "limits": "Private-project CRUD only. Shared project/document ACLs, files/NAS, production thread/run scope, frontend/cache switching, PAT/IM/backgrounds and full delivery gates remain pending. Workspace project thread listing is explicitly refused until scoped. Compiled tenant activation remains blocked."
+  },
+  "workspace_private_project_files": {
+    "base_commit": "15878b31",
+    "red": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 20,
+      "result": "FAILURE",
+      "archive_sha256": "385f9ab9bec77375bbbb3866cc816830138aaf20d39fd3415def3380b92ce127",
+      "artifact": "m3-documents-postgres-red.log",
+      "failed": 2,
+      "duration_seconds": 19.83,
+      "reason": "actual production upload persisted workspace_id=None on SQLite and PostgreSQL"
+    },
+    "green": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 21,
+      "result": "SUCCESS",
+      "archive_sha256": "bea6bd3f0577a4dc1387dd556212ec44375a1300ccfa66744c98746d266ff580",
+      "artifact": "m3-documents-postgres-green.log",
+      "passed": 4,
+      "duration_seconds": 22.68,
+      "command": "python -m pytest tests/test_workspace_http.py tests/test_project_documents_router.py::TestRoundTrip::test_upload_list_content_delete_round_trip tests/test_project_documents_router.py::TestRoundTrip::test_dedup_hit_returns_200_with_the_first_writers_row -q --tb=short --no-showlocals",
+      "warning": "Existing FastAPI/Starlette TestClient deprecation in legacy test dependency; native-auth main uses AsyncClient."
+    },
+    "scope": "Actual native JWT/RBAC/CSRF shelf main on both real databases: personal/team uploads, persisted team workspace and actual workspace-root file bytes; list/count; inline/attachment header/query selectors; conflicting/missing/wrong-parent denial; real policy mutation after preparing a FileResponse yields 404 before document bytes; wrong-space trash refusal and correct trash followed by content refusal. Existing native legacy roundtrip/dedup preserved. Does not prove shared files, threads, NAS, sandbox mounts or deployed tenant activation.",
+    "cleanup": {
+      "20": {
+        "containers": [],
+        "networks": []
+      },
+      "21": {
+        "containers": [],
+        "networks": []
+      }
+    },
+    "source_sha256": {
+      "backend/app/gateway/deps.py": "981511d71fbbbc48a6b2e3a83e69a2fc16e1462745519722873fe7668ae10e13",
+      "backend/app/gateway/routers/project_documents.py": "558acab64b5fa2c83a7e67626c79519cc1376205f732a1007dd03d6b1cc81bd4",
+      "backend/app/gateway/workspaces/dependencies.py": "ee85da675e9bc41b32e5b96a5a01a846a8ee416c5a2cdb8f17a68bd8d8e755a5",
+      "backend/app/gateway/workspaces/file_response.py": "dcde120b5b9fa2ecf44708011ed1a9200fddb7397a72b68e2554e05cd1e1b00b",
+      "backend/packages/harness/deerflow/config/paths.py": "97928bb3b54483fe1244c893c6a0973d820909077779fbbfe8c5d08bb58e5c9b",
+      "backend/packages/harness/deerflow/persistence/projects/sql.py": "e11537596d68efc8503a847d88ba48ab606e507c33346f39474e12dc0d9d4a59",
+      "backend/packages/harness/deerflow/projects/documents.py": "27bcd31b63178d2d627fd75121d21393c1cdaa195d70a36cc73d6293976441fb",
+      "backend/tests/test_workspace_http.py": "6925c534af56ce323b88d1f6e554b82510479258826cd4b0851b5982eac3ab1e"
+    },
+    "limits": "Private shelf integration only. Thread promotion/attach and scoped conversion/trash maintenance currently refuse until their planned integrations. Shared ACLs, thread/run resources, client switching/cache, PAT/IM/background scope, physical NAS and paired release remain pending. Compiled activation gate remains false.",
+    "self_review": "Native actor remains unchanged; live predicates before SQL materialization; matching parent; write lock order workspace/actor/project/document; bound ContextVar reset on route/response exit; worker context retained; scoped liveness misses cannot delete possibly committed files. Before-send check does not retract bytes already delivered."
   }
 }

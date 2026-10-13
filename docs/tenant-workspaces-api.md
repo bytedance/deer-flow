@@ -6,7 +6,9 @@ repository and RBAC provider. They are now registered by the shipped Gateway;
 workspace admission is resolved once at native database bootstrap. The default
 service is inactive. No tenant deployment or public registration has been performed.
 Full resource isolation is not complete. The project CRUD integration below
-is verified separately; file and background entrypoints still need integration.
+is verified separately. Private project document upload/list/content/trash now has
+real file evidence; shared data, thread files and background entrypoints still
+need integration.
 
 ## Implemented adapter contracts
 
@@ -118,3 +120,49 @@ SQLite and PostgreSQL: persisted scope, personal/team lists and direct accesses,
 cross-space mutation refusal, normal patch/archive/restore/delete, stale scope,
 mandatory scope and refusal to delete a foreign-scope document child. The child
 fixture is metadata only; no physical file or NAS acceptance is implied.
+
+
+## Private project documents (partial M3)
+
+The production shelf router binds a server-resolved native-session workspace
+for upload, list/count, inline content/download and individual trash. Native
+project permissions remain required. Upload preflight checks the project before
+staging; the mutation locks workspace, native actor and active project before
+placement/insert. Rows retain the actual user and persist the selected workspace.
+Reads and counts filter workspace, native owner, live account/member/policy and
+matching parent project in SQL. Unscoped rows are not exposed in scoped mode.
+
+Trusted task-local scope is propagated by the existing file-I/O workers. Shelf
+bytes use `workspaces/{workspace_id}/projects/{stored_relpath}/original/{name}`;
+legacy calls without a scope retain `users/{user_id}/projects`. A project path
+cannot select another actor's namespace. This is application path scoping;
+NAS migration, sandbox mount confinement and physical hostile-file defenses
+remain separate M3/M10/M11 gates.
+
+Browser content navigation may use the canonical UUID query locator
+`workspace_id` when it cannot send `X-Deerflow-Workspace`. Both are authenticated
+selectors; conflicting values return 404. Missing selection chooses only the
+personal workspace. A captured file response binds its original context and
+rechecks live versions plus document/parent access before emitting ASGI headers.
+Scoped content has `Cache-Control: private, no-store`. This before-send check
+does not promise recalling bytes already delivered by an ongoing download.
+
+Upload publication and trash drain their owned async writes on cancellation.
+A failed insert followed by a scoped liveness miss does not prove rollback:
+revocation may hide a committed row. Its possibly owned bytes remain for later
+scope-aware reconciliation instead of being deleted based on that miss.
+
+Thread promotion/attachment currently return 503 under a bound workspace.
+Conversion publication, trash recovery/purge and retention inventory also
+refuse scoped or required-but-missing calls until integrated. These temporary
+refusals are tracked work, not an accepted substitute for the full requirement.
+Explicit shared ACLs, threads/runs, frontend switching/cache, background scope,
+quota accounting and release evidence remain pending; activation stays blocked.
+
+Jenkins #20 observed the actual missing row workspace on SQLite/PostgreSQL.
+#21 ran the same actual JWT/RBAC/CSRF production-router main: personal/team
+uploads, team-file physical bytes, list/count, header/query downloads, mismatched
+selectors/parents, permission change between response preparation and send,
+wrong-space trash and post-trash refusal. Two affected legacy roundtrip/dedup
+checks passed as well (4 passed in 22.68s). Exact source hashes and archived
+log names are in the progress JSON. No NAS or deployed tenant acceptance is implied.

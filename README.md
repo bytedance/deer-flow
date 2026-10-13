@@ -2923,4 +2923,4 @@ Tenant development: the [offline metadata attribution procedure](docs/tenant-wor
 
 The [workspace HTTP adapter contracts](docs/tenant-workspaces-api.md) describe the current tenant control-plane foundation, member management and local-password ownership transfer. The Gateway registers these routes, but tenant activation is still blocked until SSO reauthentication, resource/background isolation and release gates are complete. The startup-only `workspaces.enabled` defaults to false; a database containing team data cannot restart in legacy authorization mode.
 
-Workspace implementation progress: [project CRUD scope and remaining file/shared-data work](docs/tenant-workspaces-api.md#project-crud-integration-partial-m3). Tenant activation remains blocked; this is not a deployed multi-tenant release.
+Workspace implementation progress: [private project file scope and remaining integration](docs/tenant-workspaces-api.md#private-project-documents-partial-m3). Tenant activation remains blocked; this is not a deployed multi-tenant release.

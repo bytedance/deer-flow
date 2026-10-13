@@ -312,3 +312,12 @@ thread store is scoped, the project thread-list route returns 503 when workspace
 services are active. Native startup sets workspace_mode_enabled once and creates
 the SQL project repository with its matching workspace_required setting. File,
 shared ACL, cache and background coverage remain required before activation.
+
+
+Project document routes bind live native-session workspace context after native
+permissions and reset it on exit. Only the content route accepts a UUID query
+locator, and conflicting header/query selectors are refused. WorkspaceFileResponse
+rebinds the captured context and checks live document/parent access before ASGI
+headers; scoped file responses are private/no-store. Upload publication and trash
+drain owned async writes. Thread promotion/attach remain explicitly refused until
+the thread store/path integration lands. No request can activate workspace mode.

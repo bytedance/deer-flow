@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from test_workspace_executor_migration import executor_engine, native_engine  # noqa: F401
 
 
-def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, monkeypatch):  # noqa: F811
+def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, monkeypatch, tmp_path):  # noqa: F811
     from app.gateway import deps
     from app.gateway.auth import config as auth_config
     from app.gateway.auth import create_access_token
@@ -23,10 +23,12 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
     from app.gateway.auth_middleware import AuthMiddleware
     from app.gateway.csrf_middleware import CSRFMiddleware
-    from app.gateway.routers import projects
+    from app.gateway.routers import project_documents, projects
     from deerflow.config import app_config
+    from deerflow.config import paths as paths_module
     from deerflow.config.app_config import AppConfig
-    from deerflow.persistence.projects import ProjectRepository
+    from deerflow.config.paths import Paths
+    from deerflow.persistence.projects import ProjectDocumentRepository, ProjectRepository
     from deerflow.persistence.projects.model import ProjectDocumentRow, ProjectRow
     from deerflow.persistence.user.model import UserRow
     from deerflow.persistence.workspaces.sql import WorkspaceRepository
@@ -53,6 +55,8 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
         }
     )
     monkeypatch.setattr(app_config, "get_app_config", lambda: configuration)
+    monkeypatch.setattr(deps, "get_app_config", lambda: configuration)
+    monkeypatch.setattr(paths_module, "_paths", Paths(tmp_path / "files"))
     monkeypatch.setattr(auth_config, "_auth_config", auth_config.AuthConfig(jwt_secret="synthetic-isolated-workspace-http-key-64-characters-for-test-only!!"))
     monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
     driver = "sqlite+aiosqlite" if native_engine.dialect.name == "sqlite" else "postgresql+asyncpg"
@@ -68,9 +72,11 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
             app = FastAPI()
             app.state.workspace_service = service
             app.state.project_repo = ProjectRepository(sf)
+            app.state.project_document_repo = ProjectDocumentRepository(sf)
             app.include_router(routes.router)
             app.include_router(admin_routes.router)
             app.include_router(projects.router)
+            app.include_router(project_documents.router)
             app.add_middleware(AuthMiddleware)
             app.add_middleware(CSRFMiddleware)
 
@@ -90,6 +96,14 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                         native_permission="projects:read" if request.method == "GET" else "projects:write",
                     )
                 return {"authorized": True}
+
+            @app.get("/api/workspace-delayed-file/{project_id}/{document_id}")
+            async def delayed_file(request: Request, project_id: str, document_id: str):
+                response = await project_documents.get_project_document_content(project_id=project_id, document_id=document_id, request=request, download=True, workspace_id=None)
+                async with sf() as session:
+                    await session.execute(sa.text("UPDATE workspaces SET policy_version=policy_version+1 WHERE id=:id"), {"id": request.headers["X-Deerflow-Workspace"]})
+                    await session.commit()
+                return response
 
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost", headers={"Origin": "http://localhost", "X-CSRF-Token": "synthetic-csrf"}) as client:
                 assert (await client.get("/api/workspaces")).status_code == 401
@@ -127,6 +141,36 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                 assert created.status_code == 201, created.text
                 personal_project = created.json()["id"]
                 assert (await client.post("/api/projects", headers=team_headers, json={"name": "Forged", "workspace_id": personal})).status_code == 422
+                team_docs = "/api/projects/" + team_project + "/documents"
+                uploaded = await client.post(team_docs, headers=team_headers, files={"file": ("team.txt", b"team private notes", "text/plain")})
+                assert uploaded.status_code == 201, uploaded.text
+                team_document = uploaded.json()["document"]["id"]
+                async with sf() as session:
+                    document = await session.get(ProjectDocumentRow, team_document)
+                    assert document.workspace_id == team, "uploaded document lost workspace ownership"
+                    original = tmp_path / "files" / "workspaces" / team / "projects" / document.stored_relpath / "original" / "team.txt"
+                    assert original.read_bytes() == b"team private notes"
+                personal_docs = "/api/projects/" + personal_project + "/documents"
+                uploaded = await client.post(personal_docs, files={"file": ("personal.txt", b"personal private notes", "text/plain")})
+                assert uploaded.status_code == 201, uploaded.text
+                personal_document = uploaded.json()["document"]["id"]
+                page = (await client.get(team_docs + "?limit=1&offset=0", headers=team_headers)).json()
+                assert page["total"] == 1 and [r["id"] for r in page["documents"]] == [team_document]
+                assert (await client.get(team_docs, headers={"X-Deerflow-Workspace": personal})).status_code == 404
+                content = team_docs + "/" + team_document + "/content"
+                response = await client.get(content, headers=team_headers)
+                assert response.status_code == 200 and response.content == b"team private notes"
+                assert response.headers["cache-control"] == "private, no-store"
+                assert (await client.get(content)).status_code == 404
+                response = await client.get(content + "?download=true&workspace_id=" + team)
+                assert response.status_code == 200 and response.content == b"team private notes"
+                assert (await client.get(content + "?workspace_id=" + personal, headers=team_headers)).status_code == 404
+                assert (await client.get(team_docs + "/" + personal_document + "/content", headers=team_headers)).status_code == 404
+                delayed = await client.get("/api/workspace-delayed-file/" + team_project + "/" + team_document, headers=team_headers)
+                assert delayed.status_code == 404 and b"team private notes" not in delayed.content
+                assert (await client.delete(team_docs + "/" + team_document, headers={"X-Deerflow-Workspace": personal})).status_code == 404
+                assert (await client.delete(team_docs + "/" + team_document, headers=team_headers)).status_code == 204
+                assert (await client.get(content, headers=team_headers)).status_code == 404
                 assert [r["id"] for r in (await client.get("/api/projects", headers=team_headers)).json()["projects"]] == [team_project]
                 assert [r["id"] for r in (await client.get("/api/projects")).json()["projects"]] == [personal_project]
                 personal_headers = {"X-Deerflow-Workspace": personal}

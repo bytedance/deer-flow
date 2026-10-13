@@ -9,7 +9,7 @@
 **Tech Stack:** FastAPI/Python、SQLAlchemy/Alembic/PostgreSQL、Redis、Next.js/React、现有MCP/Skill、Docker/NAS、上海Jenkins。
 
 设计依据：[统一设计](../specs/2026-10-13-tenant-workspaces-design.md)。OpenSpec：`openspec/changes/tenant-workspaces-self-service/`。
-基线48d5c3de。实施已进入M3的项目CRUD空间隔离；合同、迁移和离线归属基础已有定向验证，但各工作包的完整验收仍未完成。实际源码与Jenkins证据见 `docs/tenant-workspaces-progress.json`，不以计划条目代替验收。
+基线48d5c3de。实施已进入M3的项目CRUD与私有资料空间隔离；合同、迁移和离线归属基础已有定向验证，但各工作包的完整验收仍未完成。实际源码与Jenkins证据见 `docs/tenant-workspaces-progress.json`，不以计划条目代替验收。
 
 ## 用户确认后的执行顺序与可审阅交付
 
@@ -25,7 +25,7 @@
 
 阶段主干验证通过后推进后续功能；跨工作包的最终验收仍保持未完成，直到依赖证据齐备。先验证真实主干，再补必要边界检查，不用测试数量衡量进度。
 
-当前记录显示 M0–M2 有部分基础实现，M3 的私有项目 CRUD 已有定向验证；资料上传下载、共享权限、线程与客户端贯通仍未验收。下一项实施应从 M3 的真实资料上传、列表、下载和删除开始，再接线程与空间切换。已有未提交的文件验收用例保留，不将其视作功能完成。
+当前记录显示 M0–M2 有部分基础实现，M3 的私有项目 CRUD 已有定向验证；私有资料上传、列表、下载和删除已在隔离环境获得真实文件证据（Jenkins #21）；共享权限、线程与客户端贯通仍未验收。下一项继续 M3 的共享资料、线程与空间切换；已有基础通过不等于完整 M3 完成。
 
 ## 顺序、检查点与边界
 
@@ -215,6 +215,14 @@ python -m pytest tests/test_workspace_resources.py -q
 ```
 
 预期：对应主干通过；若无法证明上述验收结果则保留未完成，不能用mock成功替代物理执行或真实鉴权。
+
+M3 private file checkpoint: Jenkins #20 reproduced missing persisted scope on both
+native databases; #21 verified real production shelf upload/list/count/content/trash,
+header/query download selectors and denial before bytes when policy changed after
+response preparation, plus two legacy shelf regressions (4 passed, 22.68s). Exact
+archives/source hashes live in the progress JSON. Scope-aware thread attachment,
+shared ACLs, conversion/maintenance, frontend/cache and NAS/release gates remain
+required; do not check the parent M3 package yet.
 
 ### M4：B/C、Scheduler、通知和撤权贯通
 
