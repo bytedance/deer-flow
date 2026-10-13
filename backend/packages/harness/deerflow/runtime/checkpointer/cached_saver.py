@@ -1,4 +1,9 @@
-"""Read-through delta-history cache wrapper for any BaseCheckpointSaver.
+"""Read-through delta-history cache wrapper for a canonical BaseCheckpointSaver.
+
+The inner saver must return delta history in ascending ``(task_id, idx)``
+order per checkpoint, with each task's ``pending_writes`` in ``idx`` order.
+The in-repo memory, sqlite, and postgres backends satisfy this contract;
+the base saver's default history walk alone does not guarantee it.
 
 Correctness argument (spec §3): a checkpoint's delta history is a pure
 function of its sealed ancestor chain — the LangGraph contract excludes the
@@ -48,9 +53,11 @@ def _checkpoint_ref(tup: CheckpointTuple) -> tuple[str, str, str]:
 def _channel_writes(tup: CheckpointTuple, channel: str) -> list[PendingWrite]:
     """Writes for one channel in the inner saver's canonical delta order.
 
-    ``get_delta_channel_history`` orders a checkpoint's writes by
-    ``(task_id, idx)`` (ascending). ``CheckpointTuple.pending_writes`` already
-    carries each task's writes in ``idx`` order, but across tasks it follows
+    The wrapper assumes the inner saver's ``get_delta_channel_history`` uses
+    ascending ``(task_id, idx)`` order per checkpoint; the base implementation
+    instead iterates ``pending_writes`` in storage order. For supported savers,
+    ``CheckpointTuple.pending_writes`` carries each task's writes in ``idx``
+    order, but across tasks it follows
     *storage/completion* order, which the InMemorySaver backend leaves in task
     arrival order rather than ``task_id`` order. Composing from that raw order
     makes the cached history disagree with the inner saver on fan-out
