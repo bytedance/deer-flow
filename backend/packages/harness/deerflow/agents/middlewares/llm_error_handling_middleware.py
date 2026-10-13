@@ -165,6 +165,10 @@ _REASON_RETRY_BUDGETS: dict[str, int] = {
     "burst_rate": 2,
 }
 
+# Lower-cased message of the ``ValueError`` langchain_core raises when a
+# streamed response (HTTP 200) yields no generation chunk at all.
+_EMPTY_STREAM_MARKER = "no generations found in stream"
+
 # Exception class names that indicate the upstream stream-chunk watchdog
 # fired because the model stalled mid-flight. These deserve a more specific
 # user-facing message than the generic "temporarily unavailable" copy,
@@ -636,6 +640,13 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         # route it through the same retry/backoff path as other transient
         # provider failures rather than failing the whole run.
         if isinstance(exc, IndexError):
+            return True, "transient"
+        # The streaming counterpart of the empty-``generations`` glitch above:
+        # ``langchain_core.language_models.chat_models.generate_from_stream``
+        # raises ``ValueError("No generations found in stream.")`` when the
+        # provider answers ``200 OK`` but the stream carries no chunk at all.
+        # Same upstream-payload glitch, same retry/backoff path.
+        if isinstance(exc, ValueError) and _EMPTY_STREAM_MARKER in lowered:
             return True, "transient"
         if status_code in _RETRIABLE_STATUS_CODES:
             return True, "transient"
