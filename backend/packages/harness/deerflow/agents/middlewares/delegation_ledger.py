@@ -10,7 +10,7 @@ from typing import Any
 from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
 
 from deerflow.agents.middlewares.receipt_verification import render_citation_verdict, validate_receipt_verdict
-from deerflow.agents.thread_state import DelegationEntry
+from deerflow.agents.thread_state import _DELEGATION_LEDGER_MAX_ENTRIES, DelegationEntry
 from deerflow.subagents.acceptance_checks import AcceptanceVerdict, render_acceptance_segment, validate_acceptance_verdict
 from deerflow.subagents.status_contract import (
     read_subagent_result_metadata,
@@ -26,6 +26,7 @@ _STATUS_ONLY_RESULT_BRIEFS = {
     "timed_out": "Task timed out.",
     "polling_timed_out": "Task polling timed out.",
 }
+_DESCRIPTION_TRUNCATION_SUFFIX = " ... [truncated]"
 
 
 def _utc_now_iso() -> str:
@@ -50,6 +51,24 @@ def _bound_text(text: str, cap: int = _RESULT_BRIEF_CAP) -> str:
 
 def _escape_context_text(value: object) -> str:
     return escape(" ".join(str(value).split()), quote=False)
+
+
+def _bound_description(description: str, cap: int = _DESCRIPTION_CAP) -> str:
+    """Bound a delegation description to ``cap`` chars with an ellipsis marker.
+
+    The model that reads the durable ledger (AGENTS.md Item 16) uses the
+    description to decide whether to re-delegate, reuse the result, or
+    escalate. A ``summarize the Q3 payroll report by department`` prompt
+    silently became ``summarize the Q3 payroll repo`` on the 201st character
+    before this helper existed - exactly the kind of semantic drift the ledger
+    is supposed to prevent. (D3 in the agent-core hunt.)
+    """
+    if len(description) <= cap:
+        return description
+    if cap <= len(_DESCRIPTION_TRUNCATION_SUFFIX):
+        return description[:cap]
+    head = cap - len(_DESCRIPTION_TRUNCATION_SUFFIX)
+    return f"{description[:head]}{_DESCRIPTION_TRUNCATION_SUFFIX}"
 
 
 def _status_guidance(status: str, stop_reason: str | None = None, acceptance_verdict: AcceptanceVerdict | None = None) -> str:
@@ -122,7 +141,7 @@ def extract_delegations(messages: list[AnyMessage]) -> list[DelegationEntry]:
             if tool_call_id is None:
                 continue
             args = _tool_call_args(tool_call)
-            description = str(args.get("description") or args.get("prompt") or "")[:_DESCRIPTION_CAP]
+            description = _bound_description(str(args.get("description") or args.get("prompt") or ""))
             if tool_call_id not in entries_by_id:
                 order.append(tool_call_id)
             entries_by_id[tool_call_id] = {
@@ -216,19 +235,45 @@ def _render_entry_line(entry: DelegationEntry) -> str:
     return line
 
 
-def render_delegation_ledger(entries: list[DelegationEntry], *, max_chars: int = _LEDGER_RENDER_CHAR_BUDGET) -> str:
-    """Render the delegation ledger as model-visible durable context data."""
-    if not entries:
+def render_delegation_ledger(entries: list[DelegationEntry], *, max_chars: int = _LEDGER_RENDER_CHAR_BUDGET, truncated_count: int = 0) -> str:
+    """Render the delegation ledger as model-visible durable context data.
+
+    ``truncated_count`` is the number of entries that have been permanently
+    dropped from the durable ledger because the channel exceeded its cap.
+    Without surfacing this on the rendered output, the lead has no signal
+    that history was clipped and may re-delegate a task whose prior
+    completion is no longer in the visible ledger (D2 in the agent-core
+    hunt). When ``truncated_count > 0``, the renderer appends a single
+    model-visible "... (+N earlier delegations dropped permanently at the
+    ``_DELEGATION_LEDGER_MAX_ENTRIES``-entry durable ledger cap)" marker so
+    the loss is observable. The wording is deliberately distinct from the
+    render-budget "omitted from this model view" line above it: budget
+    omission hides entries from one request only, while cap truncation means
+    the entries are gone from the durable ledger for good. Room for the marker
+    is reserved out of ``max_chars`` before entry lines are laid out, so a
+    full ledger can never crowd the marker out of the render.
+    """
+    if not entries and not truncated_count:
         return ""
 
     lines = [
         "## Work already delegated",
         "Newest entries first. In-progress work is already delegated. Completed means execution ended, not task acceptance. Retain useful work and address remaining gaps within the current budget.",
     ]
+    marker_line = ""
+    if truncated_count > 0:
+        marker_line = f"- ... (+{truncated_count} earlier delegations dropped permanently at the {_DELEGATION_LEDGER_MAX_ENTRIES}-entry durable ledger cap)"
+    # Reserve room for the cap-truncation marker before laying out entry lines.
+    # A full ledger is exactly the case where the marker matters, and per-entry
+    # text is not constant across releases (the status guidance wording has
+    # grown over time), so without the reservation a longer entry line can push
+    # the marker past the budget and silently hide the permanent drop.
+    entry_budget = max_chars - (len(marker_line) + 1 if marker_line else 0)
+
     omitted = 0
     for index, entry in enumerate(reversed(entries)):
         line = _render_entry_line(entry)
-        if _fits_budget(lines, line, max_chars):
+        if _fits_budget(lines, line, entry_budget):
             lines.append(line)
             continue
         omitted = len(entries) - index
@@ -236,12 +281,21 @@ def render_delegation_ledger(entries: list[DelegationEntry], *, max_chars: int =
 
     if omitted:
         omitted_line = f"- ... {omitted} older delegation entries omitted from this model view because of context budget"
-        while len(lines) > 1 and not _fits_budget(lines, omitted_line, max_chars):
+        while len(lines) > 1 and not _fits_budget(lines, omitted_line, entry_budget):
             lines.pop()
             omitted += 1
             omitted_line = f"- ... {omitted} older delegation entries omitted from this model view because of context budget"
-        if _fits_budget(lines, omitted_line, max_chars):
+        if _fits_budget(lines, omitted_line, entry_budget):
             lines.append(omitted_line)
+
+    if marker_line:
+        if _fits_budget(lines, marker_line, max_chars):
+            lines.append(marker_line)
+        else:
+            # Budget exhausted: at least emit a short marker so the loss is visible.
+            short_marker = f"- ... (+{truncated_count} earlier permanently dropped)"
+            if _fits_budget(lines, short_marker, max_chars):
+                lines.append(short_marker)
 
     rendered = "\n".join(lines)
     if len(rendered) <= max_chars:
