@@ -31,6 +31,7 @@ from app.channels.message_bus import InboundMessage, InboundMessageType, Message
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
+_monotonic = time.monotonic
 
 
 class MessageItemType(IntEnum):
@@ -888,15 +889,19 @@ class WechatChannel(Channel):
             qrcode_img_content=qrcode_img_content or None,
         )
 
-        deadline = time.monotonic() + max(self._qrcode_poll_timeout, 1.0)
+        deadline = _monotonic() + max(self._qrcode_poll_timeout, 1.0)
         while True:
-            remaining = deadline - time.monotonic()
+            remaining = deadline - _monotonic()
             if remaining <= 0:
                 break
-            status_data = await self.request_login_status(
-                qrcode,
-                timeout=min(remaining, self.DEFAULT_QRCODE_STATUS_TIMEOUT),
-            )
+            try:
+                async with asyncio.timeout(remaining):
+                    status_data = await self.request_login_status(
+                        qrcode,
+                        timeout=min(remaining, self.DEFAULT_QRCODE_STATUS_TIMEOUT),
+                    )
+            except TimeoutError:
+                break
             status = str(status_data.get("status") or "").strip().lower()
             if status == "confirmed":
                 token = str(status_data.get("bot_token") or "").strip()
