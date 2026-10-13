@@ -630,6 +630,10 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         await require_activation(get_engine())
 
+        from app.gateway.workspaces.startup import validate_workspace_bootstrap
+
+        app.state.workspace_service = await validate_workspace_bootstrap(config, get_session_factory())
+
         app.state.checkpointer = await stack.enter_async_context(make_checkpointer(config))
         app.state.store = await stack.enter_async_context(make_store(config))
 

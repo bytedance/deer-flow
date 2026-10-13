@@ -2,8 +2,9 @@
 
 The first M2 adapters are verified in an isolated ASGI composition with the
 production AuthMiddleware, CSRFMiddleware, JWT implementation, SQL user
-repository and RBAC provider. They are not yet registered/initialized by the
-shipped Gateway. No tenant deployment or public registration has been performed.
+repository and RBAC provider. They are now registered by the shipped Gateway;
+workspace admission is resolved once at native database bootstrap. The default
+service is inactive. No tenant deployment or public registration has been performed.
 Do not treat this document as a claim that existing resource APIs are scoped.
 
 ## Implemented adapter contracts
@@ -27,9 +28,21 @@ CSRF/Origin middleware when registering these routers. Middleware-less API
 composition is not supported: the management dependency requires the native
 session source and matching authenticated AuthContext.
 
-A missing app.state.workspace_service returns 503. Full Gateway initialization,
-tenant-mode startup checks and resource/background isolation coverage remain
-pending; do not assign this state from an API request or tenant configuration.
+A missing app.state.workspace_service returns 503. `workspaces.enabled` is a
+strict boolean, false by default, and startup-only. The native bootstrap invokes
+`validate_workspace_bootstrap` after database initialization and before
+checkpointer/Store creation, extension services or RunManager recovery. An
+enabled mode requires persistent SQL, authenticated callers and the exact
+supported native schema. Any team row, including a closed team, prevents legacy
+startup against that database. This check does not fence an already-running peer
+or detect a database that the operator removed from configuration; M10 owns the
+paired release/generation controls.
+
+The current compiled runtime coverage gate refuses activation even with valid
+operator YAML. M3-M11 still need resource/files/background isolation and paired
+rollout evidence. There is no operator override for this missing implementation;
+public registration stays closed for tenant delivery. Do not assign service state
+from an API request. Completing route registration is not tenant activation.
 
 ## Trusted identity and resource checks
 

@@ -25,9 +25,9 @@
     "contracts/workspace_scope.v1.json": "c106de2a9f5a0d62b173719854096fef653233dd81ef2116ac664058162cb1ba"
   },
   "remaining": [
-    "M0 live SQL/HTTP resource fixture integration with M2/M3",
+    "M0 live resource fixture integration with M3",
     "M1 original deployment-data inventory and physical maintenance/restore evidence with M10",
-    "M2 Gateway lifecycle/configuration wiring and complete management acceptance",
+    "M2 complete scoped Gateway activation and SSO/invitation management acceptance",
     "M3 through M11 remain pending"
   ],
   "static_checks": [
@@ -359,5 +359,45 @@
       "backend/tests/test_workspace_repository.py": "3e4a8262a34e295886d15d46fba8ba1adea15abaec39228c5ff4beff05eb0b92"
     },
     "limits": "Proves serialization of persisted token/password proof with native credential row updates. Does not prove the still-pending public reset-email workflow, SSO step-up or complete tenant lifecycle isolation."
+  },
+  "workspace_startup_fence": {
+    "red": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 15,
+      "result": "FAILURE",
+      "archive_sha256": "c4413a8bc1982c7302dcb9536e09cfcf9d1e0fb41da2f645c167a917e8081aad",
+      "failed": 2,
+      "duration_seconds": 15.46,
+      "reason": "Gateway workspace startup guard absent on both real databases"
+    },
+    "helper_green": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 16,
+      "result": "SUCCESS",
+      "archive_sha256": "be030b385ac5a35b9b1d8e32c4568d987426d76cb48ff55c14af50ec12779da7",
+      "tests_passed": 8,
+      "duration_seconds": 29.34
+    },
+    "runtime_green": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 17,
+      "result": "SUCCESS",
+      "archive_sha256": "180fb68fd0bf9281e25c55cc7dbb08e562b5b5aac87091b5b0854db4c1b3f633",
+      "tests_passed": 8,
+      "duration_seconds": 29.68
+    },
+    "scope": "One startup main per SQLite/PostgreSQL, existing HTTP/repository mains per database and two affected reload-boundary checks. Strict frozen flag, default legacy access, enabled memory/auth-disabled/schema refusal, closed-team legacy refusal, current incomplete-build activation refusal, actual create_app route registration. PostgreSQL also exercises production langgraph_runtime against the team-bearing database and proves failure before RunManager construction.",
+    "cleanup": "Exact owned-label containers/networks for terminal builds 15, 16 and 17 empty",
+    "source_sha256": {
+      "backend/app/gateway/workspaces/startup.py": "808da58c6f65890e49e672e1920e76cc6591cfc346bebecffd9abbe76a85deb2",
+      "backend/app/gateway/deps.py": "0be56272f64be5453fcfd656480e6063f8f99e388837946ea442787c9cc18624",
+      "backend/app/gateway/app.py": "e480258d2c72415cdf2f638cc29f75dbe73d008deec7cc53e64ee88a17f102db",
+      "backend/packages/harness/deerflow/config/workspaces_config.py": "8631c83165ba09b36d6ab0b2c0ea0cc169758ab1a37b45c5a336a0723cb299d7",
+      "backend/packages/harness/deerflow/config/app_config.py": "4a1b713ef33cc77e9284b586e958c839869c9579729d19489db7e4f595187892",
+      "backend/packages/harness/deerflow/config/reload_boundary.py": "995d7841c9d3d222024fe293c2e4757227ea828e4c32d6e3a30368f78c09ca2d",
+      "config.example.yaml": "0a8ea38591e83669edaeceb03137a4e186d19e5444c36c6dbcff75ce7a3602ed",
+      "backend/tests/test_workspace_startup.py": "984d5a823189e2cc087de157c1927ab74b79718150e748b21c16bc53d1128073"
+    },
+    "limits": "Tenant activation remains refused by the compiled incomplete-integration gate. No public registration/deployment acceptance. Existing peer fencing, database retargeting, paired schema release and resource/background isolation remain M3-M11 work. Route registration and a startup refusal do not prove full tenant operation."
   }
 }

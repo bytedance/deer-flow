@@ -9,7 +9,7 @@
 **Tech Stack:** FastAPI/Python、SQLAlchemy/Alembic/PostgreSQL、Redis、Next.js/React、现有MCP/Skill、Docker/NAS、上海Jenkins。
 
 设计依据：[统一设计](../specs/2026-10-13-tenant-workspaces-design.md)。OpenSpec：`openspec/changes/tenant-workspaces-self-service/`。
-基线48d5c3de。实施已进入M2的HTTP基础；合同、迁移和离线归属基础已有定向验证，但各工作包的完整验收仍未完成。实际源码与Jenkins证据见 `docs/tenant-workspaces-progress.json`，不以计划条目代替验收。
+基线48d5c3de。实施已进入M2的成员控制与启动保护；合同、迁移和离线归属基础已有定向验证，但各工作包的完整验收仍未完成。实际源码与Jenkins证据见 `docs/tenant-workspaces-progress.json`，不以计划条目代替验收。
 
 ## 顺序、检查点与边界
 
@@ -154,6 +154,14 @@ python -m pytest tests/test_workspace_membership.py -q
 ```
 
 预期：对应主干通过；若无法证明上述验收结果则保留未完成，不能用mock成功替代物理执行或真实鉴权。
+
+M2 startup integration: production create_app registers the management routers.
+The native database bootstrap validates the frozen operator setting before
+checkpointer/Store creation and runtime recovery. Current builds refuse enabled
+mode until M3-M11 scope/release coverage is implemented; any existing team row
+refuses legacy startup. This staged refusal is a safety gate, not completed
+multi-tenant admission. Keep M2 final acceptance unchecked until a real operator
+provisioned workspace can use the fully scoped Gateway.
 
 ### M3：原生资源、文件及客户端空间切换贯通
 

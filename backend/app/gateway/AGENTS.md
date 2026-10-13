@@ -283,8 +283,8 @@ SQL and intersects membership/version, native credential permissions and the
 resource ACL. Platform-admin status cannot bypass it. Browser management
 `workspaces/dependencies.py` requires the native session source and matching
 AuthContext; selector headers never identify the actor. PAT/internal bindings
-remain separate work. New routers are currently isolated adapters, not registered
-or initialized by shipped Gateway; missing workspace_service fails 503.
+remain separate work. Workspace routers are registered by create_app(); native
+bootstrap resolves workspace_service before recovery. Disabled mode leaves it None (503).
 Persistent async writes drain with await_drained; no synchronous write worker is
 created for the native async repository. See docs/tenant-workspaces-api.md and
 actual JWT/RBAC/CSRF tests. Resource filtering, request/task binding, publication
@@ -294,4 +294,13 @@ Member-control adapters enforce owner/admin/member transitions through locked
 SQL writes with expected server scope versions. Ownership transfer uses native
 local-password verification and compares persisted credential/token versions
 before commit. SSO proof, invitations and revoke effects are still required.
-These adapters remain unregistered by the shipped Gateway.
+Router registration does not activate workspace admission.
+
+`workspaces/startup.py` refuses enabled memory/auth-disabled/wrong-schema startup
+and refuses legacy startup against any team-bearing native database. Workspace
+configuration is startup-only; the current compiled coverage gate still refuses
+tenant activation until resource/background and release integration is complete.
+This runs before checkpointer/Store construction and RunManager recovery. It is
+not a fence against already-running old peers; paired release admission remains
+M10 work. The actual PostgreSQL bootstrap rejection is exercised by the startup
+main, in addition to helper checks and create_app route registration.
