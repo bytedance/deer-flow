@@ -316,9 +316,7 @@ class TestWriteUploadFileNoSymlink:
 
         def twin_linked_fstat(fd):
             st = real_fstat(fd)
-            return os.stat_result(
-                (st.st_mode, st.st_ino, st.st_dev, 2, st.st_uid, st.st_gid, st.st_size, st.st_atime, st.st_mtime, st.st_ctime)
-            )
+            return os.stat_result((st.st_mode, st.st_ino, st.st_dev, 2, st.st_uid, st.st_gid, st.st_size, st.st_atime, st.st_mtime, st.st_ctime))
 
         monkeypatch.setattr(os, "fstat", twin_linked_fstat)
 

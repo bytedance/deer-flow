@@ -404,11 +404,7 @@ def open_upload_file_no_symlink(base_dir: Path, filename: str, *, exclusive: boo
         # The exclusive path keeps the strict post-open single-link check on every
         # platform (a just-exclusively-created file must have exactly one link);
         # only the non-exclusive replacement path defers to the Windows-aware guard.
-        if (
-            not stat.S_ISREG(opened_stat.st_mode)
-            or (exclusive and opened_stat.st_nlink != 1)
-            or (not exclusive and _replacement_destination_is_hardlinked(opened_stat))
-        ):
+        if not stat.S_ISREG(opened_stat.st_mode) or (exclusive and opened_stat.st_nlink != 1) or (not exclusive and _replacement_destination_is_hardlinked(opened_stat)):
             raise UnsafeUploadPathError(f"Upload destination is not an exclusive regular file: {safe_name}")
         os.ftruncate(fd, 0)
         fh = os.fdopen(fd, "wb")
