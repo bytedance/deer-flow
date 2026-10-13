@@ -982,5 +982,16 @@
       "networks": [],
       "verified": "Individual build labels inspected on Jenkins"
     }
+  },
+  "pause_checkpoint": {
+    "date": "2026-10-14",
+    "reason": "User explicitly requested saving current progress and continuing tomorrow",
+    "last_verified_commit": "4c0ea948",
+    "handoff": "docs/tenant-workspaces-resume-2026-10-14.md",
+    "draft_file": "backend/tests/test_workspace_http.py",
+    "draft_sha256": "be88c7136f7e5768ec4ff3a775b132b9b5fe63f4abc7f9ec5fdb47b7779c2c2f",
+    "draft_verification": "Ruff check only; pytest not run; no cloud upload/build started",
+    "draft_archive_sha256": "976ec90433e69f4ff8b98f25d404a5ee86937f864703d219c40f7b0fbf4072fb",
+    "next": "Run actual HTTP RED for goal/state writes, then integrate scoped new-thread metadata provisioning and short checkpoint commit fencing; keep M0–M11 scope intact"
   }
 }

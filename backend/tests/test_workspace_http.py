@@ -38,11 +38,13 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
     from deerflow.persistence.projects import ProjectDocumentRepository, ProjectRepository
     from deerflow.persistence.projects.model import ProjectDocumentRow, ProjectRow
     from deerflow.persistence.run.model import RunRow
+    from deerflow.persistence.run.sql import RunRepository
     from deerflow.persistence.thread_meta import ThreadMetaRepository
     from deerflow.persistence.thread_meta.model import ThreadMetaRow
     from deerflow.persistence.thread_reads import ThreadReadRepository
     from deerflow.persistence.user.model import UserRow
     from deerflow.persistence.workspaces.sql import WorkspaceRepository
+    from deerflow.runtime import RunManager
     from deerflow.runtime.events.store.memory import MemoryRunEventStore
     from deerflow.runtime.goal import build_goal_state
     from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
@@ -118,6 +120,8 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
 
             app.state.thread_store = RevokingThreadRepository(sf, workspace_required=True)
             app.state.thread_read_repo = ThreadReadRepository(sf, workspace_required=True)
+            app.state.run_store = RunRepository(sf, workspace_required=True)
+            app.state.run_manager = RunManager(store=app.state.run_store, worker_id="checkpoint-http-writer")
             app.state.checkpointer = ReplacingCheckpointSaver(checkpoint_connection)
             await app.state.checkpointer.setup()
             app.state.run_event_store = MemoryRunEventStore()
@@ -247,6 +251,39 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                 assert stale_state.status_code == 404, "prepared state outlived its admitted thread incarnation"
                 assert b"team checkpoint sentinel" not in stale_state.content
                 assert (await client.get("/api/threads/team-research-thread/state", headers=team_headers)).status_code == 200
+                new_goal_id = str(uuid4())
+                goal_created = await client.put("/api/threads/" + new_goal_id + "/goal", headers=team_headers, json={"objective": "New team research objective"})
+                assert goal_created.status_code == 200, goal_created.text
+                assert goal_created.json()["goal"]["objective"] == "New team research objective"
+                async with sf() as session:
+                    new_goal_thread = await session.get(ThreadMetaRow, new_goal_id)
+                    assert new_goal_thread.workspace_id == team and new_goal_thread.user_id == identities["alice"]
+                    assert (await session.scalar(sa.select(sa.func.count()).select_from(RunRow).where(RunRow.operation_kind != "run"))) == 0
+                state_updated = await client.post("/api/threads/team-research-thread/state", headers=team_headers, json={"values": {"title": "Updated team title"}})
+                assert state_updated.status_code == 200 and state_updated.json()["values"]["title"] == "Updated team title", state_updated.text
+                async with sf() as session:
+                    assert (await session.get(ThreadMetaRow, "team-research-thread")).display_name == "Updated team title"
+                personal_state = await client.get("/api/threads/personal-research-thread/state")
+                assert personal_state.json()["values"]["title"] == "personal checkpoint sentinel"
+                for method, suffix, payload in (("PUT", "/goal", {"objective": "Foreign goal"}), ("POST", "/state", {"values": {"title": "Foreign title"}}), ("DELETE", "/goal", None)):
+                    response = await client.request(method, "/api/threads/team-research-thread" + suffix, json=payload)
+                    assert response.status_code == 404, response.text
+                cleared = await client.delete("/api/threads/" + new_goal_id + "/goal", headers=team_headers)
+                assert cleared.status_code == 200 and cleared.json()["goal"] is None, cleared.text
+                assert (await client.get("/api/threads/" + new_goal_id + "/goal", headers=team_headers)).json()["goal"] is None
+                before_replaced = await app.state.checkpointer.aget_tuple({"configurable": {"thread_id": "team-research-thread", "checkpoint_ns": ""}})
+                checkpoint_replacement["thread_id"] = "team-research-thread"
+                replaced_update = await client.post("/api/threads/team-research-thread/state", headers=team_headers, json={"values": {"title": "Replaced thread title"}})
+                assert replaced_update.status_code == 404, replaced_update.text
+                after_replaced = await app.state.checkpointer.aget_tuple({"configurable": {"thread_id": "team-research-thread", "checkpoint_ns": ""}})
+                assert after_replaced.config == before_replaced.config, "state committed across changed thread incarnation"
+                # Withdrawal after genuine native owner admission must not mutate checkpoints.
+                before_denied = await app.state.checkpointer.aget_tuple({"configurable": {"thread_id": "team-research-thread", "checkpoint_ns": ""}})
+                delete_revocation["workspace_id"] = team
+                denied_update = await client.post("/api/threads/team-research-thread/state", headers=team_headers, json={"values": {"title": "Withdrawn title"}})
+                assert denied_update.status_code == 404, denied_update.text
+                after_denied = await app.state.checkpointer.aget_tuple({"configurable": {"thread_id": "team-research-thread", "checkpoint_ns": ""}})
+                assert after_denied.config == before_denied.config
                 async with sf() as session:
                     session.add(RunRow(run_id="team-read-http", thread_id="team-research-thread", workspace_id=team, user_id=identities["alice"], status="success", change_seq=10, origin_kind="schedule"))
                     await session.commit()

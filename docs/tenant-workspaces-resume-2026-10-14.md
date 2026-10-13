@@ -1,0 +1,45 @@
+# 多租户实施接续记录 — 2026-10-14
+
+用户要求保存当前进度，明天继续。本次暂停不缩小“完成统一计划”的范围；M0–M11完整验收仍未完成。
+
+## 工作位置和已验证提交
+
+- 功能 worktree：`/Users/wenbinwang/.codex/worktrees/ecs-native-reuse/deerflow2`。
+- 分支：`codex/tenant-workspaces-plan`。不要修改环境默认的 `1d28/deerflow2` 上游 worktree。
+- `1596886f`：原生 Run 查询按可信空间、原用户、兼容私有 ThreadMeta 父记录过滤；分页/游标/再生成来源/批量/用量均在 SQL 过滤后处理。
+- `4c0ea948`：非 Run 的 reject 预约保存 workspace；workspace→actor→thread→clock→Run 锁序；释放匹配捕获空间、用户和 worker，不删除普通 Run；撤权和空间切换不妨碍清理。
+- Jenkins `deerflow-tenant-m1-postgres` #42 RED（两数据库跨空间读取），#43 GREEN（8 passed, 21.74s）；#44 RED（预约 workspace NULL），#45 GREEN（7 passed, 21.58s）。
+- #42–#45 的每个专属容器/网络 ownership label 已独立查空；最后观察到的 #45 为 SUCCESS。没有为本次未验证草稿启动新构建。
+- 证据/源码与归档哈希：`docs/tenant-workspaces-progress.json`；完整设计与计划仍是 `docs/superpowers/specs/2026-10-13-tenant-workspaces-design.md` 和 `docs/superpowers/plans/2026-10-13-tenant-workspaces.md`。
+
+## 暂停时新增草稿，尚未运行
+
+仅修改 `backend/tests/test_workspace_http.py`，扩展已有两数据库真实认证主干，没有新增生产代码：
+
+1. 配置真实 required-scope RunRepository 和原生 RunManager。
+2. 新 UUID 会话通过 PUT goal 创建团队私有 ThreadMeta/checkpoint，预约最终清空。
+3. 已有团队会话 POST state 更新 title，并同步原生会话标题；个人空间状态不变。
+4. 外空间 PUT goal / POST state / DELETE goal 返回404。
+5. DELETE goal 清空并可再次读取。
+6. 实际 SQL incarnation 在 checkpoint 准备读取时轮换，拒绝旧实例写入，checkpoint ID 不变。
+7. 真实 owner admission 后撤销 policy，拒绝写入，checkpoint ID 不变。
+
+草稿只通过本地 Ruff check；未执行 pytest，也未取得 RED/GREEN。已准备本地公开源码归档 `/private/tmp/deerflow-tenant-m3-checkpoint-write-red.tar.gz`，SHA256 `976ec90433e69f4ff8b98f25d404a5ee86937f864703d219c40f7b0fbf4072fb`；尚未上传或触发任务。恢复时以当前源码重新打包，不能依赖临时文件永远存在。
+
+## 明天按此顺序继续
+
+1. 查真实 Git 状态、当前源码和 Jenkins 状态；前一构建已终止，不因观察超时重启运行中的构建。
+2. 从现有 PG Jenkins 模板派生 `m3-checkpoint-write-red`，仅运行 `tests/test_workspace_http.py`，确认真正业务失败后再实现。模板位于 `/private/tmp/deerflow-tenant-m3-reservation-red-job.py`；打包脚本 `/private/tmp/prepare-tenant-gate.py` 会生成非PG模板，应在打包后替换成 PG 模板。
+3. 为 PUT/DELETE goal 与 POST state 绑定可信 scope，先于 native owner-check；ScopeDenied/HTTPException 必须穿透宽泛异常处理，不能变500。
+4. 保留 `/chats/new` 先设置 goal 的原生行为：scoped模式先只建立 SQL ThreadMeta，再取得持久预约，最后受控写 checkpoint；不在预约前写 checkpoint。现有 `_ensure_thread_for_goal` 同时创建 metadata/checkpoint，需拆开或增加明确 metadata-only 路径。
+5. 图/schema构建及状态准备在 SQL 锁外进行；捕获私有会话 incarnation，在短提交前重验 live workspace/actor/thread/incarnation。使用专门的 checkpoint 提交边界，不把现有“只用于短文件操作”的 publish_under_live_lock 偷换成模型/图构建锁。回调只允许已准备的原生 checkpoint IO，排除模型/工具/网络业务执行；明确 cancellation drain 和跨库锁序。
+6. 重跑相同 HTTP 主干，加入受影响的原生 goal/state 回归；保留失败历史、实际源码哈希及清理证据，更新文档再提交。
+7. 继续 M3 生命周期、API/feed/客户端切换，随后依次 M4–M11。不得把已验证的 SQL 预约当作完整后台 Run/租户激活。
+
+## 持续约束
+
+- 所有 pytest、真实后端/模型/Docker 测试在上海 Jenkins/ECS；不启动本地 Docker Desktop或本地 pytest。
+- Jenkins 地址 `106.14.210.163`，仅管理 DeerFlow 专属任务。认证只在 Jenkins 本机内存读取已有0600私有文件，不输出/复制凭据；不处理 assetforge 发布审批。
+- 测试容器与 PG 使用内部网络、现有测试镜像、CPU/内存限制和专属 label 清理；不挂生产数据库、NAS或Docker socket。
+- 已停用的 compiled tenant activation 保持 false；当前 schema0038/e0002。原部署及迁移/恢复/公开注册门禁仍待 M10–M11。当前分支没有新增远程推送或部署。
+- 顺序实施，先主干，后必要边界；不派生并行智能体。邮件/域名配置在后续邮件验收阶段处理。
