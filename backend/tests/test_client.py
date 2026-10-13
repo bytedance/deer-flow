@@ -7,6 +7,7 @@ import os
 import shutil
 import stat
 import tempfile
+import threading
 import zipfile
 from contextlib import contextmanager
 from enum import Enum
@@ -5174,6 +5175,184 @@ class TestUploadDuplicateFilenames:
     Now duplicates are renamed (data.txt → data_1.txt) and the response
     includes original_filename so the agent / caller can see what happened.
     """
+
+    @pytest.mark.parametrize("companion", [False, True])
+    def test_rejects_substituted_upload_copy(self, client, tmp_path, monkeypatch, companion):
+        from support.symlinks import symlink_or_skip
+
+        from deerflow.uploads import manager
+
+        uploads = tmp_path / "uploads"
+        uploads.mkdir()
+        source = tmp_path / ("notes.pdf" if companion else "notes.txt")
+        source.write_bytes(b"original upload")
+        outside = tmp_path / "outside.txt"
+        outside.write_bytes(b"private test fixture")
+        real_copy = manager.shutil.copyfileobj
+        copy_count = 0
+
+        def copy_and_swap(src, dst):
+            nonlocal copy_count
+            real_copy(src, dst)
+            staging = next(uploads.glob(".upload-*.part"), None)
+            if staging is None:
+                # Source capture happens outside uploads, before staging.
+                return
+            copy_count += 1
+            if copy_count == (2 if companion else 1):
+                try:
+                    staging.unlink()
+                except PermissionError:
+                    if os.name == "nt":
+                        pytest.skip("host prevents replacing an open staging file")
+                    raise
+                symlink_or_skip(staging, outside)
+
+        async def fake_convert(path, output_path=None):
+            output_path.write_bytes(b"converted content")
+            return output_path
+
+        monkeypatch.setattr(manager.shutil, "copyfileobj", copy_and_swap)
+        with (
+            patch("deerflow.client.ensure_uploads_dir", return_value=uploads),
+            patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+            patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=fake_convert),
+        ):
+            result = client.upload_files("t-dup", [source])
+
+        assert outside.read_bytes() == b"private test fixture"
+        assert outside.stat().st_nlink == 1
+        assert not list(uploads.glob(".upload-*.part"))
+        if companion:
+            assert copy_count == 2
+            assert result["success"] is True
+            assert (uploads / "notes.pdf").read_bytes() == b"original upload"
+            assert "markdown_file" not in result["files"][0]
+            assert not os.path.lexists(uploads / "notes.md")
+        else:
+            assert copy_count == 1
+            assert result["success"] is False
+            assert result["files"] == []
+            assert result["skipped_files"] == ["notes.txt"]
+            assert not os.path.lexists(uploads / "notes.txt")
+
+    @pytest.mark.parametrize("count", [2, 3])
+    @pytest.mark.parametrize("suffix", [".txt", ".pdf"])
+    def test_concurrent_uploads_claim_distinct_names(self, client, tmp_path, count, suffix):
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        sources = []
+        for index in range(count):
+            directory = tmp_path / str(index)
+            directory.mkdir()
+            source = directory / f"data{suffix}"
+            source.write_bytes(f"payload-{index}".encode())
+            sources.append(source)
+
+        all_ready = threading.Barrier(count)
+        source_names = set(sources)
+        opened_sources = set()
+        opened_lock = threading.Lock()
+        real_open = open
+
+        def synchronized_open(file, mode="r", *args, **kwargs):
+            fh = real_open(file, mode, *args, **kwargs)
+            wait = False
+            if mode == "rb" and isinstance(file, (str, os.PathLike)) and Path(file) in source_names:
+                with opened_lock:
+                    if Path(file) not in opened_sources:
+                        opened_sources.add(Path(file))
+                        wait = True
+            if wait:
+                # All callers reach the real copy before any publishes its name.
+                try:
+                    all_ready.wait(timeout=15)
+                except BaseException:
+                    fh.close()
+                    raise
+            return fh
+
+        async def fake_convert(path: Path, output_path: Path | None = None) -> Path:
+            assert output_path is not None
+            output_path.write_bytes(path.read_bytes())
+            return output_path
+
+        with (
+            patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+            patch("builtins.open", side_effect=synchronized_open),
+            patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+            patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=fake_convert),
+        ):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=count) as pool:
+                futures = [pool.submit(client.upload_files, "t-dup", [source]) for source in sources]
+                results = [future.result(timeout=30) for future in futures]
+
+        files = [result["files"][0] for result in results]
+        names = {file["filename"] for file in files}
+        assert names == {f"data{suffix}", *(f"data_{index}{suffix}" for index in range(1, count))}
+        for source, result, file in zip(sources, results, files, strict=True):
+            assert result["success"] is True
+            assert (uploads_dir / file["filename"]).read_bytes() == source.read_bytes()
+            if file["filename"] != source.name:
+                assert file["original_filename"] == source.name
+            if suffix == ".pdf":
+                from deerflow.uploads.companions import resolve_companion
+
+                assert (uploads_dir / file["markdown_file"]).read_bytes() == source.read_bytes()
+                assert resolve_companion(uploads_dir / file["filename"]) == uploads_dir / file["markdown_file"]
+        assert len(list(uploads_dir.iterdir())) == count * (2 if suffix == ".pdf" else 1)
+
+    def test_concurrent_same_stem_companions_remain_owned(self, client, tmp_path):
+        from deerflow.uploads.companions import resolve_companion
+
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        sources = [tmp_path / "report.pdf", tmp_path / "report.docx"]
+        for index, source in enumerate(sources):
+            source.write_bytes(f"document-{index}".encode())
+        both_converting = threading.Barrier(2)
+
+        async def fake_convert(path: Path, output_path: Path | None = None) -> Path:
+            assert output_path is not None
+            output_path.write_bytes(path.read_bytes())
+            both_converting.wait(timeout=15)
+            return output_path
+
+        with (
+            patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+            patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf", ".docx"}),
+            patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=fake_convert),
+        ):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [pool.submit(client.upload_files, "t-dup", [source]) for source in sources]
+                results = [future.result(timeout=30) for future in futures]
+
+        files = [result["files"][0] for result in results]
+        assert {file["markdown_file"] for file in files} == {"report.md", "report_1.md"}
+        for source, file in zip(sources, files, strict=True):
+            assert file["filename"] == source.name
+            companion = resolve_companion(uploads_dir / source.name)
+            assert companion == uploads_dir / file["markdown_file"]
+            assert companion.read_bytes() == source.read_bytes()
+        assert len(list(uploads_dir.iterdir())) == 4
+
+    def test_sequential_upload_keeps_replacement_behavior(self, client, tmp_path):
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        first = tmp_path / "first" / "data.txt"
+        second = tmp_path / "second" / "data.txt"
+        first.parent.mkdir()
+        second.parent.mkdir()
+        first.write_bytes(b"first")
+        second.write_bytes(b"second")
+
+        with patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir):
+            client.upload_files("t-dup", [first])
+            result = client.upload_files("t-dup", [second])
+
+        assert result["files"][0]["filename"] == "data.txt"
+        assert (uploads_dir / "data.txt").read_bytes() == b"second"
+        assert len(list(uploads_dir.iterdir())) == 1
 
     def test_duplicate_filenames_auto_renamed(self, client):
         """Two files with same basename → second gets _1 suffix."""

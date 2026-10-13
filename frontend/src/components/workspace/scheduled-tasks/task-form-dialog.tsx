@@ -57,6 +57,7 @@ import { RECIPES, type Recipe } from "@/core/scheduled-tasks/recipes";
 import type { ScheduledTask } from "@/core/scheduled-tasks/types";
 import { cn } from "@/lib/utils";
 
+import { NotificationGroupSelect } from "./notification-group";
 import { DEFAULT_ASSISTANT_ID, fill, isFrequentSchedule } from "./shared";
 
 export type TaskFormMode = "create" | "edit" | "duplicate";
@@ -83,6 +84,7 @@ export type TaskFormState = {
   assistantId: string;
   contextMode: ContextMode;
   chatId: string;
+  notificationGroupConnectionId: string;
 };
 
 const DEFAULT_SCHEDULE: ScheduleValue = {
@@ -133,6 +135,7 @@ export function initialFormState(
         assistantId: DEFAULT_ASSISTANT_ID,
         contextMode: "fresh_thread_per_run",
         chatId: "",
+        notificationGroupConnectionId: "",
       },
       endAtDropped: false,
     };
@@ -160,6 +163,8 @@ export function initialFormState(
       assistantId: task.assistant_id ?? DEFAULT_ASSISTANT_ID,
       contextMode: task.context_mode,
       chatId: task.thread_id ?? "",
+      notificationGroupConnectionId:
+        task.notification_group_connection_id ?? "",
     },
     endAtDropped: endAtPassed,
   };
@@ -269,6 +274,10 @@ export function createPayload(
   if (valid.endAt) payload.end_at = valid.endAt;
   const stop = normalizeText(state.stopCondition);
   if (stop) payload.stop_condition = stop;
+  if (state.notificationGroupConnectionId) {
+    payload.notification_group_connection_id =
+      state.notificationGroupConnectionId;
+  }
   return payload;
 }
 
@@ -318,6 +327,10 @@ export function updatePayload(
       ? task.end_at != null
       : !task.end_at || minute(valid.endAt) !== minute(task.end_at);
   if (endChanged) updates.end_at = valid.endAt;
+  const notificationGroup = state.notificationGroupConnectionId || null;
+  if (notificationGroup !== (task.notification_group_connection_id ?? null)) {
+    updates.notification_group_connection_id = notificationGroup;
+  }
   return updates;
 }
 
@@ -669,6 +682,12 @@ function TaskForm({
             {st.form.frequentNeedsCap}
           </p>
         )}
+
+        <NotificationGroupSelect
+          id={id("notification-group")}
+          value={state.notificationGroupConnectionId}
+          onChange={(value) => set("notificationGroupConnectionId", value)}
+        />
 
         <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
           <CollapsibleTrigger asChild>

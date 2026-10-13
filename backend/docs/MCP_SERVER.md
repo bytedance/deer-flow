@@ -576,6 +576,14 @@ Declare interceptors in `extensions_config.json` using the `mcpInterceptors` fie
 
 Each entry is a Python import path in `module:variable` format (resolved via `resolve_variable`). The variable must be a **no-arg builder function** that returns an async interceptor compatible with `MultiServerMCPClient`’s `tool_interceptors` interface, or `None` to skip.
 
+**Lifecycle.** Builders run once per enabled MCP server, not once per discovery.
+Tool discovery is server-scoped, so every server gets its own interceptor instance built
+from a single-server configuration view, and a stateful interceptor (a counter, a cache,
+a rate limiter) only ever observes that server's calls. Do not rely on one instance being
+shared across servers. The built-in OAuth, per-user and context-header interceptors are
+unaffected: they resolve everything per `request.server_name`. Servers that are not
+discovered never run their builder.
+
 Example interceptor that injects an authorization header from the request-scoped
 LangGraph secret context. For a plain header mapping prefer the declarative
 `headers_from_context` block above; write an interceptor when the header value

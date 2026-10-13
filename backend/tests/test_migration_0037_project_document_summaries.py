@@ -20,6 +20,7 @@ REVISION = "0037_project_document_summaries"
 PREVIOUS = "0036_run_idempotency_request"
 CHANNEL_BINDINGS = "0038_channel_thread_bindings"
 USER_DISABLED = "0039_user_disabled"
+GROUP_NOTICE = "0040_scheduled_group_notice"
 pytestmark = pytest.mark.asyncio
 
 
@@ -29,6 +30,7 @@ async def test_0037_chains_after_0036_in_single_migration_chain():
     assert REVISION in {revision.revision for revision in script.walk_revisions()}
     assert script.get_revision(CHANNEL_BINDINGS).down_revision == REVISION
     assert script.get_revision(USER_DISABLED).down_revision == CHANNEL_BINDINGS
+    assert script.get_revision(GROUP_NOTICE).down_revision == USER_DISABLED
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     # alembic_version.version_num is VARCHAR(32).
     assert len(REVISION) <= 32

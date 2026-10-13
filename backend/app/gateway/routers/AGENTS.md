@@ -18,6 +18,15 @@ cancelled request still drains the owned persistence worker.
 
 Skill mutation operation lists return `next_cursor: null` when `has_more` is false, including empty pages after a supplied `after_id`. The next cursor is the final returned operation only when a further page exists.
 
+`GET /api/agent-tool-groups` projects only configured group names for the
+custom-Agent settings allowlist. Never expose tool provider paths, credentials,
+or raw tool configuration through this catalog.
+
+Custom Agent update guards apply legacy shared-file checks only when the
+resolved store is `FileAgentStore`, including the `update_agent` tool. DB
+imports retain source files for rollback; those files cannot veto SQL updates.
+Keep store resolution and filesystem checks off-loop in the HTTP route.
+
 Committed MCP reconciliation failures are logged once by
 `fail_mcp_reconciliation`, with only the underlying exception type.
 `_run_drained_mcp_apply` passes `_McpCommittedReconciliationError` as an expected

@@ -357,21 +357,27 @@ class ScheduledTaskService:
             for binding in await session.scalars(select(ChannelConnectionRow).where(ChannelConnectionRow.owner_user_id == task.user_id, ChannelConnectionRow.status == "connected"))
             if binding.provider and binding.external_account_id and supports_proactive_notifications(binding.provider)
         ]
-        if not bindings:
+        group_connection_id = getattr(task, "notification_group_connection_id", None)
+        if not bindings and not group_connection_id:
             return
         payload = _notice_payload(task, occurrence, event, reason, locale=await self._owner_locale(session, task.user_id))
         task_run_id = occurrence.id if occurrence is not None else _idle_notice_key(task.id, lifecycle_anchor(task, occurrence, now=now))
-        for binding in bindings:
+        recipients = [(binding.provider, binding.external_account_id, payload) for binding in bindings]
+        if group_connection_id:
+            # Keep the selected binding identity even if it was removed: the
+            # worker records an explicit failed delivery after its owner check.
+            recipients.append(("feishu", group_connection_id, {**payload, "target_type": "group"}))
+        for provider, target, notice_payload in recipients:
             await self._notification_repo.enqueue_in_session(
                 session,
                 task_id=task.id,
                 task_run_id=task_run_id,
                 run_id=occurrence.run_id if occurrence is not None else None,
                 event=event,
-                provider=binding.provider,
-                target=binding.external_account_id,
+                provider=provider,
+                target=target,
                 owner_user_id=task.user_id,
-                payload=payload,
+                payload=notice_payload,
             )
 
     @staticmethod

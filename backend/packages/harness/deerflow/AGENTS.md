@@ -93,6 +93,8 @@ drift.
 
 **Gateway differences**: Upload takes local `Path`, not `UploadFile`, rejects directories before copying, and reuses one conversion worker inside an active event loop. Artifacts return `(bytes, mime_type)`, not HTTP Response. Gateway alone deletes `.deer-flow/threads/{thread_id}` after LangGraph thread deletion; the client has no equivalent. `update_mcp_config()` and `update_skill()` invalidate the cached agent.
 
+Upload capture, filename claims and publication: [guide](uploads/AGENTS.md).
+
 **Tests**: `tests/test_client.py` is offline, including `TestGatewayConformance`.
 `tests/test_client_live.py` requires root `config.yaml`, valid API credentials,
 and opt-in via `make test-live` or `DEER_FLOW_RUN_LIVE_TESTS=1`. It calls real
