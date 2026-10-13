@@ -1226,6 +1226,17 @@ This release closes that milestone with **621 merged pull requests**.
 
 ### Fixed
 
+- **deploy:** The Gateway container now shuts down gracefully. The production
+  compose `command`, both `CMD`s in `backend/Dockerfile` and the Helm chart
+  started it as `sh -c "cd backend && … uv run … uvicorn …"`, which leaves `sh`
+  as PID 1 with no SIGTERM handler, so the kernel dropped the stop signal:
+  uvicorn never shut down, the lifespan teardown (memory queue flush, run
+  drain, channel, scheduler and MCP shutdown) never ran, and every stop waited
+  out the grace period and ended in SIGKILL (exit 137). Every production launch
+  path now `exec`s the server, as `docker/dev-entrypoint.sh` already did, and
+  the compose gateway sets `init: true` so orphaned grandchildren are still
+  reaped (#6835).
+
 - **channels:** `FeishuChannel.stop()` and `DingTalkChannel.stop()` now end
   their SDK threads instead of timing out. Both SDKs run on a thread-private
   event loop that only returned on a fatal error, so every stop joined for

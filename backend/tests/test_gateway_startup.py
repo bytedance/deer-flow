@@ -49,7 +49,7 @@ def test_gateway_runtime_commands_never_sync_dependencies() -> None:
     compose = _read("docker/docker-compose.yaml")
     serve = _read("scripts/serve.sh")
 
-    assert "PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app" in compose
+    assert "PYTHONPATH=. exec uv run --no-sync uvicorn app.gateway.app:app" in compose
     assert "PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app" in serve
 
 
