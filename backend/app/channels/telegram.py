@@ -764,15 +764,24 @@ class TelegramChannel(Channel):
         await self._shutdown_download_bot()
         application = self._application
         if application is not None:
+            application_cleanup_failed = False
             try:
                 if application.updater.running:
                     await application.updater.stop()
                 if application.running:
                     await application.stop()
                 await application.shutdown()
+            except BaseException:
+                application_cleanup_failed = True
+                raise
             finally:
                 # Idempotent after full shutdown, necessary after partial init.
-                await application.bot.shutdown()
+                try:
+                    await application.bot.shutdown()
+                except Exception:
+                    if not application_cleanup_failed:
+                        raise
+                    logger.warning("[Telegram] failed to shut down the application bot", exc_info=True)
 
     async def _shutdown_download_bot(self) -> None:
         """Close the download Bot's HTTPX clients on the Telegram loop.
@@ -1009,13 +1018,17 @@ class TelegramChannel(Channel):
             try:
                 cleanup = self._request_telegram_cleanup(loop)
                 loop.run_until_complete(asyncio.wrap_future(cleanup, loop=loop))
-                loop.run_until_complete(loop.shutdown_asyncgens())
             except Exception:
                 logger.exception("Error during Telegram shutdown")
             finally:
-                self._bootstrap_task = None
-                asyncio.set_event_loop(None)
-                loop.close()
+                try:
+                    loop.run_until_complete(loop.shutdown_asyncgens())
+                except Exception:
+                    logger.exception("Error shutting down Telegram async generators")
+                finally:
+                    self._bootstrap_task = None
+                    asyncio.set_event_loop(None)
+                    loop.close()
 
     def _check_user(self, user_id: int) -> bool:
         if self._allowed_users is None:

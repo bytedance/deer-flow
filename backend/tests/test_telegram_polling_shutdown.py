@@ -6,6 +6,8 @@ import asyncio
 import json
 import threading
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -236,3 +238,74 @@ async def test_stop_interruption_retains_partial_application_cleanup_for_retry(m
             if not stop.done():
                 stop.cancel()
             await asyncio.gather(stop, return_exceptions=True)
+
+
+def test_polling_finalizes_async_generators_when_resource_cleanup_fails(monkeypatch, caplog):
+    channel = TelegramChannel(MessageBus(), {"bot_token": "12345:offline-test-token"})
+    primary = ValueError("updater shutdown failed")
+    channel._application = SimpleNamespace(
+        updater=SimpleNamespace(running=True, stop=AsyncMock(side_effect=primary)),
+        running=False,
+        shutdown=AsyncMock(),
+        bot=SimpleNamespace(shutdown=AsyncMock()),
+    )
+    finalized = threading.Event()
+    generators = []
+
+    async def resource():
+        try:
+            yield
+        finally:
+            finalized.set()
+
+    async def bootstrap(application):
+        generator = resource()
+        generators.append(generator)
+        await anext(generator)
+        channel._running = False
+
+    monkeypatch.setattr(channel, "_bootstrap_telegram", bootstrap)
+    channel._running = True
+    thread = threading.Thread(target=channel._run_polling)
+    thread.start()
+    try:
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert finalized.is_set()
+        assert channel._tg_loop.is_closed()
+        assert any(record.exc_info and record.exc_info[1] is primary for record in caplog.records)
+    finally:
+        if thread.is_alive():
+            channel._tg_loop.call_soon_threadsafe(channel._tg_loop.stop)
+            thread.join(timeout=5)
+        assert not thread.is_alive(), "test must not leave a Telegram worker"
+        # RED must not leak the generator; assertions above precede fallback cleanup.
+        for generator in generators:
+            asyncio.run(generator.aclose())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("primary_kind", ["exception", "cancelled", None])
+async def test_application_bot_shutdown_preserves_primary_error_and_reports_its_own(primary_kind, caplog):
+    channel = TelegramChannel(MessageBus(), {"bot_token": "12345:offline-test-token"})
+    primary = None
+    if primary_kind == "exception":
+        primary = ValueError("updater shutdown failed")
+    elif primary_kind == "cancelled":
+        primary = asyncio.CancelledError("application cleanup cancelled")
+    bot_error = RuntimeError("application bot shutdown failed")
+    channel._application = SimpleNamespace(
+        updater=SimpleNamespace(running=True, stop=AsyncMock(side_effect=primary)),
+        running=False,
+        shutdown=AsyncMock(),
+        bot=SimpleNamespace(shutdown=AsyncMock(side_effect=bot_error)),
+    )
+
+    expected = primary if primary is not None else bot_error
+    with pytest.raises(type(expected)) as raised:
+        await channel._shutdown_telegram_resources()
+
+    assert raised.value is expected
+    channel._application.bot.shutdown.assert_awaited_once()
+    if primary is not None:
+        assert any("failed to shut down the application bot" in record.message and record.exc_info and record.exc_info[1] is bot_error for record in caplog.records)
