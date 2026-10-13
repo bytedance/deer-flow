@@ -3207,7 +3207,7 @@ run_ownership:
 #     enabled: false
 #     relay_url: wss://buzz.example.com
 #     private_key: $BUZZ_PRIVATE_KEY        # hex or nsec1…
-#     allowed_users: []                     # pubkeys (hex or npub) allowed to trigger runs.
+#     allowed_users: []                     # pubkeys (hex or npub) allowed to trigger runs:/n#                                           # one pubkey (hex or npub) or a YAML list.
 #                                           # DENY-BY-DEFAULT (unlike other channels): empty
 #                                           # means nobody, and DeerFlow logs a startup warning.
 #     require_mention: true                 # @mention needed in channels
