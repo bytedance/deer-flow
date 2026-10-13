@@ -115,7 +115,7 @@ async def test_item_list_route_never_reads_full_results(monkeypatch, tmp_path) -
             execution_spec={},
         )
         async with get_session_factory()() as session:
-            await session.execute(update(SubagentBatchItemRow).values(status="succeeded", result="full report", result_artifact={"knowledge_sources": {}}, result_preview="preview"))
+            await session.execute(update(SubagentBatchItemRow).where(SubagentBatchItemRow.batch_id == "batch-1").values(status="succeeded", result="full report", result_artifact={"knowledge_sources": {}}, result_preview="preview"))
             await session.commit()
         monkeypatch.setattr(subagent_batches, "get_current_user", AsyncMock(return_value="user-1"))
         statements = []
