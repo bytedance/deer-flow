@@ -1396,7 +1396,7 @@ async def move_thread(thread_id: ThreadId, body: ThreadMoveRequest, request: Req
 
 
 @router.get("/{thread_id}", response_model=ThreadResponse)
-@workspace_resource_scope()
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("threads", "read", owner_check=True)
 async def get_thread(thread_id: ThreadId, request: Request) -> ThreadResponse:
     """Get thread info from metadata plus the graph's materialized state."""
@@ -1452,6 +1452,7 @@ async def get_thread(thread_id: ThreadId, request: Request) -> ThreadResponse:
 
 
 @router.get("/{thread_id}/goal", response_model=ThreadGoalResponse)
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("threads", "read", owner_check=True)
 async def get_thread_goal(thread_id: ThreadId, request: Request) -> ThreadGoalResponse:
     """Return the active Claude-style goal for a thread, if any."""
@@ -1569,6 +1570,7 @@ async def compact_thread(thread_id: ThreadId, body: ThreadCompactRequest, reques
 
 # ---------------------------------------------------------------------------
 @router.get("/{thread_id}/state", response_model=ThreadStateResponse)
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("threads", "read", owner_check=True)
 async def get_thread_state(thread_id: ThreadId, request: Request) -> ThreadStateResponse:
     """Get the latest materialized graph state for a thread."""
@@ -1818,6 +1820,7 @@ async def _persist_run_history_metadata_background(
 
 
 @router.post("/{thread_id}/history", response_model=list[HistoryEntry])
+@workspace_resource_scope(private_thread_read=True)
 @require_permission("threads", "read", owner_check=True)
 async def get_thread_history(
     thread_id: ThreadId,

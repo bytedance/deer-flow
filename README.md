@@ -2934,3 +2934,5 @@ Workspace-scoped thread uploads and project file transfers now preserve original
 Workspace thread download links now retain their space locator and recheck access before sending file or archive bytes. See [download validation and limits](docs/tenant-workspaces-api.md#thread-artifact-downloads-partial-m3). This remains partial tenant integration; deployment activation stays blocked.
 
 Workspace upload deletion now rechecks live access before removing bytes. The [deletion checkpoint](docs/tenant-workspaces-api.md#thread-upload-deletion-partial-m3) records withdrawal and native file safety verification; full tenant activation remains blocked.
+
+Workspace conversation detail, state, history and goal reads now recheck private ownership and lifecycle identity around checkpoint reads. The [persistent checkpoint read checkpoint](docs/tenant-workspaces-api.md#persistent-thread-checkpoint-reads-partial-m3) records SQLite reopen through the native compiled graph and remaining runtime/client requirements. Tenant activation stays blocked.

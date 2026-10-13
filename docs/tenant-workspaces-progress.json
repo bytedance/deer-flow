@@ -784,5 +784,63 @@
     },
     "self_review": "Scoped DELETE delegates short native unlink through publish_under_live_lock, serializing live membership/private thread check and drained file worker against workspace/actor revocation. Denials escape generic 500 and become uniform scope 404. No network/model calls under locks.",
     "limits": "No physical NAS/AIO proof or new independent cancellation-under-unlink fault. Controlled mid-transfer/source-withdrawal faults, artifact PUT, full thread lifecycle/checkpoint/run/background/client and paired release remain required; compiled activation stays closed."
+  },
+  "workspace_thread_checkpoint_reads": {
+    "base_commit": "5142606c",
+    "red": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 36,
+      "result": "FAILURE",
+      "archive_sha256": "dbc6383a6b8538ff5a7ff0bac6b34552960be64209883a7e60d6921d092908fe",
+      "artifact": "m3-thread-read-red.log",
+      "failed": 2,
+      "duration_seconds": 22.55,
+      "reason": "State owner admission reaches strict native SQL without trusted workspace"
+    },
+    "scope_checkpoint": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 37,
+      "result": "FAILURE",
+      "archive_sha256": "91b97a122dfeb97976534d2a90a11f21f46a961ad63888154aca00a28f4e97a4",
+      "artifact": "m3-thread-read-scope.log",
+      "failed": 2,
+      "duration_seconds": 22.36,
+      "reason": "Native compiled graph reads and foreign workspace denial pass, but prepared state survives actual SQL incarnation change"
+    },
+    "green": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 38,
+      "result": "SUCCESS",
+      "archive_sha256": "4b956d752ba7110eb0c41118a73c87816ec806a4e4c4289d5d62c6784a1f0cc7",
+      "artifact": "m3-thread-read-green.log",
+      "passed": 6,
+      "duration_seconds": 30.28,
+      "warnings": [
+        "Existing Starlette TestClient/httpx deprecation warning"
+      ],
+      "command": "python -m pytest tests/test_workspace_http.py tests/test_threads_router.py::test_get_thread_returns_iso_for_legacy_unix_record tests/test_threads_router.py::test_goal_status_and_clear_round_trip tests/test_threads_router.py::test_get_thread_state_returns_iso_for_legacy_checkpoint_metadata tests/test_threads_router.py::test_get_thread_history_returns_iso_for_legacy_checkpoint_metadata -q --tb=short --no-showlocals"
+    },
+    "scope": "Actual JWT/RBAC/CSRF, SQLite/PostgreSQL native metadata, durable AsyncSqliteSaver file closed and reopened, real native compiled graph (raw factory-unavailable fallback explicitly refused by assertion): distinct personal/team messages and goal content read via thread detail/state/history/goal, bidirectional foreign-space denial, actual SQL incarnation rotation during checkpoint read refuses prepared state without sentinel bytes; next valid request succeeds. Prior file/transfer/onboarding main retained.",
+    "source_sha256": {
+      "backend/app/gateway/routers/threads.py": "93b07efdb1287a8dbf37491596e4283241a95727d1dd7dfbc69c9926df9dc80f",
+      "backend/app/gateway/workspaces/dependencies.py": "cc48b7de8ea5898348962d3f797203f633e0f8967e5e9a0cb6a76ab15a306673",
+      "backend/tests/test_workspace_http.py": "27b71cf0e07ce1411302571be4cabc8045a8b91be239a75674814bc8da5df07b"
+    },
+    "cleanup": {
+      "36": {
+        "containers": [],
+        "networks": []
+      },
+      "37": {
+        "containers": [],
+        "networks": []
+      },
+      "38": {
+        "containers": [],
+        "networks": []
+      }
+    },
+    "self_review": "private_thread_read binds scope before native permissions, requires persistent private SQL thread with nonempty incarnation, rechecks live membership and scoped row/incarnation after read without holding writer locks over graph assembly/checkpointer IO. Existing full/delta accessor semantics remain unchanged.",
+    "limits": "Durable SQLite checkpoint reopen with both native metadata dialects; not PostgreSQL checkpointer, cross-process/reboot recovery, delta mode or deployed acceptance. Seeded real HumanMessage and native goal, no live model calls; run-history backfill/event lookup and AI duration writes not established. Read clocks, checkpoint/goal writes, branch/delete/compact, Run/background, frontend, physical mounts and paired release remain required. Tenant activation compiled false."
   }
 }

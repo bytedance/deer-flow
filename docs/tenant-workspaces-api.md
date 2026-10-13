@@ -299,3 +299,26 @@ withdrawal, original-byte preservation and later authorized deletion, plus two
 native deletion regressions (4 passed, 26.75s). Cancellation during unlink,
 physical NAS/AIO, mid-transfer faults and full lifecycle/client acceptance remain
 unproven; tenant activation remains blocked.
+
+## Persistent thread checkpoint reads (partial M3)
+
+Thread detail, state, history and goal reads bind live native-session workspace
+scope before owner checks. `private_thread_read` additionally requires the
+scoped SQL owner-private row and a nonempty incarnation; it rechecks the row and
+incarnation after checkpoint materialization. Missing/changed ownership or
+lifecycle identity returns 404. Graph assembly and checkpointer IO do not hold
+workspace writer locks, and native full/delta accessor behavior remains intact.
+
+Jenkins #36 reproduced missing state scope; #37 verified compiled-graph reads
+and foreign-space denial but reproduced stale incarnation returning content;
+#38 passed 6 checks in 30.28s, including four affected native read regressions.
+The actual authenticated main uses SQLite/PostgreSQL metadata and a durable
+AsyncSqliteSaver closed and reopened before reading distinct personal/team
+messages and native goals. It explicitly refuses factory-unavailable raw fallback
+and changes SQL incarnation during a real checkpoint read to verify denial.
+
+This establishes SQLite checkpoint reopen, not PostgreSQL checkpoint recovery,
+cross-process/reboot recovery, delta-mode acceptance or real model execution.
+Read clocks, goal/state writes, branches/deletion/compaction, run-history
+background backfill, Run/background events, frontend and physical migration
+remain required. Compiled tenant activation is still closed.

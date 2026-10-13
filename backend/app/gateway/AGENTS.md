@@ -366,3 +366,12 @@ WorkspaceAccessDenied/HTTPException outside generic 500 handling; stale admitted
 scope must not mutate files before returning a scope denial. No sandbox network
 or model work belongs inside this SQL transaction. Full lifecycle/client,
 cancellation/physical mounts and remaining M3-M11 gates still block activation.
+
+Thread detail/state/history/goal reads use workspace_resource_scope with
+private_thread_read=True: require scoped owner-private SQL metadata and nonempty
+incarnation before reading, then revalidate membership and the same incarnation
+after materialization. Never hold workspace writer locks over graph/checkpointer
+IO. Native full/delta accessor behavior remains unchanged. Durable SQLite reopen
+and actual compiled-graph reads are verified; Postgres checkpointer/recovery,
+read markers, writes/branch/delete/compact and history background backfill still
+need scoped integration and evidence before tenant activation.

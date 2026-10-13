@@ -15,11 +15,14 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from test_workspace_executor_migration import executor_engine, native_engine  # noqa: F401
 
 
-def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, monkeypatch, tmp_path):  # noqa: F811
-    from langgraph.checkpoint.memory import InMemorySaver
+def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, monkeypatch, tmp_path, caplog):  # noqa: F811
+    import aiosqlite
+    from langchain_core.messages import HumanMessage
+    from langgraph.checkpoint.base import empty_checkpoint
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
     import deerflow.config as config_facade
-    from app.gateway import deps
+    from app.gateway import deps, services
     from app.gateway.auth import config as auth_config
     from app.gateway.auth import create_access_token
     from app.gateway.auth.local_provider import LocalAuthProvider
@@ -38,6 +41,8 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
     from deerflow.persistence.thread_meta.model import ThreadMetaRow
     from deerflow.persistence.user.model import UserRow
     from deerflow.persistence.workspaces.sql import WorkspaceRepository
+    from deerflow.runtime.events.store.memory import MemoryRunEventStore
+    from deerflow.runtime.goal import build_goal_state
     from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
 
     names = ("app.gateway.workspaces.service", "app.gateway.workspaces.dependencies", "app.gateway.routers.workspaces", "app.gateway.routers.admin_workspaces")
@@ -52,6 +57,8 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
     configuration = AppConfig.model_validate(
         {
             "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+            "models": [{"name": "fixture", "use": "langchain_openai:ChatOpenAI", "model": "fixture", "api_key": "synthetic-no-model-call"}],
+            "memory": {"enabled": False},
             "authorization": {
                 "enabled": True,
                 "provider": {
@@ -64,6 +71,7 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
     monkeypatch.setattr(config_facade, "get_app_config", lambda: configuration)
     monkeypatch.setattr(app_config, "get_app_config", lambda: configuration)
     monkeypatch.setattr(deps, "get_app_config", lambda: configuration)
+    monkeypatch.setattr(services, "get_app_config", lambda: configuration)
     monkeypatch.setattr(paths_module, "_paths", Paths(tmp_path / "files"))
     monkeypatch.setattr(uploads, "get_sandbox_provider", lambda: LocalSandboxProvider())
     monkeypatch.setattr(auth_config, "_auth_config", auth_config.AuthConfig(jwt_secret="synthetic-isolated-workspace-http-key-64-characters-for-test-only!!"))
@@ -72,6 +80,7 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
 
     async def scenario():
         engine = create_async_engine(native_engine.url.set(drivername=driver))
+        checkpoint_connection = await aiosqlite.connect(str(tmp_path / "checkpoints.sqlite"))
         try:
             sf = async_sessionmaker(engine, expire_on_commit=False)
             user_repo = SQLiteUserRepository(sf)
@@ -81,6 +90,18 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
             app = FastAPI()
             app.state.workspace_service = service
             delete_revocation = {}
+            checkpoint_replacement = {}
+
+            class ReplacingCheckpointSaver(AsyncSqliteSaver):
+                async def aget_tuple(self, config):
+                    result = await super().aget_tuple(config)
+                    thread_id = config.get("configurable", {}).get("thread_id")
+                    if checkpoint_replacement.get("thread_id") == thread_id:
+                        checkpoint_replacement.clear()
+                        async with sf() as session:
+                            await session.execute(sa.text("UPDATE threads_meta SET incarnation=:incarnation WHERE thread_id=:id"), {"incarnation": uuid4().hex, "id": thread_id})
+                            await session.commit()
+                    return result
 
             class RevokingThreadRepository(ThreadMetaRepository):
                 async def check_access(self, thread_id, user_id, *, require_existing=False):
@@ -94,7 +115,9 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                     return allowed
 
             app.state.thread_store = RevokingThreadRepository(sf, workspace_required=True)
-            app.state.checkpointer = InMemorySaver()
+            app.state.checkpointer = ReplacingCheckpointSaver(checkpoint_connection)
+            await app.state.checkpointer.setup()
+            app.state.run_event_store = MemoryRunEventStore()
             app.state.project_repo = ProjectRepository(sf)
             app.state.project_document_repo = ProjectDocumentRepository(sf)
             app.include_router(routes.router)
@@ -188,6 +211,39 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                     assert row.workspace_id == team and row.user_id == identities["alice"]
                 personal_thread = await client.post("/api/threads", json={"thread_id": "personal-research-thread", "project_id": personal_project})
                 assert personal_thread.status_code == 200, personal_thread.text
+                for thread_id, marker in (("team-research-thread", "team checkpoint sentinel"), ("personal-research-thread", "personal checkpoint sentinel")):
+                    old = await app.state.checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
+                    checkpoint = empty_checkpoint()
+                    checkpoint["channel_values"] = {"messages": [HumanMessage(content=marker, id=thread_id + "-message")], "title": marker, "goal": build_goal_state(marker + " objective")}
+                    checkpoint["channel_versions"] = {"messages": 1, "title": 1, "goal": 1}
+                    await app.state.checkpointer.aput(old.config, checkpoint, {"step": 0, "source": "update", "writes": {}, "parents": {}}, checkpoint["channel_versions"])
+                # Reopen a durable native checkpoint connection before exercising REST reads.
+                await checkpoint_connection.close()
+                checkpoint_connection = await aiosqlite.connect(str(tmp_path / "checkpoints.sqlite"))
+                app.state.checkpointer = ReplacingCheckpointSaver(checkpoint_connection)
+                for thread_id, marker, headers in (("team-research-thread", "team checkpoint sentinel", team_headers), ("personal-research-thread", "personal checkpoint sentinel", {})):
+                    info = await client.get("/api/threads/" + thread_id, headers=headers)
+                    assert info.status_code == 200, info.text
+                    assert info.json()["values"]["messages"][0]["content"] == marker
+                    state = await client.get("/api/threads/" + thread_id + "/state", headers=headers)
+                    assert state.status_code == 200, state.text
+                    assert state.json()["values"]["messages"][0]["content"] == marker
+                    history = await client.post("/api/threads/" + thread_id + "/history", headers=headers, json={"limit": 1})
+                    assert history.status_code == 200, history.text
+                    assert history.json()[0]["values"]["messages"][0]["content"] == marker
+                    goal = await client.get("/api/threads/" + thread_id + "/goal", headers=headers)
+                    assert goal.status_code == 200 and goal.json()["goal"]["objective"] == marker + " objective", goal.text
+                for suffix in ("", "/state", "/goal"):
+                    assert (await client.get("/api/threads/team-research-thread" + suffix)).status_code == 404
+                    assert (await client.get("/api/threads/personal-research-thread" + suffix, headers=team_headers)).status_code == 404
+                assert (await client.post("/api/threads/team-research-thread/history", json={"limit": 1})).status_code == 404
+                assert (await client.post("/api/threads/personal-research-thread/history", headers=team_headers, json={"limit": 1})).status_code == 404
+                assert not any("Agent factory unavailable" in record.message for record in caplog.records), "state acceptance must use the native compiled graph, not degraded raw reads"
+                checkpoint_replacement["thread_id"] = "team-research-thread"
+                stale_state = await client.get("/api/threads/team-research-thread/state", headers=team_headers)
+                assert stale_state.status_code == 404, "prepared state outlived its admitted thread incarnation"
+                assert b"team checkpoint sentinel" not in stale_state.content
+                assert (await client.get("/api/threads/team-research-thread/state", headers=team_headers)).status_code == 200
                 thread_upload = await client.post("/api/threads/team-research-thread/uploads", headers=team_headers, files={"files": ("team.txt", b"private thread source", "text/plain")})
                 assert thread_upload.status_code == 200, thread_upload.text
                 private_upload = await client.post("/api/threads/personal-research-thread/uploads", files={"files": ("team.txt", b"personal different bytes", "text/plain")})
@@ -432,6 +488,7 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                     await service.revalidate(old_context)
                 assert refused.value.status_code == 404
         finally:
+            await checkpoint_connection.close()
             await engine.dispose()
 
     asyncio.run(scenario())

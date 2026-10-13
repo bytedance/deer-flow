@@ -75,3 +75,5 @@ Thread file checkpoint #31: actual scoped upload, shelf attachment and promotion
 Thread artifact GET checkpoint #33: real returned URLs, file/ZIP bytes, selector conflicts and before-send policy revocation on SQLite/PostgreSQL; native Range/download regressions retained. PUT, deletion/withdrawal, continuous streaming, token-reset and lifecycle/client/physical mount acceptance remain required.
 
 Upload DELETE checkpoint #35: SQL policy withdrawal between native admission and unlink preserves original bytes on both databases; authorized deletion and companion/symlink regressions pass. Final scope and short drained unlink share workspace/actor/thread locking. Mid-unlink cancellation and physical mount acceptance remain unproven.
+
+Thread read checkpoint #38: native compiled graph with real persistent SQLite checkpoint reopen plus SQLite/PostgreSQL metadata; detail/state/history/goal retain distinct personal/team content and refuse foreign scope. Actual SQL incarnation change during materialization refuses the prepared response. Read-clock and write/lifecycle/background paths, Postgres checkpoint/recovery, delta and browser acceptance remain required.

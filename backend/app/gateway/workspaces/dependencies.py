@@ -6,8 +6,9 @@ from functools import wraps
 from fastapi import HTTPException, Request
 
 from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
-from app.gateway.deps import get_current_user_from_request
+from app.gateway.deps import get_current_user_from_request, get_thread_store
 from deerflow.authz.workspace import reset_current_workspace, set_current_workspace
+from deerflow.persistence.thread_meta import ThreadMetaRepository
 from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 
 
@@ -37,12 +38,14 @@ async def resolve_workspace_context(request: Request, *, selector=None):
     return await service.resolve_context(str(user.id), header if header is not None else selector)
 
 
-def workspace_resource_scope(*, allow_query_selector=False):
+def workspace_resource_scope(*, allow_query_selector=False, private_thread_read=False):
     """Bind only a live native-session scope for a resource request and its workers.
 
     Bind before native owner-check decorators, which require trusted scope.
     Plain native permissions may remain outside. Query selectors are permitted
-    only on routes explicitly supporting browser file navigation.
+    only on routes explicitly supporting browser file navigation. Private thread
+    reads additionally recheck persisted ownership/incarnation after checkpoint
+    materialization, without holding SQL locks over graph assembly or IO.
     """
 
     def decorate(function):
@@ -62,8 +65,22 @@ def workspace_resource_scope(*, allow_query_selector=False):
             context = await resolve_workspace_context(request, selector=selector)
             token = set_current_workspace(context)
             try:
+                repository = None
+                admitted_incarnation = None
+                if private_thread_read:
+                    repository = get_thread_store(request)
+                    if not isinstance(repository, ThreadMetaRepository):
+                        raise HTTPException(status_code=503, detail="Workspace reads require persistent thread scope")
+                    record = await repository.get(bound.arguments["thread_id"], user_id=context.actor_user_id)
+                    admitted_incarnation = record.get("incarnation") if record is not None else None
+                    if not isinstance(admitted_incarnation, str) or not admitted_incarnation:
+                        raise HTTPException(status_code=404, detail="Thread not found")
                 result = await function(*args, **kwargs)
                 await service.revalidate(context)
+                if private_thread_read:
+                    current = await repository.get(bound.arguments["thread_id"], user_id=context.actor_user_id)
+                    if current is None or current.get("incarnation") != admitted_incarnation:
+                        raise HTTPException(status_code=404, detail="Thread not found")
                 return result
             except WorkspaceAccessDenied:
                 raise HTTPException(status_code=404, detail="Workspace or resource not found") from None
