@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -17,6 +18,7 @@ from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.workspaces.scope import live_workspace_predicate, lock_resource_scope, resolve_resource_scope
 from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
@@ -78,6 +80,17 @@ class ThreadMetaRepository(ThreadMetaStore):
                 # ``coerce_iso`` normalizes naive values as UTC so the wire format always carries tz.
                 d[key] = coerce_iso(val)
         return d
+
+    async def publish_under_live_lock[T](self, thread_id: str, *, publish: Callable[[], Awaitable[T]], user_id: str | None | _AutoSentinel = AUTO) -> T:
+        """Fence a short file publication; never hold this over model/network work."""
+        owner = resolve_user_id(user_id, method_name="ThreadMetaRepository.publish_under_live_lock")
+        context = self._scope(owner)
+        async with self._sf() as session:
+            if await self._locked_row(session, thread_id, owner, context) is None:
+                raise WorkspaceAccessDenied("thread publication is unavailable")
+            result = await await_drained(publish())
+            await session.commit()
+            return result
 
     async def create(
         self,

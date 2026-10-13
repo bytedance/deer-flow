@@ -2928,3 +2928,5 @@ Workspace implementation progress: [explicit shared project files and remaining 
 Private conversation isolation is implemented at the native SQL repository layer; shared project sources do not grant access to other members’ chats. See the [partial thread integration](docs/tenant-workspaces-api.md#private-thread-repository-partial-m3) for validation and remaining requirements. Tenant activation is still blocked.
 
 Native thread metadata APIs and project thread lists now carry trusted workspace scope; shared projects list only the caller’s own conversations. See [HTTP integration limits](docs/tenant-workspaces-api.md#native-thread-metadata-http-partial-m3). Files, full runtime and frontend acceptance remain pending; this does not activate multi-tenant deployment.
+
+Workspace-scoped thread uploads and project file transfers now preserve original files and private conversation ownership. The [file transfer checkpoint](docs/tenant-workspaces-api.md#thread-uploads-and-project-transfer-partial-m3) records real byte checks and remaining artifact, runtime, physical mount and frontend requirements. Tenant deployment remains blocked.

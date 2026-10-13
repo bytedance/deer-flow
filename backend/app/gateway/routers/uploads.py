@@ -15,8 +15,10 @@ from pydantic import BaseModel, Field
 from app.gateway.authz import require_permission, try_acquire_sandbox_for_request
 from app.gateway.deps import get_config
 from app.gateway.upload_ingestion import ThreadUploadIngestionService, UnsafeFilenameError, UnsafeUploadDestinationError
+from app.gateway.workspaces.dependencies import workspace_resource_scope
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import get_paths
+from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
 from deerflow.uploads.manager import (
@@ -386,6 +388,7 @@ def _auto_convert_documents_enabled(app_config: AppConfig) -> bool:
 
 
 @router.post("", response_model=UploadResponse)
+@workspace_resource_scope()
 @require_permission("threads", "write", owner_check=True, require_existing=False)
 async def upload_files(
     thread_id: ThreadId,
@@ -448,6 +451,9 @@ async def upload_files(
             except HTTPException as e:
                 await service.cleanup_written()
                 raise e
+            except WorkspaceAccessDenied:
+                await service.cleanup_written()
+                raise
             except Exception as e:
                 logger.error(f"Failed to upload {file.filename}: {e}")
                 await service.cleanup_written()
@@ -471,6 +477,7 @@ async def upload_files(
 
 
 @router.get("/limits", response_model=UploadLimits)
+@workspace_resource_scope()
 @require_permission("threads", "read", owner_check=True)
 async def get_upload_limits(
     thread_id: ThreadId,
@@ -482,6 +489,7 @@ async def get_upload_limits(
 
 
 @router.get("/list", response_model=UploadListResponse)
+@workspace_resource_scope()
 @require_permission("threads", "read", owner_check=True)
 async def list_uploaded_files(thread_id: ThreadId, request: Request) -> UploadListResponse:
     """List all files in a thread's uploads directory."""
@@ -494,6 +502,7 @@ async def list_uploaded_files(thread_id: ThreadId, request: Request) -> UploadLi
 
 
 @router.delete("/{filename}")
+@workspace_resource_scope()
 @require_permission("threads", "delete", owner_check=True, require_existing=True)
 async def delete_uploaded_file(thread_id: ThreadId, filename: str, request: Request) -> dict:
     """Delete a file from a thread's uploads directory."""

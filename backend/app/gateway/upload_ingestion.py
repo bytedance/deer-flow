@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException
 
+from deerflow.authz.workspace import get_current_workspace
 from deerflow.config.app_config import AppConfig
 from deerflow.uploads.companions import register_companion, unregister_companion
 from deerflow.utils.file_io import await_drained, run_file_io
@@ -142,7 +143,9 @@ class ThreadUploadIngestionService:
     it when a per-file failure aborts the request, and attach mirrors that.
     """
 
-    def __init__(self, *, request: Request | None, thread_id: str, user_id: str, app_config: AppConfig) -> None:
+    def __init__(self, *, request: Request | None, thread_id: str, user_id: str, app_config: AppConfig, publication_check=None) -> None:
+        self._publication_check = publication_check
+        self._workspace_context = get_current_workspace()
         self._request = request
         self._thread_id = thread_id
         self._user_id = user_id
@@ -158,6 +161,27 @@ class ThreadUploadIngestionService:
         self._companion_pairs: list[tuple[Path, Path]] = []
         self._sync_targets: list[tuple[Path, str]] = []
         self._total_size = 0
+
+    async def _publish(self, operation):
+        """Serialize short filesystem publication against native scope revocation."""
+        if self._workspace_context is None:
+            return await operation()
+        from app.gateway.deps import get_thread_store
+        from deerflow.persistence.thread_meta import ThreadMetaRepository
+        from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
+
+        if self._request is None or get_current_workspace() != self._workspace_context:
+            raise WorkspaceAccessDenied("upload publication lost trusted scope")
+        repo = get_thread_store(self._request)
+        if not isinstance(repo, ThreadMetaRepository):
+            raise WorkspaceAccessDenied("workspace upload requires persistent thread scope")
+
+        async def publish():
+            if self._publication_check is not None:
+                await self._publication_check()
+            return await operation()
+
+        return await repo.publish_under_live_lock(self._thread_id, user_id=self._user_id, publish=publish)
 
     async def __aenter__(self) -> ThreadUploadIngestionService:
         await self.open()
@@ -223,7 +247,7 @@ class ThreadUploadIngestionService:
         name = claimed_name
         while True:
             try:
-                return name, await run_file_io(uploads._link_staged_no_overwrite, staged_path, self._uploads_dir, name)
+                return name, await self._publish(lambda: run_file_io(uploads._link_staged_no_overwrite, staged_path, self._uploads_dir, name))
             except FileExistsError:
                 name = uploads.claim_unique_filename(name, self._seen_filenames)
 
@@ -280,13 +304,7 @@ class ThreadUploadIngestionService:
             # once the descriptor is released below.
             while True:
                 try:
-                    file_path = await run_file_io(
-                        uploads._commit_upload_temp_no_overwrite,
-                        upload_temp,
-                        self._uploads_dir,
-                        safe_filename,
-                        unlink_staged=convert_source_fd is None,
-                    )
+                    file_path = await self._publish(lambda: run_file_io(uploads._commit_upload_temp_no_overwrite, upload_temp, self._uploads_dir, safe_filename, unlink_staged=convert_source_fd is None))
                     break
                 except FileExistsError:
                     safe_filename = uploads.claim_unique_filename(safe_filename, self._seen_filenames)
@@ -402,7 +420,7 @@ class ThreadUploadIngestionService:
         # whether the uploads directory is bind-mounted into the container or
         # synced via sandbox.update_file. Always add group/other read bits so
         # every sandbox configuration can read the uploaded content.
-        await run_file_io(uploads._make_uploaded_paths_sandbox_readable, self._written_paths)
+        await self._publish(lambda: run_file_io(uploads._make_uploaded_paths_sandbox_readable, self._written_paths))
         if self._sync_to_sandbox and self._sandbox is not None:
             for file_path, virtual_path in self._sync_targets:
                 await run_file_io(uploads._sync_upload_to_sandbox, self._sandbox, file_path, virtual_path)

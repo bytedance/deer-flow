@@ -632,5 +632,68 @@
       }
     },
     "limits": "Metadata HTTP and project listing foundation. GET binding is implemented but full state/checkpoint materialization acceptance remains pending; no persistent checkpoint/recovery, thread files, branches/delete/goal/compact/history/read-clock, Run/background or frontend integration is established. PAT/internal admission stays refused at session-only adapter until its planned integration. Tenant activation remains compiled false."
+  },
+  "workspace_thread_files": {
+    "base_commit": "4a3e934b",
+    "red": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 29,
+      "result": "FAILURE",
+      "archive_sha256": "fad43da539270a81b780fa8ffb637b6813c69574926146324e77145ad2f4ec99",
+      "artifact": "m3-thread-files-red.log",
+      "failed": 2,
+      "duration_seconds": 20.07,
+      "reason": "Uploads reach native owner check without trusted workspace"
+    },
+    "repair": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 30,
+      "result": "FAILURE",
+      "archive_sha256": "d3d5798d73b84ee45ab53f427d961d7b4ae0d96d678c43496181e966a75b7557",
+      "artifact": "m3-thread-files-green.log",
+      "failed": 2,
+      "passed": 4,
+      "duration_seconds": 25.09,
+      "reason": "Attachment source recheck used an unsupported project_id keyword on document get; fixed by scoped read plus returned parent identity check"
+    },
+    "green": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 31,
+      "result": "SUCCESS",
+      "archive_sha256": "3d96bd4640d2dfb39e12313281b4e6550d2a85842162728666d5b88482c604ed",
+      "artifact": "m3-thread-files-fixed.log",
+      "passed": 6,
+      "duration_seconds": 30.99,
+      "warnings": [
+        "Existing Starlette TestClient/httpx deprecation warning"
+      ],
+      "command": "python -m pytest tests/test_workspace_http.py tests/test_workspace_threads.py tests/test_project_documents_promotion.py::TestFromThread::test_promote_upload_with_default_name_records_provenance tests/test_project_documents_promotion.py::TestAttach::test_attach_mounted_provider_copies_without_sync -q --tb=short --no-showlocals"
+    },
+    "scope": "Real native authentication/SQL per SQLite/PostgreSQL, actual LocalSandboxProvider mount path fixture and file IO: personal/team same-name uploads have separate workspace/user/thread paths and distinct bytes; foreign upload/list refuses; native shelf attachment preserves same-name original and copies bytes as team_1.txt, foreign source/target refuses; thread-to-shelf promotion preserves source and provenance with matching bytes; ordinary team member copies shared source into own private thread but cannot target another creator. Existing SQL thread and two native transfer mains retained.",
+    "source_sha256": {
+      "backend/app/gateway/routers/uploads.py": "83fed415afe6aac001b473f9bc70b3e6161b7a6dbc01d65016bf69e1d6d4a8f8",
+      "backend/app/gateway/routers/project_documents.py": "943641225f7aa62bcb754773143053d206155521556252a916f00ae87cc2a2ba",
+      "backend/app/gateway/upload_ingestion.py": "4d46819972ad07d45eb1a1bc4f245eb25623928d3daa208d8928e9b4c8d700bd",
+      "backend/packages/harness/deerflow/config/paths.py": "c0a0e8906c48ea3b2f9e446c7c9392e4e13c9c5b52fcbd278c88f5e2abe3e4d5",
+      "backend/packages/harness/deerflow/persistence/projects/sql.py": "e72ae8f02ac312411f13f9ac1bf2ec5bf3725afb5d3f87ea30babf22f5d09367",
+      "backend/packages/harness/deerflow/persistence/thread_meta/sql.py": "b84e7864fc4439f9b9f3dc0fe71e0fd28200cc92c013625a8771e638ffe92453",
+      "backend/tests/test_workspace_http.py": "c30e15b05293049e33fde29da36309f7dd4076a5213e9cec2db4c7b38ad700e2"
+    },
+    "cleanup": {
+      "29": {
+        "containers": [],
+        "networks": []
+      },
+      "30": {
+        "containers": [],
+        "networks": []
+      },
+      "31": {
+        "containers": [],
+        "networks": []
+      }
+    },
+    "self_review": "Short original/derived upload link publication and sandbox-readable chmod are drained under workspace/actor/thread SQL lock. Shelf copy uses current parent/document scope; attachment rechecks source under publication scope; promotion validates original thread under destination project transaction. Long network synchronization is not held inside SQL transactions.",
+    "limits": "Isolated filesystem/native mounted-provider fixture, not physical NAS/AIO/remote sandbox acceptance. Artifact URL/query integration and before-send artifact authorization, upload deletion revocation races, full thread lifecycle/checkpoint/run/background, conversion/retention, frontend and paired release remain required. Controlled mid-transfer revocation/cancellation faults still require focused evidence. Tenant activation remains compiled false."
   }
 }

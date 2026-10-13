@@ -20,3 +20,5 @@ Detailed steps: `../../../docs/superpowers/plans/2026-10-13-tenant-workspaces.md
 M3 thread repository checkpoint: #25 RED (NULL scope, both databases), #26 GREEN (7 passed, 29.58s). Owner-private thread SQL and shared-project association are verified. HTTP admission, checkpoint/run/files and frontend remain incomplete; parent M3 stays unchecked.
 
 M3 metadata HTTP checkpoint: #27 RED (missing trusted HTTP scope), #28 GREEN (7 passed, 30.21s). Actual authenticated creation/search/PATCH/move and own-only project thread listing now use the scoped SQL repository. Full state/lifecycle/files, Run/background and frontend remain requirements; M3 stays unchecked.
+
+M3 thread file checkpoint: #31 passed real scoped upload, source-preserving copy/promotion, member shared-source attachment, SQL thread main and two legacy transfer checks (6 passed, 30.99s). #29/#30 failure history retained. Before-send artifacts, deletion/withdrawal, lifecycle/client and physical mounts remain unaccepted; parent M3 stays unchecked.

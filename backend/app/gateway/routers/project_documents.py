@@ -30,6 +30,7 @@ from app.gateway.workspaces.file_response import WorkspaceFileResponse
 from deerflow.authz.workspace import get_current_workspace
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import Paths, get_paths
+from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.projects.documents import (
     ShelfContentMissingError,
     ShelfUploadTooLargeError,
@@ -301,8 +302,7 @@ async def promote_thread_file_to_shelf(
     Response mirrors upload: 201 created, 200 on a content dedup hit (the
     existing row keeps its own name and provenance, §10.9).
     """
-    if get_current_workspace() is not None:
-        raise HTTPException(status_code=503, detail="Workspace thread attachments are not integrated")
+    await _require_project(request, project_id, action="write")
     if await get_thread_store(request).get(body.thread_id) is None:
         raise _not_found()
     repo = get_project_document_repo(request)
@@ -351,9 +351,9 @@ async def promote_thread_file_to_shelf(
 
 
 @router.post("/{document_id}/attach-to-thread/{thread_id}", response_model=AttachDocumentResponse)
+@workspace_resource_scope()
 @require_permission("projects", "write")
 @require_permission("threads", "write", owner_check=True, require_existing=True)
-@workspace_resource_scope()
 async def attach_project_document_to_thread(
     project_id: str,
     document_id: str,
@@ -378,8 +378,6 @@ async def attach_project_document_to_thread(
     owner check above, ``require_existing``); the response is returned only
     after ingestion succeeds.
     """
-    if get_current_workspace() is not None:
-        raise HTTPException(status_code=503, detail="Workspace thread attachments are not integrated")
     await _require_project(request, project_id)
     repo = get_project_document_repo(request)
     user_id = get_effective_user_id()
@@ -395,7 +393,12 @@ async def attach_project_document_to_thread(
         raise _not_found()
     row, staged_path = staged
 
-    service = ThreadUploadIngestionService(request=request, thread_id=thread_id, user_id=user_id, app_config=config)
+    async def check_source():
+        current = await repo.get(document_id, user_id=user_id)
+        if current is None or current["project_id"] != project_id:
+            raise _not_found()
+
+    service = ThreadUploadIngestionService(request=request, thread_id=thread_id, user_id=user_id, app_config=config, publication_check=check_source if get_current_workspace() is not None else None)
     try:
         try:
             await service.open()
@@ -408,6 +411,9 @@ async def attach_project_document_to_thread(
             await service.cleanup_written()
             raise HTTPException(status_code=500, detail=f"Failed to upload {row['name']}: {exc}")
         except HTTPException:
+            await service.cleanup_written()
+            raise
+        except WorkspaceAccessDenied:
             await service.cleanup_written()
             raise
         except Exception as exc:

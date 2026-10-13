@@ -319,8 +319,8 @@ permissions and reset it on exit. Only the content route accepts a UUID query
 locator, and conflicting header/query selectors are refused. WorkspaceFileResponse
 rebinds the captured context and checks live document/parent access before ASGI
 headers; scoped file responses are private/no-store. Upload publication and trash
-drain owned async writes. Thread promotion/attach remain explicitly refused until
-the thread store/path integration lands. No request can activate workspace mode.
+drain owned async writes. Thread promotion/attach now use scoped source and target checks and
+workspace thread paths. No request can activate workspace mode.
 
 
 Projects accept explicit private/workspace visibility. Private content uses the
@@ -329,7 +329,7 @@ project permission, while shared writes require owner/admin. HTTP preflight uses
 WorkspaceService's same permission intersection; SQL repeats live role checks
 inside the mutation lock. Shelf ACLs inherit their actual parent, preserving real
 uploader IDs. Personal/unscoped shared publication is refused. Project visibility
-does not grant thread content access; listing is own-only and attachments remain gated.
+does not grant thread content access; listing is own-only and attachments recheck source access at publication.
 
 Thread metadata HTTP (create/search/PATCH/move/GET) binds workspace_resource_scope
 before native owner-check decorators. Resolve annotated signatures from the
@@ -341,3 +341,13 @@ SQL denial must reach the outer adapter instead of becoming a generic 500.
 GET refuses checkpoint-only fallback when the scoped metadata row is missing.
 This is not state/Run/files/branch/delete/history or PAT/internal integration;
 those entrypoints remain required before compiled tenant activation.
+
+Thread uploads bind trusted scope before owner-check decorators. Ingestion captures
+that scope; short filesystem publication/chmod uses ThreadMetaRepository's drained
+publish_under_live_lock, never a DB transaction around sandbox network work.
+Shelf attachment binds before thread owner checks and rechecks its source under
+publication scope. Shelf promotion preflights destination write ACL; insert_active
+checks source thread ownership/workspace while holding the workspace and project
+locks. Legacy native permission requirements remain. Artifact ASGI/query integration,
+delete/withdrawal races, non-mounted synchronization and physical NAS evidence are
+still required before tenant activation.

@@ -197,5 +197,8 @@ A trusted task-local WorkspaceContext selects `Paths.user_projects_dir` under
 `workspaces/{workspace_id}/projects`; its real actor must match the user argument.
 Existing file-I/O worker context propagation preserves this selection. Calls
 without a scope keep the legacy user root. Path selection is not authorization:
-resource SQL and HTTP publication checks remain mandatory. Thread paths and
-least-authorized sandbox/NAS mounts still need their own integration.
+resource SQL and HTTP publication checks remain mandatory. Thread local/host paths
+now use workspaces/{workspace_id}/users/{actor_user_id}/threads/{thread_id}, with
+explicit actor matching and legacy behavior only without scope. All child paths
+inherit this binding. Least-authorized physical sandbox/NAS mounts and background
+restoration of the persisted scope still need acceptance.

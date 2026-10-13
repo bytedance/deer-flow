@@ -17,6 +17,7 @@ from test_workspace_executor_migration import executor_engine, native_engine  # 
 def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, monkeypatch, tmp_path):  # noqa: F811
     from langgraph.checkpoint.memory import InMemorySaver
 
+    import deerflow.config as config_facade
     from app.gateway import deps
     from app.gateway.auth import config as auth_config
     from app.gateway.auth import create_access_token
@@ -25,7 +26,7 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
     from app.gateway.auth_middleware import AuthMiddleware
     from app.gateway.csrf_middleware import CSRFMiddleware
-    from app.gateway.routers import project_documents, projects, threads
+    from app.gateway.routers import project_documents, projects, threads, uploads
     from deerflow.config import app_config
     from deerflow.config import paths as paths_module
     from deerflow.config.app_config import AppConfig
@@ -36,6 +37,7 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
     from deerflow.persistence.thread_meta.model import ThreadMetaRow
     from deerflow.persistence.user.model import UserRow
     from deerflow.persistence.workspaces.sql import WorkspaceRepository
+    from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
 
     names = ("app.gateway.workspaces.service", "app.gateway.workspaces.dependencies", "app.gateway.routers.workspaces", "app.gateway.routers.admin_workspaces")
     for name in names:
@@ -58,9 +60,11 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
             },
         }
     )
+    monkeypatch.setattr(config_facade, "get_app_config", lambda: configuration)
     monkeypatch.setattr(app_config, "get_app_config", lambda: configuration)
     monkeypatch.setattr(deps, "get_app_config", lambda: configuration)
     monkeypatch.setattr(paths_module, "_paths", Paths(tmp_path / "files"))
+    monkeypatch.setattr(uploads, "get_sandbox_provider", lambda: LocalSandboxProvider())
     monkeypatch.setattr(auth_config, "_auth_config", auth_config.AuthConfig(jwt_secret="synthetic-isolated-workspace-http-key-64-characters-for-test-only!!"))
     monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
     driver = "sqlite+aiosqlite" if native_engine.dialect.name == "sqlite" else "postgresql+asyncpg"
@@ -81,6 +85,7 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
             app.state.project_document_repo = ProjectDocumentRepository(sf)
             app.include_router(routes.router)
             app.include_router(admin_routes.router)
+            app.include_router(uploads.router)
             app.include_router(threads.router)
             app.include_router(projects.router)
             app.include_router(project_documents.router)
@@ -160,6 +165,16 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                     assert row.workspace_id == team and row.user_id == identities["alice"]
                 personal_thread = await client.post("/api/threads", json={"thread_id": "personal-research-thread", "project_id": personal_project})
                 assert personal_thread.status_code == 200, personal_thread.text
+                thread_upload = await client.post("/api/threads/team-research-thread/uploads", headers=team_headers, files={"files": ("team.txt", b"private thread source", "text/plain")})
+                assert thread_upload.status_code == 200, thread_upload.text
+                private_upload = await client.post("/api/threads/personal-research-thread/uploads", files={"files": ("team.txt", b"personal different bytes", "text/plain")})
+                assert private_upload.status_code == 200, private_upload.text
+                team_root = tmp_path / "files" / "workspaces" / team / "users" / identities["alice"] / "threads" / "team-research-thread" / "user-data" / "uploads"
+                personal_root = tmp_path / "files" / "workspaces" / personal / "users" / identities["alice"] / "threads" / "personal-research-thread" / "user-data" / "uploads"
+                assert (team_root / "team.txt").read_bytes() == b"private thread source"
+                assert (personal_root / "team.txt").read_bytes() == b"personal different bytes"
+                assert (await client.get("/api/threads/team-research-thread/uploads/list")).status_code == 404
+                assert (await client.post("/api/threads/team-research-thread/uploads", files={"files": ("foreign.txt", b"foreign write", "text/plain")})).status_code == 404
                 assert [r["thread_id"] for r in (await client.post("/api/threads/search", headers=team_headers, json={"limit": 1})).json()] == ["team-research-thread"]
                 assert [r["thread_id"] for r in (await client.post("/api/threads/search", json={})).json()] == ["personal-research-thread"]
                 patched = await client.patch("/api/threads/team-research-thread", headers=team_headers, json={"metadata": {"deerflow_pinned": True}})
@@ -177,6 +192,14 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                 uploaded = await client.post(team_docs, headers=team_headers, files={"file": ("team.txt", b"team private notes", "text/plain")})
                 assert uploaded.status_code == 201, uploaded.text
                 team_document = uploaded.json()["document"]["id"]
+                attach_url = team_docs + "/" + team_document + "/attach-to-thread/team-research-thread"
+                attached = await client.post(attach_url, headers=team_headers)
+                assert attached.status_code == 200, attached.text
+                assert attached.json()["filename"] == "team_1.txt"
+                assert (team_root / "team_1.txt").read_bytes() == b"team private notes"
+                assert (team_root / "team.txt").read_bytes() == b"private thread source"
+                assert (await client.post(attach_url)).status_code == 404
+                assert (await client.post(team_docs + "/" + team_document + "/attach-to-thread/personal-research-thread", headers=team_headers)).status_code == 404
                 async with sf() as session:
                     document = await session.get(ProjectDocumentRow, team_document)
                     assert document.workspace_id == team, "uploaded document lost workspace ownership"
@@ -203,6 +226,14 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                 assert (await client.delete(team_docs + "/" + team_document, headers={"X-Deerflow-Workspace": personal})).status_code == 404
                 assert (await client.delete(team_docs + "/" + team_document, headers=team_headers)).status_code == 204
                 assert (await client.get(content, headers=team_headers)).status_code == 404
+                promoted = await client.post(team_docs + "/from-thread", headers=team_headers, json={"thread_id": "team-research-thread", "kind": "upload", "name": "team.txt"})
+                assert promoted.status_code == 201, promoted.text
+                promoted_document = promoted.json()["document"]
+                assert promoted_document["source_thread_id"] == "team-research-thread"
+                result = await client.get(team_docs + "/" + promoted_document["id"] + "/content", headers=team_headers)
+                assert result.status_code == 200 and result.content == b"private thread source"
+                assert (team_root / "team.txt").read_bytes() == b"private thread source"
+                assert (await client.post(team_docs + "/from-thread", headers=team_headers, json={"thread_id": "personal-research-thread", "kind": "upload", "name": "team.txt"})).status_code == 404
                 assert [r["id"] for r in (await client.get("/api/projects", headers=team_headers)).json()["projects"]] == [team_project]
                 assert [r["id"] for r in (await client.get("/api/projects")).json()["projects"]] == [personal_project]
                 personal_headers = {"X-Deerflow-Workspace": personal}
@@ -264,6 +295,11 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                 assert (await client.get("/api/projects/" + shared_project, headers=team_headers)).status_code == 200
                 peer_thread = await client.post("/api/threads", headers=team_headers, json={"thread_id": "bob-shared-research", "project_id": shared_project})
                 assert peer_thread.status_code == 200, peer_thread.text
+                shared_attached = await client.post(shared_docs + "/" + shared_document + "/attach-to-thread/bob-shared-research", headers=team_headers)
+                assert shared_attached.status_code == 200, shared_attached.text
+                peer_upload = tmp_path / "files" / "workspaces" / team / "users" / identities["bob"] / "threads" / "bob-shared-research" / "user-data" / "uploads" / "shared.txt"
+                assert peer_upload.read_bytes() == b"team published source"
+                assert (await client.post(shared_docs + "/" + shared_document + "/attach-to-thread/team-research-thread", headers=team_headers)).status_code == 404
                 assert [r["thread_id"] for r in (await client.get("/api/projects/" + shared_project + "/threads", headers=team_headers)).json()] == ["bob-shared-research"]
                 assert (await client.patch("/api/threads/team-research-thread", headers=team_headers, json={"metadata": {"member_write": True}})).status_code == 404
                 listed = (await client.get("/api/projects", headers=team_headers)).json()["projects"]

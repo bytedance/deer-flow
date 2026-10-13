@@ -334,8 +334,6 @@ class ProjectDocumentRepository:
         """
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectDocumentRepository.insert_active")
         context = self._scope(resolved_user_id)
-        if context is not None and source_thread_id is not None:
-            raise WorkspaceAccessDenied("Thread provenance is not workspace integrated")
         async with self._sf() as session:
             if context is not None:
                 await lock_resource_scope(session, context)
@@ -344,6 +342,12 @@ class ProjectDocumentRepository:
             if await self._lock_active_project(session, project_id, resolved_user_id, context) is None:
                 await session.rollback()
                 return None
+            if context is not None and source_thread_id is not None:
+                from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
+
+                source = ThreadMetaRepository._owned_scope(select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id == source_thread_id), resolved_user_id, context)
+                if await session.scalar(source.with_for_update()) is None:
+                    raise WorkspaceAccessDenied("thread provenance is unavailable")
             dedup_stmt = select(ProjectDocumentRow).where(
                 ProjectDocumentRow.project_id == project_id,
                 ProjectDocumentRow.sha256 == sha256,
@@ -550,12 +554,20 @@ class ProjectDocumentRepository:
         is released.
         """
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectDocumentRepository.stage_live_copy")
-        self._scope(resolved_user_id, integrated=False)
+        context = self._scope(resolved_user_id)
         async with self._sf() as session:
-            await self._begin_immediate_if_sqlite(session)
-            locked = (await session.execute(select(ProjectDocumentRow).where(ProjectDocumentRow.id == document_id).with_for_update())).scalar_one_or_none()
-            if locked is None or locked.project_id != project_id or locked.trashed_at is not None or (resolved_user_id is not None and locked.user_id != resolved_user_id):
-                await session.rollback()
+            if context is not None:
+                await lock_resource_scope(session, context)
+                from deerflow.persistence.projects.model import ProjectRow
+
+                parent = ProjectRepository._owned_scope(select(ProjectRow.id).where(ProjectRow.id == project_id), resolved_user_id, context)
+                if await session.scalar(parent.with_for_update()) is None:
+                    return None
+            else:
+                await self._begin_immediate_if_sqlite(session)
+            stmt = self._owned_scope(select(ProjectDocumentRow).where(ProjectDocumentRow.id == document_id, ProjectDocumentRow.project_id == project_id, ProjectDocumentRow.trashed_at.is_(None)), resolved_user_id, context)
+            locked = await session.scalar(stmt.with_for_update())
+            if locked is None:
                 return None
             row = self._row_to_dict(locked)
             # Drained: the lock is never released over an in-flight staging copy.

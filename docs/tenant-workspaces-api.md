@@ -154,7 +154,7 @@ A failed insert followed by a scoped liveness miss does not prove rollback:
 revocation may hide a committed row. Its possibly owned bytes remain for later
 scope-aware reconciliation instead of being deleted based on that miss.
 
-Thread promotion/attachment currently return 503 under a bound workspace.
+Thread promotion/attachment are now scoped, as described in the checkpoint below.
 Conversion publication, trash recovery/purge and retention inventory also
 refuse scoped or required-but-missing calls until integrated. These temporary
 refusals are tracked work, not an accepted substitute for the full requirement.
@@ -238,3 +238,30 @@ persistent checkpoint/state/recovery, files/branches/delete/goal/history/read
 clock, Run/background, PAT/internal and frontend acceptance remain required.
 GET scope binding is implemented but full state materialization is not established
 by this main. The compiled activation gate stays closed.
+
+## Thread uploads and project transfer (partial M3)
+
+Trusted scope selects `workspaces/{workspace_id}/users/{user_id}/threads/{thread_id}`
+for local and configured host path construction; absent scope retains legacy paths.
+An explicit user must match the actual scope actor. This path binding is not
+membership authorization. Upload routes bind scope before native owner checks;
+the original pipeline still handles staging, name collisions, conversion and
+permissions. Original/derived final links and readability chmod are short drained
+operations fenced under native workspace/actor/thread locks.
+
+Shelf attachment checks native project/thread permissions, current parent/document
+ACL and private target ownership. Source copying locks workspace/actor/project/document;
+after that transaction ends, ingestion rechecks the source before publishing into
+the target. Existing legacy `projects:write` and `threads:write` requirements remain.
+Transfer neither overwrites nor moves the original. Thread-to-shelf promotion checks
+destination write ACL before reading a source; SQL verifies source thread ownership
+and matching workspace again before inserting provenance/publishing the shelf copy.
+
+Jenkins #29 reproduced missing upload scope; #30 found the unsupported document-get
+argument in source revalidation; #31 passed the actual byte-level main on both
+databases and two affected native transfer regressions (6 passed, 30.99s).
+The fixture uses the real mounted LocalSandboxProvider and private temporary files;
+it is not evidence for physical NAS/AIO mounts or remote sandbox synchronization.
+Artifact link/query handling, before-send artifact checks, deletion/revocation
+races, controlled mid-transfer cancellation/revocation, full thread lifecycle,
+checkpoint/run and browser integration remain required. Activation remains blocked.

@@ -87,7 +87,7 @@ coverage still need implementation. No activation is implied.
 ProjectDocumentRepository scopes insert/dedup/list/count/snapshot/get/trash by
 project ACL, workspace, live versions and matching project. Mutations use the
 same workspace -> actor -> project -> document order. Required scope is captured
-at native bootstrap. Scoped conversion/copy and trash maintenance are refused
+at native bootstrap. Scoped conversion and trash maintenance are refused
 until integrated, including absent scope on required repositories. Commit-error
 reconciliation must not treat a scoped invisible row as proof of rollback or
 remove bytes that a committed row may still own. Thread, conversion and retention integration remain M3/M8 work.
@@ -104,3 +104,12 @@ executor export consumption both require the current native head. Keep past
 receipts immutable; e0002 executor schema is unchanged.
 
 ThreadMetaRepository accepts workspace_required and consumes trusted task-local scope. Reads and pagination combine original owner, selected workspace, live membership and parent-workspace consistency. Private thread history remains owner-private when its project visibility changes; project source access must separately use current ProjectRepository ACL. Association locks workspace -> actor -> project; row mutations lock workspace -> actor -> thread. Workspace mode refuses orphan claiming, owner reassignment and user_id=None bypass. make_thread_store cannot fall back to memory when scope is required. Gateway admission must bind scope before native owner checks; remaining runtime/background coverage is not implied by this repository foundation.
+
+Scoped stage_live_copy adds workspace/actor/project locks before the document lock
+and read ACL; archived source projects remain readable. Its file-copy callback is
+drained before releasing the transaction. Thread-origin insert_active additionally
+locks/checks the owner-private source in the same workspace before publication.
+ThreadMetaRepository.publish_under_live_lock fences only short file operations
+under workspace/actor/thread locks. Callers must not put model or network work in
+that callback. Controlled withdrawal/cancellation and physical mount checks remain
+required; isolated byte-level mains do not close those gates.
