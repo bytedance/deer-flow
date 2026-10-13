@@ -1226,6 +1226,26 @@ This release closes that milestone with **621 merged pull requests**.
 
 ### Fixed
 
+- **channels:** `FeishuChannel.stop()` and `DingTalkChannel.stop()` now end
+  their SDK threads instead of timing out. Both SDKs run on a thread-private
+  event loop that only returned on a fatal error, so every stop joined for
+  5s, raised `ChannelStopTimeout`, and left the platform connection alive on
+  the old process — a restart, a redeploy, and the upcoming per-provider
+  leader hand-off could not release the connection. Each channel now
+  publishes that loop under a lock; `stop()` schedules a shutdown on it, then
+  joins. Feishu disarms lark-oapi's `_auto_reconnect` before closing the
+  socket and stopping the loop, because the SDK's `start()` otherwise swallows
+  the interrupted loop in its reconnect branch and dials again; DingTalk
+  drives its own copy of dingtalk-stream's connect loop (the SDK's is
+  `while True` and catches `CancelledError`), re-checks the running flag
+  before every dial, runs the blocking ticket request off the loop, and logs
+  only the endpoint rather than the ticket-bearing connection payload. A
+  shared `shutdown_private_loop` cancels the SDK's leftover tasks with a
+  bounded drain and closes the loop, and a stop requested before the client
+  exists never dials. `ChannelStopTimeout` is now reserved for a thread that
+  genuinely wedges inside an SDK call. Telegram already stopped its loop
+  this way and is unchanged.
+
 - **frontend:** The user-management settings page no longer renders a doomed
   query on the static-website demo, and a non-admin `?settings=users` deep
   link no longer opens the admin-only panel. The page gated only on

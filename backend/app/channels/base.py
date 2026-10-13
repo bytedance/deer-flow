@@ -43,6 +43,33 @@ class ChannelStopTimeout(RuntimeError):
     """A channel still owns a live provider worker after bounded teardown."""
 
 
+PRIVATE_LOOP_DRAIN_TIMEOUT_SECONDS = 1.0
+
+
+def shutdown_private_loop(loop: asyncio.AbstractEventLoop, *, drain_timeout: float = PRIVATE_LOOP_DRAIN_TIMEOUT_SECONDS) -> None:
+    """Cancel what is still scheduled on a thread-private SDK loop, then close it.
+
+    Runs on the thread that owns ``loop`` once its ``run_until_complete`` or
+    ``run_forever`` has returned. Provider SDKs leave their own tasks behind
+    (lark-oapi's ping and receive loops, dingtalk-stream's keepalive); cancelling
+    them with a bounded drain keeps the thread exit inside the channel's stop
+    budget, and a task that refuses to finish is abandoned with the loop rather
+    than joined.
+    """
+    try:
+        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            loop.run_until_complete(asyncio.wait(pending, timeout=drain_timeout))
+        loop.run_until_complete(loop.shutdown_asyncgens())
+    except Exception:
+        logger.debug("Error draining a private channel loop before close", exc_info=True)
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
 @dataclass(eq=False, slots=True)
 class _ThreadsafeSubmission:
     coroutine: Coroutine[Any, Any, Any]

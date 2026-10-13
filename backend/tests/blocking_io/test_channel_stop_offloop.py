@@ -6,8 +6,8 @@ every run, stream and channel the Gateway serves:
 
 - Slack: ``SocketModeClient.close()`` joins the SDK's message-processor thread
   and waits for in-flight listeners.
-- Feishu / DingTalk: ``stop()`` joins the SDK thread with a 5s timeout, and
-  that thread only returns on a fatal error.
+- Feishu / DingTalk: ``stop()`` asks the SDK thread's private event loop to
+  shut down, then joins that thread with a 5s timeout.
 - Discord: ``stop()`` joins the client thread with a 10s timeout, which a
   timed-out client close or a slow ``_run_client()`` drain can use up.
 
@@ -18,6 +18,7 @@ gate raises ``BlockingError`` from the thread-join lock wait.
 
 from __future__ import annotations
 
+import asyncio
 import threading
 
 import pytest
@@ -61,3 +62,35 @@ async def test_stop_joins_sdk_thread_off_loop(channel_cls) -> None:
 
     assert not sdk_thread.is_alive()
     assert channel._thread is None
+
+
+@pytest.mark.parametrize(
+    ("channel_cls", "loop_attr"),
+    [(FeishuChannel, "_ws_loop"), (DingTalkChannel, "_stream_loop")],
+)
+async def test_stop_ends_live_sdk_loop_off_loop(channel_cls, loop_attr) -> None:
+    sdk_loop = asyncio.new_event_loop()
+    ready = threading.Event()
+
+    def run_sdk_loop() -> None:
+        asyncio.set_event_loop(sdk_loop)
+        sdk_loop.call_soon(ready.set)
+        try:
+            sdk_loop.run_forever()
+        finally:
+            sdk_loop.close()
+
+    sdk_thread = threading.Thread(target=run_sdk_loop, daemon=True)
+    sdk_thread.start()
+    assert await asyncio.to_thread(ready.wait, 5)
+    channel = channel_cls(MessageBus(), {})
+    channel._thread = sdk_thread
+    channel._running = True
+    setattr(channel, loop_attr, sdk_loop)
+
+    await channel.stop()
+
+    assert not sdk_thread.is_alive()
+    assert sdk_loop.is_closed()
+    assert channel._thread is None
+    assert getattr(channel, loop_attr) is None

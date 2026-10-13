@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -1805,6 +1806,114 @@ class TestStop:
 
             thread.join.assert_called_once_with(timeout=5)
             assert channel._thread is thread
+
+        _run(go())
+
+    def test_stop_closes_live_stream_connection_and_exits_thread(self, monkeypatch):
+        pytest.importorskip("dingtalk_stream")
+        import dingtalk_stream
+        from websockets.asyncio.server import serve
+
+        async def go():
+            connected = asyncio.Event()
+            closed = asyncio.Event()
+
+            async def handler(websocket):
+                connected.set()
+                try:
+                    async for _ in websocket:
+                        pass
+                finally:
+                    closed.set()
+
+            async with serve(handler, "127.0.0.1", 0) as server:
+                port = server.sockets[0].getsockname()[1]
+
+                class _LocalStreamClient(dingtalk_stream.DingTalkStreamClient):
+                    def open_connection(self):
+                        return {"endpoint": f"ws://127.0.0.1:{port}", "ticket": "ticket"}
+
+                monkeypatch.setattr(dingtalk_stream, "DingTalkStreamClient", _LocalStreamClient)
+                channel = DingTalkChannel(MessageBus(), config={"client_id": "id", "client_secret": "secret"})
+                await channel.start()
+                thread = channel._thread
+                assert thread is not None and thread.is_alive()
+                await asyncio.wait_for(connected.wait(), 5)
+
+                started = time.monotonic()
+                await channel.stop()
+                elapsed = time.monotonic() - started
+
+                assert elapsed < 5, f"stop() took {elapsed:.2f}s"
+                await asyncio.wait_for(closed.wait(), 5)
+                assert not thread.is_alive()
+                assert channel._thread is None
+                assert channel._stream_client is None
+                assert channel.is_running is False
+
+        _run(go())
+
+    def test_stop_interrupts_open_connection_retry_sleep(self, monkeypatch):
+        pytest.importorskip("dingtalk_stream")
+        import dingtalk_stream
+
+        attempted = threading.Event()
+
+        class _RefusedStreamClient(dingtalk_stream.DingTalkStreamClient):
+            def open_connection(self):
+                attempted.set()
+                return None
+
+        monkeypatch.setattr(dingtalk_stream, "DingTalkStreamClient", _RefusedStreamClient)
+
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={"client_id": "id", "client_secret": "secret"})
+            await channel.start()
+            thread = channel._thread
+            assert await asyncio.to_thread(attempted.wait, 5)
+
+            started = time.monotonic()
+            await channel.stop()
+            elapsed = time.monotonic() - started
+
+            assert elapsed < 5, f"stop() took {elapsed:.2f}s"
+            assert not thread.is_alive()
+            assert channel._thread is None
+
+        _run(go())
+
+    def test_stop_before_stream_client_exists_never_connects(self, monkeypatch):
+        pytest.importorskip("dingtalk_stream")
+        import dingtalk_stream
+
+        gate = threading.Event()
+        opened = threading.Event()
+
+        class _GatedStreamClient(dingtalk_stream.DingTalkStreamClient):
+            def __init__(self, *args, **kwargs):
+                gate.wait(timeout=5)
+                super().__init__(*args, **kwargs)
+
+            def open_connection(self):
+                opened.set()
+                return None
+
+        monkeypatch.setattr(dingtalk_stream, "DingTalkStreamClient", _GatedStreamClient)
+
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={"client_id": "id", "client_secret": "secret"})
+            await channel.start()
+            thread = channel._thread
+
+            stop_task = asyncio.create_task(channel.stop())
+            await asyncio.sleep(0.05)
+            assert not stop_task.done()
+            gate.set()
+            await stop_task
+
+            assert not thread.is_alive()
+            assert channel._thread is None
+            assert not opened.is_set()
 
         _run(go())
 
