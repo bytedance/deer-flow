@@ -132,6 +132,7 @@ class AioSandbox(Sandbox):
         self._deerflow_base_identity: str | None = None
         self._deerflow_image_profile_revision: str | None = None
         self._deerflow_managed_image_local = False
+        self._deerflow_image_startup_missing = False
         self._session_creation_state_lock = threading.Lock()
         self._shell_session_creation_state = _SessionCreationState()
         self._bash_session_creation_state = _SessionCreationState()
@@ -344,7 +345,7 @@ class AioSandbox(Sandbox):
             # before its execution lease ends. Fencing on pending let a
             # concurrent acquire recycle a healthy container that another run
             # was actively using.
-            return bool(self._default_shell_corrupted or shell.ambiguous or bash.ambiguous)
+            return bool(self._default_shell_corrupted or shell.ambiguous or bash.ambiguous or getattr(self, "_deerflow_image_startup_missing", False))
 
     def _create_shell_session(self, client) -> str:
         session_id = str(uuid.uuid4())
@@ -783,6 +784,27 @@ class AioSandbox(Sandbox):
             raise RuntimeError("Sandbox command environment capability probe failed")
         self._command_environment_supported = True
         return True
+
+    def verify_legacy_image_credentials(self, expected_env: dict[str, str]) -> bool | None:
+        """Check key presence in an old image without sending or reading its value.
+
+        A transient provisioning probe may have created this container with
+        image keys cleared. A later 404 proves the per-command API is absent;
+        such a container must be recycled before image generation. Other probe
+        failures remain unknown and do not authorize a legacy command.
+        """
+        keys = [name for name in ("IMAGE_GENERATION_API_KEY", "GEMINI_API_KEY", "MINIMAX_API_KEY") if expected_env.get(name)]
+        if len(keys) != 1:
+            return None
+        name = keys[0]
+        command = f'if [ -n "${{{name}:-}}" ]; then printf "%s" "__DEERFLOW_IMAGE_KEY_PRESENT__"; else printf "%s" "__DEERFLOW_IMAGE_KEY_MISSING__"; fi'
+        result = self.execute_command(command, timeout=10).strip()
+        if result == "__DEERFLOW_IMAGE_KEY_PRESENT__":
+            return True
+        if result == "__DEERFLOW_IMAGE_KEY_MISSING__":
+            self._deerflow_image_startup_missing = True
+            return False
+        return None
 
     def execute_command(
         self,

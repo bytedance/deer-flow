@@ -42,21 +42,26 @@ Webpack is the default development bundler. Use `DEER_FLOW_DEV_BUNDLER=turbo` wi
 
 On Windows `pnpm dev` binds `127.0.0.1` by default because Hyper-V/winnat excluded port ranges can reject Next's default `0.0.0.0` bind with `EACCES` (#2870). Pass `pnpm dev -- --hostname 0.0.0.0` to listen on a LAN interface instead.
 
-Rstest runs them as two projects (`rstest.config.ts`). `*.test.ts` / `*.test.tsx` run in a plain **node** environment — that is nearly the whole suite, and it is the default for anything that is pure logic. `*.dom.test.ts` / `*.dom.test.tsx` run in **happy-dom**, for tests that need a document: hooks driven through `renderHook` from `@testing-library/react`, and components. Keep the split — a DOM environment costs roughly 3x the runtime of the node suite, so tests that do not render should not opt into it. A hook whose behavior only exists under real React (effect ordering, cleanup on unmount, re-render on store change) belongs in a `.dom.test.*` file rather than a node test that mocks `react` itself.
+Rstest uses node for `*.test.ts(x)` and happy-dom for `*.dom.test.ts(x)`
+(`rstest.config.ts`). Keep pure logic in node: DOM tests cost about 3x more.
+Components and hooks that depend on real React effects, cleanup, or rerenders
+belong in DOM tests, rather than node tests that mock React.
 
 E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`. The real-backend auth contract in `tests/e2e-real-backend/auth-disabled-contract.spec.ts` and `backend/tests/test_auth_me_permissions.py` pin the complete route-permission list; update both when adding registered permissions (including `projects:read/write/delete`).
 
-The dedicated `run-history.ts` hook replaces the unpaged runs hook. Show counts
-only after a successful history read, never during initial loading or errors.
-Scheduled run history uses task/page query keys and the existing live offset API.
-Fetch 51 rows to display 50 plus a next-page sentinel; never append pages. Only
-page zero polls or refreshes on focus/reconnect. Task switches reset to page zero,
-and consumed AbortSignals cancel obsolete reads. Live offsets are not snapshots;
-explicit mutations or navigation may observe newly inserted runs.
+Use `run-history.ts`, not the unpaged runs hook. Show counts only after a
+successful read. Use task/page query keys and live offsets; fetch 51 rows for
+50 displayed rows plus a next-page sentinel, without appending pages. Only page
+zero polls or refreshes on focus/reconnect. Task switches reset to page zero;
+consumed AbortSignals cancel stale reads. Offsets are live, so mutations or
+navigation may reveal newly inserted runs.
 Run status `unmet` identifies a finished occurrence whose scheduled goal was not satisfied; keep it distinct from execution failure.
 `core/scheduled-tasks/goal-outcome.ts` maps goal verdicts and host reason codes for run history; show known codes as localized labels; unknown codes, raw run errors and the evaluator's reason stay behind the run row's Details. Check-failure codes are "unchecked", not a miss. `contracts/scheduled_goal_notes_contract.json` pins the host strings it and `run-error.ts` match.
 Scheduled-task views read state through the pure `core/scheduled-tasks` helpers (`status.ts`, `actions.ts`, `format.ts`, `describeTaskSchedule`, `errors.ts`) so list, detail and chat card agree. "Is a run active?" is `status === "running"` or `active_run_status` (a recurring task stays `enabled` while it runs). Default views show no IDs, ISO times, cron strings or enum names; errors localize by `detail.code` (`contracts/scheduled_task_errors_contract.json`) with raw text only behind Details. `tests/e2e/utils/readable.ts` and `tests/unit/helpers/readable.ts` assert this.
-The tasks page (`app/workspace/scheduled-tasks/page.tsx`) only composes `components/workspace/scheduled-tasks/*`: list with status tabs, detail (Runs / Stops when / goal / Does / notes / History), outcome notice, create/edit/duplicate dialog (PATCH sends only changed fields, `null` clears) and the renew dialog that a `limits_exhausted` Resume opens. `?task_id=` selects a task; `?thread_id=` scopes the list to one chat.
+The tasks page composes `components/workspace/scheduled-tasks/*` for the tabbed
+list, detail, outcome, create/edit/duplicate, and renewal after a
+`limits_exhausted` Resume. PATCH sends changed fields only; `null` clears.
+`?task_id=` selects a task, while `?thread_id=` scopes the list to a chat.
 `notification_group_connection_id` adds one Feishu group without changing personal
 notifications. The selector requires `features.scheduled_tasks.group_notifications`
 (absent = false); otherwise a saved target is preserved but explicitly clearable.
@@ -75,18 +80,7 @@ Chat pages pass `useThreadScheduledTaskEvents` data to `MessageList` (`scheduled
 
 ## Architecture
 
-The administrator-only Models settings page also renders an image provider
-section when `/api/features.image_generation_management.enabled` is true.
-An absent flag hides the section because older Gateways lack its management API.
-The feature query is disabled for non-admins and static website builds. It calls
-`/api/image-generation/profiles`, stores no API key in browser
-state after save, and shows separate generation and reference-edit test
-results. The server entry is read-only but has generation and edit test actions
-through `/api/image-generation/server/test/{operation}`. Admins set the server or enabled web profile as the persisted image
-default through `/api/image-generation/profiles/default`; the selected card has
-a visible corner tag. The saved profile applies to new image tool calls without refreshing
-the frontend or restarting a sandbox. The API projects a dedicated image
-readiness status; it is separate from chat-model and channel connection types.
+Image-model settings behavior is documented in the image-generation section of `../README.md`.
 
 ```
 Frontend (Next.js) ──▶ LangGraph SDK ──▶ LangGraph Backend (lead_agent)

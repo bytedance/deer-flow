@@ -828,7 +828,9 @@ class DeerFlowTUI(App):
         self._refresh_status()
 
     def _tick_spinner(self) -> None:
-        if self._streaming:
+        # A queued Textual timer can fire after the screen is removed during
+        # shutdown, even while a worker still has the streaming flag set.
+        if self._streaming and len(self.query("#status")):
             self._spinner_idx = (self._spinner_idx + 1) % len(SYMBOLS["spinner"])
             self._refresh_status()
 

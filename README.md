@@ -1473,6 +1473,10 @@ old container's environment until removal. Remote/provisioner AIO still needs
 `/v1/bash/exec` for web-managed and typed server keys. Changing legacy
 `sandbox.environment` requires a Gateway restart. A typed server model or key
 change uses a separate local AIO container with the selected startup credentials.
+If the initial AIO capability check times out, generic sandbox tools remain
+available without web image credentials. If a later image request confirms an
+older image, DeerFlow recycles that container instead of running generation
+without a key; retry the image request in a new turn after replacement.
 A chat choice of a new server model uses a separate
 container identity; the previous container remains available until normal
 idle or capacity cleanup. Other existing containers still need recreation to

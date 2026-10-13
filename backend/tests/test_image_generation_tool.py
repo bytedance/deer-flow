@@ -167,8 +167,8 @@ def test_local_sandbox_powershell_fallback_receives_image_launcher(monkeypatch):
     )
     observed = {}
 
-    def fake_run(args, timeout, env, *, encoding=None):
-        observed.update(args=args, env=env, encoding=encoding)
+    def fake_run(args, timeout, env, *, encoding=None, fallback_encoding=None):
+        observed.update(args=args, env=env, encoding=encoding, fallback_encoding=fallback_encoding)
         return "__DEERFLOW_IMAGE_OK_test__\n", "", 0, False
 
     monkeypatch.setattr(local_module.os, "name", "nt")
@@ -183,6 +183,7 @@ def test_local_sandbox_powershell_fallback_receives_image_launcher(monkeypatch):
     assert observed["args"][3].endswith(command)
     assert observed["env"]["IMAGE_GENERATION_API_KEY"] == "synthetic-secret"
     assert observed["encoding"] == "utf-8"
+    assert observed["fallback_encoding"]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires a Windows shell fallback")
@@ -281,6 +282,7 @@ def test_managed_container_rejects_legacy_fallback_after_profile_is_disabled(mon
     provider._bind_image_profile_context(sandbox, "thread", "user")
     assert sandbox._deerflow_image_profile_revision == managed.revision
     monkeypatch.setattr(sandbox, "supports_command_environment", lambda: False)
+    monkeypatch.setattr(sandbox, "verify_legacy_image_credentials", lambda _env: True)
     monkeypatch.setattr(sandbox_tools, "ensure_sandbox_initialized", lambda _runtime: sandbox)
     monkeypatch.setattr(sandbox_tools, "is_local_sandbox", lambda _runtime: False)
     commands = []
@@ -376,6 +378,7 @@ def test_web_image_profile_selects_container_command_mode_only_for_matching_revi
     sandbox._deerflow_managed_image_local = True
     sandbox._deerflow_image_profile_revision = "revision-1"
     monkeypatch.setattr(sandbox, "supports_command_environment", lambda: supports_env)
+    monkeypatch.setattr(sandbox, "verify_legacy_image_credentials", lambda _env: True)
     monkeypatch.setattr(image_tool, "get_app_config", config)
     monkeypatch.setattr(image_tool, "resolve_image_generation_profile", lambda _env: (profile, "managed", profile))
     monkeypatch.setattr(sandbox_tools, "ensure_sandbox_initialized", lambda _runtime: sandbox)
@@ -394,6 +397,27 @@ def test_web_image_profile_selects_container_command_mode_only_for_matching_revi
     sandbox._deerflow_image_profile_revision = "previous-revision"
     assert "IMAGE_PROFILE_CHANGED" in image_tool.generate_image_tool.func(*args)
     assert received == [profile.command_environment() if supports_env else None]
+
+
+def test_uncredentialed_legacy_image_container_is_fenced_before_generation(monkeypatch):
+    from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
+    from deerflow.sandbox import tools as sandbox_tools
+
+    profile = ManagedImageGenerationProfile(name="image", provider="openai", model="test-image", base_url="https://images.example/v1", api_key="synthetic-secret", revision="revision-1")
+    sandbox = object.__new__(AioSandbox)
+    sandbox._deerflow_managed_image_local = True
+    sandbox._deerflow_image_profile_revision = profile.revision
+    monkeypatch.setattr(sandbox, "supports_command_environment", lambda: False)
+    monkeypatch.setattr(sandbox, "execute_command", lambda _command, **_kwargs: "__DEERFLOW_IMAGE_KEY_MISSING__")
+    monkeypatch.setattr(image_tool, "get_app_config", config)
+    monkeypatch.setattr(image_tool, "resolve_image_generation_profile", lambda _env: (profile, "managed", profile))
+    monkeypatch.setattr(sandbox_tools, "ensure_sandbox_initialized", lambda _runtime: sandbox)
+    monkeypatch.setattr(sandbox_tools, "is_local_sandbox", lambda _runtime: False)
+    monkeypatch.setattr(sandbox_tools, "_execute_bash_command", lambda *_args, **_kwargs: pytest.fail("image generation ran without credentials"))
+
+    result = image_tool.generate_image_tool.func(SimpleNamespace(context={}), "/mnt/user-data/workspace/prompt.json", "/mnt/user-data/outputs/slide.png")
+    assert "IMAGE_PROFILE_CHANGED" in result
+    assert sandbox._deerflow_image_startup_missing is True
 
 
 def test_rejects_path_traversal_before_sandbox(monkeypatch):

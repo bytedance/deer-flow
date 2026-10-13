@@ -194,8 +194,14 @@ def _generate_image_with_selected_source(runtime: Runtime, prompt_file: str, out
             if managed is None or getattr(sandbox, "_deerflow_image_profile_revision", None) != managed.revision:
                 return "Error: IMAGE_PROFILE_CHANGED. The image model changed during this run; retry in a new turn."
             if not sandbox.supports_command_environment():
-                # This container was recreated with this exact profile at startup.
-                # Old AIO images execute through their persistent shell endpoint.
+                # A failed creation-time probe may have left this old image
+                # without startup credentials. Fence it for provider recycle
+                # before using the persistent shell for image generation.
+                key_present = sandbox.verify_legacy_image_credentials(env)
+                if key_present is False:
+                    return "Error: IMAGE_PROFILE_CHANGED. The legacy image sandbox has no startup credentials; retry in a new turn after it is replaced."
+                if key_present is None:
+                    return "Error: IMAGE_PROVIDER_UNAVAILABLE. Could not verify legacy sandbox credentials; retry shortly."
                 command_env = None
         thread_data = None
         if is_local_sandbox(runtime):

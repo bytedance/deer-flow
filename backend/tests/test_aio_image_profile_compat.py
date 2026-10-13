@@ -178,6 +178,46 @@ def test_actual_missing_bash_route_is_classified_as_legacy(caplog):
         sandbox.close()
 
 
+@pytest.mark.parametrize(
+    ("probe_result", "expected", "recycle"),
+    [
+        ("__DEERFLOW_IMAGE_KEY_PRESENT__", True, False),
+        ("__DEERFLOW_IMAGE_KEY_MISSING__", False, True),
+        ("Error: connection timed out", None, False),
+    ],
+)
+def test_legacy_image_key_check_never_sends_secret_and_fences_missing_startup_key(monkeypatch, probe_result, expected, recycle):
+    sandbox = object.__new__(AioSandbox)
+    sandbox._deerflow_image_startup_missing = False
+    commands = []
+    monkeypatch.setattr(sandbox, "execute_command", lambda command, **kwargs: commands.append((command, kwargs)) or probe_result)
+
+    assert sandbox.verify_legacy_image_credentials({"IMAGE_GENERATION_API_KEY": "synthetic-secret"}) is expected
+    assert sandbox._deerflow_image_startup_missing is recycle
+    assert len(commands) == 1
+    assert "IMAGE_GENERATION_API_KEY" in commands[0][0]
+    assert "synthetic-secret" not in commands[0][0]
+    assert commands[0][1] == {"timeout": 10}
+
+
+def test_uncredentialed_legacy_container_is_recycled_instead_of_parked_warm(monkeypatch):
+    sandbox = AioSandbox(id="synthetic", base_url="http://127.0.0.1:18080")
+    try:
+        monkeypatch.setattr(sandbox, "execute_command", lambda *_args, **_kwargs: "__DEERFLOW_IMAGE_KEY_MISSING__")
+        assert sandbox.verify_legacy_image_credentials({"IMAGE_GENERATION_API_KEY": "synthetic-secret"}) is False
+        assert sandbox.requires_container_recycle is True
+
+        provider = object.__new__(AioSandboxProvider)
+        provider._lock = threading.RLock()
+        provider._sandboxes = {sandbox.id: sandbox}
+        destroyed = []
+        monkeypatch.setattr(provider, "_destroy_tracked", lambda sandbox_id, **_kwargs: destroyed.append(sandbox_id) or True)
+        provider._release_idle_sandbox(sandbox.id)
+        assert destroyed == [sandbox.id]
+    finally:
+        sandbox.close()
+
+
 def _creation_provider(monkeypatch, tmp_path, *, supports_env):
     provider = object.__new__(AioSandboxProvider)
     provider._config = {"replicas": 3, "command_timeout": 600}
@@ -287,6 +327,46 @@ async def test_unknown_image_capability_does_not_block_generic_aio_creation_or_i
     assert "synthetic-secret" not in str(calls)
     assert [item[0] for item in destroyed] == probes
     assert user_file.read_text(encoding="utf-8") == "persistent plan"
+
+
+def test_unknown_probe_then_legacy_image_call_recycles_before_reprovision(monkeypatch, tmp_path):
+    from deerflow.sandbox import tools as sandbox_tools
+    from deerflow.tools.builtins import image_generation_tool as image_tool
+
+    provider, sandbox_id, calls, _, _ = _creation_provider(monkeypatch, tmp_path, supports_env=True)
+    monkeypatch.setattr(provider, "_probe_command_environment", lambda _info: (_ for _ in ()).throw(OSError("temporary timeout")))
+    assert provider._create_sandbox("thread", sandbox_id, user_id="user") == sandbox_id
+    assert calls[-1][2]["extra_environment"]["IMAGE_GENERATION_API_KEY"] == ""
+
+    sandbox = AioSandbox(id=sandbox_id, base_url="http://127.0.0.1:18080")
+    try:
+        sandbox._deerflow_managed_image_local = True
+        sandbox._deerflow_image_profile_revision = "revision-1"
+        monkeypatch.setattr(sandbox, "supports_command_environment", lambda: False)
+        monkeypatch.setattr(sandbox, "execute_command", lambda *_args, **_kwargs: "__DEERFLOW_IMAGE_KEY_MISSING__")
+        profile = ManagedImageGenerationProfile(name="image", provider="openai", model="test-image", base_url="https://images.example/v1", api_key="synthetic-secret", revision="revision-1")
+        settings = AppConfig.model_validate({"sandbox": {"use": "test", "environment": {}}})
+        monkeypatch.setattr(image_tool, "get_app_config", lambda: settings)
+        monkeypatch.setattr(image_tool, "resolve_image_generation_profile", lambda _env: (profile, "managed", profile))
+        monkeypatch.setattr(image_tool, "image_profile_choice_needed", lambda _env: False)
+        monkeypatch.setattr(sandbox_tools, "ensure_sandbox_initialized", lambda _runtime: sandbox)
+        monkeypatch.setattr(sandbox_tools, "_execute_bash_command", lambda *_args, **_kwargs: pytest.fail("legacy image command ran"))
+        result = image_tool.generate_image_tool.func(SimpleNamespace(context={}, state={}), "/mnt/user-data/workspace/prompt.json", "/mnt/user-data/outputs/image.png")
+        assert "IMAGE_PROFILE_CHANGED" in result
+        assert sandbox.requires_container_recycle is True
+
+        provider._lock = threading.RLock()
+        provider._sandboxes = {sandbox_id: sandbox}
+        destroyed = []
+        monkeypatch.setattr(provider, "_destroy_tracked", lambda sid, **_kwargs: destroyed.append(sid) or True)
+        provider._release_idle_sandbox(sandbox_id)
+        assert destroyed == [sandbox_id]
+
+        monkeypatch.setattr(provider, "_probe_command_environment", lambda _info: False)
+        assert provider._create_sandbox("thread", sandbox_id, user_id="user") == sandbox_id
+        assert calls[-1][2]["extra_environment"]["IMAGE_GENERATION_API_KEY"] == "synthetic-secret"
+    finally:
+        sandbox.close()
 
 
 @pytest.mark.asyncio
