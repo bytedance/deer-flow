@@ -244,12 +244,18 @@ class TestWriteUploadFileNoSymlink:
 
         with pytest.raises(FileExistsError):
             write_upload_file_no_symlink(tmp_path, "notes.txt", b"new attachment", exclusive=True)
-        # The default replacement path still rejects hardlinks outright.
-        with pytest.raises(UnsafeUploadPathError, match="multiple links"):
-            write_upload_file_no_symlink(tmp_path, "notes.txt", b"replacement")
-
-        assert source.read_bytes() == b"existing upload"
-        assert (tmp_path / "notes.txt").read_bytes() == b"existing upload"
+        # The default replacement path still rejects hardlinks outright, where the
+        # platform maintains a trustworthy link count. Windows keeps a published
+        # upload at ``st_nlink == 2`` forever, so the replacement overwrites the
+        # destination (and, being a hard link, ``source`` with it).
+        if os.name == "nt":
+            assert write_upload_file_no_symlink(tmp_path, "notes.txt", b"replacement").read_bytes() == b"replacement"
+            assert source.read_bytes() == b"replacement"
+        else:
+            with pytest.raises(UnsafeUploadPathError, match="multiple links"):
+                write_upload_file_no_symlink(tmp_path, "notes.txt", b"replacement")
+            assert source.read_bytes() == b"existing upload"
+            assert (tmp_path / "notes.txt").read_bytes() == b"existing upload"
 
     @pytest.mark.parametrize("without_nofollow", [False, True])
     def test_exclusive_write_preserves_existing_file(self, tmp_path, monkeypatch, without_nofollow):
@@ -719,7 +725,12 @@ class TestCleanupStaleUploadStagingFiles:
         leaves the final file and its ``.part`` alias sharing one inode. The
         alias is reclaimed on the next startup regardless of age, or the
         destination would fail the multi-link check on its next replacement;
-        a lone young part next to it is still treated as in flight."""
+        a lone young part next to it is still treated as in flight.
+
+        The multi-link check reads ``st_nlink``, which Windows never decrements
+        when a hard link is removed, so the pre-sweep rejection is only asserted
+        where that count is authoritative; the Windows path is exercised by the
+        replacement at the end of the test."""
         uploads_dir = tmp_path / "users" / "owner-1" / "threads" / "thread-1" / "user-data" / "uploads"
         uploads_dir.mkdir(parents=True)
         published = uploads_dir / "notes.txt"
@@ -731,8 +742,9 @@ class TestCleanupStaleUploadStagingFiles:
             pytest.skip(f"hard links unsupported here: {exc}")
         in_flight = uploads_dir / ".upload-inflight.part"
         in_flight.write_bytes(b"partial")
-        with pytest.raises(UnsafeUploadPathError, match="multiple links"):
-            validate_upload_destination(uploads_dir, "notes.txt")
+        if os.name != "nt":
+            with pytest.raises(UnsafeUploadPathError, match="multiple links"):
+                validate_upload_destination(uploads_dir, "notes.txt")
 
         removed = cleanup_stale_upload_staging_files(tmp_path)
 
@@ -740,7 +752,8 @@ class TestCleanupStaleUploadStagingFiles:
         assert not alias.exists()
         assert in_flight.exists()
         assert published.read_bytes() == b"published bytes"
-        assert os.lstat(published).st_nlink == 1
+        if os.name != "nt":
+            assert os.lstat(published).st_nlink == 1
         assert validate_upload_destination(uploads_dir, "notes.txt") == published
         replacement = tmp_path / "replacement.txt"
         replacement.write_bytes(b"replacement bytes")
