@@ -229,7 +229,7 @@ def _apply_legacy_thinking_settings(
         if model_config.when_thinking_disabled is not None:
             # User-provided disable settings win on conflicts; profile keys survive.
             _merge_thinking_payload(settings, model_config.when_thinking_disabled)
-        elif has_thinking_settings and (effective_wte.get("extra_body") or {}).get("thinking", {}).get("type"):
+        elif has_thinking_settings and ((effective_wte.get("extra_body") or {}).get("thinking") or {}).get("type"):
             # OpenAI-compatible gateway: thinking is nested under extra_body
             _merge_thinking_payload(settings, {"extra_body": {"thinking": {"type": "disabled"}}})
             settings["reasoning_effort"] = "minimal"

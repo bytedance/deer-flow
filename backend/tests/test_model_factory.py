@@ -442,8 +442,16 @@ def test_legacy_non_mapping_template_values_are_forwarded_not_rejected(monkeypat
         (True, {"extra_body": None, "thinking": {"type": "enabled"}}, {"extra_body": None, "thinking": {"type": "enabled"}}),
         (False, {"extra_body": None}, {}),
         (False, {"thinking": None}, {}),
+        (False, {"extra_body": {"thinking": None}}, {}),
+        (True, {"extra_body": {"thinking": None}}, {"extra_body": {"thinking": None}}),
+        (False, {"extra_body": {"thinking": None}, "thinking": {"type": "enabled"}}, {"thinking": {"type": "disabled"}}),
+        (
+            False,
+            {"extra_body": {"thinking": None, "chat_template_kwargs": {"enable_thinking": True}}},
+            {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}},
+        ),
     ],
-    ids=["thinking-off", "thinking-on", "extra-body-null", "thinking-null"],
+    ids=["thinking-off", "thinking-on", "extra-body-null", "thinking-null", "nested-null-off", "nested-null-on", "nested-null-native-fallback", "nested-null-vllm-fallback"],
 )
 def test_legacy_null_template_values_build_on_both_thinking_paths(monkeypatch, thinking_enabled, when_thinking_enabled, expected):
     """A template key left blank in ``config.yaml`` (``extra_body:``, ``thinking:``) loads as an
