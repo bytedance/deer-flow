@@ -33,6 +33,8 @@ def options(team, payload, validate_text):
 
 
 def stored_result(team, job):
+    if job["status"] == "cancelled":
+        return None
     if "result" in job:
         return job["result"]
     return next((message["text"] for message in reversed(team["messages"]) if message["job_id"] == job["id"] and message["kind"] in TERMINAL), None)
@@ -86,7 +88,7 @@ def page(team, payload, validate_text, *, results=False):
             continue
         if results:
             item = job_record(team, record)
-            anchor = record["id"]
+            anchor = token(record_job_id, record["kind"])
         else:
             content, cut = excerpt(record["text"], 6000)
             job = jobs.get(record_job_id)
