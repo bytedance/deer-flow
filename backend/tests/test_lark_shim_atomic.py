@@ -20,6 +20,7 @@ def test_install_shim_publishes_executable_files(tmp_path):
     assert [p.name for p in (tmp_path / "bin").glob("*.tmp")] == []
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows stat mode approximates POSIX permission bits (0o644 for every regular file); exact 0o755/0o644 assertions are POSIX-bound")
 def test_install_shim_publishes_correct_permissions(tmp_path):
     """Launcher and shim must be executable (0o755), marker readable (0o644)."""
     launcher = install_shim(str(tmp_path), version="1.2.3")
