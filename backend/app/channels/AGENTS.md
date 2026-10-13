@@ -1,11 +1,15 @@
 ### IM Channels System (`app/channels/`)
 
-Bridges external messaging platforms (Feishu, Slack, Telegram, Discord, DingTalk, GitHub) to the DeerFlow agent via Gateway's LangGraph-compatible API.
+IM channels reach DeerFlow through `langgraph-sdk` HTTP; Gateway owns thread lifecycle.
 
 WeChat `_read_outbound_bytes` reads cap+1 off-loop; overflow returns `None` before encryption/upload; caps <=0 are unlimited.
 Cursor writes drain before cancellation; token expiry drains cursor/auth clearing under `_auth_lock`.
 
-**Architecture**: Channels use `langgraph-sdk` HTTP to reach Gateway; Gateway owns thread lifecycle. The SDK client and raw-httpx `/goal` calls send process-local auth plus `_csrf_headers()`; internal auth is not CSRF-exempt.
+Telegram stop retries share live cleanup. If its loop dies, warn once and
+drop only the matching future under `_shutdown_resources_lock`; client closure
+remains unconfirmed.
+
+**Auth**: SDK and raw-httpx `/goal` calls send process-local auth plus `_csrf_headers()`; internal auth requires CSRF.
 
 **Components**:
 - `message_bus.py` - Inbound queue → dispatcher; outbound uses a dispatch-start listener snapshot. Unsubscribe neither cancels nor drains captured callbacks.
