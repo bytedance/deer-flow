@@ -359,3 +359,10 @@ incarnation before ASGI headers, then delegates native file/ZIP/Range behavior
 and FastAPI background tasks. Scoped responses are private/no-store. This is a
 before-send fence, not continuous-stream or credential-reset revocation. Artifact
 PUT, deletion races and full runtime/client coverage remain activation gates.
+
+Workspace upload DELETE uses ThreadMetaRepository.publish_under_live_lock for
+final private ownership/live scope and the short drained unlink worker. Keep
+WorkspaceAccessDenied/HTTPException outside generic 500 handling; stale admitted
+scope must not mutate files before returning a scope denial. No sandbox network
+or model work belongs inside this SQL transaction. Full lifecycle/client,
+cancellation/physical mounts and remaining M3-M11 gates still block activation.

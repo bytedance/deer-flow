@@ -73,3 +73,5 @@ Thread repository checkpoint: Jenkins #26 verifies SQL filtering before paginati
 Thread file checkpoint #31: actual scoped upload, shelf attachment and promotion byte-level main on both databases, plus legacy transfer regression. Short file publication uses live thread SQL fencing; scoped shelf copy and provenance use matching parent/source checks. Artifact ASGI/query, deletion/withdrawal races, full lifecycle and physical NAS/remote mounts remain required.
 
 Thread artifact GET checkpoint #33: real returned URLs, file/ZIP bytes, selector conflicts and before-send policy revocation on SQLite/PostgreSQL; native Range/download regressions retained. PUT, deletion/withdrawal, continuous streaming, token-reset and lifecycle/client/physical mount acceptance remain required.
+
+Upload DELETE checkpoint #35: SQL policy withdrawal between native admission and unlink preserves original bytes on both databases; authorized deletion and companion/symlink regressions pass. Final scope and short drained unlink share workspace/actor/thread locking. Mid-unlink cancellation and physical mount acceptance remain unproven.

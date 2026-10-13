@@ -80,7 +80,20 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
             service = service_module.WorkspaceService(WorkspaceRepository(sf))
             app = FastAPI()
             app.state.workspace_service = service
-            app.state.thread_store = ThreadMetaRepository(sf, workspace_required=True)
+            delete_revocation = {}
+
+            class RevokingThreadRepository(ThreadMetaRepository):
+                async def check_access(self, thread_id, user_id, *, require_existing=False):
+                    allowed = await super().check_access(thread_id, user_id, require_existing=require_existing)
+                    workspace_id = delete_revocation.pop("workspace_id", None)
+                    if allowed and workspace_id is not None:
+                        # Actual persisted withdrawal between owner admission and filesystem mutation.
+                        async with sf() as session:
+                            await session.execute(sa.text("UPDATE workspaces SET policy_version=policy_version+1 WHERE id=:id"), {"id": workspace_id})
+                            await session.commit()
+                    return allowed
+
+            app.state.thread_store = RevokingThreadRepository(sf, workspace_required=True)
             app.state.checkpointer = InMemorySaver()
             app.state.project_repo = ProjectRepository(sf)
             app.state.project_document_repo = ProjectDocumentRepository(sf)
@@ -203,6 +216,16 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                 assert delayed.status_code == 404 and b"private thread source" not in delayed.content
                 delayed = await client.get("/api/workspace-delayed-artifact/team-research-thread/" + skill_path, headers=team_headers)
                 assert delayed.status_code == 404 and b"# private pack" not in delayed.content
+                revocable = await client.post("/api/threads/team-research-thread/uploads", headers=team_headers, files={"files": ("revocation.txt", b"must survive withdrawn deletion", "text/plain")})
+                assert revocable.status_code == 200, revocable.text
+                delete_revocation["workspace_id"] = team
+                denied_delete = await client.delete("/api/threads/team-research-thread/uploads/revocation.txt", headers=team_headers)
+                assert denied_delete.status_code == 404, denied_delete.text
+                assert (team_root / "revocation.txt").is_file(), "withdrawn deletion removed the private file before final authorization"
+                assert (team_root / "revocation.txt").read_bytes() == b"must survive withdrawn deletion"
+                valid_delete = await client.delete("/api/threads/team-research-thread/uploads/revocation.txt", headers=team_headers)
+                assert valid_delete.status_code == 200, valid_delete.text
+                assert not (team_root / "revocation.txt").exists()
                 assert (await client.get("/api/threads/team-research-thread/uploads/list")).status_code == 404
                 assert (await client.post("/api/threads/team-research-thread/uploads", files={"files": ("foreign.txt", b"foreign write", "text/plain")})).status_code == 404
                 assert [r["thread_id"] for r in (await client.post("/api/threads/search", headers=team_headers, json={"limit": 1})).json()] == ["team-research-thread"]

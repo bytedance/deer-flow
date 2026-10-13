@@ -741,5 +741,48 @@
     },
     "self_review": "Wrapper delegates unchanged native responses, propagates private/no-store headers and FastAPI background tasks, and rechecks live workspace plus SQL private thread/incarnation before sending. Query UUID is a locator, never credential or authority.",
     "limits": "Isolated native LocalSandboxProvider/files; no physical NAS/AIO proof. Thread incarnation comparison implemented but recreation race not yet independently fault-tested. Credential token-version reset, continuous stream revocation, artifact PUT, upload deletion races, full thread/checkpoint/run/background, frontend and paired release remain required. Tenant activation stays compiled false."
+  },
+  "workspace_upload_delete": {
+    "base_commit": "035ca2c1",
+    "red": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 34,
+      "result": "FAILURE",
+      "archive_sha256": "9427900dd56cfdfa778cad0715749699b664bab00862665bfc1b11a675610a16",
+      "artifact": "m3-upload-delete-red.log",
+      "failed": 2,
+      "duration_seconds": 21.35,
+      "reason": "Actual SQL policy withdrawal after owner admission returns 404 but already deletes private file"
+    },
+    "green": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 35,
+      "result": "SUCCESS",
+      "archive_sha256": "0669e28a0cdd56fbf7eef60b192fbd2936cfa9f73a4ac95101d124a1eb5fe03c",
+      "artifact": "m3-upload-delete-green.log",
+      "passed": 4,
+      "duration_seconds": 26.75,
+      "warnings": [
+        "Existing Starlette TestClient/httpx deprecation warning"
+      ],
+      "command": "python -m pytest tests/test_workspace_http.py tests/test_uploads_router.py::test_delete_uploaded_file_keeps_the_converted_markdown tests/test_uploads_router.py::test_delete_uploaded_file_rejects_symlink_to_sibling_upload -q --tb=short --no-showlocals"
+    },
+    "scope": "Real JWT/RBAC/CSRF and SQL SQLite/PostgreSQL main: controlled actual persisted policy withdrawal after genuine native owner admission leaves private file present with original bytes; subsequent valid scope deletes it successfully. Retains native converted companion preservation and symlink refusal regressions.",
+    "source_sha256": {
+      "backend/app/gateway/routers/uploads.py": "6748c80f69c5355906b14ce5815bafc884c56dc0f39e0616761e20fbc6ac4cf5",
+      "backend/tests/test_workspace_http.py": "60f2bd184707868e161abe9766578007ad0dcbf6b40f3339af8e0477d8c74a60"
+    },
+    "cleanup": {
+      "34": {
+        "containers": [],
+        "networks": []
+      },
+      "35": {
+        "containers": [],
+        "networks": []
+      }
+    },
+    "self_review": "Scoped DELETE delegates short native unlink through publish_under_live_lock, serializing live membership/private thread check and drained file worker against workspace/actor revocation. Denials escape generic 500 and become uniform scope 404. No network/model calls under locks.",
+    "limits": "No physical NAS/AIO proof or new independent cancellation-under-unlink fault. Controlled mid-transfer/source-withdrawal faults, artifact PUT, full thread lifecycle/checkpoint/run/background/client and paired release remain required; compiled activation stays closed."
   }
 }

@@ -13,11 +13,13 @@ from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission, try_acquire_sandbox_for_request
-from app.gateway.deps import get_config
+from app.gateway.deps import get_config, get_thread_store
 from app.gateway.upload_ingestion import ThreadUploadIngestionService, UnsafeFilenameError, UnsafeUploadDestinationError
 from app.gateway.workspaces.dependencies import workspace_resource_scope
+from deerflow.authz.workspace import get_current_workspace
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import get_paths
+from deerflow.persistence.thread_meta import ThreadMetaRepository
 from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
@@ -507,7 +509,21 @@ async def list_uploaded_files(thread_id: ThreadId, request: Request) -> UploadLi
 async def delete_uploaded_file(thread_id: ThreadId, filename: str, request: Request) -> dict:
     """Delete a file from a thread's uploads directory."""
     try:
-        return await run_file_io(_delete_uploaded_file_for_thread, thread_id, filename, get_effective_user_id())
+        owner = get_effective_user_id()
+
+        async def delete():
+            return await run_file_io(_delete_uploaded_file_for_thread, thread_id, filename, owner)
+
+        if get_current_workspace() is None:
+            return await delete()
+        repo = get_thread_store(request)
+        if not isinstance(repo, ThreadMetaRepository):
+            raise HTTPException(status_code=503, detail="Workspace deletion requires persistent thread scope")
+        # Recheck live membership/private ownership while serializing with
+        # revocation; drain the short unlink worker before releasing SQL locks.
+        return await repo.publish_under_live_lock(thread_id, user_id=owner, publish=delete)
+    except (HTTPException, WorkspaceAccessDenied):
+        raise
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"File not found: {filename}")
     except PathTraversalError:

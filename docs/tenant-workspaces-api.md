@@ -283,3 +283,19 @@ verify no private bytes are sent. This does not prove continuous-stream withdraw
 credential-reset revocation, recreation faults, artifact writes, physical mounts
 or full browser/runtime integration. Upload deletion and full thread lifecycle
 remain required; compiled tenant activation stays closed.
+
+## Thread upload deletion (partial M3)
+
+Scoped DELETE rechecks live private-thread access under workspace/actor/thread SQL
+locks immediately before its native unlink, and drains the short worker before
+releasing those locks. Revocation denials propagate as scope 404 without deleting
+the file. An authorized operation serialized before a withdrawal may finish; an
+operation reaching the final check afterward is refused. Legacy companion-file
+preservation and symlink confinement remain unchanged.
+
+Jenkins #34 reproduced policy withdrawal after genuine owner admission deleting
+bytes despite a 404. #35 passed the SQLite/PostgreSQL main with actual persisted
+withdrawal, original-byte preservation and later authorized deletion, plus two
+native deletion regressions (4 passed, 26.75s). Cancellation during unlink,
+physical NAS/AIO, mid-transfer faults and full lifecycle/client acceptance remain
+unproven; tenant activation remains blocked.

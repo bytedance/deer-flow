@@ -2932,3 +2932,5 @@ Native thread metadata APIs and project thread lists now carry trusted workspace
 Workspace-scoped thread uploads and project file transfers now preserve original files and private conversation ownership. The [file transfer checkpoint](docs/tenant-workspaces-api.md#thread-uploads-and-project-transfer-partial-m3) records real byte checks and remaining artifact, runtime, physical mount and frontend requirements. Tenant deployment remains blocked.
 
 Workspace thread download links now retain their space locator and recheck access before sending file or archive bytes. See [download validation and limits](docs/tenant-workspaces-api.md#thread-artifact-downloads-partial-m3). This remains partial tenant integration; deployment activation stays blocked.
+
+Workspace upload deletion now rechecks live access before removing bytes. The [deletion checkpoint](docs/tenant-workspaces-api.md#thread-upload-deletion-partial-m3) records withdrawal and native file safety verification; full tenant activation remains blocked.
