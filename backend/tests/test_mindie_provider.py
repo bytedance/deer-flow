@@ -1076,6 +1076,37 @@ class TestParserToSerializerChain:
 
         assert "<parameter=content>{1, 2, 3}</parameter>" in fixed[0].content
 
+    @pytest.mark.parametrize(
+        "raw_value",
+        ["{1e400}", "{-1e400}", "{1, 1e400}", "{(1e400,)}", "[{'n': {1e400}}]", "{'n': {1e400}}", "{'n': [{1e400}]}", "{'n': (1e400,)}"],
+    )
+    def test_non_finite_literal_containers_remain_text_on_replay(self, raw_value):
+        content = f"<tool_call><function=echo><parameter=data>{raw_value}</parameter></function></tool_call>"
+        _, calls = _parse_xml_tool_call_to_dict(content)
+        assert calls[0]["args"]["data"] == raw_value
+
+        fixed = _fix_messages([AIMessage(content="", tool_calls=calls)])
+        _, replayed = _parse_xml_tool_call_to_dict(fixed[0].content)
+        assert replayed[0]["args"]["data"] == raw_value
+
+    @pytest.mark.parametrize(
+        "raw_value,expected",
+        [
+            ("{1.5, -2.0}", {1.5, -2.0}),
+            ("{(1.5, -2.0)}", {(1.5, -2.0)}),
+            ("[{'n': {1.5}}]", [{"n": {1.5}}]),
+            ("{'n': ({1.5},)}", {"n": ({1.5},)}),
+        ],
+    )
+    def test_finite_literal_containers_still_parse_and_replay(self, raw_value, expected):
+        content = f"<tool_call><function=echo><parameter=data>{raw_value}</parameter></function></tool_call>"
+        _, calls = _parse_xml_tool_call_to_dict(content)
+        assert calls[0]["args"]["data"] == expected
+
+        fixed = _fix_messages([AIMessage(content="", tool_calls=calls)])
+        _, replayed = _parse_xml_tool_call_to_dict(fixed[0].content)
+        assert replayed[0]["args"]["data"] == expected
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_mode", [False, True], ids=["sync", "async"])

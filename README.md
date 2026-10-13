@@ -2615,7 +2615,9 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 MindIE XML tool-call arguments support signed, fractional, and exponent JSON
 numbers. If a number overflows, underflows to zero, or exceeds Python's integer
 digit limit, the complete argument stays a string, including nested JSON lists
-and objects, so parsing does not silently change its value.
+and objects, so parsing does not silently change its value. Python-literal sets
+and tuples containing non-finite floats also retain the complete argument as
+text, including when nested in other containers.
 
 ## Embedded Python Client
 

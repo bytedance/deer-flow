@@ -31,7 +31,7 @@ def _safe_literal(value: object) -> bool:
     """Reject non-finite floats nested in an AST fallback value."""
     if isinstance(value, float):
         return math.isfinite(value)
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple, set)):
         return all(_safe_literal(item) for item in value)
     if isinstance(value, dict):
         return all(_safe_literal(item) for item in value.values())
