@@ -1235,7 +1235,7 @@ This release closes that milestone with **621 merged pull requests**.
   out the grace period and ended in SIGKILL (exit 137). Every production launch
   path now `exec`s the server, as `docker/dev-entrypoint.sh` already did, and
   the compose gateway sets `init: true` so orphaned grandchildren are still
-  reaped (#6835).
+  reaped. (issue #6835, [#6836])
 
 - **channels:** `FeishuChannel.stop()` and `DingTalkChannel.stop()` now end
   their SDK threads instead of timing out. Both SDKs run on a thread-private
@@ -11645,3 +11645,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6706]: https://github.com/bytedance/deer-flow/pull/6706
 [#6746]: https://github.com/bytedance/deer-flow/pull/6746
 [#6798]: https://github.com/bytedance/deer-flow/pull/6798
+[#6836]: https://github.com/bytedance/deer-flow/pull/6836
