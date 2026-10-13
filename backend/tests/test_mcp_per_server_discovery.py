@@ -744,5 +744,5 @@ async def test_per_server_discovery_failure_log_redacts_resolved_credentials(mon
 
     assert result == {}
     assert secret not in caplog.text  # the resolved credential never reaches the log
-    assert "A" in caplog.text  # server name retained for diagnosis
+    assert "server 'A'" in caplog.text  # the offending server name is retained
     assert "HTTPStatusError" in caplog.text  # exception type retained
