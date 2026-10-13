@@ -102,7 +102,7 @@ def test_windows_timeout_returns_notice(monkeypatch):
     monkeypatch.setattr(
         LocalSandbox,
         "_run_windows_command",
-        staticmethod(lambda args, timeout, env: ("partial out", "partial err", 0, True)),
+        staticmethod(lambda args, timeout, env, **kwargs: ("partial out", "partial err", 0, True)),
     )
 
     output = LocalSandbox("t").execute_command("wait", timeout=1.5)
