@@ -1,6 +1,6 @@
 # 原生 ECS 工作池部署与恢复
 
-更新：2026-10-13。两台 ECS 再次开机，经 Jenkins deerflow-native-recovery-20261013 #1 恢复原 e84 容器与手工 NAS bind。公网地址按本次用户信息更新，私网身份及原 host key 已核对，保持 drain。2026-10-10 验收仍作为独立历史记录。这里是操作指南；此前构建过程保存在 [部署历史](ecs-native-deployment-history-2026-10-10.md)，实际运行证据见 [测试文档](ecs-native-testing.md) 和 [恢复记录](ecs-native-shanghai-resume-2026-10-10.md)。旧固定 source566/5dda 的 Shanghai build/transfer/bootstrap 脚本是历史验收输入，不能作为当前源码的冷部署入口。
+更新：2026-10-13。两台 ECS 经恢复后已完成新镜像交付，deerflow-native-release #5构建/#6传输/#7部署/#8独立就绪检查全部SUCCESS，角色镜像8c206436a47d；详见 [交付验证](ecs-native-shanghai-validation-2026-10-13.md)。公网地址按本次用户信息更新，私网身份及原 host key 已核对，保持 drain。2026-10-10 验收仍作为独立历史记录。这里是操作指南；此前构建过程保存在 [部署历史](ecs-native-deployment-history-2026-10-10.md)，实际运行证据见 [测试文档](ecs-native-testing.md) 和 [恢复记录](ecs-native-shanghai-resume-2026-10-10.md)。旧固定 source566/5dda 的 Shanghai build/transfer/bootstrap 脚本是历史验收输入，不能作为当前源码的冷部署入口。
 
 | 资源 | 当前地址 / 约束 |
 | --- | --- |
@@ -10,13 +10,13 @@
 | NAS | `031sp6l7o6sh4hzha32-jow11.cn-shanghai.nas.aliyuncs.com:/` |
 | 命名空间 | `task6b-native-820d7a3429d9`，两端 bind 到 `/srv/deerflow-native-test` |
 
-B/C/BC, NAS, HTTP/WSS browser, lifecycle and same-schema rollback mains are accepted. Frozen backend composite838e is accepted with historical failures retained. Production #65, export #66, transfer #67 and installed recovery #69 SUCCESS. At the 2026-10-10 acceptance snapshot, Controller Gateway/MCP and worker resident used e84bc2845f89; all917 public runtime files match under UID1000. Database/NAS history, native0035/executor e0001 and private model/auth configuration are preserved. Admission remains drained. See [current acceptance](ecs-native-shanghai-acceptance-2026-10-10.md) and [release lock](../examples/ecs-native/deploy/shanghai-tested-release-2026-10-10.json).
+B/C/BC, NAS, HTTP/WSS browser, lifecycle and same-schema rollback mains are accepted. Frozen backend composite838e is accepted with historical failures retained. Production #65, export #66, transfer #67 and installed recovery #69 SUCCESS. At the 2026-10-10 acceptance snapshot, Controller Gateway/MCP and worker resident used e84bc2845f89; all917 public runtime files match under UID1000. Database/NAS history, native0035/executor e0001 and private model/auth configuration are preserved. Admission remains drained. See [historical acceptance](ecs-native-shanghai-acceptance-2026-10-10.md) and [release lock](../examples/ecs-native/deploy/shanghai-tested-release-2026-10-10.json).
 
 操作范围：worker 的独立 installed operator CLI 已验；controller 使用宿主机受控 Compose 已验。下文通用 CLI 描述实现接口，不代表 controller installed CLI 已验收。不要在即将被停止的 resident 内执行它自身的 stop/restart。任何环境变量变化都要对指定角色执行 `up --force-recreate`，普通 `restart` 不会重新加载环境。
 
 Gateway 或 MCP 容器重建后，必须在现有 proxy 容器内执行 `nginx -t`，成功后执行 `nginx -s reload`，再检查严格 TLS 的 `/health/ready` 和正常 owner 会话，最后启动 worker。这里的静态 `proxy_pass` 在 Nginx 加载配置时解析容器地址；只重建应用、保留代理而不 reload 会继续连接旧 IP，产生 502。重载保持代理容器、证书和配置不变。升级前先 drain 并确认 ledger/原生 Run/物理任务均已收尾，停止 idle worker resident；不要依赖出站 daemon 在控制端不可达期间自动存活。恢复保持 drain，验证两端健康后才显式 resume。
 
-可复用同 schema 后端镜像更新入口见 [Jenkins 交付流程](ecs-native-release-ci.md)。新流程守卫与 Groovy 已验证，正式镜像交付继续验证；旧固定 pin 任务仍只是历史证据。
+可复用同 schema 后端镜像更新入口见 [Jenkins 交付流程](ecs-native-release-ci.md)。新流程5守卫、Groovy及正式四阶段镜像交付均已验证；旧固定 pin 任务仍只是历史证据。
 
 ## Images and private configuration
 
@@ -26,7 +26,7 @@ PostgreSQL/Redis/browser extras and Chromium with its system libraries. Startup
 runs installed Python directly, without `uv sync`. Build the existing native
 frontend separately; do not substitute a historical Fleet UI image.
 
-The runtime Dockerfile explicitly installs Debian `media-types` for native artifact MIME classification. Git belongs in the separate CI test image, where benchmark tests need version metadata; it is not added to the production role image. The currently installed Shanghai imagee84 includes the MIME packaging and focused UTF-8 source corrections. Test-tools images1e10 and4f269 are CI derivatives only; do not deploy it as a role image or treat its metadata checks as installed-role acceptance.
+The runtime Dockerfile explicitly installs Debian `media-types` for native artifact MIME classification. Git belongs in the separate CI test image, where benchmark tests need version metadata; it is not added to the production role image. The historical Shanghai imagee84 includes the MIME packaging and focused UTF-8 source corrections. Test-tools images1e10 and4f269 are CI derivatives only; do not deploy it as a role image or treat its metadata checks as installed-role acceptance.
 
 ```bash
 docker build --target native-role --build-arg UV_EXTRAS=postgres,browser \
@@ -237,18 +237,28 @@ mountpoint -q /srv/deerflow-native-test
 
 ## 本次上海已安装环境重新拉起
 
-先完成上文两端 NAS 和 bind/marker 检查。以下命令只使用已保留的私有配置与不可变镜像，不重建用户、数据库或历史。镜像归档还保存在 Jenkins 的 `/data/jenkins-agent/deerflow/native-task6b-56636cebddc6/transfer/production-repaired-contract-c6af94a95ae7-image.tar` 及两台 ECS 的 `/srv/deerflow-native-task6b/56636cebddc6/received/`；加载前核对 release JSON 的 SHA256。
+先完成上文两端 NAS 和 bind/marker 检查。当前两端 ops JSON 指向 `sha256:8c206436a47d3ee2def2721e01a11a60f5cb9e050788df168b4e33a4665a0e21`。新包和锁保存在 Jenkins `/data/jenkins-agent/deerflow/releases/native-20261013-5f45039e-locked/`；两端包在 `/srv/deerflow-native-releases/native-20261013-5f45039e-locked/role-image.tar`。加载前核对交付锁与包 SHA。旧e84仅作历史/回滚输入。
 
-Controller 执行：
+以下命令读取最新ops中的镜像、Compose绝对路径和NAS选择，不source私有env、不重建用户或数据库。必须显式传ECS_ROLE_IMAGE覆盖旧env中的镜像值；直接沿用旧env裸跑Compose可能回到旧镜像。当前运行环境已经通过交付检查，这段是下次停机后手工恢复步骤，不声称新增OS自动启动验收。
+
+Controller 执行（以 root 或原受信部署账户）：
 
 ```bash
 DEER_NATIVE_ROOT=/srv/deerflow-native-task6b/56636cebddc6
 DEER_NATIVE_PRIVATE="$DEER_NATIVE_ROOT/private/820d7a3429d9/resident"
+DEER_NATIVE_OPS="$DEER_NATIVE_PRIVATE/controller-ops.json"
+ECS_ROLE_IMAGE=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["image"])' "$DEER_NATIVE_OPS")
+DEER_NATIVE_COMPOSE=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["compose_file"])' "$DEER_NATIVE_OPS")
+ECS_NAS_ROOT=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["nas_root"])' "$DEER_NATIVE_OPS")
+ECS_PRIVATE_DIR="$DEER_NATIVE_PRIVATE"
+ECS_FRONTEND_IMAGE=sha256:d302f8c890fbb3259f633fe38244d841f8614016cdf77818660d7bf949bb46de
+export ECS_ROLE_IMAGE ECS_NAS_ROOT ECS_PRIVATE_DIR ECS_FRONTEND_IMAGE
 docker compose --project-name deer-native-820d7a3429d9-controller \
-  --env-file "$DEER_NATIVE_PRIVATE/controller.env" \
-  -f "$DEER_NATIVE_ROOT/source/examples/ecs-native/deploy/controller.compose.yaml" \
-  up -d --no-build --pull never --wait --wait-timeout 180 \
-  postgres redis gateway mcp frontend proxy
+  --env-file "$DEER_NATIVE_PRIVATE/controller.env" -f "$DEER_NATIVE_COMPOSE" \
+  up -d --no-build --pull never --wait --wait-timeout 180 postgres redis
+docker compose --project-name deer-native-820d7a3429d9-controller \
+  --env-file "$DEER_NATIVE_PRIVATE/controller.env" -f "$DEER_NATIVE_COMPOSE" \
+  up -d --no-build --pull never --wait --wait-timeout 180 gateway mcp frontend proxy
 docker exec deer-native-820d7a3429d9-controller-proxy-1 nginx -t &&
   docker exec deer-native-820d7a3429d9-controller-proxy-1 nginx -s reload
 curl --fail --cacert "$DEER_NATIVE_PRIVATE/ca.crt" \
@@ -260,9 +270,14 @@ Controller 严格 TLS 健康检查成功后，在 Worker 执行：
 ```bash
 DEER_NATIVE_ROOT=/srv/deerflow-native-task6b/56636cebddc6
 DEER_NATIVE_PRIVATE="$DEER_NATIVE_ROOT/private/820d7a3429d9/resident"
+DEER_NATIVE_OPS="$DEER_NATIVE_PRIVATE/worker-ops.json"
+ECS_ROLE_IMAGE=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["image"])' "$DEER_NATIVE_OPS")
+DEER_NATIVE_COMPOSE=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["compose_file"])' "$DEER_NATIVE_OPS")
+ECS_NAS_ROOT=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["nas_root"])' "$DEER_NATIVE_OPS")
+ECS_PRIVATE_DIR="$DEER_NATIVE_PRIVATE"
+export ECS_ROLE_IMAGE ECS_NAS_ROOT ECS_PRIVATE_DIR
 docker compose --project-name deer-native-820d7a3429d9-worker \
-  --env-file "$DEER_NATIVE_PRIVATE/worker.env" \
-  -f "$DEER_NATIVE_ROOT/source/examples/ecs-native/deploy/worker.compose.yaml" \
+  --env-file "$DEER_NATIVE_PRIVATE/worker.env" -f "$DEER_NATIVE_COMPOSE" \
   up -d --no-build --pull never --wait --wait-timeout 180 resident
 ```
 

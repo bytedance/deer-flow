@@ -44,12 +44,11 @@ controller 更新只 force-recreate Gateway/MCP；PG、Redis、前端和现有�
 
 镜像传输中断保留 partial 文件；同一目标只有内容完全匹配才可复用，不自动覆盖不明内容。build 未产生 release.json 不允许进入 transfer；transfer 回执不匹配当前环境不允许 deploy。旧 release 的恢复或回滚应基于旧不可变镜像、保留的配置副本、同 schema 和明确 generation，不能倒改新的验收回执。
 
-## 待开机后一次验证
+## 已完成的交付验证
 
-先确认两台机器的新公网 IP 和既有私网身份，恢复 NAS/bind/marker，使用既有 e84 镜像按当前部署指南恢复，保持 drain。然后检查新的 Jenkins 源码输入、builder 和私有环境清单，依次验证新流水线四阶段。先跑交付主干，成功后只选一个真实业务工作流冒烟；不用重跑已经通过的全部测试矩阵。5 个守卫用例已经在 Jenkins #3 通过，原 e84 冷恢复已通过；正式构建/传输/更新与业务冒烟继续顺序验证。
+2026-10-13 同 schema 交付主干全部通过：`deerflow-native-release` #5 build、#6 transfer、#7 deploy、#8 smoke。Release `native-20261013-5f45039e-locked`；具体源码、镜像、锁、耗时、失败历史和独立证据见 [交付验证](ecs-native-shanghai-validation-2026-10-13.md)。原五守卫通过，Chromium实际启动通过。真实DeepSeek销售工作流已在2026-10-12验证，本轮没有重跑模型。
 
-本次静态证据：Ruff check/format、三个 Python 文件语法编译、示例 JSON、三个 Jenkins shell 段的 sh -n、OpenSpec 严格校验及 67 个历史输入 SHA 一致性均通过。随后 5 个守卫用例已在 Jenkins #3 通过，prepared-checkout 流水线通过实际 Jenkins Groovy 校验；原 e84 恢复仍不能当作新镜像交付成功。
-
+当前两端 ops 已指向新镜像；下次恢复读取这些 ops，不能重跑固定e84恢复助手或沿用旧env中的镜像覆盖值。NAS bind仍需按部署文档恢复。再次升级时，DeerFlow环境文件凭据中的 expected_image必须重新审查并更新为届时实际安装值；本次原清单绑定e84仅用于此次升级，保留其SHA和历史回执，不篡改已有release输入。
 
 ## 受限网络的构建配置
 
@@ -62,4 +61,4 @@ Dockerfile 已有 APT_MIRROR 参数。交付入口现在接受 --apt-mirror，Je
 Jenkins 任务中断会终止整个进程组，可能在 Python finally 的 docker stop 完成前再次终止清理进程。2026-10-13 #2 ABORTED 后 builder 仍运行，已在确认任务终态与原 CID 后手工停止，缓存保留；不能把 finally/SIGTERM 支持当成 Jenkins ABORTED 必然已清理。中断后始终按回执复核并只停止原确切 builder，再开始下一次构建。
 
 
-2026-10-13：release #3 的原生 Python 包直连持续慢下载；构建容器同一 Playwright wheel 样本，直连393216字节/17.65秒后超时，既有清华源2097152字节/1秒。仅正常停止本项目 #3（ABORTED）并核对确切 builder CID 后停止；缓存及失败证据保留。入口新增 `--locked-artifact-mirror` / Jenkins `LOCKED_ARTIFACT_MIRROR` 布尔开关，透传既有 Dockerfile 固定 `UV_ARTIFACT_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/pypi/web`；不新增任意URL输入，不改变依赖版本、SHA、大小或锁文件恢复校验，选定布尔值写入build-inputs摘要。原5守卫内补开关断言：先RED1再GREEN5，测试仅在Jenkins代理运行；不重跑真实模型主干。新镜像交付仍待完成。
+2026-10-13：release #3 的原生 Python 包直连持续慢下载；构建容器同一 Playwright wheel 样本，直连393216字节/17.65秒后超时，既有清华源2097152字节/1秒。仅正常停止本项目 #3（ABORTED）并核对确切 builder CID 后停止；缓存及失败证据保留。入口新增 `--locked-artifact-mirror` / Jenkins `LOCKED_ARTIFACT_MIRROR` 布尔开关，透传既有 Dockerfile 固定 `UV_ARTIFACT_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/pypi/web`；不新增任意URL输入，不改变依赖版本、SHA、大小或锁文件恢复校验，选定布尔值写入build-inputs摘要。原5守卫内补开关断言：先RED1再GREEN5，测试仅在Jenkins代理运行；不重跑真实模型主干。该检查点之后完成上述交付。

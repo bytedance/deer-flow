@@ -1,6 +1,8 @@
 # 原生 ECS 工作池测试与复验
 
-Final Shanghai acceptance (2026-10-10): production image e84bc2845f89 installed on controller Gateway/MCP and worker resident; Jenkins #65/#66/#67 SUCCESS and recovery #69 SUCCESS. #68 FAILURE remains preserved (stale Nginx upstream); exact source and installed metadata verified, database/NAS history preserved. Admission remains drained with unreleased=0. Current coherent evidence: [Shanghai acceptance](ecs-native-shanghai-acceptance-2026-10-10.md). Historical pending statements below describe their checkpoints.
+最新：2026-10-13 新镜像同schema交付主干完成，Jenkins deerflow-native-release #5/#6/#7/#8全部SUCCESS；5守卫通过、严格TLS/双端就绪/Chromium实际启动通过，历史与私有配置保留，继续drain。详见 [交付验证](ecs-native-shanghai-validation-2026-10-13.md)。真实DeepSeek销售C→B→C已于2026-10-12通过，详见 [销售验收](ecs-native-business-sales-validation-2026-10-12.md)。两份证据分开，今天没有重跑模型或完整测试矩阵。
+
+Historical Shanghai acceptance (2026-10-10): production image e84bc2845f89 installed on controller Gateway/MCP and worker resident; Jenkins #65/#66/#67 SUCCESS and recovery #69 SUCCESS. #68 FAILURE remains preserved (stale Nginx upstream); exact source and installed metadata verified, database/NAS history preserved. Admission remains drained with unreleased=0. Current coherent evidence: [Shanghai acceptance](ecs-native-shanghai-acceptance-2026-10-10.md). Historical pending statements below describe their checkpoints.
 
 | Scope | Current result |
 | --- | --- |
