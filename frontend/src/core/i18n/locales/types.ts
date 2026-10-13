@@ -1564,6 +1564,18 @@ export interface Translations {
       success: string;
       tool_call_missing: string;
       connection_failed: string;
+      customProvider: string;
+      apiKey: string;
+      advanced: string;
+      providerDefault: string;
+      requiredKey: string;
+      providerChanged: string;
+      missing_api_key: string;
+      authentication_failed: string;
+      response_limit: string;
+      revisionConflict: string;
+      keyOrCapabilities: string;
+      invalidModel: string;
     };
     users: {
       title: string;
