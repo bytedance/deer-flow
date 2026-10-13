@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 
+from deerflow.authz.workspace import get_current_workspace
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
 from deerflow.utils.time import is_lease_expired
 from deerflow.utils.time import now_iso as _now_iso
@@ -1905,6 +1906,7 @@ class RunManager:
         """
         if kind == ThreadOperationKind.run:
             raise ValueError("Normal runs must be admitted with create_or_reject()")
+        workspace_context = get_current_workspace()
         record = await self._admit_thread_operation(
             thread_id,
             operation_kind=kind,
@@ -1931,10 +1933,13 @@ class RunManager:
             try:
                 if self._store is not None:
                     try:
+                        cleanup_kwargs = {"user_id": record.user_id}
+                        if workspace_context is not None:
+                            cleanup_kwargs.update(workspace_context=workspace_context, owner_worker_id=record.owner_worker_id)
                         await self._call_store_with_retry(
                             "release thread operation",
                             record.run_id,
-                            lambda: self._store.delete_thread_operation(record.run_id, user_id=record.user_id),
+                            lambda: self._store.delete_thread_operation(record.run_id, **cleanup_kwargs),
                         )
                     except Exception:
                         logger.warning(

@@ -132,3 +132,11 @@ with the compatible private ThreadMeta predicate before pagination, cursor looku
 or token reduction. Scope validation precedes empty batch returns. Default unbound
 legacy mode is preserved. Run admission, operation cleanup, global worker recovery
 and HTTP feeds are not yet integrated; do not infer activation from read tests.
+
+Scoped non-run reject reservations lock workspace -> actor -> private thread,
+then preserve clock -> Run row order and persist workspace_id. Invisible global
+idempotency conflicts never return a foreign payload. Operation release uses
+captured workspace/user/worker and excludes normal runs; it deliberately does
+not require live membership/parent so withdrawal/deletion cannot strand cleanup.
+This release is not authority for reads/publication. Normal scoped Run lifecycle
+and HTTP goal/state writers remain unintegrated; activation stays refused.

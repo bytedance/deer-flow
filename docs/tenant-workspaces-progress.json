@@ -945,5 +945,42 @@
       "networks": [],
       "verified": "Each build ownership label independently inspected on Jenkins"
     }
+  },
+  "operation_reservations": {
+    "base_commit": "1596886f",
+    "job": "deerflow-tenant-m1-postgres",
+    "red": {
+      "build": 44,
+      "result": "FAILURE",
+      "tests_failed": 2,
+      "elapsed_seconds": 16.54,
+      "archive_sha256": "1aa90043e5a07199272f94bf1e0041ab8158b18f7764956f46a9e0ef33aba1e7",
+      "reason": "native durable reservation workspace_id remains NULL"
+    },
+    "green": {
+      "build": 45,
+      "result": "SUCCESS",
+      "tests_passed": 7,
+      "elapsed_seconds": 21.58,
+      "archive_sha256": "9099f676a4c2b61f4d3e3d87ebf7bb90faba5959acd90afd5ed46279eec3f055",
+      "command": "python -m pytest tests/test_workspace_run_reservations.py tests/test_workspace_run_reads.py tests/test_run_repository.py::TestRunRepository::test_checkpoint_write_reservation_blocks_interrupt_run_on_sql_store tests/test_run_repository.py::TestRunRepository::test_reservation_release_uses_record_user_without_ambient_context tests/test_run_repository.py::test_legacy_create_run_atomic_store_remains_compatible -q --tb=short --no-showlocals"
+    },
+    "source_sha256": {
+      "backend/packages/harness/deerflow/persistence/run/sql.py": "099e586138699bcd14186fc460ccb187a9695b0d613aae932ba3bbf5d4a51f48",
+      "backend/packages/harness/deerflow/runtime/runs/manager.py": "7d883645414e78db8b5a92314b04d3103f1d4164a4d79f4e3f60d5deb19ee7c3",
+      "backend/packages/harness/deerflow/runtime/runs/store/base.py": "ca88f03f1bf818fdea78fc950a05efe32b918e82e70067f7ca7b5804e5453e12",
+      "backend/tests/test_workspace_run_reservations.py": "0bb1ab5a587137c47ee5cc91065e5fb78f8f865eb420e06628dd14835a5ce816"
+    },
+    "scope": "Actual SQL/native manager non-run admission and captured-scope release, peer exclusion, wrong-worker refusal, policy withdrawal/context selection change, foreign thread/key denial and normal Run preservation.",
+    "remaining": "HTTP goal/state/new-thread behavior, cancellation/commit faults and worker lifecycle/normal Run/recovery. Compiled activation remains false.",
+    "cleanup": {
+      "builds": [
+        44,
+        45
+      ],
+      "containers": [],
+      "networks": [],
+      "verified": "Individual build labels inspected on Jenkins"
+    }
   }
 }

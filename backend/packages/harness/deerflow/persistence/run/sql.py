@@ -19,6 +19,7 @@ from deerflow.persistence.run.model import RunChangeClockRow, RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
 from deerflow.persistence.workspaces.scope import resolve_resource_scope
+from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.runtime.run_origin import origin_kind_of
 from deerflow.runtime.runs.store.base import (
     LeaseRenewal,
@@ -472,9 +473,23 @@ class RunRepository(RunStore):
             await session.commit()
             return count
 
-    async def delete_thread_operation(self, run_id: str, *, user_id: str | None) -> None:
-        """Release a reservation using its captured owner, not request context."""
-        await self.delete(run_id, user_id=user_id)
+    async def delete_thread_operation(self, run_id: str, *, user_id: str | None, workspace_context=None, owner_worker_id: str | None = None) -> None:
+        """Release only the captured reservation, even after live revocation.
+
+        This cleanup grants no content read or new work. A scoped caller must
+        supply the admitting worker, and cannot delete normal agent runs.
+        """
+        context = resolve_resource_scope(workspace_context, user_id, required=self._workspace_required)
+        conditions = [RunRow.run_id == run_id, RunRow.operation_kind != "run"]
+        if user_id is not None:
+            conditions.append(RunRow.user_id == user_id)
+        if context is not None:
+            if not owner_worker_id:
+                raise WorkspaceAccessDenied("reservation cleanup requires its captured worker")
+            conditions.extend((RunRow.workspace_id == context.workspace_id, RunRow.owner_worker_id == owner_worker_id))
+        async with self._sf() as session:
+            await session.execute(delete(RunRow).where(*conditions))
+            await session.commit()
 
     async def list_pending(self, *, before=None):
         if before is None:
@@ -910,6 +925,9 @@ class RunRepository(RunStore):
         from deerflow.runtime.runs.manager import ConflictError
 
         resolved_user_id = resolve_user_id(user_id or AUTO, method_name="RunRepository.create_thread_operation_atomic")
+        context = resolve_resource_scope(None, resolved_user_id, required=self._workspace_required)
+        if context is not None and (operation_kind == "run" or multitask_strategy != "reject"):
+            raise WorkspaceAccessDenied("workspace agent-run lifecycle is not integrated")
         now = datetime.now(UTC)
         created = datetime.fromisoformat(created_at) if created_at else now
         lease_dt = datetime.fromisoformat(lease_expires_at) if lease_expires_at else None
@@ -933,7 +951,16 @@ class RunRepository(RunStore):
             "updated_at": now,
         }
 
+        if context is not None:
+            values["workspace_id"] = context.workspace_id
         async with self._sf() as session:
+            if context is not None:
+                # Short admission only: workspace -> actor -> private thread,
+                # then the existing global clock -> Run row order. No checkpoint
+                # or model IO is held under this database transaction.
+                thread = await ThreadMetaRepository(self._sf)._locked_row(session, thread_id, resolved_user_id, context)
+                if thread is None or not thread.incarnation:
+                    raise WorkspaceAccessDenied("private thread is unavailable")
             # Keep the global clock -> run-row lock order used by every other
             # mutator. One position covers this atomic set of changes; run_id
             # provides deterministic ordering within the position.
@@ -988,9 +1015,16 @@ class RunRepository(RunStore):
             except IntegrityError as exc:
                 await session.rollback()
                 if idempotency_key is not None:
-                    existing = (await session.execute(select(RunRow).where(RunRow.idempotency_key == idempotency_key))).scalar_one_or_none()
+                    query = select(RunRow).where(RunRow.idempotency_key == idempotency_key)
+                    if context is not None:
+                        query = self._read_scope(query.where(RunRow.thread_id == thread_id, RunRow.operation_kind == operation_kind), resolved_user_id)
+                    existing = (await session.execute(query)).scalar_one_or_none()
                     if existing is not None:
                         raise RunIdempotencyConflict(self._row_to_dict(existing)) from exc
+                    if context is not None:
+                        # A global key collision must not return another space's
+                        # payload or identifiers, even when acknowledgement was lost.
+                        raise WorkspaceAccessDenied("reservation conflict is unavailable") from None
                 raise
 
             new_row = await session.get(RunRow, run_id)

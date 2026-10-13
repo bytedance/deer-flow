@@ -366,3 +366,29 @@ compatibility regressions. Archive/source hashes are in tenant-workspaces-progre
 This proves repository reads, not HTTP activity/stream admission, scoped Run
 creation/reservations, worker cancellation/recovery, frontend switching or deployed
 multi-tenancy. Compiled activation remains false; M3 and M4 remain incomplete.
+
+## Scoped native operation reservations (partial M3)
+
+Non-run reject-strategy reservations now persist trusted workspace_id. SQL
+admission locks workspace, native actor and matching owner-private ThreadMeta
+before the existing global change clock and Run row. It requires a live
+membership/policy and nonempty thread incarnation; no checkpoint/model IO runs
+inside this transaction. An invisible global idempotency collision returns no
+foreign payload. Scoped normal-run/interrupt lifecycle remains refused until M4.
+
+RunManager captures immutable space context before admission for reservation
+release. SQL cleanup matches reservation ID, captured original user/workspace
+and admitting worker, excludes normal Run rows and does not require live
+membership or a surviving thread parent. This narrow release grants no reads,
+new work or publication; it remains possible after withdrawal and UI/context
+selection changes. Legacy custom stores retain their unscoped call shape, while
+the default store refuses captured workspace cleanup it cannot enforce.
+
+Jenkins #44 reproduced NULL workspace on real SQLite/PostgreSQL reservations.
+#45 passed 7 checks in 21.58s: real native RunManager/SQL admission and peer
+exclusion, wrong-worker cleanup refusal, actual policy withdrawal followed by
+ambient space change and successful own cleanup, foreign thread/key denial,
+normal-run preservation, prior Run reads and three native compatibility tests.
+HTTP goal/state writes, new-thread provisioning, interrupted/cancelled commits,
+worker lease recovery and frontend remain separate acceptance requirements.
+Tenant activation stays closed; no full M3/M4 completion is claimed.

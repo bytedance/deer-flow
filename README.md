@@ -2940,3 +2940,5 @@ Workspace conversation detail, state, history and goal reads now recheck private
 Workspace read markers now use independent per-space viewer clocks and matching private Run/thread scope. The [read-clock checkpoint](docs/tenant-workspaces-api.md#workspace-read-markers-and-clocks-partial-m3) records real database/HTTP and old-data upgrade validation. Current native schema is 0038; tenant deployment remains blocked.
 
 Native Run history and usage repository reads now filter the selected workspace before pagination and aggregation. See [validation and remaining integration](docs/tenant-workspaces-api.md#native-run-read-isolation-partial-m3); tenant deployment remains blocked.
+
+Native non-run reservations now preserve workspace ownership through admission and cleanup after withdrawal. See [reservation validation and remaining HTTP/runtime work](docs/tenant-workspaces-api.md#scoped-native-operation-reservations-partial-m3); tenant activation remains closed.

@@ -247,13 +247,15 @@ class RunStore(abc.ABC):
     async def delete(self, run_id: str) -> None:
         pass
 
-    async def delete_thread_operation(self, run_id: str, *, user_id: str | None) -> None:
+    async def delete_thread_operation(self, run_id: str, *, user_id: str | None, workspace_context=None, owner_worker_id: str | None = None) -> None:
         """Release an admitted thread operation for its recorded owner.
 
         The default keeps legacy stores compatible: older implementations only
         accepted ``run_id``. User-aware stores should override this method so
         cleanup never depends on ambient request context.
         """
+        if workspace_context is not None:
+            raise NotImplementedError("Workspace reservation cleanup requires a scope-aware persistent store")
         await self.delete(run_id)
 
     @abc.abstractmethod

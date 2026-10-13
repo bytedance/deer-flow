@@ -283,3 +283,10 @@ normalization and durable admission, before local native task attachment. Its
 `admit(record)` returns False for the usual local path, or stages durable work
 and calls handoff before returning True. HTTP input cannot install/select this
 hook. The hook alone does not provide remote execution or durable queue recovery.
+
+Native short thread-operation reservations capture the trusted immutable
+WorkspaceContext before admission and pass it, original record user and admitting
+worker to scoped SQL cleanup. Ambient selection changes do not redirect release.
+Legacy calls omit the new cleanup keywords for custom-store compatibility.
+Scope-aware cleanup is mandatory for tenant stores; worker lifecycle/snapshots,
+leases and normal Run admission remain M4 integration work.
