@@ -2,7 +2,14 @@ from datetime import timedelta
 
 import pytest
 
-from deerflow.mcp.tasks import McpTaskDriverRegistry, TaskSnapshot, TaskStatus, TaskSubmission, TaskSubmitRequest
+from deerflow.mcp.tasks import (
+    McpTaskDriverRegistry,
+    TaskReference,
+    TaskSnapshot,
+    TaskStatus,
+    TaskSubmission,
+    TaskSubmitRequest,
+)
 
 
 def test_task_snapshot_normalizes_string_statuses():
@@ -53,6 +60,36 @@ def test_task_storage_identifiers_reject_values_longer_than_the_database_columns
                 arguments={},
                 **request_kwargs,
             )
+
+
+def test_incarnation_fields_preserve_legacy_positional_construction():
+    reference_driver_data = {"status_tool": "status"}
+    reference = TaskReference(
+        "task-1",
+        "user-1",
+        "thread-1",
+        "reports",
+        "remote-1",
+        reference_driver_data,
+    )
+    assert reference.driver_data is reference_driver_data
+    assert reference.thread_incarnation is None
+
+    request_driver_data = {"submit_tool": "submit"}
+    request = TaskSubmitRequest(
+        "user-1",
+        "thread-1",
+        "run-1",
+        "call-1",
+        "reports",
+        "Generate report",
+        {},
+        request_driver_data,
+        "task-1",
+    )
+    assert request.driver_data is request_driver_data
+    assert request.local_task_id == "task-1"
+    assert request.thread_incarnation is None
 
 
 def test_driver_registry_rejects_duplicate_names():

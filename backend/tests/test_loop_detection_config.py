@@ -36,6 +36,28 @@ class TestLoopDetectionConfig:
         assert config.tool_freq_warn == 60
         assert config.tool_freq_hard_limit == 80
 
+    def test_accepts_numeric_string_thresholds(self):
+        config = LoopDetectionConfig.model_validate(
+            {
+                "warn_threshold": "10",
+                "hard_limit": "20",
+                "window_size": "50",
+                "max_tracked_threads": "200",
+                "tool_freq_warn": "60",
+                "tool_freq_hard_limit": "80",
+                "tool_freq_overrides": {"bash": {"warn": "150", "hard_limit": "300"}},
+            },
+        )
+
+        assert config.warn_threshold == 10
+        assert config.hard_limit == 20
+        assert config.window_size == 50
+        assert config.max_tracked_threads == 200
+        assert config.tool_freq_warn == 60
+        assert config.tool_freq_hard_limit == 80
+        assert config.tool_freq_overrides["bash"].warn == 150
+        assert config.tool_freq_overrides["bash"].hard_limit == 300
+
     def test_rejects_zero_thresholds(self):
         with pytest.raises(ValueError):
             LoopDetectionConfig(warn_threshold=0)
@@ -48,6 +70,23 @@ class TestLoopDetectionConfig:
 
         with pytest.raises(ValueError):
             LoopDetectionConfig(tool_freq_hard_limit=0)
+
+    @pytest.mark.parametrize(
+        ("payload", "field"),
+        [
+            ({"warn_threshold": True}, "warn_threshold"),
+            ({"warn_threshold": 1, "hard_limit": True}, "hard_limit"),
+            ({"window_size": True}, "window_size"),
+            ({"max_tracked_threads": True}, "max_tracked_threads"),
+            ({"tool_freq_warn": True}, "tool_freq_warn"),
+            ({"tool_freq_warn": 1, "tool_freq_hard_limit": True}, "tool_freq_hard_limit"),
+            ({"tool_freq_overrides": {"bash": {"warn": True, "hard_limit": 2}}}, "warn"),
+            ({"tool_freq_overrides": {"bash": {"warn": 1, "hard_limit": True}}}, "hard_limit"),
+        ],
+    )
+    def test_rejects_boolean_integer_thresholds(self, payload, field):
+        with pytest.raises(ValueError, match=field):
+            LoopDetectionConfig(**payload)
 
     def test_rejects_hard_limit_below_warn_threshold(self):
         with pytest.raises(ValueError, match="hard_limit"):

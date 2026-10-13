@@ -112,14 +112,10 @@ def present_file_tool(
             update={"messages": [ToolMessage(f"Error: {exc}", tool_call_id=tool_call_id)]},
         )
 
-    from deerflow.runtime.execution.workspace_boundary import current_workspace_controller
-
-    controller = current_workspace_controller()
-    message_id = controller.observe_presentation(runtime, normalized_paths) if controller is not None else None
     # The merge_artifacts reducer will handle merging and deduplication
     return Command(
         update={
             "artifacts": normalized_paths,
-            "messages": [ToolMessage("Successfully presented files", tool_call_id=tool_call_id, id=message_id)],
+            "messages": [ToolMessage("Successfully presented files", tool_call_id=tool_call_id)],
         },
     )

@@ -6,8 +6,12 @@
 #
 # Updates:
 #   backend/pyproject.toml              (version = "...")
+#   backend/uv.lock                     (root package version, via `uv lock`)
 #   frontend/package.json               ("version": "...")
 #   deploy/helm/deer-flow/Chart.yaml    (version: + appVersion:)
+#
+# Requires `uv` on PATH: backend/uv.lock pins the root package version too, and
+# lint CI runs `uv lock --check`, so the lock has to move with the sources.
 #
 # This does NOT edit CHANGELOG.md or create/push a git tag — keep those manual.
 # After running, commit and tag v<version> to trigger the release workflows
@@ -38,6 +42,17 @@ for f in "$PYPROJECT" "$PACKAGE" "$CHART"; do
     exit 1
   fi
 done
+
+# backend/uv.lock records the root package's version as well (uv normalizes a
+# prerelease, so `2.1.0-rc0` is stored as `2.1.0rc0`). Leaving it behind is not
+# a cosmetic drift: `uv lock --check` in lint CI fails on the stale lock, and
+# `uv sync --locked` refuses the tree — so the release step would produce a
+# commit whose own CI is red. Refresh it here, and fail before editing anything
+# when uv is missing rather than leaving a half-bumped tree behind.
+if ! command -v uv >/dev/null 2>&1; then
+  echo "error: 'uv' is required to refresh backend/uv.lock in lockstep; install it from https://docs.astral.sh/uv/ and re-run" >&2
+  exit 1
+fi
 
 python3 - "$PYPROJECT" "$PACKAGE" "$CHART" "$VERSION" <<'PY'
 import re
@@ -79,8 +94,14 @@ with open(chart, "w") as f:
     f.write(new)
 PY
 
+if ! (cd "$ROOT/backend" && uv lock); then
+  echo "error: 'uv lock' failed; backend/uv.lock still pins the previous version. Fix the resolution error and re-run, or revert the version edits above." >&2
+  exit 1
+fi
+
 echo "Bumped version to $VERSION in:"
 echo "  backend/pyproject.toml"
+echo "  backend/uv.lock"
 echo "  frontend/package.json"
 echo "  deploy/helm/deer-flow/Chart.yaml (version + appVersion)"
 echo

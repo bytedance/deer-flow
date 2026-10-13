@@ -40,6 +40,7 @@ import atexit
 import hashlib
 import json
 import logging
+import math
 import os
 import posixpath
 import shlex
@@ -48,13 +49,14 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from functools import partial
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from e2b import SandboxQuery
 from e2b_code_interpreter import Sandbox as E2BClientSandbox
@@ -116,6 +118,11 @@ _MAX_MOUNT_PASS_TOTAL_BYTES = 512 * 1024 * 1024
 _MAX_MOUNT_PASS_FILES = 2000
 # Deadline checks stop preflight work and new writes. Active SDK writes finish.
 _MOUNT_PASS_DEADLINE_SECONDS = 120
+
+
+class _E2BMaintenanceShutdownTimeout(RuntimeError):
+    """A bounded maintenance-worker join did not prove worker termination."""
+
 
 # Recursive skill projection replacement must never target an operating-system
 # tree. The configured E2B home is handled separately: an isolated descendant
@@ -291,6 +298,7 @@ class E2BSandboxProvider(SandboxProvider):
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._lifecycle_locks: dict[tuple[str, str], tuple[threading.RLock, int]] = {}
         # Active sandboxes, keyed by DeerFlow-side sandbox id (== e2b id).
         self._sandboxes: dict[str, E2BSandbox] = {}
         # (user_id, thread_id, skills_root) -> sandbox id for fast in-process
@@ -299,6 +307,8 @@ class E2BSandboxProvider(SandboxProvider):
         self._thread_sandboxes: dict[tuple[str, str, str], str] = {}
         # Per-(user,thread,skills_root) serializer for acquire() and release() state
         # transitions without holding the provider-wide lock across remote IO.
+        # VM lifecycle IO uses separate locks that remain usable at shutdown.
+        # Lock order: thread, VM, _lock.
         self._acquire_serializer: AcquireSerializer[tuple[str, str, str]] = AcquireSerializer(thread_name_prefix="e2b-sandbox-lock-wait")
         # Mount upload results keyed by sandbox id. Survives warm-pool
         # reclaim so the result is available after reconnect.
@@ -324,6 +334,9 @@ class E2BSandboxProvider(SandboxProvider):
         self._transitioning_slots = 0
         self._capacity_cond = threading.Condition(self._lock)
         self._shutdown_called = False
+        # Keep admission fenced if shutdown has to retry after a bounded
+        # maintenance-thread join times out.
+        self._shutdown_cleanup_pending = False
         self._owned_sandbox_ids: set[str] = set()
         self._acquire_inflight: set[str] = set()
         self._orphan_first_seen: dict[str, float] = {}
@@ -353,7 +366,7 @@ class E2BSandboxProvider(SandboxProvider):
         if not self._ownership.supports_cross_process:
             logger.warning("E2B sandbox ownership is process-local. Multi-worker gateways must configure sandbox.ownership.type: redis for safe reconciliation.")
 
-        atexit.register(self.shutdown)
+        atexit.register(self._shutdown_at_exit)
         self._register_signal_handlers()
         self._start_maintenance_threads()
 
@@ -523,6 +536,16 @@ class E2BSandboxProvider(SandboxProvider):
 
     # ── Signal / shutdown handling ───────────────────────────────────────
 
+    def _shutdown_at_exit(self) -> None:
+        """Best-effort process-exit cleanup without turning a retryable timeout into an atexit error."""
+        try:
+            self.shutdown()
+        except _E2BMaintenanceShutdownTimeout as exc:
+            logger.warning(
+                "E2B shutdown cleanup is still pending at interpreter exit: %s",
+                exc,
+            )
+
     def _register_signal_handlers(self) -> None:
         try:
             self._original_sigterm = signal.getsignal(signal.SIGTERM)
@@ -532,7 +555,14 @@ class E2BSandboxProvider(SandboxProvider):
             return
 
         def _handler(signum, frame):
-            self.shutdown()
+            try:
+                self.shutdown()
+            except _E2BMaintenanceShutdownTimeout:
+                logger.warning(
+                    "E2B shutdown cleanup is still pending while handling signal %s; forwarding the signal action",
+                    signum,
+                )
+
             if signum == signal.SIGTERM:
                 original = self._original_sigterm
             elif hasattr(signal, "SIGHUP") and signum == signal.SIGHUP:
@@ -557,7 +587,22 @@ class E2BSandboxProvider(SandboxProvider):
                     sig_name,
                 )
 
+    def _raise_if_shutting_down(self) -> None:
+        with self._lock:
+            if not self._shutdown_called:
+                return
+            raise SandboxCapacityExceededError(
+                "Sandbox provider is shutting down; cannot acquire sandbox",
+                active=len(self._sandboxes),
+                warm=len(self._warm_pool),
+                reserved=self._reserved_slots,
+                replicas=int(self._config["replicas"]),
+                retry_after_seconds=30.0,
+                reason="shutdown",
+            )
+
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
+        self._raise_if_shutting_down()
         effective_user_id = self._effective_acquire_user_id(user_id)
         if thread_id:
             with self._acquire_serializer.hold(self._thread_key(thread_id, effective_user_id)):
@@ -571,6 +616,9 @@ class E2BSandboxProvider(SandboxProvider):
         return await loop.run_in_executor(self._acquire_executor, acquire)
 
     def _acquire_internal(self, thread_id: str | None, *, user_id: str) -> str:
+        # The serializer may have queued this caller before shutdown started.
+        # Recheck admission after the wait and before any cache/reclaim path.
+        self._raise_if_shutting_down()
         if thread_id:
             cached = self._reuse_in_process_sandbox(thread_id, user_id=user_id)
             if cached is not None:
@@ -625,17 +673,30 @@ class E2BSandboxProvider(SandboxProvider):
             self._refresh_remote_timeout(sandbox.client)
         except Exception as e:  # pragma: no cover - defensive
             logger.debug("Failed to refresh timeout on reuse: %s", e)
+        # Shutdown may have started while the remote ping/timeout refresh was
+        # in flight. Do not publish or expose this cached client after admission
+        # closes.
+        self._raise_if_shutting_down()
         self._publish_ownership(sid)
         with self._lock:
             self._acquire_inflight.discard(sid)
-
-        logger.info(
-            "Reusing in-process e2b sandbox %s for user/thread %s/%s",
-            sid,
-            user_id,
-            thread_id,
-        )
-        return sid
+            if self._shutdown_called:
+                raise SandboxCapacityExceededError(
+                    "Sandbox provider shut down while reusing a cached sandbox",
+                    active=len(self._sandboxes),
+                    warm=len(self._warm_pool),
+                    reserved=self._reserved_slots,
+                    replicas=int(self._config["replicas"]),
+                    retry_after_seconds=30.0,
+                    reason="shutdown",
+                )
+            logger.info(
+                "Reusing in-process e2b sandbox %s for user/thread %s/%s",
+                sid,
+                user_id,
+                thread_id,
+            )
+            return sid
 
     def _reclaim_warm_pool_sandbox(self, thread_id: str, *, user_id: str) -> str | None:
         """Reclaim a warm-pool sandbox, holding a transitioning slot throughout.
@@ -1421,40 +1482,69 @@ class E2BSandboxProvider(SandboxProvider):
             complete = False
         return entries, exhausted, complete
 
+    @contextmanager
+    def _sandbox_lifecycle(self, sandbox_id: str, *, domain: Literal["ownership", "timeout"] = "ownership") -> Iterator[None]:
+        """Serialize one VM's writes within an independent lifecycle domain.
+
+        Timeout IO must not block ownership heartbeats. The two domains never
+        acquire each other's locks; each may briefly acquire the metadata lock.
+        Holders and waiters share a refcounted lock; idle IDs are reclaimed.
+        Reentrancy lets a sweep release ownership inside the same transition.
+        Unlike acquire admission, cleanup must remain usable after shutdown.
+        Lock order is lifecycle -> metadata; never wait while holding _lock.
+        """
+        key = (domain, sandbox_id)
+        with self._lock:
+            lock, users = self._lifecycle_locks.get(key, (threading.RLock(), 0))
+            self._lifecycle_locks[key] = (lock, users + 1)
+        try:
+            with lock:
+                yield
+        finally:
+            with self._lock:
+                _, users = self._lifecycle_locks[key]
+                if users == 1:
+                    del self._lifecycle_locks[key]
+                else:
+                    self._lifecycle_locks[key] = (lock, users - 1)
+
     def _publish_ownership(self, sandbox_id: str) -> None:
         """Publish acquire-side ownership before exposing a sandbox locally."""
-        with self._lock:
-            self._acquire_inflight.add(sandbox_id)
-        try:
-            if not self._ownership.take(sandbox_id):
-                raise RuntimeError(f"E2B sandbox {sandbox_id} is being destroyed")
-        except Exception:
+        with self._sandbox_lifecycle(sandbox_id):
             with self._lock:
-                self._acquire_inflight.discard(sandbox_id)
-            raise
-        with self._lock:
-            self._owned_sandbox_ids.add(sandbox_id)
+                self._acquire_inflight.add(sandbox_id)
+            try:
+                if not self._ownership.take(sandbox_id):
+                    raise RuntimeError(f"E2B sandbox {sandbox_id} is being destroyed")
+            except Exception:
+                with self._lock:
+                    self._acquire_inflight.discard(sandbox_id)
+                raise
+            with self._lock:
+                self._owned_sandbox_ids.add(sandbox_id)
 
     def _claim_ownership(self, sandbox_id: str, *, for_destroy: bool = False) -> bool:
         """Exclusively claim an unowned sandbox, failing closed on store errors."""
-        try:
-            claimed = self._ownership.claim(sandbox_id, for_destroy=for_destroy)
-        except OwnershipBackendError as e:
-            logger.warning("E2B ownership claim failed for %s: %s", sandbox_id, e)
-            return False
-        if claimed:
-            with self._lock:
-                self._owned_sandbox_ids.add(sandbox_id)
-        return claimed
+        with self._sandbox_lifecycle(sandbox_id):
+            try:
+                claimed = self._ownership.claim(sandbox_id, for_destroy=for_destroy)
+            except OwnershipBackendError as e:
+                logger.warning("E2B ownership claim failed for %s: %s", sandbox_id, e)
+                return False
+            if claimed:
+                with self._lock:
+                    self._owned_sandbox_ids.add(sandbox_id)
+            return claimed
 
     def _release_ownership(self, sandbox_id: str) -> None:
-        try:
-            self._ownership.release(sandbox_id)
-        except OwnershipBackendError as e:
-            logger.warning("Failed to release E2B ownership for %s: %s", sandbox_id, e)
-        with self._lock:
-            self._owned_sandbox_ids.discard(sandbox_id)
-            self._acquire_inflight.discard(sandbox_id)
+        with self._sandbox_lifecycle(sandbox_id):
+            try:
+                self._ownership.release(sandbox_id)
+            except OwnershipBackendError as e:
+                logger.warning("Failed to release E2B ownership for %s: %s", sandbox_id, e)
+            with self._lock:
+                self._owned_sandbox_ids.discard(sandbox_id)
+                self._acquire_inflight.discard(sandbox_id)
 
     def _forget_local_sandbox(self, sandbox_id: str) -> None:
         """Forget a lease taken by a peer without touching the remote VM."""
@@ -1478,22 +1568,26 @@ class E2BSandboxProvider(SandboxProvider):
         with self._lock:
             sandbox_ids = list(self._owned_sandbox_ids)
         for sandbox_id in sandbox_ids:
-            try:
-                outcome = self._ownership.renew(sandbox_id)
-            except OwnershipBackendError as e:
-                logger.warning("Could not renew E2B ownership for %s; will retry: %s", sandbox_id, e)
-                continue
-            if outcome is RenewOutcome.RENEWED:
-                continue
-            if outcome is RenewOutcome.LAPSED:
-                try:
-                    if self._ownership.claim(sandbox_id):
+            with self._sandbox_lifecycle(sandbox_id):
+                with self._lock:
+                    if sandbox_id not in self._owned_sandbox_ids:
                         continue
+                try:
+                    outcome = self._ownership.renew(sandbox_id)
                 except OwnershipBackendError as e:
-                    logger.warning("Could not re-establish E2B ownership for %s: %s", sandbox_id, e)
+                    logger.warning("Could not renew E2B ownership for %s; will retry: %s", sandbox_id, e)
                     continue
-            logger.info("E2B sandbox %s ownership moved to a peer; forgetting local client", sandbox_id)
-            self._forget_local_sandbox(sandbox_id)
+                if outcome is RenewOutcome.RENEWED:
+                    continue
+                if outcome is RenewOutcome.LAPSED:
+                    try:
+                        if self._ownership.claim(sandbox_id):
+                            continue
+                    except OwnershipBackendError as e:
+                        logger.warning("Could not re-establish E2B ownership for %s: %s", sandbox_id, e)
+                        continue
+                logger.info("E2B sandbox %s ownership moved to a peer; forgetting local client", sandbox_id)
+                self._forget_local_sandbox(sandbox_id)
 
     def _start_maintenance_threads(self) -> None:
         def renew() -> None:
@@ -1539,11 +1633,59 @@ class E2BSandboxProvider(SandboxProvider):
             self._acquire_inflight.add(sandbox_id)
             return True
 
+    def _sweep_expired_warm_entries(self) -> None:
+        """Drop locally expired warm entries without assuming remote death.
+
+        A peer may have taken ownership and extended the VM's timeout since
+        it was parked here. Shared capacity stays reserved until the existing
+        remote inventory reconciliation confirms disappearance, with its
+        revision check and missing-inventory grace period.
+        """
+        idle_timeout = float(self._config["idle_timeout"])
+        if idle_timeout <= 0:
+            return
+        now_wall = time.time()
+        with self._lock:
+            expired = [(sandbox_id, entry) for sandbox_id, entry in self._warm_pool.items() if now_wall - entry[1] >= idle_timeout]
+        for sandbox_id, entry in expired:
+            with self._sandbox_lifecycle(sandbox_id):
+                with self._lock:
+                    # A reclaim/release or ownership publication may have won
+                    # while this sweep waited. Never clean up its newer lease.
+                    if self._warm_pool.get(sandbox_id) is not entry or sandbox_id in self._acquire_inflight or sandbox_id in self._sandboxes:
+                        continue
+                    self._warm_pool.pop(sandbox_id)
+                logger.info("Dropping expired warm-pool e2b sandbox %s (parked longer than idle_timeout=%ss)", sandbox_id, idle_timeout)
+                self._forget_mount_result(sandbox_id)
+                self._release_ownership(sandbox_id)
+
     def _reconcile_remote_sandboxes(self, *, now: float | None = None) -> ReconciliationStats:
         """Adopt canonical E2B sandboxes and safely reap duplicates/orphans."""
         observed_at = time.monotonic() if now is None else now
         deadline = time.monotonic() + float(self._config["reconciliation_max_seconds"])
         stats = ReconciliationStats()
+        self._sweep_expired_warm_entries()
+        # Keep actively-used VMs alive: their remote TTL is set at acquire /
+        # reuse / release, but a single turn may outlive ``idle_timeout``.
+        # Refresh through the cached client — never ``connect()`` — so
+        # warm-pool entries are untouched and still expire on schedule.
+        with self._lock:
+            active_sandboxes = list(self._sandboxes.items())
+        # Preserve connect()'s previous 300s floor, and leave room for another
+        # reconciliation pass plus its sleep when the configured cadence is
+        # longer. The idle timeout still governs release into the warm pool.
+        active_timeout = max(
+            E2BClientSandbox.default_sandbox_timeout,
+            math.ceil(2 * (float(self._config["reconciliation_interval_seconds"]) + float(self._config["reconciliation_max_seconds"]))),
+        )
+        for sandbox_id, sandbox in active_sandboxes:
+            with self._sandbox_lifecycle(sandbox_id, domain="timeout"):
+                with self._lock:
+                    if self._sandboxes.get(sandbox_id) is not sandbox or self._shutdown_called:
+                        continue
+                # Hold the VM lock until the network write finishes. Release
+                # then owns the final idle-TTL write before publishing warm.
+                self._refresh_remote_timeout(sandbox.client, minimum_timeout=active_timeout)
         capacity_revision = None
         capacity_store = self._deployment_capacity
         if capacity_store is not None:
@@ -1615,12 +1757,16 @@ class E2BSandboxProvider(SandboxProvider):
         for (user_id, thread_id), candidates in groups.items():
             candidates.sort(key=lambda item: (item[1].get(META_KEY_CREATED_AT, ""), item[0]))
             with self._lock:
-                local_id = self._thread_sandboxes.get(self._thread_key(thread_id, user_id))
-            if local_id:
-                candidates.sort(key=lambda item: item[0] != local_id)
+                # Locally tracked VMs — active, warm, or in a remote transition —
+                # are never probed: ``Sandbox.connect`` refreshes the remote
+                # expiry, which would defeat the warm pool's idle timeout and
+                # keep idle VMs alive indefinitely.
+                local_ids = {sandbox_id for sandbox_id, _metadata in candidates if sandbox_id in self._sandboxes or sandbox_id in self._warm_pool or sandbox_id in self._remote_ops_in_progress}
 
             live: list[tuple[str, dict[str, Any], E2BClientSandbox]] = []
             for sandbox_id, metadata in candidates:
+                if sandbox_id in local_ids:
+                    continue
                 if time.monotonic() >= deadline:
                     stats.budget_exhausted = True
                     break
@@ -1634,57 +1780,64 @@ class E2BSandboxProvider(SandboxProvider):
                     continue
                 live.append((sandbox_id, metadata, client))
 
-            if not live:
+            if local_ids:
+                # The locally tracked sandbox is canonical; every live remote
+                # candidate is a duplicate. No probe, no adoption.
+                stats.duplicates += len(live)
+                duplicates = live
+            elif not live:
                 continue
-            stats.duplicates += max(0, len(live) - 1)
-            canonical_id, canonical_metadata, canonical_client = live[0]
-            with self._lock:
-                already_local = canonical_id in self._sandboxes
-            if already_local:
-                self._safe_close_client(canonical_client)
-            elif not self._reserve_reconciliation_capacity(
-                canonical_id,
-                reservation_token=self._capacity_reservation_from_metadata(canonical_metadata),
-            ):
-                self._safe_close_client(canonical_client)
-                stats.deferred += 1
-            elif not self._claim_ownership(canonical_id):
-                self._complete_reserved_remote_op(canonical_id, remote_destroyed=False)
-                with self._lock:
-                    self._acquire_inflight.discard(canonical_id)
-                self._safe_close_client(canonical_client)
-                stats.deferred += 1
             else:
-                bootstrap_error, remote_destroyed = self._bootstrap_or_discard(canonical_client, canonical_id)
-                if bootstrap_error is not None:
-                    self._complete_reserved_remote_op(canonical_id, remote_destroyed=remote_destroyed)
+                stats.duplicates += max(0, len(live) - 1)
+                duplicates = live[1:]
+                canonical_id, canonical_metadata, canonical_client = live[0]
+                with self._lock:
+                    already_local = canonical_id in self._sandboxes or canonical_id in self._warm_pool or canonical_id in self._remote_ops_in_progress
+                if already_local:
+                    self._safe_close_client(canonical_client)
+                elif not self._reserve_reconciliation_capacity(
+                    canonical_id,
+                    reservation_token=self._capacity_reservation_from_metadata(canonical_metadata),
+                ):
+                    self._safe_close_client(canonical_client)
+                    stats.deferred += 1
+                elif not self._claim_ownership(canonical_id):
+                    self._complete_reserved_remote_op(canonical_id, remote_destroyed=False)
                     with self._lock:
                         self._acquire_inflight.discard(canonical_id)
+                    self._safe_close_client(canonical_client)
                     stats.deferred += 1
                 else:
-                    discard_after_shutdown = False
-                    with self._lock:
-                        if self._shutdown_called:
-                            discard_after_shutdown = True
-                        else:
-                            self._owned_sandbox_ids.add(canonical_id)
-                            self._unowned_remote_ops_in_progress.discard(canonical_id)
-                            self._register_connected_sandbox(
-                                canonical_id,
-                                canonical_client,
-                                thread_id=thread_id,
-                                user_id=user_id,
-                            )
-                            self._commit_capacity()
-                    if discard_after_shutdown:
-                        if self._claim_ownership(canonical_id, for_destroy=True):
-                            self._kill_client(canonical_client)
-                            self._release_ownership(canonical_id)
-                        self._safe_close_client(canonical_client)
+                    bootstrap_error, remote_destroyed = self._bootstrap_or_discard(canonical_client, canonical_id)
+                    if bootstrap_error is not None:
+                        self._complete_reserved_remote_op(canonical_id, remote_destroyed=remote_destroyed)
+                        with self._lock:
+                            self._acquire_inflight.discard(canonical_id)
+                        stats.deferred += 1
                     else:
-                        stats.adopted += 1
+                        discard_after_shutdown = False
+                        with self._lock:
+                            if self._shutdown_called:
+                                discard_after_shutdown = True
+                            else:
+                                self._owned_sandbox_ids.add(canonical_id)
+                                self._unowned_remote_ops_in_progress.discard(canonical_id)
+                                self._register_connected_sandbox(
+                                    canonical_id,
+                                    canonical_client,
+                                    thread_id=thread_id,
+                                    user_id=user_id,
+                                )
+                                self._commit_capacity()
+                        if discard_after_shutdown:
+                            if self._claim_ownership(canonical_id, for_destroy=True):
+                                self._kill_client(canonical_client)
+                                self._release_ownership(canonical_id)
+                            self._safe_close_client(canonical_client)
+                        else:
+                            stats.adopted += 1
 
-            for sandbox_id, _metadata, client in live[1:]:
+            for sandbox_id, _metadata, client in duplicates:
                 first_seen = self._orphan_first_seen.setdefault(sandbox_id, observed_at)
                 if observed_at - first_seen < float(self._config["reconciliation_grace_seconds"]):
                     self._safe_close_client(client)
@@ -1798,9 +1951,9 @@ class E2BSandboxProvider(SandboxProvider):
             self._thread_sandboxes[self._thread_key(thread_id, user_id)] = sandbox_id
         self._acquire_inflight.discard(sandbox_id)
 
-    def _refresh_remote_timeout(self, client: E2BClientSandbox) -> None:
-        """Push the configured idle timeout to the e2b control plane."""
-        idle_timeout = int(self._config["idle_timeout"])
+    def _refresh_remote_timeout(self, client: E2BClientSandbox, *, minimum_timeout: int = 0) -> None:
+        """Refresh remote TTL, optionally flooring it for active keepalive."""
+        idle_timeout = min(MAX_E2B_TIMEOUT, max(int(self._config["idle_timeout"]), minimum_timeout))
         if idle_timeout <= 0:
             return
         set_timeout = getattr(client, "set_timeout", None)
@@ -2667,18 +2820,24 @@ class E2BSandboxProvider(SandboxProvider):
         removed_keys: list[tuple[str, str, str]] = []
         transition_slot_held = False
 
-        with self._lock:
-            sandbox = self._sandboxes.pop(sandbox_id, None)
-            if sandbox is None:
-                return
-            self._begin_transition_locked()
-            transition_slot_held = True
-            removed_keys = [key for key, sid in self._thread_sandboxes.items() if sid == sandbox_id]
-            for key in removed_keys:
-                self._thread_sandboxes.pop(key, None)
-            if removed_keys:
-                user_id, thread_id, _skills_root = removed_keys[0]
-                seed = self._stable_seed(thread_id, user_id)
+        # Drain any dispatched active renewal before removing the VM from
+        # active state. Later renewal snapshots recheck under this same lock
+        # and skip it, so release owns the final TTL write. No timeout lock
+        # is needed during output sync once the active entry is removed.
+        with self._sandbox_lifecycle(sandbox_id, domain="timeout"):
+            with self._lock:
+                sandbox = self._sandboxes.pop(sandbox_id, None)
+                if sandbox is None:
+                    return
+                self._begin_transition_locked()
+                self._remote_ops_in_progress.add(sandbox_id)
+                transition_slot_held = True
+                removed_keys = [key for key, sid in self._thread_sandboxes.items() if sid == sandbox_id]
+                for key in removed_keys:
+                    self._thread_sandboxes.pop(key, None)
+                if removed_keys:
+                    user_id, thread_id, _skills_root = removed_keys[0]
+                    seed = self._stable_seed(thread_id, user_id)
 
         # E2BSandbox.close() clears its client reference. Keep this reference
         # so a shutdown that races release can still kill the remote VM.
@@ -2746,6 +2905,8 @@ class E2BSandboxProvider(SandboxProvider):
             except Exception as e:
                 logger.warning("Error closing e2b sandbox %s during release: %s", sandbox_id, e)
         finally:
+            with self._lock:
+                self._remote_ops_in_progress.discard(sandbox_id)
             if transition_slot_held:
                 self._free_transitioning_slot()
 
@@ -2799,13 +2960,29 @@ class E2BSandboxProvider(SandboxProvider):
 
     def shutdown(self) -> None:
         with self._lock:
-            if self._shutdown_called:
+            if self._shutdown_called and not self._shutdown_cleanup_pending:
                 return
             self._shutdown_called = True
+            self._shutdown_cleanup_pending = False
+
         self._maintenance_stop.set()
-        for thread in (self._lease_thread, self._reconcile_thread):
-            if thread is not None and thread is not threading.current_thread():
-                thread.join(timeout=max(5.0, float(self._config["reconciliation_max_seconds"]) + 1.0))
+        join_timeout = max(5.0, float(self._config["reconciliation_max_seconds"]) + 1.0)
+        live_threads: list[str] = []
+        for name, thread in (
+            ("lease renewal", self._lease_thread),
+            ("reconciliation", self._reconcile_thread),
+        ):
+            if thread is None or thread is threading.current_thread():
+                continue
+            thread.join(timeout=join_timeout)
+            if thread.is_alive():
+                live_threads.append(name)
+
+        if live_threads:
+            with self._lock:
+                self._shutdown_cleanup_pending = True
+            raise _E2BMaintenanceShutdownTimeout("E2B maintenance thread shutdown timed out: " + ", ".join(live_threads))
+
         with self._lock:
             active = list(self._sandboxes.items())
             warm_ids = list(self._warm_pool.keys() | self._eviction_tombstones | self._remote_ops_in_progress)

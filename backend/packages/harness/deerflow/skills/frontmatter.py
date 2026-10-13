@@ -26,7 +26,10 @@ ALLOWED_FRONTMATTER_PROPERTIES = {
     "author",
 }
 
-_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
+# `\ufeff` is the UTF-8 byte-order mark that Windows Notepad and PowerShell's
+# `Set-Content -Encoding UTF8` prepend to a saved file. It is consumed by the match, so
+# neither the front matter nor the body carries it downstream.
+_FRONTMATTER_RE = re.compile(r"^\ufeff?---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 
 
 @dataclass(frozen=True)

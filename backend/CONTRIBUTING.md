@@ -299,12 +299,18 @@ class MyMiddleware(AgentMiddleware[AgentState]):
 Lifecycle hooks can return a dictionary of state updates, which LangChain merges
 into the agent state, or `None` when they only observe state.
 
-2. Register the zero-argument middleware class in `config.yaml`:
+2. Register the middleware class in `config.yaml`. A class path uses the
+   zero-argument constructor; `{class, kwargs}` passes constructor arguments.
+   `kwargs` values must be JSON types (object, array, string, number, boolean,
+   or null); YAML dates and timestamps are coerced to ISO strings so they match JSON:
 
 ```yaml
 extensions:
   middlewares:
     - deerflow.agents.middlewares.my_middleware:MyMiddleware
+    - class: deerflow.agents.middlewares.my_middleware:MyMiddleware
+      kwargs:
+        max_tool_calls: 5
 ```
 
 Configured middleware runs after the built-in middleware and optional loop/token

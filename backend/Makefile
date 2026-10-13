@@ -19,8 +19,15 @@ dev:
 gateway:
 	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run --locked uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001
 
+# Run all four duration-balanced shards locally; wait for every shard on failure.
+TEST_JOBS ?= 4
+TEST_SHARD_TARGETS := test-shard-1 test-shard-2 test-shard-3 test-shard-4
+.PHONY: test test-shard $(TEST_SHARD_TARGETS)
 test:
-	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "not live" --ignore=tests/blocking_io tests/ -v
+	$(MAKE) --no-print-directory -k -j$(TEST_JOBS) $(TEST_SHARD_TARGETS)
+
+$(TEST_SHARD_TARGETS):
+	$(MAKE) --no-print-directory test-shard SPLITS=4 GROUP=$(patsubst test-shard-%,%,$@)
 
 test-live:
 	DEER_FLOW_RUN_LIVE_TESTS=1 PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m live tests/ -v -s
@@ -35,17 +42,14 @@ test-blocking-io:
 # so concurrent CI jobs cannot race writes on it. Refresh it with
 # `make test-shard-durations` after a meaningful change to the test set.
 # `make test-shard SPLITS=4 GROUP=2` runs shard 2 of 4; a bare `make test-shard`
-# runs the whole (non-live) suite as a single split, matching `make test`.
+# runs the whole offline suite as a single split; `make test` runs all four shards.
 SPLITS ?= 1
 GROUP ?= 1
 DURATIONS_FILE ?= .test_durations
-# CI core shards lack the operator-owned Fleet image/evidence fixtures.
-# Only those callers supply --ignore=tests/fleet; explicit Fleet gates stay unchanged.
-TEST_SHARD_EXTRA_ARGS ?=
 test-shard:
 	@test -f "$(DURATIONS_FILE)" || \
 		(echo "error: $(DURATIONS_FILE) is missing; run 'make test-shard-durations' to regenerate the duration baseline" >&2; exit 1)
-	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "not live" --ignore=tests/blocking_io --splits $(SPLITS) --group $(GROUP) --splitting-algorithm least_duration --durations-path=$(DURATIONS_FILE) $(TEST_SHARD_EXTRA_ARGS) tests/ -q
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "not live" --ignore=tests/blocking_io --splits $(SPLITS) --group $(GROUP) --splitting-algorithm least_duration --durations-path=$(DURATIONS_FILE) tests/ -q
 
 # Regenerate .test_durations from the full offline (non-live, non-blocking-I/O)
 # suite so duration-aware sharding reflects real wall-clock cost. Run locally or

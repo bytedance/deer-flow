@@ -12,6 +12,7 @@ from _router_auth_helpers import call_unwrapped, make_authed_test_app
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from app.gateway import services
 from app.gateway.auth.models import User
 from app.gateway.routers import thread_runs
 from app.gateway.run_models import RunCreateRequest
@@ -50,7 +51,7 @@ def _make_client(monkeypatch, user: User, admissions: dict[str, RunRecord]) -> T
     monkeypatch.setattr(thread_runs, "start_run", fake_start_run)
     app = make_authed_test_app(user_factory=lambda: user)
     app.include_router(thread_runs.router)
-    app.state.stream_bridge = MagicMock(stream_exists=AsyncMock(return_value=False), is_remote=AsyncMock(return_value=False), prepare=None, supports_cross_process=False)
+    app.state.stream_bridge = MagicMock(stream_exists=AsyncMock(return_value=False))
     app.state.run_manager = MagicMock()
     return TestClient(app)
 
@@ -215,7 +216,7 @@ def test_wait_reused_store_only_run_does_not_return_stale_checkpoint(monkeypatch
 
     monkeypatch.setattr(thread_runs, "start_run", fake_start_run)
     monkeypatch.setattr(
-        thread_runs,
+        services,
         "build_checkpoint_state_accessor",
         lambda *args, **kwargs: (SimpleNamespace(aget=fake_aget), {}),
     )
@@ -262,7 +263,7 @@ def test_wait_reused_completed_run_does_not_return_later_checkpoint(monkeypatch)
 
     monkeypatch.setattr(thread_runs, "start_run", fake_start_run)
     monkeypatch.setattr(
-        thread_runs,
+        services,
         "build_checkpoint_state_accessor",
         lambda *args, **kwargs: (SimpleNamespace(aget=fake_aget), {}),
     )
@@ -320,7 +321,7 @@ async def test_wait_original_request_keeps_checkpoint_when_retry_overlaps():
         patch.object(thread_runs, "get_stream_bridge", return_value=bridge),
         patch.object(thread_runs, "get_run_manager", return_value=MagicMock()),
         patch.object(
-            thread_runs,
+            services,
             "build_checkpoint_state_accessor",
             lambda *args, **kwargs: (SimpleNamespace(aget=fake_aget), {}),
         ),
@@ -386,7 +387,7 @@ async def test_wait_peer_refreshes_status_after_owner_completes():
         patch.object(thread_runs, "get_stream_bridge", return_value=bridge),
         patch.object(thread_runs, "get_run_manager", return_value=peer),
         patch.object(
-            thread_runs,
+            services,
             "build_checkpoint_state_accessor",
             side_effect=AssertionError("reused wait must not read latest checkpoint"),
         ),
@@ -769,7 +770,7 @@ async def test_wait_retry_after_later_run_does_not_return_later_checkpoint(monke
 
     monkeypatch.setattr(thread_runs, "start_run", fake_start_run)
     monkeypatch.setattr(
-        thread_runs,
+        services,
         "build_checkpoint_state_accessor",
         lambda *args, **kwargs: (SimpleNamespace(aget=fake_aget), {}),
     )

@@ -9,6 +9,8 @@ import { ModelLoadErrorBanner } from "@/components/workspace/model-load-error-ba
 import { SettingsDialogHost } from "@/components/workspace/settings";
 import { WorkspaceSettingsDeepLink } from "@/components/workspace/workspace-settings-deep-link";
 import { WorkspaceSidebar } from "@/components/workspace/workspace-sidebar";
+import { ExtensionPageBootstrap } from "@/core/extensions/hooks";
+import { UserPreferencesBoundary } from "@/core/settings/user-preferences-boundary";
 
 function parseSidebarOpenCookie(
   value: string | undefined,
@@ -32,18 +34,21 @@ export async function WorkspaceContent({
 
   return (
     <QueryClientProvider>
-      <SidebarProvider className="h-screen" defaultOpen={initialSidebarOpen}>
-        <WorkspaceSidebar />
-        <SidebarInset className="min-w-0">
-          <GatewayOfflineBanner gatewayUnavailable={gatewayUnavailable} />
-          <ModelLoadErrorBanner gatewayUnavailable={gatewayUnavailable} />
-          {children}
-        </SidebarInset>
-      </SidebarProvider>
-      <CommandPalette />
-      <SettingsDialogHost />
-      <WorkspaceSettingsDeepLink />
-      <Toaster position="top-center" />
+      <UserPreferencesBoundary>
+        <ExtensionPageBootstrap />
+        <SidebarProvider className="h-screen" defaultOpen={initialSidebarOpen}>
+          <WorkspaceSidebar />
+          <SidebarInset className="min-w-0">
+            <GatewayOfflineBanner gatewayUnavailable={gatewayUnavailable} />
+            <ModelLoadErrorBanner gatewayUnavailable={gatewayUnavailable} />
+            {children}
+          </SidebarInset>
+        </SidebarProvider>
+        <CommandPalette />
+        <SettingsDialogHost />
+        <WorkspaceSettingsDeepLink />
+        <Toaster position="top-center" />
+      </UserPreferencesBoundary>
     </QueryClientProvider>
   );
 }

@@ -1,0 +1,127 @@
+---
+title: Extensions
+description: An extension is a separately released Python package that plugs into the DeerFlow Gateway through one install() function. This chapter covers what extensions can contribute, when to use one instead of a tool, MCP server, or skill, how they are loaded, and how to read this manual.
+asIndexPage: true
+---
+
+import { Callout } from "nextra/components";
+
+# Extensions
+
+<Callout type="info" emoji="🧩">
+  An extension is an ordinary Python package that DeerFlow imports at Gateway
+  startup. It depends only on the public `deerflow-extension-api` contract, so
+  it can be built, tested, and released without importing DeerFlow itself.
+</Callout>
+
+Tools, MCP servers, and skills add capabilities the model can call. Extensions add behavior to the **host**: they observe every model and tool call, react when a run starts or stops, run background services next to the Gateway, and serve their own HTTP routes. An extension is the supported way to ship that kind of integration, such as audit logging, cost accounting, or a governance dashboard, without forking DeerFlow.
+
+## How to read this manual
+
+| Reader                  | Start with                                                                                          |
+| ----------------------- | --------------------------------------------------------------------------------------------------- |
+| Extension authors       | This page, [Quick Start](/docs/harness/extensions/quick-start), [Runtime Model](/docs/harness/extensions/runtime), then the chapter for each contribution kind below |
+| Operators               | [Operating Extensions](/docs/harness/extensions/operations), [Troubleshooting](/docs/harness/extensions/troubleshooting), [Trust model](#trust-model) |
+| Looking up a name       | [Reference](/docs/harness/extensions/reference)                                                                           |
+| DeerFlow contributors   | `backend/packages/harness/deerflow/extensions/AGENTS.md`, which records the host-side design decisions |
+
+## Should this be an extension?
+
+Pick the lightest mechanism that does the job. Each row executes operator-trusted code, but the lower rows reach further into the runtime.
+
+| You want to                                                        | Use                                                                               |
+| ------------------------------------------------------------------ | --------------------------------------------------------------------------------- |
+| Give the model a new callable capability                            | A [custom tool](/docs/harness/tools) (`tools:` in `config.yaml`) or an [MCP server](/docs/harness/mcp) |
+| Teach the model a workflow or domain procedure                      | A [skill](/docs/harness/skills)                                                   |
+| Add one `AgentMiddleware` class to every agent, configured in place | `extensions.middlewares` in `config.yaml`. See [Customization](/docs/harness/customization) |
+| Ship a versioned package that observes runs, keeps state, runs a service, or serves routes | **An extension** (this manual)                                 |
+
+The two middleware paths are easy to confuse. `extensions.middlewares` inserts a class at one fixed slot and imposes no contract. An extension middleware declares a semantic [placement](/docs/harness/extensions/middleware#placements), runs inside a failure-isolating wrapper, and ships alongside the other contribution kinds below.
+
+## What an extension can contribute
+
+`install(registry, config)` receives a write-only registry. Each registry method registers one contribution kind:
+
+| Registry method                         | Contribution                                                                                       |
+| --------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `registry.middlewares(contributor)`     | `AgentMiddleware` instances inserted into the Lead Agent and subagent chains at a semantic placement. See [Middleware Contributions](/docs/harness/extensions/middleware) |
+| `registry.task_lifecycle(contributor)`  | `on_task_start` / `on_task_stop` for every lead run and every delegated subagent. See [Lifecycle and Observers](/docs/harness/extensions/observers) |
+| `registry.system_model_observer(obs)`   | A snapshot of each model call DeerFlow makes for itself: goal evaluation, memory extraction, title generation, summarization. See [Lifecycle and Observers](/docs/harness/extensions/observers) |
+| `registry.agent_assembly_observer(obs)` | A descriptor of every assembled agent: model, prompt hash, tools, middleware stack, skills, and a fingerprint. See [Lifecycle and Observers](/docs/harness/extensions/observers) |
+| `registry.context_compaction_observer(obs)` | A `CompactionEvent` each time summarization removes messages from context. See [Lifecycle and Observers](/docs/harness/extensions/observers) |
+| `registry.service(service)`             | An object started after the Gateway's persistence layer is ready and stopped at shutdown. May read runs through the [Run Evidence](/docs/harness/extensions/run-evidence) reader. See [Services and Routes](/docs/harness/extensions/services-and-routes) |
+| `registry.routers(routers)`             | FastAPI routers mounted after every host route, behind Gateway authentication. See [Services and Routes](/docs/harness/extensions/services-and-routes) |
+| `registry.plugin(contribution)`         | Experimental. Browser modules, authenticated backend actions, and model tools. Returns `False` on a host without plugin support. See [Full-Stack Plugins](/docs/harness/extensions/plugins) |
+
+A single extension may register any combination. The [bundled example](https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-example) registers a middleware, a task-lifecycle contributor, a system-model observer, a service, and a router.
+
+## Installing and loading
+
+Operators install extensions with the extension manager, which adds the package to the backend's `extensions` dependency group, updates `uv.lock`, and writes one record under the top-level `plugins:` list in `config.yaml`:
+
+```yaml
+plugins:
+  - name: hello
+    package: deerflow-extension-hello
+    use: deerflow_extension_hello:install
+    enabled: true
+    required: false
+    config: {}
+```
+
+| Field      | Meaning                                                                                                      |
+| ---------- | ------------------------------------------------------------------------------------------------------------ |
+| `use`      | Entry point as `module.path:install`                                                                         |
+| `enabled`  | `false` skips the extension without importing it                                                             |
+| `required` | `false` (default): a load failure is logged and the Gateway starts without the extension. `true`: the Gateway refuses to start |
+| `config`   | Private configuration passed verbatim to `install()` as its second argument (a shallow copy)                  |
+
+Loading happens exactly once, while the Gateway builds its application. The Gateway resolves each enabled entry in list order, checks the API version, and calls `install()`. If `install()` raises, the entries it registered are rolled back and the next extension loads normally. The Gateway logs `Extensions loaded: N/M (...)` when it finishes.
+
+Because loading is startup-only, **every change needs a Gateway restart**: install, upgrade, enable, disable, remove, or a hand edit of `plugins:`. `plugins:` lives only in `config.yaml`, never in `extensions_config.json`, because the latter is writable through Gateway APIs and importing a package is code execution.
+
+## Failure model
+
+Extensions are observational, so a broken extension degrades to a log line instead of a broken run:
+
+- A contribution that raises is skipped, and the Gateway logs an error attributed to its entry point (`Extension <use>: ...`).
+- Contributed middleware runs inside an isolating wrapper that never repeats a model call or tool side effect. See [Failure isolation](/docs/harness/extensions/middleware#failure-isolation).
+- Task-lifecycle notifications share a bounded time budget, and observers are notified one by one: a failing observer does not skip the ones after it.
+
+The single exception is `required: true`, which turns any load failure into a startup abort. Use it only when the deployment is wrong without the extension, because recovering from it needs shell access to the config file.
+
+## Trust model
+
+<Callout type="warning">
+  An extension is not sandboxed. Its build hooks run during installation and its
+  code runs inside the Gateway process with the Gateway's privileges, including
+  database access through the session factory handed to services. Install only
+  sources you have reviewed and trust.
+</Callout>
+
+The extension manager asks for confirmation before installing, rejects source URLs with embedded credentials, and accepts only package requirements, HTTPS sources (including public Git over HTTPS), and local directories, which it copies as a snapshot. SSH Git URLs and local wheels are rejected. These checks prevent packaging accidents, not malicious code.
+
+## Versioning
+
+The contract package is versioned separately from DeerFlow, and a host exposes its version as `deerflow_extension_api.API_VERSION`. This manual covers `deerflow-extension-api` **0.2.4**.
+
+- Before 1.0, a minor release may break extensions and a patch release only adds. From 1.0 on, breaking changes bump the major.
+- Every Protocol method has a default implementation and every optional dataclass field has a default, so additive releases do not break already-released extensions.
+- Decorating `install` with `@extension(api="0.2.0")` declares the version you wrote against. The Gateway refuses the extension, with an actionable message, unless the host is the same `0.minor` and at least the declared patch. Declare the lowest version whose features you use.
+
+Declare the matching range in your package metadata as well, for example `deerflow-extension-api>=0.2,<0.3`.
+
+## Terminology
+
+- **Host**: the DeerFlow Gateway process that loads extensions.
+- **Contribution**: one object registered through the registry: a contributor, observer, service, router, or plugin.
+- **Contributor**: an object the host calls back to obtain contributions, such as a `MiddlewareContributor` that returns middleware for each agent it builds.
+- **Scope**: the lifetime a piece of state belongs to. The **app scope** lives as long as the Gateway; a **task scope** lives for one lead run or one subagent execution.
+- **`ExtensionData`**: the typed store attached to a scope, keyed by Python type so two extensions cannot collide.
+- **Diagnostic**: a load-time or run-time problem attributed to one extension and written to the Gateway log.
+
+<Cards num={3}>
+  <Cards.Card title="Quick Start" href="/docs/harness/extensions/quick-start" />
+  <Cards.Card title="Runtime Model" href="/docs/harness/extensions/runtime" />
+  <Cards.Card title="Operating Extensions" href="/docs/harness/extensions/operations" />
+</Cards>

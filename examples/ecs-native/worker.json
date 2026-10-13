@@ -1,0 +1,8 @@
+{
+  "enabled": true,
+  "role": "worker",
+  "artifact_root": "/shared/executor",
+  "executor_url": "https://private-gateway.example",
+  "node_id": "ecs-one",
+  "credential_env": "ECS_ONE_TOKEN"
+}

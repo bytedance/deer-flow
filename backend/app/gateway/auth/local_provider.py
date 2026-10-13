@@ -83,6 +83,23 @@ class LocalAuthProvider(AuthProvider):
         )
         return await self._repo.create_user(user)
 
+    async def create_first_admin(self, email: str, password: str) -> User | None:
+        """Create the first admin account, or return None if one already exists.
+
+        The check and the insert are one atomic claim in the repository, so
+        concurrent first-boot requests cannot both succeed.
+
+        Args:
+            email: Admin email address
+            password: Plain text password (will be hashed)
+
+        Returns:
+            Created admin User, or None if the system already has an admin
+        """
+        password_hash = await hash_password_async(password)
+        user = User(email=email, password_hash=password_hash, system_role="admin", needs_setup=False)
+        return await self._repo.create_first_admin(user)
+
     async def get_user_by_oauth(self, provider: str, oauth_id: str) -> User | None:
         """Get user by OAuth provider and ID."""
         return await self._repo.get_user_by_oauth(provider, oauth_id)

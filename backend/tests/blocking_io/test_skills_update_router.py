@@ -110,13 +110,14 @@ async def test_update_skill_writes_from_snapshot_without_mutating_singleton(tmp_
     assert "demo-skill" not in shared_config.skills
     config_text = await asyncio.to_thread(config_path.read_text, encoding="utf-8")
     written = json.loads(config_text)
-    assert written["skills"] == {
-        "existing-skill": {"enabled": True},
-        "demo-skill": {"enabled": False},
+    # A new file is seeded with the cached skill states only. The cached model
+    # holds $VAR-resolved values, so none of its other fields are serialized.
+    assert written == {
+        "skills": {
+            "existing-skill": {"enabled": True},
+            "demo-skill": {"enabled": False},
+        }
     }
-    # to_file_dict() serializes the full shape, so unrelated top-level keys survive.
-    assert written["mcpServers"] == {}
-    assert "middlewares" in written
 
 
 async def test_update_skill_persists_state_when_source_omits_skills(tmp_path: Path, monkeypatch) -> None:
@@ -227,8 +228,9 @@ async def test_cancelled_writer_keeps_the_lock_until_its_worker_finishes(tmp_pat
     write and reload actually finish.
 
     Here the skills worker is paused after it has written and is inside the lock;
-    its route task is then cancelled and the MCP writer is started. The MCP RMW
-    must not enter until the skills worker is released.
+    its route task is then cancelled and the MCP writer is started. The cancelled
+    route task drains its mutation tail, so it is not awaited before the MCP
+    writer starts: the MCP RMW must not enter until the skills worker is released.
     """
     config_path = tmp_path / "extensions_config.json"
     await asyncio.to_thread(config_path.write_text, '{"mcpServers": {}, "skills": {}}', encoding="utf-8")
@@ -268,18 +270,22 @@ async def test_cancelled_writer_keeps_the_lock_until_its_worker_finishes(tmp_pat
     assert await asyncio.to_thread(skills_inside.wait, 5), "skills worker never entered the critical section"
 
     # Cancel the awaiting task while its worker thread is still inside the RMW.
+    # The drained route task absorbs the cancellation until its tail settles,
+    # so it is not awaited here: the MCP writer starts while the cancelled
+    # caller's worker still owns the section.
     skills_task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await skills_task
 
     mcp_task = asyncio.create_task(mcp_router.update_mcp_configuration(_admin_request(), McpConfigUpdateRequest(mcp_servers={})))
     await asyncio.sleep(0.1)
 
-    # The cancelled request's worker still owns the section.
+    # The cancelled request's worker still owns the section while its drained
+    # tail is in flight.
     with order_lock:
         assert "mcp-enter" not in order, f"MCP writer entered while the cancelled worker was still inside: {order}"
 
     release_skills.set()
+    with pytest.raises(asyncio.CancelledError):
+        await skills_task
     await mcp_task
 
     with order_lock:

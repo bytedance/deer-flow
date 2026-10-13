@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from langchain.tools import tool
@@ -100,7 +101,7 @@ async def web_fetch_tool(url: str) -> str:
     try:
         cfg = _get_tool_config("web_fetch")  # read config once; pass the values down
         allow_private_addresses = _coerce_bool(cfg.get("allow_private_addresses") if cfg is not None else None, False)
-        url_error = validate_public_http_url(url, allow_private_addresses=allow_private_addresses)
+        url_error = await asyncio.to_thread(validate_public_http_url, url, allow_private_addresses=allow_private_addresses)
         if url_error:
             return url_error
         filter_mode = _coerce_filter(cfg.get("filter") if cfg is not None else None)

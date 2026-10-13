@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, Index, Integer, String, Text, text
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -13,12 +13,19 @@ class ScheduledTaskRunRow(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     task_id: Mapped[str] = mapped_column(String(64), index=True)
+    # NULL identifies legacy history or direct inserts without a parent task.
+    occurrence_seq: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # New occurrences start False; NULL preserves unknown legacy accounting.
+    launch_accounted: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     thread_id: Mapped[str] = mapped_column(String(64), index=True)
     run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     scheduled_for: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     trigger: Mapped[str] = mapped_column(String(16))
     status: Mapped[str] = mapped_column(String(16), index=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    goal_objective: Mapped[str | None] = mapped_column(Text, nullable=True)
+    goal_verdict: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    stop_requested_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     attempt_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
@@ -27,6 +34,7 @@ class ScheduledTaskRunRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
     __table_args__ = (
+        Index("uq_scheduled_task_run_occurrence_seq", "task_id", "occurrence_seq", unique=True),
         # At most one non-terminal (queued/launching/running) occurrence per
         # task. Queued occurrences are deliberately durable; ``launching`` is
         # a short lease-fenced claim used so multiple gateway instances cannot

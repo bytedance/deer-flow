@@ -163,6 +163,55 @@ _ACTOR_PEER: ContextVar[str | None] = ContextVar(
 )
 
 
+@pytest.mark.parametrize("kind", ["invalid", "legacy"])
+@pytest.mark.parametrize("entry", ["after-agent", "async-after-agent", "compaction"])
+def test_memory_admission_redacts_call_views_before_openviking_recorder(tmp_path, monkeypatch, official_integration, kind: str, entry: str) -> None:
+    import asyncio
+
+    from langchain_core.messages import messages_to_dict
+    from langchain_openai.chat_models.base import _convert_dict_to_message
+    from langgraph.runtime import Runtime
+
+    from deerflow.agents.memory import summarization_hook
+    from deerflow.agents.middlewares import memory_middleware
+    from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+    from deerflow.agents.middlewares.summarization_middleware import SummarizationEvent
+    from deerflow.config.memory_config import MemoryConfig
+    from deerflow.config.pii_redaction_config import PiiRedactionConfig
+
+    config = PiiRedactionConfig(enabled=True, token_secret="openviking-regression-secret")
+    raw = {"role": "assistant", "content": "Preparing lookup"}
+    call = {"name": "lookup", "arguments": '{"email":"alice@example.com"}' if kind == "legacy" else '{"email":"alice@example.com",'}
+    raw.update({"function_call": call} if kind == "legacy" else {"tool_calls": [{"id": "call-1", "type": "function", "function": call}]})
+    messages = [HumanMessage("Look up contact"), _convert_dict_to_message(raw), AIMessage("Lookup was not executed")]
+    original = messages_to_dict(messages)
+    manager = _manager(tmp_path, monkeypatch)
+    monkeypatch.setattr(memory_middleware, "get_memory_manager", lambda: manager)
+    monkeypatch.setattr(summarization_hook, "get_memory_manager", lambda: manager)
+    monkeypatch.setattr(summarization_hook, "get_memory_config", lambda: MemoryConfig(enabled=True))
+    runtime = Runtime(context={"thread_id": "thread-1", "user_id": "alice"})
+    middleware = MemoryMiddleware(memory_config=MemoryConfig(enabled=True), pii_redaction_config=config)
+    try:
+        if entry == "after-agent":
+            middleware.after_agent({"messages": messages}, runtime)
+        elif entry == "async-after-agent":
+            asyncio.run(middleware.aafter_agent({"messages": messages}, runtime))
+        else:
+            event = SummarizationEvent(messages_to_summarize=tuple(messages), preserved_messages=(), thread_id="thread-1", agent_name=None, runtime=runtime)
+            summarization_hook.memory_flush_hook(event, pii_redaction_config=config)
+        assert len(manager._recorder.calls) == 1
+        recorded = manager._recorder.calls[0][1]
+        assert len(recorded) == 3
+        assert "alice@example.com" not in str(messages_to_dict(recorded))
+        if kind == "legacy":
+            assert "[EMAIL_" in recorded[1].additional_kwargs["function_call"]["arguments"]
+        else:
+            assert "[EMAIL_" in recorded[1].invalid_tool_calls[0]["args"]
+        assert messages_to_dict(messages) == original
+    finally:
+        manager.close()
+
+
 @contextmanager
 def _use_actor_peer(peer_id: str | None):
     token = _ACTOR_PEER.set(peer_id)
@@ -246,6 +295,65 @@ def test_config_uses_single_user_key_and_rejects_legacy_trusted_fields(
         OpenVikingConfig.from_backend_config(_backend_config(tmp_path, default_peer_id="df-agent-default"))
     with pytest.raises(ValueError, match="custom HTTP client fields"):
         OpenVikingConfig.from_backend_config(_backend_config(tmp_path, max_connections=10))
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "attr", "default"),
+    [
+        (None, "timeout_seconds", "timeout_seconds", 30.0),
+        (None, "max_seen_message_ids", "max_seen_message_ids", 512),
+        ("retrieval", "top_k", "search_top_k", 8),
+        ("retrieval", "max_injection_chars", "max_injection_chars", 12_000),
+        ("retrieval", "score_threshold", "score_threshold", None),
+    ],
+)
+@pytest.mark.parametrize("unset", [None, "", "   "])
+def test_numeric_knob_written_without_a_value_keeps_its_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    section: str | None,
+    key: str,
+    attr: str,
+    default: Any,
+    unset: Any,
+) -> None:
+    """An unquoted ``top_k:`` in YAML parses as unset, not as a broken backend."""
+    monkeypatch.setenv("OPENVIKING_API_KEY", "user-key")
+    config = _backend_config(tmp_path)
+    target = config if section is None else config[section]
+    target[key] = unset
+
+    cfg = OpenVikingConfig.from_backend_config(config)
+
+    assert getattr(cfg, attr) == default
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "value"),
+    [
+        (None, "timeout_seconds", "soon"),
+        (None, "timeout_seconds", [30]),
+        (None, "max_seen_message_ids", "many"),
+        ("retrieval", "top_k", "four"),
+        ("retrieval", "top_k", {"count": 4}),
+        ("retrieval", "score_threshold", "high"),
+    ],
+)
+def test_non_numeric_knob_names_the_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    section: str | None,
+    key: str,
+    value: Any,
+) -> None:
+    """The report has to say which knob is wrong, not just that a cast failed."""
+    monkeypatch.setenv("OPENVIKING_API_KEY", "user-key")
+    config = _backend_config(tmp_path)
+    target = config if section is None else config[section]
+    target[key] = value
+
+    with pytest.raises(ValueError, match=f"OpenViking {key} must be a number"):
+        OpenVikingConfig.from_backend_config(config)
 
 
 def test_backend_is_discovered_by_registered_name() -> None:

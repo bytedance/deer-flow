@@ -21,8 +21,10 @@ from langgraph.types import Overwrite
 
 from deerflow.agents.thread_state import merge_artifacts, merge_message_writes
 from deerflow.config.run_ownership_config import RunOwnershipConfig
-from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
-from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.runtime import context_compaction
+from deerflow.runtime.checkpoint_state import CheckpointStateAccessor, build_state_mutation_graph
+from deerflow.runtime.context_compaction import compact_thread_context
+from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY, CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.journal import RunJournal
 from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, RunManager
@@ -182,8 +184,8 @@ async def test_run_agent_cleans_up_when_mcp_task_projection_is_cancelled():
     projection_started = asyncio.Event()
 
     class BlockingTaskRepository:
-        async def list_by_thread(self, thread_id, *, user_id, limit):
-            del thread_id, user_id, limit
+        async def list_by_thread(self, thread_id, *, user_id, thread_incarnation, limit):
+            del thread_id, user_id, thread_incarnation, limit
             projection_started.set()
             await asyncio.Event().wait()
 
@@ -208,6 +210,7 @@ async def test_run_agent_cleans_up_when_mcp_task_projection_is_cancelled():
             agent_factory=agent_factory,
             graph_input={},
             config={},
+            thread_incarnation=None,
         )
     )
     await asyncio.wait_for(projection_started.wait(), timeout=1)
@@ -372,6 +375,14 @@ class _DeltaChannelState(TypedDict):
 
 class _FullChannelState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
+
+
+class _CompactionFullState(_FullChannelState):
+    summary_text: NotRequired[str | None]
+
+
+class _CompactionDeltaState(_DeltaChannelState):
+    summary_text: NotRequired[str | None]
 
 
 def _build_message_append_graph(state_schema: type, checkpointer: Any):
@@ -637,6 +648,53 @@ def test_install_runtime_context_removes_caller_sandbox_execution_identities():
 
     assert SANDBOX_LEASE_OWNER_CONTEXT_KEY not in config["context"]
     assert SANDBOX_COMMAND_SCOPE_CONTEXT_KEY not in config["context"]
+
+
+def test_build_runtime_context_ignores_caller_project_context_key():
+    """The worker merge refuses a caller-supplied pinned project snapshot (§12)."""
+    from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
+
+    ctx = _build_runtime_context("thread-1", "run-1", {PROJECT_CONTEXT_KEY: {"project_id": "forged"}, "agent_name": "kept"})
+
+    assert PROJECT_CONTEXT_KEY not in ctx
+    assert ctx["agent_name"] == "kept"
+
+
+def test_install_runtime_context_removes_caller_project_context_key_when_unpinned():
+    from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
+
+    config = {"context": {PROJECT_CONTEXT_KEY: {"project_id": "forged"}}}
+
+    _install_runtime_context(config, {"thread_id": "record-thread", "run_id": "run-1"})
+
+    assert PROJECT_CONTEXT_KEY not in config["context"]
+
+
+def test_install_runtime_context_preserves_the_pinned_project_context():
+    from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
+
+    stamped = {"project_id": "p-1", "name": "Roadmap", "instructions": "x"}
+    config = {"context": {PROJECT_CONTEXT_KEY: stamped}}
+
+    _install_runtime_context(config, {"thread_id": "record-thread", "run_id": "run-1", PROJECT_CONTEXT_KEY: stamped})
+
+    assert config["context"][PROJECT_CONTEXT_KEY] is stamped
+
+
+def test_pin_admission_project_context_hoists_only_the_stamped_value():
+    from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
+    from deerflow.runtime.runs.worker import _pin_admission_project_context
+
+    stamped = {"project_id": "p-1", "name": "Roadmap", "instructions": "x"}
+    runtime_ctx = {"thread_id": "record-thread", "run_id": "run-1"}
+    _pin_admission_project_context({"context": {PROJECT_CONTEXT_KEY: stamped}}, runtime_ctx)
+    assert runtime_ctx[PROJECT_CONTEXT_KEY] is stamped
+
+    empty = {"thread_id": "record-thread", "run_id": "run-1"}
+    _pin_admission_project_context({"context": {}}, empty)
+    _pin_admission_project_context({}, empty)
+    _pin_admission_project_context({"context": "not-a-mapping"}, empty)
+    assert PROJECT_CONTEXT_KEY not in empty
 
 
 @pytest.mark.parametrize(
@@ -1089,6 +1147,93 @@ async def test_run_agent_closes_stream_when_abort_breaks_iteration():
 
 
 @pytest.mark.parametrize("stream_modes", [["values"], ["messages-tuple", "values"]])
+@pytest.mark.parametrize("close_fails", [False, True], ids=["close-succeeds", "close-fails"])
+@pytest.mark.anyio
+async def test_run_agent_repeated_cancellation_waits_for_stream_close(stream_modes, close_fails, caplog):
+    run_manager = RunManager()
+    record = await run_manager.create("thread-stream-close-cancellation")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    iteration_started = asyncio.Event()
+    close_started = asyncio.Event()
+    allow_close = asyncio.Event()
+
+    class BlockingStream:
+        def __init__(self) -> None:
+            self.close_cancelled = False
+            self.closed = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            iteration_started.set()
+            await asyncio.Event().wait()
+
+        async def aclose(self) -> None:
+            close_started.set()
+            try:
+                await allow_close.wait()
+            except asyncio.CancelledError:
+                self.close_cancelled = True
+                raise
+            if close_fails:
+                raise RuntimeError("stream close failed")
+            self.closed = True
+
+    stream = BlockingStream()
+
+    class DummyAgent:
+        def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            return stream
+
+    run_task = asyncio.create_task(
+        run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=None),
+            agent_factory=lambda **_kwargs: DummyAgent(),
+            graph_input={},
+            config={},
+            stream_modes=stream_modes,
+        )
+    )
+    await iteration_started.wait()
+    run_task.cancel("first")
+    await close_started.wait()
+
+    run_task.cancel("second")
+    await asyncio.sleep(0)
+    run_task.cancel("third")
+    await asyncio.sleep(0)
+
+    assert not run_task.done()
+    assert not stream.close_cancelled
+    assert not stream.closed
+    bridge.publish_end.assert_not_awaited()
+
+    with caplog.at_level(logging.DEBUG, logger="deerflow.runtime.runs.worker"):
+        allow_close.set()
+        await run_task
+
+    assert not stream.close_cancelled
+    assert record.status == RunStatus.interrupted
+    if close_fails:
+        assert not stream.closed
+        assert "Could not close agent stream" in caplog.text
+        assert "stream close failed" in caplog.text
+    else:
+        assert stream.closed
+        assert "Could not close agent stream" not in caplog.text
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.parametrize("stream_modes", [["values"], ["messages-tuple", "values"]])
 @pytest.mark.parametrize("abort_before_break", [True, False], ids=["early-break", "exhaustion-race"])
 @pytest.mark.anyio
 async def test_run_agent_ignores_stream_close_failure_after_abort(stream_modes, abort_before_break, caplog):
@@ -1146,6 +1291,62 @@ async def test_run_agent_ignores_stream_close_failure_after_abort(stream_modes, 
     assert record.status == RunStatus.interrupted
     assert record.error is None
     assert "Could not close aborted agent stream" in caplog.text
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.parametrize("stream_modes", [["values"], ["messages-tuple", "values"]])
+@pytest.mark.parametrize("synchronous_close", [False, True], ids=["async-close", "sync-close"])
+@pytest.mark.anyio
+async def test_run_agent_treats_stream_originated_close_cancellation_as_error(stream_modes, synchronous_close):
+    run_manager = RunManager()
+    record = await run_manager.create("thread-stream-self-cancel")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class SelfCancellingCloseStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+        def aclose(self):
+            if synchronous_close:
+                raise asyncio.CancelledError("stream cancelled its own close")
+
+            async def cancel_close() -> None:
+                raise asyncio.CancelledError("stream cancelled its own close")
+
+            return cancel_close()
+
+    stream = SelfCancellingCloseStream()
+
+    class DummyAgent:
+        def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            return stream
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=lambda **_kwargs: DummyAgent(),
+        graph_input={},
+        config={},
+        stream_modes=stream_modes,
+    )
+
+    assert record.status == RunStatus.error
+    assert record.error == "Agent stream cancelled its own close operation"
+    error_events = [call.args for call in bridge.publish.await_args_list if call.args[1] == "error"]
+    assert len(error_events) == 1
+    error_event = error_events[0]
+    assert error_event[1] == "error"
+    assert error_event[2]["name"] == "AgentStreamCloseCancelledError"
     bridge.publish_end.assert_awaited_once_with(record.run_id)
 
 
@@ -2200,6 +2401,97 @@ async def test_rollback_linearizes_delta_restore_onto_cancelled_head():
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    "mode,state_schema",
+    [("full", _CompactionFullState), ("delta", _CompactionDeltaState)],
+)
+async def test_rollback_preserves_agent_binding_for_manual_compaction(monkeypatch, mode, state_schema):
+    """A state-only rollback must keep the policy that produced its state."""
+    import deerflow.config.agents_config as agents_config
+
+    checkpointer = InMemorySaver()
+
+    async def _finish(_state: dict[str, Any]) -> dict[str, Any]:
+        return {}
+
+    builder = StateGraph(state_schema)
+    builder.add_node("finish", _finish)
+    builder.set_entry_point("finish")
+    builder.set_finish_point("finish")
+    graph = builder.compile(checkpointer=checkpointer)
+    accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode=mode)
+    thread_config = {"configurable": {"thread_id": "thread-binding"}}
+    seeded_config = {
+        **thread_config,
+        "metadata": {CHECKPOINT_AGENT_NAME_METADATA_KEY: "stateless-worker"},
+    }
+    original_messages = [
+        HumanMessage(content="old question", id="h1"),
+        AIMessage(content="old answer", id="a1"),
+        HumanMessage(content="latest question", id="h2"),
+    ]
+    await graph.ainvoke({"messages": original_messages}, seeded_config)
+    rollback_point = await _capture_rollback_point(accessor, checkpointer, thread_config)
+    assert rollback_point is not None
+
+    await graph.ainvoke(
+        {"messages": [AIMessage(content="cancelled answer", id="a2")]},
+        thread_config,
+    )
+    await _rollback_to_pre_run_checkpoint(
+        accessor=accessor,
+        checkpointer=checkpointer,
+        thread_id="thread-binding",
+        run_id="run-binding",
+        rollback_point=rollback_point,
+        snapshot_capture_failed=False,
+    )
+
+    restored = await accessor.aget(thread_config)
+    assert restored.metadata[CHECKPOINT_AGENT_NAME_METADATA_KEY] == "stateless-worker"
+    assert [message.id for message in restored.values["messages"]] == ["h1", "a1", "h2"]
+
+    config_reads: list[tuple[str, str | None]] = []
+
+    def _load_agent_config(name, *, user_id=None):
+        config_reads.append((name, user_id))
+        return SimpleNamespace(model=None, memory_enabled=False)
+
+    monkeypatch.setattr(agents_config, "load_agent_config", _load_agent_config)
+    captured: dict[str, Any] = {}
+
+    class _CompactionMiddleware:
+        async def acompact_state(self, state, runtime, *, force=False, raise_on_failure=False):
+            del runtime, force, raise_on_failure
+            return SimpleNamespace(
+                summary_text="summary",
+                messages_to_summarize=tuple(state["messages"][:-1]),
+                preserved_messages=tuple(state["messages"][-1:]),
+                total_tokens=42,
+            )
+
+    def _create_compaction_middleware(**kwargs):
+        captured.update(kwargs)
+        return _CompactionMiddleware()
+
+    monkeypatch.setattr(context_compaction, "_create_compaction_middleware", _create_compaction_middleware)
+    compaction_graph = build_state_mutation_graph("manual_compaction", mode, state_schema)
+    compaction_accessor = CheckpointStateAccessor.bind(compaction_graph, checkpointer, mode=mode)
+
+    result = await compact_thread_context(
+        compaction_accessor,
+        "thread-binding",
+        app_config=SimpleNamespace(models=[]),
+        user_id="user-1",
+        agent_name="memory-enabled-impostor",
+    )
+
+    assert result.compacted is True
+    assert captured["skip_memory_flush"] is True
+    assert config_reads == [("stateless-worker", "user-1")]
+
+
+@pytest.mark.anyio
 async def test_rollback_restores_pre_run_pending_writes_for_delta_checkpoints():
     """Pre-run pending writes are re-attached to the restored checkpoint; writes
     attached to the cancelled run are not."""
@@ -2309,6 +2601,81 @@ def test_build_runtime_context_defaults_to_thread_and_run_id():
     assert ctx == {"thread_id": "thread-1", "run_id": "run-1"}
 
 
+@pytest.mark.parametrize("forged_reader", [lambda: None, {"allowed_ids": ["other-thread"]}])
+@pytest.mark.parametrize("carrier", ["context", "configurable"])
+def test_embedded_caller_cannot_supply_conversation_reader(forged_reader, carrier):
+    key = "__conversation_reader"
+    config = {carrier: {key: forged_reader}}
+
+    runtime_context = _build_runtime_context("thread-1", "run-1", config.get("context"))
+    _install_runtime_context(config, runtime_context)
+
+    assert key not in runtime_context
+    assert key not in config["context"]
+    assert key not in config.get("configurable", {})
+
+
+def test_host_conversation_reader_replaces_caller_value_in_both_contexts():
+    key = "__conversation_reader"
+    reader = AsyncMock()
+    config = {"context": {key: AsyncMock()}, "configurable": {key: AsyncMock()}}
+
+    runtime_context = _build_runtime_context("thread-1", "run-1", config["context"], conversation_reader=reader)
+    _install_runtime_context(config, runtime_context)
+
+    assert runtime_context[key] is reader
+    assert config["context"][key] is reader
+    assert key not in config["configurable"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("outcome", ["success", "error", "cancel"])
+async def test_run_agent_scopes_conversation_reader_to_the_active_run(outcome):
+    key = "__conversation_reader"
+    reader = AsyncMock(return_value="authorized conversation")
+    run_manager = RunManager()
+    record = await run_manager.create(f"thread-conversation-{outcome}")
+    captured: dict[str, Any] = {}
+    config = {"context": {key: AsyncMock()}}
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, stream_mode, subgraphs
+            captured["stream_config"] = config
+            runtime_context = config["configurable"]["__pregel_runtime"].context
+            captured["runtime_context"] = runtime_context
+            assert config["context"][key] is reader
+            assert runtime_context[key] is reader
+            assert await runtime_context[key]("allowed-thread") == "authorized conversation"
+            if outcome == "error":
+                raise RuntimeError("model failed")
+            if outcome == "cancel":
+                record.abort_event.set()
+            yield {"messages": []}
+
+    def factory(*, config):
+        captured["factory_context"] = config["context"]
+        assert config["context"][key] is reader
+        return DummyAgent()
+
+    await run_agent(
+        _lease_test_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, conversation_reader=reader),
+        agent_factory=factory,
+        graph_input={},
+        config=config,
+    )
+    await asyncio.sleep(0)
+
+    reader.assert_awaited_once_with("allowed-thread")
+    expected_status = {"success": RunStatus.success, "error": RunStatus.error, "cancel": RunStatus.interrupted}[outcome]
+    assert record.status == expected_status
+    for context in (config["context"], captured["factory_context"], captured["stream_config"]["context"], captured["runtime_context"]):
+        assert key not in context
+
+
 def test_build_runtime_context_merges_caller_context():
     """Regression for issue #2677: keys from ``config['context']`` (e.g. ``agent_name``)
     must be merged into the Runtime's context so that ``ToolRuntime.context`` — which
@@ -2336,6 +2703,21 @@ def test_build_runtime_context_caller_cannot_override_thread_id_or_run_id():
     assert ctx["agent_name"] == "ok"
 
 
+def test_build_runtime_context_uses_server_owned_thread_incarnation():
+    ctx = _build_runtime_context(
+        "thread-1",
+        "run-1",
+        {
+            "thread_incarnation": "spoofed",
+            "__deerflow_thread_incarnation_metadata_guard": True,
+        },
+        thread_incarnation="server-incarnation",
+    )
+
+    assert ctx["thread_incarnation"] == "server-incarnation"
+    assert "__deerflow_thread_incarnation_metadata_guard" not in ctx
+
+
 def test_build_runtime_context_ignores_caller_pre_existing_message_ids():
     caller_context = {CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: {"spoofed"}}
 
@@ -2354,6 +2736,20 @@ def test_build_runtime_context_ignores_caller_sandbox_execution_identities():
 
     assert SANDBOX_LEASE_OWNER_CONTEXT_KEY not in ctx
     assert SANDBOX_COMMAND_SCOPE_CONTEXT_KEY not in ctx
+
+
+def test_build_runtime_context_ignores_caller_audit_attribution_and_recorders():
+    caller_context = {
+        "is_subagent": True,
+        "agent_id": "forged-agent",
+        "__run_loop_detection_recorder": object(),
+        "__run_tool_promotion_recorder": object(),
+        "__run_tool_progress_recorder": object(),
+    }
+
+    ctx = _build_runtime_context("thread-1", "run-1", caller_context)
+
+    assert set(caller_context).isdisjoint(ctx)
 
 
 def test_build_runtime_context_ignores_non_dict_caller_context():

@@ -1,0 +1,11 @@
+{
+  "format_version": 1,
+  "release_id": "native-20261013-5f45039e-locked",
+  "source_commit": "5f45039eeaff4568898d88e461be7bcac138c88c",
+  "source_archive_sha256": "90d3db09cfe0183a887a27da2accbf99f4fd5df437e46fc7e30bbc58092d61cc",
+  "image": "sha256:8c206436a47d3ee2def2721e01a11a60f5cb9e050788df168b4e33a4665a0e21",
+  "image_archive_sha256": "4efdeb16fdc1a55f456817da09787cb2e22b7bca3486bad91b353070dc5f1578",
+  "image_archive_bytes": 880769024,
+  "native_revision": "0035_native_fork_compatibility",
+  "executor_revision": "e0001_execution_ledger"
+}

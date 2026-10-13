@@ -19,6 +19,14 @@ const withNextra = nextra({});
 
 /** @type {import("next").NextConfig} */
 const config = {
+  ...(process.env.DEER_FLOW_BUILD_MEMORY_OPTIMIZATIONS === "1"
+    ? {
+        experimental: {
+          webpackBuildWorker: true,
+          webpackMemoryOptimizations: true,
+        },
+      }
+    : {}),
   output:
     process.env.NEXT_CONFIG_BUILD_OUTPUT === "standalone"
       ? "standalone"

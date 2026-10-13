@@ -1,1 +1,0 @@
-{"model-1":{"provider_use":"fleet.c04_worker_fixture:ScriptedModel","target_model":"parent","version":"v1"},"child":{"provider_use":"fleet.c04_worker_fixture:ScriptedModel","target_model":"child","version":"v1"}}

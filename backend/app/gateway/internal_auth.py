@@ -7,6 +7,7 @@ import secrets
 from types import SimpleNamespace
 from typing import Any
 
+from app.gateway.utils import constant_time_equals
 from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime.user_context import DEFAULT_USER_ID
 
@@ -36,7 +37,7 @@ def create_internal_auth_headers(*, owner_user_id: str | None = None) -> dict[st
 
 def is_valid_internal_auth_token(token: str | None) -> bool:
     """Return True when *token* matches this Gateway worker's internal token."""
-    return bool(token) and secrets.compare_digest(token, _INTERNAL_AUTH_TOKEN)
+    return bool(token) and constant_time_equals(token, _INTERNAL_AUTH_TOKEN)
 
 
 def get_internal_user(owner_user_id: str | None = None):
@@ -83,56 +84,3 @@ def get_trusted_internal_owner_user_id(request: Any) -> str | None:
         return None
     owner_user_id = owner_user_id.strip()
     return owner_user_id or None
-
-
-# Separate from the internal token: possessing that token cannot sign a human
-# event. This worker-local secret deliberately fails closed across restart/workers.
-_HUMAN_EVENT_SECRET = secrets.token_bytes(32)
-_HUMAN_EVENT_HEADER = "X-DeerFlow-Human-Event"
-
-
-def _human_event_payload(owner, thread_id, graph_input, key, expiry):
-    import hashlib
-    import json
-
-    digest = hashlib.sha256(json.dumps(graph_input, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
-    return json.dumps([make_safe_user_id(owner), thread_id, digest, key, expiry], separators=(",", ":")).encode()
-
-
-def create_channel_human_headers(*, owner_user_id, thread_id, graph_input, event_key):
-    """Only the three real ChannelManager human launch sites call this signer."""
-    import hashlib
-    import hmac
-    import time
-
-    key = "channel:" + hashlib.sha256(event_key.encode()).hexdigest()
-    expiry = int(time.time()) + 300
-    payload = _human_event_payload(owner_user_id, thread_id, graph_input, key, expiry)
-    signature = hmac.new(_HUMAN_EVENT_SECRET, payload, hashlib.sha256).hexdigest()
-    return dict(create_internal_auth_headers(owner_user_id=owner_user_id), **{"Idempotency-Key": key, _HUMAN_EVENT_HEADER: str(expiry) + "." + signature})
-
-
-def authenticated_channel_human_event(request, thread_id, graph_input):
-    """Return signed key/freshness; expired exact receipt reuse grants no new intent."""
-    import hashlib
-    import hmac
-    import time
-
-    from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
-
-    if getattr(request.state, "auth_source", None) != AUTH_SOURCE_INTERNAL:
-        return None
-    owner = get_trusted_internal_owner_user_id(request)
-    key = request.headers.get("Idempotency-Key")
-    header = request.headers.get(_HUMAN_EVENT_HEADER, "")
-    if not owner or not key or len(key) > 128:
-        return None
-    try:
-        expiry_text, signature = header.split(".", 1)
-        expiry = int(expiry_text)
-    except (ValueError, TypeError):
-        return None
-    expected = hmac.new(_HUMAN_EVENT_SECRET, _human_event_payload(owner, thread_id, graph_input, key, expiry), hashlib.sha256).hexdigest()
-    if not secrets.compare_digest(signature, expected):
-        return None
-    return key, int(time.time()) <= expiry

@@ -1,5 +1,6 @@
 import builtins
 import os
+import shutil
 import subprocess
 import sys
 
@@ -34,6 +35,61 @@ def test_bounded_pipe_capture_preserves_posix_newlines_by_default():
     capture.append(b"crlf\r\nbare-cr\rlf\n")
 
     assert capture.read() == "crlf\r\nbare-cr\rlf\n"
+
+
+@pytest.mark.parametrize("encoding", [None, "utf-8"])
+def test_windows_pipe_capture_uses_explicit_encoding_or_locale(monkeypatch, encoding):
+    """Exercise real pipes with a legacy locale, even on a POSIX test host."""
+    monkeypatch.setattr(local_sandbox.locale, "getpreferredencoding", lambda _: "cp936")
+    if os.name != "nt":
+        monkeypatch.setattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0, raising=False)
+    expected = "你好 日本語"
+    payload = (expected + "\r\n").encode(encoding or "cp936")
+
+    stdout, stderr, returncode, timed_out = LocalSandbox._run_windows_command(
+        [sys.executable, "-c", f"import os; p=bytes.fromhex('{payload.hex()}'); os.write(1,p); os.write(2,p)"],
+        10,
+        encoding=encoding,
+    )
+
+    assert stdout == stderr == expected + "\n"
+    assert returncode == 0
+    assert timed_out is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Requires real Windows PowerShell")
+@pytest.mark.parametrize("shell_name", ["powershell.exe", "pwsh.exe"])
+@pytest.mark.parametrize("no_console", [False, True], ids=["inherited-console", "no-console"])
+def test_windows_powershell_cjk_roundtrip(shell_name, no_console):
+    shell = shutil.which(shell_name)
+    if shell is None:
+        pytest.skip(f"{shell_name} is not installed")
+    probe = r"""
+import sys
+import deerflow.sandbox.local.local_sandbox as local_sandbox
+from deerflow.sandbox.local.local_sandbox import LocalSandbox
+
+# Keep this regression effective even on an English or UTF-8 Windows runner.
+local_sandbox.locale.getpreferredencoding = lambda _: "cp936"
+LocalSandbox._get_shell = staticmethod(lambda: sys.argv[1])
+expected = "\u4f60\u597d \u65e5\u672c\u8a9e"
+command = f"Write-Output '{expected}'; [Console]::Error.WriteLine('{expected}'); exit 3"
+output = LocalSandbox("encoding-probe").execute_command(command, timeout=15)
+assert output == expected + "\n\nStd Error:\n" + expected + "\n\nExit Code: 3", ascii(output)
+"""
+    env = {**os.environ, "PYTHONUTF8": "0"}
+    result = subprocess.run(
+        [sys.executable, "-c", probe, shell],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        creationflags=subprocess.CREATE_NO_WINDOW if no_console else 0,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX capture semantics")
@@ -181,10 +237,10 @@ def test_get_shell_uses_cmd_as_last_windows_fallback(monkeypatch):
 
 
 def test_execute_command_uses_powershell_command_mode_on_windows(monkeypatch):
-    calls: list[tuple[list[str], float, dict[str, str]]] = []
+    calls: list[tuple[list[str], float, dict[str, str], str | None]] = []
 
-    def fake_run(args, timeout, env):
-        calls.append((args, timeout, env))
+    def fake_run(args, timeout, env, *, encoding=None):
+        calls.append((args, timeout, env, encoding))
         return "ok", "", 0, False
 
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
@@ -204,12 +260,37 @@ def test_execute_command_uses_powershell_command_mode_on_windows(monkeypatch):
                 r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
                 "-NoProfile",
                 "-Command",
-                "Write-Output hello",
+                "try{[Console]::InputEncoding=[System.Text.Encoding]::UTF8}catch{};try{[Console]::OutputEncoding=[System.Text.Encoding]::UTF8}catch{};$OutputEncoding=[System.Text.Encoding]::UTF8;Write-Output hello",
             ],
             600,
             {"PATH": r"C:\Windows"},
+            "utf-8",
         )
     ]
+
+
+def test_execute_command_forces_utf8_console_for_powershell_cjk_output(monkeypatch):
+    """PowerShell 5.1 defaults console output to the OEM codepage (GBK on
+    zh-CN); without the UTF-8 preamble, CJK output is garbled by the UTF-8
+    pipe reader even though decoding never raises (errors=replace)."""
+    calls: list[tuple[list[str], float, dict[str, str], str | None]] = []
+
+    def fake_run(args, timeout, env, *, encoding=None):
+        calls.append((args, timeout, env, encoding))
+        return "你好", "", 0, False
+
+    monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": r"C:\Windows"})
+    monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: "pwsh"))
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(fake_run))
+
+    output = LocalSandbox("t").execute_command("Write-Output 你好")
+
+    assert output == "你好"
+    cmd = calls[0][0][3]
+    assert cmd.startswith("try{[Console]::InputEncoding=[System.Text.Encoding]::UTF8}catch{};try{[Console]::OutputEncoding=[System.Text.Encoding]::UTF8}catch{};$OutputEncoding=[System.Text.Encoding]::UTF8;")
+    assert cmd.endswith("Write-Output 你好")
+    assert calls[0][3] == "utf-8"
 
 
 def test_execute_command_keeps_msys_path_conversion_for_host_commands_on_windows(monkeypatch):

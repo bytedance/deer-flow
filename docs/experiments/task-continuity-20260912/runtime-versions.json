@@ -1,0 +1,17 @@
+{
+  "python": "3.12.9",
+  "sqlite": "3.47.1",
+  "packages": {
+    "httpx": "0.28.1",
+    "numpy": "2.4.4",
+    "tiktoken": "0.12.0",
+    "pytest": "9.0.3",
+    "langchain": "1.3.14",
+    "langchain-core": "1.4.9",
+    "langgraph": "1.2.9"
+  },
+  "prompts_sha256": {
+    "notes.txt": "b2529cbc2c215b8e6a8e108960ab9188e0276877083067dd4060d8940365ce26",
+    "deerflow-default-summary.txt": "3db0629298e760ec31ccb85d9102ef6c7d93f613b1dbc6b74ad18dce14538d0e"
+  }
+}

@@ -21,6 +21,7 @@ from uuid import uuid4
 
 import pytest
 from _router_auth_helpers import make_authed_test_app
+from _windows_acl_helpers import _windows_acl_owner_sid, _windows_acl_protected, _windows_acl_sids
 from fastapi.testclient import TestClient
 
 from app.gateway.auth.models import User
@@ -90,63 +91,6 @@ def _bootstrap_credential_dirs(monkeypatch, tmp_path, *, config: bool = True, da
     if data:
         data_dir.mkdir(parents=True)
     return config_dir, data_dir
-
-
-def _windows_acl_env() -> dict[str, str]:
-    """Return a PowerShell environment with a clean, ordered ``PSModulePath``.
-
-    The Codex runtime prepends a bundled PowerShell module path that shadows the
-    stock ``Microsoft.PowerShell.Security`` module, which makes ``Get-Acl`` fail
-    to autoload under ``-NoProfile``. Use the stock Windows PowerShell module path
-    so ACL inspection is reliable on any host.
-    """
-    system_root = os.environ.get("SystemRoot", r"C:\Windows")
-    program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
-    modules = f"{system_root}\\system32\\WindowsPowerShell\\v1.0\\Modules;{program_files}\\WindowsPowerShell\\Modules"
-    return {**os.environ, "PSModulePath": modules}
-
-
-def _windows_acl_sids(path: Path) -> set[str]:
-    """Return the SIDs granted on *path* (Windows-only, PowerShell resolver).
-
-    ``icacls`` displays localized account names rather than raw SIDs, so we
-    translate each ACE IdentityReference back to a SID before asserting.
-    """
-    cmd = "(Get-Acl -LiteralPath '" + str(path) + "').Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }"
-    out = subprocess.run(
-        ["powershell", "-NoProfile", "-Command", cmd],
-        capture_output=True,
-        text=True,
-        check=True,
-        env=_windows_acl_env(),
-    )
-    return {line.strip() for line in out.stdout.splitlines() if line.strip()}
-
-
-def _windows_acl_protected(path: Path) -> bool:
-    """Return whether *path*'s DACL is protected from inheritance (Windows-only)."""
-    cmd = "(Get-Acl -LiteralPath '" + str(path) + "').AreAccessRulesProtected"
-    out = subprocess.run(
-        ["powershell", "-NoProfile", "-Command", cmd],
-        capture_output=True,
-        text=True,
-        check=True,
-        env=_windows_acl_env(),
-    )
-    return out.stdout.strip() == "True"
-
-
-def _windows_acl_owner_sid(path: Path) -> str:
-    """Return *path*'s object owner as a raw SID (Windows-only)."""
-    cmd = "$acl = Get-Acl -LiteralPath $env:DEER_FLOW_TEST_ACL_PATH; $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value"
-    out = subprocess.run(
-        ["powershell", "-NoProfile", "-Command", cmd],
-        capture_output=True,
-        text=True,
-        check=True,
-        env={**_windows_acl_env(), "DEER_FLOW_TEST_ACL_PATH": str(path)},
-    )
-    return out.stdout.strip()
 
 
 class _FakeWindowsHandle:
@@ -295,8 +239,8 @@ def test_managed_sandbox_runtime_verifies_and_installs_linux_archives(monkeypatc
     assert hasattr(lark_cli, "_ensure_managed_sandbox_lark_cli"), "managed sandbox runtime installer is missing"
     _patch_paths(monkeypatch, tmp_path / "home")
     archives = {
-        "lark-cli-1.0.65-linux-amd64.tar.gz": _make_lark_cli_binary_tar(b"amd64-binary"),
-        "lark-cli-1.0.65-linux-arm64.tar.gz": _make_lark_cli_binary_tar(b"arm64-binary"),
+        "lark-cli-1.0.65-linux-amd64.tar.gz": _make_lark_cli_binary_tar(b"\x7fELF-amd64-payload"),
+        "lark-cli-1.0.65-linux-arm64.tar.gz": _make_lark_cli_binary_tar(b"\x7fELF-arm64-payload"),
     }
     checksums = "".join(f"{hashlib.sha256(payload).hexdigest()}  {name}\n" for name, payload in archives.items()).encode()
     assets = {"checksums.txt": checksums, **archives}
@@ -305,9 +249,15 @@ def test_managed_sandbox_runtime_verifies_and_installs_linux_archives(monkeypatc
 
     runtime = lark_cli._ensure_managed_sandbox_lark_cli("v1.0.65")
 
-    assert (runtime / "linux-amd64" / "lark-cli").read_bytes() == b"amd64-binary"
-    assert (runtime / "linux-arm64" / "lark-cli").read_bytes() == b"arm64-binary"
-    assert stat.S_IMODE((runtime / "linux-amd64" / "lark-cli").stat().st_mode) == 0o755
+    assert (runtime / "linux-amd64" / "lark-cli").read_bytes() == b"\x7fELF-amd64-payload"
+    assert (runtime / "linux-arm64" / "lark-cli").read_bytes() == b"\x7fELF-arm64-payload"
+    installed_mode = stat.S_IMODE((runtime / "linux-amd64" / "lark-cli").stat().st_mode)
+    if os.name == "nt":
+        # NTFS cannot represent the exec bit; writability is the strongest
+        # host-side contract the extractor can establish for the artifact.
+        assert installed_mode & 0o222
+    else:
+        assert installed_mode == 0o755
     launcher = (runtime / "bin" / "lark-cli").read_text(encoding="utf-8")
     assert "uname -m" in launcher
     assert "x86_64" in launcher and "aarch64" in launcher
@@ -353,7 +303,7 @@ def test_managed_sandbox_runtime_accepts_prestaged_airgapped_tree(monkeypatch, t
     for arch in ("amd64", "arm64"):
         binary = source / f"linux-{arch}" / "lark-cli"
         binary.parent.mkdir(parents=True)
-        binary.write_bytes(f"{arch}-binary".encode())
+        binary.write_bytes(b"\x7fELF" + f"{arch}-binary".encode())
         binary.chmod(0o755)
     launcher = source / "bin" / "lark-cli"
     launcher.parent.mkdir(parents=True)
@@ -368,8 +318,8 @@ def test_managed_sandbox_runtime_accepts_prestaged_airgapped_tree(monkeypatch, t
 
     runtime = lark_cli._ensure_managed_sandbox_lark_cli("v1.0.65")
 
-    assert (runtime / "linux-amd64" / "lark-cli").read_bytes() == b"amd64-binary"
-    assert (runtime / "linux-arm64" / "lark-cli").read_bytes() == b"arm64-binary"
+    assert (runtime / "linux-amd64" / "lark-cli").read_bytes() == b"\x7fELFamd64-binary"
+    assert (runtime / "linux-arm64" / "lark-cli").read_bytes() == b"\x7fELFarm64-binary"
 
 
 def test_managed_sandbox_runtime_rejects_any_symlink_in_prestaged_tree(monkeypatch, tmp_path) -> None:
@@ -401,6 +351,8 @@ def test_managed_sandbox_runtime_rejects_any_symlink_in_prestaged_tree(monkeypat
 def test_managed_sandbox_runtime_rejects_non_executable_prestaged_binary(monkeypatch, tmp_path) -> None:
     _patch_paths(monkeypatch, tmp_path / "home")
     source = tmp_path / "pre-staged"
+    # On Windows chmod() cannot clear the exec bit, so rejection there comes
+    # from the non-magic payload content rather than the 0o644 mode below.
     for arch in ("amd64", "arm64"):
         binary = source / f"linux-{arch}" / "lark-cli"
         binary.parent.mkdir(parents=True)
@@ -419,13 +371,48 @@ def test_managed_sandbox_runtime_rejects_non_executable_prestaged_binary(monkeyp
     assert not lark_cli.lark_cli_managed_sandbox_dir().exists()
 
 
+def test_managed_sandbox_runtime_rejects_launcher_without_shebang_on_windows(monkeypatch, tmp_path) -> None:
+    """The Windows content gate must reject a launcher without a shebang.
+
+    ``test_managed_sandbox_runtime_rejects_non_executable_prestaged_binary``
+    stages a launcher WITH a shebang, so on Windows its rejection always comes
+    from the per-arch binary content and this branch is only exercised
+    positively. Monkeypatching ``lark_cli.os`` with the Windows stub runs the
+    Windows branch on POSIX CI too; ``candidate.open()`` is a pathlib method,
+    so the stub is safe here.
+    """
+    _patch_paths(monkeypatch, tmp_path / "home")
+    source = tmp_path / "pre-staged"
+    for arch in ("amd64", "arm64"):
+        binary = source / f"linux-{arch}" / "lark-cli"
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(b"\x7fELF" + f"{arch}-binary".encode())
+        binary.chmod(0o755)
+    launcher = source / "bin" / "lark-cli"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("echo not-a-launcher\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    monkeypatch.setenv(lark_cli.LARK_CLI_SANDBOX_RUNTIME_SOURCE_ENV, str(source))
+    windows_os = _windows_os_stub()
+    # The installer also touches a few host-neutral os helpers; only os.name
+    # must read "nt" to drive the validation branch under test.
+    windows_os.getenv = os.getenv
+    windows_os.getpid = os.getpid
+    monkeypatch.setattr(lark_cli, "os", windows_os)
+
+    with pytest.raises(ValueError, match="executable"):
+        lark_cli._ensure_managed_sandbox_lark_cli("v1.0.65")
+
+    assert not lark_cli.lark_cli_managed_sandbox_dir().exists()
+
+
 def test_concurrent_managed_sandbox_runtime_installs_serialize_replacement(monkeypatch, tmp_path) -> None:
     _patch_paths(monkeypatch, tmp_path / "home")
     source = tmp_path / "pre-staged"
     for arch in ("amd64", "arm64"):
         binary = source / f"linux-{arch}" / "lark-cli"
         binary.parent.mkdir(parents=True)
-        binary.write_bytes(f"{arch}-binary".encode())
+        binary.write_bytes(b"\x7fELF" + f"{arch}-binary".encode())
         binary.chmod(0o755)
     launcher = source / "bin" / "lark-cli"
     launcher.parent.mkdir(parents=True)
@@ -487,7 +474,8 @@ def test_install_lark_integration_installs_one_readonly_pack_for_all_users(monke
     assert (root / "lark-doc" / "SKILL.md").is_file()
     assert (root / lark_cli.LARK_CLI_MANIFEST_FILE).is_file()
     shared_content = (root / "lark-shared" / "SKILL.md").read_text(encoding="utf-8")
-    assert "?settings=integrations" in shared_content
+    assert "/workspace/capabilities?tab=plugins&plugin=lark" in shared_content
+    assert "?settings=integrations" not in shared_content
     assert "不要要求用户在终端执行" in shared_content
     assert "Exact OAuth scope" in shared_content
 
@@ -565,10 +553,11 @@ def test_remote_provisioner_install_skips_gateway_sandbox_runtime(monkeypatch, t
 def test_status_runtime_mode_none_for_non_aio(monkeypatch, tmp_path) -> None:
     config = _config(tmp_path / "skills")
     config.sandbox = SimpleNamespace(use="deerflow.sandbox.local:LocalSandboxProvider")
-    mode, ready, detail = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
+    mode, ready, detail, probed = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
     assert mode == "none"
     assert ready is False
     assert detail
+    assert probed is True
 
 
 def test_status_runtime_mode_gateway_download_ready(monkeypatch, tmp_path) -> None:
@@ -587,20 +576,22 @@ def test_status_runtime_mode_gateway_download_ready(monkeypatch, tmp_path) -> No
         target.write_bytes(b"\x7fELF")
         target.chmod(0o755)
 
-    mode, ready, detail = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
+    mode, ready, detail, probed = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
     assert mode == "gateway-download"
     assert ready is True
     assert detail is None
+    assert probed is True
 
 
 def test_status_runtime_mode_gateway_download_not_ready(monkeypatch, tmp_path) -> None:
     _patch_paths(monkeypatch, tmp_path / "home")
     config = _config(tmp_path / "skills")
     config.sandbox = SimpleNamespace(use="deerflow.community.aio_sandbox:AioSandboxProvider")
-    mode, ready, detail = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
+    mode, ready, detail, probed = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
     assert mode == "gateway-download"
     assert ready is False
     assert detail
+    assert probed is True
 
 
 def test_status_runtime_mode_init_container_ready(monkeypatch, tmp_path) -> None:
@@ -610,10 +601,11 @@ def test_status_runtime_mode_init_container_ready(monkeypatch, tmp_path) -> None
         provisioner_url="http://provisioner:8002",
     )
     monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", lambda _config: {"lark_cli_init_image": True, "lark_cli_broker_image": False})
-    mode, ready, detail = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
+    mode, ready, detail, probed = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
     assert mode == "init-container"
     assert ready is True
     assert detail is None
+    assert probed is True
 
 
 def test_status_runtime_mode_broker_supersedes_init_container(monkeypatch, tmp_path) -> None:
@@ -624,10 +616,11 @@ def test_status_runtime_mode_broker_supersedes_init_container(monkeypatch, tmp_p
     )
     # Broker (Pattern B) wins even when the init image is also configured.
     monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", lambda _config: {"lark_cli_init_image": True, "lark_cli_broker_image": True})
-    mode, ready, detail = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
+    mode, ready, detail, probed = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
     assert mode == "broker"
     assert ready is True
     assert detail is None
+    assert probed is True
 
 
 def test_status_runtime_mode_init_container_not_configured(monkeypatch, tmp_path) -> None:
@@ -637,10 +630,11 @@ def test_status_runtime_mode_init_container_not_configured(monkeypatch, tmp_path
         provisioner_url="http://provisioner:8002",
     )
     monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", lambda _config: {"lark_cli_init_image": False, "lark_cli_broker_image": False})
-    mode, ready, detail = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
+    mode, ready, detail, probed = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
     assert mode == "init-container"
     assert ready is False
     assert detail
+    assert probed is True
 
 
 def test_status_runtime_mode_init_container_unreachable(monkeypatch, tmp_path) -> None:
@@ -650,10 +644,11 @@ def test_status_runtime_mode_init_container_unreachable(monkeypatch, tmp_path) -
         provisioner_url="http://provisioner:8002",
     )
     monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", lambda _config: None)
-    mode, ready, detail = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
+    mode, ready, detail, probed = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
     assert mode == "init-container"
     assert ready is False
     assert detail
+    assert probed is True
 
 
 def test_status_runtime_probe_skipped_when_not_requested(monkeypatch, tmp_path) -> None:
@@ -667,10 +662,32 @@ def test_status_runtime_probe_skipped_when_not_requested(monkeypatch, tmp_path) 
         raise AssertionError("provisioner should not be probed when probe=False")
 
     monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", _fail)
-    mode, ready, detail = lark_cli._resolve_sandbox_runtime_readiness(config, probe=False)
+    mode, ready, detail, probed = lark_cli._resolve_sandbox_runtime_readiness(config, probe=False)
     assert mode == "init-container"
     assert ready is False
     assert detail is None
+    assert probed is False
+
+
+def test_status_explicitly_reports_remote_runtime_probe_state(monkeypatch, tmp_path) -> None:
+    _patch_paths(monkeypatch, tmp_path / "home")
+    config = _config(tmp_path / "skills")
+    config.sandbox = SimpleNamespace(
+        use="deerflow.community.aio_sandbox:AioSandboxProvider",
+        provisioner_url="http://provisioner:8002",
+    )
+    monkeypatch.setattr(
+        lark_cli,
+        "_probe_provisioner_capabilities",
+        lambda _config: {"lark_cli_init_image": True, "lark_cli_broker_image": False},
+    )
+
+    unprobed = lark_cli.get_lark_integration_status("alice", config, check_runtime=False)
+    probed = lark_cli.get_lark_integration_status("alice", config, check_runtime=True)
+
+    assert unprobed.sandbox_runtime_probed is False
+    assert probed.sandbox_runtime_probed is True
+    assert probed.sandbox_runtime_ready is True
 
 
 def _reset_broker_mode_cache() -> None:
@@ -947,6 +964,60 @@ def test_install_lark_integration_reports_content_change_on_reinstall(monkeypatc
 
     second = lark_cli.install_lark_integration("alice", config, source_archive=changed_archive)
     assert "content changed" in second.message
+    reset_skill_storage()
+
+
+def test_install_lark_integration_snapshots_credentials_under_lock(monkeypatch, tmp_path) -> None:
+    reset_skill_storage()
+    _patch_paths(monkeypatch, tmp_path / "home")
+    skills_root = tmp_path / "skills"
+    (skills_root / "public").mkdir(parents=True)
+    (skills_root / "custom").mkdir()
+    config = _config(skills_root)
+    archive = _make_lark_cli_source_zip(tmp_path)
+
+    lock_state = {"active": False}
+    snapshot_lock_states: list[bool] = []
+    status_lock_states: list[bool] = []
+
+    class _CredentialLock:
+        def __enter__(self):
+            assert lock_state["active"] is False
+            lock_state["active"] = True
+            return self
+
+        def __exit__(self, *_args):
+            lock_state["active"] = False
+
+    monkeypatch.setattr(lark_cli, "_lark_credential_lock", lambda _user_id: _CredentialLock())
+    monkeypatch.setattr(lark_cli, "probe_lark_cli", lambda: lark_cli.LarkCliProbe(available=True, path="/usr/bin/lark-cli", version="v1.0.65"))
+
+    def _credential_snapshot(_user_id, *, verify_auth):
+        snapshot_lock_states.append(lock_state["active"])
+        return lark_cli._LarkCredentialSnapshot(
+            app_config={"configured": True, "app_id": "cli_test", "brand": "feishu"},
+            auth=lark_cli.LarkAuthProbe(status="authenticated", user="Alice", verified=False),
+        )
+
+    monkeypatch.setattr(lark_cli, "_read_lark_credential_snapshot", _credential_snapshot)
+
+    real_status = lark_cli.get_lark_integration_status
+
+    def _status(_user_id, _config, **kwargs):
+        status_lock_states.append(lock_state["active"])
+        assert kwargs.get("check_runtime") is True
+        assert kwargs.get("credential_snapshot") is not None
+        return real_status(_user_id, _config, **kwargs)
+
+    monkeypatch.setattr(lark_cli, "get_lark_integration_status", _status)
+
+    result = lark_cli.install_lark_integration("alice", config, source_archive=archive)
+
+    assert result.success is True
+    assert result.status.app_id == "cli_test"
+    assert result.status.auth.status == "authenticated"
+    assert snapshot_lock_states == [True]
+    assert status_lock_states == [False]
     reset_skill_storage()
 
 
@@ -2224,6 +2295,299 @@ def test_complete_lark_auth_polls_device_code_and_returns_status(monkeypatch, tm
     }
 
 
+def test_complete_lark_auth_captures_status_under_lock_and_probes_runtime_after(monkeypatch, tmp_path) -> None:
+    config = _config(tmp_path / "skills")
+    lock_state = {"active": False}
+    credential_state = {
+        "app_id": "previous-app",
+        "auth": lark_cli.LarkAuthProbe(status="not_authorized", user=None),
+    }
+    snapshot_lock_states: list[bool] = []
+    status_lock_states: list[bool] = []
+
+    class _CredentialLock:
+        def __enter__(self):
+            assert lock_state["active"] is False
+            lock_state["active"] = True
+
+        def __exit__(self, *_args):
+            lock_state["active"] = False
+            # Model another tab switching credentials as soon as this operation unlocks.
+            credential_state["app_id"] = "next-app"
+            credential_state["auth"] = lark_cli.LarkAuthProbe(status="not_authorized", user=None)
+
+    monkeypatch.setattr(lark_cli, "_lark_credential_lock", lambda _user_id: _CredentialLock())
+    monkeypatch.setattr(lark_cli, "_require_lark_flow_generation_locked", lambda _user_id, generation: generation)
+    monkeypatch.setattr(lark_cli, "_require_lark_cli_path", lambda: "/usr/bin/lark-cli")
+
+    def _complete_login(*_args, **_kwargs):
+        assert lock_state["active"] is True
+        credential_state["app_id"] = "completed-app"
+        credential_state["auth"] = lark_cli.LarkAuthProbe(status="authenticated", user="Alice", verified=True)
+
+    monkeypatch.setattr(lark_cli, "_run_lark_cli_json", _complete_login)
+
+    def _credential_snapshot(_user_id, *, verify_auth):
+        snapshot_lock_states.append(lock_state["active"])
+        assert verify_auth is True
+        return lark_cli._LarkCredentialSnapshot(
+            app_config={"configured": True, "app_id": credential_state["app_id"], "brand": "feishu"},
+            auth=credential_state["auth"],
+        )
+
+    monkeypatch.setattr(lark_cli, "_read_lark_credential_snapshot", _credential_snapshot)
+
+    def _status(_user_id, _config, **kwargs):
+        status_lock_states.append(lock_state["active"])
+        assert kwargs.get("check_runtime") is True
+        credential_snapshot = kwargs["credential_snapshot"]
+        return lark_cli.LarkIntegrationStatus(
+            installed=True,
+            version="v1.0.65",
+            manifest_version="v1.0.65",
+            latest_available_version=None,
+            runtime_version_mismatch=False,
+            app_configured=True,
+            app_id=credential_snapshot.app_config["app_id"],
+            app_brand="feishu",
+            skills_expected=27,
+            skills_installed=27,
+            installed_skills=("lark-doc",),
+            enabled_skills=("lark-doc",),
+            install_path="/tmp/lark",
+            cli=lark_cli.LarkCliProbe(available=True),
+            auth=credential_snapshot.auth,
+            sandbox_runtime_mode="init-container",
+            sandbox_runtime_probed=True,
+            sandbox_runtime_ready=True,
+        )
+
+    monkeypatch.setattr(lark_cli, "get_lark_integration_status", _status)
+
+    result = lark_cli.complete_lark_auth(
+        "alice",
+        config,
+        device_code="device-code",
+        generation="auth-generation",
+    )
+
+    assert result.success is True
+    assert result.status.app_id == "completed-app"
+    assert result.status.auth.status == "authenticated"
+    assert result.status.sandbox_runtime_ready is True
+    assert snapshot_lock_states == [True]
+    assert status_lock_states == [False]
+
+
+def test_complete_lark_auth_status_ignores_credential_changes_during_runtime_probe(monkeypatch, tmp_path) -> None:
+    """End-to-end with the real status builder: a credential change landing while
+    the unlocked runtime probe runs must not turn the completed login into
+    success=false or mix newer credential state into the response."""
+    _patch_paths(monkeypatch, tmp_path / "home")
+    skills_root = tmp_path / "skills"
+    (skills_root / "public").mkdir(parents=True)
+    (skills_root / "custom").mkdir()
+    config = _config(skills_root)
+
+    credential_state = {
+        "app": {"configured": True, "app_id": "completed-app", "brand": "feishu"},
+        "auth": lark_cli.LarkAuthProbe(status="authenticated", user="Alice", verified=True),
+    }
+    monkeypatch.setattr(lark_cli, "read_lark_app_config", lambda _user_id: dict(credential_state["app"]))
+    monkeypatch.setattr(lark_cli, "probe_lark_auth", lambda _user_id, *, verify=False: credential_state["auth"])
+    monkeypatch.setattr(lark_cli, "probe_lark_cli", lambda: lark_cli.LarkCliProbe(available=True, version="1.0.65"))
+    monkeypatch.setattr(lark_cli, "_require_lark_cli_path", lambda: "/usr/bin/lark-cli")
+    monkeypatch.setattr(lark_cli, "_run_lark_cli_json", lambda *_args, **_kwargs: {})
+
+    runtime_probes: list[bool] = []
+
+    def _runtime_probe(_config, *, probe):
+        # A concurrent app switch clears these tokens while the runtime probe runs.
+        credential_state["app"] = {"configured": True, "app_id": "racer-app", "brand": "feishu"}
+        credential_state["auth"] = lark_cli.LarkAuthProbe(status="not_authorized", message="tokens cleared")
+        runtime_probes.append(probe)
+        return "init-container", True, None, True
+
+    monkeypatch.setattr(lark_cli, "_resolve_sandbox_runtime_readiness", _runtime_probe)
+
+    generation = _advance_lark_flow()
+    result = lark_cli.complete_lark_auth("alice", config, device_code="device-code", generation=generation)
+
+    assert runtime_probes == [True]
+    assert result.success is True
+    assert result.status.app_id == "completed-app"
+    assert result.status.auth.status == "authenticated"
+    assert result.status.sandbox_runtime_probed is True
+    assert result.status.sandbox_runtime_ready is True
+
+
+def test_complete_lark_config_captures_status_under_lock_and_probes_runtime_after(monkeypatch, tmp_path) -> None:
+    config = _config(tmp_path / "skills")
+    lock_state = {"active": False}
+    credential_state = {
+        "app_id": "previous-app",
+        "auth": lark_cli.LarkAuthProbe(status="not_authorized", user=None),
+    }
+    snapshot_lock_states: list[bool] = []
+    status_lock_states: list[bool] = []
+
+    class _CredentialLock:
+        def __enter__(self):
+            assert lock_state["active"] is False
+            lock_state["active"] = True
+
+        def __exit__(self, *_args):
+            lock_state["active"] = False
+            # Model another tab switching credentials as soon as this operation unlocks.
+            credential_state["app_id"] = "next-app"
+            credential_state["auth"] = lark_cli.LarkAuthProbe(status="not_authorized", user=None)
+
+    monkeypatch.setattr(lark_cli, "_lark_credential_lock", lambda _user_id: _CredentialLock())
+    monkeypatch.setattr(lark_cli, "_require_lark_flow_generation_locked", lambda _user_id, generation: generation)
+    monkeypatch.setattr(
+        lark_cli,
+        "_poll_lark_app_registration",
+        lambda **_kwargs: {"client_id": "cli_registered", "client_secret": "registered-secret"},
+    )
+
+    def _replace(_user_id, *, app_id, app_secret, brand):
+        assert lock_state["active"] is True
+        credential_state["app_id"] = app_id
+        credential_state["auth"] = lark_cli.LarkAuthProbe(status="not_authorized", message="authorize the new app")
+
+    monkeypatch.setattr(lark_cli, "_replace_lark_app_credentials_locked", _replace)
+
+    def _credential_snapshot(_user_id, *, verify_auth):
+        snapshot_lock_states.append(lock_state["active"])
+        assert verify_auth is False
+        return lark_cli._LarkCredentialSnapshot(
+            app_config={"configured": True, "app_id": credential_state["app_id"], "brand": "feishu"},
+            auth=credential_state["auth"],
+        )
+
+    monkeypatch.setattr(lark_cli, "_read_lark_credential_snapshot", _credential_snapshot)
+
+    def _status(_user_id, _config, **kwargs):
+        status_lock_states.append(lock_state["active"])
+        assert kwargs.get("check_runtime") is True
+        credential_snapshot = kwargs["credential_snapshot"]
+        return lark_cli.LarkIntegrationStatus(
+            installed=True,
+            version="v1.0.65",
+            manifest_version="v1.0.65",
+            latest_available_version=None,
+            runtime_version_mismatch=False,
+            app_configured=True,
+            app_id=credential_snapshot.app_config["app_id"],
+            app_brand="feishu",
+            skills_expected=27,
+            skills_installed=27,
+            installed_skills=("lark-doc",),
+            enabled_skills=("lark-doc",),
+            install_path="/tmp/lark",
+            cli=lark_cli.LarkCliProbe(available=True),
+            auth=credential_snapshot.auth,
+            sandbox_runtime_mode="init-container",
+            sandbox_runtime_probed=True,
+            sandbox_runtime_ready=True,
+        )
+
+    monkeypatch.setattr(lark_cli, "get_lark_integration_status", _status)
+
+    result = lark_cli.complete_lark_config(
+        "alice",
+        config,
+        device_code="device-code",
+        generation="config-generation",
+    )
+
+    assert result.success is True
+    assert result.status.app_id == "cli_registered"
+    assert result.status.sandbox_runtime_ready is True
+    assert snapshot_lock_states == [True]
+    assert status_lock_states == [False]
+
+
+def test_set_lark_app_credentials_captures_status_under_lock_and_probes_runtime_after(monkeypatch, tmp_path) -> None:
+    config = _config(tmp_path / "skills")
+    lock_state = {"active": False}
+    credential_state = {
+        "app_id": "previous-app",
+        "auth": lark_cli.LarkAuthProbe(status="authenticated", user="Alice"),
+    }
+    snapshot_lock_states: list[bool] = []
+    status_lock_states: list[bool] = []
+
+    class _CredentialLock:
+        def __enter__(self):
+            assert lock_state["active"] is False
+            lock_state["active"] = True
+
+        def __exit__(self, *_args):
+            lock_state["active"] = False
+            # Model another tab switching credentials as soon as this operation unlocks.
+            credential_state["app_id"] = "racer-app"
+            credential_state["auth"] = lark_cli.LarkAuthProbe(status="authenticated", user="Racer")
+
+    monkeypatch.setattr(lark_cli, "_lark_credential_lock", lambda _user_id: _CredentialLock())
+    monkeypatch.setattr(lark_cli, "_validate_lark_app_credentials_with_cli", lambda **kwargs: None)
+    monkeypatch.setattr(lark_cli, "_advance_lark_flow_generation_locked", lambda _user_id: "switch-generation")
+
+    def _replace(_user_id, *, app_id, app_secret, brand):
+        assert lock_state["active"] is True
+        credential_state["app_id"] = app_id
+        credential_state["auth"] = lark_cli.LarkAuthProbe(status="not_authorized", message="prior token revoked")
+
+    monkeypatch.setattr(lark_cli, "_replace_lark_app_credentials_locked", _replace)
+
+    def _credential_snapshot(_user_id, *, verify_auth):
+        snapshot_lock_states.append(lock_state["active"])
+        assert verify_auth is False
+        return lark_cli._LarkCredentialSnapshot(
+            app_config={"configured": True, "app_id": credential_state["app_id"], "brand": "feishu"},
+            auth=credential_state["auth"],
+        )
+
+    monkeypatch.setattr(lark_cli, "_read_lark_credential_snapshot", _credential_snapshot)
+
+    def _status(_user_id, _config, **kwargs):
+        status_lock_states.append(lock_state["active"])
+        assert kwargs.get("check_runtime") is True
+        credential_snapshot = kwargs["credential_snapshot"]
+        return lark_cli.LarkIntegrationStatus(
+            installed=True,
+            version="v1.0.65",
+            manifest_version="v1.0.65",
+            latest_available_version=None,
+            runtime_version_mismatch=False,
+            app_configured=True,
+            app_id=credential_snapshot.app_config["app_id"],
+            app_brand="feishu",
+            skills_expected=27,
+            skills_installed=27,
+            installed_skills=("lark-doc",),
+            enabled_skills=("lark-doc",),
+            install_path="/tmp/lark",
+            cli=lark_cli.LarkCliProbe(available=True),
+            auth=credential_snapshot.auth,
+            sandbox_runtime_mode="init-container",
+            sandbox_runtime_probed=True,
+            sandbox_runtime_ready=True,
+        )
+
+    monkeypatch.setattr(lark_cli, "get_lark_integration_status", _status)
+
+    result = lark_cli.set_lark_app_credentials("alice", config, app_id="cli_new", app_secret="new-secret")
+
+    assert result.success is True
+    assert result.generation == "switch-generation"
+    assert result.status.app_id == "cli_new"
+    assert result.status.auth.status == "not_authorized"
+    assert result.status.sandbox_runtime_ready is True
+    assert snapshot_lock_states == [True]
+    assert status_lock_states == [False]
+
+
 def test_complete_lark_auth_accepts_short_automatic_poll_timeout(monkeypatch, tmp_path) -> None:
     assert "wait_timeout_seconds" in inspect.signature(lark_cli.complete_lark_auth).parameters
     _patch_paths(monkeypatch, tmp_path / "home")
@@ -2588,6 +2952,7 @@ def test_lark_status_is_available_to_authenticated_users(monkeypatch, tmp_path):
             install_path="/tmp/lark-cli",
             cli=lark_cli.LarkCliProbe(available=False, error="missing"),
             auth=lark_cli.LarkAuthProbe(status="unavailable", message="missing"),
+            sandbox_runtime_probed=True,
         ),
     )
 
@@ -2596,6 +2961,7 @@ def test_lark_status_is_available_to_authenticated_users(monkeypatch, tmp_path):
 
     assert response.status_code == 200
     assert response.json()["installed"] is False
+    assert response.json()["sandbox_runtime_probed"] is True
 
 
 def _status_with_host_paths() -> lark_cli.LarkIntegrationStatus:

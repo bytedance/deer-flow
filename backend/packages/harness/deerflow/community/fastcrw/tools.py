@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 
 from firecrawl import FirecrawlApp
@@ -7,11 +8,30 @@ from langchain.tools import tool
 from deerflow.community.url_safety import validate_public_http_url
 from deerflow.config import get_app_config
 
+logger = logging.getLogger(__name__)
+
 # fastCRW is a Firecrawl-compatible web data engine (single Rust binary; self-host
 # or cloud). Because the REST API is Firecrawl-compatible, this provider reuses the
 # Firecrawl client and only swaps the base URL. Cloud default points at the managed
 # service; override `base_url` in the tool config (or set CRW_API_URL) for self-host.
 DEFAULT_BASE_URL = "https://fastcrw.com/api"
+DEFAULT_MAX_RESULTS = 5
+
+
+def _coerce_max_results(value: object) -> int:
+    """Normalize the configured ``max_results`` before handing it to the client."""
+    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+        # int() accepts booleans and silently truncates a YAML value such as 3.5.
+        count = 0
+    else:
+        try:
+            count = int(value)  # type: ignore[call-overload]
+        except (TypeError, ValueError, OverflowError):
+            count = 0
+    if count <= 0:
+        logger.warning("Invalid fastCRW max_results=%r; using default %s", value, DEFAULT_MAX_RESULTS)
+        return DEFAULT_MAX_RESULTS
+    return count
 
 
 def _get_fastcrw_client(tool_name: str = "web_search") -> FirecrawlApp:
@@ -56,9 +76,9 @@ def web_search_tool(query: str) -> str:
     """
     try:
         config = get_app_config().get_tool_config("web_search")
-        max_results = 5
+        max_results = DEFAULT_MAX_RESULTS
         if config is not None:
-            max_results = config.model_extra.get("max_results", max_results)
+            max_results = _coerce_max_results(config.model_extra.get("max_results", max_results))
 
         client = _get_fastcrw_client("web_search")
         result = client.search(query, limit=max_results)

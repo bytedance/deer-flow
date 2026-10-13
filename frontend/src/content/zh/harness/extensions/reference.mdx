@@ -1,0 +1,531 @@
+---
+title: 参考
+description: deerflow-extension-api 0.2.4 中的每一个公开名称，按主题分组，附签名、字段和默认值。另含兼容性规则和契约的版本历史。
+---
+
+import { Callout } from "nextra/components";
+
+# 参考
+
+本页列出契约版本 **0.2.4** 中 `deerflow_extension_api.__all__` 的每一个名称。请从包根导入：
+
+```python
+from deerflow_extension_api import ExtensionRegistry, MiddlewarePlacement, Placement
+```
+
+这个包没有任何依赖，也从不导入 DeerFlow。下文写成 `Any` 的类型（例如中间件或路由器）由宿主在运行时校验，而不是由契约校验。
+
+## 入口点与注册表
+
+### `ExtensionInstall`
+
+```python
+ExtensionInstall = Callable[[ExtensionRegistry, Mapping[str, Any]], None]
+```
+
+`plugins:` 记录的 `use` 所指函数的签名。第二个参数是记录中 `config` 的浅拷贝。
+
+### `extension(*, api, name=None)`
+
+装饰器，为 install 函数标记编写时所用的契约版本（`__deerflow_api__`）和一个可选名称（`__deerflow_name__`）。可选；见[兼容性规则](#兼容性规则)。
+
+```python
+@extension(api="0.2.0", name="hello")
+def install(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None: ...
+```
+
+### `ExtensionRegistry`
+
+一个 `runtime_checkable` 的 Protocol：传给 `install()` 的只写接口。每个方法都有一个什么都不注册的默认实现。如果宿主的注册表早于某个方法，就会继承这个默认实现，于是调用成功，但贡献并没有被注册。只有 `plugin()` 会通过返回 `False` 报告这一点；对其他方法，要靠版本标记和包元数据来防止这种情况。
+
+| 方法                                                       | 返回值  | 注册内容                                                                     |
+| ---------------------------------------------------------- | ------- | ---------------------------------------------------------------------------- |
+| `middlewares(contributor: MiddlewareContributor)`          | `None`  | 一个中间件贡献者                                                             |
+| `task_lifecycle(contributor: TaskLifecycleContributor)`    | `None`  | Lead 运行和子 Agent 的开始、结束钩子                                         |
+| `system_model_observer(observer: SystemModelCallObserver)` | `None`  | DeerFlow 自有模型调用的观察者                                                |
+| `agent_assembly_observer(observer: AgentAssemblyObserver)` | `None`  | 已组装 Agent 的观察者                                                        |
+| `context_compaction_observer(observer: ContextCompactionObserver)` | `None` | 摘要压缩的观察者                                                     |
+| `service(service: ExtensionService)`                       | `None`  | 与 Gateway 同寿的服务                                                        |
+| `routers(routers: Sequence[Any])`                          | `None`  | 在 `install()` 期间构建的 FastAPI 路由器                                      |
+| `plugin(contribution: PluginContribution)`                 | `bool`  | 全栈插件。被接受时返回 `True`，宿主不支持插件时返回 `False`。实验性           |
+
+## 中间件
+
+### `MiddlewareContributor`
+
+```python
+class MiddlewareContributor(Protocol):
+    def contribute_middlewares(
+        self, app_store: ExtensionData, ctx: AgentBuildContext
+    ) -> Sequence[MiddlewarePlacement]: ...
+```
+
+每次组装 Agent 都会调用。默认返回 `()`。
+
+### `MiddlewarePlacement`
+
+冻结的 dataclass。
+
+| 字段         | 类型         | 默认值            |
+| ------------ | ------------ | ----------------- |
+| `middleware` | `Any`（必须是 LangChain `AgentMiddleware`） | 必填 |
+| `placement`  | `Placement`  | 必填              |
+| `scope`      | `AgentScope` | `AgentScope.BOTH` |
+| `order`      | `int`        | `0`               |
+
+### `Placement`
+
+`StrEnum`：`MODEL_LOGICAL = "model_logical"`、`MODEL_PHYSICAL = "model_physical"`、`TOOL_VISIBLE = "tool_visible"`、`TOOL_RAW = "tool_raw"`、`STANDARD = "standard"`。各自的保证见[中间件贡献](/docs/harness/extensions/middleware)。
+
+### `AgentScope`
+
+`Flag`：`LEAD`、`SUBAGENT`、`BOTH = LEAD | SUBAGENT`。
+
+### `AgentBuildContext`
+
+传给 `contribute_middlewares()` 的冻结 dataclass。
+
+| 字段         | 类型                 | 默认值                 |
+| ------------ | -------------------- | ---------------------- |
+| `scope`      | `AgentScope`         | 必填                   |
+| `agent_name` | `str \| None`        | `None`                 |
+| `model_name` | `str \| None`        | `None`                 |
+| `policy`     | `HostPolicySnapshot` | `HostPolicySnapshot()` |
+
+### `HostPolicySnapshot`
+
+冻结的 dataclass：宿主实际执行的限制，以投影的形式提供，使扩展不依赖 DeerFlow 的配置类型。每个字段都有默认值。
+
+| 字段                    | 类型            | 默认值  |
+| ----------------------- | --------------- | ------- |
+| `token_budget_enabled`  | `bool`          | `False` |
+| `max_input_tokens`      | `int \| None`   | `None`  |
+| `max_output_tokens`     | `int \| None`   | `None`  |
+| `max_total_tokens`      | `int \| None`   | `None`  |
+| `budget_warn_fraction`  | `float \| None` | `None`  |
+| `budget_hard_fraction`  | `float \| None` | `None`  |
+| `max_subagents_per_run` | `int \| None`   | `None`  |
+
+## 状态
+
+### `ExtensionData`
+
+挂在某个宿主作用域（应用或一个任务）上的类型化、线程安全的存储。以 Python 类型为键，两个扩展不会冲突。
+
+| 成员                                           | 说明                                                                      |
+| ---------------------------------------------- | ------------------------------------------------------------------------- |
+| `ExtensionData(scope_id: str)`                 | 构造函数。存储由宿主创建；只在测试中自己构造                              |
+| `scope_id: str`                                | 该作用域在宿主中的标识                                                    |
+| `get(typ: type[T]) -> T \| None`               | `typ` 的已存实例，或 `None`                                               |
+| `get_or_init(typ: type[T], init: Callable[[], T]) -> T` | 已存实例；不存在时由 `init()` 创建。`init` 在存储的锁内运行      |
+| `set(value: T) -> None`                        | 以 `type(value)` 为键存入 `value`，替换之前的值                           |
+| `remove(typ: type[T]) -> T \| None`            | 移除并返回已存实例                                                        |
+
+### `task_store_from_runtime(runtime: object) -> ExtensionData | None`
+
+从 LangGraph runtime（包装钩子中的 `request.runtime`，生命周期钩子的 `runtime` 参数）取回任务作用域的存储；没有活跃任务时返回 `None`。
+
+### `EXTENSION_TASK_STORE_KEY`
+
+`"__deerflow_extension_task_store"`。`task_store_from_runtime()` 背后由宿主拥有的 runtime context 键。只通过该辅助函数读取，永远不要写入。
+
+## 任务生命周期
+
+### `TaskLifecycleContributor`
+
+```python
+class TaskLifecycleContributor(Protocol):
+    async def on_task_start(self, app_store: ExtensionData, task_store: ExtensionData, info: TaskInfo) -> None: ...
+    async def on_task_stop(
+        self, app_store: ExtensionData, task_store: ExtensionData, info: TaskInfo, outcome: TaskOutcome
+    ) -> None: ...
+```
+
+### `TaskInfo`
+
+冻结的 dataclass。
+
+| 字段             | 类型                          | 默认值  |
+| ---------------- | ----------------------------- | ------- |
+| `task_id`        | `str`                         | 必填    |
+| `run_id`         | `str`                         | 必填    |
+| `thread_id`      | `str`                         | 必填    |
+| `kind`           | `Literal["lead", "subagent"]` | 必填    |
+| `parent_task_id` | `str \| None`                 | `None`  |
+| `agent_name`     | `str \| None`                 | `None`  |
+| `resumed`        | `bool`                        | `False` |
+
+### `TaskOutcome`
+
+`StrEnum`：`COMPLETED = "completed"`、`ABORTED = "aborted"`、`FAILED = "failed"`。
+
+## 系统模型调用
+
+### `SystemModelCallObserver`
+
+```python
+class SystemModelCallObserver(Protocol):
+    async def on_system_model_call(
+        self,
+        app_store: ExtensionData,
+        task_store: ExtensionData,
+        kind: SystemOperationKind,
+        request: SystemModelRequest,
+        result: SystemModelResult,
+    ) -> None: ...
+```
+
+### `SystemOperationKind`
+
+`StrEnum`：`GOAL = "goal"`、`MEMORY = "memory"`、`TITLE = "title"`、`SUMMARIZATION = "summarization"`。
+
+### `SystemModelRequest`
+
+冻结的 dataclass，调用前拍下的只读快照。
+
+| 字段            | 类型                          | 默认值  |
+| --------------- | ----------------------------- | ------- |
+| `messages`      | `Sequence[Any]`               | `()`    |
+| `model_name`    | `str \| None`                 | `None`  |
+| `invoke_config` | `Mapping[str, Any] \| None`   | `None`  |
+
+`messages` 在构造时规范化为 tuple。单个提示字符串会变成只有一个元素的 tuple，而不是字符序列。
+
+### `SystemModelResult`
+
+冻结的 dataclass：`response: Any | None = None`、`error: BaseException | None = None`、`duration_ms: float | None = None`。
+
+## Agent 组装
+
+### `AgentAssemblyObserver`
+
+```python
+class AgentAssemblyObserver(Protocol):
+    def on_agent_assembled(self, app_store: ExtensionData, descriptor: AgentAssemblyDescriptor) -> None: ...
+```
+
+同步调用，发生在 Agent 构建的末尾。必须轻量，且不得抛出异常。
+
+### `AgentAssemblyDescriptor`
+
+冻结的 dataclass。
+
+| 字段                  | 类型                               | 默认值  |
+| --------------------- | ---------------------------------- | ------- |
+| `namespace`           | `str`                              | 必填    |
+| `agent_name`          | `str`                              | 必填    |
+| `requested_model`     | `str \| None`                      | 必填    |
+| `effective_model`     | `str`                              | 必填    |
+| `model_parameters`    | `dict[str, Any]`                   | 必填    |
+| `thinking_enabled`    | `bool`                             | 必填    |
+| `reasoning_effort`    | `Any`                              | 必填    |
+| `base_prompt_hash`    | `str`                              | 必填    |
+| `tools`               | `tuple[ToolDescriptor, ...]`       | 必填    |
+| `middlewares`         | `tuple[MiddlewareDescriptor, ...]` | 必填    |
+| `deferred_tool_names` | `tuple[str, ...]`                  | 必填    |
+| `enabled_skills`      | `tuple[str, ...]`                  | 必填    |
+| `effective_policies`  | `dict[str, Any]`                   | 必填    |
+| `build`               | `dict[str, Any]`                   | `{}`    |
+
+`fingerprint: str`（缓存属性）是对一切影响行为的内容做的 `canonical_hash`。工具、延迟工具名和技能会排序；中间件顺序保持不变，因为它决定谁包裹谁。`build` 和 `requested_model` 被排除，所以同一组装重新部署后指纹不变。
+
+### `ToolDescriptor`
+
+冻结的 dataclass：`name: str`、`description_hash: str`、`schema_hash: str`、`source: str`、`mcp_server: str | None = None`、`mcp_transport: str | None = None`。
+
+### `MiddlewareDescriptor`
+
+冻结的 dataclass：`name: str`、`module: str`、`policy_parameters: dict[str, Any] = {}`、`extension: str | None = None`。`extension` 是贡献它的扩展；宿主中间件为 `None`。
+
+## 上下文压缩
+
+### `ContextCompactionObserver`
+
+```python
+class ContextCompactionObserver(Protocol):
+    async def on_context_compacted(
+        self, app_store: ExtensionData, task_store: ExtensionData, event: CompactionEvent
+    ) -> None: ...
+```
+
+### `CompactionEvent`
+
+冻结的 dataclass，在变换两侧都还存在时捕获。
+
+| 字段                      | 类型              |
+| ------------------------- | ----------------- |
+| `transform_kind`          | `str`             |
+| `transform_version`       | `str`             |
+| `source_content_hashes`   | `tuple[str, ...]` |
+| `output_content_hash`     | `str`             |
+| `compacted_message_count` | `int`             |
+| `kept_message_count`      | `int`             |
+
+哈希是对直接传入的内容计算的 `canonical_hash(message.content)`，从不是字符串化后的副本。要把某条消息与事件对应起来，请用同样的方式哈希它的 `content`。
+
+## 服务
+
+### `ExtensionService`
+
+```python
+class ExtensionService(Protocol):
+    async def start(self, deps: ExtensionRuntimeDeps) -> None: ...
+    async def stop(self) -> None: ...
+```
+
+### `ExtensionRuntimeDeps`
+
+传给 `start()` 的冻结 dataclass。
+
+| 字段                  | 类型                        | 默认值                 |
+| --------------------- | --------------------------- | ---------------------- |
+| `app_store`           | `ExtensionData \| None`     | `None`                 |
+| `policy`              | `HostPolicySnapshot`        | `HostPolicySnapshot()` |
+| `session_factory`     | `Any \| None`               | `None`                 |
+| `run_evidence_reader` | `RunEvidenceReader \| None` | `None`                 |
+
+宿主不提供读取器时，`run_evidence_reader` 为 `None`。
+
+## 运行证据
+
+### `RunEvidenceReader`
+
+只读 Protocol。其默认方法会抛出 `NotImplementedError`。
+
+| 方法                                                                                             | 返回值                    |
+| ------------------------------------------------------------------------------------------------ | ------------------------- |
+| `async list_changed_runs(*, cursor: str \| None, limit: int)`                                     | `RunPage`                 |
+| `async list_run_events(*, thread_id: str, run_id: str, after_seq: int \| None, limit: int)`       | `RunEventPage`            |
+| `async get_run_status(*, thread_id: str, run_id: str)`                                            | `RunStatusView \| None`   |
+
+Gateway 的实现接受 1 到 2000 的 `limit` 和非负的 `after_seq`，否则抛出 `ValueError`。删除不会产生墓碑记录：`get_run_status()` 返回 `None` 表示该运行不存在或不可见。见[运行证据](/docs/harness/extensions/run-evidence)。
+
+### `RunStatusView`
+
+冻结的 dataclass：`thread_id`、`run_id`、`status`、`created_at`、`updated_at`（均为 `str = ""`），`error: str | None = None`，`stop_reason: str | None = None`。
+
+### `RunEventView`
+
+冻结的 dataclass：`thread_id: str = ""`、`run_id: str = ""`、`seq: int = 0`（在线程内单调递增）、`event_type: str = ""`、`category: str = ""`、`content: Any = None`、`metadata: dict[str, Any] = {}`、`created_at: str = ""`。内容和元数据是脱离宿主存储的副本。内容原样返回；元数据只去掉了旧的 `auth_token` 键，没有做其他脱敏。
+
+### `RunPage` / `RunEventPage`
+
+冻结的 dataclass。`RunPage`：`items: tuple[RunStatusView, ...] = ()`、`next_cursor: str | None = None`、`has_more: bool = False`。`RunEventPage`：`items: tuple[RunEventView, ...] = ()`、`next_after_seq: int | None = None`、`has_more: bool = False`。
+
+### `resolve_run_evidence_reader(request: object) -> RunEvidenceReader | None`
+
+返回绑定到贡献路由已认证调用者的读取器。面向用户的路由应使用它，而不是能看到所有用户运行的全局 `ExtensionRuntimeDeps.run_evidence_reader`。`request` 是鸭子类型。宿主不支持请求级运行证据时返回 `None`。调用者未认证或缺少 `runs:read` 权限时，Gateway 抛出 `PermissionError("run evidence requires an authenticated user with runs:read")`；它从不把管理员或内部调用者放宽到全局可见。其他解析器错误会直接传播。
+
+### `require_run_evidence_reader(request: object) -> RunEvidenceReader`
+
+与 `resolve_run_evidence_reader()` 相同，但在不支持时抛出 `NotImplementedError("request-scoped run evidence is unavailable")`，而不是返回 `None`。把 `NotImplementedError` 映射为 HTTP 503，把 `PermissionError` 映射为 403。它从不回退到全局读取器。
+
+### `RUN_EVIDENCE_READER_RESOLVER_KEY`
+
+`"deerflow_extension_run_evidence_reader_resolver"`。宿主安装请求级解析器所用的 `app.state` 属性名，由宿主拥有。
+
+### `InvalidRunEvidenceCursor`
+
+`ValueError` 的子类，游标格式错误、不受支持或属于另一个作用域时抛出。
+
+## 身份
+
+### `ExtensionPrincipal`
+
+冻结的 dataclass：`user_id: str`、`is_admin: bool = False`、`is_internal: bool = False`、`roles: tuple[str, ...] = ()`。
+
+### `resolve_principal(request: object) -> ExtensionPrincipal | None`
+
+贡献路由的已认证调用者；无法确定时返回 `None`。`request` 是鸭子类型，所以传 Starlette 的 `Request` 即可，契约本身不依赖 Starlette。
+
+### `require_admin(request: object) -> ExtensionPrincipal`
+
+主体是管理员时返回它，否则抛出 `PermissionError("this endpoint requires an administrator account")`。无法确定身份时按失败处理（fail closed）。
+
+### `EXTENSION_PRINCIPAL_RESOLVER_KEY`
+
+`"deerflow_extension_principal_resolver"`。宿主安装解析器所用的 `app.state` 属性名，由宿主拥有。
+
+### `require_plugin_management(request: object, namespace: str, *, scope: Literal["read", "write"] = "read") -> ExtensionPrincipal`
+
+当调用者对已安装插件的 *namespace* 拥有 `plugin_management` 的指定 **scope** 时返回该主体，否则抛出 `PermissionError`。在自有的管理路由里，读取（`scope="read"`）或修改（`scope="write"`）企业自己的策略存储之前调用它。宿主会用调用者的可信身份询问其配置的授权 provider，因此读和写是两个独立决策，且都不由页面访问或工具授权隐含。
+
+它按失败关闭（fail closed）：未知 namespace、匿名调用者、宿主解析器缺失或失败、以及非允许的决策都会抛 `PermissionError`。宿主正在运行一份配置、但当前读不到它时，走配置的失败策略——默认 `fail_closed: true` 即拒绝。当宿主 `authorization.enabled: false`，或宿主根本没有配置时，答案恒为「允许」，因此该 helper 是 no-op，不会开始拒绝路由；需要无条件底线的企业仍应同时调用 `require_admin`。`scope` 不是 `"read"`/`"write"`，或 namespace 不符合 `[a-z][a-z0-9_.-]{0,95}`，都会在任何决策之前抛 `ValueError`。
+
+这是同步形式。请在 FastAPI 的 `def` 端点（在线程池中执行）中调用，不要在 async 端点中使用。
+
+### `arequire_plugin_management(request: object, namespace: str, *, scope: Literal["read", "write"] = "read") -> ExtensionPrincipal`
+
+`require_plugin_management` 的异步形式，供 `async def` 端点使用。它 await 宿主的异步解析器，且从不回退到同步解析器，因此宿主的配置读取始终不占用事件循环。
+
+### `EXTENSION_PLUGIN_AUTHZ_RESOLVER_KEY`
+
+`"deerflow_extension_plugin_authz_resolver"`。宿主安装同步 `plugin_management` 解析器所用的 `app.state` 属性名，签名为 `(request, namespace, scope) -> bool | None`。由宿主拥有。
+
+### `EXTENSION_PLUGIN_AUTHZ_RESOLVER_ASYNC_KEY`
+
+`"deerflow_extension_plugin_authz_resolver_async"`。对应的异步解析器，签名为 `async (request, namespace, scope) -> bool | None`。由宿主拥有。
+
+## 消息来源标记
+
+注入消息的中间件会给消息打上标记，这样观察者无需匹配措辞就能区分注入的消息和用户自己的消息。
+
+| 常量                             | 值                              |
+| -------------------------------- | ------------------------------- |
+| `MESSAGE_CONTENT_KIND_KEY`       | `"deerflow_content_kind"`       |
+| `MESSAGE_PRODUCER_KIND_KEY`      | `"deerflow_producer_kind"`      |
+| `MESSAGE_PRODUCER_ENTITY_ID_KEY` | `"deerflow_producer_entity_id"` |
+| `PROVENANCE_KEYS`                | 这三个键组成的 `frozenset`。宿主把它们视为服务端所有，并从不可信输入中剥离调用方提供的值 |
+
+### `ContentKind`
+
+`StrEnum`：`MIDDLEWARE_INJECTION = "middleware_injection"`、`MEMORY = "memory"`、`DURABLE_CONTEXT = "durable_context"`、`SKILL_BODY = "skill_body"`、`IMAGE_PAYLOAD = "image_payload"`。标记的值是普通字符串，所以更新的宿主新增的种类会以无法识别的字符串到达，而不会报错。
+
+### `MessageProvenance`
+
+冻结的 dataclass：`content_kind: str`、`producer_kind: str`、`producer_entity_id: str | None = None`。
+
+### `provenance_kwargs(content_kind, producer_kind, *, producer_entity_id=None) -> dict[str, str]`
+
+要合并进你所生成消息的 `additional_kwargs` 片段。`producer_entity_id` 为 `None` 时省略。
+
+### `read_provenance(message: object) -> MessageProvenance | None`
+
+从 `message.additional_kwargs` 读取标记。任一必需键缺失或不是字符串时返回 `None`。
+
+## 发布策略与哈希
+
+### `ReleasePolicyProvider`
+
+```python
+@runtime_checkable
+class ReleasePolicyProvider(Protocol):
+    def release_policy_parameters(self) -> dict[str, object]: ...
+```
+
+在中间件上实现它，以声明其影响行为的参数。它们会出现在 `MiddlewareDescriptor.policy_parameters` 和组装指纹中。值必须可 JSON 序列化；长文本请哈希而不要直接嵌入。
+
+### `collect_release_policies(middlewares: Sequence[object]) -> dict[str, dict[str, object]]`
+
+从一个栈中收集声明，以类名为键（重复时为 `Name`、`Name#2`……），并会解开隔离包装器。抛出异常的声明记为 `{"error": "<异常类型>"}`，返回非映射的记为 `{"error": "NonMappingDeclaration"}`。
+
+### `canonical_json(value: object) -> str`
+
+确定性 JSON：键排序，分隔符为 `(",", ":")`，`ensure_ascii=False`。对不可 JSON 序列化的值抛出 `TypeError`。
+
+### `canonical_hash(value: object) -> str`
+
+对 `canonical_json(value)` 以 UTF-8 编码后计算的 SHA-256 十六进制摘要。
+
+## 全栈插件（实验性）
+
+<Callout type="warning">
+  插件契约在 0.2.4 中是实验性的。务必检查 `registry.plugin(...)` 的返回值。见[插件](/docs/harness/extensions/plugins)。
+</Callout>
+
+### `PluginContribution`
+
+冻结的 dataclass。
+
+| 字段          | 类型                           | 默认值  |
+| ------------- | ------------------------------ | ------- |
+| `namespace`   | `str`                          | 必填    |
+| `title`       | `str`                          | 必填    |
+| `description` | `str`                          | `""`    |
+| `enabled`     | `bool`                         | `False` |
+| `fields`      | `tuple[SettingsField, ...]`    | `()`    |
+| `frontend`    | `BrowserModule \| BrowserAssets \| None` | `None`  |
+| `backend`     | `tuple[BackendAction, ...]`    | `()`    |
+| `api_version` | `int`                          | `1`     |
+| `tools`       | `tuple[ModelTool, ...]`        | `()`    |
+
+宿主只接受 `api_version == 1`，并要求 `frontend`、`backend`、`tools` 至少有一项。命名空间必须唯一。
+
+### `BrowserModule`
+
+冻结的 dataclass：`module: str`、`code: str`（一个自包含的 ES 模块，非空且不超过 512 KiB）、`public_fields: tuple[str, ...] = ()`。发现接口把这种传输方式标记为 `inline-v1`。模块需要相对导入、样式表或图片时，请使用 `BrowserAssets`。
+
+### `BrowserAssets`
+
+冻结的 dataclass，声明已安装包内的清单和静态文件。发现接口把这种传输方式标记为 `assets-v1`。
+
+| 字段            | 类型              | 默认值               |
+| --------------- | ----------------- | -------------------- |
+| `module`        | `str`             | 必填                 |
+| `root`          | `str \| Path`     | 必填                 |
+| `manifest`      | `str`             | `"ui_manifest.json"` |
+| `public_fields` | `tuple[str, ...]` | `()`                 |
+
+`root` 通常是 `Path(__file__).parent`。清单相对于 `root`，必须是恰好包含 `schema_version`（整数 `1`）、`entry` 和 `files` 三个键的 JSON 对象：
+
+```json
+{
+  "schema_version": 1,
+  "entry": "static/dist/index.mjs",
+  "files": ["static/dist/index.mjs", "static/dist/styles.css"]
+}
+```
+
+`files` 列出 1 到 256 个不重复的路径，`entry` 必须是其中之一，并以 `.js` 或 `.mjs` 结尾。路径只能使用 ASCII 字母、数字、`_`、`-` 和 `.`，以 `/` 分隔，每一段必须以字母、数字、`_` 或 `-` 开头。`root` 本身不能是符号链接，列出的路径也不能经过符号链接。限制：清单 64 KiB，单个文件 4 MiB，总计 16 MiB。接受的文件类型：`.js`、`.mjs`、`.css`、`.json`、`.map`、`.wasm`、`.png`、`.jpg`、`.jpeg`、`.gif`、`.webp`、`.svg`、`.ico`、`.woff`、`.woff2`、`.ttf`、`.otf`。
+
+`registry.plugin()` 会校验清单，并把列出的每个文件读入内存快照。校验错误会从 `registry.plugin()` 抛出，于是 `install()` 失败。快照的 revision 是对清单、路径和文件内容计算的 SHA-256，Gateway 从这个快照在 `GET /api/plugins/{namespace}/assets/{revision}/{path}` 提供文件。任何已认证用户都能下载列出的文件（包括 source map），即使插件处于禁用状态，所以绝不要列出机密。
+
+### `BackendAction`
+
+冻结的 dataclass：`name: str`、`handler: Callable[[Mapping[str, Any], ActionContext], Awaitable[Any]]`。名称必须唯一，handler 必须是异步的。
+
+### `ModelTool`
+
+冻结的 dataclass：`name: str`、`description: str`、`input_schema: Mapping[str, Any]`（内联的对象 schema）、`handler: Callable[[Mapping[str, Any], ToolContext], Awaitable[Any]]`、`group: str = "extensions"`。
+
+### `ActionContext` / `ToolContext`
+
+冻结的 dataclass。`ActionContext`：`principal: ExtensionPrincipal`、`settings: Mapping[str, bool | int | str]`。`ToolContext` 在其基础上增加 `thread_id: str | None`。
+
+### `SettingsField`
+
+描述一项非机密部署设置的冻结 dataclass。
+
+| 字段          | 类型                                         | 默认值  |
+| ------------- | -------------------------------------------- | ------- |
+| `key`         | `str`                                        | 必填    |
+| `title`       | `str`                                        | 必填    |
+| `kind`        | `Literal["boolean", "integer", "string"]`    | 必填    |
+| `default`     | `bool \| int \| str`                         | 必填    |
+| `description` | `str`                                        | `""`    |
+| `minimum`     | `int \| None`                                | `None`  |
+| `maximum`     | `int \| None`                                | `None`  |
+| `max_length`  | `int`                                        | `256`   |
+
+## 版本常量
+
+### `API_VERSION`
+
+宿主的契约版本，为点分字符串，本页描述的契约是 `"0.2.4"`。始终等于 `backend/packages/extension-api/pyproject.toml` 中的包版本。
+
+## 兼容性规则
+
+- **增量演进。** 每个 Protocol 方法都有默认实现，每个可选的 dataclass 字段都有默认值。新增方法或字段的契约发布不会破坏基于更早版本构建的扩展。
+- **1.0 之前**，minor 版本可以有不兼容变更，patch 版本只做增量。**1.0 之后**，不兼容变更会升 major。
+- **`@extension(api=...)` 检查。** install 函数带有标记时，宿主只在以下情况接受它：
+  - 1.0 之前：major 和 minor 相同，且宿主版本不低于声明版本（`0.2.4` 宿主接受 `0.2.0` 到 `0.2.4`，拒绝 `0.2.5`、`0.1.x` 和 `0.3.x`）；
+  - 1.0 之后：major 相同，且宿主版本不低于声明版本。
+
+  不是点分数字字符串的标记会被拒绝。没有标记的 install 函数不做检查。
+- **包元数据**是主要机制：声明 `deerflow-extension-api>=0.2,<0.3`，让依赖解析器在任何东西加载之前就拒绝不匹配的宿主。标记用来覆盖绕过依赖解析的安装方式。
+- **自己声明框架依赖。** 契约不依赖任何东西。导入 LangChain、LangGraph 或 FastAPI 的扩展需要自己声明它们。
+
+## 版本历史
+
+| 版本  | PR | 新增内容 |
+| ----- | -- | -------- |
+| 0.1.0 | [#4636](https://github.com/bytedance/deer-flow/pull/4636) | 基础部分：`install()` 与 `@extension`、`ExtensionRegistry.middlewares`、`MiddlewareContributor`、`MiddlewarePlacement`、`Placement`、`AgentScope`、`AgentBuildContext`、`HostPolicySnapshot`、`ExtensionData`、`task_store_from_runtime`、`EXTENSION_TASK_STORE_KEY`、`API_VERSION` |
+| 0.1.1 | [#4684](https://github.com/bytedance/deer-flow/pull/4684) | `task_lifecycle` 和 `system_model_observer` 注册，以及 `TaskLifecycleContributor`、`TaskInfo`、`TaskOutcome`、`SystemModelCallObserver`、`SystemModelRequest`、`SystemModelResult`、`SystemOperationKind` |
+| 0.1.2 | [#4780](https://github.com/bytedance/deer-flow/pull/4780) | `service` 和 `routers` 注册，以及 `ExtensionService` 和 `ExtensionRuntimeDeps`；打包扩展管理器 |
+| 0.2.0 | [#4863](https://github.com/bytedance/deer-flow/pull/4863) | `agent_assembly_observer` 和 `context_compaction_observer`，以及 `AgentAssemblyDescriptor`、`ToolDescriptor`、`MiddlewareDescriptor`、`CompactionEvent`；消息来源标记；发布策略与规范哈希；`ExtensionPrincipal`、`resolve_principal`、`require_admin` |
+| 0.2.1 | [#5405](https://github.com/bytedance/deer-flow/pull/5405) | `ExtensionRuntimeDeps.run_evidence_reader`，以及 `RunEvidenceReader`、`RunPage`、`RunEventPage`、`RunStatusView`、`RunEventView`、`InvalidRunEvidenceCursor` |
+| 0.2.2 | [#5647](https://github.com/bytedance/deer-flow/pull/5647) | 实验性的 `registry.plugin()`，以及 `PluginContribution`、`BrowserModule`、`BackendAction`、`ModelTool`、`ActionContext`、`ToolContext`、`SettingsField` |
+| 0.2.3 | [#5727](https://github.com/bytedance/deer-flow/pull/5727)、[#5685](https://github.com/bytedance/deer-flow/pull/5685) | 请求级运行证据：`resolve_run_evidence_reader`、`require_run_evidence_reader`、`RUN_EVIDENCE_READER_RESOLVER_KEY`（#5727）。打包的浏览器资源：`BrowserAssets`，`PluginContribution.frontend` 也接受它（#5685） |
+| 0.2.4 | [#5842](https://github.com/bytedance/deer-flow/pull/5842) | 插件资源授权：`require_plugin_management`、`arequire_plugin_management`、`EXTENSION_PLUGIN_AUTHZ_RESOLVER_KEY`、`EXTENSION_PLUGIN_AUTHZ_RESOLVER_ASYNC_KEY` |
+
+至今没有任何版本移除过公开名称。

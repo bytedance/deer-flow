@@ -7,12 +7,14 @@ Both Gateway and Client delegate to these functions.
 import asyncio
 import concurrent.futures
 import logging
+import os
 import posixpath
 import shutil
 import stat
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+from deerflow.skills.package_files import is_code_path, is_executable_binary_prefix
 from deerflow.skills.permissions import make_skill_tree_sandbox_readable
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.security_static_scanner import (
@@ -28,21 +30,6 @@ logger = logging.getLogger(__name__)
 
 _PROMPT_INPUT_DIRS = {"references", "templates"}
 _PROMPT_INPUT_SUFFIXES = frozenset({".json", ".markdown", ".md", ".rst", ".txt", ".yaml", ".yml"})
-_CODE_SUFFIXES = frozenset({".bash", ".cjs", ".js", ".mjs", ".php", ".pl", ".ps1", ".py", ".rb", ".sh", ".ts", ".zsh"})
-# Full magics per variant — a shorter shared prefix would also match
-# non-executable data files.
-_EXECUTABLE_MAGIC_PREFIXES = (
-    b"\x7fELF",  # ELF
-    b"MZ",  # PE/DOS
-    b"\xfe\xed\xfa\xce",  # Mach-O 32-bit big-endian
-    b"\xfe\xed\xfa\xcf",  # Mach-O 64-bit big-endian
-    b"\xce\xfa\xed\xfe",  # Mach-O 32-bit little-endian
-    b"\xcf\xfa\xed\xfe",  # Mach-O 64-bit little-endian
-    b"\xca\xfe\xba\xbe",  # Mach-O fat binary big-endian
-    b"\xbe\xba\xfe\xca",  # Mach-O fat binary little-endian
-    b"\xca\xfe\xba\xbf",  # Mach-O fat64 binary big-endian
-    b"\xbf\xba\xfe\xca",  # Mach-O fat64 binary little-endian
-)
 
 
 class SkillAlreadyExistsError(ValueError):
@@ -99,11 +86,6 @@ def is_symlink_member(info: zipfile.ZipInfo) -> bool:
     """Detect symlinks based on the external attributes stored in the ZipInfo."""
     mode = info.external_attr >> 16
     return stat.S_ISLNK(mode)
-
-
-def is_executable_binary_prefix(prefix: bytes) -> bool:
-    """Detect ELF, PE, and Mach-O executables by magic bytes."""
-    return prefix.startswith(_EXECUTABLE_MAGIC_PREFIXES)
 
 
 def should_ignore_archive_entry(path: Path) -> bool:
@@ -191,6 +173,8 @@ def safe_extract_skill_archive(
                 if total_written > max_total_size:
                     raise ValueError("Skill archive is too large or appears highly compressed.")
                 dst.write(chunk)
+        if os.name == "posix":
+            member_path.chmod(0o755 if (info.external_attr >> 16) & 0o111 else 0o644)
 
 
 def _is_script_support_file(rel_path: Path) -> bool:
@@ -211,20 +195,14 @@ def _has_shebang(path: Path) -> bool:
         return False
 
 
-def _is_code_file_by_name(rel_path: Path) -> bool:
-    """Pure name-based code classification: scripts/ members and code suffixes."""
-    if _is_script_support_file(rel_path):
-        return True
-    return rel_path.suffix.lower() in _CODE_SUFFIXES
-
-
 async def _is_code_file(path: Path, rel_path: Path) -> bool:
     """Classify code files anywhere in the tree for the executable scan policy.
 
-    Name checks are pure and stay on the event loop; only the shebang
-    sniff for extensionless files reads the file and is offloaded.
+    Applies :func:`is_code_file` lazily: name checks are pure and stay on the
+    event loop; only the shebang sniff for extensionless files reads the file
+    and is offloaded.
     """
-    if _is_code_file_by_name(rel_path):
+    if is_code_path(rel_path):
         return True
     return not rel_path.suffix and await asyncio.to_thread(_has_shebang, path)
 
@@ -250,7 +228,7 @@ def _findings_for_file(findings: list[StaticFinding], rel_path: str) -> list[Sta
     return [finding for finding in findings if finding.get("file") in {rel_path, None}]
 
 
-async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str, *, executable: bool, static_findings: list[StaticFinding] | None = None) -> None:
+async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str, *, executable: bool, static_findings: list[StaticFinding] | None = None, app_config=None) -> None:
     rel_path = path.relative_to(skill_dir).as_posix()
     location = f"{skill_name}/{rel_path}"
     try:
@@ -259,7 +237,7 @@ async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str
         raise SkillSecurityScanError(f"Security scan failed for skill '{skill_name}': {location} must be valid UTF-8") from e
 
     try:
-        result = await scan_skill_content(content, executable=executable, location=location, static_findings=static_findings or [])
+        result = await scan_skill_content(content, executable=executable, location=location, app_config=app_config, static_findings=static_findings or [])
     except Exception as e:
         raise SkillSecurityScanError(f"Security scan failed for {location}: {e}") from e
 
@@ -311,7 +289,7 @@ async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str
     static_findings = await _scan_static_skill_archive_or_raise(skill_dir, skill_name, app_config=app_config)
 
     skill_md = skill_dir / "SKILL.md"
-    await _scan_skill_file_or_raise(skill_dir, skill_md, skill_name, executable=False, static_findings=_findings_for_file(static_findings, "SKILL.md"))
+    await _scan_skill_file_or_raise(skill_dir, skill_md, skill_name, executable=False, static_findings=_findings_for_file(static_findings, "SKILL.md"), app_config=app_config)
 
     for path in await asyncio.to_thread(_collect_scannable_files, skill_dir):
         rel_path = path.relative_to(skill_dir)
@@ -327,6 +305,7 @@ async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str
                 skill_name,
                 executable=True,
                 static_findings=_findings_for_file(static_findings, rel_path_posix),
+                app_config=app_config,
             )
         elif _should_scan_support_file(rel_path):
             await _scan_skill_file_or_raise(
@@ -335,6 +314,7 @@ async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str
                 skill_name,
                 executable=False,
                 static_findings=_findings_for_file(static_findings, rel_path_posix),
+                app_config=app_config,
             )
     return static_findings
 

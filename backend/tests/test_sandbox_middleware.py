@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import get_type_hints
 
 import pytest
@@ -157,6 +158,10 @@ class _AsyncOnlyProvider(SandboxProvider):
         if sandbox_id == "async-sandbox":
             return self.sandbox
         return None
+
+    def get_scoped(self, sandbox_id: str, *, thread_id: str, user_id: str) -> Sandbox | None:
+        del thread_id, user_id
+        return self.get(sandbox_id)
 
     def release(self, sandbox_id: str) -> None:
         self.released_ids.append(sandbox_id)
@@ -335,7 +340,7 @@ def test_explicit_skill_policy_does_not_reuse_checkpointed_sandbox_after_auth_de
     [
         (SandboxMiddleware(lazy_init=True), {}, Runtime(context={"thread_id": "thread-lazy"})),
         (SandboxMiddleware(lazy_init=False), {}, Runtime(context={})),
-        (SandboxMiddleware(lazy_init=False), {"sandbox": {"sandbox_id": "existing"}}, Runtime(context={"thread_id": "thread-existing"})),
+        (SandboxMiddleware(lazy_init=False), {"sandbox": {"sandbox_id": "async-sandbox"}}, Runtime(context={"thread_id": "thread-existing"})),
     ],
 )
 async def test_abefore_agent_delegates_to_super_when_not_acquiring(
@@ -599,17 +604,72 @@ def test_wrap_tool_call_passthrough_when_sandbox_already_in_state() -> None:
     assert result is original
 
 
-def test_wrap_tool_call_turns_trusted_proxy_denial_into_human_input() -> None:
+def test_wrap_tool_call_overwrites_a_repaired_checkpoint_sandbox() -> None:
+    middleware = SandboxMiddleware()
+    state: dict = {"sandbox": {"sandbox_id": "foreign"}}
+    request = _make_tool_call_request(state)
+
+    def handler(req: ToolCallRequest) -> ToolMessage:
+        req.runtime.state["sandbox"] = {"sandbox_id": "canonical"}
+        return ToolMessage(content="ok", tool_call_id="call-1", name="bash")
+
+    result = middleware.wrap_tool_call(request, handler)
+
+    assert isinstance(result, Command)
+    assert isinstance(result.update, dict)
+    assert isinstance(result.update["sandbox"], Overwrite)
+    assert result.update["sandbox"].value == {"sandbox_id": "canonical"}
+
+
+def test_network_prompt_preserves_repaired_checkpoint_overwrite() -> None:
+    provider = _NetworkPolicyProvider()
+    provider.events = [{"request_id": "req-1", "host": "example.com", "port": 443, "method": "CONNECT"}]
+    state: dict = {"sandbox": {"sandbox_id": "foreign"}}
+    request = _make_tool_call_request(state)
+
+    def handler(req: ToolCallRequest) -> ToolMessage:
+        req.runtime.state["sandbox"] = {"sandbox_id": "canonical"}
+        return ToolMessage(content="proxy denied", tool_call_id="call-1", name="bash")
+
+    set_sandbox_provider(provider)
+    try:
+        result = SandboxMiddleware().wrap_tool_call(request, handler)
+    finally:
+        reset_sandbox_provider()
+
+    assert isinstance(result, Command)
+    assert result.goto == END
+    assert isinstance(result.update, dict)
+    assert isinstance(result.update["sandbox"], Overwrite)
+    assert result.update["sandbox"].value == {"sandbox_id": "canonical"}
+
+
+@pytest.mark.parametrize("async_path", [False, True])
+@pytest.mark.parametrize(
+    "context",
+    [
+        {},
+        {"interaction_mode": "interactive"},
+        {"interaction_mode": "interactive", "non_interactive": True, "disable_clarification": True, "channel_name": "github"},
+    ],
+)
+def test_wrap_tool_call_turns_trusted_proxy_denial_into_human_input(context: dict, async_path: bool) -> None:
     provider = _NetworkPolicyProvider()
     provider.events = [{"request_id": "req-1", "host": "pypi.org", "port": 443, "method": "CONNECT"}]
     state: dict = {"sandbox": {"sandbox_id": "existing"}}
     request = _make_tool_call_request(state)
+    request.runtime.context.update(context)
+    original = ToolMessage(content="curl: proxy denied", tool_call_id="call-1", name="bash")
+
+    async def handler(_request: ToolCallRequest) -> ToolMessage:
+        return original
+
     set_sandbox_provider(provider)
     try:
-        result = SandboxMiddleware().wrap_tool_call(
-            request,
-            lambda _request: ToolMessage(content="curl: proxy denied", tool_call_id="call-1", name="bash"),
-        )
+        if async_path:
+            result = asyncio.run(SandboxMiddleware().awrap_tool_call(request, handler))
+        else:
+            result = SandboxMiddleware().wrap_tool_call(request, lambda _request: original)
     finally:
         reset_sandbox_provider()
 
@@ -669,6 +729,65 @@ def test_before_agent_applies_network_approval_to_same_sandbox() -> None:
     assert provider.decisions == [("existing", "req-1", "allow_temporary")]
 
 
+@pytest.mark.anyio
+async def test_abefore_agent_drains_started_network_approval_across_cancellation() -> None:
+    provider = _NetworkPolicyProvider()
+    started = threading.Event()
+    release = threading.Event()
+
+    def decide(sandbox_id: str, request_id: str, decision: str) -> bool:
+        started.set()
+        assert release.wait(timeout=2)
+        provider.decisions.append((sandbox_id, request_id, decision))
+        return True
+
+    provider.decide_network_policy_request = decide  # type: ignore[method-assign]
+    response = HumanMessage(
+        content="Allow network access for 5 minutes",
+        additional_kwargs={
+            "hide_from_ui": True,
+            "human_input_response": {
+                "version": 1,
+                "kind": "human_input_response",
+                "source": "sandbox_network",
+                "request_id": "req-cancel",
+                "response_kind": "option",
+                "option_id": "allow_temporary",
+                "value": "Allow network access for 5 minutes",
+            },
+        },
+    )
+    state = {"sandbox": {"sandbox_id": "existing"}, "messages": [response]}
+    task = None
+    set_sandbox_provider(provider)
+    try:
+        task = asyncio.create_task(
+            SandboxMiddleware().abefore_agent(
+                state,
+                Runtime(context={"thread_id": "thread-cancel"}),
+            )
+        )
+        assert await asyncio.to_thread(started.wait, 2)
+
+        task.cancel()
+        await asyncio.sleep(0.05)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        reset_sandbox_provider()
+
+    assert provider.decisions == [("existing", "req-cancel", "allow_temporary")]
+
+
 def test_before_agent_does_not_reapply_network_approval_after_new_user_turn() -> None:
     provider = _NetworkPolicyProvider()
     response = HumanMessage(
@@ -699,13 +818,23 @@ def test_before_agent_does_not_reapply_network_approval_after_new_user_turn() ->
     assert provider.decisions == []
 
 
-@pytest.mark.parametrize("context_key", ["disable_clarification", "non_interactive"])
-def test_sync_noninteractive_network_denial_is_recorded_without_prompt(context_key: str) -> None:
+_UNATTENDED_CONTEXTS = [
+    pytest.param({"disable_clarification": True}, id="legacy-disable-clarification"),
+    pytest.param({"non_interactive": True}, id="legacy-non-interactive"),
+    pytest.param({"channel_name": "github"}, id="github-channel"),
+    pytest.param({"interaction_mode": "webhook"}, id="webhook"),
+    pytest.param({"interaction_mode": "scheduled"}, id="scheduled"),
+    pytest.param({"interaction_mode": "autonomous"}, id="autonomous"),
+]
+
+
+@pytest.mark.parametrize("context", _UNATTENDED_CONTEXTS)
+def test_sync_noninteractive_network_denial_is_recorded_without_prompt(context: dict) -> None:
     provider = _NetworkPolicyProvider()
     provider.events = [{"request_id": "req-1", "host": "example.com", "port": 443, "method": "CONNECT"}]
     state: dict = {"sandbox": {"sandbox_id": "existing"}}
     request = _make_tool_call_request(state)
-    request.runtime.context[context_key] = True
+    request.runtime.context.update(context)
     original = ToolMessage(content="proxy denied", tool_call_id="call-1", name="bash")
     set_sandbox_provider(provider)
     try:
@@ -720,13 +849,13 @@ def test_sync_noninteractive_network_denial_is_recorded_without_prompt(context_k
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("context_key", ["disable_clarification", "non_interactive"])
-async def test_async_noninteractive_network_denial_is_recorded_without_prompt(context_key: str) -> None:
+@pytest.mark.parametrize("context", _UNATTENDED_CONTEXTS)
+async def test_async_noninteractive_network_denial_is_recorded_without_prompt(context: dict) -> None:
     provider = _NetworkPolicyProvider()
     provider.events = [{"request_id": "req-1", "host": "example.com", "port": 443, "method": "CONNECT"}]
     state: dict = {"sandbox": {"sandbox_id": "existing"}}
     request = _make_tool_call_request(state)
-    request.runtime.context[context_key] = True
+    request.runtime.context.update(context)
     original = ToolMessage(content="proxy denied", tool_call_id="call-1", name="bash")
 
     async def handler(_request: ToolCallRequest) -> ToolMessage:
@@ -750,6 +879,7 @@ def test_subagent_network_denial_fails_closed_without_prompt() -> None:
     state: dict = {"sandbox": {"sandbox_id": "existing"}}
     request = _make_tool_call_request(state)
     request.runtime.context["is_subagent"] = True
+    request.runtime.context["interaction_mode"] = "interactive"
     original = ToolMessage(content="proxy denied", tool_call_id="call-1", name="bash")
     set_sandbox_provider(provider)
     try:
@@ -771,6 +901,7 @@ async def test_async_subagent_network_denial_fails_closed_without_prompt() -> No
     state: dict = {"sandbox": {"sandbox_id": "existing"}}
     request = _make_tool_call_request(state)
     request.runtime.context["is_subagent"] = True
+    request.runtime.context["interaction_mode"] = "interactive"
     original = ToolMessage(content="proxy denied", tool_call_id="call-1", name="bash")
 
     async def handler(_request: ToolCallRequest) -> ToolMessage:

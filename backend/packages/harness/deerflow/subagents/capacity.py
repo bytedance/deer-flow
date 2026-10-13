@@ -105,13 +105,32 @@ class SubagentExecutionCapacity:
         async with self._lock:
             self._release_locked()
 
+    async def _release_cancellation_safe(self) -> None:
+        """Release an acquired slot before propagating repeated cancellation."""
+        release_task = asyncio.create_task(self._release())
+        cancellation: asyncio.CancelledError | None = None
+        while not release_task.done():
+            try:
+                await asyncio.shield(release_task)
+            except asyncio.CancelledError as exc:
+                if cancellation is None:
+                    cancellation = exc
+
+        if cancellation is not None:
+            try:
+                release_task.result()
+            except Exception as exc:
+                raise cancellation from exc
+            raise cancellation
+        release_task.result()
+
     @asynccontextmanager
     async def slot(self) -> AsyncIterator[None]:
         await self._acquire()
         try:
             yield
         finally:
-            await self._release()
+            await self._release_cancellation_safe()
 
 
 _config = SubagentRuntimeConfig()

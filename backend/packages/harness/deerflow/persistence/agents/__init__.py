@@ -42,11 +42,6 @@ def make_agent_store(config: AppConfig) -> AgentStore:
     ``memory`` database has no durable URL and is rejected here (the gateway
     also fails fast at startup, but this guard covers the graph-process path).
     """
-    from deerflow.persistence.agent_definition_context import get_scoped_definition_stores
-
-    scoped = get_scoped_definition_stores()
-    if scoped is not None:
-        return scoped[0]
     if config.agent_storage.backend == "db":
         db_backend = config.database.backend
         if db_backend not in ("sqlite", "postgres"):
@@ -85,12 +80,6 @@ def get_agent_store() -> AgentStore:
     downgraded to node-local ``file``. Pinned by
     ``test_get_agent_store_resolves_db_backend_from_on_disk_config``.
     """
-    from deerflow.persistence.agent_definition_context import get_scoped_definition_stores
-
-    scoped = get_scoped_definition_stores()
-    if scoped is not None:
-        return scoped[0]
-
     from deerflow.config.app_config import AppConfig, get_app_config
 
     try:

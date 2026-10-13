@@ -49,6 +49,17 @@ spec:
               value: {{ include "deer-flow.namespace" . | quote }}
             - name: SANDBOX_IMAGE
               value: {{ .Values.provisioner.sandboxImage | quote }}
+            # Shared secret the gateway sends as X-API-Key. verify_api_key in
+            # docker/provisioner/app.py answers 401 to every /api/* request
+            # while this is empty or mismatched, so a provisioner without it
+            # cannot create a single sandbox: the key is required (a
+            # user-managed existingAppSecret must carry it) and comes from the
+            # same Secret the gateway reads.
+            - name: PROVISIONER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "deer-flow.appSecret" . }}
+                  key: PROVISIONER_API_KEY
             # In-cluster API access via the mounted ServiceAccount token.
             # K8S_API_SERVER is intentionally unset (do NOT use host.docker.internal).
             # Service type for per-sandbox Services. ClusterIP (default) routes the
@@ -74,6 +85,11 @@ spec:
             {{- end }}
             # PVC mode — sandbox Pods mount the same PVCs the gateway uses.
             {{- if .Values.persistence.home.enabled }}
+            # Extra-mount paths originate in the Gateway's state namespace.
+            # Keep this logical base aligned so the provisioner can translate
+            # those paths into USERDATA PVC subPaths.
+            - name: DEER_FLOW_HOST_BASE_DIR
+              value: /app/backend/.deer-flow
             - name: USERDATA_PVC_NAME
               value: {{ include "deer-flow.homePVC" . | quote }}
             {{- end }}
@@ -83,6 +99,19 @@ spec:
             {{- end }}
             - name: SANDBOX_CONTAINER_PORT
               value: {{ .Values.provisioner.sandboxPort | quote }}
+            # Optional lark-cli sandbox runtime images. The provisioner keys off
+            # "non-empty", so render the variables only when set; an empty
+            # string would still mean "off" but would churn the Pod spec on
+            # every values edit. Broker (Pattern B) supersedes init (Pattern A)
+            # in the provisioner when both are set.
+            {{- with .Values.provisioner.larkCliInitImage }}
+            - name: LARK_CLI_INIT_IMAGE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.provisioner.larkCliBrokerImage }}
+            - name: LARK_CLI_BROKER_IMAGE
+              value: {{ . | quote }}
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /health

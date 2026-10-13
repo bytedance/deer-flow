@@ -514,6 +514,30 @@ async def test_create_all_and_alembic_upgrade_produce_same_schema(tmp_path: Path
         fresh_tables = await _reflect_columns(fresh)
         upgraded_tables = await _reflect_columns(upgraded)
 
+        # The preserved historical fork table is intentionally outside active ORM
+        # metadata, but a real Alembic upgrade must retain its exact empty shape.
+        assert "thread_execution_bindings" not in fresh_tables
+        legacy_columns = upgraded_tables.pop("thread_execution_bindings")
+        assert {name: column["nullable"] for name, column in legacy_columns.items()} == {
+            "user_id": False,
+            "thread_id": False,
+            "backend": False,
+            "parent_thread_id": True,
+            "source_workspace": True,
+            "recovery_required": False,
+        }
+        assert {name for name, column in legacy_columns.items() if column["primary_key"]} == {"user_id", "thread_id"}
+        assert _normalize_default(legacy_columns["recovery_required"]["default"]) in {"false", "0"}
+        async with upgraded.connect() as conn:
+            assert (await conn.execute(sa.text("SELECT COUNT(*) FROM thread_execution_bindings"))).scalar_one() == 0
+
+        # The same historical branch preserves this optional inert intent column.
+        assert "execution" not in fresh_tables["scheduled_tasks"]
+        legacy_execution = upgraded_tables["scheduled_tasks"].pop("execution")
+        assert legacy_execution["nullable"] is True
+        assert isinstance(legacy_execution["type"], sa.JSON)
+        assert _normalize_default(legacy_execution["default"]) is None
+
         # Same set of tables. A mismatch here means either ``Base.metadata``
         # has gained/lost a table without a matching revision, or a revision
         # creates/drops a table without a matching model change.

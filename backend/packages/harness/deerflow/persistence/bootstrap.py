@@ -50,10 +50,12 @@ Layered, with different guarantees per backend. Postgres has true
 cross-process serialisation. SQLite is single-process safe and cross-process
 best-effort; multi-instance deployments should use Postgres.
 
-* **Postgres -- true cross-process serialisation.** ``pg_advisory_lock`` runs
-  the whole reflect-and-act sequence under an exclusive lock that survives
-  cross-process. Concurrent Gateway instances queue cleanly and the second
-  one observes head as a no-op.
+* **Postgres -- true cross-process serialisation.** A session-level advisory
+  lock runs the whole reflect-and-act sequence under an exclusive lock that
+  survives cross-process. Concurrent Gateway instances wait for it however
+  long the holder's migration takes (polling, so the engine's
+  ``command_timeout`` never cuts the wait short) and the second one observes
+  head as a no-op.
 
 * **SQLite -- single-process serialisation, best-effort cross-process.**
   SQLite is single-node by deployment, so the realistic concurrency case is
@@ -97,7 +99,9 @@ from alembic.script import ScriptDirectory
 from alembic.util.exc import CommandError
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+
+from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 
@@ -181,6 +185,11 @@ _BASELINE_REVISION = "0001_baseline"
 # change without coordinating a one-time migration (a key change effectively
 # releases the prior lock).
 _PG_LOCK_KEY = 0x0DEE_12F1_0BEE_3682
+
+# Delay between ``pg_try_advisory_lock`` attempts while another instance holds
+# the bootstrap lock. Waiting is a loop of short statements, so the engine's
+# ``command_timeout`` bounds each attempt instead of the whole wait.
+_PG_LOCK_POLL_INTERVAL_SECONDS = 1.0
 
 
 # Tables created by ``0001_baseline.upgrade()``. The legacy branch restricts
@@ -505,18 +514,38 @@ def _run_baseline_create_all_sync(sync_conn: Any) -> None:
 
 
 def _stamp(cfg: AlembicConfig, revision: str) -> None:
-    """Synchronous alembic stamp; callers must wrap in ``asyncio.to_thread``."""
+    """Synchronous alembic stamp; callers must drain via ``await_drained(asyncio.to_thread(...))``."""
     alembic_command.stamp(cfg, revision)
 
 
 def _upgrade(cfg: AlembicConfig, revision: str) -> None:
-    """Synchronous alembic upgrade; callers must wrap in ``asyncio.to_thread``."""
+    """Synchronous alembic upgrade; callers must drain via ``await_drained(asyncio.to_thread(...))``."""
     alembic_command.upgrade(cfg, revision)
 
 
 # ---------------------------------------------------------------------------
 # Cross-process locking
 # ---------------------------------------------------------------------------
+
+
+async def _acquire_postgres_lock(conn: AsyncConnection) -> None:
+    """Take the session-level bootstrap advisory lock on *conn*, waiting as
+    long as another instance holds it.
+
+    Polls ``pg_try_advisory_lock`` instead of blocking in
+    ``pg_advisory_lock``. The app engine sets asyncpg's ``command_timeout``
+    (30s by default), which applies to every statement without an explicit
+    timeout -- a blocking acquire would raise ``TimeoutError`` and fail
+    startup whenever a peer's migration outlasts it. Each poll returns
+    immediately, so ``command_timeout`` still bounds a stalled round trip
+    while the wait itself stays unbounded, like the holder's migration.
+    """
+    logged_wait = False
+    while not (await conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": _PG_LOCK_KEY})).scalar_one():
+        if not logged_wait:
+            logger.info("bootstrap: postgres advisory lock key=0x%x is held by another instance; waiting", _PG_LOCK_KEY)
+            logged_wait = True
+        await asyncio.sleep(_PG_LOCK_POLL_INTERVAL_SECONDS)
 
 
 @asynccontextmanager
@@ -545,18 +574,20 @@ async def _postgres_lock(engine: AsyncEngine):
     the kill **for this transaction only** (no global / role-level effect).
     Self-hosted Postgres usually ships with the timeout off, so this is a
     no-op there; on managed PG it is what keeps the lock alive while DDL
-    runs. Must execute *before* ``pg_advisory_lock`` so a slow lock acquire
-    on a heavily-contended cluster is itself protected.
+    runs. Must execute *before* the lock is acquired so a slow acquire on a
+    heavily-contended cluster is itself protected.
+
+    Acquisition polls rather than blocks -- see ``_acquire_postgres_lock``.
     """
     async with engine.connect() as conn:
         await conn.execute(text("SET LOCAL idle_in_transaction_session_timeout = 0"))
-        await conn.execute(text("SELECT pg_advisory_lock(:k)"), {"k": _PG_LOCK_KEY})
+        await _acquire_postgres_lock(conn)
         try:
             logger.info("bootstrap: acquired postgres advisory lock key=0x%x", _PG_LOCK_KEY)
             yield
         finally:
             try:
-                await conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _PG_LOCK_KEY})
+                await await_drained(conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _PG_LOCK_KEY}))
             except Exception:  # noqa: BLE001
                 logger.warning("bootstrap: pg_advisory_unlock raised; session close will release", exc_info=True)
 
@@ -609,7 +640,8 @@ async def bootstrap_schema(engine: AsyncEngine, *, backend: str, postgres_schema
 
     Branch dispatch is documented at module top. ``alembic.command.stamp`` and
     ``alembic.command.upgrade`` are synchronous and would block the event
-    loop; both are wrapped in ``asyncio.to_thread``.
+    loop; both are wrapped in ``await_drained(asyncio.to_thread(...))`` so the
+    worker finishes before the bootstrap lock is released on cancellation.
 
     *postgres_schema*, when set, is forwarded to the alembic config so the
     alembic-spawned engine pins its ``search_path`` to that schema. The target
@@ -629,7 +661,7 @@ async def bootstrap_schema(engine: AsyncEngine, *, backend: str, postgres_schema
             logger.info("bootstrap: branch=empty -> create_all + stamp head (%s)", head)
             async with engine.begin() as conn:
                 await conn.run_sync(_run_create_all_sync)
-            await asyncio.to_thread(_stamp, cfg, head)
+            await await_drained(asyncio.to_thread(_stamp, cfg, head))
 
         elif decision == "legacy":
             logger.info(
@@ -649,8 +681,8 @@ async def bootstrap_schema(engine: AsyncEngine, *, backend: str, postgres_schema
             # columns those revisions would add.
             async with engine.begin() as conn:
                 await conn.run_sync(_run_baseline_create_all_sync)
-            await asyncio.to_thread(_stamp, cfg, _BASELINE_REVISION)
-            await asyncio.to_thread(_upgrade, cfg, "head")
+            await await_drained(asyncio.to_thread(_stamp, cfg, _BASELINE_REVISION))
+            await await_drained(asyncio.to_thread(_upgrade, cfg, "head"))
 
         elif decision == "versioned":
             # The same revision id once named a different out-of-tree schema.
@@ -667,7 +699,7 @@ async def bootstrap_schema(engine: AsyncEngine, *, backend: str, postgres_schema
                     head,
                 )
                 try:
-                    await asyncio.to_thread(_upgrade, cfg, "head")
+                    await await_drained(asyncio.to_thread(_upgrade, cfg, "head"))
                 except CommandError:
                     # SQLite has no cross-process bootstrap mutex. Another
                     # process may advance 0018 to the reviewed 0019 after this

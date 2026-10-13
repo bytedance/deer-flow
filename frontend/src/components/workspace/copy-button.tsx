@@ -43,9 +43,9 @@ export function CopyButton({
         {...props}
       >
         {copied ? (
-          <CheckIcon className="text-green-500" size={12} />
+          <CheckIcon className="size-4 text-green-500" />
         ) : (
-          <CopyIcon size={12} />
+          <CopyIcon className="size-4" />
         )}
       </Button>
     </Tooltip>

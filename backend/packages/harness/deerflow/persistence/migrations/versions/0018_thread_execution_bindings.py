@@ -24,6 +24,4 @@ def upgrade():
 
 
 def downgrade():
-    if not sa.inspect(op.get_bind()).has_table("thread_execution_bindings"):
-        return
-    op.drop_table("thread_execution_bindings")
+    raise RuntimeError("Legacy execution rollback requires drained writers and a coherent backup; preserved intent must not be deleted")

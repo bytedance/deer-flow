@@ -1,0 +1,30 @@
+{
+  "protocol": "scheduled-tasks-synthetic-v1",
+  "synthetic": true,
+  "cases": [
+    {
+      "id": "inventory",
+      "source": {"document": "Synthetic inventory ledger: Alpha has 3 units. Beta has 4 units. These are the current records."},
+      "instruction": "Write JSON with total equal to the total current units, and items equal to the sorted item names.",
+      "expected": {"total": 7, "items": ["Alpha", "Beta"]}
+    },
+    {
+      "id": "corrected-ledger",
+      "source": {"document": "Synthetic corrected ledger: the obsolete draft total was 11. The current approved records are Alpha=4 and Beta=6. Use current records, not the obsolete draft."},
+      "instruction": "Write JSON with total equal to the current total, and basis equal to current_ledger.",
+      "expected": {"total": 10, "basis": "current_ledger"}
+    },
+    {
+      "id": "missing-reviewer",
+      "source": {"document": "Synthetic meeting packet: there are 5 completed items. No reviewer has been assigned. Do not invent a person's identity."},
+      "instruction": "Write JSON with total equal to completed items and reviewer equal to null when no reviewer is assigned.",
+      "expected": {"total": 5, "reviewer": null}
+    },
+    {
+      "id": "continuity",
+      "source": {"document": "Synthetic weekly project ledger. The main branch has 3 resolved items. The develop branch has 7 resolved items. Use main unless the user adds a standing note selecting develop.", "branches": {"main": 3, "develop": 7}},
+      "instruction": "Write JSON with branch, total, and previous_total. On the first occurrence previous_total is null. On a later occurrence, read the provided previous conversation reference and extract its reported total.",
+      "expected": {"first": {"branch": "main", "total": 3, "previous_total": null}, "second": {"branch": "develop", "total": 7, "previous_total": 3}}
+    }
+  ]
+}

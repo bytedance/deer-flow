@@ -25,6 +25,12 @@ def _validate_skill_frontmatter(skill_dir: Path) -> tuple[bool, str, str | None]
         return False, f"{SKILL_MD_FILE} not found", None
 
     content = skill_md.read_text(encoding="utf-8")
+    return validate_skill_frontmatter_text(content)
+
+
+def validate_skill_frontmatter_text(content: str) -> tuple[bool, str, str | None]:
+    """Validate captured text using the same rules as installation."""
+    skill_md = Path(SKILL_MD_FILE)
     parts, error = split_skill_markdown(content)
     if error:
         return False, error, None
@@ -81,6 +87,12 @@ def _validate_skill_frontmatter(skill_dir: Path) -> tuple[bool, str, str | None]
     required_secrets = frontmatter.get("required-secrets")
     if required_secrets is not None and not isinstance(required_secrets, list):
         return False, f"required-secrets in {SKILL_MD_FILE} must be a list", None
+    if required_secrets is not None:
+        for item in required_secrets:
+            if isinstance(item, dict) and not isinstance(item.get("optional", False), bool):
+                if item.get("name") is None:
+                    return False, "required-secrets entry without a name has an optional field that must be a boolean", None
+                return False, f"required-secrets entry {item.get('name')!r} optional must be a boolean", None
 
     secrets_autonomous = frontmatter.get("secrets-autonomous")
     if secrets_autonomous is not None and not isinstance(secrets_autonomous, bool):

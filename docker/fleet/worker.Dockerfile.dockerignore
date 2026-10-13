@@ -1,9 +1,0 @@
-# Only this source package enters the worker build. Artifacts use a separate context.
-**
-!backend/
-!backend/packages/
-!backend/packages/ecs-fleet/
-!backend/packages/ecs-fleet/deerflow_ecs_fleet/
-!backend/packages/ecs-fleet/deerflow_ecs_fleet/**
-**/__pycache__
-**/*.pyc

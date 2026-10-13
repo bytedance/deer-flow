@@ -88,18 +88,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        from app.gateway.fleet_auth import authenticate_node, is_node_credential, is_node_route
-
-        route_path = get_request_route_path(request)
-        if is_node_route(request.method, route_path):
-            try:
-                request.state.fleet_node = await authenticate_node(request)
-            except HTTPException as exc:
-                return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
-            return await call_next(request)
-        if is_node_credential(request.headers.get("authorization")):
-            return JSONResponse(status_code=403, content={"detail": "Node credentials are not permitted on this route"})
-        if _is_public(route_path):
+        if _is_public(get_request_route_path(request)):
             return await call_next(request)
 
         internal_user = None

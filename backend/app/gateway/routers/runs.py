@@ -16,8 +16,15 @@ from app.gateway.authz import require_permission
 from app.gateway.deps import get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.run_models import RunCreateRequest
-from app.gateway.services import build_checkpoint_state_accessor, prepare_sse_subscription, should_wait_for_run_stream, sse_consumer, start_run, wait_for_run_completion
-from deerflow.runtime import serialize_channel_values_for_api
+from app.gateway.services import (
+    abuild_checkpoint_state_accessor,
+    serialize_wait_run_status,
+    sse_consumer,
+    start_run,
+    wait_for_run_completion,
+)
+from app.gateway.sse_headers import sse_response_headers
+from deerflow.runtime import RunStatus, serialize_channel_values_for_api
 from deerflow.utils.thread_id import resolve_thread_id
 
 logger = logging.getLogger(__name__)
@@ -44,16 +51,10 @@ async def stateless_stream(body: RunCreateRequest, request: Request) -> Streamin
     run_mgr = get_run_manager(request)
     record = await start_run(body, thread_id, request)
 
-    prepared_subscription = await prepare_sse_subscription(bridge, record, request)
     return StreamingResponse(
-        sse_consumer(bridge, record, request, run_mgr, prepared_subscription=prepared_subscription),
+        sse_consumer(bridge, record, request, run_mgr),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-            "Content-Location": f"/api/threads/{thread_id}/runs/{record.run_id}",
-        },
+        headers=sse_response_headers(content_location=f"/api/threads/{thread_id}/runs/{record.run_id}"),
     )
 
 
@@ -72,12 +73,15 @@ async def stateless_wait(body: RunCreateRequest, request: Request) -> dict:
     record = await start_run(body, thread_id, request)
 
     completed = True
-    if await should_wait_for_run_stream(bridge, record):
+    if record.task is not None or record.ownership_lost:
         completed = await wait_for_run_completion(bridge, record, request, run_mgr)
+
+    if completed and record.status == RunStatus.error:
+        return serialize_wait_run_status(record)
 
     if completed:
         try:
-            accessor, config = build_checkpoint_state_accessor(
+            accessor, config = await abuild_checkpoint_state_accessor(
                 request,
                 thread_id=thread_id,
                 assistant_id=body.assistant_id,

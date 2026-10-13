@@ -5,6 +5,7 @@ import asyncio
 import pytest
 import sqlalchemy as sa
 from alembic import command
+from alembic.script import ScriptDirectory
 from alembic.util.exc import CommandError
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -33,8 +34,7 @@ async def test_upgrade_and_downgrade_preserve_legacy_batch_item(tmp_path, source
                     "VALUES ('i','b','k',0,'p','succeeded',1,'old result',0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"
                 )
             )
-        # Audit the upstream branch in isolation: the combined Fleet head has
-        # a deliberately irreversible downgrade and is outside this audit.
+        # Audit reversible native DDL independently of the protected fork join.
         await asyncio.to_thread(bootstrap._upgrade, cfg, bootstrap._FORWARD_COMPATIBLE_REVISION)
         await asyncio.to_thread(bootstrap._upgrade, cfg, bootstrap._FORWARD_COMPATIBLE_REVISION)
         async with engine.connect() as conn:
@@ -67,15 +67,14 @@ async def test_forward_revision_cannot_skip_required_batch_columns(tmp_path, mon
             await conn.execute(sa.text("ALTER TABLE mcp_tasks ADD COLUMN thread_incarnation VARCHAR(32)"))
         if race:
             current_head, current_revisions = bootstrap._get_revision_metadata()
-            assert current_head == bootstrap._get_head_revision()
-            assert {"0020_threads_meta_project_id", "0021_batch_acceptance", current_head} <= current_revisions
+            assert {"0020_threads_meta_project_id", "0021_batch_acceptance", "0019_thread_incarnations", current_head} <= current_revisions
+            # The published 0020 binary knows only the ancestors of its own head.
+            rollback_revisions = frozenset(revision.revision for revision in ScriptDirectory.from_config(cfg).iterate_revisions("0020_threads_meta_project_id", "base"))
+            assert not ({"0021_batch_acceptance", "0019_thread_incarnations", current_head} & rollback_revisions)
             monkeypatch.setattr(
                 bootstrap,
                 "_get_revision_metadata",
-                lambda: (
-                    "0020_threads_meta_project_id",
-                    current_revisions - {"0021_batch_acceptance", bootstrap._FORWARD_COMPATIBLE_REVISION, current_head},
-                ),
+                lambda: ("0020_threads_meta_project_id", rollback_revisions),
             )
 
             def raced_upgrade(*args):

@@ -23,20 +23,16 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet";
-import { FleetTaskSummary } from "@/components/workspace/fleet-task-summary";
 import {
-  backgroundTaskPresentation,
   isActiveBackgroundTask,
   type BackgroundTask,
   type BackgroundTaskDetail,
-  type BackgroundTaskPresentation,
+  type BackgroundTaskStatus,
   useBackgroundTask,
   useBackgroundTasks,
   useCancelBackgroundTask,
 } from "@/core/background-tasks";
 import { useMcpTasksEnabled } from "@/core/features";
-import { useFleetTasks, useFleetGoalOperation } from "@/core/fleet/hooks";
-import { isUnsettledFleetTask } from "@/core/fleet/presentation";
 import { useI18n } from "@/core/i18n/hooks";
 import { formatTimeAgo } from "@/core/utils/datetime";
 import { cn } from "@/lib/utils";
@@ -48,15 +44,11 @@ export function ThreadBackgroundTasks({ threadId }: { threadId: string }) {
     enabled: mcpTasksEnabled,
   });
   const cancelTask = useCancelBackgroundTask(threadId);
-  const fleetQuery = useFleetTasks(threadId);
-  const fleetOperation = useFleetGoalOperation(threadId);
-  const fleetTasks = fleetQuery.data ?? [];
-  const fleetActive = fleetTasks.filter(isUnsettledFleetTask).length;
-  const tasks = mcpTasksEnabled ? (tasksQuery.data ?? []) : [];
+  const tasks = tasksQuery.data ?? [];
   const activeTasks = tasks.filter(isActiveBackgroundTask);
   const recentTasks = tasks.filter((task) => !isActiveBackgroundTask(task));
 
-  if (!mcpTasksEnabled && fleetTasks.length === 0 && !fleetQuery.isError) {
+  if (!mcpTasksEnabled) {
     return null;
   }
 
@@ -73,11 +65,9 @@ export function ThreadBackgroundTasks({ threadId }: { threadId: string }) {
         >
           <ListChecksIcon />
           <span className="hidden lg:inline">{t.backgroundTasks.label}</span>
-          {activeTasks.length + fleetActive > 0 && (
+          {activeTasks.length > 0 && (
             <span className="bg-primary text-primary-foreground grid size-4 place-items-center rounded-full text-[10px] font-semibold">
-              {activeTasks.length + fleetActive > 9
-                ? "9+"
-                : activeTasks.length + fleetActive}
+              {activeTasks.length > 9 ? "9+" : activeTasks.length}
             </span>
           )}
         </Button>
@@ -92,100 +82,62 @@ export function ThreadBackgroundTasks({ threadId }: { threadId: string }) {
         </SheetHeader>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
-          {fleetQuery.isError && (
+          {tasksQuery.isLoading ? (
             <div
-              role="alert"
-              className="border-destructive/30 mb-4 rounded-xl border p-4 text-sm"
+              role="status"
+              className="text-muted-foreground flex items-center justify-center gap-2 py-12 text-sm"
             >
-              <p>{t.fleetTasks.loadFailed}</p>
+              <LoaderCircleIcon className="size-4 animate-spin" />
+              {t.common.loading}
+            </div>
+          ) : tasksQuery.isError ? (
+            <div className="border-destructive/30 bg-destructive/5 rounded-xl border p-4 text-sm">
+              <p className="text-destructive font-medium">
+                {t.backgroundTasks.loadFailed}
+              </p>
+              <p className="text-muted-foreground mt-1 text-xs">
+                {tasksQuery.error.message}
+              </p>
               <Button
                 type="button"
                 size="sm"
                 variant="outline"
-                onClick={() => void fleetQuery.refetch()}
+                className="mt-3"
+                onClick={() => void tasksQuery.refetch()}
               >
                 {t.backgroundTasks.retry}
               </Button>
             </div>
-          )}
-          {fleetTasks.length > 0 && (
-            <section className="mb-5 space-y-2" aria-label={t.fleetTasks.title}>
-              {fleetTasks.map((task) => (
-                <FleetTaskSummary
-                  key={task.task_id}
-                  task={task}
+          ) : tasks.length === 0 ? (
+            <div className="text-muted-foreground flex flex-col items-center px-6 py-14 text-center">
+              <ListChecksIcon className="mb-3 size-8 opacity-40" />
+              <p className="text-foreground text-sm font-medium">
+                {t.backgroundTasks.empty}
+              </p>
+              <p className="mt-1 text-xs">{t.backgroundTasks.emptyHint}</p>
+            </div>
+          ) : (
+            <div className="space-y-5">
+              {activeTasks.length > 0 && (
+                <TaskSection
                   threadId={threadId}
-                  onOperation={(action, operation) =>
-                    fleetOperation.mutate({ action, ...operation })
+                  title={t.backgroundTasks.active}
+                  tasks={activeTasks}
+                  cancellingTaskId={
+                    cancelTask.isPending ? cancelTask.variables : undefined
                   }
-                  isPending={fleetOperation.isPending}
-                  pendingAction={
-                    fleetOperation.variables?.taskId === task.task_id
-                      ? fleetOperation.variables.action
-                      : undefined
-                  }
+                  onCancel={(taskId) => cancelTask.mutate(taskId)}
                 />
-              ))}
-            </section>
+              )}
+              {recentTasks.length > 0 && (
+                <TaskSection
+                  threadId={threadId}
+                  title={t.backgroundTasks.recent}
+                  tasks={recentTasks}
+                />
+              )}
+            </div>
           )}
-          {mcpTasksEnabled &&
-            (tasksQuery.isLoading ? (
-              <div
-                role="status"
-                className="text-muted-foreground flex items-center justify-center gap-2 py-12 text-sm"
-              >
-                <LoaderCircleIcon className="size-4 animate-spin" />
-                {t.common.loading}
-              </div>
-            ) : tasksQuery.isError ? (
-              <div className="border-destructive/30 bg-destructive/5 rounded-xl border p-4 text-sm">
-                <p className="text-destructive font-medium">
-                  {t.backgroundTasks.loadFailed}
-                </p>
-                <p className="text-muted-foreground mt-1 text-xs">
-                  {tasksQuery.error.message}
-                </p>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  className="mt-3"
-                  onClick={() => void tasksQuery.refetch()}
-                >
-                  {t.backgroundTasks.retry}
-                </Button>
-              </div>
-            ) : tasks.length === 0 &&
-              fleetTasks.length > 0 ? null : tasks.length === 0 ? (
-              <div className="text-muted-foreground flex flex-col items-center px-6 py-14 text-center">
-                <ListChecksIcon className="mb-3 size-8 opacity-40" />
-                <p className="text-foreground text-sm font-medium">
-                  {t.backgroundTasks.empty}
-                </p>
-                <p className="mt-1 text-xs">{t.backgroundTasks.emptyHint}</p>
-              </div>
-            ) : (
-              <div className="space-y-5">
-                {activeTasks.length > 0 && (
-                  <TaskSection
-                    threadId={threadId}
-                    title={t.backgroundTasks.active}
-                    tasks={activeTasks}
-                    cancellingTaskId={
-                      cancelTask.isPending ? cancelTask.variables : undefined
-                    }
-                    onCancel={(taskId) => cancelTask.mutate(taskId)}
-                  />
-                )}
-                {recentTasks.length > 0 && (
-                  <TaskSection
-                    threadId={threadId}
-                    title={t.backgroundTasks.recent}
-                    tasks={recentTasks}
-                  />
-                )}
-              </div>
-            ))}
         </div>
       </SheetContent>
     </Sheet>
@@ -241,13 +193,9 @@ function BackgroundTaskCard({
   const detailsQuery = useBackgroundTask(threadId, task.task_id, {
     enabled: detailsOpen,
   });
-  const presentation = backgroundTaskPresentation(
-    task,
-    t.backgroundTasks,
-    isCancelling,
-  );
-  const { active, cancelling } = presentation;
-  const status = taskStatusPresentation(presentation.kind);
+  const active = isActiveBackgroundTask(task);
+  const cancelling = active && (task.cancel_requested || isCancelling);
+  const status = taskStatusPresentation(task.status, t.backgroundTasks.status);
   const canShowDetails =
     task.cancel_requested ||
     (task.status !== "submitted" &&
@@ -277,7 +225,7 @@ function BackgroundTaskCard({
           <status.Icon
             className={cn("size-3", status.spinning && "animate-spin")}
           />
-          {presentation.label}
+          {cancelling ? t.backgroundTasks.cancelling : status.label}
         </Badge>
       </div>
 
@@ -390,10 +338,6 @@ function BackgroundTaskDetails({
   }
 
   if (!task) return null;
-  const { requiresReconciliation } = backgroundTaskPresentation(
-    task,
-    t.backgroundTasks,
-  );
 
   return (
     <div className="border-border mt-3 space-y-3 border-t pt-3">
@@ -437,22 +381,17 @@ function BackgroundTaskDetails({
         label={t.backgroundTasks.lastPollError}
         value={task.last_poll_error}
       />
-      {task.input_required != null &&
-        (requiresReconciliation ? (
-          <p className="text-xs text-amber-700 dark:text-amber-300">
-            {t.backgroundTasks.reconciliationRequired}
+      {task.input_required != null && (
+        <div>
+          <TaskDetailField
+            label={t.backgroundTasks.inputRequired}
+            value={task.input_required}
+          />
+          <p className="text-muted-foreground mt-1 text-[11px]">
+            {t.backgroundTasks.inputUnavailable}
           </p>
-        ) : (
-          <div>
-            <TaskDetailField
-              label={t.backgroundTasks.inputRequired}
-              value={task.input_required}
-            />
-            <p className="text-muted-foreground mt-1 text-[11px]">
-              {t.backgroundTasks.inputUnavailable}
-            </p>
-          </div>
-        ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -486,47 +425,59 @@ function formatTaskDetailValue(value: unknown): string | null {
   }
 }
 
-function taskStatusPresentation(status: BackgroundTaskPresentation["kind"]) {
+type StatusTranslations = {
+  submitted: string;
+  working: string;
+  inputRequired: string;
+  completed: string;
+  failed: string;
+  cancelled: string;
+};
+
+function taskStatusPresentation(
+  status: BackgroundTaskStatus,
+  labels: StatusTranslations,
+) {
   switch (status) {
     case "submitted":
       return {
         Icon: Clock3Icon,
+        label: labels.submitted,
         className: "text-blue-700 dark:text-blue-300",
         spinning: false,
       };
     case "working":
       return {
         Icon: LoaderCircleIcon,
+        label: labels.working,
         className: "text-blue-700 dark:text-blue-300",
         spinning: true,
       };
     case "input_required":
       return {
         Icon: MessageCircleQuestionIcon,
-        className: "text-amber-700 dark:text-amber-300",
-        spinning: false,
-      };
-    case "uncertain":
-      return {
-        Icon: TriangleAlertIcon,
+        label: labels.inputRequired,
         className: "text-amber-700 dark:text-amber-300",
         spinning: false,
       };
     case "completed":
       return {
         Icon: CircleCheckIcon,
+        label: labels.completed,
         className: "text-emerald-700 dark:text-emerald-300",
         spinning: false,
       };
     case "failed":
       return {
         Icon: TriangleAlertIcon,
+        label: labels.failed,
         className: "text-destructive",
         spinning: false,
       };
     case "cancelled":
       return {
         Icon: CircleStopIcon,
+        label: labels.cancelled,
         className: "text-muted-foreground",
         spinning: false,
       };

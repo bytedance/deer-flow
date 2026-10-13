@@ -16,7 +16,10 @@ segment boundary to the reverse patterns and missed the masking patterns, and
 #4053 had to add the same boundary to the other copy. This module holds the
 rule once so a third copy cannot silently disagree.
 
-The two sites are *not* identical, and the difference is deliberate — see
+Both sites match separator-agnostically: ``sandbox.tools`` derives its bases
+from ``_path_variants``, and ``LocalSandbox``'s forward resolution spells
+resolved paths with forward slashes in commands and file content, so the
+reverse direction has to accept both spellings of the same host path — see
 ``separator_agnostic``.
 """
 
@@ -41,10 +44,16 @@ _SEGMENT_BOUNDARY = r"(?=/|$|[^\w./-])"
 # The path tail following the base. ``[/\\]`` keeps Windows-separated paths
 # matching; the negated class stops at whitespace and shell punctuation so a
 # path embedded in a larger line is not over-consumed.
-_PATH_TAIL = r"(?:[/\\][^\s\"';&|<>()]*)?"
+#
+# ``:`` ends the tail as well. Scanning resumes after a match, so a tail that
+# ran on through a ``:``-joined list ($PATH, $PYTHONPATH) carried every later
+# entry under the same base to the model unmasked. ``;``, the Windows list
+# separator, already ended it. A ``:`` inside one path (``grep -n`` output,
+# a file name) only shortens the match; the rest is copied through verbatim.
+_PATH_TAIL = r"(?:[/\\][^\s\"';&|<>():]*)?"
 
 _SEGMENT_BOUNDARY_CHAR = re.compile(r"[^\w./-]")
-_PATH_TAIL_TERMINATORS = frozenset("\"';&|<>()")
+_PATH_TAIL_TERMINATORS = frozenset("\"';&|<>():")
 
 
 def normalize_mask_tail(tail: str) -> str:
@@ -66,12 +75,12 @@ def build_output_mask_pattern(base: str, *, separator_agnostic: bool = False) ->
         base: Host path root to match (already resolved by the caller).
         separator_agnostic: Accept either separator *inside* the base, so a
             base captured with ``\\`` still matches output that spells the same
-            path with ``/``. ``sandbox.tools`` needs this because it derives its
-            bases from ``_path_variants`` (which yields Windows-style spellings)
-            and matches them against output whose separators it does not
-            control. ``LocalSandbox`` does not: its bases come from filesystem
-            resolution on the running platform, and relaxing them would widen
-            what it masks.
+            path with ``/``. Both call sites need this: ``sandbox.tools``
+            derives its bases from ``_path_variants`` (which yields
+            Windows-style spellings) and matches them against output whose
+            separators it does not control, and ``LocalSandbox``'s forward
+            resolution emits forward-slash spellings on Windows even though its
+            bases are resolved with native separators.
 
     Returns:
         A compiled pattern matching ``base`` at a segment boundary, plus an

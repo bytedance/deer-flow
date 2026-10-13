@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
+import copy
+import json
+
+import httpx
+import pytest
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 
 from deerflow.models.vllm_provider import VllmChatModel
 
@@ -76,6 +81,40 @@ def test_vllm_provider_restores_reasoning_in_request_payload():
     assert assistant_message["tool_calls"][0]["function"]["name"] == "bash"
 
 
+@pytest.mark.parametrize(
+    ("fields", "expected"),
+    [
+        pytest.param({"reasoning_content": "legacy"}, "legacy", id="legacy-only"),
+        pytest.param({"reasoning": None, "reasoning_content": "legacy"}, "legacy", id="null-canonical"),
+        pytest.param({"reasoning": "new", "reasoning_content": "legacy"}, "new", id="both-fields"),
+        pytest.param({"reasoning": "", "reasoning_content": "legacy"}, "", id="empty-canonical"),
+        pytest.param({"reasoning_content": ""}, "", id="empty-legacy"),
+        pytest.param({}, None, id="no-reasoning"),
+    ],
+)
+def test_vllm_provider_restores_reasoning_field_precedence_in_request_payload(fields, expected):
+    model = _make_model()
+    payload = model._get_request_payload(
+        [
+            HumanMessage(content="Inspect the workspace."),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "bash", "args": {"cmd": "pwd"}, "id": "tool-1", "type": "tool_call"}],
+                additional_kwargs=fields,
+            ),
+            ToolMessage(content="/workspace", tool_call_id="tool-1"),
+        ]
+    )
+
+    assistant_message = payload["messages"][1]
+    if expected is None:
+        assert "reasoning" not in assistant_message
+    else:
+        assert assistant_message["reasoning"] == expected
+    assert assistant_message["tool_calls"][0]["function"]["name"] == "bash"
+    assert payload["messages"][2]["tool_call_id"] == "tool-1"
+
+
 def test_vllm_provider_normalizes_legacy_thinking_kwarg_to_enable_thinking():
     model = VllmChatModel(
         model="qwen3",
@@ -103,6 +142,77 @@ def test_vllm_provider_preserves_explicit_enable_thinking_kwarg():
         "enable_thinking": False,
         "foo": "bar",
     }
+
+
+def test_vllm_provider_keeps_legacy_model_defaults_unmodified():
+    extra_body = {"chat_template_kwargs": {"thinking": True}, "tool_stream": True}
+    original = copy.deepcopy(extra_body)
+    model = VllmChatModel(model="qwen3", api_key="dummy", extra_body=extra_body)
+
+    payload = model._get_request_payload([HumanMessage(content="Hello")])
+
+    assert payload["extra_body"] == {"chat_template_kwargs": {"enable_thinking": True}, "tool_stream": True}
+    assert model.extra_body == original
+    assert extra_body == original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("streaming", [False, True], ids=["invoke", "stream"])
+async def test_vllm_provider_reused_request_body_can_disable_thinking(async_mode, streaming):
+    requests = []
+
+    def handle(request):
+        body = json.loads(request.content)
+        requests.append(body)
+        if body.get("stream"):
+            chunks = [
+                {"id": "completion", "object": "chat.completion.chunk", "created": 0, "model": "qwen3", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "ok"}, "finish_reason": None}]},
+                {"id": "completion", "object": "chat.completion.chunk", "created": 0, "model": "qwen3", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+            ]
+            content = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks) + "data: [DONE]\n\n"
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=content)
+        return httpx.Response(200, json={"id": "completion", "model": "qwen3", "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]})
+
+    async def call(model, prompt, extra_body):
+        if streaming:
+            if async_mode:
+                chunks = [chunk async for chunk in model.astream(prompt, extra_body=extra_body)]
+            else:
+                chunks = list(model.stream(prompt, extra_body=extra_body))
+            assert "".join(chunk.content for chunk in chunks) == "ok"
+            assert any(chunk.response_metadata.get("finish_reason") == "stop" for chunk in chunks)
+        elif async_mode:
+            assert (await model.ainvoke(prompt, extra_body=extra_body)).content == "ok"
+        else:
+            assert model.invoke(prompt, extra_body=extra_body).content == "ok"
+
+    extra_body = {"chat_template_kwargs": {"thinking": True, "foo": "bar"}, "tool_stream": True}
+    original = copy.deepcopy(extra_body)
+    with httpx.Client(transport=httpx.MockTransport(handle)) as sync_client:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as async_client:
+            model = VllmChatModel(model="qwen3", api_key="dummy", base_url="https://offline.invalid/v1", http_client=sync_client, http_async_client=async_client, max_retries=0)
+            await call(model, "first", extra_body)
+            after_first = copy.deepcopy(extra_body)
+            extra_body["chat_template_kwargs"]["thinking"] = False
+            await call(model, "second", extra_body)
+
+    assert [request["stream"] for request in requests] == [streaming, streaming]
+    assert [request["chat_template_kwargs"]["enable_thinking"] for request in requests] == [True, False]
+    assert all(request["chat_template_kwargs"]["foo"] == "bar" and request["tool_stream"] is True for request in requests)
+    assert after_first == original
+    assert extra_body == {"chat_template_kwargs": {"thinking": False, "foo": "bar"}, "tool_stream": True}
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_vllm_provider_explicit_switch_wins_without_mutating_request(enabled):
+    extra_body = {"chat_template_kwargs": {"thinking": not enabled, "enable_thinking": enabled}, "tool_stream": True}
+    original = copy.deepcopy(extra_body)
+
+    payload = _make_model()._get_request_payload([HumanMessage(content="Hello")], extra_body=extra_body)
+
+    assert payload["extra_body"] == {"chat_template_kwargs": {"enable_thinking": enabled}, "tool_stream": True}
+    assert extra_body == original
 
 
 def test_vllm_provider_preserves_reasoning_in_chat_result():
@@ -507,3 +617,112 @@ def test_vllm_provider_evicts_only_idle_streams_above_soft_capacity(monkeypatch)
         "chatcmpl-2",
         "chatcmpl-3",
     ]
+
+
+def test_vllm_provider_falls_back_to_reasoning_content_in_chat_result():
+    model = _make_model()
+    result = model._create_chat_result(
+        {
+            "model": "Qwen/QwQ-32B",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "42",
+                        "reasoning_content": "I compared the two numbers directly.",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+    )
+
+    message = result.generations[0].message
+    assert message.additional_kwargs["reasoning"] == "I compared the two numbers directly."
+    assert message.additional_kwargs["reasoning_content"] == "I compared the two numbers directly."
+
+    payload = model._get_request_payload([HumanMessage(content="Compare the numbers."), message, HumanMessage(content="Continue.")])
+    assert payload["messages"][1]["reasoning"] == "I compared the two numbers directly."
+
+
+def test_vllm_provider_falls_back_to_reasoning_content_in_streaming_chunks():
+    model = _make_model()
+    chunk = model._convert_chunk_to_generation_chunk(
+        {
+            "model": "Qwen/QwQ-32B",
+            "choices": [
+                {
+                    "delta": {
+                        "role": "assistant",
+                        "reasoning_content": "First, call the weather tool.",
+                        "content": "Calling tool...",
+                    },
+                    "finish_reason": None,
+                }
+            ],
+        },
+        AIMessageChunk,
+        {},
+    )
+
+    assert chunk is not None
+    assert chunk.message.additional_kwargs["reasoning"] == "First, call the weather tool."
+    assert chunk.message.additional_kwargs["reasoning_content"] == "First, call the weather tool."
+    assert chunk.message.content == "Calling tool..."
+
+    payload = model._get_request_payload([HumanMessage(content="Check the weather."), chunk.message, HumanMessage(content="Continue.")])
+    assert payload["messages"][1]["reasoning"] == "First, call the weather tool."
+
+
+def test_vllm_provider_prefers_reasoning_over_reasoning_content_in_chat_result():
+    """A payload carrying both fields keeps `reasoning` (#6047)."""
+    model = _make_model()
+    result = model._create_chat_result(
+        {
+            "model": "Qwen/QwQ-32B",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "42",
+                        "reasoning": "new",
+                        "reasoning_content": "legacy",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+    )
+
+    message = result.generations[0].message
+    assert message.additional_kwargs["reasoning"] == "new"
+    assert message.additional_kwargs["reasoning_content"] == "new"
+
+
+def test_vllm_provider_prefers_reasoning_over_reasoning_content_in_streaming_chunks():
+    """Streaming deltas resolve both fields the same way (#6047)."""
+    model = _make_model()
+    chunk = model._convert_chunk_to_generation_chunk(
+        {
+            "model": "Qwen/QwQ-32B",
+            "choices": [
+                {
+                    "delta": {
+                        "role": "assistant",
+                        "reasoning": "new",
+                        "reasoning_content": "legacy",
+                        "content": "Calling tool...",
+                    },
+                    "finish_reason": None,
+                }
+            ],
+        },
+        AIMessageChunk,
+        {},
+    )
+
+    assert chunk is not None
+    assert chunk.message.additional_kwargs["reasoning"] == "new"
+    assert chunk.message.additional_kwargs["reasoning_content"] == "new"

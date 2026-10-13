@@ -60,15 +60,6 @@ class CachedHistorySaver(BaseCheckpointSaver):
         self._compose_hits = 0
         self._full_walks = 0
 
-    @property
-    def after_root_commit(self):
-        """Bind the optional hook to the saver that owns the actual commit."""
-        return getattr(self._inner, "after_root_commit", None)
-
-    @after_root_commit.setter
-    def after_root_commit(self, callback):
-        self._inner.after_root_commit = callback
-
     def __getattr__(self, name: str) -> Any:
         # Safety net for saver-specific extras (e.g. AsyncSqliteSaver.setup).
         # Base-class methods are explicitly delegated below, so this only

@@ -29,7 +29,7 @@ const TERMINAL_TASK: BackgroundTaskDetail = {
 };
 
 describe("background task detail polling", () => {
-  it.each(["pending", "claimed", "retry", "dispatched"] as const)(
+  it.each(["pending", "claimed", "launching", "retry", "dispatched"] as const)(
     "keeps polling a terminal task while notification status is %s",
     (notificationStatus) => {
       expect(

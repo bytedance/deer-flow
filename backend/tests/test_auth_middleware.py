@@ -447,6 +447,17 @@ def test_protected_post_with_internal_auth_header_passes():
     assert res.status_code == 200
 
 
+def test_protected_post_with_non_ascii_internal_auth_header_returns_401(client):
+    from app.gateway.internal_auth import INTERNAL_AUTH_HEADER_NAME
+
+    res = client.post(
+        "/api/threads/abc/runs/stream",
+        headers={INTERNAL_AUTH_HEADER_NAME: "forged-tok\xe9n".encode("latin-1")},
+    )
+
+    assert res.status_code == 401
+
+
 # ── Method matrix: PUT/DELETE/PATCH also protected ────────────────────────
 
 

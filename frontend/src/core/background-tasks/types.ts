@@ -10,6 +10,7 @@ export type BackgroundTaskNotificationStatus =
   | "none"
   | "pending"
   | "claimed"
+  | "launching"
   | "retry"
   | "dispatched"
   | "delivered"
@@ -24,7 +25,6 @@ export type BackgroundTask = {
   error: string | null;
   tracking_degraded: boolean;
   cancel_requested: boolean;
-  execution_uncertain?: boolean;
 };
 
 export type BackgroundTaskDetail = BackgroundTask & {
@@ -46,7 +46,7 @@ export const ACTIVE_BACKGROUND_TASK_STATUSES: ReadonlySet<BackgroundTaskStatus> 
   new Set(["submitted", "working", "input_required"]);
 
 export const ACTIVE_BACKGROUND_TASK_NOTIFICATION_STATUSES: ReadonlySet<BackgroundTaskNotificationStatus> =
-  new Set(["pending", "claimed", "retry", "dispatched"]);
+  new Set(["pending", "claimed", "launching", "retry", "dispatched"]);
 
 export function isActiveBackgroundTask(task: BackgroundTask): boolean {
   return ACTIVE_BACKGROUND_TASK_STATUSES.has(task.status);

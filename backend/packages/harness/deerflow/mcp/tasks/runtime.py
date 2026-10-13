@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
-from contextvars import ContextVar
 from typing import Any, Protocol
 
-from deerflow.config.extensions_config import ExtensionsConfig
+from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
+from deerflow.mcp.config_normalization import normalize_mcp_interceptor_paths, normalize_mcp_server_config
+from deerflow.mcp.oauth import OAuthTokenManager
 from deerflow.mcp.tasks.models import TaskSubmitRequest
-from deerflow.runtime.execution.mutation_context import OwnershipRejected, current_remote_mutation_context
 
 
 class McpTaskConfigurationError(RuntimeError):
@@ -29,6 +28,7 @@ class McpTaskSubmitter(Protocol):
         *,
         thread_id: str,
         user_id: str,
+        thread_incarnation: str | None,
         limit: int = 50,
         active_only: bool = False,
     ) -> list[dict[str, Any]]: ...
@@ -38,6 +38,7 @@ class McpTaskSubmitter(Protocol):
         *,
         thread_id: str,
         user_id: str,
+        thread_incarnation: str | None,
         task: str | None = None,
     ) -> dict[str, Any]: ...
 
@@ -45,43 +46,56 @@ class McpTaskSubmitter(Protocol):
 _submitter: McpTaskSubmitter | None = None
 _TaskServerConfigSnapshot = tuple[dict[str, dict[str, Any]], Any]
 _task_server_config_snapshot: _TaskServerConfigSnapshot | None = None
+_task_oauth_token_manager: OAuthTokenManager | None = None
+
+
+def _task_enabled_servers(extensions_config: ExtensionsConfig) -> dict[str, McpServerConfig]:
+    """Select the deployment connections frozen and shared by the task runtime."""
+    return {name: server for name, server in extensions_config.get_enabled_mcp_servers().items() if server.task_toolsets}
 
 
 def _task_server_configs(extensions_config: ExtensionsConfig) -> _TaskServerConfigSnapshot:
     servers: dict[str, dict[str, Any]] = {}
-    for server_name, server in extensions_config.get_enabled_mcp_servers().items():
-        if not server.task_toolsets:
-            continue
-        runtime_config = server.model_dump(mode="json")
-        for presentation_field in ("description", "routing", "tools", "tool_name_prefix"):
-            runtime_config.pop(presentation_field, None)
-        servers[server_name] = runtime_config
-    interceptors = (extensions_config.model_extra or {}).get("mcpInterceptors") if servers else None
+    for server_name, server in _task_enabled_servers(extensions_config).items():
+        servers[server_name] = normalize_mcp_server_config(server, task_runtime=True)
+    raw_interceptors = (extensions_config.model_extra or {}).get("mcpInterceptors")
+    interceptors = normalize_mcp_interceptor_paths(raw_interceptors) if servers else None
     return servers, interceptors
 
 
 def set_mcp_task_config_snapshot(extensions_config: ExtensionsConfig | None) -> None:
     """Freeze task-enabled server settings for one Gateway process lifetime."""
-    global _task_server_config_snapshot
+    global _task_server_config_snapshot, _task_oauth_token_manager
     _task_server_config_snapshot = None if extensions_config is None else _task_server_configs(extensions_config)
+    # Keep rotating credentials for task-enabled deployment servers for this
+    # Gateway lifetime, including tool-cache resets. Do not retain OAuth state
+    # for hot-reloadable non-task servers or owner-scoped personal connections.
+    _task_oauth_token_manager = None
+    if extensions_config is not None:
+        task_servers = _task_enabled_servers(extensions_config)
+        _task_oauth_token_manager = OAuthTokenManager.from_extensions_config(extensions_config.model_copy(update={"mcp_servers": task_servers}))
 
 
 def validate_mcp_task_config_snapshot(extensions_config: ExtensionsConfig) -> None:
     """Reject hot changes that would split tool discovery from background calls."""
-    scoped = _scoped_task_runtime.get()
-    snapshot = scoped[1] if scoped is not None else _task_server_config_snapshot
-    if snapshot is None:
+    if _task_server_config_snapshot is None:
         return
     current = _task_server_configs(extensions_config)
-    if current == snapshot:
+    if current == _task_server_config_snapshot:
         return
     current_servers, current_interceptors = current
-    startup_servers, startup_interceptors = snapshot
+    startup_servers, startup_interceptors = _task_server_config_snapshot
     changed = sorted(server_name for server_name in current_servers.keys() | startup_servers.keys() if current_servers.get(server_name) != startup_servers.get(server_name))
     if current_interceptors != startup_interceptors:
         changed.append("mcpInterceptors")
     names = ", ".join(changed) or "<unknown>"
     raise McpTaskConfigurationError(f"MCP task-enabled server configuration changed after Gateway startup ({names}); restart DeerFlow before using durable task tools")
+
+
+def get_mcp_task_oauth_token_manager(extensions_config: ExtensionsConfig) -> OAuthTokenManager:
+    """Share OAuth state only for the matching frozen deployment connections."""
+    validate_mcp_task_config_snapshot(extensions_config)
+    return OAuthTokenManager.from_extensions_config(extensions_config, shared_manager=_task_oauth_token_manager)
 
 
 def set_mcp_task_submitter(submitter: McpTaskSubmitter | None) -> None:
@@ -92,23 +106,10 @@ def set_mcp_task_submitter(submitter: McpTaskSubmitter | None) -> None:
 
 def is_mcp_task_runtime_available() -> bool:
     """Return whether the Gateway-owned durable task runtime is installed."""
-    if _scoped_task_runtime.get() is not None:
-        get_mcp_task_submitter()
-        return True
-    if current_remote_mutation_context() is not None:
-        return False
     return _submitter is not None
 
 
 def get_mcp_task_submitter() -> McpTaskSubmitter:
-    scoped = _scoped_task_runtime.get()
-    if scoped is not None:
-        submitter, _, capability = scoped
-        if current_remote_mutation_context() != capability.context:
-            raise OwnershipRejected("Remote MCP task submitter lost original context")
-        return submitter
-    if current_remote_mutation_context() is not None:
-        raise OwnershipRejected("Remote MCP requires private bound submitter")
     if _submitter is None:
         raise McpTaskConfigurationError("The MCP task runtime is not initialized. Run this tool through the Gateway with mcp_tasks.enabled=true and a SQL database backend.")
     return _submitter
@@ -140,18 +141,3 @@ def validate_mcp_task_runtime_configuration(
             build_server_params(server_name, server)
         except ValueError as exc:
             raise McpTaskConfigurationError(str(exc)) from exc
-
-
-_scoped_task_runtime: ContextVar[Any] = ContextVar("private_mcp_task_runtime", default=None)
-
-
-@contextmanager
-def mcp_task_submitter_scope(submitter, extensions_config):
-    capability = getattr(submitter._repository, "_mutation_capability", None)
-    if capability is None or current_remote_mutation_context() != capability.context:
-        raise OwnershipRejected("Remote MCP task scope requires original bound service")
-    token = _scoped_task_runtime.set((submitter, _task_server_configs(extensions_config), capability))
-    try:
-        yield
-    finally:
-        _scoped_task_runtime.reset(token)

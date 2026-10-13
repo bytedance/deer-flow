@@ -7,10 +7,13 @@ import logging
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
-from app.gateway.authz import require_permission
+from app.gateway.authz import Permissions, require_permission, resolve_route_permissions
 from app.gateway.browser_capability import browser_capability
+from app.gateway.browser_control import get_browser_control
+from deerflow.community.browser_automation.session import BrowserSessionCapacityError, browser_session_scope
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id, reset_current_user, set_current_user
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
@@ -87,6 +90,14 @@ async def navigate_browser(thread_id: ThreadId, body: BrowserNavigateRequest, re
     if not _browser_tools_enabled():
         raise HTTPException(status_code=404, detail="Browser automation is not enabled")
 
+    provider = get_browser_control(request.app)
+    scope = None
+    if provider is not None:
+        remote = await provider.navigate(request, thread_id, body.url)
+        if remote is not None:
+            return BrowserNavigateResponse(**remote)
+        scope = await provider.session_scope(thread_id, user_id)
+
     try:
         from deerflow.community.browser_automation import navigate_and_capture, redact_browser_url
     except ImportError as exc:  # Playwright is an optional dependency.
@@ -98,7 +109,10 @@ async def navigate_browser(thread_id: ThreadId, body: BrowserNavigateRequest, re
 
     outputs_path = get_paths().sandbox_outputs_dir(thread_id, user_id=get_effective_user_id())
     try:
-        result = await navigate_and_capture(thread_id=thread_id, url=url, outputs_path=outputs_path)
+        with browser_session_scope(scope) if scope is not None else contextlib.nullcontext():
+            result = await navigate_and_capture(thread_id=thread_id, url=url, outputs_path=outputs_path)
+    except BrowserSessionCapacityError as exc:
+        raise HTTPException(status_code=429, detail="Browser capacity unavailable; retry after closure", headers={"Retry-After": "1"}) from exc
     except ValueError as exc:
         # SSRF / URL validation failure.
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -222,6 +236,21 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
         await websocket.close(code=4403)
         return
 
+    # HTTP auth middleware does not run for WebSockets. Live is bidirectional,
+    # so even a viewer must have the same write permission as REST navigation.
+    # _authenticate_ws accepts session cookies or the auth-disabled user, not
+    # internal-auth tokens. Both sources are non-internal, including the
+    # synthetic admin used when authentication is disabled.
+    try:
+        permissions = await resolve_route_permissions(user, is_internal=False)
+    except Exception:
+        logger.warning("Failed to resolve browser stream permissions", exc_info=True)
+        await websocket.close(code=4501)
+        return
+    if Permissions.THREADS_WRITE not in permissions:
+        await websocket.close(code=4403)
+        return
+
     thread_store = getattr(websocket.app.state, "thread_store", None)
     if thread_store is None:
         # Fail closed: the live stream drives a real browser (cookies,
@@ -241,11 +270,32 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
         await websocket.close(code=4404)
         return
 
+    provider = get_browser_control(websocket.app)
+    scope = None
+    if provider is not None:
+        try:
+            if await provider.stream(websocket, thread_id, str(user.id)):
+                return
+            scope = await provider.session_scope(thread_id, str(user.id))
+        except HTTPException as exc:
+            await websocket.close(code=4404 if exc.status_code == 404 else 4503)
+            return
+        except Exception:
+            with contextlib.suppress(Exception):
+                await websocket.close(code=4501)
+            return
+    with browser_session_scope(scope) if scope is not None else contextlib.nullcontext():
+        await _local_browser_stream(websocket, thread_id, user)
+
+
+async def _local_browser_stream(websocket: WebSocket, thread_id: ThreadId, user) -> None:
+    """Native Live implementation shared unchanged by local and ASGI control."""
     try:
         from deerflow.community.browser_automation import (
             BrowserLiveViewerError,
             BrowserSessionCapacityError,
             get_browser_session_manager,
+            resolve_browser_egress,
             validate_browser_url,
         )
     except ImportError:
@@ -311,6 +361,7 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
             cdp_url=_cfg_str("cdp_url"),
             allow_unguarded_cdp=_cfg_bool("allow_unguarded_cdp", False),
             url_guard=validate_browser_url,
+            egress_resolver=resolve_browser_egress,
         )
         session = session_lease.__enter__()
     except BrowserSessionCapacityError:
@@ -441,7 +492,7 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
                     # SSRF-screen client-driven navigations with the same policy
                     # the agent tools enforce; reject rather than dispatch.
                     url = event.get("url")
-                    reason = validate_browser_url(url) if isinstance(url, str) else "Error: invalid navigation URL"
+                    reason = await asyncio.to_thread(validate_browser_url, url) if isinstance(url, str) else "Error: invalid navigation URL"
                     if reason is not None:
                         await _send_payload({"type": "nav_rejected", "url": url, "message": reason})
                         continue
@@ -459,13 +510,14 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
     input_task: asyncio.Task | None = None
     reader_task: asyncio.Task | None = None
     poll_task: asyncio.Task | None = None
+    cancellation: asyncio.CancelledError | None = None
     try:
         # Seed the live page from the latest browser_view URL. A thread can have
         # a stale browser session from an earlier panel/live attempt; if that
         # page differs from the latest visible browser artifact, align Live with
         # what the user expects instead of requiring an off/on reconnect.
         seed = websocket.query_params.get("seed")
-        if seed and validate_browser_url(seed) is None:
+        if seed and await asyncio.to_thread(validate_browser_url, seed) is None:
             with contextlib.suppress(Exception):
                 current = await session.current_url()
                 if _should_apply_browser_seed(current, seed):
@@ -483,6 +535,8 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
         await reader_task
     except WebSocketDisconnect:
         pass
+    except asyncio.CancelledError as exc:
+        cancellation = exc
     except Exception as exc:
         logger.exception("browser stream error: thread_id=%s err=%s", thread_id, exc)
     finally:
@@ -493,7 +547,14 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
             reader_task.cancel()
         if poll_task is not None:
             poll_task.cancel()
-        with contextlib.suppress(Exception):
-            await session.stop_screencast(_on_frame)
+        try:
+            await await_drained(session.stop_screencast(_on_frame))
+        except asyncio.CancelledError as exc:
+            if cancellation is None:
+                cancellation = exc
+        except Exception:
+            pass
         session_lease.__exit__(None, None, None)
         reset_current_user(token)
+        if cancellation is not None:
+            raise cancellation

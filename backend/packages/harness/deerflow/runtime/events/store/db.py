@@ -10,18 +10,16 @@ import asyncio
 import json
 import logging
 import re
-from contextlib import asynccontextmanager
+import weakref
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from deerflow.persistence.models.run_event import RunEventRow
+from deerflow.persistence.models.run_event import RunEventRow, RunEventThreadSeqRow
 from deerflow.runtime.events.message_identity import message_identity
 from deerflow.runtime.events.store.base import RunEventStore
-from deerflow.runtime.events.transactions import RunEventTransactionParticipant
-from deerflow.runtime.execution.mutation_context import MutationTarget, current_remote_mutation_context, reject_remote_operation, validate_mutation, validate_mutation_after_sql
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
 from deerflow.utils.time import coerce_iso
 
@@ -29,17 +27,22 @@ logger = logging.getLogger(__name__)
 
 
 class DbRunEventStore(RunEventStore):
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, max_trace_content: int = 10240, mutation_capability=None, transaction_participant: RunEventTransactionParticipant | None = None):
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, max_trace_content: int = 10240):
         self._sf = session_factory
-        self._mutation_capability = mutation_capability
-        self._transaction_participant = transaction_participant
         self._max_trace_content = max_trace_content
         # Per-thread asyncio locks serialize seq assignment for concurrent
         # in-process writers on the same thread. The DB-level FOR UPDATE /
         # advisory lock guards cross-process races; this guards the common
         # single-process case where two coroutines interleave between the
         # max(seq) read and the INSERT and would otherwise collide on seq.
-        self._write_locks: dict[str, asyncio.Lock] = {}
+        #
+        # The weak registry preserves one lock generation while an admitted
+        # holder/waiter still references it. A separate pin keeps the historical
+        # one-lock-per-live-thread behavior until delete_by_thread() explicitly
+        # retires that thread; after retirement, outstanding users alone keep
+        # the generation alive until they drain.
+        self._write_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+        self._write_lock_pins: dict[str, asyncio.Lock] = {}
 
     def _get_write_lock(self, thread_id: str) -> asyncio.Lock:
         """Return (creating if needed) the per-thread seq-assignment lock."""
@@ -47,6 +50,9 @@ class DbRunEventStore(RunEventStore):
         if lock is None:
             lock = asyncio.Lock()
             self._write_locks[thread_id] = lock
+        # A fresh caller after deletion makes the thread live again. Repin the
+        # current generation so normal live-thread registry lifetime is stable.
+        self._write_lock_pins[thread_id] = lock
         return lock
 
     @staticmethod
@@ -93,15 +99,6 @@ class DbRunEventStore(RunEventStore):
             metadata["content_is_dict"] = True
         return db_content, metadata
 
-    @property
-    def max_trace_content(self) -> int:
-        return self._max_trace_content
-
-    @classmethod
-    def serialized_content_size(cls, content: Any) -> int:
-        """The exact UTF-8 byte count used by structured-content persistence."""
-        return len(cls._content_to_db(content, None)[0].encode("utf-8"))
-
     @staticmethod
     def _user_id_from_context() -> str | None:
         """Soft read of user_id from contextvar for write paths.
@@ -119,20 +116,6 @@ class DbRunEventStore(RunEventStore):
         """
         user = get_current_user()
         return str(user.id) if user is not None else None
-
-    async def _participate(self, session: AsyncSession, rows: list[RunEventRow]) -> None:
-        if self._transaction_participant is None:
-            return
-        await session.flush()
-        for row in rows:
-            await self._transaction_participant.insert(session, event_id=row.id, record=self._row_to_dict(row))
-
-    @asynccontextmanager
-    async def _post_write_fence(self, session, *, operation, targets):
-        yield
-        if self._mutation_capability is not None:
-            await session.flush()
-            await self._mutation_capability.validate_async(session, context=current_remote_mutation_context(), operation=operation, targets=targets)
 
     #: Characters json.dumps escapes in the stored content (``ensure_ascii``
     #: is False, so non-ASCII survives verbatim and stays matchable).
@@ -159,15 +142,21 @@ class DbRunEventStore(RunEventStore):
         return ids
 
     @staticmethod
-    async def _max_seq_for_thread(session: AsyncSession, thread_id: str) -> int | None:
-        """Return the current max seq while serializing writers per thread.
+    async def _acquire_thread_mutation_fence(session: AsyncSession, thread_id: str) -> None:
+        """Take the cross-process thread mutation fence, if the dialect has one.
 
         PostgreSQL rejects ``SELECT max(...) FOR UPDATE`` because aggregate
-        results are not lockable rows. As a release-safe workaround, take a
-        transaction-level advisory lock keyed by thread_id before reading the
-        aggregate. Other dialects keep the existing row-locking statement.
+        results are not lockable rows, so it serializes a thread's mutations with
+        a transaction-level advisory lock keyed by ``thread_id``. This is the
+        database half of the contract whose in-process half is
+        ``_get_write_lock()``: every thread mutation — ``put``, ``put_batch``,
+        ``put_if_absent`` and both deletions — takes this fence before touching
+        rows, so an admitted writer can never land a row between a deletion's
+        count and its commit.
+
+        Dialects without a cross-process fence (SQLite) rely on the in-process
+        per-thread lock alone, so this is a no-op there.
         """
-        stmt = select(func.max(RunEventRow.seq)).where(RunEventRow.thread_id == thread_id)
         bind = session.get_bind()
         dialect_name = bind.dialect.name if bind is not None else ""
 
@@ -176,15 +165,41 @@ class DbRunEventStore(RunEventStore):
                 text("SELECT pg_advisory_xact_lock(hashtext(CAST(:thread_id AS text))::bigint)"),
                 {"thread_id": thread_id},
             )
-            return await session.scalar(stmt)
 
-        return await session.scalar(stmt.with_for_update())
+    @staticmethod
+    async def _max_seq_for_thread(session: AsyncSession, thread_id: str) -> int | None:
+        """Return the current seq high-water mark while serializing writers.
 
-    async def _sequence_base(self, session: AsyncSession, thread_id: str) -> int:
-        retained = await self._max_seq_for_thread(session, thread_id)
-        floor = getattr(self._transaction_participant, "sequence_floor", None)
-        private = await floor(session, thread_id=thread_id) if floor is not None else 0
-        return max(retained or 0, private or 0)
+        The row aggregate is the source of truth for existing data, while the
+        durable watermark preserves sequence values after a run is deleted.
+        Takes the shared thread mutation fence before reading either value, so
+        the read is ordered against every other mutation of the same thread.
+        """
+        await DbRunEventStore._acquire_thread_mutation_fence(session, thread_id)
+
+        stmt = select(func.max(RunEventRow.seq)).where(RunEventRow.thread_id == thread_id)
+        bind = session.get_bind()
+        dialect_name = bind.dialect.name if bind is not None else ""
+
+        if dialect_name == "postgresql":
+            row_max = await session.scalar(stmt)
+        else:
+            row_max = await session.scalar(stmt.with_for_update())
+
+        watermark = await session.scalar(select(RunEventThreadSeqRow.seq).where(RunEventThreadSeqRow.thread_id == thread_id))
+        values = [value for value in (row_max, watermark) if value is not None]
+        return max(values) if values else None
+
+    @staticmethod
+    async def _raise_seq_watermark(session: AsyncSession, thread_id: str, seq: int) -> None:
+        """Persist *seq* as the thread's new minimum allocation floor."""
+        if seq <= 0:
+            return
+        watermark = await session.get(RunEventThreadSeqRow, thread_id)
+        if watermark is None:
+            session.add(RunEventThreadSeqRow(thread_id=thread_id, seq=seq))
+        elif watermark.seq < seq:
+            watermark.seq = seq
 
     async def put(self, *, thread_id, run_id, event_type, category, content="", metadata=None, created_at=None):  # noqa: D401
         """Write a single event — low-frequency path only.
@@ -198,13 +213,10 @@ class DbRunEventStore(RunEventStore):
         content, metadata = self._truncate_trace(category, content, metadata)
         db_content, metadata = self._content_to_db(content, metadata)
         user_id = self._user_id_from_context()
-        if self._mutation_capability is not None and user_id is None:
-            user_id = self._mutation_capability.context.user_id
         async with self._get_write_lock(thread_id):
             async with self._sf() as session:
-                async with session.begin(), self._post_write_fence(session, operation="events.put", targets=(MutationTarget(thread_id=thread_id, run_id=run_id, user_id=user_id, event_types=(event_type,)),)):
-                    await validate_mutation(self._mutation_capability, session, "events.put", thread_id=thread_id, run_id=run_id, user_id=user_id, event_types=(event_type,))
-                    max_seq = await self._sequence_base(session, thread_id)
+                async with session.begin():
+                    max_seq = await self._max_seq_for_thread(session, thread_id)
                     seq = (max_seq or 0) + 1
                     row = RunEventRow(
                         thread_id=thread_id,
@@ -218,7 +230,7 @@ class DbRunEventStore(RunEventStore):
                         created_at=datetime.fromisoformat(created_at) if created_at else datetime.now(UTC),
                     )
                     session.add(row)
-                    await self._participate(session, [row])
+                    await self._raise_seq_watermark(session, thread_id, seq)
                 return self._row_to_dict(row)
 
     async def put_batch(self, events):
@@ -228,24 +240,12 @@ class DbRunEventStore(RunEventStore):
         if len(thread_ids) > 1:
             raise ValueError(f"put_batch requires all events to belong to the same thread; got {thread_ids!r}")
         user_id = self._user_id_from_context()
-        if self._mutation_capability is not None and user_id is None:
-            user_id = self._mutation_capability.context.user_id
         # All events belong to the same thread (validated above).
         thread_id = events[0]["thread_id"]
         async with self._get_write_lock(thread_id):
             async with self._sf() as session:
-                async with (
-                    session.begin(),
-                    self._post_write_fence(session, operation="events.batch", targets=tuple(MutationTarget(thread_id=e["thread_id"], run_id=e["run_id"], user_id=e.get("user_id", user_id), event_types=(e["event_type"],)) for e in events)),
-                ):
-                    if self._mutation_capability is not None:
-                        await self._mutation_capability.validate_async(
-                            session,
-                            context=current_remote_mutation_context(),
-                            operation="events.batch",
-                            targets=tuple(MutationTarget(thread_id=e["thread_id"], run_id=e["run_id"], user_id=e.get("user_id", user_id), event_types=(e["event_type"],)) for e in events),
-                        )
-                    max_seq = await self._sequence_base(session, thread_id)
+                async with session.begin():
+                    max_seq = await self._max_seq_for_thread(session, thread_id)
                     seq = max_seq or 0
                     rows = []
                     for e in events:
@@ -258,7 +258,7 @@ class DbRunEventStore(RunEventStore):
                         row = RunEventRow(
                             thread_id=e["thread_id"],
                             run_id=e["run_id"],
-                            user_id=self._mutation_capability.context.user_id if self._mutation_capability is not None else e.get("user_id", user_id),
+                            user_id=e.get("user_id", user_id),
                             event_type=e["event_type"],
                             category=category,
                             content=db_content,
@@ -268,7 +268,7 @@ class DbRunEventStore(RunEventStore):
                         )
                         session.add(row)
                         rows.append(row)
-                    await self._participate(session, rows)
+                    await self._raise_seq_watermark(session, thread_id, seq)
                 return [self._row_to_dict(r) for r in rows]
 
     async def put_if_absent(
@@ -293,13 +293,10 @@ class DbRunEventStore(RunEventStore):
         content, metadata = self._truncate_trace(category, content, metadata)
         db_content, metadata = self._content_to_db(content, metadata)
         user_id = self._user_id_from_context()
-        if self._mutation_capability is not None and user_id is None:
-            user_id = self._mutation_capability.context.user_id
         async with self._get_write_lock(thread_id):
             async with self._sf() as session:
-                async with session.begin(), self._post_write_fence(session, operation="events.singleton", targets=(MutationTarget(thread_id=thread_id, run_id=run_id, user_id=user_id, event_types=(event_type,)),)):
-                    await validate_mutation(self._mutation_capability, session, "events.singleton", thread_id=thread_id, run_id=run_id, user_id=user_id, event_types=(event_type,))
-                    max_seq = await self._sequence_base(session, thread_id)
+                async with session.begin():
+                    max_seq = await self._max_seq_for_thread(session, thread_id)
                     stmt = (
                         select(RunEventRow)
                         .where(
@@ -325,7 +322,7 @@ class DbRunEventStore(RunEventStore):
                         created_at=datetime.fromisoformat(created_at) if created_at else datetime.now(UTC),
                     )
                     session.add(row)
-                    await self._participate(session, [row])
+                    await self._raise_seq_watermark(session, thread_id, row.seq)
                 return self._row_to_dict(row), True
 
     async def list_messages(
@@ -531,26 +528,40 @@ class DbRunEventStore(RunEventStore):
         *,
         user_id: str | None | _AutoSentinel = AUTO,
     ):
-        reject_remote_operation(self._mutation_capability)
+        """Delete every event of *thread_id* inside the thread mutation fence.
+
+        Deletion takes the same critical section as the writers — the in-process
+        per-thread lock plus, on PostgreSQL, the transaction advisory lock — so a
+        writer admitted before this call can no longer land a row between the
+        count below and the commit, which would resurrect a deleted thread. The
+        JSONL store serializes deletion the same way (``_run_mutation``).
+        """
         resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.delete_by_thread")
-        async with self._sf() as session:
-            count_conditions = [RunEventRow.thread_id == thread_id]
-            if resolved_user_id is not None:
-                count_conditions.append(RunEventRow.user_id == resolved_user_id)
-            count_stmt = select(func.count()).select_from(RunEventRow).where(*count_conditions)
-            count = await session.scalar(count_stmt) or 0
-            if count > 0:
-                await session.execute(delete(RunEventRow).where(*count_conditions))
-                await session.commit()
-            # Evict the per-thread seq-assignment lock so ``_write_locks`` does
-            # not grow unbounded over the (long-lived, singleton) store's
-            # lifetime. Only pop when no writer is mid-flight; a later write
-            # recreates the lock lazily and seq restarts correctly from the
-            # now-deleted thread.
-            lock = self._write_locks.get(thread_id)
-            if lock is not None and not lock.locked():
-                self._write_locks.pop(thread_id, None)
-            return count
+        async with self._get_write_lock(thread_id):
+            async with self._sf() as session:
+                async with session.begin():
+                    await self._acquire_thread_mutation_fence(session, thread_id)
+                    count_conditions = [RunEventRow.thread_id == thread_id]
+                    if resolved_user_id is not None:
+                        count_conditions.append(RunEventRow.user_id == resolved_user_id)
+                    count_stmt = select(func.count()).select_from(RunEventRow).where(*count_conditions)
+                    count = await session.scalar(count_stmt) or 0
+                    if count > 0:
+                        await session.execute(delete(RunEventRow).where(*count_conditions))
+                    # Owner-scoped deletion is the Gateway's normal path.
+                    # Reset only an empty thread: surviving events from any
+                    # owner still need the allocation floor for deleted runs.
+                    remaining_events = select(RunEventRow.id).where(RunEventRow.thread_id == thread_id).exists()
+                    await session.execute(delete(RunEventThreadSeqRow).where(RunEventThreadSeqRow.thread_id == thread_id, ~remaining_events))
+            # Retire the live-thread pin, but never remove the weak registry
+            # entry directly. asyncio.Lock.release() clears ``locked()`` before
+            # a queued waiter resumes, so an unlocked check can observe the
+            # handoff window and split one thread onto two lock generations.
+            # Holders/waiters keep the old generation alive until they drain; a
+            # later caller therefore resolves that same lock instead of racing
+            # it with a fresh one.
+            self._write_lock_pins.pop(thread_id, None)
+        return count
 
     async def delete_by_run(
         self,
@@ -559,49 +570,22 @@ class DbRunEventStore(RunEventStore):
         *,
         user_id: str | None | _AutoSentinel = AUTO,
     ):
-        resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.delete_by_run")
-        if self._mutation_capability is not None and resolved_user_id is None:
-            resolved_user_id = self._mutation_capability.context.user_id
-        async with self._sf() as session:
-            await validate_mutation(self._mutation_capability, session, "events.delete_run", thread_id=thread_id, run_id=run_id, user_id=resolved_user_id)
-            count_conditions = [RunEventRow.thread_id == thread_id, RunEventRow.run_id == run_id]
-            if resolved_user_id is not None:
-                count_conditions.append(RunEventRow.user_id == resolved_user_id)
-            count_stmt = select(func.count()).select_from(RunEventRow).where(*count_conditions)
-            count = await session.scalar(count_stmt) or 0
-            if count > 0:
-                await session.execute(delete(RunEventRow).where(*count_conditions))
-                await validate_mutation_after_sql(self._mutation_capability, session, "events.delete_run", thread_id=thread_id, run_id=run_id, user_id=resolved_user_id)
-                await session.commit()
-            return count
+        """Delete one run's events inside the thread mutation fence.
 
-    async def record_extension_task_stop(self, *, task_id, outcome):
-        """Terminal extension receipt for the original lead task only.
-
-        No session, SQL, event name or mutable payload escapes this operation.
+        Shares ``delete_by_thread``'s critical section; deleting a single run
+        leaves the thread alive, so the write-lock pin is deliberately kept.
         """
-        from deerflow.runtime.execution.mutation_context import OwnershipRejected
-
-        capability = self._mutation_capability
-        if capability is None or task_id != capability.context.run_id or outcome not in {"completed", "failed", "aborted"}:
-            raise OwnershipRejected("Extension terminal task target rejected")
-        context = capability.context
-        async with self._get_write_lock(context.thread_id):
-            async with (
-                self._sf() as session,
-                session.begin(),
-                self._post_write_fence(session, operation="extension.task_stop", targets=(MutationTarget(run_id=task_id, thread_id=context.thread_id, user_id=context.user_id, status=outcome, event_types=("run.extension.task_stop",)),)),
-            ):
-                await validate_mutation(capability, session, "extension.task_stop", run_id=task_id, thread_id=context.thread_id, user_id=context.user_id, status=outcome, event_types=("run.extension.task_stop",))
-                seq = (await self._max_seq_for_thread(session, context.thread_id) or 0) + 1
-                existing = await session.scalar(select(RunEventRow).where(RunEventRow.run_id == task_id, RunEventRow.event_type == "run.extension.task_stop"))
-                content, metadata = self._content_to_db({"task_id": task_id, "outcome": outcome}, None)
-                if existing is not None:
-                    if existing.content != content or existing.user_id != context.user_id or existing.thread_id != context.thread_id:
-                        raise OwnershipRejected("Extension terminal receipt conflicts")
-                    return self._row_to_dict(existing)
-                row = RunEventRow(
-                    thread_id=context.thread_id, run_id=task_id, user_id=context.user_id, event_type="run.extension.task_stop", category="lifecycle", content=content, event_metadata=metadata, seq=seq, created_at=datetime.now(UTC)
-                )
-                session.add(row)
-            return self._row_to_dict(row)
+        resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.delete_by_run")
+        async with self._get_write_lock(thread_id):
+            async with self._sf() as session:
+                async with session.begin():
+                    max_seq = await self._max_seq_for_thread(session, thread_id)
+                    count_conditions = [RunEventRow.thread_id == thread_id, RunEventRow.run_id == run_id]
+                    if resolved_user_id is not None:
+                        count_conditions.append(RunEventRow.user_id == resolved_user_id)
+                    count_stmt = select(func.count()).select_from(RunEventRow).where(*count_conditions)
+                    count = await session.scalar(count_stmt) or 0
+                    if count > 0:
+                        await session.execute(delete(RunEventRow).where(*count_conditions))
+                        await self._raise_seq_watermark(session, thread_id, max_seq or 0)
+        return count

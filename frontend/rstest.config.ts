@@ -35,15 +35,6 @@ export default defineConfig({
       name: "dom",
       testEnvironment: "happy-dom",
       include: ["tests/unit/**/*.dom.test.ts", "tests/unit/**/*.dom.test.tsx"],
-      // This installed acceptance consumes captured real Gateway responses.
-      // Ordinary unit CI has no backend-owned fixture; the explicit Fleet gate
-      // sets BC09_HTTP_FIXTURE and must still execute these cases without skips.
-      exclude: {
-        patterns: process.env.BC09_HTTP_FIXTURE
-          ? []
-          : ["tests/unit/core/fleet/unified-task-experience.dom.test.tsx"],
-        override: false,
-      },
     },
   ],
 });

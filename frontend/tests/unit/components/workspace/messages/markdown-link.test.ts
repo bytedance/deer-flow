@@ -50,6 +50,7 @@ describe("MarkdownLink rendering", () => {
     expect(html).toContain("<span");
     expect(html).toContain("click me");
     expect(html).not.toContain("href=");
+    expect(html).toContain('aria-label="Unsafe link omitted"');
   });
 
   it("blocks unsafe hrefs before the citation branch", () => {

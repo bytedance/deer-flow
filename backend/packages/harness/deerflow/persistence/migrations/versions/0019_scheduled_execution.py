@@ -15,6 +15,4 @@ def upgrade():
 
 
 def downgrade():
-    from deerflow.persistence.migrations._helpers import safe_drop_column
-
-    safe_drop_column("scheduled_tasks", "execution")
+    raise RuntimeError("Legacy execution rollback requires drained writers and a coherent backup; preserved intent must not be deleted")

@@ -99,7 +99,7 @@ enum UserScope:
 5. 服务端确认当前没有 admin，创建 `system_role="admin"`、`needs_setup=false` 的用户。
 6. 服务端设置 `access_token` HttpOnly cookie，用户进入 workspace。
 
-`/api/v1/auth/initialize` 只在没有 admin 时可用。并发初始化由数据库唯一约束兜底，失败方返回 409。
+`/api/v1/auth/initialize` 只在没有 admin 时可用。并发初始化由存储层的原子认领兜底：admin 计数与插入在同一个事务内完成，且写入先被串行化（SQLite 使用 `BEGIN IMMEDIATE`，PostgreSQL 使用事务级 advisory lock），因此同时到达的两个首次初始化请求不会都看到空系统，失败方返回 409。邮箱唯一约束只覆盖相同邮箱的重复提交，无法阻止两个不同邮箱同时成为 admin。
 
 ### 普通登录
 
@@ -419,6 +419,10 @@ PYTHONPATH=. python scripts/migrate_user_isolation.py --user-id <target-user-id>
 ```
 
 迁移脚本覆盖 legacy `memory.json`、`threads/` 和 `agents/` 到 per-user layout。
+
+thread 归属读取 Gateway 所配置数据库（`config.yaml` 的 `database`）中 `threads_meta.user_id`，未记录归属的 thread 归入 `default`。若存在 legacy thread 但无法读取该表（数据库文件不存在、`memory` 后端或查询失败），脚本在移动任何数据前退出；只有从未记录过 thread 归属的安装才应传 `--allow-missing-thread-owners`，此时所有 legacy thread 归入 `default`。
+
+修复前的脚本找不到数据库，会把所有 legacy thread 移到 `users/default/threads/`，且因 `threads/` 已不存在，重跑不会生效。恢复方法：停止 Gateway，用 `SELECT thread_id, user_id FROM threads_meta WHERE user_id IS NOT NULL AND user_id <> 'default'` 列出有真实归属的 thread，把存在的 `users/default/threads/{thread_id}` 移回 `threads/{thread_id}`，再重跑脚本（先 `--dry-run`）。若归属用户之后又使用过该 thread，目标目录已存在，脚本不会覆盖，而是把旧副本放到 `migration-conflicts/{thread_id}`，需手动合并。
 
 ## 安全不变量
 

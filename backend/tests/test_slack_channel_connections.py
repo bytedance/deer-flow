@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
+import threading
 from datetime import UTC, datetime, timedelta
 from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from app.channels.message_bus import MessageBus, OutboundMessage
 
@@ -133,5 +137,224 @@ def test_slack_http_events_mode_is_rejected(monkeypatch, caplog):
         assert channel._running is False
         assert channel._web_client is None
         assert "Slack HTTP Events mode is not supported" in caplog.text
+
+    anyio.run(go)
+
+
+def test_slack_socket_mode_connect_failure_is_logged(monkeypatch, caplog):
+    import anyio
+
+    from app.channels.slack import SlackChannel
+
+    class FailingSocketModeClient:
+        def __init__(self, *, app_token, web_client):
+            self.socket_mode_request_listeners = []
+
+        def connect(self):
+            raise RuntimeError("apps.connections.open failed: invalid_auth")
+
+        def close(self):
+            pass
+
+    slack_sdk = ModuleType("slack_sdk")
+    slack_sdk.WebClient = MagicMock
+    socket_mode = ModuleType("slack_sdk.socket_mode")
+    socket_mode.SocketModeClient = FailingSocketModeClient
+    response = ModuleType("slack_sdk.socket_mode.response")
+    response.SocketModeResponse = object
+    monkeypatch.setitem(sys.modules, "slack_sdk", slack_sdk)
+    monkeypatch.setitem(sys.modules, "slack_sdk.socket_mode", socket_mode)
+    monkeypatch.setitem(sys.modules, "slack_sdk.socket_mode.response", response)
+
+    async def go():
+        channel = SlackChannel(
+            bus=MessageBus(),
+            config={
+                "bot_token": "xoxb-operator",
+                "app_token": "xapp-token",
+                # A configured bot user id skips the auth_test lookup, so the
+                # only background work start() schedules is the connect.
+                "bot_user_id": "UBOT",
+                "connection_repo": MagicMock(),
+            },
+        )
+
+        # start() drops the future for the executor-backed connect; capture it
+        # here so the test can wait for the connect attempt to finish.
+        loop = asyncio.get_running_loop()
+        real_run_in_executor = loop.run_in_executor
+        connect_futures = []
+
+        def capture_run_in_executor(executor, func, *args):
+            future = real_run_in_executor(executor, func, *args)
+            connect_futures.append(future)
+            return future
+
+        monkeypatch.setattr(loop, "run_in_executor", capture_run_in_executor)
+
+        with caplog.at_level("ERROR", logger="app.channels.slack"):
+            await channel.start()
+            assert len(connect_futures) == 1
+            await asyncio.gather(*connect_futures, return_exceptions=True)
+        await channel.stop()
+
+        assert "Socket Mode connection failed" in caplog.text
+
+    anyio.run(go)
+
+
+def test_slack_socket_mode_queued_connect_does_not_target_replacement_client(monkeypatch):
+    import anyio
+
+    from app.channels.slack import SlackChannel
+
+    clients = []
+
+    class RecordingSocketModeClient:
+        def __init__(self, *, app_token, web_client):
+            self.socket_mode_request_listeners = []
+            self.connect_calls = 0
+            clients.append(self)
+
+        def connect(self):
+            self.connect_calls += 1
+
+        def close(self):
+            pass
+
+    slack_sdk = ModuleType("slack_sdk")
+    slack_sdk.WebClient = MagicMock
+    socket_mode = ModuleType("slack_sdk.socket_mode")
+    socket_mode.SocketModeClient = RecordingSocketModeClient
+    response = ModuleType("slack_sdk.socket_mode.response")
+    response.SocketModeResponse = object
+    monkeypatch.setitem(sys.modules, "slack_sdk", slack_sdk)
+    monkeypatch.setitem(sys.modules, "slack_sdk.socket_mode", socket_mode)
+    monkeypatch.setitem(sys.modules, "slack_sdk.socket_mode.response", response)
+
+    async def go():
+        channel = SlackChannel(
+            bus=MessageBus(),
+            config={
+                "bot_token": "xoxb-operator",
+                "app_token": "xapp-token",
+                "bot_user_id": "UBOT",
+                "connection_repo": MagicMock(),
+            },
+        )
+        queued_callbacks = []
+        loop = asyncio.get_running_loop()
+
+        real_run_in_executor = loop.run_in_executor
+
+        def queue_run_in_executor(executor, func, *args):
+            # Hold back only the connect; stop() offloads close() through the
+            # same executor path and must still run.
+            if func != channel._connect_socket_mode:
+                return real_run_in_executor(executor, func, *args)
+            queued_callbacks.append((func, args))
+            return loop.create_future()
+
+        monkeypatch.setattr(loop, "run_in_executor", queue_run_in_executor)
+
+        await channel.start()
+        await channel.stop()
+        await channel.start()
+
+        assert len(clients) == 2
+        assert len(queued_callbacks) == 2
+
+        stale_func, stale_args = queued_callbacks[0]
+        stale_func(*stale_args)
+        assert clients[0].connect_calls == 0
+        assert clients[1].connect_calls == 0
+
+        current_func, current_args = queued_callbacks[1]
+        current_func(*current_args)
+        assert clients[0].connect_calls == 0
+        assert clients[1].connect_calls == 1
+
+        await channel.stop()
+
+    anyio.run(go)
+
+
+class _BlockingSocketModeClient:
+    """Socket Mode stand-in whose ``close()`` blocks like the SDK's thread joins."""
+
+    def __init__(self):
+        self.close_started = threading.Event()
+        self.release = threading.Event()
+        self.close_calls = 0
+        self.connect_calls = 0
+
+    def connect(self):
+        self.connect_calls += 1
+
+    def close(self):
+        self.close_calls += 1
+        self.close_started.set()
+        # Bounded so a close() run on the event loop fails the test's
+        # assertions instead of deadlocking it.
+        self.release.wait(timeout=2)
+
+
+def test_slack_stop_closes_socket_client_off_the_event_loop():
+    import anyio
+
+    from app.channels.slack import SlackChannel
+
+    async def go():
+        channel = SlackChannel(bus=MessageBus(), config={})
+        socket_client = _BlockingSocketModeClient()
+        channel._socket_client = socket_client
+        channel._running = True
+
+        stop_task = asyncio.create_task(channel.stop())
+        assert await asyncio.to_thread(socket_client.close_started.wait, 2)
+        # close() is blocked in a worker thread, so the loop keeps running and
+        # stop() is still waiting for it.
+        assert not stop_task.done()
+        # A connect still queued in the executor must not reopen the client
+        # that is being closed.
+        channel._connect_socket_mode(socket_client)
+        assert socket_client.connect_calls == 0
+
+        socket_client.release.set()
+        await stop_task
+        assert socket_client.close_calls == 1
+        assert channel._socket_client is None
+
+    anyio.run(go)
+
+
+def test_slack_stop_retried_after_cancellation_awaits_the_same_close():
+    import anyio
+
+    from app.channels.slack import SlackChannel
+
+    async def go():
+        channel = SlackChannel(bus=MessageBus(), config={})
+        socket_client = _BlockingSocketModeClient()
+        channel._socket_client = socket_client
+        channel._running = True
+
+        first_stop = asyncio.create_task(channel.stop())
+        assert await asyncio.to_thread(socket_client.close_started.wait, 2)
+        first_stop.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first_stop
+
+        # The Gateway retries a cancelled shutdown on the same channel. The
+        # retry must wait for the close still running in the worker rather
+        # than return early or start a second close.
+        retry = asyncio.create_task(channel.stop())
+        await asyncio.sleep(0.05)
+        assert not retry.done()
+
+        socket_client.release.set()
+        await retry
+        assert socket_client.close_calls == 1
+        assert channel._socket_client is None
 
     anyio.run(go)

@@ -77,7 +77,6 @@ class NoopMemoryManager(MemoryManager):
     # noop overrides search() to return [] (its "store/recall nothing" design --
     # every read returns empty, never raises), so it is search-capable; the flag
     # is True to match the override (the invariant requires flag == override).
-    remote_mutation_mode: ClassVar[str] = "stateless"
     supports_search: ClassVar[bool] = True
 
     def model_post_init(self, __context: Any) -> None:
@@ -123,6 +122,7 @@ class NoopMemoryManager(MemoryManager):
         *,
         agent_name: str | None = None,
         thread_id: str | None = None,
+        query: str | None = None,
     ) -> str:
         return ""
 

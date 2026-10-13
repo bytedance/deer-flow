@@ -3,9 +3,9 @@
 Covers: DI construction (owns storage/updater/queue/llm), zero-config defaults,
 ``trace_id`` threading to the optional ``callbacks`` hook, langfuse being
 optional, ``hide_from_ui`` default-skip + hook-keep, empty ``storage_class``
-(portable default), and portability -- ``backends/deermem/`` has two explicit
-host imports (the memory contract and model-budget guard) and can be vendored
-into another agent by copying the folder and repointing those contracts.
+(portable default), and portability -- ``backends/deermem/`` has exactly one
+``from deerflow`` line (the ABC contract) and can be vendored into another agent
+by copying the folder and repointing that one line.
 
 Storage is isolated via ``$DEERMEM_DATA_DIR`` -> ``tmp_path``; the LLM is a fake
 injected onto the updater so no network is needed.
@@ -210,6 +210,7 @@ def test_import_empty_summary_sections_replace_existing_summaries_with_complete_
         "workContext": {"summary": "", "updatedAt": ""},
         "personalContext": {"summary": "", "updatedAt": ""},
         "topOfMind": {"summary": "", "updatedAt": ""},
+        "cognitiveStyle": {"summary": "", "updatedAt": ""},
     }
     assert imported["history"] == {
         "recentMonths": {"summary": "", "updatedAt": ""},
@@ -325,8 +326,8 @@ def test_storage_class_empty_uses_filememorystorage():
     assert isinstance(dm._storage, FileMemoryStorage)
 
 
-def test_portability_only_explicit_host_contracts_import_deerflow():
-    """No host coupling beyond the memory contract and Fleet model-budget guard."""
+def test_portability_only_abc_contract_imports_deerflow():
+    """backends/deermem/ has exactly ONE `from deerflow` line: the ABC contract in deer_mem.py."""
     import deerflow.agents.memory.backends.deermem as pkg
 
     root = Path(pkg.__file__).parent
@@ -336,14 +337,13 @@ def test_portability_only_explicit_host_contracts_import_deerflow():
             s = line.strip()
             if s.startswith("from deerflow") or s.startswith("import deerflow"):
                 deerflow_imports.append((p.relative_to(root).as_posix(), s))
-    assert sorted(deerflow_imports) == [
-        ("deer_mem.py", "from deerflow.agents.memory.manager import MemoryConflictError, MemoryCorruptionError, MemoryManager"),
-        ("deermem/core/llm.py", "from deerflow.models.budgeted_provider import guard_model"),
-    ]
+    assert len(deerflow_imports) == 1, deerflow_imports
+    assert deerflow_imports[0][0] == "deer_mem.py"
+    assert "memory.manager import MemoryConflictError, MemoryCorruptionError, MemoryManager" in deerflow_imports[0][1]
 
 
-# Minimal vendored memory contract. Explicit model construction also invokes
-# the new host's budget guard, repointed separately in the portability demo.
+# Minimal vendored host contract (what another agent would ship). DeerMem only
+# needs this ABC -- nothing else from a host.
 _VENDORED_MANAGER_PY = '''
 """Vendored host contract (pydantic BaseModel + three-tier ABC) for the portability demo."""
 from abc import abstractmethod
@@ -420,10 +420,9 @@ class MemoryCorruptionError(RuntimeError): ...
 
 
 def test_portability_vendor_to_other_agent(tmp_path, monkeypatch):
-    """Repoint both host contracts, run memory CRUD and explicit LLM construction.
-
-    The copied backend retains its model guard, supplied by the new host.
-    """
+    """Copy backends/deermem/ into a temp package, repoint the ONE ABC import to
+    a vendored manager, import, and run a round-trip -- proves copy + 1-line +
+    run portability (zero deerflow dependency at runtime)."""
     import importlib
     import shutil
 
@@ -435,14 +434,10 @@ def test_portability_vendor_to_other_agent(tmp_path, monkeypatch):
     host_pkg.mkdir()
     (host_pkg / "__init__.py").write_text("", encoding="utf-8")
     (host_pkg / "manager.py").write_text(_VENDORED_MANAGER_PY, encoding="utf-8")
-    (host_pkg / "budgeted_provider.py").write_text(
-        "guarded_calls = []\ndef guard_model(model, *, model_name, provider_use):\n    guarded_calls.append((model, model_name, provider_use))\n    return model\n",
-        encoding="utf-8",
-    )
     # Copy the DeerMem backend folder.
     dst_pkg = tmp_path / "otheragent_deermem"
     shutil.copytree(src, dst_pkg)
-    # Repoint the memory contract to the vendored manager.
+    # Repoint the single ABC-contract import line to the vendored manager.
     deer_mem_file = dst_pkg / "deer_mem.py"
     text = deer_mem_file.read_text(encoding="utf-8")
     contract_import = "from deerflow.agents.memory.manager import MemoryConflictError, MemoryCorruptionError, MemoryManager"
@@ -452,15 +447,6 @@ def test_portability_vendor_to_other_agent(tmp_path, monkeypatch):
         "from otheragent.manager import MemoryConflictError, MemoryCorruptionError, MemoryManager",
     )
     deer_mem_file.write_text(text, encoding="utf-8")
-    llm_file = dst_pkg / "deermem" / "core" / "llm.py"
-    text = llm_file.read_text(encoding="utf-8")
-    guard_import = "from deerflow.models.budgeted_provider import guard_model"
-    assert guard_import in text
-    llm_file.write_text(text.replace(guard_import, "from otheragent.budgeted_provider import guard_model"), encoding="utf-8")
-    # Every host reference is repointed; new coupling cannot hide in an
-    # unexercised branch of the copied backend.
-    for path in dst_pkg.rglob("*.py"):
-        assert not any(line.strip().startswith(("from deerflow", "import deerflow")) for line in path.read_text(encoding="utf-8").splitlines()), path
 
     monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.syspath_prepend(str(tmp_path))
@@ -473,17 +459,8 @@ def test_portability_vendor_to_other_agent(tmp_path, monkeypatch):
             user_id="ua",
         )
         assert "y" in dm.get_context(user_id="ua")
-        fake_model = _FakeLLM()
-        import langchain.chat_models
-
-        monkeypatch.setattr(langchain.chat_models, "init_chat_model", lambda **kwargs: fake_model)
-        config = importlib.import_module("otheragent_deermem.deermem.config")
-        llm = importlib.import_module("otheragent_deermem.deermem.core.llm")
-        guard = importlib.import_module("otheragent.budgeted_provider")
-        assert llm.build_llm(config.DeerMemModelConfig(model="fake", provider="openai")) is fake_model
-        assert guard.guarded_calls == [(fake_model, "explicit-memory", "deermem:init_chat_model")]
     finally:
-        for k in [k for k in list(sys.modules) if k.startswith("otheragent_deermem") or k == "otheragent" or k.startswith("otheragent.")]:
+        for k in [k for k in list(sys.modules) if k.startswith("otheragent_deermem") or k == "otheragent"]:
             sys.modules.pop(k, None)
 
 
@@ -954,3 +931,76 @@ def test_from_backend_config_null_values_do_not_warn_as_unknown(caplog):
     with caplog.at_level("WARNING", logger=cfg_logger):
         DeerMemConfig.from_backend_config({"model": None})
     assert not any("Unknown backend_config keys" in r.message for r in caplog.records)
+
+
+def test_apply_updates_cognitive_style_and_fact_category(deermem_data_dir) -> None:
+    dm = DeerMem(backend_config=None)
+    current_memory = dm.get_memory(user_id="cognitive-user")
+
+    result = dm._updater._apply_updates(
+        current_memory,
+        {
+            "user": {
+                "cognitiveStyle": {
+                    "summary": "Prefers conclusions first, then details.",
+                    "shouldUpdate": True,
+                    "scope": "user",
+                    "authority": "descriptive",
+                }
+            },
+            "newFacts": [
+                {
+                    "content": "User prefers conclusions before implementation details.",
+                    "category": "cognitive",
+                    "confidence": 0.92,
+                    "scope": "user",
+                    "durability": "durable",
+                    "authority": "descriptive",
+                }
+            ],
+        },
+        thread_id="thread-cognitive",
+    )
+
+    assert result["user"]["cognitiveStyle"]["summary"] == "Prefers conclusions first, then details."
+    assert result["user"]["cognitiveStyle"]["updatedAt"]
+    assert result["facts"][0]["category"] == "cognitive"
+    assert result["facts"][0]["source"] == "thread-cognitive"
+
+
+def test_import_memory_persists_normalized_legacy_payload(deermem_data_dir) -> None:
+    dm = DeerMem(backend_config=None)
+    legacy = {
+        "version": "1.0",
+        "lastUpdated": "",
+        "user": {},
+        "history": {},
+        "facts": [{"content": "User prefers conclusions first.", "category": "cognitive"}],
+    }
+
+    result = dm.import_memory(legacy, user_id="legacy-user")
+
+    assert result["user"]["cognitiveStyle"] == {"summary": "", "updatedAt": ""}
+    assert result["facts"][0]["id"].startswith("fact_")
+    assert result["facts"][0]["category"] == "cognitive"
+    assert result["facts"][0]["confidence"] == 0.5
+    assert result["facts"][0]["createdAt"] == ""
+    assert result["facts"][0]["source"] == "unknown"
+
+
+@pytest.mark.parametrize("facts", [[{"id": "keep", "content": "   "}], [None], {}, None, "missing", [{"id": "keep", "content": 42}], [{"id": "new", "content": "valid"}, {}]])
+def test_replacement_import_rejects_unrecoverable_facts_without_writes(deermem_data_dir, facts):
+    dm = DeerMem(backend_config=None)
+    before = dm.import_memory({"user": {}, "history": {}, "facts": [{"id": "keep", "content": "Saved preference"}]}, user_id="alice")
+    snapshot = {str(path.relative_to(deermem_data_dir)): path.read_bytes() for path in deermem_data_dir.rglob("*") if path.is_file()}
+
+    payload = {"user": {}, "history": {}, "facts": facts}
+    if facts == "missing":
+        payload.pop("facts")
+    with pytest.raises(ValueError, match="facts"):
+        dm.import_memory(payload, user_id="alice")
+
+    assert {str(path.relative_to(deermem_data_dir)): path.read_bytes() for path in deermem_data_dir.rglob("*") if path.is_file()} == snapshot
+    reloaded = DeerMem(backend_config=None).get_memory(user_id="alice")
+    assert reloaded["facts"] == before["facts"]
+    assert reloaded["revision"] == before["revision"]

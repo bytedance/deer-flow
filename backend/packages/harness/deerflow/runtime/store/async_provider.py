@@ -26,6 +26,7 @@ from langgraph.store.base import BaseStore
 
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.persistence.postgres_schema import dsn_with_search_path, ensure_postgres_schema_async
+from deerflow.runtime.cancellation import drained_async_context
 from deerflow.runtime.store.provider import (
     POSTGRES_CONN_REQUIRED,
     POSTGRES_STORE_INSTALL,
@@ -49,16 +50,12 @@ async def _ensure_postgres_schema(conn_string: str, schema: str) -> None:
 
 
 @contextlib.asynccontextmanager
-async def _async_store(config, *, mutation_capability=None) -> AsyncIterator[BaseStore]:
+async def _async_store(config) -> AsyncIterator[BaseStore]:
     """Async context manager that constructs and tears down a Store.
 
     The ``config`` argument is a :class:`deerflow.config.checkpointer_config.CheckpointerConfig`
     instance — the same object used by the checkpointer factory.
     """
-    if mutation_capability is not None and config.type != "postgres":
-        from deerflow.runtime.execution.mutation_context import OwnershipRejected
-
-        raise OwnershipRejected("Remote Store requires PostgreSQL")
     if config.type == "memory":
         from langgraph.store.memory import InMemoryStore
 
@@ -75,7 +72,7 @@ async def _async_store(config, *, mutation_capability=None) -> AsyncIterator[Bas
         conn_str = resolve_sqlite_conn_str(config.connection_string or "store.db")
         await asyncio.to_thread(ensure_sqlite_parent_dir, conn_str)
 
-        async with AsyncSqliteStore.from_conn_string(conn_str) as store:
+        async with drained_async_context(AsyncSqliteStore.from_conn_string(conn_str)) as store:
             await store.setup()
             logger.info("Store: using AsyncSqliteStore (%s)", conn_str)
             yield store
@@ -90,20 +87,9 @@ async def _async_store(config, *, mutation_capability=None) -> AsyncIterator[Bas
         if not config.connection_string:
             raise ValueError(POSTGRES_CONN_REQUIRED)
 
-        conn_string = dsn_with_search_path(config.connection_string, config.postgres_schema)
-        if mutation_capability is not None:
-            from psycopg import AsyncConnection
-            from psycopg.rows import dict_row
-
-            from deerflow.runtime.store.fenced_store import FencedAsyncPostgresStore
-
-            async with await AsyncConnection.connect(conn_string, autocommit=True, prepare_threshold=0, row_factory=dict_row) as conn:
-                async with FencedAsyncPostgresStore(conn, mutation_capability=mutation_capability, schema=config.postgres_schema) as store:
-                    await store.setup()
-                    yield store
-            return
         await _ensure_postgres_schema(config.connection_string, config.postgres_schema)
-        async with AsyncPostgresStore.from_conn_string(conn_string) as store:
+        conn_string = dsn_with_search_path(config.connection_string, config.postgres_schema)
+        async with drained_async_context(AsyncPostgresStore.from_conn_string(conn_string)) as store:
             await store.setup()
             logger.info("Store: using AsyncPostgresStore")
             yield store
@@ -118,7 +104,7 @@ async def _async_store(config, *, mutation_capability=None) -> AsyncIterator[Bas
 
 
 @contextlib.asynccontextmanager
-async def make_store(app_config: AppConfig | None = None, *, mutation_capability=None) -> AsyncIterator[BaseStore]:
+async def make_store(app_config: AppConfig | None = None) -> AsyncIterator[BaseStore]:
     """Yield a Store selected from legacy or unified persistence config.
 
     The legacy ``checkpointer`` section takes precedence when configured;
@@ -135,5 +121,5 @@ async def make_store(app_config: AppConfig | None = None, *, mutation_capability
         app_config = get_app_config()
 
     config = _resolve_store_config(app_config)
-    async with _async_store(config, **({"mutation_capability": mutation_capability} if mutation_capability is not None else {})) as store:
+    async with _async_store(config) as store:
         yield store

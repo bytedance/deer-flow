@@ -7,6 +7,11 @@ import {
 } from "@/core/messages/derived-state";
 import { getMessageGroups } from "@/core/messages/utils";
 
+import {
+  loadScheduledThread,
+  withOrdinaryHumanTurn,
+} from "../../helpers/scheduled-fixtures";
+
 function message(type: Message["type"], id: string, content: string): Message {
   return { type, id, content } as Message;
 }
@@ -151,5 +156,122 @@ describe("incremental message derivation", () => {
 
     expect(next.byGroupIndex[1]).toBe(initial.byGroupIndex[1]);
     expect(next.byGroupIndex.at(-1)).not.toBe(initial.byGroupIndex.at(-1));
+  });
+});
+
+it("keeps pre-clarification answers stable through hidden replies, reconnect, and settlement", () => {
+  const history = [
+    message("human", "h", "Plan a deployment"),
+    message("ai", "plan", "Completed plan"),
+    {
+      ...message("ai", "ask", ""),
+      tool_calls: [{ id: "call", name: "ask_clarification", args: {} }],
+    },
+    {
+      ...message("tool", "request", "Which environment?"),
+      name: "ask_clarification",
+      tool_call_id: "call",
+    },
+  ] as Message[];
+  const reply = {
+    ...message("human", "reply", "staging"),
+    additional_kwargs: { hide_from_ui: true },
+  } as Message;
+  const continued = [
+    ...history,
+    reply,
+    message("ai", "next", "Starting deployment"),
+  ];
+  const waiting = deriveStableMessageGroups(history, false, [], false);
+  const running = deriveStableMessageGroups(continued, true, waiting, false);
+  const reconnect = deriveStableMessageGroups(continued, true, [], false);
+  const settled = deriveStableMessageGroups(continued, false, running, true);
+  for (const groups of [waiting, running, reconnect, settled]) {
+    expect(groups.find((group) => group.id === "plan")?.type).toBe("assistant");
+    expect(
+      groups
+        .flatMap((group) => group.messages)
+        .filter((item) => item.id === "plan"),
+    ).toHaveLength(1);
+  }
+  expect(
+    running
+      .find((group) => group.id === "ask")
+      ?.messages.map((item) => item.id),
+  ).toEqual(["ask", "request"]);
+  expect(running.find((group) => group.id === "plan")).toBe(
+    waiting.find((group) => group.id === "plan"),
+  );
+  const nextVisibleTurn = [
+    ...continued,
+    message("human", "followup", "Check status"),
+    message("ai", "status", "Checking"),
+  ];
+  expect(
+    deriveStableMessageGroups(nextVisibleTurn, true, running, true),
+  ).toEqual(getMessageGroups(nextVisibleTurn, { isCurrentTurnLoading: true }));
+  expect(running).toEqual(reconnect);
+  expect(running.find((group) => group.id === "next")?.type).toBe(
+    "assistant:processing",
+  );
+  expect(settled.find((group) => group.id === "next")?.type).toBe("assistant");
+});
+
+describe("scheduled run threads and schedule cards", () => {
+  const types = (groups: ReturnType<typeof getMessageGroups>) =>
+    groups.map((group) => group.type);
+
+  it("segments a run thread's turn like an ordinary human turn while streaming", () => {
+    const { messages } = loadScheduledThread("minute-run");
+    const ordinaryMessages = withOrdinaryHumanTurn(messages);
+    for (const source of [messages, ordinaryMessages]) {
+      let previous: ReturnType<typeof getMessageGroups> = [];
+      for (let end = 2; end <= source.length; end += 1) {
+        previous = deriveStableMessageGroups(
+          source.slice(0, end),
+          end < source.length,
+          previous,
+          true,
+        );
+        expect(types(previous)).toEqual(
+          types(
+            getMessageGroups(source.slice(0, end), {
+              isCurrentTurnLoading: end < source.length,
+            }),
+          ),
+        );
+      }
+    }
+    const scheduled = deriveStableMessageGroups(messages, false, [], false);
+    const ordinary = deriveStableMessageGroups(
+      ordinaryMessages,
+      false,
+      [],
+      false,
+    );
+    expect(types(scheduled)).toEqual(types(ordinary));
+    const usageIds = (groups: typeof scheduled) =>
+      deriveAssistantTurnUsageState(groups).byGroupIndex.map((items) =>
+        items?.map((item) => item.id),
+      );
+    expect(usageIds(scheduled)).toEqual(usageIds(ordinary));
+  });
+
+  it("keeps a schedule card inside its turn for usage", () => {
+    // Live: create (after a read_file), trial, edit, pause, resume.
+    const { messages } = loadScheduledThread("weekday-chat");
+    const groups = deriveStableMessageGroups(messages, false, [], false);
+    const { byGroupIndex } = deriveAssistantTurnUsageState(groups);
+    const cardIndexes = groups.flatMap((group, index) =>
+      group.type === "assistant:scheduled-task" ? [index] : [],
+    );
+    expect(cardIndexes).toHaveLength(5);
+    // The create turn has three model calls (read_file, schedule_task,
+    // reply); the others two. The card splits none of them.
+    cardIndexes.forEach((index, turn) => {
+      expect(byGroupIndex[index]).toBeNull();
+      expect(groups[index + 1]?.type).toBe("assistant");
+      expect(byGroupIndex[index + 1]?.length).toBe(turn === 0 ? 3 : 2);
+    });
   });
 });

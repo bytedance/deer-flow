@@ -34,8 +34,9 @@ export function resolveStoredArtifactLanguage(filepath: string) {
  * Markdown and tabular files go to the in-app viewer route, which renders it with the same
  * components as the panel instead of handing the browser a `text/markdown`
  * response it can only show as raw source. Everything else keeps the raw
- * Gateway URL — notably HTML/SVG, which the Gateway deliberately serves as a
- * download so active content never executes in the application origin.
+ * Gateway URL — notably HTML, SVG, and other XML documents, which the Gateway
+ * deliberately serves as a download so active content never executes in the
+ * application origin.
  */
 export function resolveArtifactOpenURL({
   filepath,

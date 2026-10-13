@@ -1,0 +1,305 @@
+"""Admin user-management router tests (RFC #4063 / issue #3462 gap 2).
+
+Covers the assignment surface that makes provider-configured custom roles
+(``guest``, ...) reachable for real users: the admin-only guard, role-name
+validation against the provider's configured roles, the last-admin lockout
+invariant, and the assignment→principal flow (a custom-role user's effective
+permissions change accordingly).
+"""
+
+from __future__ import annotations
+
+from uuid import uuid4
+
+from _router_auth_helpers import make_authed_test_app
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from app.gateway.auth.models import User
+from app.gateway.authz import assignable_role_names
+from app.gateway.deps import get_user_repository
+from app.gateway.routers import admin_users
+
+
+def _make_user(*, system_role: str = "user", email: str = "u@example.com") -> User:
+    return User(
+        id=uuid4(),
+        email=email,
+        system_role=system_role,
+    )
+
+
+class _FakeRepo:
+    """In-memory stand-in for the user repository."""
+
+    def __init__(self, users: list[User]) -> None:
+        self.users = {str(u.id): u for u in users}
+        self.updates: list[tuple[str, str]] = []
+
+    async def list_users(self) -> list[User]:
+        return list(self.users.values())
+
+    async def get_user_by_id(self, user_id: str) -> User | None:
+        return self.users.get(user_id)
+
+    async def count_admin_users(self) -> int:
+        return sum(1 for u in self.users.values() if u.system_role == "admin")
+
+    async def update_user(self, user: User) -> User:
+        self.updates.append((str(user.id), user.system_role))
+        self.users[str(user.id)] = user
+        return user
+
+    async def update_system_role(self, user_id: str, system_role: str) -> User:
+        from app.gateway.auth.repositories.base import LastAdminRemainsError, UserNotFoundError
+
+        user = self.users.get(user_id)
+        if user is None:
+            raise UserNotFoundError(f"User {user_id} no longer exists")
+        if user.system_role == "admin" and system_role != "admin":
+            if await self.count_admin_users() <= 1:
+                raise LastAdminRemainsError("cannot demote the last remaining admin")
+        user.system_role = system_role
+        self.updates.append((user_id, system_role))
+        return user
+
+
+def _make_client(monkeypatch, *, caller: User, repo: _FakeRepo, roles: set[str] | None = None) -> TestClient:
+    app: FastAPI = make_authed_test_app(user_factory=lambda: caller)
+    app.include_router(admin_users.router)
+    app.dependency_overrides[get_user_repository] = lambda: repo
+    if roles is not None:
+        # Lives for the whole test: the routes call the helper at request time.
+        monkeypatch.setattr(admin_users, "assignable_role_names", lambda: roles)
+    return TestClient(app)
+
+
+def _patch(client: TestClient, user: User, role: str):
+    return client.patch(f"/api/v1/admin/users/{user.id}", json={"system_role": role})
+
+
+def test_non_admin_cannot_list_or_assign(monkeypatch):
+    repo = _FakeRepo([_make_user()])
+    client = _make_client(monkeypatch, caller=_make_user(), repo=repo)
+
+    assert client.get("/api/v1/admin/users").status_code == 403
+    assert _patch(client, _make_user(), "guest").status_code == 403
+    assert repo.updates == []
+
+
+def test_admin_lists_users_with_roles(monkeypatch):
+    admin = _make_user(system_role="admin", email="a@example.com")
+    guest = _make_user(system_role="guest", email="g@example.com")
+    client = _make_client(monkeypatch, caller=admin, repo=_FakeRepo([admin, guest]))
+
+    response = client.get("/api/v1/admin/users")
+
+    assert response.status_code == 200
+    assert {row["system_role"] for row in response.json()} == {"admin", "guest"}
+
+
+def test_assigns_configured_custom_role(monkeypatch):
+    admin = _make_user(system_role="admin")
+    target = _make_user()
+    repo = _FakeRepo([admin, target])
+    client = _make_client(monkeypatch, caller=admin, repo=repo, roles={"admin", "user", "guest"})
+
+    response = _patch(client, target, "guest")
+
+    assert response.status_code == 200
+    assert response.json()["system_role"] == "guest"
+    assert repo.updates == [(str(target.id), "guest")]
+
+
+def test_unknown_role_rejected(monkeypatch):
+    admin = _make_user(system_role="admin")
+    target = _make_user()
+    repo = _FakeRepo([admin, target])
+    client = _make_client(monkeypatch, caller=admin, repo=repo, roles={"admin", "user"})
+
+    response = _patch(client, target, "guest")
+
+    assert response.status_code == 422
+    assert "guest" in response.json()["detail"]
+    assert repo.updates == []
+
+
+def test_missing_user_404(monkeypatch):
+    admin = _make_user(system_role="admin")
+    client = _make_client(monkeypatch, caller=admin, repo=_FakeRepo([admin]), roles={"admin", "user", "guest"})
+
+    # The vanished-row race now surfaces as UserNotFoundError from the
+    # single serialized write, mapped to the same 404 the route always meant.
+    assert _patch(client, _make_user(), "guest").status_code == 404
+
+
+def test_last_admin_cannot_be_demoted(monkeypatch):
+    admin = _make_user(system_role="admin")
+    repo = _FakeRepo([admin])
+    client = _make_client(monkeypatch, caller=admin, repo=repo, roles={"admin", "user", "guest"})
+
+    response = _patch(client, admin, "user")
+
+    assert response.status_code == 409
+    assert repo.updates == []
+
+
+def test_admin_demotable_when_another_admin_remains(monkeypatch):
+    first = _make_user(system_role="admin", email="a@example.com")
+    second = _make_user(system_role="admin", email="b@example.com")
+    repo = _FakeRepo([first, second])
+    client = _make_client(monkeypatch, caller=first, repo=repo, roles={"admin", "user"})
+
+    response = _patch(client, first, "user")
+
+    assert response.status_code == 200
+    assert response.json()["system_role"] == "user"
+    assert repo.updates == [(str(first.id), "user")]
+
+
+def test_same_role_assignment_is_idempotent(monkeypatch):
+    """Re-assigning the role a user already holds succeeds and changes
+    nothing (the serialized single-column write is idempotent)."""
+    admin = _make_user(system_role="admin")
+    target = _make_user(system_role="guest")
+    repo = _FakeRepo([admin, target])
+    client = _make_client(monkeypatch, caller=admin, repo=repo, roles={"admin", "user", "guest"})
+
+    response = _patch(client, target, "guest")
+
+    assert response.status_code == 200
+    assert response.json()["system_role"] == "guest"
+    assert repo.users[str(target.id)].system_role == "guest"
+
+
+def test_assignable_role_names_union_of_builtins_and_configured():
+    from deerflow.authz.rbac import RbacAuthorizationProvider
+    from deerflow.config.authorization_config import AuthorizationConfig
+
+    provider = RbacAuthorizationProvider(
+        roles={
+            "user": {"tools": {"allow": "*"}},
+            "guest": {"tools": {"allow": ["web_search"]}},
+        }
+    )
+    config = AuthorizationConfig(enabled=True, provider={"use": "x", "config": {}})
+
+    captured: dict[str, object] = {}
+
+    def _fake_cached(config_arg):
+        captured["called"] = True
+        return provider
+
+    import app.gateway.authz as authz_module
+
+    original = authz_module._get_cached_route_provider
+    original_config = authz_module._get_route_authorization_config
+    authz_module._get_cached_route_provider = _fake_cached
+    authz_module._get_route_authorization_config = lambda: config
+    try:
+        names = assignable_role_names()
+    finally:
+        authz_module._get_cached_route_provider = original
+        authz_module._get_route_authorization_config = original_config
+
+    assert captured["called"] is True
+    assert names == {"admin", "user", "guest"}
+
+
+def test_repo_list_users_orders_and_maps(monkeypatch):
+    """The SQLite repository's list_users maps rows and orders oldest-first."""
+    import asyncio
+
+    first = _make_user(email="first@example.com")
+    second = _make_user(email="second@example.com")
+    repo = _FakeRepo([first, second])
+    assert asyncio.run(repo.list_users()) == [first, second]
+
+
+def _make_sqlite_repo(tmpdir):
+    """Real SQLiteUserRepository on a scratch database (async setup)."""
+    import asyncio
+
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+    from deerflow.persistence.engine import get_session_factory, init_engine
+
+    async def _setup():
+        await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmpdir}/users.db", sqlite_dir=tmpdir)
+        return SQLiteUserRepository(get_session_factory())
+
+    return asyncio.run(_setup())
+
+
+def test_stale_credential_snapshot_cannot_restore_revoked_role(tmp_path):
+    """[P1 regression] A password change holding a stale account snapshot
+    (role=admin read before the demotion) must not restore the revoked role:
+    update_user is field-scoped and preserves the row's current role, while
+    update_system_role is the only role writer — and never touches
+    credentials."""
+    import asyncio
+    import tempfile
+
+    from app.gateway.auth.repositories.base import LastAdminRemainsError
+    from deerflow.persistence.engine import close_engine
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        repo = _make_sqlite_repo(tmpdir)
+
+        async def _run():
+            admin = User(email="admin@example.com", system_role="admin")
+            other = User(email="other@example.com", system_role="admin")
+            admin = await repo.create_user(admin)
+            other = await repo.create_user(other)
+            stale_snapshot = User(
+                id=admin.id,
+                email=admin.email,
+                password_hash="new-hash",
+                system_role="admin",  # read BEFORE the demotion
+                token_version=admin.token_version + 1,
+            )
+
+            # The demotion lands first (single-column write).
+            demoted = await repo.update_system_role(str(admin.id), "user")
+            assert demoted.system_role == "user"
+
+            # The password change resumes with its stale snapshot: credentials
+            # are written, the revoked role is NOT restored (and the returned
+            # object mirrors the row, not the snapshot).
+            after = await repo.update_user(stale_snapshot)
+            assert after.password_hash == "new-hash"
+            assert after.system_role == "user"
+            assert (await repo.get_user_by_id(str(admin.id))).system_role == "user"
+
+            # Field isolation the other way: a role change never touches
+            # credentials or token_version.
+            await repo.update_system_role(str(admin.id), "guest")
+            row = await repo.get_user_by_id(str(admin.id))
+            assert row.password_hash == "new-hash"
+            assert row.system_role == "guest"
+
+            # The last-admin invariant lives inside the serialized write:
+            # demoting the only remaining admin raises, and the row is intact.
+            try:
+                await repo.update_system_role(str(other.id), "user")
+            except LastAdminRemainsError:
+                pass
+            else:
+                raise AssertionError("demoting the last admin must raise")
+            assert (await repo.get_user_by_id(str(other.id))).system_role == "admin"
+
+        try:
+            asyncio.run(_run())
+        finally:
+            asyncio.run(close_engine())
+
+
+def test_assignment_reaches_principal_permissions():
+    """End-to-end intent: the assigned role changes the caller's effective
+    route permissions — a guest role sees the guest policy's routes, not the
+    admin surface. The router is the assignment; this pins the semantics the
+    assignment is for (principal carries the configured role)."""
+    from app.gateway.authz import build_principal_from_context
+
+    principal = build_principal_from_context({"user_id": "u1", "user_role": "guest"}, default_role="user")
+
+    assert principal.role == "guest"

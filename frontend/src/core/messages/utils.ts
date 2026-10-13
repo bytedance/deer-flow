@@ -1,12 +1,30 @@
 import type { AIMessage, Message } from "@langchain/langgraph-sdk";
 
+import {
+  parseScheduleToolResult,
+  SCHEDULE_TASK_TOOL_NAME,
+  type ScheduleToolResult,
+} from "@/core/scheduled-tasks/tool-result";
+import type { ScheduledOrigin } from "@/core/scheduled-tasks/types";
+import {
+  FENCE_MARKER_RE,
+  INDENTED_CODE_RE,
+  isClosingFence,
+} from "@/core/streamdown/fences";
+
 interface GenericMessageGroup<T = string> {
   type: T;
   id: string | undefined;
   messages: Message[];
 }
 
-interface HumanMessageGroup extends GenericMessageGroup<"human"> {}
+interface HumanMessageGroup extends GenericMessageGroup<"human"> {
+  /**
+   * Set when the human message is a scheduled launch: the host-written prompt
+   * is replaced by these user-language parts, and the message is not editable.
+   */
+  scheduledOrigin?: ScheduledOrigin;
+}
 
 interface AssistantProcessingGroup extends GenericMessageGroup<"assistant:processing"> {}
 
@@ -18,13 +36,82 @@ interface AssistantClarificationGroup extends GenericMessageGroup<"assistant:cla
 
 interface AssistantSubagentGroup extends GenericMessageGroup<"assistant:subagent"> {}
 
+/**
+ * A `schedule_task` result shown as a live card. Like a clarification it is a
+ * standalone copy of a tool message that also stays in its processing group;
+ * unlike a clarification it is not a turn boundary.
+ */
+interface AssistantScheduledTaskGroup extends GenericMessageGroup<"assistant:scheduled-task"> {
+  scheduleResult: ScheduleToolResult;
+}
+
 export type MessageGroup =
   | HumanMessageGroup
   | AssistantProcessingGroup
   | AssistantMessageGroup
   | AssistantPresentFilesGroup
   | AssistantClarificationGroup
-  | AssistantSubagentGroup;
+  | AssistantSubagentGroup
+  | AssistantScheduledTaskGroup;
+
+/**
+ * `additional_kwargs` key of a scheduled launch's human message. Pinned as
+ * `scheduled_origin_key` in `contracts/scheduled_goal_notes_contract.json`
+ * (backend `SCHEDULED_ORIGIN_KEY`).
+ */
+export const SCHEDULED_ORIGIN_KEY = "deerflow_scheduled_origin";
+
+function stringOr<T>(value: unknown, fallback: T): string | T {
+  return typeof value === "string" ? value : fallback;
+}
+
+/** The scheduled-launch origin of a human message, or null for ordinary input. */
+export function scheduledOriginOf(message: Message): ScheduledOrigin | null {
+  if (message.type !== "human") {
+    return null;
+  }
+  const raw: unknown = message.additional_kwargs?.[SCHEDULED_ORIGIN_KEY];
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return null;
+  }
+  const origin = raw as Record<string, unknown>;
+  if (typeof origin.task_id !== "string" || !origin.task_id) {
+    return null;
+  }
+  return {
+    task_id: origin.task_id,
+    task_run_id: stringOr(origin.task_run_id, ""),
+    trigger: origin.trigger === "manual" ? "manual" : "scheduled",
+    run_number:
+      typeof origin.run_number === "number" ? origin.run_number : null,
+    scheduled_for: stringOr(origin.scheduled_for, ""),
+    timezone: stringOr(origin.timezone, ""),
+    schedule_type:
+      origin.schedule_type === "once" ||
+      origin.schedule_type === "cron" ||
+      origin.schedule_type === "interval"
+        ? origin.schedule_type
+        : null,
+    task_title: stringOr(origin.task_title, ""),
+    instructions: stringOr(origin.instructions, ""),
+    stop_condition: stringOr(origin.stop_condition, null),
+    standing_notes: Array.isArray(origin.standing_notes)
+      ? origin.standing_notes.filter(
+          (note): note is string => typeof note === "string",
+        )
+      : [],
+  };
+}
+
+/** A `schedule_task` tool message whose result renders as a card. */
+export function scheduleCardResultOf(
+  message: Message,
+): ScheduleToolResult | null {
+  if (message.type !== "tool" || message.name !== SCHEDULE_TASK_TOOL_NAME) {
+    return null;
+  }
+  return parseScheduleToolResult(message.content);
+}
 
 const HIDDEN_CONTROL_MESSAGE_NAMES = new Set([
   "summary",
@@ -42,21 +129,20 @@ export function getMessageGroups(
   }
 
   const groups: MessageGroup[] = [];
-  let currentTurnStartIndex = -1;
-  if (isCurrentTurnLoading) {
-    for (let index = messages.length - 1; index >= 0; index--) {
-      const message = messages[index];
-      if (message?.type === "human" && !isHiddenFromUIMessage(message)) {
-        currentTurnStartIndex = index;
-        break;
-      }
-    }
-  }
+  const currentTurnStartIndex = isCurrentTurnLoading
+    ? findCurrentTurnStartIndex(messages)
+    : -1;
 
   // Returns the last group if it can still accept tool messages
   // (i.e. it's an in-flight processing group, not a terminal human/assistant group).
+  // A schedule card sits after its processing group while sibling tool results
+  // of the same AI message may still arrive, so look past it.
   function lastOpenGroup() {
-    const last = groups[groups.length - 1];
+    let index = groups.length - 1;
+    while (groups[index]?.type === "assistant:scheduled-task") {
+      index -= 1;
+    }
+    const last = groups[index];
     if (
       last &&
       last.type !== "human" &&
@@ -74,11 +160,22 @@ export function getMessageGroups(
     }
 
     if (message.type === "human") {
-      groups.push({ id: message.id, type: "human", messages: [message] });
+      const scheduledOrigin = scheduledOriginOf(message);
+      groups.push(
+        scheduledOrigin
+          ? {
+              id: message.id,
+              type: "human",
+              messages: [message],
+              scheduledOrigin,
+            }
+          : { id: message.id, type: "human", messages: [message] },
+      );
       continue;
     }
 
     if (message.type === "tool") {
+      const scheduleResult = scheduleCardResultOf(message);
       if (isClarificationToolMessage(message)) {
         // Add to the preceding processing group to preserve tool-call association,
         // then also open a standalone clarification group for prominent display.
@@ -87,6 +184,30 @@ export function getMessageGroups(
           id: message.id,
           type: "assistant:clarification",
           messages: [message],
+        });
+      } else if (scheduleResult) {
+        // Same association rule as clarifications: the step stays in its
+        // processing group and the card is a standalone group after it.
+        const open = lastOpenGroup();
+        if (open) {
+          open.messages.push(message);
+        }
+        // One card per task within an assistant turn: the latest result wins.
+        for (let index = groups.length - 1; index >= 0; index -= 1) {
+          const group = groups[index]!;
+          if (group.type === "human") break;
+          if (
+            group.type === "assistant:scheduled-task" &&
+            group.scheduleResult.task.id === scheduleResult.task.id
+          ) {
+            groups.splice(index, 1);
+          }
+        }
+        groups.push({
+          id: message.id,
+          type: "assistant:scheduled-task",
+          messages: [message],
+          scheduleResult,
         });
       } else {
         const open = lastOpenGroup();
@@ -145,13 +266,24 @@ export function getMessageGroups(
       // same message later. Keep that unresolved message in the processing
       // group so its visible text does not jump from an assistant bubble into
       // the steps panel when the tool call arrives (#4304).
+      // A reasoning-bearing answer is treated as terminal until tool calls
+      // actually arrive. If they do arrive on that same message, it is
+      // deliberately reclassified as processing so its tool activity remains
+      // visible with the text that introduced it.
+      // Non-empty content arrays can contain only Anthropic thinking blocks.
+      // Require content the answer renderer can actually display.
+      const hasAnswerContent = extractContentFromMessage(message).length > 0;
       const isUnresolvedAssistantText =
         currentTurnStartIndex >= 0 &&
         messageIndex > currentTurnStartIndex &&
-        hasContent(message) &&
-        !hasToolCalls(message);
+        hasAnswerContent &&
+        !hasToolCalls(message) &&
+        // A provider that has already supplied reasoning with answer text is
+        // completing an answer, not merely streaming a pre-tool narration.
+        // Keep it out of the processing disclosure while the turn is active.
+        !hasReasoning(message);
       const becomesAssistantBubble =
-        hasContent(message) &&
+        hasAnswerContent &&
         !hasToolCalls(message) &&
         !isUnresolvedAssistantText;
 
@@ -278,6 +410,10 @@ export function getLatestEditableTurn(
 
     if (
       currentHumanGroup &&
+      // A scheduled launch's prompt belongs to the task, not to the user.
+      !(
+        currentHumanGroup.type === "human" && currentHumanGroup.scheduledOrigin
+      ) &&
       lastAIGroup?.type === "assistant" &&
       humanMessage &&
       isTerminalAssistantTextMessage(assistantMessage)
@@ -569,55 +705,212 @@ export function extractTextFromMessage(message: Message) {
 }
 
 const THINK_OPEN_TAG = "<think>";
-const THINK_TAG_RE = /<think>\s*([\s\S]*?)\s*<\/think>/g;
+const THINK_CLOSE_TAG = "</think>";
 
 interface InlineReasoningSplit {
   content: string;
   reasoning: string | null;
 }
 
-function splitInlineReasoning(content: string): InlineReasoningSplit {
-  const reasoningParts: string[] = [];
-
-  // First pass: strip every fully closed `<think>...</think>` pair and
-  // collect its body as reasoning. A pair whose opener sits right after a
-  // backtick is the model talking about the tag literally inside markdown
-  // inline code (same guard as the streaming pass below) — leave it in the
-  // rendered content instead of hollowing out the code span.
-  let cleaned = content.replace(
-    THINK_TAG_RE,
-    (match: string, reasoning: string, offset: number) => {
-      if (content[offset - 1] === "`") {
-        return match;
-      }
-      const normalized = reasoning.trim();
-      if (normalized) {
-        reasoningParts.push(normalized);
-      }
-      return "";
-    },
-  );
-
-  // Streaming-safe pass: a `<think>` opener whose `</think>` has not arrived
-  // yet means the rest of the chunk is reasoning in flight. Route it into the
-  // reasoning slot instead of letting it render as message content (the
-  // raw-HTML markdown pipeline would otherwise paint the inner text on
-  // screen until the closing tag lands).
-  //
-  // Skip when the opener sits right after a backtick — that is the model
-  // talking about `<think>` literally inside markdown inline code, not
-  // actually streaming reasoning.
-  const openTagIndex = cleaned.indexOf(THINK_OPEN_TAG);
-  if (openTagIndex !== -1 && cleaned[openTagIndex - 1] !== "`") {
-    const tail = cleaned.slice(openTagIndex + THINK_OPEN_TAG.length).trim();
-    if (tail) {
-      reasoningParts.push(tail);
-    }
-    cleaned = cleaned.slice(0, openTagIndex);
+function markdownColumns(prefix: string): number {
+  let column = 0;
+  for (const char of prefix) {
+    column += char === "\t" ? 4 - (column % 4) : 1;
   }
+  return column;
+}
+
+function skipListFence(
+  content: string,
+  start: number,
+  marker: string,
+  listIndent: number,
+): number {
+  let lineStart = start;
+  while (lineStart < content.length) {
+    const newline = content.indexOf("\n", lineStart);
+    const lineEnd = newline === -1 ? content.length : newline;
+    const line = content.slice(lineStart, lineEnd);
+    const whitespace = /^[ \t]*/.exec(line)![0];
+    const indent = markdownColumns(whitespace);
+    if (line.trim() !== "") {
+      // A fenced block cannot outlive its containing list item, even when
+      // the model has not supplied a closing fence yet.
+      if (indent < listIndent) return lineStart;
+      const closer = /^(`{3,}|~{3,})[ \t]*\r?$/.exec(
+        line.slice(whitespace.length),
+      )?.[1];
+      if (
+        indent <= listIndent + 3 &&
+        closer?.startsWith(marker[0]!) &&
+        closer.length >= marker.length
+      ) {
+        return lineEnd;
+      }
+    }
+    lineStart = lineEnd + 1;
+  }
+  return content.length;
+}
+
+function splitInlineReasoning(content: string): InlineReasoningSplit {
+  if (!content.includes(THINK_OPEN_TAG)) {
+    return { content: content.trim(), reasoning: null };
+  }
+  const reasoningParts: string[] = [];
+  const contentParts: string[] = [];
+  // Scan code delimiters and reasoning openers in source order. Once inside
+  // real reasoning, jump directly to its closing tag: Markdown in reasoning
+  // must not change how the following answer is parsed.
+  // Thematic-break repetitions already consume trailing whitespace. Do not add
+  // another whitespace repetition after them: near-matches then backtrack quadratically.
+  const tokens =
+    /^ {0,3}(`{3,}|~{3,})|^( {4}|\t)|(\r?\n[ \t]*\r?\n)|^ {0,3}(#{1,6})(?=[ \t]|\r?$)|^ {0,3}((?:(?:=+|-+)[ \t]*|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,}|(?:-[ \t]*){3,})\r?$)|^ {0,3}((?:[-+*]|\d{1,9}[.)])[ \t]+)(?=\S)|`+|<think>/gm;
+  let fence: string | null = null;
+  let inlineDelimiter: string | null = null;
+  let headingEnd: number | null = null;
+  let indentedCodeEnd: number | null = null;
+  let contentStart = 0;
+  let match: RegExpExecArray | null;
+  while ((match = tokens.exec(content)) !== null) {
+    if (headingEnd !== null && match.index >= headingEnd) {
+      inlineDelimiter = null;
+      headingEnd = null;
+    }
+    if (match[4] || match[5] || match[6]) {
+      // Headings, thematic breaks and nonempty lists delimit inline spans
+      // without a blank line. Ordered lists must start at 1 to interrupt.
+      if (fence === null) {
+        if (match[6] && !/^(?:[-+*]|1[.)])/.test(match[6])) {
+          const previousLineStart =
+            content.lastIndexOf("\n", match.index - 2) + 1;
+          if (content.slice(previousLineStart, match.index).trim() !== "") {
+            continue;
+          }
+        }
+        inlineDelimiter = null;
+        if (match[4]) {
+          const newline = content.indexOf("\n", tokens.lastIndex);
+          headingEnd = newline === -1 ? content.length : newline;
+        }
+        if (match[6]) {
+          const newline = content.indexOf("\n", tokens.lastIndex);
+          const lineEnd = newline === -1 ? content.length : newline;
+          const line = content.slice(match.index, lineEnd);
+          const listFence =
+            /^ {0,3}(?:(?:[-+*]|\d{1,9}[.)])[ \t]{1,4})+(`{3,}|~{3,})/.exec(
+              line,
+            );
+          const marker = listFence?.[1];
+          if (
+            listFence &&
+            marker &&
+            (marker.startsWith("~") ||
+              !line.slice(listFence[0].length).includes("`"))
+          ) {
+            const prefix = listFence[0].slice(0, -marker.length);
+            tokens.lastIndex = skipListFence(
+              content,
+              lineEnd + 1,
+              marker,
+              markdownColumns(prefix),
+            );
+          }
+        }
+      }
+      continue;
+    }
+    if (match[3]) {
+      // Inline spans cannot cross paragraph boundaries, unlike fenced code.
+      if (fence === null) inlineDelimiter = null;
+      continue;
+    }
+    if (match[2]) {
+      // An indented continuation can still close an open inline code span.
+      // Indented code cannot interrupt an existing paragraph either.
+      const previousLineStart = content.lastIndexOf("\n", match.index - 2) + 1;
+      const startsBlock =
+        content.slice(previousLineStart, match.index).trim() === "";
+      const continuesBlock =
+        indentedCodeEnd !== null &&
+        content.slice(indentedCodeEnd, match.index).trim() === "";
+      if (inlineDelimiter === null && (startsBlock || continuesBlock)) {
+        const newline = content.indexOf("\n", tokens.lastIndex);
+        tokens.lastIndex = newline === -1 ? content.length : newline;
+        indentedCodeEnd = tokens.lastIndex;
+      } else {
+        indentedCodeEnd = null;
+      }
+      continue;
+    }
+    const marker = match[1];
+    if (marker) {
+      const newline = content.indexOf("\n", tokens.lastIndex);
+      const lineEnd = newline === -1 ? content.length : newline;
+      const lineTail = content.slice(tokens.lastIndex, lineEnd);
+      if (fence !== null) {
+        if (
+          marker.startsWith(fence.charAt(0)) &&
+          marker.length >= fence.length &&
+          lineTail.trim() === ""
+        ) {
+          fence = null;
+        }
+        tokens.lastIndex = lineEnd;
+        continue;
+      }
+      // Backtick fence info strings cannot contain backticks. Such a run
+      // may instead open or close an inline code span on this line.
+      if (marker.startsWith("~") || !lineTail.includes("`")) {
+        // Fenced blocks also interrupt paragraphs, including unfinished spans.
+        inlineDelimiter = null;
+        fence = marker;
+        tokens.lastIndex = lineEnd;
+        continue;
+      }
+    }
+    if (fence !== null) {
+      continue;
+    }
+    let delimiter = marker ?? match[0];
+    if (delimiter.startsWith("`")) {
+      // Backslash escapes apply outside a code span, not within one.
+      let escapeStart = match.index;
+      while (escapeStart > 0 && content[escapeStart - 1] === "\\") {
+        escapeStart--;
+      }
+      if (inlineDelimiter === null && (match.index - escapeStart) % 2 === 1) {
+        // An escape consumes one character, not the whole delimiter run.
+        delimiter = delimiter.slice(1);
+        if (!delimiter) continue;
+      }
+      if (inlineDelimiter === null) {
+        inlineDelimiter = delimiter;
+      } else if (inlineDelimiter === delimiter) {
+        inlineDelimiter = null;
+      }
+      continue;
+    }
+    if (inlineDelimiter !== null || match[0] !== THINK_OPEN_TAG) {
+      continue;
+    }
+    contentParts.push(content.slice(contentStart, match.index));
+    const reasoningStart = tokens.lastIndex;
+    const close = content.indexOf(THINK_CLOSE_TAG, reasoningStart);
+    const reasoning = content
+      .slice(reasoningStart, close === -1 ? undefined : close)
+      .trim();
+    if (reasoning) {
+      reasoningParts.push(reasoning);
+    }
+    contentStart =
+      close === -1 ? content.length : close + THINK_CLOSE_TAG.length;
+    tokens.lastIndex = contentStart;
+  }
+  contentParts.push(content.slice(contentStart));
 
   return {
-    content: cleaned.trim(),
+    content: contentParts.join("").trim(),
     reasoning: reasoningParts.length > 0 ? reasoningParts.join("\n\n") : null,
   };
 }
@@ -738,7 +1031,7 @@ export function hasReasoning(message: Message) {
     return false;
   }
   if (typeof message.additional_kwargs?.reasoning_content === "string") {
-    return true;
+    return message.additional_kwargs.reasoning_content.trim().length > 0;
   }
   if (Array.isArray(message.content)) {
     const part = message.content[0];
@@ -764,6 +1057,25 @@ export function hasPresentFiles(message: Message) {
     message.type === "ai" &&
     message.tool_calls?.some((toolCall) => toolCall.name === "present_files")
   );
+}
+
+/** The latest visible user input or clarification result delimits a run. */
+export function findCurrentTurnStartIndex(
+  messages: readonly Message[],
+): number {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    // Clarification replies are hidden: the result, rather than the last
+    // visible human, separates completed answers from their continuation.
+    if (
+      message &&
+      !isHiddenFromUIMessage(message) &&
+      (message.type === "human" || isClarificationToolMessage(message))
+    ) {
+      return index;
+    }
+  }
+  return -1;
 }
 
 export function isClarificationToolMessage(message: Message) {
@@ -879,10 +1191,9 @@ export function stripUploadedFilesTag(content: string): string {
  *   legacy history does not leak raw blocks or server paths — see #4212)
  * - ``SkillActivationMiddleware`` → ``<slash_skill_activation>``
  * - ``DynamicContextMiddleware`` → ``<system-reminder>`` (carrying
- *   ``<memory>`` / ``<current_date>`` inside)
- * - ``TodoListMiddleware`` / ``LoopDetectionMiddleware`` style reminders
- *   live in ``hide_from_ui`` HumanMessages, but their inner payload uses
- *   the same tag vocabulary.
+ *   ``<memory>`` / ``<current_date>`` inside), plus the Phase-2 project
+ *   context blocks: ``<project name="…">`` (instructions identity) and the
+ *   request-scoped ``<documents count=… shown=…>`` shelf index.
  *
  * The primary export filter is {@link isHiddenFromUIMessage}. This list is
  * the defence-in-depth strip for any message that — by middleware bug,
@@ -896,12 +1207,58 @@ export const INTERNAL_MARKER_TAGS = [
   "system-reminder",
   "memory",
   "current_date",
+  "project",
+  "documents",
 ] as const;
 
+// The project context blocks carry attributes (``<project name="…">``,
+// ``<documents count=… shown=…>``), so the opener match tolerates an
+// attribute span — same shape as the streamdown preprocess regex.
 const INTERNAL_MARKER_RE = new RegExp(
-  `<(${INTERNAL_MARKER_TAGS.join("|")})>[\\s\\S]*?</\\1>`,
+  `<(${INTERNAL_MARKER_TAGS.join("|")})(?:\\s[^>]*)?>[\\s\\S]*?</\\1>`,
   "g",
 );
+
+/**
+ * Character ranges that must survive marker stripping: fenced code blocks
+ * (marker-aware, so a shorter or different fence inside a block does not
+ * close it, and a fence line that carries an info string never closes one)
+ * and 4-space indented code lines — the same protection the render
+ * path applies in ``stripLeakedSystemTags``. ``project`` and ``documents``
+ * are generic tag names, so a fenced Maven ``pom.xml`` or pasted XML must not
+ * lose its span on export; a marker whose span STARTS inside a protected
+ * range is left alone, while injected blocks (never fenced) keep being
+ * removed even when their content contains a fence.
+ */
+function protectedCodeRanges(content: string): Array<[number, number]> {
+  const ranges: Array<[number, number]> = [];
+  let fenceMarker: string | null = null;
+  let fenceStart = 0;
+  let offset = 0;
+  for (const line of content.split("\n")) {
+    const fenceMatch = FENCE_MARKER_RE.exec(line);
+    if (fenceMatch) {
+      const marker = fenceMatch[1]!;
+      if (fenceMarker === null) {
+        fenceMarker = marker;
+        fenceStart = offset;
+      } else if (isClosingFence(line, fenceMarker)) {
+        ranges.push([fenceStart, offset + line.length]);
+        fenceMarker = null;
+      }
+    } else if (fenceMarker !== null) {
+      // Inside a fenced block: covered by the open range.
+    } else if (INDENTED_CODE_RE.test(line)) {
+      ranges.push([offset, offset + line.length]);
+    }
+    offset += line.length + 1;
+  }
+  if (fenceMarker !== null) {
+    // Unclosed fence: everything after the opener is code.
+    ranges.push([fenceStart, content.length]);
+  }
+  return ranges;
+}
 
 /**
  * Strip every known backend-injected marker from message content.
@@ -912,9 +1269,25 @@ const INTERNAL_MARKER_RE = new RegExp(
  * via a separate filter and the narrower function avoids stripping content
  * a user might legitimately type into a meta-discussion (e.g. asking the
  * model about its own ``<memory>`` system).
+ *
+ * Code-aware like the renderer: markers inside fenced or indented code
+ * blocks are preserved, so a pasted ``<project>``/``<documents>`` snippet in
+ * a code block is not silently deleted from the exported markdown.
  */
 export function stripInternalMarkers(content: string): string {
-  return content.replace(INTERNAL_MARKER_RE, "").trim();
+  const protectedRanges = protectedCodeRanges(content);
+  if (protectedRanges.length === 0) {
+    return content.replace(INTERNAL_MARKER_RE, "").trim();
+  }
+  return content
+    .replace(INTERNAL_MARKER_RE, (match: string, ...args: unknown[]) => {
+      const offset = args[args.length - 2] as number;
+      const isProtected = protectedRanges.some(
+        ([start, end]) => offset >= start && offset < end,
+      );
+      return isProtected ? match : "";
+    })
+    .trim();
 }
 
 // The upload context block renders sizes as human-readable strings

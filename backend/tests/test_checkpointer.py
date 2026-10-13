@@ -208,7 +208,7 @@ class TestHarnessPackaging:
         assert "postgres" in optional_dependencies
         assert optional_dependencies["postgres"] == [
             "asyncpg>=0.29",
-            "langgraph-checkpoint-postgres>=3.1.1,<3.2",
+            "langgraph-checkpoint-postgres>=3.1.2,<3.2",
             "psycopg[binary]>=3.3.3",
             "psycopg-pool>=3.3.0",
         ]
@@ -1155,6 +1155,92 @@ class TestStoreDatabaseConfig:
         with patch("deerflow.runtime.store.provider.get_app_config", return_value=app_config):
             with store_context() as store:
                 assert isinstance(store, InMemoryStore)
+
+
+# ---------------------------------------------------------------------------
+# SQLite URI connection strings
+# ---------------------------------------------------------------------------
+
+# LangGraph's SQLite ``from_conn_string`` factories connect without
+# ``uri=True``, so SQLite treats a ``file:`` URI as a literal filename.
+SQLITE_URIS = [
+    "file:rel.db?mode=rwc",
+    "file::memory:?cache=shared",
+    "file:memdb1?mode=memory&cache=shared",
+]
+
+
+class TestSqliteUriRejection:
+    """A ``file:`` URI must fail closed instead of creating a file named after it."""
+
+    @pytest.mark.parametrize("conn_string", SQLITE_URIS)
+    def test_resolve_rejects_uri(self, conn_string):
+        from deerflow.runtime.store._sqlite_utils import resolve_sqlite_conn_str
+
+        with pytest.raises(ValueError, match="SQLite URI"):
+            resolve_sqlite_conn_str(conn_string)
+
+    def test_resolve_keeps_memory_and_resolves_paths(self, tmp_path):
+        from deerflow.runtime.store._sqlite_utils import resolve_sqlite_conn_str
+
+        assert resolve_sqlite_conn_str(":memory:") == ":memory:"
+        assert resolve_sqlite_conn_str(str(tmp_path / "cp.db")) == str(tmp_path / "cp.db")
+
+    @pytest.mark.parametrize("conn_string", ["FILE:x.db", "File:x.db"])
+    def test_resolve_treats_non_lowercase_file_prefix_as_path(self, conn_string):
+        """SQLite only recognizes a lowercase ``file:`` prefix as a URI, even with ``uri=True``."""
+        from deerflow.config.paths import resolve_path
+        from deerflow.runtime.store._sqlite_utils import resolve_sqlite_conn_str
+
+        assert resolve_sqlite_conn_str(conn_string) == str(resolve_path(conn_string))
+
+    @pytest.mark.parametrize("conn_string", SQLITE_URIS)
+    def test_sync_checkpointer_rejects_uri(self, conn_string, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        load_checkpointer_config_from_dict({"type": "sqlite", "connection_string": conn_string})
+
+        with pytest.raises(ValueError, match="SQLite URI"):
+            get_checkpointer()
+
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize("conn_string", SQLITE_URIS)
+    def test_sync_store_rejects_uri(self, conn_string, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        load_checkpointer_config_from_dict({"type": "sqlite", "connection_string": conn_string})
+
+        with pytest.raises(ValueError, match="SQLite URI"):
+            get_store()
+
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("conn_string", SQLITE_URIS)
+    async def test_async_checkpointer_rejects_uri(self, conn_string, tmp_path, monkeypatch):
+        from deerflow.runtime.checkpointer.async_provider import make_checkpointer
+
+        monkeypatch.chdir(tmp_path)
+        app_config = SimpleNamespace(checkpointer=CheckpointerConfig(type="sqlite", connection_string=conn_string), database=None)
+
+        with pytest.raises(ValueError, match="SQLite URI"):
+            async with make_checkpointer(app_config):
+                pass
+
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("conn_string", SQLITE_URIS)
+    async def test_async_store_rejects_uri(self, conn_string, tmp_path, monkeypatch):
+        from deerflow.runtime.store.async_provider import make_store
+
+        monkeypatch.chdir(tmp_path)
+        app_config = SimpleNamespace(checkpointer=CheckpointerConfig(type="sqlite", connection_string=conn_string), database=None)
+
+        with pytest.raises(ValueError, match="SQLite URI"):
+            async with make_store(app_config):
+                pass
+
+        assert list(tmp_path.iterdir()) == []
 
 
 # ---------------------------------------------------------------------------

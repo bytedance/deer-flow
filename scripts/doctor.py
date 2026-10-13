@@ -11,10 +11,12 @@ Exit codes:
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 import sys
+import time
 from importlib import import_module
 from pathlib import Path
 from typing import Literal
@@ -65,7 +67,7 @@ def _icon(status: Status) -> str:
 
 def _run(cmd: list[str]) -> str | None:
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=True)
         return (r.stdout or r.stderr).strip()
     except Exception:
         return None
@@ -99,6 +101,48 @@ def _split_use_path(use: str) -> tuple[str, str] | None:
     if not module_name or not attr_name:
         return None
     return module_name, attr_name
+
+
+def _load_json_object(path: Path) -> dict | None:
+    """Load a JSON object without letting malformed CLI state abort doctor."""
+    if not path.is_file():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _has_non_empty_token(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+# Acceptance rules mirror backend/packages/harness/deerflow/models/credential_loader.py
+# (``load_codex_cli_credential``, ``_extract_claude_code_credential`` + ``is_expired``), which
+# stays the source of truth; keep the two in lockstep when the loader changes. The mirror is
+# deliberate: importing the loader could consume the one-shot
+# CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR handoff. Strictness differs on purpose in one
+# place -- doctor rejects a whitespace-only token that the runtime's truthiness check would
+# accept before failing at the provider.
+def _codex_auth_file_has_access_token(path: Path) -> bool:
+    data = _load_json_object(path)
+    if data is None:
+        return False
+    tokens = data.get("tokens")
+    nested_access_token = tokens.get("access_token") if isinstance(tokens, dict) else None
+    return any(_has_non_empty_token(value) for value in (data.get("access_token"), data.get("token"), nested_access_token))
+
+
+def _claude_credentials_file_has_access_token(path: Path) -> bool:
+    data = _load_json_object(path)
+    oauth = data.get("claudeAiOauth") if data is not None else None
+    if not isinstance(oauth, dict) or not _has_non_empty_token(oauth.get("accessToken")):
+        return False
+    expires_at = oauth.get("expiresAt", 0)
+    if isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)):
+        return False
+    return expires_at <= 0 or time.time() * 1000 <= expires_at - 60_000
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +217,8 @@ def check_pnpm() -> CheckResult:
             cwd=FRONTEND_DIR,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=False,
             shell=False,
         )
@@ -227,6 +273,64 @@ def check_nginx() -> CheckResult:
         "fail",
         fix=("macOS:   brew install nginx\nUbuntu:  sudo apt install nginx\nWindows: use WSL or Docker mode"),
     )
+
+
+# Environment variables that choose which config file the Gateway loads.
+CONFIG_LOCATION_ENV_VARS = ("DEER_FLOW_CONFIG_PATH", "DEER_FLOW_PROJECT_ROOT")
+
+
+def _unquoted_dotenv_keys(env_path: Path) -> set[str]:
+    """Return the ``.env`` keys whose value is written without quotes."""
+    from dotenv.parser import parse_stream
+
+    with open(env_path, encoding="utf-8") as stream:
+        return {binding.key for binding in parse_stream(stream) if binding.key and binding.original.string.split("=", 1)[-1].lstrip()[:1] not in ("'", '"')}
+
+
+def resolve_config_path() -> tuple[Path, CheckResult | None]:
+    """Locate the config.yaml the Gateway would read.
+
+    Delegates to the harness resolver (``DEER_FLOW_CONFIG_PATH``, then
+    ``config.yaml`` under ``DEER_FLOW_PROJECT_ROOT``, then the legacy
+    backend/repository-root locations) so doctor checks the same file the
+    Gateway loads. When an environment override would stop the Gateway from
+    starting, returns the path it names (which does not exist) and a failed
+    ``config.yaml found`` result carrying the Gateway's error.
+    """
+    config_env = os.environ.get("DEER_FLOW_CONFIG_PATH")
+    default_path = Path(os.environ.get("DEER_FLOW_PROJECT_ROOT") or ".") / "config.yaml"
+    try:
+        from deerflow.config.app_config import AppConfig
+    except Exception as exc:
+        # Keep diagnosing a broken backend environment instead of crashing
+        # (any import-time failure, as in check_config_loadable); the
+        # YAML-only checks still run against the most likely path.
+        return Path(config_env) if config_env else default_path, CheckResult(
+            "config.yaml found",
+            "fail",
+            f"cannot import the DeerFlow harness to resolve it ({type(exc).__name__}: {exc})",
+            fix="Run 'make install'",
+        )
+
+    try:
+        return AppConfig.resolve_config_path(), None
+    except FileNotFoundError as exc:
+        if not config_env:
+            # Nothing at the default locations: a plain missing config.
+            return default_path, None
+        return Path(config_env), CheckResult(
+            "config.yaml found",
+            "fail",
+            str(exc),
+            fix="Point DEER_FLOW_CONFIG_PATH at an existing config.yaml, or unset it",
+        )
+    except ValueError as exc:
+        return Path(os.environ["DEER_FLOW_PROJECT_ROOT"]) / "config.yaml", CheckResult(
+            "config.yaml found",
+            "fail",
+            str(exc),
+            fix="Point DEER_FLOW_PROJECT_ROOT at the DeerFlow checkout, or unset it",
+        )
 
 
 def check_config_exists(config_path: Path) -> CheckResult:
@@ -414,7 +518,7 @@ def check_llm_auth(config_path: Path) -> list[CheckResult]:
 
             if use == "deerflow.models.openai_codex_provider:CodexChatModel":
                 auth_path = Path(os.environ.get("CODEX_AUTH_PATH", "~/.codex/auth.json")).expanduser()
-                if auth_path.exists():
+                if _codex_auth_file_has_access_token(auth_path):
                     results.append(CheckResult(f"Codex CLI auth available (model: {model_name})", "ok", str(auth_path)))
                 else:
                     results.append(
@@ -422,7 +526,7 @@ def check_llm_auth(config_path: Path) -> list[CheckResult]:
                             f"Codex CLI auth available (model: {model_name})",
                             "fail",
                             str(auth_path),
-                            fix="Run `codex login`, or set CODEX_AUTH_PATH to a valid auth.json",
+                            fix="Run `codex login`, or set CODEX_AUTH_PATH to an auth.json containing a valid access token",
                         )
                     )
 
@@ -430,7 +534,7 @@ def check_llm_auth(config_path: Path) -> list[CheckResult]:
                 credential_paths = [Path(os.environ["CLAUDE_CODE_CREDENTIALS_PATH"]).expanduser() for env_name in ("CLAUDE_CODE_CREDENTIALS_PATH",) if os.environ.get(env_name)]
                 credential_paths.append(Path("~/.claude/.credentials.json").expanduser())
                 has_oauth_env = any(
-                    os.environ.get(name)
+                    (os.environ.get(name) or "").strip()
                     for name in (
                         "ANTHROPIC_API_KEY",
                         "CLAUDE_CODE_OAUTH_TOKEN",
@@ -439,14 +543,16 @@ def check_llm_auth(config_path: Path) -> list[CheckResult]:
                     )
                 )
                 existing_path = next((path for path in credential_paths if path.exists()), None)
-                if has_oauth_env or existing_path is not None:
-                    detail = "env var set" if has_oauth_env else str(existing_path)
+                valid_path = next((path for path in credential_paths if _claude_credentials_file_has_access_token(path)), None)
+                if has_oauth_env or valid_path is not None:
+                    detail = "env var set" if has_oauth_env else str(valid_path)
                     results.append(CheckResult(f"Claude auth available (model: {model_name})", "ok", detail))
                 else:
                     results.append(
                         CheckResult(
                             f"Claude auth available (model: {model_name})",
                             "fail",
+                            str(existing_path) if existing_path is not None else "",
                             fix=("Set ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN, or place credentials at ~/.claude/.credentials.json"),
                         )
                     )
@@ -506,6 +612,7 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "firecrawl": "FIRECRAWL_API_KEY",
                 "fastcrw": "CRW_API_KEY",
                 "sofya": "SOFYA_API_KEY",
+                "unbrowse": "UNBROWSE_API_KEY",
             },
             "image_search": {
                 "brave": "BRAVE_SEARCH_API_KEY",
@@ -713,17 +820,30 @@ def check_env_file(project_root: Path) -> CheckResult:
 
 def main() -> int:
     project_root = Path(__file__).resolve().parents[1]
-    config_path = project_root / "config.yaml"
 
     # Load .env early so key checks work
     try:
-        from dotenv import load_dotenv
+        from dotenv import dotenv_values, load_dotenv
 
         env_path = project_root / ".env"
         if env_path.exists():
             load_dotenv(env_path, override=False)
+            # `make dev` (scripts/serve.sh) sources .env over the shell, so
+            # for the variables that choose the config file, .env wins.
+            unquoted = _unquoted_dotenv_keys(env_path)
+            for name, value in dotenv_values(env_path).items():
+                if name in CONFIG_LOCATION_ENV_VARS and value is not None:
+                    # `source` expands an unquoted leading `~`, not a quoted one.
+                    os.environ[name] = os.path.expanduser(value) if name in unquoted else value
     except ImportError:
         pass
+
+    # serve.sh then replaces an unset or empty runtime root with the
+    # checkout, so config resolution and the loadable check see what the
+    # Gateway sees.
+    if not os.environ.get("DEER_FLOW_PROJECT_ROOT"):
+        os.environ["DEER_FLOW_PROJECT_ROOT"] = str(project_root)
+    config_path, config_failure = resolve_config_path()
 
     print()
     print(bold("DeerFlow Health Check"))
@@ -745,7 +865,7 @@ def main() -> int:
     cfg_checks: list[CheckResult] = [
         check_env_file(project_root),
         check_frontend_env(project_root),
-        check_config_exists(config_path),
+        config_failure or check_config_exists(config_path),
         check_config_version(config_path, project_root),
         check_config_loadable(config_path),
         check_models_configured(config_path),

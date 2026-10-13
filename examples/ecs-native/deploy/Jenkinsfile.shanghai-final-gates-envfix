@@ -1,0 +1,37 @@
+pipeline {
+  agent { node { label 'shanghai-builder'; customWorkspace '/data/jenkins-agent/deerflow/native-task6b-56636cebddc6' } }
+  options { disableConcurrentBuilds(); skipDefaultCheckout(true); timeout(time: 95, unit: 'MINUTES'); timestamps() }
+  parameters {
+    choice(name: 'PHASE', choices: ['final-code-gates-envfix'], description: 'One reviewed source gate; no build or role changes')
+    string(name: 'FINAL_ARCHIVE_NAME', defaultValue: '', description: 'Reviewed immutable public archive basename')
+    string(name: 'FINAL_ARCHIVE_SHA256', defaultValue: '', description: 'Reviewed immutable archive hash')
+    string(name: 'FINAL_SOURCE_SHA256', defaultValue: '', description: 'Reviewed source entry hashes')
+    string(name: 'FINAL_MANIFEST_SHA256', defaultValue: '', description: 'Reviewed embedded manifest hash')
+  }
+  stages {
+    stage('Final source gates in isolated accepted image') {
+      options { timeout(time: 85, unit: 'MINUTES') }
+      steps {
+        withEnv(["FINAL_ARCHIVE_NAME=${params.FINAL_ARCHIVE_NAME}", "FINAL_ARCHIVE_SHA256=${params.FINAL_ARCHIVE_SHA256}", "FINAL_SOURCE_SHA256=${params.FINAL_SOURCE_SHA256}", "FINAL_MANIFEST_SHA256=${params.FINAL_MANIFEST_SHA256}"]) {
+          sh '''set +x
+set -eu
+python3 -c "import hashlib;from pathlib import Path;assert hashlib.sha256(Path('scripts/ecs_native_final_code_gates_envfix.py').read_bytes()).hexdigest()=='e9e8eace2b2ae24df06ca1085155d75dcf579a54a65d9e6a2f5a76eb9e42e51b';assert hashlib.sha256(Path('scripts/ecs_native_final_code_gates_envfix_inner.py').read_bytes()).hexdigest()=='f33bd31944634777969d41071b67fae008bd0cacf567f8ec7717456d0b72cf14'"
+python3 scripts/ecs_native_final_code_gates_envfix.py "$FINAL_ARCHIVE_NAME" "$FINAL_ARCHIVE_SHA256" "$FINAL_SOURCE_SHA256" "$FINAL_MANIFEST_SHA256"
+'''
+        }
+      }
+    }
+  }
+  post {
+    always {
+      timeout(time: 5, unit: 'MINUTES') {
+        sh '''set +x
+set -eu
+python3 -c "import hashlib;from pathlib import Path;assert hashlib.sha256(Path('scripts/ecs_native_final_code_gates_envfix.py').read_bytes()).hexdigest()=='e9e8eace2b2ae24df06ca1085155d75dcf579a54a65d9e6a2f5a76eb9e42e51b'"
+python3 scripts/ecs_native_final_code_gates_envfix.py --cleanup
+'''
+      }
+      archiveArtifacts artifacts: 'native-final-code-gates-envfix-*/receipt.json,native-final-code-gates-envfix-*/public-gates.log', allowEmptyArchive: true, fingerprint: true
+    }
+  }
+}

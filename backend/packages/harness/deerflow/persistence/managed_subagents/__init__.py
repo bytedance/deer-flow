@@ -28,11 +28,6 @@ _file_store_singleton: ManagedSubagentStore | None = None
 
 def make_managed_subagent_store(config: AppConfig) -> ManagedSubagentStore:
     """Select the same persistence backend used by custom agent definitions."""
-    from deerflow.persistence.agent_definition_context import get_scoped_definition_stores
-
-    scoped = get_scoped_definition_stores()
-    if scoped is not None:
-        return scoped[1]
     if config.agent_storage.backend == "db":
         if config.database.backend not in ("sqlite", "postgres"):
             raise ValueError("Managed subagent database storage requires database.backend to be 'sqlite' or 'postgres'.")
@@ -43,12 +38,6 @@ def make_managed_subagent_store(config: AppConfig) -> ManagedSubagentStore:
 
 
 def get_managed_subagent_store(config: AppConfig | None = None) -> ManagedSubagentStore:
-    from deerflow.persistence.agent_definition_context import get_scoped_definition_stores
-
-    scoped = get_scoped_definition_stores()
-    if scoped is not None:
-        return scoped[1]
-
     if config is not None:
         return make_managed_subagent_store(config)
     from deerflow.config.app_config import get_app_config

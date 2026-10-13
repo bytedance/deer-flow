@@ -1,7 +1,6 @@
 """User Pydantic models for authentication."""
 
 from datetime import UTC, datetime
-from typing import Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
@@ -20,7 +19,12 @@ class User(BaseModel):
     id: UUID = Field(default_factory=uuid4, description="Primary key")
     email: EmailStr = Field(..., description="Unique email address")
     password_hash: str | None = Field(None, description="bcrypt hash, nullable for OAuth users")
-    system_role: Literal["admin", "user"] = Field(default="user")
+    # Plain string on purpose: the DB column is String(16) and the RBAC
+    # provider accepts arbitrary configured role names (RFC #4063 gap 2 —
+    # custom roles must be assignable to authenticated users). "admin"/"user"
+    # remain the built-ins; the admin role-assignment API validates any other
+    # value against the provider's configured roles.
+    system_role: str = Field(default="user", min_length=1)
     created_at: datetime = Field(default_factory=_utc_now)
 
     # OAuth linkage (optional)
@@ -37,7 +41,7 @@ class UserResponse(BaseModel):
 
     id: str
     email: str
-    system_role: Literal["admin", "user"]
+    system_role: str = Field(..., min_length=1)
     needs_setup: bool = False
     oauth_provider: str | None = Field(None, description="OAuth/SSO provider ID if the user logged in via SSO (e.g. 'keycloak')")
     permissions: list[str] | None = Field(

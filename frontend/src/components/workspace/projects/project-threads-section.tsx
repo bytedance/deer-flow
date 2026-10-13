@@ -28,8 +28,9 @@ export function ProjectThreadsSection({
             {t.projects.threadsLoadFailed}
           </div>
         ) : threads.length === 0 && !query.isLoading ? (
-          <div className="text-muted-foreground p-4 text-sm">
-            {t.projects.empty}
+          <div className="text-muted-foreground flex flex-col gap-1 p-4 text-sm">
+            <p>{t.projects.empty}</p>
+            <p className="text-xs">{t.projects.interimMemoryNotice}</p>
           </div>
         ) : (
           // The page scrolls inside its own ScrollArea; the list windows rows

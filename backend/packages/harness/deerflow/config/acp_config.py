@@ -3,7 +3,9 @@
 import logging
 from collections.abc import Mapping
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
+
+from deerflow.config._boolean_guards import reject_boolean
 
 logger = logging.getLogger(__name__)
 
@@ -28,13 +30,17 @@ class ACPAgentConfig(BaseModel):
         default=1800,
         ge=1,
         description=(
-            "Maximum time in seconds to wait for the agent to respond to a single invoke_acp_agent "
-            "call before the invocation is aborted and the subprocess is terminated. Mirrors "
-            "subagents.timeout_seconds (default: 1800 = 30 minutes) — without this backstop, an ACP "
-            "agent subprocess that hangs after initialize/new_session blocks the tool call, and "
-            "therefore the whole agent turn, indefinitely."
+            "Shared time budget in seconds for initialization, session creation, and prompt during one "
+            "invoke_acp_agent call, starting after the subprocess is launched. On timeout, the invocation "
+            "is aborted and the subprocess is terminated. Workspace/MCP preparation and subprocess cleanup "
+            "are outside this budget. Mirrors subagents.timeout_seconds (default: 1800 = 30 minutes)."
         ),
     )
+
+    @field_validator("timeout_seconds", mode="before")
+    @classmethod
+    def _reject_boolean_timeout(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")
 
 
 _acp_agents: dict[str, ACPAgentConfig] = {}

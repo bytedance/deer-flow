@@ -5,11 +5,6 @@ const skipWebServer = process.env.PLAYWRIGHT_SKIP_WEB_SERVER === "1";
 
 export default defineConfig({
   testDir: "./tests/e2e",
-  // Installed Fleet acceptance is driven by the authenticated backend fixture.
-  // Keep it outside demo-only CI while explicit BC10 runs retain required().
-  testIgnore: process.env.BC10_THREAD_ID
-    ? []
-    : ["**/fleet-continuation.spec.ts"],
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,

@@ -5,8 +5,9 @@ each tool call creates a new MCP session. For stateful servers like Playwright,
 this means browser state (opened pages, filled forms) is lost between calls.
 
 This module provides a session pool that maintains persistent MCP sessions,
-scoped by ``(server_name, scope_key)`` — typically scope_key is the thread_id —
-so that consecutive tool calls share the same session and server-side state.
+scoped by ``(server_name, scope_key, owning_loop, ownership_domain)``. Consecutive calls on
+the same loop share server-side state; independent loops use separate sessions.
+The sync wrapper uses a fresh loop per call, so it does not preserve that state.
 Sessions are evicted in LRU order when the pool reaches capacity.
 
 Lifecycle model (owner task)
@@ -41,18 +42,72 @@ single caller that might get cancelled.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import threading
-import time
 from collections import OrderedDict
-from typing import Any
+from collections.abc import Collection, Mapping
+from dataclasses import dataclass, field
+from typing import Any, Literal
 
 import anyio
 from mcp import ClientSession
 from mcp.shared.exceptions import McpError
 from mcp.types import CONNECTION_CLOSED
 
+from deerflow.mcp_scope import mcp_scope_belongs_to_thread
+
 logger = logging.getLogger(__name__)
+
+MCPPoolDomain = Literal["deployment", "personal"]
+
+_STDIO_IDENTITY_KEYS = ("transport", "command", "args", "cwd", "env")
+
+
+def normalized_connection_fingerprint(connection: Mapping[str, Any]) -> str:
+    """Return a secret-safe digest of the stdio process identity."""
+    identity = {key: connection[key] for key in _STDIO_IDENTITY_KEYS if key in connection}
+    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class ServerBinding:
+    """Opaque capability naming one configuration epoch for a pooled server."""
+
+    domain: MCPPoolDomain
+    server_name: str
+    epoch: int
+    fingerprint: str | None = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedRetirement:
+    """Owners atomically detached and signalled by a binding transition."""
+
+    entries: tuple[
+        tuple[ClientSession, asyncio.AbstractEventLoop, asyncio.Task[Any], asyncio.Event],
+        ...,
+    ] = ()
+    inflight: tuple[
+        tuple[
+            asyncio.AbstractEventLoop,
+            asyncio.Future[ClientSession],
+            asyncio.Task[Any],
+            asyncio.Event,
+        ],
+        ...,
+    ] = ()
+
+
+class StaleMCPBindingError(RuntimeError):
+    """Raised when a caller holds a superseded stdio server binding."""
+
+    def __init__(self, server_name: str) -> None:
+        super().__init__(f"MCP server '{server_name}' configuration changed; rebuild the MCP tools before calling it again")
+        self.server_name = server_name
+
 
 _MCP_CLOSED_STREAM_ERRORS = (
     anyio.ClosedResourceError,
@@ -108,24 +163,22 @@ async def call_pooled_session_tool(
     tool_name: str,
     arguments: dict[str, Any],
     call_kwargs: dict[str, Any],
+    domain: MCPPoolDomain = "deployment",
 ) -> Any:
     """Call a pooled session and evict it only after an explicit disconnect."""
     try:
         return await session.call_tool(tool_name, arguments, **call_kwargs)
     except Exception as error:
         if _is_mcp_transport_disconnect(error):
-            cleanup = asyncio.create_task(pool.close_session_if_current(server_name, scope_key, session))
+            cleanup_call = pool.close_session_if_current(server_name, scope_key, session) if domain == "deployment" else pool.close_session_if_current(server_name, scope_key, session, domain=domain)
+            cleanup = asyncio.create_task(cleanup_call)
             if await _finish_session_cleanup(cleanup, server_name):
                 raise asyncio.CancelledError
         raise
 
 
-class McpScopeBarrierClosed(RuntimeError):
-    """Trusted scope is paused; this is not a remote task status failure."""
-
-
 class MCPSessionPool:
-    """Manages persistent MCP sessions scoped by ``(server_name, scope_key)``."""
+    """Manages persistent MCP sessions scoped by ``(server_name, scope_key, owning_loop, ownership_domain)``."""
 
     MAX_SESSIONS = 256
     SESSION_CLOSE_TIMEOUT = 5.0  # seconds to wait when closing a session on a foreign loop
@@ -133,7 +186,7 @@ class MCPSessionPool:
     def __init__(self) -> None:
         # Each entry: (session, owning_loop, owner_task, close_event).
         self._entries: OrderedDict[
-            tuple[str, str],
+            tuple[str, str, asyncio.AbstractEventLoop, MCPPoolDomain],
             tuple[
                 ClientSession,
                 asyncio.AbstractEventLoop,
@@ -141,7 +194,7 @@ class MCPSessionPool:
                 asyncio.Event,
             ],
         ] = OrderedDict()
-        # In-flight creations, keyed by (server, scope). Lets concurrent callers
+        # In-flight creations, keyed by (server, scope, owning_loop, ownership_domain). Lets concurrent callers
         # on the same loop share a single creation instead of each spawning a
         # duplicate session. Value: (loop, ready_future, owner_task, close_event).
         # The owner task promotes the record into ``_entries`` and resolves
@@ -149,7 +202,7 @@ class MCPSessionPool:
         # ``_run_session``), so ``ready`` resolving with a *result* always means
         # the session is registered — never merely handed to one caller.
         self._inflight: dict[
-            tuple[str, str],
+            tuple[str, str, asyncio.AbstractEventLoop, MCPPoolDomain],
             tuple[
                 asyncio.AbstractEventLoop,
                 asyncio.Future[ClientSession],
@@ -166,127 +219,175 @@ class MCPSessionPool:
         # garbage-collected before teardown completes; the done callback keeps
         # the set from growing without bound.
         self._teardown_tasks: set[asyncio.Task[Any]] = set()
-        # Optional positive scope barriers retain real owners across timeout or
-        # cancelled waiters; the ordinary Local close API stays unchanged.
-        self._scope_closing: dict[str, set[tuple[asyncio.AbstractEventLoop, asyncio.Task[Any]]]] = {}
-        self._scope_barriers: dict[str, int] = {}
-        # Host-bound C scopes retain each actual owner from birth, before any
-        # legacy LRU/close/unwind path can detach its registry entry. Unbound
-        # Local scopes keep their existing best-effort close behavior.
-        self._managed_scopes: set[str] = set()
-        self._scope_monitored: set[tuple[str, asyncio.AbstractEventLoop, asyncio.Task[Any]]] = set()
+        # Per-(ownership-domain, server-name) configuration capability.
+        # Session registry keys remain the four-tuple introduced by PR A.
+        self._bindings: dict[tuple[MCPPoolDomain, str], ServerBinding] = {}
+        self._binding_lifecycle_servers: set[tuple[MCPPoolDomain, str]] = set()
+        self._next_binding_epoch = 1
+        self._retired = False
 
-    def manage_scope(self, scope_key: str) -> None:
-        """Trusted host binding before C tools can create any SDK owners."""
+    # ------------------------------------------------------------------
+    # Server binding identity
+    # ------------------------------------------------------------------
+
+    def _install_binding_locked(
+        self,
+        binding_key: tuple[MCPPoolDomain, str],
+        fingerprint: str | None,
+    ) -> ServerBinding:
+        domain, server_name = binding_key
+        binding = ServerBinding(
+            domain=domain,
+            server_name=server_name,
+            epoch=self._next_binding_epoch,
+            fingerprint=fingerprint,
+        )
+        self._next_binding_epoch += 1
+        self._bindings[binding_key] = binding
+        return binding
+
+    def _binding_is_current(self, expected: ServerBinding) -> bool:
         with self._lock:
-            self._managed_scopes.add(scope_key)
-            for key, (_, loop, task, _) in self._entries.items():
-                if key[1] == scope_key:
-                    self._retain_scope_owner_locked(scope_key, loop, task)
-            for key, (loop, _, task, _) in self._inflight.items():
-                if key[1] == scope_key:
-                    self._retain_scope_owner_locked(scope_key, loop, task)
+            return not self._retired and self._bindings.get((expected.domain, expected.server_name)) is expected
 
-    def _retain_scope_owner_locked(self, scope_key, loop, task):
-        if scope_key not in self._managed_scopes:
-            return
-        pair = (loop, task)
-        self._scope_closing.setdefault(scope_key, set()).add(pair)
-        marker = (scope_key, loop, task)
-        if marker in self._scope_monitored:
-            return
-        self._scope_monitored.add(marker)
+    def ensure_binding(
+        self,
+        server_name: str,
+        fingerprint: str,
+        *,
+        domain: MCPPoolDomain = "deployment",
+    ) -> ServerBinding:
+        """Resolve the discovery/task binding atomically without overwriting newer state."""
+        binding_key = (domain, server_name)
+        with self._lock:
+            self._binding_lifecycle_servers.add(binding_key)
+            if self._retired:
+                raise StaleMCPBindingError(server_name)
+            current = self._bindings.get(binding_key)
+            if current is None:
+                return self._install_binding_locked(binding_key, fingerprint)
+            if current.fingerprint != fingerprint:
+                raise StaleMCPBindingError(server_name)
+            return current
 
-        def start_positive_join():
-            async def join_actual_owner():
-                try:
-                    await asyncio.shield(task)
-                except BaseException:
-                    if not task.done():
-                        raise
-                finally:
-                    # Only awaiting the original SDK owner through its real
-                    # __aexit__ grants removal, never a detached wrapper/reaper
-                    # finishing or a legacy registry becoming empty.
-                    with self._lock:
-                        self._scope_monitored.discard(marker)
-                        if task.done():
-                            owners = self._scope_closing.get(scope_key)
-                            if owners is not None:
-                                owners.discard(pair)
-                                if not owners:
-                                    self._scope_closing.pop(scope_key, None)
+    def reconcile_bindings(
+        self,
+        active: Mapping[str, str],
+        removed: Collection[str],
+        *,
+        domain: MCPPoolDomain = "deployment",
+    ) -> PreparedRetirement:
+        """Apply already-classified binding changes and detach only changed owners.
 
-            monitor = loop.create_task(join_actual_owner())
-            self._teardown_tasks.add(monitor)
-            monitor.add_done_callback(self._teardown_tasks.discard)
+        This method deliberately does not inspect configuration. A higher layer
+        supplies current fingerprints and removed names. Epoch installation,
+        registry detach and owner signalling are one non-awaiting critical
+        section, so a stale creator cannot resurrect after the transition.
+        """
+        entries: list[tuple[ClientSession, asyncio.AbstractEventLoop, asyncio.Task[Any], asyncio.Event]] = []
+        inflight: list[tuple[asyncio.AbstractEventLoop, asyncio.Future[ClientSession], asyncio.Task[Any], asyncio.Event]] = []
+        changed: set[str] = set()
 
-        if not loop.is_closed():
-            try:
-                loop.call_soon_threadsafe(start_positive_join)
-            except RuntimeError:
-                pass
-        # An unverifiable/closed owner loop stays retained for the explicit
-        # scope barrier to fail closed; no completion is invented here.
+        with self._lock:
+            for server_name, fingerprint in active.items():
+                binding_key = (domain, server_name)
+                self._binding_lifecycle_servers.add(binding_key)
+                current = self._bindings.get(binding_key)
+                if current is not None and current.fingerprint == fingerprint:
+                    continue
+                self._install_binding_locked(binding_key, fingerprint)
+                changed.add(server_name)
+
+            for server_name in removed:
+                binding_key = (domain, server_name)
+                self._binding_lifecycle_servers.add(binding_key)
+                current = self._bindings.get(binding_key)
+                if current is not None and current.fingerprint is None:
+                    continue
+                self._install_binding_locked(binding_key, None)
+                changed.add(server_name)
+
+            for key in [k for k in self._entries if k[3] == domain and k[0] in changed]:
+                entries.append(self._entries.pop(key))
+            for key in [k for k in self._inflight if k[3] == domain and k[0] in changed]:
+                inflight.append(self._inflight.pop(key))
+
+            for _session, loop, _task, close_evt in entries:
+                self._signal_close(loop, close_evt)
+            for loop, ready, task, close_evt in inflight:
+                self._signal_close(loop, close_evt)
+                self._cancel_owner(loop, task, ready)
+
+        # Owners are already out of the registry, so retain their teardown even
+        # if the caller never awaits the returned PreparedRetirement.
+        for _session, loop, task, _close_evt in entries:
+            self._track_detached_owner(loop, task)
+        for loop, _ready, task, _close_evt in inflight:
+            self._track_detached_owner(loop, task)
+
+        return PreparedRetirement(entries=tuple(entries), inflight=tuple(inflight))
+
+    def retire_all(self) -> None:
+        """Fence this pool so stale wrappers cannot create sessions after reset."""
+        with self._lock:
+            self._retired = True
 
     # ------------------------------------------------------------------
     # Session owner task
     # ------------------------------------------------------------------
 
+    def _discard_owner(
+        self,
+        key: tuple[str, str, asyncio.AbstractEventLoop, MCPPoolDomain],
+        owner: asyncio.Task[Any],
+    ) -> None:
+        """Retire only this owner, including after asyncio.run shuts its loop down."""
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is not None and entry[2] is owner:
+                self._entries.pop(key)
+            inflight = self._inflight.get(key)
+            if inflight is not None and inflight[2] is owner:
+                self._inflight.pop(key)
+
     async def _run_session(
         self,
-        key: tuple[str, str],
+        key: tuple[str, str, asyncio.AbstractEventLoop, MCPPoolDomain],
         connection: dict[str, Any],
         ready: asyncio.Future[ClientSession],
         close_evt: asyncio.Event,
+        expected_binding: ServerBinding,
     ) -> None:
-        """Own a single MCP session for its entire lifetime.
-
-        Enters the session context manager, initializes it, and *commits* the
-        session: promotes the in-flight record into ``_entries`` and resolves
-        ``ready`` with the live session in one atomic critical section, then
-        blocks until ``close_evt`` is set. The context manager is *always*
-        exited from this task, satisfying anyio's cancel-scope same-task
-        requirement.
-        """
+        """Own one MCP session and fence promotion against binding replacement."""
         from langchain_mcp_adapters.sessions import create_session
 
         cm = create_session(connection)
         try:
             session = await cm.__aenter__()
-        except BaseException as e:
-            # Never entered the cancel scope, so there is nothing to exit.
+        except BaseException as error:
             if not ready.done():
-                ready.set_exception(e)
+                if self._binding_is_current(expected_binding):
+                    ready.set_exception(error)
+                else:
+                    logger.debug(
+                        "Suppressing MCP session error for superseded binding '%s'",
+                        expected_binding.server_name,
+                        exc_info=(type(error), error, error.__traceback__),
+                    )
+                    ready.set_exception(StaleMCPBindingError(expected_binding.server_name))
             return
 
-        # The context manager is now entered. From here on __aexit__ MUST run in
-        # this task — on init failure, on cancellation, or on the close signal —
-        # to satisfy anyio's same-task cancel-scope requirement and to avoid
-        # leaking the session/subprocess.
         try:
             await session.initialize()
-            # Commit point. ``ready`` resolves with a *result* only inside the
-            # critical section that also registers the session in ``_entries``:
-            # a resolved-with-result future therefore means the session is
-            # pool-owned (visible to LRU eviction and the close_* paths), never
-            # the private property of one caller. Joiners waiting on ``ready``
-            # can only ever receive a committed session, and an unwind path can
-            # check the outcome race-free. If the record was already removed
-            # (the creator unwound or a close_* ran), the creation is aborted:
-            # ``ready`` carries the cancellation instead, so no caller can end
-            # up holding an unmanaged session.
             loop = asyncio.get_running_loop()
             task = asyncio.current_task()
             promoted_evicted: list[tuple[asyncio.AbstractEventLoop, asyncio.Task[Any], asyncio.Event]] = []
+            binding_key = (expected_binding.domain, expected_binding.server_name)
             with self._lock:
+                binding_ok = not self._retired and self._bindings.get(binding_key) is expected_binding
                 still_ours = self._inflight.get(key) == (loop, ready, task, close_evt)
-                if still_ours:
+                if still_ours and binding_ok:
                     self._inflight.pop(key)
-                    # Different keys can finish initialization concurrently.
-                    # They may all pass the earlier capacity check while no
-                    # session is registered, so enforce the cap again at the
-                    # single owner-controlled commit point.
                     while len(self._entries) >= self.MAX_SESSIONS:
                         oldest_key, (_, ent_loop, ent_task, ent_close) = next(iter(self._entries.items()))
                         self._entries.pop(oldest_key)
@@ -294,26 +395,40 @@ class MCPSessionPool:
                     self._entries[key] = (session, loop, task, close_evt)
                     if not ready.done():
                         ready.set_result(session)
-            if still_ours:
-                # Drain victims independently: a blocked victim's __aexit__
-                # must not prevent this owner from handling its own close.
+                elif still_ours:
+                    self._inflight.pop(key)
+
+            if still_ours and binding_ok:
                 for ent_loop, _ent_task, ent_close in promoted_evicted:
                     self._signal_close(ent_loop, ent_close)
-                for ent_loop, ent_task, ent_close in promoted_evicted:
+                for ent_loop, ent_task, _ent_close in promoted_evicted:
                     if ent_loop is loop:
                         self._track_owner_teardown(ent_task)
                     elif not ent_loop.is_closed():
                         try:
                             ent_loop.call_soon_threadsafe(self._track_owner_teardown, ent_task)
                         except RuntimeError:
-                            pass  # The owning loop closed before scheduling.
+                            pass
                 logger.info("Created persistent MCP session for %s/%s", key[0], key[1])
-            elif not ready.done():
-                ready.set_exception(asyncio.CancelledError("MCP session pool was closed while the session was being created"))
-            await close_evt.wait()
-        except BaseException as e:
+                await close_evt.wait()
+            elif not binding_ok:
+                if not ready.done():
+                    ready.set_exception(StaleMCPBindingError(expected_binding.server_name))
+            else:
+                if not ready.done():
+                    ready.set_exception(asyncio.CancelledError("MCP session pool was closed while the session was being created"))
+                await close_evt.wait()
+        except BaseException as error:
             if not ready.done():
-                ready.set_exception(e)
+                if self._binding_is_current(expected_binding):
+                    ready.set_exception(error)
+                else:
+                    logger.debug(
+                        "Suppressing MCP session error for superseded binding '%s'",
+                        expected_binding.server_name,
+                        exc_info=(type(error), error, error.__traceback__),
+                    )
+                    ready.set_exception(StaleMCPBindingError(expected_binding.server_name))
         finally:
             try:
                 await cm.__aexit__(None, None, None)
@@ -325,113 +440,76 @@ class MCPSessionPool:
         server_name: str,
         scope_key: str,
         connection: dict[str, Any],
+        *,
+        binding: ServerBinding | None = None,
+        domain: MCPPoolDomain = "deployment",
     ) -> ClientSession:
-        """Get or create a persistent MCP session.
+        """Get/create a pooled session while proving the caller owns the current binding."""
+        effective_domain = binding.domain if binding is not None else domain
+        if binding is not None and binding.server_name != server_name:
+            raise StaleMCPBindingError(server_name)
 
-        If an existing session was created in a different (or closed) event
-        loop, it is evicted and replaced with a fresh one owned by a task on
-        the current loop.
-
-        Args:
-            server_name: MCP server name.
-            scope_key: Isolation key (typically thread_id).
-            connection: Connection configuration for ``create_session``.
-
-        Returns:
-            An initialized ``ClientSession``.
-        """
-        key = (server_name, scope_key)
         current_loop = asyncio.get_running_loop()
+        key = (server_name, scope_key, current_loop, effective_domain)
+        binding_key = (effective_domain, server_name)
 
-        # Phase 1: inspect/mutate the registry under the thread lock (no awaits).
-        # Decide one of three outcomes atomically: return an existing session,
-        # join an in-flight creation, or become the creator for this key.
-        # Each item: (loop, owner_task, close_event, cancel, ready_future).
-        # ``cancel`` is True for in-flight creations, whose owner may be blocked
-        # inside ``initialize()`` where close_evt cannot wake it — it must be
-        # cancelled (guarded: never when the owner already failed and is
-        # unwinding in __aexit__). ``ready`` is the creation's future, used only
-        # for that guard.
-        evicted: list[tuple[asyncio.AbstractEventLoop, asyncio.Task[Any], asyncio.Event, bool, asyncio.Future[ClientSession] | None]] = []
+        evicted: list[tuple[asyncio.AbstractEventLoop, asyncio.Task[Any], asyncio.Event]] = []
         join: asyncio.Future[ClientSession] | None = None
         ready: asyncio.Future[ClientSession] | None = None
         close_evt: asyncio.Event | None = None
         task: asyncio.Task[Any] | None = None
+
         with self._lock:
-            if scope_key in self._scope_barriers:
-                raise McpScopeBarrierClosed("Original MCP scope barrier is closed")
+            if self._retired:
+                raise StaleMCPBindingError(server_name)
+
+            if binding is not None:
+                if self._bindings.get(binding_key) is not binding:
+                    raise StaleMCPBindingError(server_name)
+                expected_binding = binding
+            else:
+                # Compatibility for callers not yet binding-aware. Once a
+                # server participates in explicit binding lifecycle, callers
+                # must present the opaque capability; fingerprint equality
+                # alone cannot distinguish remove/re-add ABA.
+                if binding_key in self._binding_lifecycle_servers:
+                    raise StaleMCPBindingError(server_name)
+                expected_binding = self._bindings.get(binding_key)
+                fingerprint = normalized_connection_fingerprint(connection)
+                if expected_binding is None:
+                    expected_binding = self._install_binding_locked(binding_key, fingerprint)
+                elif expected_binding.fingerprint != fingerprint:
+                    raise StaleMCPBindingError(server_name)
+
             if key in self._entries:
-                session, loop, ent_task, ent_close = self._entries[key]
-                if loop is current_loop and not loop.is_closed():
+                session, _loop, ent_task, _ent_close = self._entries[key]
+                if not ent_task.done():
                     self._entries.move_to_end(key)
                     return session
-                # Session belongs to a different/closed event loop – evict it.
                 self._entries.pop(key)
-                evicted.append((loop, ent_task, ent_close, False, None))
 
             inflight = self._inflight.get(key)
-            if inflight is not None and inflight[0] is current_loop and not inflight[0].is_closed():
-                # Another caller on this loop is already creating the session;
-                # wait for the same result instead of building a duplicate.
+            if inflight is not None:
                 join = inflight[1]
             else:
-                if inflight is not None:
-                    # Stale in-flight creation owned by a different/closed loop.
-                    # Drop the record and tear its owner down; because that owner
-                    # may be blocked inside initialize() (where close_evt cannot
-                    # wake it), it must be cancelled. We then create a fresh
-                    # session here.
-                    self._inflight.pop(key)
-                    evicted.append((inflight[0], inflight[2], inflight[3], True, inflight[1]))
-                # Become the creator: publish an in-flight record before any
-                # await so concurrent callers join us instead of racing.
                 ready = current_loop.create_future()
                 close_evt = asyncio.Event()
-                task = current_loop.create_task(self._run_session(key, connection, ready, close_evt))
+                task = current_loop.create_task(self._run_session(key, connection, ready, close_evt, expected_binding))
                 self._inflight[key] = (current_loop, ready, task, close_evt)
-                self._retain_scope_owner_locked(scope_key, current_loop, task)
+                task.add_done_callback(lambda owner: self._discard_owner(key, owner))
 
-            # Evict LRU entries when at capacity.
             while len(self._entries) >= self.MAX_SESSIONS:
                 oldest_key, (_, loop, ent_task, ent_close) = next(iter(self._entries.items()))
                 self._entries.pop(oldest_key)
-                evicted.append((loop, ent_task, ent_close, False, None))
+                evicted.append((loop, ent_task, ent_close))
 
-        # Phase 2: shut down evicted sessions/creations. Signal EVERY removed
-        # owner first — the signal loop contains no awaits, so it completes
-        # atomically and a cancellation during the teardown awaits below can
-        # never strand an owner that was already removed from the registries.
-        # Then await teardowns (same-loop deterministically; foreign-loop
-        # in-flight creations routed to their loop). In every case the owner
-        # task — never this one — runs __aexit__.
-        for loop, ent_task, ent_close, cancel, ent_ready in evicted:
+        for loop, _ent_task, ent_close in evicted:
             self._signal_close(loop, ent_close)
-            if cancel:
-                self._cancel_owner(loop, ent_task, ent_ready)
         try:
-            for loop, ent_task, ent_close, cancel, ent_ready in evicted:
+            for loop, ent_task, ent_close in evicted:
                 if loop is current_loop and not loop.is_closed():
-                    await self._shutdown(ent_close, ent_task, cancel=False, ready=ent_ready)
-                elif cancel:
-                    await self._shutdown_entry(loop, ent_task, ent_close, cancel=False, ready=ent_ready)
-                # else: foreign-loop registered entry — already signalled above;
-                # its teardown completes on its own loop.
+                    await self._shutdown(ent_close, ent_task)
         except BaseException:
-            # We may already be the creator for ``key``: the in-flight record
-            # and owner task were published under the lock *before* these
-            # awaits. A cancellation here (routine — both production call
-            # sites wrap get_session in asyncio.wait_for(session_init_timeout))
-            # would otherwise orphan that owner: it finishes initialize(),
-            # commits, and blocks on close_evt forever — invisible to LRU
-            # eviction, which only scans _entries. Unwind exactly like the
-            # Phase-3 path — unless the owner already committed while we were
-            # parked here: then the session is registered in _entries and may
-            # already be in a joiner's hands, so tearing it down would close it
-            # underneath them. A committed session is pool property; LRU
-            # eviction and the close_* paths own it from here on. Every evicted
-            # owner was already signalled in the atomic loop above, so skipping
-            # the remaining teardown *awaits* (not signals) on unwind is safe:
-            # each victim still tears down in its own task.
             if task is not None and not self._creation_committed(ready):
                 assert ready is not None and close_evt is not None
                 try:
@@ -443,42 +521,20 @@ class MCPSessionPool:
                         self._inflight.pop(key)
             raise
 
-        # Phase 2b: a concurrent creation for this key is already in progress on
-        # this loop — share its result rather than create a duplicate session.
-        # The creator's owner task resolves ``ready`` with a result only at the
-        # commit critical section that also registers the session, so a value
-        # returned here is always pool-owned; if the creation is aborted (the
-        # creator unwound or a close_* ran), ``ready`` carries the exception and
-        # this joiner fails with it instead of holding an unmanaged session.
         if join is not None:
-            return await asyncio.shield(join)
+            session = await asyncio.shield(join)
+            # Check-before-return fence, not a lease across subsequent caller
+            # use: a reconcile racing after this check detaches and closes the
+            # owner, and the caller then fails through the existing transport
+            # disconnect path.
+            if not self._binding_is_current(expected_binding):
+                raise StaleMCPBindingError(server_name)
+            return session
 
         assert ready is not None and close_evt is not None and task is not None
-
-        # Phase 3: wait for our owner task to commit the initialized session.
-        # A successful result means the session is already registered in
-        # _entries — the commit critical section did both — so from that moment
-        # the pool, not this call, owns its lifetime.
         try:
             session = await asyncio.shield(ready)
         except BaseException:
-            # Three distinct cases reach here:
-            #
-            # 1. The owner task failed (e.g. connect/initialize error) and
-            #    reported it via ready.set_exception(). It is *already* in its
-            #    finally block running cm.__aexit__ in its own task, so we must
-            #    NOT cancel it — doing so would interrupt that cleanup. We only
-            #    wait for it to finish unwinding.
-            # 2. This call itself was cancelled (CancelledError) while the
-            #    creation was still in flight. Because of the shield, `ready`
-            #    is still pending and the owner task is alive. We signal close
-            #    and cancel it so it exits the cancel scope in its own task,
-            #    then wait for it to finish.
-            # 3. This call was cancelled at the very moment the owner
-            #    committed: `ready` resolved with a result and the session is
-            #    registered in _entries. Joiners may already hold it, so we
-            #    must NOT tear it down — just propagate the cancellation and
-            #    leave the pooled session to LRU eviction / close_*.
             if not self._creation_committed(ready):
                 owner_already_failed = ready.done() and not ready.cancelled() and ready.exception() is not None
                 if not owner_already_failed:
@@ -493,8 +549,9 @@ class MCPSessionPool:
                         self._inflight.pop(key)
             raise
 
-        # Phase 4: the owner task already promoted the initialized session and
-        # enforced capacity in the same commit critical section.
+        # Same check-before-return fence as the joiner path above; not a lease.
+        if not self._binding_is_current(expected_binding):
+            raise StaleMCPBindingError(server_name)
         return session
 
     # ------------------------------------------------------------------
@@ -567,6 +624,33 @@ class MCPSessionPool:
         except RuntimeError:
             # Loop was closed between the is_closed() check and now.
             pass
+
+    def _track_detached_owner(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        task: asyncio.Task[Any],
+    ) -> None:
+        """Keep an owner detached by binding reconciliation strongly retained.
+
+        ``reconcile_bindings()`` removes owners from the registry without
+        awaiting their teardown, so the pool itself must keep that teardown
+        observable even when the caller drops the returned
+        ``PreparedRetirement``. The reaper has to run on the owner's loop, which
+        is where ``__aexit__`` executes.
+        """
+        try:
+            current_loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        if loop is current_loop:
+            self._track_owner_teardown(task)
+        elif not loop.is_closed():
+            try:
+                loop.call_soon_threadsafe(self._track_owner_teardown, task)
+            except RuntimeError:
+                # Loop was closed between the is_closed() check and now.
+                pass
 
     def _track_owner_teardown(self, task: asyncio.Task[Any]) -> None:
         """Keep detached eviction or cancelled-caller teardown observable.
@@ -695,7 +779,7 @@ class MCPSessionPool:
             await self._shutdown_entry(loop, ent_task, ent_close, ready=ent_ready)
 
     async def close_scope(self, scope_key: str) -> None:
-        """Close all sessions for a given scope (e.g. thread_id)."""
+        """Close all sessions for a scope across ownership domains."""
         with self._lock:
             keys = [k for k in self._entries if k[1] == scope_key]
             entries = [(self._entries.pop(k)) for k in keys]
@@ -703,115 +787,74 @@ class MCPSessionPool:
             inflight = [self._inflight.pop(k) for k in inflight_keys]
         await self._close_owners(entries, inflight)
 
-    def freeze_scope(self, scope_key: str, *, barrier_epoch: int) -> None:
-        """Host-only admission fence before detaching original scope owners."""
-        if type(barrier_epoch) is not int or barrier_epoch <= 0:
-            raise ValueError("Original MCP barrier epoch required")
-        with self._lock:
-            existing = self._scope_barriers.get(scope_key)
-            if existing is not None and existing != barrier_epoch:
-                raise ValueError("Original MCP barrier epoch conflicts")
-            self._scope_barriers[scope_key] = barrier_epoch
+    async def close_thread_scope(self, *, user_id: str, thread_id: str) -> None:
+        """Close every session scoped to one user/thread identity across ownership domains.
 
-    def reopen_scope(self, scope_key: str, *, barrier_epoch: int) -> None:
-        """Reopen only the same positively joined original partial barrier."""
-        with self._lock:
-            if self._scope_barriers.get(scope_key) != barrier_epoch:
-                raise ValueError("Original MCP barrier epoch conflicts")
-            if self._scope_closing.get(scope_key) or any(key[1] == scope_key for key in (*self._entries, *self._inflight)):
-                raise RuntimeError("Original MCP scope owners are not settled")
-            self._scope_barriers.pop(scope_key)
+        Differs from :meth:`close_scope` in matching *all incarnations* of the
+        thread rather than one exact scope key. A thread-deletion path knows the
+        user and thread but not reliably the incarnation: the record may predate
+        incarnation tracking (legacy ``user:thread`` scope), and a new
+        incarnation can be minted between reading the record and tearing down.
+        Keying cleanup on a read incarnation would therefore both miss legacy
+        sessions and race a concurrent incarnation. Every generation of a
+        deleted thread is equally stale, so all of them are closed.
 
-    def scope_owners_pending(self, scope_key: str) -> bool:
-        """C host evidence includes detached owners until positive join."""
-        with self._lock:
-            return bool(self._scope_closing.get(scope_key)) or any(key[1] == scope_key for key in (*self._entries, *self._inflight))
+        ``user_id`` must be the same string used by
+        ``resolve_runtime_user_id(runtime)`` when minting the session scope.
+        The Gateway delete route passes ``get_effective_user_id()`` and relies
+        on both resolving to the same identity in its embedded runtime.
 
-    async def close_scope_and_join(self, scope_key: str, *, deadline: float) -> None:
-        """Close original scope owners and prove every actual task has finished.
-
-        The trusted caller must first close tool admission. This optional API
-        provides physical owner-task settlement, not a Node process census or
-        a stateless/reconnectable contract. Retained references survive timeout
-        and cancellation so retry cannot confuse an empty registry with done.
+        Sessions belonging to another user or thread are left untouched.
         """
         with self._lock:
-            entries = [self._entries.pop(key) for key in tuple(self._entries) if key[1] == scope_key]
-            inflight = [self._inflight.pop(key) for key in tuple(self._inflight) if key[1] == scope_key]
-            owners = self._scope_closing.setdefault(scope_key, set())
-            owners.update((loop, task) for _, loop, task, _ in entries)
-            owners.update((loop, task) for loop, _, task, _ in inflight)
-            retained = tuple(owners)
-        # Signal every owner before waiting for any. Only original in-flight
-        # initialization receives the existing guarded cancellation semantics.
-        for _, loop, task, close in entries:
-            self._signal_close(loop, close)
-        for loop, ready, task, close in inflight:
-            self._signal_close(loop, close)
-            self._cancel_owner(loop, task, ready)
+            keys = [k for k in self._entries if mcp_scope_belongs_to_thread(k[1], user_id=user_id, thread_id=thread_id)]
+            entries = [self._entries.pop(k) for k in keys]
+            inflight_keys = [k for k in self._inflight if mcp_scope_belongs_to_thread(k[1], user_id=user_id, thread_id=thread_id)]
+            inflight = [self._inflight.pop(k) for k in inflight_keys]
+        await self._close_owners(entries, inflight)
 
-        async def settle(task):
-            try:
-                await asyncio.shield(task)
-            except BaseException:
-                if not task.done():
-                    raise
-                # Original close swallows owner teardown errors; actual task
-                # completion is all this barrier proves. Node still verifies
-                # that the SDK's real child processes disappeared.
-
-        for loop, task in retained:
-            if not task.done():
-                if loop.is_closed() or (loop is not asyncio.get_running_loop() and not loop.is_running()):
-                    raise RuntimeError("Original MCP owner loop cannot positively settle")
-                if loop is asyncio.get_running_loop():
-                    waiter = asyncio.create_task(settle(task))
-                else:
-                    waiter = asyncio.ensure_future(asyncio.wrap_future(asyncio.run_coroutine_threadsafe(settle(task), loop)))
-                self._teardown_tasks.add(waiter)
-                waiter.add_done_callback(self._teardown_tasks.discard)
-                done, _ = await asyncio.wait({waiter}, timeout=max(0, deadline - time.monotonic()))
-                if not done or not task.done():
-                    raise TimeoutError("Original MCP scope owners have not physically joined")
-                waiter.result()
-            with self._lock:
-                if self._scope_closing.get(scope_key) is owners:
-                    owners.discard((loop, task))
+    async def close_session(
+        self,
+        server_name: str,
+        scope_key: str,
+        *,
+        domain: MCPPoolDomain = "deployment",
+    ) -> None:
+        """Close this ownership domain's session for a server/scope across loops."""
         with self._lock:
-            if self._scope_closing.get(scope_key) is owners and not owners:
-                self._scope_closing.pop(scope_key, None)
-
-    async def close_session(self, server_name: str, scope_key: str) -> None:
-        """Close one exact server/scope session so a retry reconnects cleanly."""
-        key = (server_name, scope_key)
-        with self._lock:
-            entry = self._entries.pop(key, None)
-            inflight = self._inflight.pop(key, None)
-        await self._close_owners([entry] if entry is not None else [], [inflight] if inflight is not None else [])
+            keys = [k for k in self._entries if k[:2] == (server_name, scope_key) and k[3] == domain]
+            entries = [self._entries.pop(k) for k in keys]
+            keys = [k for k in self._inflight if k[:2] == (server_name, scope_key) and k[3] == domain]
+            inflight = [self._inflight.pop(k) for k in keys]
+        await self._close_owners(entries, inflight)
 
     async def close_session_if_current(
         self,
         server_name: str,
         scope_key: str,
         session: ClientSession,
+        *,
+        domain: MCPPoolDomain = "deployment",
     ) -> bool:
-        """Close *session* only if it is still the registered entry for the key."""
-        key = (server_name, scope_key)
+        """Close *session* only if it is current in the requested ownership domain."""
         with self._lock:
-            entry = self._entries.get(key)
-            if entry is None or entry[0] is not session:
+            key = next(
+                (k for k, entry in self._entries.items() if k[:2] == (server_name, scope_key) and k[3] == domain and entry[0] is session),
+                None,
+            )
+            if key is None:
                 return False
-            self._entries.pop(key)
+            entry = self._entries.pop(key)
         _session, loop, task, close_evt = entry
         await self._shutdown_entry(loop, task, close_evt)
         return True
 
-    async def close_server(self, server_name: str) -> None:
-        """Close all sessions for a given server."""
+    async def close_server(self, server_name: str, *, domain: MCPPoolDomain = "deployment") -> None:
+        """Close one ownership domain's sessions for a given server."""
         with self._lock:
-            keys = [k for k in self._entries if k[0] == server_name]
+            keys = [k for k in self._entries if k[0] == server_name and k[3] == domain]
             entries = [(self._entries.pop(k)) for k in keys]
-            inflight_keys = [k for k in self._inflight if k[0] == server_name]
+            inflight_keys = [k for k in self._inflight if k[0] == server_name and k[3] == domain]
             inflight = [self._inflight.pop(k) for k in inflight_keys]
         await self._close_owners(entries, inflight)
 
@@ -908,9 +951,15 @@ def get_session_pool() -> MCPSessionPool:
 
 
 def reset_session_pool() -> MCPSessionPool | None:
-    """Reset the singleton and return the retired pool, if any."""
+    """Reset the singleton and return the retired pool, if any.
+
+    The old pool is fenced before publication of the replacement so wrappers
+    that captured it cannot create a post-reset session.
+    """
     global _pool
     with _pool_lock:
         retired = _pool
+        if retired is not None:
+            retired.retire_all()
         _pool = None
         return retired

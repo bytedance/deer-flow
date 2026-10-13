@@ -20,6 +20,7 @@ from skill_review_waivers import (
     parse_manifest,
     validate_manifest_against_facts,
 )
+from support.symlinks import symlink_or_skip
 
 from deerflow.skills.review.analyzer import analyze_skill_package
 from deerflow.skills.review.readers import LocalDirectoryReader
@@ -221,7 +222,7 @@ def test_matching_waiver_rejects_symlinked_package_outside_repository(tmp_path: 
     external_target, digest = _write_target(external_root)
     public_root = tmp_path / "skills/public"
     public_root.mkdir(parents=True)
-    (public_root / "demo").symlink_to(external_target.parents[1], target_is_directory=True)
+    symlink_or_skip(public_root / "demo", external_target.parents[1], target_is_directory=True)
 
     assert (
         matching_waiver(

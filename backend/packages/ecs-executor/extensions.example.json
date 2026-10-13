@@ -1,0 +1,16 @@
+{
+  "mcpInterceptors": ["ecs_executor.interceptor:build_execution_scope_interceptor"],
+  "mcpServers": {
+    "ecs": {
+      "type": "http",
+      "url": "http://127.0.0.1:8003/mcp",
+      "headers": {"Authorization": "$ECS_EXECUTOR_DISCOVERY_AUTH_HEADER"},
+      "user_auth": {
+        "enabled": true,
+        "on_missing": "deny",
+        "users": {"alice": "$ECS_EXECUTOR_ALICE_AUTH_HEADER"}
+      },
+      "task_toolsets": [{"name": "execution", "submit_tool": "submit", "status_tool": "status", "cancel_tool": "cancel"}]
+    }
+  }
+}

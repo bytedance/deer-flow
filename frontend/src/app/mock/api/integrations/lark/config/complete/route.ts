@@ -29,6 +29,7 @@ export function POST() {
         verified: false,
       },
       sandbox_runtime_mode: "none",
+      sandbox_runtime_probed: true,
       sandbox_runtime_ready: false,
       sandbox_runtime_detail: null,
     },

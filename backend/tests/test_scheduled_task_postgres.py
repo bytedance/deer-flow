@@ -3,18 +3,26 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
+from sqlalchemy import select, text, update
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from deerflow.config.database_config import DatabaseConfig
+from deerflow.persistence.base import Base
 from deerflow.persistence.engine import close_engine, get_engine, get_session_factory, init_engine_from_config
+from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 from deerflow.persistence.run import RunRepository
+from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs import ScheduledTaskRunRepository
+from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
+from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 
 POSTGRES_URL = os.environ.get("TEST_POSTGRES_URI")
 
@@ -156,3 +164,146 @@ async def test_postgres_reconciliation_uses_metadata_and_atomically_claims_expir
     assert recovered is not None
     assert recovered["status"] == "error"
     assert recovered["stop_reason"] == "scheduled_task_orphan_recovered"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovery_method", ["cancel_stuck_once_tasks", "reconcile_stuck_once_tasks"])
+@pytest.mark.parametrize("newer_status", ["skipped", "queued", "launching", "running"])
+@pytest.mark.parametrize("older_clock_ahead_seconds", [30, 0], ids=["reversed-timestamps", "equal-timestamps"])
+async def test_postgres_once_recovery_uses_occurrence_order_despite_clock_skew(postgres_repositories, recovery_method, newer_status, older_clock_ahead_seconds):
+    task_repo, task_run_repo, _run_repo = postgres_repositories
+    now = datetime(2026, 7, 15, 12, 0, tzinfo=UTC)
+    await task_repo.create(
+        task_id="task-once",
+        user_id="user-1",
+        thread_id=None,
+        context_mode="fresh_thread_per_run",
+        assistant_id=None,
+        title="Once task",
+        prompt="p",
+        schedule_type="once",
+        schedule_spec={"run_at": now.isoformat()},
+        timezone="UTC",
+        next_run_at=None,
+    )
+    await task_repo.update_after_launch(
+        "task-once",
+        status="running",
+        next_run_at=None,
+        last_run_at=now,
+        last_run_id=None,
+        last_thread_id=None,
+        last_error=None,
+        increment_run_count=False,
+    )
+    # The older worker's clock and descending UUID order both favor its success.
+    with patch("deerflow.persistence.scheduled_task_runs.sql.datetime") as clock:
+        clock.now.return_value = now + timedelta(seconds=older_clock_ahead_seconds)
+        older = await task_run_repo.create(
+            run_record_id="ffffffff-ffff-4fff-8fff-ffffffffffff",
+            task_id="task-once",
+            thread_id="thread-old",
+            scheduled_for=clock.now.return_value,
+            trigger="manual",
+            status="success",
+        )
+        clock.now.return_value = now
+        newer = await task_run_repo.create(
+            run_record_id="00000000-0000-4000-8000-000000000000",
+            task_id="task-once",
+            thread_id="thread-new",
+            scheduled_for=clock.now.return_value,
+            trigger="manual",
+            status=newer_status,
+        )
+    assert older["created_at"] >= newer["created_at"]
+    assert older["scheduled_for"] >= newer["scheduled_for"]
+    kwargs = {"error": "interrupted: recovery"}
+    if recovery_method == "reconcile_stuck_once_tasks":
+        kwargs["now"] = now + timedelta(minutes=1)
+    count = await getattr(task_repo, recovery_method)(**kwargs)
+
+    task = await task_repo.get_internal("task-once")
+    assert task is not None
+    assert task["status"] == ("cancelled" if newer_status == "skipped" else "running")
+    assert count == (1 if newer_status == "skipped" else 0)
+    assert task["last_error"] is None
+    async with task_run_repo._sf() as session:
+        older_row = await session.get(ScheduledTaskRunRow, older["id"])
+        newer_row = await session.get(ScheduledTaskRunRow, newer["id"])
+        assert newer_row.occurrence_seq > older_row.occurrence_seq
+
+
+@asynccontextmanager
+async def _contender_engines(count: int):
+    """``count`` independent engines on one fresh schema (one pool per contender)."""
+    assert POSTGRES_URL is not None
+    parts = urlsplit(_postgres_url(POSTGRES_URL))
+    scheme = "postgresql+asyncpg" if parts.scheme in {"postgres", "postgresql"} else parts.scheme
+    url = urlunsplit(parts._replace(scheme=scheme))
+    schema = f"scheduler_owner_cap_{uuid.uuid4().hex}"
+    engines = [create_async_engine(url, connect_args=build_asyncpg_connect_args(schema)) for _ in range(count)]
+    try:
+        async with engines[0].begin() as conn:
+            await conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+            await conn.run_sync(lambda sync: Base.metadata.create_all(sync, tables=[ScheduledTaskRow.__table__, ScheduledTaskRunRow.__table__, RunRow.__table__]))
+        yield [async_sessionmaker(engine, expire_on_commit=False) for engine in engines]
+    finally:
+        async with engines[0].begin() as conn:
+            await conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        for engine in engines:
+            await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("global_cap", [3, 1], ids=["owner-cap-binds", "global-cap-binds"])
+async def test_postgres_per_owner_cap_is_atomic_under_concurrent_claims(global_cap):
+    per_user = 1
+    async with _contender_engines(4) as factories:
+        task_repo = ScheduledTaskRepository(factories[0])
+        contenders = [ScheduledTaskRunRepository(sf) for sf in factories]
+        seed = contenders[0]
+        now = datetime.now(UTC)
+        for round_index in range(20):
+            rows = {f"a1-{round_index}": "owner-a", f"a2-{round_index}": "owner-a", f"b-{round_index}": "owner-b"}
+            for row_id, owner in rows.items():
+                await task_repo.create(
+                    task_id=f"task-{row_id}",
+                    user_id=owner,
+                    thread_id=None,
+                    context_mode="fresh_thread_per_run",
+                    assistant_id="lead_agent",
+                    title=row_id,
+                    prompt="p",
+                    schedule_type="cron",
+                    schedule_spec={"cron": "* * * * *"},
+                    timezone="UTC",
+                    next_run_at=None,
+                )
+                await seed.create(run_record_id=row_id, task_id=f"task-{row_id}", thread_id=f"thread-{row_id}", scheduled_for=now, trigger="scheduled", status="queued")
+            # Four contenders on separate engines: both A rows, B's row, and a
+            # second claimer racing for A's first row.
+            targets = [f"a1-{round_index}", f"a2-{round_index}", f"b-{round_index}", f"a1-{round_index}"]
+            await asyncio.gather(
+                *(
+                    repo.claim_queued_run(target, lease_owner=f"pod-{index}", now=now, lease_seconds=60, global_max_concurrent_runs=global_cap, per_user_max_concurrent_runs=per_user)
+                    for index, (repo, target) in enumerate(zip(contenders, targets, strict=True))
+                )
+            )
+            async with factories[0]() as session:
+                launching = {
+                    row_id: owner
+                    for row_id, owner in (
+                        await session.execute(select(ScheduledTaskRunRow.id, ScheduledTaskRow.user_id).join(ScheduledTaskRow, ScheduledTaskRow.id == ScheduledTaskRunRow.task_id).where(ScheduledTaskRunRow.status == "launching"))
+                    ).all()
+                }
+            owners = list(launching.values())
+            assert all(owners.count(owner) <= per_user for owner in set(owners)), launching
+            if global_cap >= 2:
+                assert sorted(owners) == ["owner-a", "owner-b"], launching
+            else:
+                assert len(owners) == 1, launching
+            # Free the slots before the next round.
+            async with factories[0]() as session:
+                await session.execute(update(ScheduledTaskRunRow).where(ScheduledTaskRunRow.status.in_(("queued", "launching"))).values(status="success", lease_owner=None, lease_expires_at=None))
+                await session.commit()

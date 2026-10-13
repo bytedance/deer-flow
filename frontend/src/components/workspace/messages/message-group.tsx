@@ -1,8 +1,12 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import {
   BookOpenTextIcon,
+  CalendarClockIcon,
+  CalendarX2Icon,
   ChevronUp,
   CoinsIcon,
+  FileIcon,
+  FilesIcon,
   FolderOpenIcon,
   GlobeIcon,
   LightbulbIcon,
@@ -38,6 +42,7 @@ import {
   extractReasoningContentFromMessage,
   extractTextFromMessage,
 } from "@/core/messages/utils";
+import type { ArtifactEntry } from "@/core/threads/types";
 import { extractTitleFromMarkdown } from "@/core/utils/markdown";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -48,25 +53,32 @@ import { FlipDisplay } from "../flip-display";
 import { Tooltip } from "../tooltip";
 
 import { MarkdownContent } from "./markdown-content";
+import { isSafeHref, UnsafeLink } from "./markdown-link";
+import { MessageReasoning } from "./message-reasoning";
+import { ToolCallDetails } from "./tool-call-details";
 
 interface MessageGroupProps {
   className?: string;
   messages: Message[];
   isLoading?: boolean;
+  durationSeconds?: number;
   deferBrowserPreviews?: boolean;
   tokenDebugSteps?: TokenDebugStep[];
   showTokenDebugSummaries?: boolean;
   threadId?: string;
+  toolArtifacts?: ArtifactEntry[];
 }
 
 function MessageGroupComponent({
   className,
   messages,
   isLoading = false,
+  durationSeconds,
   deferBrowserPreviews = false,
   tokenDebugSteps = [],
   showTokenDebugSummaries = false,
   threadId,
+  toolArtifacts,
 }: MessageGroupProps) {
   const { t } = useI18n();
   const [showAbove, setShowAbove] = useState(
@@ -75,7 +87,27 @@ function MessageGroupComponent({
   const [showLastThinking, setShowLastThinking] = useState(
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
   );
-  const steps = useMemo(() => convertToSteps(messages), [messages]);
+  const allSteps = useMemo(
+    () => convertToSteps(messages, toolArtifacts),
+    [messages, toolArtifacts],
+  );
+  // Keep the original messages and tool associations intact. Only the display
+  // of clarification context moves outside the execution disclosure (#5503).
+  const clarificationTextSteps = useMemo(
+    () =>
+      allSteps.filter(
+        (step): step is CoTAssistantTextStep =>
+          step.type === "assistantText" && step.isClarificationContext === true,
+      ),
+    [allSteps],
+  );
+  const steps = useMemo(
+    () =>
+      allSteps.filter(
+        (step) => step.type !== "assistantText" || !step.isClarificationContext,
+      ),
+    [allSteps],
+  );
   const stepIndexByStep = useMemo(
     () => new Map(steps.map((step, index) => [step, index] as const)),
     [steps],
@@ -127,15 +159,10 @@ function MessageGroupComponent({
       aboveLastToolCallSteps.filter((step) => step.type !== "assistantText"),
     [aboveLastToolCallSteps],
   );
-  const lastReasoningStep = useMemo(() => {
-    if (lastToolCallStep) {
-      const index = stepIndexByStep.get(lastToolCallStep) ?? -1;
-      return steps.slice(index + 1).find((step) => step.type === "reasoning");
-    } else {
-      const filteredSteps = steps.filter((step) => step.type === "reasoning");
-      return filteredSteps[filteredSteps.length - 1];
-    }
-  }, [lastToolCallStep, stepIndexByStep, steps]);
+  const lastReasoningStep = useMemo(
+    () => getTrailingReasoningStep(steps),
+    [steps],
+  );
   // Assistant text emitted after the trailing reasoning is the answer that
   // reasoning produced, so it renders below the reasoning disclosure. The
   // settled assistant bubble always paints reasoning above content, and the
@@ -264,6 +291,7 @@ function MessageGroupComponent({
         isLast={options?.isLast}
         isLoading={isLoading}
         deferBrowserPreview={deferBrowserPreviews}
+        showDetails={showTokenDebugSummaries}
         tokenDebugStep={
           debugStep && !debugStep.sharedAttribution ? debugStep : undefined
         }
@@ -313,7 +341,7 @@ function MessageGroupComponent({
       ? debugStepByMessageId.get(lastReasoningStep.messageId)
       : undefined;
 
-  return (
+  const processingPanel = (
     <ChainOfThought
       className={cn("w-full gap-2 rounded-lg border p-0.5", className)}
       open={true}
@@ -386,55 +414,77 @@ function MessageGroupComponent({
             lastReasoningStep.messageId,
             stepIndexByStep.get(lastReasoningStep) ?? -1,
           )}
-          <Button
-            key={lastReasoningStep.id}
-            className="w-full items-start justify-start text-left"
-            variant="ghost"
-            onClick={() => setShowLastThinking(!showLastThinking)}
-          >
-            <div className="flex w-full items-center justify-between">
-              <ChainOfThoughtStep
-                className="font-normal"
-                label={
-                  <DebugStepLabel
-                    label={t.common.thinking}
-                    token={shouldInlineThinkingToken({
-                      debugStep: lastReasoningDebugStep,
-                      toolCallCount: lastReasoningStep.messageId
-                        ? (toolCallCountByMessageId.get(
-                            lastReasoningStep.messageId,
-                          ) ?? 0)
-                        : 0,
-                      enabled: showTokenDebugSummaries,
-                      thinkingLabel: t.common.thinking,
-                      t,
-                    })}
-                  />
-                }
-                icon={LightbulbIcon}
-              ></ChainOfThoughtStep>
-              <div>
-                <ChevronUp
-                  className={cn(
-                    "text-muted-foreground size-4",
-                    showLastThinking ? "" : "rotate-180",
-                  )}
-                />
-              </div>
-            </div>
-          </Button>
-          {showLastThinking && (
-            <ChainOfThoughtContent className="px-4 pb-2">
-              <ChainOfThoughtStep
+          {!isLoading && durationSeconds !== undefined ? (
+            <MessageReasoning
+              isLoading={false}
+              durationSeconds={durationSeconds}
+              tokenLabel={shouldInlineThinkingToken({
+                debugStep: lastReasoningDebugStep,
+                toolCallCount: lastReasoningStep.messageId
+                  ? (toolCallCountByMessageId.get(
+                      lastReasoningStep.messageId,
+                    ) ?? 0)
+                  : 0,
+                enabled: showTokenDebugSummaries,
+                thinkingLabel: t.common.thinking,
+                t,
+              })}
+            >
+              {lastReasoningStep.reasoning ?? ""}
+            </MessageReasoning>
+          ) : (
+            <>
+              <Button
                 key={lastReasoningStep.id}
-                label={
-                  <MarkdownContent
-                    content={lastReasoningStep.reasoning ?? ""}
-                    isLoading={isLoading}
-                  />
-                }
-              ></ChainOfThoughtStep>
-            </ChainOfThoughtContent>
+                className="w-full items-start justify-start text-left"
+                variant="ghost"
+                onClick={() => setShowLastThinking(!showLastThinking)}
+              >
+                <div className="flex w-full items-center justify-between">
+                  <ChainOfThoughtStep
+                    className="font-normal"
+                    label={
+                      <DebugStepLabel
+                        label={t.common.thinking}
+                        token={shouldInlineThinkingToken({
+                          debugStep: lastReasoningDebugStep,
+                          toolCallCount: lastReasoningStep.messageId
+                            ? (toolCallCountByMessageId.get(
+                                lastReasoningStep.messageId,
+                              ) ?? 0)
+                            : 0,
+                          enabled: showTokenDebugSummaries,
+                          thinkingLabel: t.common.thinking,
+                          t,
+                        })}
+                      />
+                    }
+                    icon={LightbulbIcon}
+                  ></ChainOfThoughtStep>
+                  <div>
+                    <ChevronUp
+                      className={cn(
+                        "text-muted-foreground size-4",
+                        showLastThinking ? "" : "rotate-180",
+                      )}
+                    />
+                  </div>
+                </div>
+              </Button>
+              {showLastThinking && (
+                <ChainOfThoughtContent className="px-4 pb-2">
+                  <ChainOfThoughtStep
+                    key={lastReasoningStep.id}
+                    label={
+                      <MarkdownContent
+                        content={lastReasoningStep.reasoning ?? ""}
+                        isLoading={isLoading}
+                      />
+                    }
+                  ></ChainOfThoughtStep>
+                </ChainOfThoughtContent>
+              )}
+            </>
           )}
           {belowLastReasoningAssistantTextSteps.length > 0 && (
             <ChainOfThoughtContent className="px-4 pb-2">
@@ -444,6 +494,17 @@ function MessageGroupComponent({
         </>
       )}
     </ChainOfThought>
+  );
+
+  return (
+    <>
+      {processingPanel}
+      {clarificationTextSteps.map((step) => (
+        <div key={step.id} className="w-full">
+          <MarkdownContent content={step.content} isLoading={isLoading} />
+        </div>
+      ))}
+    </>
   );
 }
 
@@ -462,6 +523,7 @@ function areMessageGroupPropsEqual(
   }
   return (
     previous.className === next.className &&
+    previous.durationSeconds === next.durationSeconds &&
     Boolean(previous.isLoading) === Boolean(next.isLoading) &&
     Boolean(previous.deferBrowserPreviews) ===
       Boolean(next.deferBrowserPreviews) &&
@@ -469,6 +531,7 @@ function areMessageGroupPropsEqual(
       Boolean(next.showTokenDebugSummaries) &&
     previous.threadId === next.threadId &&
     sameReferences(previous.messages, next.messages) &&
+    sameReferences(previous.toolArtifacts, next.toolArtifacts) &&
     sameReferences(previous.tokenDebugSteps, next.tokenDebugSteps)
   );
 }
@@ -571,6 +634,78 @@ function browserToolLabel(
   }
 }
 
+const SCHEDULE_TASK_LABEL_KEYS = {
+  create: "scheduleTaskCreate",
+  update: "scheduleTaskUpdate",
+  list: "scheduleTaskList",
+  pause: "scheduleTaskPause",
+  resume: "scheduleTaskResume",
+  delete: "scheduleTaskDelete",
+  note: "scheduleTaskNote",
+  trial: "scheduleTaskTrial",
+} as const;
+
+/**
+ * Human step labels for the scheduler tools ("Scheduled a task", "Paused this
+ * scheduled task …"), never `Use "schedule_task" tool`. `result` is the parsed
+ * tool result when it has arrived; a coded error or unparsable text reads as
+ * a failed change.
+ */
+export function scheduleToolLabel(
+  name: string,
+  args: Record<string, unknown> | null | undefined,
+  result: string | Record<string, unknown> | undefined,
+  t: ReturnType<typeof useI18n>["t"],
+): string | null {
+  if (name !== "schedule_task" && name !== "stop_scheduled_task") {
+    return null;
+  }
+  // Both tools always return a JSON object, so text that does not parse is a
+  // tool-level failure (for example rejected arguments), never a success.
+  if (
+    (typeof result === "string" && result.trim() !== "") ||
+    (typeof result === "object" &&
+      result !== null &&
+      ("error" in result || "code" in result))
+  ) {
+    return t.toolCalls.scheduleTaskFailed;
+  }
+  if (name === "stop_scheduled_task") {
+    return t.toolCalls.stopScheduledTask;
+  }
+  const action = args?.action;
+  const key =
+    typeof action === "string" &&
+    Object.hasOwn(SCHEDULE_TASK_LABEL_KEYS, action)
+      ? SCHEDULE_TASK_LABEL_KEYS[
+          action as keyof typeof SCHEDULE_TASK_LABEL_KEYS
+        ]
+      : "scheduleTaskGeneric";
+  return t.toolCalls[key];
+}
+
+// Shared routing for result conversion and specialized rendering.
+function getToolCallKind(name: string) {
+  if (name.startsWith("browser_")) return "browser";
+  switch (name) {
+    case "web_search":
+    case "image_search":
+    case "web_fetch":
+    case "ls":
+    case "read_file":
+    case "write_file":
+    case "str_replace":
+    case "bash":
+    case "ask_clarification":
+    case "write_todos":
+    case "schedule_task":
+    case "stop_scheduled_task":
+      return name;
+    default:
+      return "generic";
+  }
+}
+
 function ToolCall({
   id,
   messageId,
@@ -581,7 +716,10 @@ function ToolCall({
   isLoading = false,
   deferBrowserPreview = false,
   tokenDebugStep,
+  showDetails = false,
+  resultMessage,
   browserView,
+  artifacts,
   threadId,
 }: {
   id?: string;
@@ -593,10 +731,14 @@ function ToolCall({
   isLoading?: boolean;
   deferBrowserPreview?: boolean;
   tokenDebugStep?: TokenDebugStep;
+  showDetails?: boolean;
+  resultMessage?: Extract<Message, { type: "tool" }>;
   browserView?: BrowserViewMeta;
+  artifacts?: ArtifactEntry[];
   threadId?: string;
 }) {
   const { t } = useI18n();
+  const kind = getToolCallKind(name);
   const { setOpen, autoOpen, autoSelect, selectedArtifact, select } =
     useArtifacts();
   const browserViewPanel = useMaybeBrowserView();
@@ -610,7 +752,7 @@ function ToolCall({
       fallback
     );
   const writeFilePath =
-    (name === "write_file" || name === "str_replace") &&
+    (kind === "write_file" || kind === "str_replace") &&
     typeof args.path === "string"
       ? args.path
       : undefined;
@@ -644,7 +786,7 @@ function ToolCall({
     return () => window.clearTimeout(timeout);
   }, [autoOpenArtifactUrl, select, selectedArtifact, setOpen]);
 
-  if (name.startsWith("browser_")) {
+  if (kind === "browser") {
     const shot = browserView?.screenshot;
     const previewUrl =
       shot && threadId ? resolveArtifactURL(shot, threadId) : undefined;
@@ -691,7 +833,7 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "web_search") {
+  } else if (kind === "web_search") {
     let label: React.ReactNode = t.toolCalls.searchForRelatedInfo;
     if (typeof args.query === "string") {
       label = t.toolCalls.searchOnWebFor(args.query);
@@ -704,18 +846,25 @@ function ToolCall({
       >
         {Array.isArray(result) && (
           <ChainOfThoughtSearchResults>
+            {/* Tool args and results are model- or provider-controlled, so
+                every tool link passes the same scheme allowlist as markdown
+                links and degrades to the same UnsafeLink marker. */}
             {result.map((item) => (
               <ChainOfThoughtSearchResult key={item.url}>
-                <a href={item.url} target="_blank" rel="noopener noreferrer">
-                  {item.title}
-                </a>
+                {isSafeHref(item.url) ? (
+                  <a href={item.url} target="_blank" rel="noopener noreferrer">
+                    {item.title}
+                  </a>
+                ) : (
+                  <UnsafeLink href={item.url}>{item.title}</UnsafeLink>
+                )}
               </ChainOfThoughtSearchResult>
             ))}
           </ChainOfThoughtSearchResults>
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "image_search") {
+  } else if (kind === "image_search") {
     let label: React.ReactNode = t.toolCalls.searchForRelatedImages;
     if (typeof args.query === "string") {
       label = t.toolCalls.searchForRelatedImagesFor(args.query);
@@ -739,32 +888,48 @@ function ToolCall({
         {Array.isArray(results) && (
           <ChainOfThoughtSearchResults>
             {Array.isArray(results) &&
-              results.map((item) => (
-                <Tooltip key={item.image_url} content={item.title}>
-                  <a
-                    className="size-24 overflow-hidden rounded-lg object-cover"
-                    href={item.source_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    <div className="bg-accent size-24">
-                      <img
-                        className="size-full object-cover"
-                        src={item.thumbnail_url}
-                        alt={item.title}
-                        width={100}
-                        height={100}
-                      />
-                    </div>
-                  </a>
-                </Tooltip>
-              ))}
+              results.map((item) => {
+                const thumbnail = (
+                  <div className="bg-accent size-24">
+                    <img
+                      className="size-full object-cover"
+                      src={item.thumbnail_url}
+                      alt={item.title}
+                      width={100}
+                      height={100}
+                    />
+                  </div>
+                );
+                return (
+                  <Tooltip key={item.image_url} content={item.title}>
+                    {isSafeHref(item.source_url) ? (
+                      <a
+                        className="size-24 overflow-hidden rounded-lg object-cover"
+                        href={item.source_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        {thumbnail}
+                      </a>
+                    ) : (
+                      <UnsafeLink
+                        href={item.source_url}
+                        className="size-24 overflow-hidden rounded-lg"
+                      >
+                        {thumbnail}
+                      </UnsafeLink>
+                    )}
+                  </Tooltip>
+                );
+              })}
           </ChainOfThoughtSearchResults>
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "web_fetch") {
-    const url = (args as { url: string })?.url;
+  } else if (kind === "web_fetch") {
+    // Models occasionally emit non-string args mid-stream; an object here
+    // would reach the JSX below and throw.
+    const url = typeof args.url === "string" ? args.url : undefined;
     let title = url;
     if (typeof result === "string") {
       const potentialTitle = extractTitleFromMarkdown(result);
@@ -779,20 +944,23 @@ function ToolCall({
         icon={GlobeIcon}
       >
         <ChainOfThoughtSearchResult>
-          {url && (
-            <a
-              href={url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="cursor-pointer"
-            >
-              {title}
-            </a>
-          )}
+          {url &&
+            (isSafeHref(url) ? (
+              <a
+                href={url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="cursor-pointer"
+              >
+                {title}
+              </a>
+            ) : (
+              <UnsafeLink href={url}>{title}</UnsafeLink>
+            ))}
         </ChainOfThoughtSearchResult>
       </ChainOfThoughtStep>
     );
-  } else if (name === "ls") {
+  } else if (kind === "ls") {
     let description: string | undefined = (args as { description: string })
       ?.description;
     if (!description) {
@@ -812,7 +980,7 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "read_file") {
+  } else if (kind === "read_file") {
     let description: string | undefined = (args as { description: string })
       ?.description;
     if (!description) {
@@ -832,7 +1000,7 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "write_file" || name === "str_replace") {
+  } else if (kind === "write_file" || kind === "str_replace") {
     let description: string | undefined = (args as { description: string })
       ?.description;
     if (!description) {
@@ -860,7 +1028,7 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "bash") {
+  } else if (kind === "bash") {
     const description: string | undefined = (args as { description: string })
       ?.description;
     if (!description) {
@@ -889,7 +1057,7 @@ function ToolCall({
         )}
       </ChainOfThoughtStep>
     );
-  } else if (name === "ask_clarification") {
+  } else if (kind === "ask_clarification") {
     return (
       <ChainOfThoughtStep
         key={id}
@@ -897,13 +1065,33 @@ function ToolCall({
         icon={MessageCircleQuestionMarkIcon}
       ></ChainOfThoughtStep>
     );
-  } else if (name === "write_todos") {
+  } else if (kind === "write_todos") {
     return (
       <ChainOfThoughtStep
         key={id}
         label={resolveLabel(t.toolCalls.writeTodos)}
         icon={ListTodoIcon}
       ></ChainOfThoughtStep>
+    );
+  } else if (kind === "schedule_task" || kind === "stop_scheduled_task") {
+    const stop = kind === "stop_scheduled_task";
+    return (
+      <ChainOfThoughtStep
+        key={id}
+        label={resolveLabel(scheduleToolLabel(name, args, result, t))}
+        icon={stop ? CalendarX2Icon : CalendarClockIcon}
+        className={stop ? "text-sky-700 dark:text-sky-400" : undefined}
+        data-testid={stop ? "scheduled-stop-step" : undefined}
+      >
+        {showDetails && (
+          <ToolCallDetails
+            name={name}
+            callId={id}
+            args={args}
+            resultMessage={resultMessage}
+          />
+        )}
+      </ChainOfThoughtStep>
     );
   } else {
     const description: string | undefined = (args as { description: string })
@@ -913,9 +1101,44 @@ function ToolCall({
         key={id}
         label={resolveLabel(description ?? t.toolCalls.useTool(name))}
         icon={WrenchIcon}
-      ></ChainOfThoughtStep>
+      >
+        {renderArtifactBadges(artifacts)}
+        {showDetails && (
+          <ToolCallDetails
+            name={name}
+            callId={id}
+            args={args}
+            resultMessage={resultMessage}
+          />
+        )}
+      </ChainOfThoughtStep>
     );
   }
+}
+
+function renderArtifactBadges(artifacts?: ArtifactEntry[]) {
+  if (!artifacts || artifacts.length === 0) {
+    return null;
+  }
+  return (
+    <div className="artifact-badges mt-1 flex flex-wrap gap-1">
+      {artifacts.map((a) => (
+        <span
+          key={a.handle}
+          className="border-border bg-muted text-muted-foreground inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-xs"
+          title={a.real_ref}
+        >
+          {a.artifact_type === "file" ? (
+            <FileIcon className="size-3" />
+          ) : (
+            <FilesIcon className="size-3" />
+          )}
+          {a.display_name}
+          <code>{a.handle}</code>
+        </span>
+      ))}
+    </div>
+  );
 }
 
 interface GenericCoTStep<T extends string = string> {
@@ -925,6 +1148,7 @@ interface GenericCoTStep<T extends string = string> {
 }
 
 interface CoTReasoningStep extends GenericCoTStep<"reasoning"> {
+  message: Message;
   reasoning: string | null;
 }
 
@@ -932,10 +1156,13 @@ interface CoTToolCallStep extends GenericCoTStep<"toolCall"> {
   name: string;
   args: Record<string, unknown>;
   result?: string;
+  resultMessage?: Extract<Message, { type: "tool" }>;
   browserView?: BrowserViewMeta;
+  artifacts?: ArtifactEntry[];
 }
 
 interface CoTAssistantTextStep extends GenericCoTStep<"assistantText"> {
+  isClarificationContext?: boolean;
   content: string;
 }
 
@@ -950,6 +1177,7 @@ interface BrowserViewMeta {
 function indexToolCallData(messages: Message[]) {
   const toolCallResults = new Map<string, string>();
   const browserViews = new Map<string, BrowserViewMeta>();
+  const resultMessages = new Map<string, Extract<Message, { type: "tool" }>>();
 
   for (const message of messages) {
     if (message.type !== "tool" || !message.tool_call_id) {
@@ -957,10 +1185,13 @@ function indexToolCallData(messages: Message[]) {
     }
 
     const toolCallId = message.tool_call_id;
+    if (!resultMessages.has(toolCallId))
+      resultMessages.set(toolCallId, message);
     if (!toolCallResults.has(toolCallId)) {
       const result = extractTextFromMessage(message);
       if (result) {
         toolCallResults.set(toolCallId, result);
+        resultMessages.set(toolCallId, message);
       }
     }
 
@@ -976,12 +1207,24 @@ function indexToolCallData(messages: Message[]) {
     }
   }
 
-  return { browserViews, toolCallResults };
+  return { browserViews, toolCallResults, resultMessages };
 }
 
-function convertToSteps(messages: Message[]): CoTStep[] {
+function convertToSteps(
+  messages: Message[],
+  toolArtifacts?: ArtifactEntry[],
+): CoTStep[] {
   const steps: CoTStep[] = [];
-  const { browserViews, toolCallResults } = indexToolCallData(messages);
+  const { browserViews, toolCallResults, resultMessages } =
+    indexToolCallData(messages);
+  const artifactsByToolCallId = new Map<string, ArtifactEntry[]>();
+  for (const entry of toolArtifacts ?? []) {
+    const key = entry.tool_call_id;
+    artifactsByToolCallId.set(key, [
+      ...(artifactsByToolCallId.get(key) ?? []),
+      entry,
+    ]);
+  }
   for (const [messageIndex, message] of messages.entries()) {
     if (message.type === "ai") {
       // Reasoning precedes the answer text it produced, so it is pushed first:
@@ -993,6 +1236,7 @@ function convertToSteps(messages: Message[]): CoTStep[] {
           id: message.id,
           messageId: message.id,
           type: "reasoning",
+          message,
           reasoning,
         };
         steps.push(step);
@@ -1004,6 +1248,9 @@ function convertToSteps(messages: Message[]): CoTStep[] {
           messageId: message.id,
           type: "assistantText",
           content,
+          isClarificationContext: message.tool_calls?.some(
+            (toolCall) => toolCall.name === "ask_clarification",
+          ),
         });
       }
       for (const tool_call of message.tool_calls ?? []) {
@@ -1015,12 +1262,16 @@ function convertToSteps(messages: Message[]): CoTStep[] {
           messageId: message.id,
           type: "toolCall",
           name: tool_call.name,
-          args: tool_call.args,
+          // Persisted or mid-stream tool calls can omit args (or send null);
+          // every ToolCall branch reads them, so normalize once here.
+          args: tool_call.args ?? {},
         };
         const toolCallId = tool_call.id;
         if (toolCallId) {
           const toolCallResult = toolCallResults.get(toolCallId);
-          if (toolCallResult) {
+          step.resultMessage = resultMessages.get(toolCallId);
+          // Generic details preserve received text; specialized tools retain their parsing.
+          if (toolCallResult && getToolCallKind(tool_call.name) !== "generic") {
             try {
               const json = JSON.parse(toolCallResult);
               step.result = json;
@@ -1029,10 +1280,32 @@ function convertToSteps(messages: Message[]): CoTStep[] {
             }
           }
           step.browserView = browserViews.get(toolCallId);
+          const artifacts = artifactsByToolCallId.get(toolCallId);
+          if (artifacts) {
+            step.artifacts = artifacts;
+          }
         }
         steps.push(step);
       }
     }
   }
   return steps;
+}
+
+// Use the same selection for rendering and duration ownership: reasoning that
+// precedes the final tool remains inside the execution timeline, not this header.
+function getTrailingReasoningStep(steps: CoTStep[]) {
+  const lastToolCall = [...steps]
+    .reverse()
+    .find((step) => step.type === "toolCall");
+  if (lastToolCall) {
+    return steps
+      .slice(steps.indexOf(lastToolCall) + 1)
+      .find((step) => step.type === "reasoning");
+  }
+  return [...steps].reverse().find((step) => step.type === "reasoning");
+}
+
+export function getMessageGroupReasoningMessage(messages: Message[]) {
+  return getTrailingReasoningStep(convertToSteps(messages))?.message;
 }

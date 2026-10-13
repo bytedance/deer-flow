@@ -34,8 +34,7 @@ from deerflow.persistence.agents.base import (
     parse_agent_config,
 )
 from deerflow.persistence.agents.model import AgentRow
-from deerflow.runtime.execution.mutation_context import OwnershipRejected, validate_mutation_after_sql_sync, validate_mutation_sync
-from deerflow.runtime.user_context import get_current_user, get_effective_user_id
+from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -100,13 +99,12 @@ def _config_document(config: dict) -> dict:
 
 
 class SqlAgentStore(AgentStore):
-    def __init__(self, url: str, *, session_factory=None, mutation_capability=None) -> None:
-        self._Session = session_factory if session_factory is not None else get_sync_sessionmaker(url)
-        self._mutation_capability = mutation_capability
+    def __init__(self, url: str) -> None:
+        self._Session = get_sync_sessionmaker(url)
 
-    def _row(self, session: Session, name: str, user_id: str, *, lock=False) -> AgentRow | None:
+    def _row(self, session: Session, name: str, user_id: str) -> AgentRow | None:
         stmt = select(AgentRow).where(AgentRow.user_id == user_id, AgentRow.name == name.lower())
-        return session.execute(stmt.with_for_update() if lock else stmt).scalar_one_or_none()
+        return session.execute(stmt).scalar_one_or_none()
 
     def get(self, name: str, *, user_id: str | None = None) -> AgentConfig:
         effective_user = user_id or get_effective_user_id()
@@ -142,14 +140,8 @@ class SqlAgentStore(AgentStore):
             rows = list(session.execute(stmt).scalars())
         return [(r.user_id, parse_agent_config(r.config or {}, r.name)) for r in rows]
 
-    def _write_user(self, user_id):
-        if self._mutation_capability is None:
-            return user_id or get_effective_user_id()
-        current = get_current_user()
-        return user_id if user_id is not None else str(current.id) if current is not None else self._mutation_capability.context.user_id
-
     def create(self, name: str, config: dict, soul: str, *, user_id: str | None = None) -> None:
-        effective_user = self._write_user(user_id)
+        effective_user = user_id or get_effective_user_id()
         now = datetime.now(UTC)
         row = AgentRow(
             id=uuid.uuid4().hex,
@@ -162,25 +154,18 @@ class SqlAgentStore(AgentStore):
         )
         try:
             with self._Session() as session:
-                validate_mutation_sync(self._mutation_capability, session, "definition.agent.create", user_id=effective_user)
                 session.add(row)
-                validate_mutation_after_sql_sync(self._mutation_capability, session, "definition.agent.create", user_id=effective_user)
                 session.commit()
         except IntegrityError as e:
-            if self._mutation_capability is not None:
-                with self._Session() as session, session.begin():
-                    validate_mutation_sync(self._mutation_capability, session, "definition.agent.create", user_id=effective_user)
             # UNIQUE(user_id, name) turns the check-then-write race into a clean conflict.
             raise AgentExistsError(f"Agent '{name}' already exists for user '{effective_user}'") from e
 
     def update(self, name: str, config: dict | None, soul: str | None, *, user_id: str | None = None) -> None:
-        effective_user = self._write_user(user_id)
+        effective_user = user_id or get_effective_user_id()
         with self._Session() as session:
-            validate_mutation_sync(self._mutation_capability, session, "definition.agent.update", user_id=effective_user)
-            row = self._row(session, name, effective_user, **({"lock": True} if self._mutation_capability is not None else {}))
+            row = self._row(session, name, effective_user)
             if row is not None:
                 self._apply_update(row, config, soul)
-                validate_mutation_after_sql_sync(self._mutation_capability, session, "definition.agent.update", user_id=effective_user)
                 session.commit()
                 return
             # Upsert: setup_agent and any first-time write land here. Two
@@ -198,16 +183,13 @@ class SqlAgentStore(AgentStore):
             )
             session.add(row)
             try:
-                validate_mutation_after_sql_sync(self._mutation_capability, session, "definition.agent.update", user_id=effective_user)
                 session.commit()
             except IntegrityError:
                 session.rollback()
-                validate_mutation_sync(self._mutation_capability, session, "definition.agent.update", user_id=effective_user)
-                existing = self._row(session, name, effective_user, **({"lock": True} if self._mutation_capability is not None else {}))
+                existing = self._row(session, name, effective_user)
                 if existing is None:
                     raise
                 self._apply_update(existing, config, soul)
-                validate_mutation_after_sql_sync(self._mutation_capability, session, "definition.agent.update", user_id=effective_user)
                 session.commit()
 
     @staticmethod
@@ -218,17 +200,11 @@ class SqlAgentStore(AgentStore):
             row.soul = soul
 
     def delete(self, name: str, *, user_id: str | None = None) -> AgentDeleteOutcome:
-        effective_user = self._write_user(user_id)
+        effective_user = user_id or get_effective_user_id()
         with self._Session() as session:
-            validate_mutation_sync(self._mutation_capability, session, "definition.agent.delete", user_id=effective_user)
-            if self._mutation_capability is not None and get_paths().user_agent_dir(effective_user, name).exists():
-                raise OwnershipRejected("Remote agent deletion cannot delete file-backed memory")
             result = session.execute(delete(AgentRow).where(AgentRow.user_id == effective_user, AgentRow.name == name.lower()))
-            validate_mutation_after_sql_sync(self._mutation_capability, session, "definition.agent.delete", user_id=effective_user)
             session.commit()
             row_deleted = result.rowcount > 0
-        if self._mutation_capability is not None:
-            return "deleted" if row_deleted else "missing"
         agent_dir = get_paths().user_agent_dir(effective_user, name)
         if row_deleted:
             # The agent existed as a row; remove any co-located on-disk memory

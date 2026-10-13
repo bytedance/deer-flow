@@ -114,6 +114,26 @@ def _as_int(value: object, default: int) -> int:
     return default
 
 
+def _as_str_list(value: object) -> list[str] | None:
+    """Coerce a config value into a non-empty list of strings, or ``None``.
+
+    Accepts a list of strings and a comma-separated string, since YAML makes
+    both spellings natural. Non-string sequence items are ignored. Unsupported
+    top-level values, an empty list, or a blank string yield ``None`` so the
+    parameter stays out of the payload instead of reaching Browserless as an
+    unusable value.
+    """
+    if isinstance(value, str):
+        parts = value.split(",")
+    elif isinstance(value, (list, tuple)):
+        parts = [part for part in value if isinstance(part, str)]
+    else:
+        return None
+
+    items = [part.strip() for part in parts if part.strip()]
+    return items or None
+
+
 def _as_optional_quality(value: object, output_format: str) -> int | None:
     if output_format not in {"jpeg", "webp"}:
         return None
@@ -237,7 +257,8 @@ async def web_fetch_tool(url: str) -> str:
     try:
         cfg = _get_tool_config("web_fetch") or {}
         allow_private_addresses = _as_bool(cfg.get("allow_private_addresses"), False)
-        url_error = validate_public_http_url(
+        url_error = await asyncio.to_thread(
+            validate_public_http_url,
             url,
             allow_private_addresses=allow_private_addresses,
             resolver=_resolve_host_addresses,
@@ -249,13 +270,13 @@ async def web_fetch_tool(url: str) -> str:
         wait_for_timeout_ms = 0
         wait_for_selector = ""
         wait_for_selector_timeout_ms = 5000
-        reject_resource_types: list[str] | None = None
-        reject_request_pattern: list[str] | None = None
+        reject_resource_types = _as_str_list(cfg.get("reject_resource_types"))
+        reject_request_pattern = _as_str_list(cfg.get("reject_request_pattern"))
 
         wait_for_event = cfg.get("wait_for_event", wait_for_event)
-        raw_wait = cfg.get("wait_for_timeout_ms", wait_for_timeout_ms)
-        wait_for_timeout_ms = int(raw_wait) if not isinstance(raw_wait, int) else raw_wait
+        wait_for_timeout_ms = _as_int(cfg.get("wait_for_timeout_ms"), wait_for_timeout_ms)
         wait_for_selector = cfg.get("wait_for_selector", wait_for_selector)
+        wait_for_selector_timeout_ms = _as_int(cfg.get("wait_for_selector_timeout_ms"), wait_for_selector_timeout_ms)
 
         client = _get_browserless_client("web_fetch")
         result = await client.fetch_html_with_status(
@@ -271,7 +292,7 @@ async def web_fetch_tool(url: str) -> str:
         if isinstance(result, str):
             return result
 
-        article = await asyncio.to_thread(_readability_extractor.extract_article, result.html)
+        article = await asyncio.to_thread(_readability_extractor.extract_article, result.html, url=url)
         return f"{article.to_markdown()[:4096]}{_target_status_warning(result)}"
 
     except Exception as e:
@@ -308,7 +329,7 @@ async def web_capture_tool(
         cfg = _get_tool_config("web_capture") or {}
         allow_private_addresses = _as_bool(cfg.get("allow_private_addresses"), False)
 
-        url_error = _validate_capture_url(url, allow_private_addresses=allow_private_addresses)
+        url_error = await asyncio.to_thread(_validate_capture_url, url, allow_private_addresses=allow_private_addresses)
         if url_error:
             return _tool_message(url_error, tool_call_id)
 

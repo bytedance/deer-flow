@@ -44,7 +44,7 @@ class _MinimalBackend(MemoryManager):
     def add(self, thread_id, messages, *, agent_name=None, user_id=None, trace_id=None) -> None:
         self._adds.append((thread_id, user_id))
 
-    def get_context(self, user_id, *, agent_name=None, thread_id=None) -> str:
+    def get_context(self, user_id, *, agent_name=None, thread_id=None, query=None) -> str:
         return f"ctx:{user_id}"
 
     @classmethod

@@ -129,15 +129,42 @@ class SubagentRuntime:
             self._batch_started = True
 
     async def stop(self) -> None:
-        """Stop the owned worker and hide its bound tools from new graphs."""
+        """Stop the owned worker before propagating caller cancellation.
 
-        if self._owned_batch_service is None:
+        The drain intentionally has no timeout: releasing lifecycle ownership
+        while the service is still stopping would allow work to outlive this
+        runtime. The owned service's stop() must terminate, so its repository
+        awaits and child cleanup must not suppress cancellation indefinitely.
+        """
+
+        service = self._owned_batch_service
+        if service is None:
             return
         async with self._lifecycle_lock:
             if not self._batch_started:
                 return
+            # Hide the submitter immediately, but keep this lifecycle operation
+            # alive until the owned worker has actually finished stopping.
             self._batch_started = False
-            await self._owned_batch_service.stop()
+            stop_task = asyncio.create_task(service.stop(), name="subagent-runtime-batch-stop")
+            cancellation: asyncio.CancelledError | None = None
+            while not stop_task.done():
+                try:
+                    # wait() neither forwards caller cancellation to the owned
+                    # task nor raises that task's exception. Inspect its outcome
+                    # below so a service failure cannot replace cancellation.
+                    await asyncio.wait({stop_task})
+                except asyncio.CancelledError as exc:
+                    if cancellation is None:
+                        cancellation = exc
+
+            if cancellation is not None:
+                try:
+                    stop_task.result()
+                except (asyncio.CancelledError, Exception) as exc:
+                    raise cancellation from exc
+                raise cancellation
+            stop_task.result()
 
     async def __aenter__(self) -> SubagentRuntime:
         await self.start()

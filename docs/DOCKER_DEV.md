@@ -2,7 +2,8 @@
 
 面向 `make docker-start`（容器版开发环境）的启动手册，重点讲清**数据库接线**：
 容器内 `localhost` 不是宿主机，postgres 模式必须改用 `host.docker.internal`。
-本文所有结论均在 macOS + Docker Desktop 环境实测验证过（2026-09-11）。
+本文保留用户 fork `0aee7096` 的数据库接线说明，并按当前原生 Gateway 拓扑更新。
+历史 macOS + Docker Desktop 实测发生于 2026-09-11；本次 Task6A 没有重跑开发栈或连接用户数据库。
 
 ## 1. 服务拓扑
 
@@ -79,13 +80,7 @@ psql: error: connection to server at "localhost" (::1), port 5432 failed: Connec
  container->host.docker.internal OK
 ```
 
-验证命令（密码不落 shell 历史，从 `.env` 现读）：
-
-```bash
-URL=$(grep '^DATABASE_URL=' .env | cut -d= -f2-)
-docker run --rm -e PGPURL="$URL" pgvector/pgvector:pg16 \
-  sh -c 'psql "$PGPURL" -t -c "select 1"'
-```
+使用 `/health/ready` 和 Gateway 日志确认连接状态；不要打印完整 DATABASE_URL 或容器环境。
 
 ### 3.3 正确配置：按运行方式切换主机名
 
@@ -132,7 +127,7 @@ docker compose -p deer-flow-dev -f docker/docker-compose-dev.yaml up -d gateway
 | `database.backend: memory` 时数据重启消失 | 这是该模式的定义 | 切 `postgres`（推荐）或 `sqlite` |
 | compose 报 env_file 长语法解析错误 | Compose < 2.24 | 升级 Docker Desktop / compose 插件 |
 | 沙箱 skill 报缺 secrets | AIO 镜像 `:latest` 被冻结在旧版 | 固定镜像 tag ≥ 1.11.0（§2） |
-| 想确认容器实际拿到的连接串 | 环境变量可直接查 | `docker compose -p deer-flow-dev -f docker/docker-compose-dev.yaml exec gateway env | grep DATABASE_URL`（输出含密码，勿截图外发） |
+| 想确认数据库连接 | 连接串属于私有配置 | 检查 `/health/ready` 的 database 状态；不要输出环境变量 |
 
 日志入口：`make docker-logs`（全部）、`make docker-logs-gateway`（后端 trace
 back 在这里）、`make docker-logs-frontend`（前端编译错误）。
@@ -148,3 +143,12 @@ back 在这里）、`make docker-logs-frontend`（前端编译错误）。
 
 `DEER_FLOW_HOME`（默认 `backend/.deer-flow`）在两种模式下指向同一个宿主机
 目录，因此 **sqlite 模式切模式不丢数据**；postgres 模式则与运行方式完全无关。
+
+
+## 6. 原生 ECS 的数据库边界
+
+原生多实例 Gateway、checkpoint、run events、MCP tasks 和 schedules 使用原生应用 PostgreSQL。
+私有 `ecs_executor` 的三个 ledger 表使用**另一个独立数据库**，由自己的 Alembic chain 管理，
+不能把 executor URL 指向 Gateway 数据库。原生 worker 只有出站控制通道，不开放额外入站端口。
+普通 Docker dev 命令不会启用 ECS，也不会自动转换旧 Fleet execution 数据；
+含旧 intent 的数据库会被原生 Gateway 隔离，参见 [兼容和切换步骤](ecs-native-fork-integration.md)。

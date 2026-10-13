@@ -3,10 +3,14 @@ from .session import (
     BrowserSession,
     BrowserSessionCapacityError,
     BrowserSessionManager,
+    BrowserSessionScope,
     BrowserTab,
     PageSnapshot,
     SnapshotElement,
     browser_multi_worker_error,
+    browser_session_key,
+    browser_session_scope,
+    configure_browser_session_manager,
     get_browser_session_manager,
     redact_browser_url,
     reset_browser_session_manager,
@@ -21,11 +25,16 @@ from .tools import (
     browser_snapshot_tool,
     browser_type_tool,
     navigate_and_capture,
+    resolve_browser_egress,
     validate_browser_url,
 )
 
 __all__ = [
     "BrowserSession",
+    "BrowserSessionScope",
+    "browser_session_scope",
+    "browser_session_key",
+    "configure_browser_session_manager",
     "BrowserSessionCapacityError",
     "BrowserSessionManager",
     "BrowserTab",
@@ -45,5 +54,6 @@ __all__ = [
     "navigate_and_capture",
     "redact_browser_url",
     "reset_browser_session_manager",
+    "resolve_browser_egress",
     "validate_browser_url",
 ]

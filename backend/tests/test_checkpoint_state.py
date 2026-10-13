@@ -17,14 +17,15 @@ class FakeCheckpointer:
     def __init__(self) -> None:
         self.sync_configs: list[dict[str, Any]] = []
         self.async_configs: list[dict[str, Any]] = []
+        self.checkpoint_tuple: Any | None = None
 
     def get_tuple(self, config: dict[str, Any]) -> None:
         self.sync_configs.append(config)
-        return None
+        return self.checkpoint_tuple
 
     async def aget_tuple(self, config: dict[str, Any]) -> None:
         self.async_configs.append(config)
-        return None
+        return self.checkpoint_tuple
 
 
 class FakeGraph:
@@ -150,6 +151,42 @@ async def test_async_accessor_binds_persistence_guards_operations_and_preserves_
     for call in graph.calls:
         _assert_delta_config_is_copied(config, call[1])
     assert graph.calls[-1][2:] == ({"messages": ["changed"]}, "agent")
+
+
+@pytest.mark.anyio
+async def test_async_accessor_reads_checkpoint_metadata_without_materializing_state() -> None:
+    graph = FakeGraph()
+    saver = FakeCheckpointer()
+    saver.checkpoint_tuple = SimpleNamespace(metadata={"deerflow_agent_name": "stateless-agent"})
+    accessor = CheckpointStateAccessor.bind(graph, saver, mode="delta")
+    config = {
+        "configurable": {"thread_id": "thread-metadata", "checkpoint_ns": ""},
+        "metadata": {"caller": "test"},
+    }
+    original = deepcopy(config)
+
+    metadata = await accessor.aget_metadata(config)
+
+    assert metadata == {"deerflow_agent_name": "stateless-agent"}
+    assert graph.calls == []
+    assert len(saver.async_configs) == 1
+    _assert_delta_config_is_copied(config, saver.async_configs[0])
+    assert config == original
+
+
+@pytest.mark.anyio
+async def test_full_accessor_metadata_read_rejects_delta_checkpoint() -> None:
+    from deerflow.runtime.checkpoint_mode import CheckpointModeMismatchError
+
+    graph = FakeGraph()
+    saver = FakeCheckpointer()
+    saver.checkpoint_tuple = SimpleNamespace(metadata={CHECKPOINT_MODE_METADATA_KEY: "delta"})
+    accessor = CheckpointStateAccessor.bind(graph, saver, mode="full")
+
+    with pytest.raises(CheckpointModeMismatchError, match="requires delta mode"):
+        await accessor.aget_metadata({"configurable": {"thread_id": "thread-delta"}})
+
+    assert graph.calls == []
 
 
 def test_sync_history_zero_limit_guards_without_consuming_a_snapshot() -> None:

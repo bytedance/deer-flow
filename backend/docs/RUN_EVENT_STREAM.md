@@ -77,9 +77,9 @@ through run-event or specialized APIs:
 | `middleware:{tag}` | `middleware` | `record_middleware()` |
 
 Current middleware tags are `guardrail`, `loop_detection`,
-`safety_termination`, `skill_activation`, `skill_secrets`, and
-`tool_promotion`. The pattern is intentionally open so new middleware tags are
-additive. Because the full event type is limited to 32 characters and
+`safety_termination`, `skill_activation`, `skill_secrets`, `tool_promotion`,
+and `tool_progress`. The pattern is intentionally open so new middleware tags
+are additive. Because the full event type is limited to 32 characters and
 `middleware:` uses 11, a tag must contain 1-21 characters.
 
 `middleware:loop_detection` records transitions into the warned state (first
@@ -95,6 +95,25 @@ subagent, and its agent id when applicable. Tool arguments, prompts, message
 content, tool results, and argument-derived hashes are not persisted in this
 event.
 
+`middleware:tool_progress` records effective result-quality state transitions
+from `ToolProgressMiddleware`: `warn` for ACTIVE → WARNED, `block` for a
+transition to BLOCKED, `recover` for WARNED → ACTIVE after a useful result,
+and `reset` when a later agent invocation (for example, goal continuation)
+deliberately clears a prior WARNED/BLOCKED phase.
+The bounded `changes` object contains the tool name, source and destination
+phases, consecutive-problem count, normalized result status, error
+classification and recovery advice, effective count threshold (null when no
+count threshold fired), and
+subagent attribution. Tool
+arguments, prompts, message content, tool results, and content-derived hashes
+are never copied into this event. Producer-supplied metadata is projected onto
+fixed error/action vocabularies and a strict boolean-or-null before persistence,
+so a custom tool cannot smuggle arbitrary values through its result stamp.
+Recorder calls happen after the state lock is released, so a slow custom
+recorder cannot stall unrelated tool-state updates. Recorder failures are
+fail-open and do not change guard behavior. These events are emitted only when
+`tool_progress.enabled` is true (the default is false).
+
 `middleware:tool_promotion` records deferred MCP schemas newly promoted for
 the active catalog. `changes.source` distinguishes automatic `routing_hint`
 promotion from an explicit `tool_search`; the remaining fields contain sorted
@@ -107,9 +126,10 @@ no names emit no event. Queries, routing keywords, catalog hashes, tool schemas
 and descriptions, arguments, and results are not copied into this middleware
 event. Other event types retain their existing payload contracts.
 
-Ordinary task-tool subagents forward both loop-detection and tool-promotion
-appends to the parent run loop through dedicated recorder context keys. The
-loop-bound `RunJournal` itself never enters the isolated subagent loop.
+Ordinary task-tool subagents forward loop-detection, tool-promotion, and
+tool-progress appends to the parent run loop through dedicated recorder context
+keys. The loop-bound `RunJournal` itself never enters the isolated subagent
+loop.
 
 ### Opaque Run Outputs
 
@@ -206,62 +226,8 @@ be used by new producers.
 - Nested non-JSON values in `run.end.content` have backend-dependent
   representations: memory retains Python values, while JSONL and database
   stores read them back as strings.
-- Durable batch subagent loop detection and deferred-tool promotion do not
-  emit middleware events because those runs have no parent run journal.
+- Durable batch subagent loop detection, deferred-tool promotion, and
+  tool-progress transitions do not emit middleware events because those runs
+  have no parent run journal.
 - Journal attribution, token accounting, and external tracing metadata still
   depend on manual instrumentation at several LLM call sites.
-
-
-## Optional remote stream frames
-
-`stream.frame` in category `stream` records the actual SSE frame as a structured
-`{"event": name, "data": value}` envelope. Event names preserve subgraph namespace
-suffixes. These rows are excluded from message-history projections. Private
-attempt identity and delivery state belong in Fleet tables, never public content
-or metadata. The event row and private pointer commit in the original writer
-transaction; Redis receives only committed run/attempt/sequence delivery hints.
-
-For `events` and `debug` frames (including namespace suffixes), the full envelope's
-UTF-8 size uses the same `json.dumps(default=str, ensure_ascii=False)` serializer
-as DbRunEventStore, including its default spaces and envelope overhead. Frames
-over `max_trace_content` reject before either persistence or publication; no
-JSON truncation or metadata bypass is allowed. `values`, `messages-tuple` and
-`updates` retain their payload without a new global 10240-byte transport limit.
-
-Remote cursors are canonical `fleet.v1.<run-base64url>.<attempt-base64url>.<seq>`
-with unpadded UTF-8 base64url components and a positive decimal bigint sequence.
-An absent cursor requests complete history for the accepted original identity.
-Malformed, foreign, stale or deleted cursors return HTTP 400 before any SSE
-headers. A retained cursor or cursorless request returns HTTP 410 with detail
-`Remote stream history is unavailable` if a matching original private SSE
-pointer after the consumed cursor has lost its matching public `stream.frame`.
-This applies to active and sealed runs. A deleted public event cannot be
-recreated from its pointer. Retention at or before a retained consumed cursor
-does not block resuming the remaining tail; semantic journal sequence gaps
-are valid and do not imply missing stream history.
-
-Preparation validates all remaining matching history once before headers.
-During a subscription, the reader selects at most128 original private pointers
-before left-joining public frames, so a missing host frame occupies its pointer
-slot rather than being skipped by pagination. Pre-yield existence checks only
-cover the current prefetched pointer window and one exact original authority
-pointer; they do not repeatedly scan the entire remaining history or hydrate
-launch payloads. A mapping change closes the original subscription before its
-next cached frame is emitted.
-
-Retention within the current prefetched page closes it with EOF and no synthetic
-END. Missing frames in a later page are detected when that page is fetched;
-healthy earlier pages may still be delivered. Reconnection reports 410 when its cursor remains valid, or
-400 if that cursor itself was deleted. A real seal with no frames still allows
-END. A sealed run emits END only after an empty pointer page and a matching
-consumed seal highwater. The existence checks read pointer identity/sequence and
-host row matching, not the full event payload. Publisher target lookup remains separate: a missing
-host frame is not acknowledged or reconstructed.
-The optional private sequence floor preserves monotonic allocation after host
-retention. Local cursor and gap rules remain unchanged.
-
-A durable private seal stores the final pointer sequence after live original
-record finalizing clears and SQL is terminal. The reader drains frames through
-that sequence before emitting the existing idless `end` with data null. Trusted
-accepted physical-stop observations can separately recover an omitted seal;
-unknown/quarantined or unproven stops never imply END and never restart an Agent.

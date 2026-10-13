@@ -234,32 +234,32 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
 
             async with spawn_agent_process(client, cmd, *args, env=agent_env, cwd=physical_cwd) as (conn, proc):
                 logger.info("Spawning ACP agent '%s' with command '%s' and args %s in cwd %s", agent, cmd, args, physical_cwd)
-                await conn.initialize(
-                    protocol_version=PROTOCOL_VERSION,
-                    client_capabilities=ClientCapabilities(),
-                    client_info=Implementation(name="deerflow", title="DeerFlow", version="0.1.0"),
-                )
-                session_kwargs: dict[str, Any] = {"cwd": physical_cwd, "mcp_servers": mcp_servers}
-                if agent_config.model:
-                    session_kwargs["model"] = agent_config.model
-                session = await conn.new_session(**session_kwargs)
                 try:
-                    await asyncio.wait_for(
-                        conn.prompt(
+                    async with asyncio.timeout(agent_config.timeout_seconds) as deadline:
+                        await conn.initialize(
+                            protocol_version=PROTOCOL_VERSION,
+                            client_capabilities=ClientCapabilities(),
+                            client_info=Implementation(name="deerflow", title="DeerFlow", version="0.1.0"),
+                        )
+                        session_kwargs: dict[str, Any] = {"cwd": physical_cwd, "mcp_servers": mcp_servers}
+                        if agent_config.model:
+                            session_kwargs["model"] = agent_config.model
+                        session = await conn.new_session(**session_kwargs)
+                        await conn.prompt(
                             session_id=session.session_id,
                             prompt=[text_block(prompt)],
-                        ),
-                        timeout=agent_config.timeout_seconds,
-                    )
+                        )
                 except TimeoutError:
+                    if not deadline.expired():
+                        raise
                     logger.error(
-                        "ACP agent '%s' timed out after %s seconds without responding to prompt; terminating subprocess",
+                        "ACP agent '%s' timed out after %s seconds during initialization, session creation, or prompt; terminating subprocess",
                         agent,
                         agent_config.timeout_seconds,
                     )
                     return (
                         f"Error: ACP agent '{agent}' timed out after {agent_config.timeout_seconds} seconds "
-                        "without responding. The agent subprocess has been terminated. If this agent handles "
+                        "without completing the ACP invocation. The agent subprocess has been terminated. If this agent handles "
                         f"long-running tasks, increase acp_agents.{agent}.timeout_seconds in config.yaml."
                     )
             result = client.collected_text

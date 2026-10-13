@@ -49,14 +49,11 @@ def build_llm(model_config: DeerMemModelConfig | None) -> Any:
     if model_config.temperature is not None:
         kwargs["temperature"] = model_config.temperature
     try:
-        model = init_chat_model(
+        return init_chat_model(
             model=model_config.model,
             model_provider=model_config.provider or "openai",
             **kwargs,
         )
-        from deerflow.models.budgeted_provider import guard_model
-
-        return guard_model(model, model_name="explicit-memory", provider_use="deermem:init_chat_model")
     except Exception as e:  # noqa: BLE001 - degrade like _host_default_llm (don't crash startup)
         logger.warning(
             "build_llm failed for model=%r (provider=%r): %s; memory extraction disabled (non-LLM ops still work; an update will raise).",

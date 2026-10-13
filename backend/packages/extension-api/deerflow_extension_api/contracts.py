@@ -14,12 +14,15 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar, runtime_checkable
 
+from deerflow_extension_api.plugins import PluginContribution
 from deerflow_extension_api.state import ExtensionData
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from deerflow_extension_api.assembly import AgentAssemblyObserver
     from deerflow_extension_api.compaction import ContextCompactionObserver
+    from deerflow_extension_api.model_invocation import ModelInvoker
     from deerflow_extension_api.placement import AgentBuildContext, MiddlewarePlacement
+    from deerflow_extension_api.run_evidence import RunEvidenceReader
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -157,14 +160,6 @@ class MiddlewareContributor(Protocol):
 # --- Extension services ----------------------------------------------------
 
 
-class RemoteStateMode(StrEnum):
-    """Operator-trusted contribution declaration; absent means unsupported."""
-
-    UNSUPPORTED = "unsupported"
-    STATELESS = "stateless"
-    TRANSACTIONAL = "transactional"
-
-
 @dataclass(frozen=True)
 class ExtensionRuntimeDeps:
     """Host capabilities bound after Gateway infrastructure is ready."""
@@ -172,10 +167,8 @@ class ExtensionRuntimeDeps:
     app_store: ExtensionData | None = None
     policy: HostPolicySnapshot = field(default_factory=HostPolicySnapshot)
     session_factory: Any | None = None
-    # Adapted remote contributions receive active-only bound transactions.
-    # Local hosts continue to provide the historical session_factory.
-    mutation_transactions: Any | None = None
-    terminal_operations: Any | None = None
+    run_evidence_reader: RunEvidenceReader | None = None
+    model_invoker: ModelInvoker | None = None
 
 
 class ExtensionService(Protocol):
@@ -198,6 +191,10 @@ class ExtensionRegistry(Protocol):
     The host's concrete registry additionally carries host-only machinery
     (attribution, positional rollback, build) that is deliberately absent here.
     """
+
+    def plugin(self, contribution: PluginContribution) -> bool:
+        """Return True when accepted; False means this host lacks plugin UI support."""
+        return False
 
     def middlewares(self, contributor: MiddlewareContributor) -> None:
         return None

@@ -10,13 +10,15 @@ Starlette runs when a client drops the connection — against the production
 consumer.
 """
 
-import ast
 import asyncio
 import inspect
 from types import SimpleNamespace
 
+import anyio
+import pytest
+
 from app.gateway.services import sse_consumer
-from deerflow.runtime import DisconnectMode, RunRecord, RunStatus
+from deerflow.runtime import END_SENTINEL, HEARTBEAT_SENTINEL, DisconnectMode, RunRecord, RunStatus
 
 
 def _running_record() -> RunRecord:
@@ -40,6 +42,66 @@ class _StubBridge:
         return _gen()
 
 
+class _TwoEventBridge:
+    """Yields twice so the request can disconnect on the second poll."""
+
+    def subscribe(self, run_id, last_event_id=None):
+        async def _gen():
+            yield SimpleNamespace(event="message", data='{"step": 1}', id="1")
+            yield SimpleNamespace(event="message", data='{"step": 2}', id="2")
+
+        return _gen()
+
+
+class _HeartbeatBridge:
+    def subscribe(self, run_id, last_event_id=None):
+        async def _gen():
+            yield HEARTBEAT_SENTINEL
+
+        return _gen()
+
+
+class _FailingBridge:
+    """Fails before yielding: the client remains connected."""
+
+    def subscribe(self, run_id, last_event_id=None):
+        async def _gen():
+            raise RuntimeError("stream bridge unavailable")
+            yield
+
+        return _gen()
+
+
+class _BlockingBridge:
+    def __init__(self):
+        self.subscribed = asyncio.Event()
+
+    def subscribe(self, run_id, last_event_id=None):
+        async def _gen():
+            self.subscribed.set()
+            await asyncio.Event().wait()
+            yield
+
+        return _gen()
+
+
+class _ExhaustedBridge:
+    def subscribe(self, run_id, last_event_id=None):
+        async def _gen():
+            if False:
+                yield
+
+        return _gen()
+
+
+class _EndBridge:
+    def subscribe(self, run_id, last_event_id=None):
+        async def _gen():
+            yield END_SENTINEL
+
+        return _gen()
+
+
 class _CancelRecorder:
     """Stands in for the RunManager: records cancel calls, mutates nothing."""
 
@@ -47,6 +109,12 @@ class _CancelRecorder:
         self.cancelled: list[str] = []
 
     async def cancel(self, run_id, action="interrupt"):
+        self.cancelled.append(run_id)
+
+
+class _DrainingCancelRecorder(_CancelRecorder):
+    async def cancel(self, run_id, action="interrupt"):
+        await asyncio.sleep(0)
         self.cancelled.append(run_id)
 
 
@@ -59,6 +127,17 @@ class _StubRequest:
 
     async def is_disconnected(self) -> bool:
         return False
+
+
+class _PollingDisconnectRequest(_StubRequest):
+    def __init__(self, *, disconnect_after: int):
+        super().__init__()
+        self._disconnect_after = disconnect_after
+        self._polls = 0
+
+    async def is_disconnected(self) -> bool:
+        self._polls += 1
+        return self._polls > self._disconnect_after
 
 
 def _request() -> _StubRequest:
@@ -85,6 +164,23 @@ def test_creator_stream_disconnect_applies_cancel_policy():
     assert asyncio.run(scenario()) == ["run-1"]
 
 
+def test_creator_stream_poll_disconnect_applies_cancel_policy():
+    """The primary request-poll arm must mark the disconnect before breaking."""
+
+    async def scenario():
+        recorder = _CancelRecorder()
+        request = _PollingDisconnectRequest(disconnect_after=1)
+        consumer = sse_consumer(_TwoEventBridge(), _running_record(), request, recorder)
+        first_frame = await anext(consumer)
+        assert "event: message\n" in first_frame
+        assert "id: 1\n" in first_frame
+        with pytest.raises(StopAsyncIteration):
+            await anext(consumer)
+        return recorder.cancelled
+
+    assert asyncio.run(scenario()) == ["run-1"]
+
+
 def test_observer_join_disconnect_does_not_cancel():
     """A join/observer stream closing must not cancel the run — including for
     a read-only credential that never held runs:cancel."""
@@ -98,42 +194,116 @@ def test_observer_join_disconnect_does_not_cancel():
     assert asyncio.run(scenario()) == []
 
 
+def test_creator_stream_bridge_failure_does_not_apply_disconnect_policy():
+    """A server-side subscription failure is not a client disconnect."""
+
+    async def scenario():
+        recorder = _CancelRecorder()
+        consumer = sse_consumer(_FailingBridge(), _running_record(), _request(), recorder)
+        with pytest.raises(RuntimeError, match="stream bridge unavailable"):
+            await anext(consumer)
+        return recorder.cancelled
+
+    assert asyncio.run(scenario()) == []
+
+
+def test_creator_stream_request_cancellation_applies_disconnect_policy():
+    """Cancelling the hosting request task retains creator disconnect semantics."""
+
+    async def scenario():
+        bridge = _BlockingBridge()
+        recorder = _CancelRecorder()
+        consumer = sse_consumer(bridge, _running_record(), _request(), recorder)
+        next_frame = asyncio.create_task(anext(consumer))
+        await bridge.subscribed.wait()
+
+        next_frame.cancel()
+        try:
+            await next_frame
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("cancelled request task must propagate cancellation")
+        return recorder.cancelled
+
+    assert asyncio.run(scenario()) == ["run-1"]
+
+
+def test_creator_stream_anyio_cancel_scope_drains_disconnect_policy():
+    """Level cancellation cannot interrupt the owned run-cancel operation."""
+
+    async def scenario():
+        bridge = _BlockingBridge()
+        recorder = _DrainingCancelRecorder()
+        consumer = sse_consumer(bridge, _running_record(), _request(), recorder)
+
+        with anyio.CancelScope() as scope:
+            scope.cancel()
+            await anext(consumer)
+
+        return recorder.cancelled
+
+    assert anyio.run(scenario) == ["run-1"]
+
+
+def test_creator_stream_unexpected_exhaustion_does_not_cancel():
+    """A subscription ending without END is a server error, not disconnect."""
+
+    async def scenario():
+        recorder = _CancelRecorder()
+        consumer = sse_consumer(_ExhaustedBridge(), _running_record(), _request(), recorder)
+        with pytest.raises(RuntimeError, match="ended before a terminal event"):
+            await anext(consumer)
+        return recorder.cancelled
+
+    assert asyncio.run(scenario()) == []
+
+
+def test_creator_stream_close_after_end_does_not_cancel():
+    """Closing after a terminal frame cannot reinterpret END as disconnect."""
+
+    async def scenario():
+        recorder = _CancelRecorder()
+        consumer = sse_consumer(_EndBridge(), _running_record(), _request(), recorder)
+        assert await anext(consumer) == "event: end\ndata: null\n\n"
+        await consumer.aclose()
+        return recorder.cancelled
+
+    assert asyncio.run(scenario()) == []
+
+
+def test_creator_stream_close_after_orphan_recovery_end_does_not_cancel(monkeypatch):
+    """A synthetic orphan terminal frame owns the same local invariant as END."""
+
+    async def scenario():
+        recorder = _CancelRecorder()
+
+        async def orphan_recovered(record, run_mgr):
+            return True
+
+        monkeypatch.setattr(
+            "app.gateway.services._orphan_recovery_observed_after_heartbeat",
+            orphan_recovered,
+        )
+        consumer = sse_consumer(_HeartbeatBridge(), _running_record(), _request(), recorder)
+        assert await anext(consumer) == "event: end\ndata: null\n\n"
+        await consumer.aclose()
+        return recorder.cancelled
+
+    assert asyncio.run(scenario()) == []
+
+
 def test_join_routes_wire_sse_consumer_as_observers():
     """Both join surfaces must be wired as observers, and the creator's
     create-and-stream endpoints must keep the creator policy (default)."""
     from app.gateway.routers import runs as runs_router
     from app.gateway.routers import thread_runs
 
-    for module, expected in [
-        (thread_runs, {"stream_run": True, "join_run": False, "_stream_existing_run": False}),
-        (runs_router, {"stateless_stream": True}),
-    ]:
-        tree = ast.parse(inspect.getsource(module))
-        all_calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "sse_consumer"]
-        assert len(all_calls) == len(expected)
-        for handler_name, creator in expected.items():
-            handler = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name == handler_name)
-            calls = [node for node in ast.walk(handler) if node in all_calls]
-            assert len(calls) == 1, handler_name
-            call = calls[0]
-            assert [ast.unparse(arg) for arg in call.args] == ["bridge", "record", "request", "run_mgr"]
-            assert all(keyword.arg is not None for keyword in call.keywords), "Dynamic keywords could override observer policy"
-            policy = [keyword.value for keyword in call.keywords if keyword.arg == "apply_on_disconnect"]
-            if creator:
-                assert not policy, f"{handler_name} must retain the creator default"
-            else:
-                assert len(policy) == 1 and isinstance(policy[0], ast.Constant) and policy[0].value is False, handler_name
-
-    # Creating retries opt into a missing-stream gap; first creates keep the
-    # default. Follow the call's flag back to its assignment rather than pinning
-    # a variable name or the complete source line.
-    tree = ast.parse(inspect.getsource(thread_runs))
-    handler = next(node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "stream_run")
-    call = next(node for node in ast.walk(handler) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "sse_consumer")
-    gap_flag = next(keyword.value for keyword in call.keywords if keyword.arg == "emit_gap_on_missing_stream")
-    assert isinstance(gap_flag, ast.Name)
-    assignment = next(node for node in ast.walk(handler) if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == gap_flag.id for target in node.targets))
-    assert ast.unparse(assignment.value) == "bool(getattr(record, 'idempotency_reused', False))"
+    thread_runs_source = inspect.getsource(thread_runs)
+    # join_run + the shared existing-run stream implementation
+    assert thread_runs_source.count("sse_consumer(bridge, record, request, run_mgr, apply_on_disconnect=False)") == 2
+    # stream_run — creating retry opts into missing-stream gap; first create does not
+    assert "emit_gap_on_missing_stream=record.idempotency_reused" in thread_runs_source
 
     runs_source = inspect.getsource(runs_router)
     # stateless create-and-stream — creator on_disconnect policy, not the retry gap

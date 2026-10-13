@@ -1,6 +1,6 @@
 """Migration tests for 0017_personal_access_tokens (#4849).
 
-Runs the upstream alembic branch on an empty SQLite database (not
+Runs the full alembic chain on an empty SQLite database (not
 ``create_all`` + stamp), then exercises the 0017 downgrade/upgrade cycle.
 """
 
@@ -22,7 +22,6 @@ pytestmark = pytest.mark.asyncio
 _SCRIPT_LOCATION = str(_MIGRATIONS_DIR)
 _REVISION = "0017_personal_access_tokens"
 _PREVIOUS = "0016_subagent_batches"
-_UPSTREAM_LEAF = "0019_thread_incarnations"
 
 _EXPECTED_COLUMNS = {
     "id",
@@ -66,9 +65,7 @@ async def test_pat_migration_upgrade_downgrade_cycle(tmp_path: Path) -> None:
         # Alembic's env.py drives migrations with its own asyncio.run, so the
         # sync command API must run off the test loop (same wrapper the
         # production bootstrap uses).
-        # This reversible PAT audit stays on the upstream branch; the merged
-        # Fleet head deliberately requires an approved backup for rollback.
-        await asyncio.to_thread(alembic_command.upgrade, cfg, _UPSTREAM_LEAF)
+        await asyncio.to_thread(alembic_command.upgrade, cfg, "0034_run_event_seq_watermark")
 
         tables = await _inspect(engine, _table_names)
         assert "personal_access_tokens" in tables
@@ -89,7 +86,7 @@ async def test_pat_migration_upgrade_downgrade_cycle(tmp_path: Path) -> None:
         assert "personal_access_tokens" not in tables_after_down
 
         # Upgrade again recreates it (idempotent round trip).
-        await asyncio.to_thread(alembic_command.upgrade, cfg, _UPSTREAM_LEAF)
+        await asyncio.to_thread(alembic_command.upgrade, cfg, "0034_run_event_seq_watermark")
         tables_after_up = await _inspect(engine, _table_names)
         assert "personal_access_tokens" in tables_after_up
     finally:

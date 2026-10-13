@@ -14,6 +14,8 @@ import logging
 import os
 import re
 import shlex
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -23,15 +25,17 @@ import pytest
 
 from deerflow.community.tenki.provider import _BOOTSTRAP_TIMEOUT, TenkiSandboxProvider, _import_client
 from deerflow.community.tenki.sandbox import TenkiSandbox
+from deerflow.config.app_config import AppConfig
 
 # ── Fake Tenki SDK ────────────────────────────────────────────────────
 
 
 class _FakeResult:
-    def __init__(self, exit_code: int = 0, stdout: bytes = b"", stderr: bytes = b"") -> None:
+    def __init__(self, exit_code: int = 0, stdout: bytes = b"", stderr: bytes = b"", timed_out: bool = False) -> None:
         self.exit_code = exit_code
         self.stdout = stdout
         self.stderr = stderr
+        self.timed_out = timed_out
 
     @property
     def stdout_text(self) -> str:
@@ -108,6 +112,13 @@ class _FakeFS:
         return _FakeFileInfo(path, len(self._owner.files[path]))
 
 
+def _search_inner(script: str) -> str:
+    """The grep/find command inside ``remote_search_command``, or ``script`` itself."""
+    if "__DF_SEARCH_STATUS__:" not in script:
+        return script
+    return script[script.index("{ ") + 2 : script.index('; echo $? > "$_st"; }')]
+
+
 class _FakeSandbox:
     """A fake tenki ``Sandbox``: a native ``fs`` API plus the handful of shell
     commands the adapter still emits for search, backed by one in-memory
@@ -155,6 +166,8 @@ class _FakeSandbox:
             return _FakeResult(exit_code=1, stdout=b"5 passed, 1 error\n")
         if "BOOTSTRAP_OK" in script:  # provider create-time bootstrap script
             return _FakeResult(stdout=b"BOOTSTRAP_OK\n")
+        if "__DF_SEARCH_STATUS__:" in script:
+            return self._search(script)
         if script.startswith("find ") or "find -H " in script:
             match = re.search(r"(?:^|[\s;{])find(?:\s+-[HLP])*\s+(\S+)", script)
             root = match.group(1).strip("'\"") if match else ""
@@ -162,7 +175,8 @@ class _FakeSandbox:
             listing = ("\n".join(hits) + "\n") if hits else ""
             if "__DF_FIND_STATUS__:" in script:
                 status = 0 if hits else 1
-                return _FakeResult(stdout=f"{listing}\n__DF_FIND_STATUS__:{status}\n".encode(), exit_code=status)
+                marker = "0" if hits else "missing"
+                return _FakeResult(stdout=f"{listing}\n__DF_FIND_STATUS__:{marker}\n".encode(), exit_code=status)
             return _FakeResult(stdout=listing.encode())
         if script.startswith("grep "):
             # grep <flags> -e <pattern> <root> 2>/dev/null | head -N
@@ -177,6 +191,16 @@ class _FakeSandbox:
                         lines.append(f"{path}:{n}:{text}")
             return _FakeResult(stdout=("\n".join(lines) + "\n").encode() if lines else b"")
         return _FakeResult()
+
+    def _search(self, script: str) -> _FakeResult:
+        # remote_search_command: a root-existence check, then the wrapped search and its status marker.
+        root = shlex.split(re.search(r"\[ ! -e (.+?) \]; then", script).group(1))[0].rstrip("/") or "/"
+        if not any(p == root or p.startswith(f"{root}/") for p in (*self.files, *self.dirs)):
+            return _FakeResult(stdout=b"__DF_SEARCH_STATUS__:missing\n")
+        inner = _search_inner(script)
+        listing = self._run_script(inner).stdout_text
+        status = 0 if listing or inner.startswith("find ") else 1
+        return _FakeResult(stdout=f"{listing}\n__DF_SEARCH_STATUS__:{status}\n".encode())
 
     def close(self):
         self.closed = True
@@ -365,6 +389,26 @@ def test_execute_command_returns_error_as_text() -> None:
     assert box.execute_command("echo hi") == "Error: boom"
 
 
+@pytest.mark.parametrize("exit_code", [0, 143])
+@pytest.mark.parametrize("stdout,stderr", [(b"partial output", b"diagnostic"), (b"", b"")])
+def test_execute_command_reports_timeout_and_preserves_output(monkeypatch, exit_code, stdout, stderr) -> None:
+    fake = _FakeSandbox()
+    monkeypatch.setattr(fake, "_run_script", lambda script: _FakeResult(exit_code=exit_code, stdout=stdout, stderr=stderr, timed_out=True))
+    invalidated = []
+    box = TenkiSandbox("sb", fake, on_terminal_failure=lambda *args: invalidated.append(args))
+
+    output = box.execute_command("sleep 10", timeout=1)
+
+    assert "Error: command timed out" in output
+    assert output.endswith("Exit Code: 124")
+    assert stdout.decode() in output
+    assert stderr.decode() in output
+    assert len(fake.exec_calls) == 1
+    assert fake.exec_calls[0]["timeout"] == 1
+    assert not invalidated
+    assert not box.is_closed
+
+
 def test_execute_command_closed_returns_error() -> None:
     box = TenkiSandbox("sb", _FakeSandbox())
     box.close()
@@ -492,6 +536,23 @@ def test_read_missing_file_returns_error() -> None:
     assert box.read_file("/mnt/user-data/workspace/nope.txt").startswith("Error:")
 
 
+def test_read_file_supports_bounded_ranges() -> None:
+    """The tools layer passes ``start_line``/``end_line`` on every ranged read."""
+    box = TenkiSandbox("sb", _FakeSandbox())
+    box.write_file("/mnt/user-data/workspace/range.txt", "line 1\nline 2\nline 3\nline 4\nline 5")
+    assert box.read_file("/mnt/user-data/workspace/range.txt") == "line 1\nline 2\nline 3\nline 4\nline 5"
+    assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=2, end_line=4) == "line 2\nline 3\nline 4"
+    assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=4) == "line 4\nline 5"
+    assert box.read_file("/mnt/user-data/workspace/range.txt", end_line=2) == "line 1\nline 2"
+    # A start past EOF comes back empty rather than raising: the tool layer's
+    # "(start_line exceeds file length)" message and the truncated-read
+    # continuation path both depend on that contract.
+    assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=99) == ""
+    # Negative bounds clamp like LocalSandbox instead of wrapping around.
+    assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=-1) == ("line 1\nline 2\nline 3\nline 4\nline 5")
+    assert box.read_file("/mnt/user-data/workspace/range.txt", end_line=-1) == ""
+
+
 def test_download_missing_file_raises_oserror() -> None:
     box = TenkiSandbox("sb", _FakeSandbox())
     with pytest.raises(OSError):
@@ -583,7 +644,7 @@ def test_grep_passes_capital_h_so_single_file_matches_parse() -> None:
     box = TenkiSandbox("sb", fake)
     box.write_file("/mnt/user-data/workspace/a.txt", "needle here\n")
     box.grep("/mnt/user-data/workspace", "needle")
-    grep_scripts = [c["argv"][2] for c in fake.exec_calls if c["argv"][:2] == ("sh", "-lc") and c["argv"][2].startswith("grep ")]
+    grep_scripts = [_search_inner(c["argv"][2]) for c in fake.exec_calls if c["argv"][:2] == ("sh", "-lc") and _search_inner(c["argv"][2]).startswith("grep ")]
     assert grep_scripts and "-H" in shlex.split(grep_scripts[0])
 
 
@@ -598,7 +659,7 @@ def test_grep_single_file_path_with_matching_glob() -> None:
 
 
 def _grep_script(fake: _FakeSandbox) -> list[str]:
-    scripts = [c["argv"][2] for c in fake.exec_calls if c["argv"][:2] == ("sh", "-lc") and c["argv"][2].startswith("grep ")]
+    scripts = [_search_inner(c["argv"][2]) for c in fake.exec_calls if c["argv"][:2] == ("sh", "-lc") and _search_inner(c["argv"][2]).startswith("grep ")]
     assert scripts, "no grep command was issued"
     return shlex.split(scripts[0])
 
@@ -626,8 +687,9 @@ def test_grep_case_sensitive_omits_ignore_case_flag() -> None:
 def test_glob_include_dirs_adds_directory_type_to_find() -> None:
     fake = _FakeSandbox()
     box = TenkiSandbox("sb", fake)
+    box.write_file("/mnt/user-data/workspace/a.txt", "x")  # glob searches an existing root
     box.glob("/mnt/user-data/workspace", "*", include_dirs=True)
-    find_scripts = [c["argv"][2] for c in fake.exec_calls if c["argv"][:2] == ("sh", "-lc") and c["argv"][2].startswith("find ")]
+    find_scripts = [_search_inner(c["argv"][2]) for c in fake.exec_calls if c["argv"][:2] == ("sh", "-lc") and _search_inner(c["argv"][2]).startswith("find ")]
     assert find_scripts and "-type d" in find_scripts[-1]  # dirs requested, not just files
 
 
@@ -715,6 +777,42 @@ def test_create_waits_client_side_and_configures_lifetime(monkeypatch):
     provider.shutdown()
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("false", False), ("0", False), ("off", False), ("no", False), ("FALSE", False), ("true", True), ("1", True), ("on", True), ("yes", True)],
+)
+def test_create_sticky_from_environment(monkeypatch, tmp_path, value, expected):
+    monkeypatch.setenv("TEST_TENKI_STICKY", value)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("models: []\nsandbox:\n  use: deerflow.community.tenki:TenkiSandboxProvider\n  sticky: $TEST_TENKI_STICKY\n  idle_timeout: 0\n", encoding="utf-8")
+    config = AppConfig.from_file(config_path)
+    client = _FakeClient()
+    monkeypatch.setattr("deerflow.community.tenki.provider.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.community.tenki.provider._import_client", lambda: lambda **kw: client)
+    provider = TenkiSandboxProvider()
+    try:
+        provider.acquire("thread-1", user_id="u1")
+        assert client.create_kwargs[0]["sticky"] is expected
+    finally:
+        provider.shutdown()
+
+
+@pytest.mark.parametrize("value", [False, True, None])
+def test_create_sticky_native_value(monkeypatch, value):
+    client = _FakeClient()
+    provider = _install(monkeypatch, client=client, config_attrs={"sticky": value, "idle_timeout": 0})
+    try:
+        provider.acquire("thread-1", user_id="u1")
+        assert client.create_kwargs[0]["sticky"] is bool(value)
+    finally:
+        provider.shutdown()
+
+
+def test_sticky_rejects_invalid_boolean(monkeypatch):
+    with pytest.raises(ValueError, match="valid boolean"):
+        _install(monkeypatch, config_attrs={"sticky": "not-a-boolean"})
+
+
 def test_create_default_lifetime_is_explicit(monkeypatch):
     client = _FakeClient()
     provider = _install(monkeypatch, client=client)
@@ -766,6 +864,127 @@ def test_bootstrap_is_non_interactive_and_time_bounded(monkeypatch):
     # timeout=0 (no timeout in some SDKs) would slip past an `is not None` check.
     assert bootstrap["timeout"] == _BOOTSTRAP_TIMEOUT
     provider.shutdown()
+
+
+def test_timed_out_bootstrap_warns_even_with_success_marker(monkeypatch, caplog):
+    class _TimedOutBootstrap(_FakeSandbox):
+        def _run_script(self, script: str) -> _FakeResult:
+            if "BOOTSTRAP_OK" in script:
+                return _FakeResult(stdout=b"BOOTSTRAP_OK\n", timed_out=True)
+            return super()._run_script(script)
+
+    provider = _install(monkeypatch, client=_FakeClient(sandbox_factory=_TimedOutBootstrap))
+    try:
+        with caplog.at_level("WARNING"):
+            sid = provider.acquire("thread-1", user_id="u1")
+        assert provider.get(sid) is not None
+        assert any("bootstrap" in r.message and "timed_out=True" in r.message for r in caplog.records)
+    finally:
+        provider.shutdown()
+
+
+@pytest.mark.parametrize("timed_out,exit_code", [(True, 0), (False, 1)])
+def test_warm_pool_rejects_unsuccessful_probe_with_ok_output(monkeypatch, caplog, timed_out, exit_code):
+    client = _FakeClient()
+    provider = _install(monkeypatch, client=client)
+    try:
+        sid = provider.acquire("thread-1", user_id="u1")
+        first = client.last_sandbox
+        provider.release(sid)
+        monkeypatch.setattr(
+            first,
+            "_run_script",
+            lambda script: _FakeResult(stdout=b"ok\n", exit_code=exit_code, timed_out=timed_out),
+        )
+
+        with caplog.at_level(logging.WARNING):
+            assert provider.acquire("thread-1", user_id="u1") == sid
+        assert client.last_sandbox is not first
+        assert first.closed
+        failure = next(record.message for record in caplog.records if "health check failed" in record.message)
+        assert sid in failure
+        assert "ok\n" in failure
+        assert f"Exit Code: {124 if timed_out else exit_code}" in failure
+    finally:
+        provider.shutdown()
+
+
+@pytest.mark.parametrize(
+    "stdout,stderr",
+    [
+        (b"ok\n", b"sh: warning: setlocale: LC_ALL: cannot change locale\n"),
+        (b"profile loaded\nok\n", b""),
+        (
+            b"profile loaded\nok\n",
+            b"sh: warning: setlocale: LC_ALL: cannot change locale\n",
+        ),
+    ],
+)
+def test_warm_pool_reclaims_healthy_probe_with_shell_noise(monkeypatch, caplog, stdout, stderr):
+    client = _FakeClient()
+    provider = _install(monkeypatch, client=client)
+    try:
+        sid = provider.acquire("thread-1", user_id="u1")
+        first = client.last_sandbox
+        provider.release(sid)
+        monkeypatch.setattr(
+            first,
+            "_run_script",
+            lambda script: _FakeResult(stdout=stdout, stderr=stderr),
+        )
+        calls_before = len(first.exec_calls)
+
+        with caplog.at_level(logging.WARNING):
+            assert provider.acquire("thread-1", user_id="u1") == sid
+        assert client.create_count == 1
+        assert client.last_sandbox is first
+        assert not first.closed
+        assert len(first.exec_calls) == calls_before + 1
+        assert first.exec_calls[-1]["argv"] == ("sh", "-lc", "echo ok")
+        assert first.exec_calls[-1]["timeout"] == 10
+        assert not any("health check" in record.message for record in caplog.records)
+    finally:
+        provider.shutdown()
+
+
+@pytest.mark.parametrize("stdout", [b"not ok\n", b"ok-ish\n", b""])
+def test_warm_pool_logs_probe_without_exact_success_line(monkeypatch, caplog, stdout):
+    client = _FakeClient()
+    provider = _install(monkeypatch, client=client)
+    try:
+        sid = provider.acquire("thread-1", user_id="u1")
+        first = client.last_sandbox
+        provider.release(sid)
+        monkeypatch.setattr(first, "_run_script", lambda script: _FakeResult(stdout=stdout))
+
+        with caplog.at_level(logging.WARNING):
+            assert provider.acquire("thread-1", user_id="u1") == sid
+        assert client.create_count == 2
+        assert client.last_sandbox is not first
+        assert first.closed
+        output = stdout.decode() if stdout else "(no output)"
+        assert any(f"Tenki warm-pool sandbox {sid} health check failed: {output}" == record.message for record in caplog.records)
+    finally:
+        provider.shutdown()
+
+
+def test_warm_pool_rejects_probe_error_containing_success_line(monkeypatch, caplog):
+    client = _FakeClient()
+    provider = _install(monkeypatch, client=client)
+    try:
+        sid = provider.acquire("thread-1", user_id="u1")
+        first = client.last_sandbox
+        provider.release(sid)
+        first.exec_error = RuntimeError("probe transport failed\nok")
+
+        with caplog.at_level(logging.WARNING):
+            assert provider.acquire("thread-1", user_id="u1") == sid
+        assert client.create_count == 2
+        assert client.last_sandbox is not first
+        assert first.closed
+        assert any(f"Tenki warm-pool sandbox {sid} health check failed: Error: probe transport failed\nok" == record.message for record in caplog.records)
+    finally:
+        provider.shutdown()
 
 
 def test_release_parks_in_warm_pool(monkeypatch):
@@ -1051,3 +1270,109 @@ def test_list_dir_and_glob_preserve_trailing_space_in_filename() -> None:
     found, truncated = box.glob("/mnt/user-data/workspace", "notes*")
     assert found == ["/mnt/user-data/workspace/notes.txt "]
     assert truncated is False
+
+
+# ── Remote grep/glob failure contract against a real POSIX sh (#5376) ─────────
+
+_RS_POSIX = pytest.mark.skipif(
+    os.name == "nt" or any(shutil.which(tool) is None for tool in ("sh", "head", "grep", "find")),
+    reason="POSIX sh, head, grep and find required",
+)
+
+
+def _rs_env(tmp_path, failing: str | None = None) -> dict[str, str]:
+    env = os.environ.copy()
+    if failing is not None:
+        bin_dir = tmp_path / "fake-bin"
+        bin_dir.mkdir()
+        fake = bin_dir / failing
+        fake.write_text("#!/bin/sh\nexit 127\n", encoding="utf-8")
+        fake.chmod(0o755)
+        env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+    return env
+
+
+def _rs_box(tmp_path, monkeypatch, failing: str | None = None) -> TenkiSandbox:
+    box = TenkiSandbox("sb", _FakeSandbox())
+    shell_env = _rs_env(tmp_path, failing)
+
+    def sh(script: str, env=None, timeout=None) -> _FakeResult:
+        # ``sh -c`` (not ``-lc``) keeps a login profile from overriding the fake PATH.
+        proc = subprocess.run(["sh", "-c", script], capture_output=True, text=True, env=shell_env, check=False)
+        return _FakeResult(exit_code=proc.returncode, stdout=proc.stdout.encode(), stderr=proc.stderr.encode())
+
+    monkeypatch.setattr(box, "_sh", sh)
+    return box
+
+
+def _rs_search(box, op: str, root: str):
+    return box.grep(root, "needle") if op == "grep" else box.glob(root, "**/*.py")
+
+
+@_RS_POSIX
+@pytest.mark.parametrize("op", ["grep", "glob"])
+def test_remote_search_missing_root_raises_file_not_found(tmp_path, monkeypatch, op) -> None:
+    with pytest.raises(FileNotFoundError):
+        _rs_search(_rs_box(tmp_path, monkeypatch), op, str(tmp_path / "missing"))
+
+
+@_RS_POSIX
+@pytest.mark.parametrize(("op", "binary"), [("grep", "grep"), ("glob", "find")])
+def test_remote_search_missing_binary_raises_instead_of_no_matches(tmp_path, monkeypatch, op, binary) -> None:
+    with pytest.raises(OSError, match="exited with code 127"):
+        _rs_search(_rs_box(tmp_path, monkeypatch, failing=binary), op, str(tmp_path))
+
+
+@_RS_POSIX
+def test_remote_search_keeps_real_matches_and_genuine_no_match(tmp_path, monkeypatch) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("def needle():\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    matches, _ = box.grep(str(tmp_path), "needle")
+    assert [(os.path.basename(m.path), m.line_number) for m in matches] == [("app.py", 1)]
+    assert box.grep(str(tmp_path), "zzz_nothing") == ([], False)
+    found, _ = box.glob(str(tmp_path), "**/*.py")
+    assert [os.path.basename(path) for path in found] == ["app.py"]
+    assert box.glob(str(tmp_path), "*.md") == ([], False)
+
+
+@_RS_POSIX
+@pytest.mark.parametrize(("op", "entries", "truncated"), [("grep", 51, False), ("grep", 52, True), ("glob", 51, False), ("glob", 52, True)])
+def test_remote_search_reports_truncation_when_the_cap_hides_filtered_results(tmp_path, monkeypatch, op, entries, truncated) -> None:
+    # max_results=1 caps the raw stream at 51 lines, and every line falls outside
+    # the glob, so nothing survives the Python-side filter. Only the cap decides
+    # whether that empty result is complete; reporting it as such reads as "no
+    # matches" while an in-scope file may sit past the cap.
+    (tmp_path / "other").mkdir()
+    for index in range(entries):
+        (tmp_path / "other" / f"f{index}.js").write_text("needle\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    if op == "grep":
+        result = box.grep(str(tmp_path), "needle", glob="src/*.js", max_results=1)
+    else:
+        result = box.glob(str(tmp_path), "src/*.js", max_results=1)
+
+    assert result == ([], truncated)
+
+
+@_RS_POSIX
+@pytest.mark.parametrize(("op", "entries", "truncated"), [("grep", 1, False), ("grep", 2, True), ("glob", 1, False), ("glob", 2, True)])
+def test_remote_search_exactly_full_is_not_truncated(tmp_path, monkeypatch, op, entries, truncated) -> None:
+    # max_results=1 over a tree holding one in-scope match is a complete result:
+    # the Python-side loop used to return on the max-th match without looking for
+    # one more, so an exhausted search over a one-match tree read as cut off. A
+    # second match keeps that report honest.
+    (tmp_path / "src").mkdir()
+    for index in range(entries):
+        (tmp_path / "src" / f"f{index}.js").write_text("needle\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    if op == "grep":
+        matches, reported = box.grep(str(tmp_path), "needle", glob="src/*.js", max_results=1)
+    else:
+        matches, reported = box.glob(str(tmp_path), "src/*.js", max_results=1)
+
+    assert len(matches) == 1
+    assert reported is truncated

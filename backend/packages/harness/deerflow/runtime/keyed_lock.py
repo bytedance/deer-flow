@@ -1,12 +1,17 @@
-"""Async per-key serialization with waiter-aware entry reclamation."""
+"""Per-key serialization with waiter-aware entry reclamation.
+
+:func:`AsyncKeyedLockTable` serves asyncio callers;
+:class:`KeyedLockTable` is the thread-side counterpart for blocking
+critical sections running on worker threads.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import threading
 import weakref
-from collections.abc import AsyncIterator, Hashable
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Hashable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 
 
@@ -85,3 +90,58 @@ class AsyncKeyedLockTable[KeyT: Hashable]:
             entries.pop(key)
             if not entries and self._entries_by_loop.get(loop) is entries:
                 self._entries_by_loop.pop(loop, None)
+
+
+@dataclass(slots=True)
+class _ThreadEntry:
+    lock: threading.Lock
+    participants: int = 0  # current holder plus queued waiters
+
+
+class KeyedLockTable[KeyT: Hashable]:
+    """Serialize same-key blocking work across worker threads.
+
+    Thread-side counterpart of :class:`AsyncKeyedLockTable`: the guard
+    protects only the registry, and the blocking critical section never
+    holds it. Participants are counted before acquiring the lock, so an
+    entry stays discoverable until its final holder or waiter leaves and a
+    new caller cannot create a second lock that bypasses an already queued
+    waiter. Entries whose last participant leaves are reclaimed so idle
+    keys do not accumulate.
+    """
+
+    def __init__(self) -> None:
+        self._guard = threading.Lock()
+        self._entries: dict[KeyT, _ThreadEntry] = {}
+
+    @contextmanager
+    def hold(self, key: KeyT) -> Iterator[None]:
+        """Hold the lock for ``key``, blocking the calling thread."""
+        entry = self._checkout(key)
+        acquired = False
+        try:
+            entry.lock.acquire()
+            acquired = True
+            yield
+        finally:
+            if acquired:
+                entry.lock.release()
+            self._checkin(key, entry)
+
+    def _checkout(self, key: KeyT) -> _ThreadEntry:
+        with self._guard:
+            entry = self._entries.get(key)
+            if entry is None:
+                entry = _ThreadEntry(lock=threading.Lock())
+                self._entries[key] = entry
+            entry.participants += 1
+            return entry
+
+    def _checkin(self, key: KeyT, entry: _ThreadEntry) -> None:
+        with self._guard:
+            entry.participants -= 1
+            if entry.participants != 0 or entry.lock.locked():
+                return
+            if self._entries.get(key) is not entry:
+                return
+            self._entries.pop(key)

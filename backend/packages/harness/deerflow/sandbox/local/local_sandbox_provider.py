@@ -4,7 +4,6 @@ from collections import OrderedDict
 from pathlib import Path
 
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
-from deerflow.runtime.execution.workspace_boundary import native_writer
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
@@ -84,7 +83,6 @@ class LocalSandboxProvider(SandboxProvider):
             # an isolation boundary by accident.
             return False
 
-    @native_writer
     def __init__(self, max_cached_threads: int = DEFAULT_MAX_CACHED_THREAD_SANDBOXES):
         """Initialize the local sandbox provider with static path mappings.
 
@@ -436,7 +434,6 @@ class LocalSandboxProvider(SandboxProvider):
 
         return [mapping for mapping in mappings if not conflicts(mapping)]
 
-    @native_writer
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Return a sandbox id scoped to *thread_id* (or the generic singleton).
 
@@ -469,9 +466,15 @@ class LocalSandboxProvider(SandboxProvider):
         # triggers a full rebuild (~400 ms measured locally) under the
         # cross-process projection lock, serializing concurrent acquires and
         # mutations for that user. Acceptable for an editing-frequency event.
+        #
+        # A thread view exists only to enforce an Agent skill allowlist, and
+        # SandboxMiddleware keeps it fresh only while this provider can enforce
+        # one. With host bash allowed it skips the view (restricted runs are
+        # rejected), so mounting a leftover view would pin the last restricted
+        # Agent's allowlist; use the shared projection instead.
         skill_projection = self._ensure_skills_projection(
             effective_user_id,
-            thread_id=thread_id,
+            thread_id=thread_id if self.supports_agent_skill_isolation else None,
         )
         key = self._thread_key(thread_id, effective_user_id)
 

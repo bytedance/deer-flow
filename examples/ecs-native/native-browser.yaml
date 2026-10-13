@@ -1,0 +1,29 @@
+# Partial tools overlay: APPEND to native-shell.yaml tools; keep all native files/bash.
+# Add browser_control.provider explicitly to both ECS_NATIVE_CONFIG role JSON files.
+tools:
+- name: browser_navigate
+  group: browser
+  use: deerflow.community.browser_automation.tools:browser_navigate_tool
+  allow_private_addresses: false
+  allow_unguarded_cdp: false
+- name: browser_snapshot
+  group: browser
+  use: deerflow.community.browser_automation.tools:browser_snapshot_tool
+- name: browser_click
+  group: browser
+  use: deerflow.community.browser_automation.tools:browser_click_tool
+- name: browser_type
+  group: browser
+  use: deerflow.community.browser_automation.tools:browser_type_tool
+- name: browser_get_text
+  group: browser
+  use: deerflow.community.browser_automation.tools:browser_get_text_tool
+- name: browser_back
+  group: browser
+  use: deerflow.community.browser_automation.tools:browser_back_tool
+- name: browser_screenshot
+  group: browser
+  use: deerflow.community.browser_automation.tools:browser_screenshot_tool
+- name: browser_close
+  group: browser
+  use: deerflow.community.browser_automation.tools:browser_close_tool

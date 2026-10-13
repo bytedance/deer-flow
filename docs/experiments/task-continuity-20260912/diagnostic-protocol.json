@@ -1,0 +1,9 @@
+{
+  "version": "oracle-reader-diagnostic-v1",
+  "reason": "Two excluded development QA cases showed source-turn hits without full answer correctness; isolate reader limitations before interpreting retrieval gains.",
+  "selection": "All 42 already-selected public test cases, no score-based selection.",
+  "input": "Only original sessions identified by official evidence_session labels, with full session content. No reference answer or has_answer metadata is supplied to reader. Abstention rows have no evidence and are reported separately.",
+  "reader": "Same model, system prompt, output limit and final question as A-D, but oracle evidence selection and potentially different context length.",
+  "use": "Diagnostic reader reference only. Not an implementable retrieval method, not a fifth competing retrieval score, not an official leaderboard result.",
+  "frozen_primary_protocol": "protocol.json and A-D results remain unchanged."
+}

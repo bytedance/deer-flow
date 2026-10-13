@@ -56,7 +56,7 @@ def _coerce_max_results(
 ) -> int:
     try:
         coerced = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         logger.warning(
             "Invalid Brave Search max_results=%r; using default %s",
             value,

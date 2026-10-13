@@ -339,8 +339,9 @@ Phase 1 最低验证要求：
 - **兼容性：** `authorization.enabled: false` 时两条路径均为 no-op（路由返回全部模型，
   解析返回原名）。匿名请求（user=None）不触发过滤。RBAC provider 的 `_RESOURCE_POLICY_KEYS`
   已包含 `"model": "models"`，无需 schema 变更。
-- **证据：** `tests/test_models_authorization.py`（24 tests）覆盖 disabled/anonymous/
-  RBAC allow/deny/wildcard/fail-closed/fail-open 路由场景，disabled/allowed/
+- **证据：** `tests/test_models_authorization.py`（26 tests）覆盖 disabled/anonymous/
+  RBAC allow/deny/wildcard/fail-closed/fail-open 路由场景（含 provider-resolution-error
+  fail-closed/fail-open），disabled/allowed/
   graceful-fallback/all-denied-fail-closed/all-denied-fail-open/custom-provider-list-vs-use/
   no-usable-fallback 运行时场景，以及 `DeerFlowClient._ensure_agent` 的 model:use 强制 +
   None 默认解析 + disabled no-op 集成场景；
@@ -348,6 +349,60 @@ Phase 1 最低验证要求：
   `test_auth_middleware.py` 共 318 tests 全部通过。
 - **延期：** Skills、Sandbox 权限（Phase 3 后续 PR）；前端 effective-permissions 展示；
   management route 的 provider 迁移。
+
+### 2026-07-28 — Phase 3 / Skills authorization (activate)
+
+- **背景：** Phase 2A 合并后，技能仍然对所有已认证用户开放——`available_skills`
+  仅由 agent config 白名单控制，不检查角色。RFC §9 Phase 3 要求覆盖 Skills 资源类型。
+  技能的 enforcement 与 Models 不同：技能没有 Gateway route，而是在 harness 层
+  （lead agent assembly + subagent executor + slash-activation middleware）执行。
+- **决策（Layer 1 — 装配阶段）：** 新增 `filter_available_skills_by_authorization()`
+  过滤技能名称集合（`set[str] | None`），而非 `Skill` 对象列表。在 lead agent
+  `_make_lead_agent` 中，该函数在 `_available_skill_names()` 之后、`_load_enabled_available_skills()`
+  之前执行，使得 catalog（`describe_skill`）和 `SkillActivationMiddleware`（slash 激活）
+  共享同一个已过滤的 allowlist。在 subagent `executor.py` 的 `_load_skills()` 中同样过滤
+  `config.skills` 白名单。
+- **决策（Layer 2 — 运行时 slash 激活，2026-09-03 修订）：** 成员检查之外，显式
+  slash 激活还执行动作级 `authorize("skill", "activate")` 检查。`SkillActivationMiddleware`
+  新增 `skill_authorization` 参数（`ResolvedSkillAuthorization`：装配时解析一次的
+  provider + principal + fail_closed），在 `_resolve_activation` 的成员检查之后调用
+  `_activation_allowed()`；deny 返回与成员拒绝相同的用户文案（不泄露原因），provider
+  异常按 fail_closed 拒绝 / fail_open 放行。三条链路（lead `build_middlewares`、
+  `DeerFlowClient._ensure_agent`、subagent `build_subagent_runtime_middlewares`）均接线。
+  修订原因：Layer 1 的 `filter_resources` 是动作无关的可见性层，动作感知的自定义
+  provider 可以"可见但拒绝激活"——原设计（仅成员检查）对该类 provider 不闭合。
+  ~~`describe_skill` 与 in-context 秘密绑定保持在可见性层~~（2026-09-04 再修订：
+  `describe_skill` 与 skill-file-load 路径也执行动作检查，见下方 2026-09-04 日志；
+  in-context 秘密绑定经由"拒绝的读取不进 `skill_context`"传递性覆盖）。
+- **决策（候选集解析的 fail-closed）：** 当 `available_skills=None`（无 agent 级白名单）
+  且 `_all_configured_skill_names` 抛错（storage I/O 错误）时，不静默返回 `None`
+  （会让所有技能绕过授权）。改为让 `_all_configured_skill_names` 抛异常，调用方按
+  `fail_closed` 决策：fail-closed → `set()`（拒绝全部），fail-open → `None`（无限制）。
+  与 provider 错误的 fail-closed/open 处理对称。
+- **决策（通用过滤器）：** 新增 `filter_resources_by_authorization()` 在 `enforcement.py`，
+  是 `filter_tools_by_authorization` 的泛化版本，适用于任何有 `name` 属性的资源（技能、模型等）。
+- **否决方案（2026-09-03 部分反转）：** 原方案否决在 `_resolve_activation` 中添加
+  运行时 `authorize("skill", "activate")` 检查，理由是需要将 provider + principal 传入
+  middleware 构造函数并改变 `build_middlewares` 签名，且认为 Layer 1 过滤已覆盖激活路径。
+  该理由对动作无关的 RBAC provider 成立，但对动作感知的自定义 provider 不成立（可见 ≠
+  可激活，评审 P1 发现并复现）——现按上文 Layer 2 修订落地，"穿 provider/principal 进
+  构造函数"的成本被接受，与 `_authorize_model_name` 的第二重 `authorize("model", "use")`
+  检查模式一致。仍然成立的部分：不为技能新增独立 Gateway route（技能管理路由保持
+  `require_admin_user`，per §12 Q6）；~~`describe_skill` 不做动作检查（见 Layer 2 修订）~~
+  （2026-09-04 再修订：describe 与 skill-file-load 均已加动作检查，见下方日志）。
+- **兼容性：** `authorization.enabled: false` 时 `filter_available_skills_by_authorization`
+  是 no-op（返回原始 allowlist）。`available_skills=None`（无 agent 级白名单）+ 启用授权时，
+  从 config 解析全部技能名并过滤。RBAC provider 的 `_RESOURCE_POLICY_KEYS` 已包含
+  `"skill": "skills"`，无需 schema 变更。对 test mock（SimpleNamespace app_config）安全：
+  使用 `getattr` + `is not True` 防御。
+- **证据：** `tests/test_skills_authorization.py`（45 tests，2026-09-04 两轮扩充）覆盖 disabled/RBAC allow/deny/
+  wildcard/empty/provider-error-fail-closed-fail-open/internal-caller 场景，generic filter，
+  候选集解析错误的 fail-closed/fail-open + 空配置无 bypass 回归，以及 Layer 2：动作级
+  deny 阻断激活（lead 中间件单测 + client 装配接线 + subagent 链接线）、provider 异常
+  fail-closed/fail-open、候选集复用 catalog loader（不再二次扫描）、effective user
+  三处统一。既有 authz + skills 测试全部通过。
+- **延期：** Sandbox 权限（Phase 3 后续 PR，已由 #4911 落地）；前端 effective-permissions 展示；
+  management route 的 provider 迁移。Models 权限由并行 PR（#4540）处理。
 
 ### 2026-08-02 — Phase 3 / Sandbox authorization (execute)
 
@@ -437,6 +492,663 @@ Phase 1 最低验证要求：
 - 回归覆盖同时固定两个边界：阻塞文件探针证明 config hash 与 class discovery 不占用
   event loop；loop-affine provider 在 `__init__` 调用 `asyncio.get_running_loop()` 并在
   `aauthorize()` 验证仍是同一个 loop。
+
+### 2026-09-04 — Phase 3 / PR #4541 自主加载路径动作门控、bootstrap 装配收口与 subagent provider 复用
+
+- **背景：** review（CHANGES_REQUESTED）发现三个缺口：① 动作级 `skill:activate` 只在
+  显式 slash 路径执行——动作感知 provider 可以让技能"可见"（`filter_resources` 放行）
+  但拒绝激活，模型仍可 `describe_skill` → `read_file`，`DurableContextMiddleware` 把文件
+  记入 `skill_context` 后 allowed-tools 策略与自主秘密绑定全部生效，被拒的动作从未检查；
+  ② bootstrap 分支把未过滤的 `set(_BOOTSTRAP_SKILL_NAMES)` 传给 `build_middlewares` /
+  `apply_prompt_template`，且 `skill_setup.skill_names or None` 在策略拒绝 `bootstrap` 时
+  把空集转回 `None`，legacy 全量 prompt 会重新加载并宣传被拒技能；③ subagent
+  `_load_skills()` 与 `_create_agent()` 各自解析一次 provider——provider 明确不缓存，
+  两层可能拿到不同实例/策略快照，违反"Layer 1/Layer 2 同实例"契约。
+- **决策（共享动作检查）：** `skill_filter.skill_activation_allowed(authorization, name)`
+  成为唯一的动作检查实现（provider + principal + fail_closed 语义，异常按配置
+  fail-closed/open）。slash 路径（`SkillActivationMiddleware._activation_allowed` 委托）、
+  `describe_skill`（匹配集过滤，全部被拒时与"无匹配"不可区分以避免泄露原因）、
+  skill-file-load 盖章路径三处共用，防止语义漂移。
+- **决策（自主加载路径的 gate 位置）：** 盖章生产者 `ToolErrorHandlingMiddleware
+  ._stamp_skill_read_metadata` 是单一收口点——`skill_context` 条目、`SkillToolPolicyMiddleware`
+  的 allowed-tools、`_in_context_secret_sources` 的秘密绑定全部以该盖章为源头。动作被拒的
+  读取改盖 `SKILL_CONTEXT_DENIED_KEY` 拒绝标记（而非条目元数据），`extract_skills` 见标记
+  即跳过且不产生 "missing skill read metadata" 告警。`skill_authorization` 经
+  `_build_runtime_middlewares` → `build_lead_runtime_middlewares` / 
+  `build_subagent_runtime_middlewares` 穿入。文件内容本身仍可读——可见性是 Layer 1 的
+  决定（与 sandbox projection 同语义），被拒的是"激活"（策略/秘密/持久上下文）。
+- **决策（bootstrap 装配）：** bootstrap 分支全程使用过滤后的 `available_skills`
+  （拒绝时为空集：激活中间件成员门 = 不可激活任何技能；legacy prompt 路径的空 allowlist
+  分支返回空）；`skill_names` 仅在 deferred discovery 开启时保留（含空集），关闭时保持
+  `None`（legacy 渲染）——允许路径行为不变。
+- **决策（subagent provider 复用）：** `SubagentExecutor._resolve_skill_authorization()`
+  按执行器实例记忆化（executor 每次任务派发新建），Layer 1 filter（`authorization=`）、
+  激活中间件、describe 盖章、read 盖章四点共用同一 `ResolvedSkillAuthorization`。
+- **否决方案：** 不在 `read_file` 工具本体 gate（需要路径→技能名映射且影响非技能读取）；
+  不在 `DurableContextMiddleware` gate（时序上晚于 `SkillToolPolicyMiddleware` 读 state，
+  依赖 hook 顺序）；不在装配期过滤 catalog（会把 `<skill_index>` 可见性折叠进激活语义，
+  且需 N 次 authorize 调用；运行期过滤每次 ≤ MAX_RESULTS 次）。
+- **证据：** `tests/test_skills_authorization.py` 45 tests（describe 动作门控 + provider
+  错误 fail-closed/open + 禁用时全量；read 盖章拒绝/放行 + `extract_skills` 无告警跳过；
+  lead/subagent 链 stamping 接线；distinct-instance 工厂回归——`_load_skills` 与
+  `_create_agent` 共享一个实例且仅解析一次）+ `test_authorization_enforcement.py`
+  bootstrap 三参数回归（允许/拒绝×deferred 开关）。突变验证：逐项还原六处修复，
+  对应测试均失败。
+- **兼容性：** `authorization.enabled: false` 时三处 gate 均 no-op；`build_skill_search_setup` /
+  `build_describe_skill_tool` / `ToolErrorHandlingMiddleware` / 两个 runtime builder 的新
+  参数均默认 `None`；bootstrap 允许路径与 deferred 关闭路径行为不变。
+
+### 2026-09-04（第二轮）— PR #4541 持久化条目复授权与异步 provider API
+
+- **背景：** review 第五轮发现两个缺口：① `skill_context` 跨 run 持久——条目在盖章时
+  授权过，但下一轮被 `SkillToolPolicyMiddleware`（allowed-tools）与
+  `_in_context_secret_sources()`（秘密绑定）直接消费，不再查 `skill:activate`；provider
+  从允许翻转为拒绝后，旧条目仍在施加策略与绑定秘密。② `skill_activation_allowed()`
+  只调同步 `provider.authorize()`——异步执行路径因此用错 API：盖章在 event loop 上
+  同步调用、slash 激活与 describe 在 worker 线程同步调用；loop-affine provider 永远
+  收不到 `aauthorize()`，同步调用可能阻塞或失败，把允许错成 fail-closed 拒绝、把拒绝
+  错成 fail-open 放行。
+- **决策（异步助手）：** `skill_filter.skill_activation_allowed_async()` 与同步版同语义
+  （同 fail-closed/open），经 `await provider.aauthorize()`，镜像
+  `authorize_sandbox_execution_async` 的既有模式。
+- **决策（决策预计算模式）：** 异步 hook 在 event loop 上预计算
+  `activation_decisions: dict[name, bool]`（slash 目标名 + 持久化条目名，一次批量
+  aauthorize），传入 to_thread 中的阻塞处理函数；处理函数查映射，未覆盖的名字回退
+  同步检查（同步路径的正确 API）。三处落地：`SkillActivationMiddleware.awrap_model_call`
+  （决策贯穿激活与秘密绑定）、`ToolErrorHandlingMiddleware.awrap_tool_call`（`_amaybe_stamp`
+  先 await 决策再盖章）、`SkillToolPolicyMiddleware.awrap_model_call` / `awrap_tool_call`
+  （条目名 + slash 来源名预计算）。
+- **决策（describe 双实现）：** `describe_skill` 用 `StructuredTool.from_function`
+  同时挂同步函数与 coroutine——`invoke`（测试/同步链）走 `authorize()`，
+  `ainvoke`（异步 agent 执行）在 loop 上 `await aauthorize()`。
+- **决策（持久化条目复授权）：** 两个消费点在使用前复授权：
+  `_in_context_secret_sources` 对每个解析后的条目查动作决策，拒绝则跳过（不绑定秘密）；
+  `SkillToolPolicyMiddleware._active_skills_for_paths` 对每个解析后的技能查动作决策，
+  拒绝则 `continue`（与 disabled / 出 allowlist 的技能同等跳过；全部被拒时沿用既有
+  "no active reference authorized → fail-closed builtins" 语义）。`skill_authorization`
+  新传入 `SkillToolPolicyMiddleware`（lead `build_middlewares` 与 subagent builder 两处）。
+- **否决方案：** 不在 `DurableContextMiddleware` 渲染时复授权（消费点直接读 state，
+  渲染层过滤不覆盖 policy/secret 读取）；不在条目上缓存决策（持久化条目的正确缓存
+  粒度是"每次消费时重查"，与 live registry 复验同一模式）。
+- **证据：** `tests/test_skills_authorization.py` 45 tests：allow→deny-next-run 双回归
+  （秘密绑定断源、allowed-tools 部分拒绝不株连、全拒 fail-closed builtins）、
+  `_AsyncOnlyProvider`（同步 API 恒失败、aauthorize 可用）驱动四条异步路径断言
+  （激活、盖章允许/拒绝、describe、tool policy——允许场景下正确接线保留技能声明，
+  错回退同步 API 则 fail-closed 丢声明）。六项突变（两个复授权 gate + 四处异步预计算）
+  逐一还原均有测试失败。
+- **兼容性：** 同步 hook 路径行为不变（决策映射仅异步构造）；`SkillToolPolicyMiddleware`
+  新参数默认 `None`；`describe_skill` 对 `invoke` 调用方（既有测试）保持同步语义。
+
+### 2026-09-17 — Phase 4 / PR #5489 Skills listing visibility (list / detail)
+
+- **背景：** Phase 4 PR 1（#5228 `/me` route permissions）与 PR 2（#5294 前端权限门控）
+  合并后，模型已有 per-caller listing/use 授权（#4540），sandbox 已有 execute 授权
+  （#4911），但 skill 列表表面仍对全部已认证用户开放——`GET /api/skills`、
+  `GET /api/skills/custom`、`GET /api/skills/{name}` 不检查角色，是 Phase 3 资源类型
+  清单里最后未收口的 listing 面。
+- **决策（表面清单）：** 恰好三个非管理 GET 表面接入 per-caller 可见过滤：`list_skills`、
+  `list_custom_skills`、`get_skill`，共享 `_filter_visible_skills(request, config, skills)`
+  helper，语义镜像 `list_models`：`provider.filter_resources(principal, "skill", names)`
+  批量过滤；provider 解析失败 → `_AuthorizationUnavailable`（携带 `fail_closed` 标志）；
+  provider 抛错或返回非 `list[str]` → 空（fail-closed）或全量（fail-open）。skills.py
+  其余全部路由维持 `require_admin_user` 门控，不在本层重复过滤。
+- **决策（detail 404 而非 403）：** `get_skill` 对被过滤 skill 返回与真实缺失逐字一致的
+  404，而非 `get_model` 的 403。理由：`get_model` 执行的是 `authorize("model", "use")`
+  使用决策（模型存在但角色无权使用 → 403 合理）；本层只有 listing visibility，没有
+  skill 执行决策的对应物，403 会让 detail 端点变成过滤清单刚关掉的 existence oracle。
+- **决策（resolver 结构）：** 从 `resolve_model_authorization` 提取共享核心
+  `_resolve_route_scoped_authorization(user, *, is_internal)`，
+  `resolve_skill_authorization` 与 model 版本互为薄封装（含 `INTERNAL_SYSTEM_ROLE → None`
+  pop 与 internal-caller 语义）。RBAC `_RESOURCE_POLICY_KEYS` 已含 `"skill": "skills"`
+  （rbac.py），roles 的 `skills: {allow: [...]}` 直接生效，无 schema 变更。
+- **否决方案：** 不为 skill 引入 `authorize("skill", "read")` 逐名授权——listing 表面
+  用批量 `filter_resources` 一次往返即可，逐名决策增加配置面且与 `list_models` 不对称。
+  不只过滤 `/skills` 主列表——自审发现 `/skills/custom` 与 `/skills/{name}` 会原样
+  泄露主列表隐藏的名字，三个表面必须同批收口。
+- **兼容性：** `authorization.enabled: false` 时三表面均 no-op（返回全量）。匿名请求
+  （user=None）不过滤——生产 auth 开启时 `AuthMiddleware` 先行 401，该分支实际只覆盖
+  auth-disabled 本地模式，与 `list_models` 对齐。skill 管理端点（install/edit/export/
+  delete 等）保持 `require_admin_user`，不受本过滤影响。RBAC 缺 `skills` 键 = 放行，
+  `allow: []` = 全拒（与 `models` 键同语义）。
+- **证据：** `tests/test_skills_listing_authorization.py` 覆盖 disabled/anonymous/RBAC
+  allow/deny/wildcard/absent-policy、custom+public 一致过滤、provider error/unavailable/
+  坏返回类型 × fail-closed/fail-open、`("skill", [...])` 契约、custom 列表绕过封闭、
+  detail 404 与真实缺失逐字一致；`test_skills_router_authz.py` 与
+  `test_skills_custom_router.py` 的 fake config 补 `AuthorizationConfig`（含
+  `_make_test_app` 回填 shim）。review（willem-bd）在 head tree 执行验证：4 套件
+  78 tests 通过，且移除 custom-listing 过滤的突变使
+  `test_list_custom_skills_rbac_filters_by_deny` 变红，守护测试真实。
+- **延期：** #4541（Phase 3 执行层：assembly 过滤 + slash-activation 授权）与本 PR
+  互补（本 PR 管 listing visibility，#4541 管 runtime use），其 rebase 时需双向调和：
+  `config.example.yaml` roles 注释段两 PR 均改；本文件决策日志两 PR 也在同一插入点
+  各追加条目。前端 effective-permissions 展示剩余项；management route 的 provider
+  迁移（沿袭前阶段延期项）。
+
+### 2026-09-24 — Phase 5 / PR1 — 插件资源授权管道（targets、决策层、action 检查、management 守卫）
+
+- **背景：** 设计文档 `2026-09-23-extension-tool-authorization-coverage-gaps.md` 与实施规格
+  `2026-09-24-extension-tool-authorization-spec.md`（rev 5）把「插件工具/页面授权覆盖缺口」
+  切成三个 PR：PR1 = 插件管道（target 编码、provenance 展示、`plugin_authz`、action 检查、
+  management 守卫、provider 生命周期、公开 helper + 一次契约版本提升），PR2 = 工具链路
+  （middleware 声明工具、identity-bound exemption），PR3 = 页面切片。本条记录 PR1。
+- **决策（target 编码）：** 新增 `deerflow/authz/plugin_targets.py`，复合 target 一律
+  `"{namespace}/{part}"`，由唯一 `_join` 校验器编码：namespace 字符集与
+  `config/plugin_settings.py` 一致，action / surface id / management part 分别镜像 registry、
+  浏览器 surface 规则和两个模块常量。三个构造器各带 kind 检查，调用点禁止字符串拼接；
+  非法输入抛 `PluginTargetError`（`ValueError` 子类），绝不返回 best-effort 字符串。
+- **决策（RBAC 别名）：** `_RESOURCE_POLICY_KEYS` 新增 `"plugin_action" → "plugin_actions"`
+  与 `"plugin_management" → "plugin_management"`（自映射，合法，同 `sandbox`）。左值仍是请求
+  `resource`，右值是 `config.yaml` 键；把 `plugin_action` 当作 config 键会在构造期被拒
+  （reserved request alias）。`plugin_page → plugin_pages` 随 PR3 落地——该 PR 才产生
+  `plugin_page` 资源，缺 key = 不受限仍是不变的语义。
+- **决策（决策层）：** 新增 `deerflow/authz/plugin_authz.py`：六个决策函数 +
+  `PluginAuthorizationError`（携带 resource / target / reason_code / fail_closed）。disabled →
+  no-op；显式 deny 抛错；provider 异常、解析失败、malformed decision、无 principal 一律按
+  `fail_closed` 抛错或 warning 放行（镜像 sandbox gate 的语义，而不是工具过滤器的静默集合
+  语义）。异步批量决策用 `asyncio.to_thread(filter_resources)`，因此
+  `AuthorizationProvider.filter_resources` 的 docstring 增加一句线程安全要求（仅文档，
+  三个方法和签名不变）。
+- **决策（provider 生命周期）：** 插件请求路径**不**复用既有 route provider cache（同步、
+  在事件循环上构造、仅按 config identity 命中，且无 blocking-IO anchor）。新增按
+  `(config signature, loop_key)` 键的缓存：同步调用者用私有 `_SYNC_SLOT`，异步按
+  `id(asyncio.get_running_loop())`；两者互不串用，也不跨 loop 复用；config 读取与
+  `resolve_authorization_provider_spec` 在线程中执行，`construct_authorization_provider`
+  保持在调用方 loop 上；无 single-flight 锁（允许并发冷启动重复构造，已文档化）；
+  写入时清理已关闭 loop 的条目。
+- **决策（公开 helper + 契约版本）：** `deerflow_extension_api.auth` 新增
+  `EXTENSION_PLUGIN_AUTHZ_RESOLVER_KEY`、`EXTENSION_PLUGIN_AUTHZ_RESOLVER_ASYNC_KEY` 与
+  `require_plugin_management` / `arequire_plugin_management`（只读 `request.app.state`，保持
+  契约包不依赖 `deerflow`）。两者 fail closed：解析器缺失/失败/返回 `None`、未知 namespace、
+  非 `True` 答案都抛 `PermissionError`；`authorization.enabled: false` 时宿主回答 `True`
+  （no-op），因此不会开始拒绝企业路由，需要无条件底线的企业仍叠加 `require_admin`。同步形式
+  供 FastAPI `def` 端点（线程池）使用，异步端点使用 `a` 版本。契约版本 `0.2.3 → 0.2.4`
+  （`API_VERSION`、包 version、harness 精确 pin、lockfile、契约测试四处同步）。
+- **决策（action 检查）：** `POST /api/plugins/{ns}/actions/{name}` 在 action 解析之后
+  （未知 action 仍是 404，不改变存在性预言）、读取请求体之前插入一次 `plugin_action` 决策；
+  deny → `403 "Plugin action not permitted for your role."`，handler 不被调用，被拒调用者
+  无法占用 256 KiB 输入预算。
+- **证据：** 新增 `tests/test_plugin_targets.py`（字符集、跨 kind 同形 target、
+  management part、非法输入）、`tests/test_tool_provenance.py`（plugin tag 往返、错配 tag 被丢弃、
+  MCP 优先级、`deerflow_tool_source` 与模块回退标签保持）、
+  `tests/test_plugin_action_authorization.py`（allow/deny/未授权先于 body、
+  fail_closed/fail_open、disabled no-op、未知 action 404、internal 身份）、
+  `tests/test_plugin_management_guard.py`（helper 的 fail-closed 矩阵、宿主解析器安装与
+  未知 namespace、disabled 放行、loop 生命周期与只读投影前置）、
+  `tests/blocking_io/test_plugin_authorization.py`（config/discovery 不在事件循环上，
+  含 red→green teeth）；扩展 `test_rbac_authorization_provider.py`、`test_plugin_tools.py`、
+  `test_extension_api_contracts.py`。
+- **兼容性：** `authorization.enabled: false` 时 action 路由与 management helper 均为 no-op；
+  既有工具 resource 名与 `AuthorizationProvider` Protocol 未变；`config_version` 47 → 49
+  （与主线的并发 bump 竞争后按「每次更新 PR 前的固定清单」重取下一个可用号，见下方合并记录；
+  `config.example.yaml` + Helm values + Helm README 三处同步）；`config.example.yaml`
+  roles 新增 `plugin_actions` / `plugin_management` 两行并注明「省略 key = 该资源不受限」。
+- **否决方案：** 不为节省一次构造而复用 route cache（会把一个 loop 上的 loop-affine provider
+  交给另一个 loop）；不在请求边界拼接 target（必须走 `plugin_targets`）；不在 PR1 引入
+  `plugin_page` 别名（没有生产者，属 PR3）；不把插件检查做成第二个常开 gate。
+- **延期：** PR2（工具链路：middleware 声明工具、`LayerOneOutcome` 种子、build-local view、
+  identity-bound infrastructure exemption、`GuardrailRequest.tool_provenance`/`tool_identity`）、
+  PR3（`pages`/`shared_operation` 声明门、`extensions/catalog.py`、`/api/plugins` 只读投影、
+  前端页面 gate、企业示例与剩余文档）。
+
+### 2026-09-24 — Phase 5 / PR1 review round 1（PR #5842，willem-bd）
+
+- **背景：** 静态审查对 PR1 提出两条授权缺陷：P1 —— 决策层为了判断 `enabled`/`fail_closed`
+  会**第二次**读取配置，而 Gateway 已经用可读配置解析出 provider/principal；这次重读若在
+  热重载窗口内失败（文件缺失/暂时非法），`_enabled_config(None)` 会把「配置不可用」当作
+  「授权已关闭」，于是受保护的插件 action/management 请求在未询问 `fail_closed` 的情况下被放行。
+  P2 —— `AuthzDecision` 是普通 dataclass，自定义 provider 可以返回
+  `AuthzDecision(allow="false")`；`isinstance` 校验通过后真值字符串被当作 allow。
+- **决策（P1，采纳审查建议的第一种修法）：** 决策层不再自行读取配置。`plugin_authz` 的六个函数
+  把 `app_config` 改为**必填**，语义是「调用方用于解析 provider 的那个请求级快照」；
+  §5.3-C 的两个 Gateway 解析辅助函数改为返回 `(provider, principal, app_config)` 三元组，
+  并把同一快照交给执行层，因此一次请求只有一次配置读取，也不存在两次读取之间的状态漂移。
+  快照为 `None`（调用方完全读不到配置）时，视为**不可用**而非「已关闭」：
+  以 `authz.config_unavailable` + `fail_closed=True` 失败关闭（能放行的那个开关本身读不到）。
+  同时 Gateway 侧新增 `_plugin_app_config[_async]`，把「不存在 config.yaml」(`FileNotFoundError`
+  → 今日行为，无门禁) 与「配置存在但当前读不了/解析不了」（异常上抛 → 拒绝）区分开；
+  后者不再被 `safe_app_config` 的宽泛 `except Exception` 吞掉。
+- **决策（P2）：** 新增 `_validated_decision`，要求返回值是 `AuthzDecision` 且
+  `type(decision.allow) is bool`（同步 `authorize` 与异步 `aauthorize` 两条路径都走它）；
+  非 bool 的 `allow` 与 `AuthzDecision` 类型错误一样按 provider 失败处理，遵循 `fail_closed`。
+- **证据：** 新增回归测试并做了反证（revert 修复后必须变红）——
+  `test_unreadable_config_denies_the_action`（200 vs 403）、
+  `test_installed_resolver_denies_when_the_config_cannot_be_read`（True vs False）、
+  `test_a_non_bool_allow_is_a_malformed_decision[...]`（12 项红）与对应异步/路由用例、
+  `test_installed_resolver_allows_when_no_config_exists`（不存在 config.yaml 仍为放行）、
+  `test_no_config_at_all_keeps_todays_behavior`。全部 95 项插件套件在修复后通过。
+- **兼容性：** `authorization.enabled: false` 与「没有 config.yaml」两种情形行为不变；
+  harness 内部函数签名由「可选 app_config」变为「必填快照」，属 PR1 内的内部契约调整，
+  不涉及 `deerflow_extension_api` 公开面（公开 helper 的 fail-closed 语义只在“宿主读不到配置”
+  时更严格）。
+- **延期：** 不变（工具链路 PR2、页面切片 PR3）。
+
+### 2026-09-25 — Phase 5 / PR1 review round 2（PR #5842，willem-bd）
+
+- **背景：** 静态审查对当前 head（`62197d96`）再提两条：P1 —— `_plugin_app_config` 仍把
+  `FileNotFoundError`（请求时刻文件不在）映射成「授权从未启用」并返回 `None`，调用方据此放行
+  受保护的插件 action 与 management 路由；但真实 Gateway 不可能在没有可读 `config.yaml` 的情况下
+  启动（`app/gateway/app.py` 的 `lifespan` 用同一个访问器读配置，失败即 `RuntimeError`），
+  因此请求期的「缺失」只意味着这份配置在运行中变得不可用（热重载 / 原子替换窗口）。
+  P2 —— `_deny_reason_code` 在 provider 校验的 `try` 之外遍历 `decision.reasons`，
+  自定义 provider 返回 `AuthzDecision(allow=False, reasons=None)`（或任何不可迭代对象）时抛
+  `TypeError`，把一次拒绝变成未捕获错误，而不是配置好的授权失败（403）。
+- **决策（P1，采纳审查建议的第一种修法）：** 用「这个进程是否在跑一份配置」区分「不可用」与「未配置」，
+  而不是用异常类型或无条件失败关闭：
+  - 读取失败且进程**从未加载过配置**（`peek_loaded_app_config() is None`；`deerflow.config.app_config`
+    新增只读访问器，覆盖 `get_app_config()` 成功缓存与 `set_app_config()` 注入两种来源）：授权只能由
+    配置开启，故**无门禁**放行——与同一文件里的 `_get_route_authorization_config()`
+    （`(FileNotFoundError, RuntimeError)` → disabled）和 `sandbox_authz.safe_app_config()`
+    （“no readable config ⇒ the sandbox gate is a no-op … CI runners and direct-call tests”）同一条规则。
+    挂载 plugins router 的 e2e 宿主（`backend/extension_test_fixtures/bookmark_plugin_gateway.py`）
+    正属此类。
+  - 读取失败且进程**正在跑一份配置**：这是「可用但当前读不到」，异常上抛，
+    `resolve_/aresolve_plugin_authorization` 以 `_PluginAuthorizationUnavailable(fail_closed=…)`
+    失败处理，标志由**那份配置自己**给出（`enabled` 非 `True` → 无门禁；enabled → 取该策略的
+    `fail_closed`，默认 `true`）。于是启用授权且 fail-closed 的宿主在窗口内返回 403 / `False`，
+    不再像以前那样被当成「授权从未开启」放行。
+  - 文件存在但读不了/解析不了（非 `FileNotFoundError`）：无已加载配置时沿用 round 1 的 fail-closed
+    （能放行的那个开关读不到）；有已加载配置时同样取该策略的 `fail_closed`。
+  *被取代的规则：* round 1 记录的「不存在 `config.yaml` → 今日行为，无门禁」，以及本轮中间版本的
+  「任何读取失败都无条件失败关闭（`fail_closed=True`）」。
+- **修正记录：** 本轮先按审查字面实现「缺失即无条件失败关闭」，本地与 CI e2e 立刻变红
+  （`frontend/tests/e2e/bookmark-plugin.spec.ts` 的 save action 由 200 变 403——该宿主本来就
+  没有 `config.yaml`），且与 `_get_route_authorization_config()`、`safe_app_config()` 的既有规则
+  冲突。随后改为上面的「按进程已加载的配置」判定：没有配置的宿主行为不变，丢失配置的宿主不再被
+  当成未配置。
+- **决策（P2）：** 拒绝码提取改为全函数：`reasons` 不可迭代时直接退化为 `authz.denied`，
+  元素校验额外要求 `reason.code` 是非空 `str`。刻意**不**并入 `_validated_decision` 的「畸形判决」
+  判定：`allow` 已是真正的 `bool`，这条判决本身是合法拒绝；若按畸形判决走 `fail_closed`，
+  在 `fail_closed: false` 下会把明确拒绝翻成放行。
+- **证据：** 新增/改写回归测试并做了反证（修复前必须变红）——
+  `test_installed_resolver_allows_when_no_config_exists`（无配置宿主：True）、
+  `test_installed_resolver_applies_the_running_policy_when_the_config_disappears[True/False]`、
+  `test_installed_async_resolver_denies_when_the_config_disappears`、
+  `test_installed_resolver_stays_noop_when_the_lost_config_had_authorization_off`、
+  `test_a_lost_config_follows_the_running_policy[403/200]`、`test_no_config_at_all_keeps_todays_behavior`、
+  `test_peek_loaded_app_config_survives_a_missing_file`（文件删除后 `peek_loaded_app_config()`
+  仍返回已加载配置），以及 round 1 的 `test_unreadable_config_denies_the_action` /
+  `test_installed_resolver_denies_when_the_config_cannot_be_read`（非 `FileNotFoundError` 仍然 fail-closed）；
+  P2 侧 `test_malformed_reasons_keep_the_denial[...]` / `test_async_malformed_reasons_keep_the_denial[...]`
+  （`TypeError: 'NoneType' object is not iterable`，`plugin_authz.py:113`）。
+  e2e 层面复现了 spec 的后端一半：拉起 `extension_test_fixtures.bookmark_plugin_gateway` 后
+  POST `/api/plugins/community.bookmarks/actions/save`，中间版本 `403`（与 CI 的 3 个 bookmark 用例
+  失败一致），最终版本 `200`。验证：配置模块测试 41 项、插件/extension + blocking-IO 429 项、
+  `ruff check` 与 `format --check` 全绿。
+- **否决方案：** ①「缺失即无条件失败关闭」：与既有 `safe_app_config` / `_get_route_authorization_config`
+  规则冲突，并打断 e2e 宿主的插件 action（见上）。②「Gateway 侧发布 startup 快照」：状态要手动接线、
+  且只反映启动那一刻的策略（热重载后的新策略不会生效），改用配置模块自己缓存的「最后一次成功加载」
+  更准确且无需额外生命周期钩子。
+- **兼容性：** 没有配置的宿主（CI runner、直接调用、只挂 plugins router 的宿主）行为完全不变；
+  配置可读且 `authorization.enabled: false` 时不变（no-op）；只有「运行中配置消失/读不了」由
+  静默放行改为按该策略的 `fail_closed` 处理（默认拒绝）。
+- **延期：** 不变（工具链路 PR2、页面切片 PR3）。相邻风险已记录但未改：同一文件里的
+  `_get_route_authorization_config()`（model / skill / sandbox 路由门）对读取失败仍一律回退到
+  disabled，存在同类窗口；如需同样收紧应另开一条（影响面覆盖全部路由门，超出本轮范围）。
+
+### 2026-09-25 — Phase 5 / PR1 review round 3（PR #5842，willem-bd）
+
+- **背景：** 静态审查对当前 head（`a891e704`）追加一条 P3 —— round 2 的 P2 修复只挡住了
+  「`reasons` 不是 `Iterable`」，遍历本身仍在 provider 校验的 `try` 之外：生成器或自定义可迭代
+  对象可以满足 `isinstance(reasons, Iterable)`，却在 `__iter__`/`__next__` 中抛错，于是一次明确
+  拒绝仍会以未捕获错误（500）逃逸，而不是按配置的授权失败退化为 `authz.denied`。
+- **决策（采纳审查建议的第一种修法）：** `_deny_reason_code` 的**整段提取**（取属性、`Iterable`
+  判定、遍历）包进一个窄 `try/except Exception`，任何异常都降级为 `authz.denied`，并记一条
+  `logger.debug(..., exc_info=True)`；函数签名、返回值域与「拒绝仍是拒绝」的语义不变。
+  不采纳第二种修法（把 `reasons` 校验成声明的具体 list 形状）：合法 provider 返回 tuple 或生成器
+  形态的 `AuthzReason` 时，那会把**本来可读**的拒绝码一并降级为 `authz.denied`，属无谓的行为收窄；
+  「`Iterable` 判定 + 全函数提取」既保留合法可迭代对象，又对抛错对象收敛。
+- **证据：** 红先验证（修复前必须变红）——管理器层
+  `test_malformed_reasons_keep_the_denial[True|False-reasons2|reasons3]`（4 项）与异步
+  `test_async_malformed_reasons_keep_the_denial[reasons2|reasons3]`（2 项）修复前抛
+  `RuntimeError: reasons.__iter__ failed` / `RuntimeError: reasons.__next__ failed`
+  （`plugin_authz.py:127`），修复后降级为
+  `PluginAuthorizationError(reason_code="authz.denied")`；新增的 `_ExplodingReasons` 覆盖两种形态：
+  `__iter__` 直接抛，以及先产出一个非 `AuthzReason` 再从 `__next__` 抛。路由层
+  `test_unreadable_reasons_deny_instead_of_erroring[True|False]` 修复前让异常穿出路由（未捕获），
+  修复后 `403` 且 handler 未被调用——两种 `fail_closed` 取值下都保持拒绝
+  （`fail_closed: false` 不得把明确拒绝翻成放行）。验证：两个插件测试文件 115 项、
+  `tests/blocking_io` 163 项、`ruff check` 与 `ruff format --check` 全绿。
+- **兼容性：** 拒绝码提取的返回值域不变（`str`，无法读取时为 `authz.denied`）；只有「可迭代对象在
+  遍历时抛错」这一种输入从 500 变为降级后的 403。
+- **延期：** 不变（工具链路 PR2、页面切片 PR3）。相邻同类风险已记录但未改：
+  `deerflow/authz/adapter.py` 的 `_to_guardrail` 仍直接遍历 `d.reasons`，而消费它的
+  `GuardrailMiddleware` 把 provider 异常按 `fail_closed` 处理，因此 `fail_closed: false` 时
+  「显式拒绝 + reasons 遍历抛错」可能被翻成放行；该文件不在本 PR 面内（工具链路），
+  如需同样收敛应随 PR2 一并处理。
+
+### 2026-09-25 — Phase 5 / PR1 合并主线 `3a862780`（config_version 竞争）
+
+- **背景：** 合并最新 `upstream/main`（`3a862780`）时只有 `config.example.yaml` 一处文本冲突：
+  冲突块本身是主线新增的 `lead_prompt_overlay` 注释段（本 PR 该位置为空），取主线即可。
+  真正的语义问题是 `config_version`：merge-base 为 47，本 PR 与主线**各自** bump 到同一个 48
+  （本 PR 为 `authorization` / roles 新增字段，主线为 prompt overlay 等）。该字段只驱动
+  `AppConfig._check_config_version()` 的过期提示（`backend/docs/CONFIGURATION.md`），两边同号会让
+  「已从主线 48 升级过的 `config.yaml`」收不到缺 `authorization` 字段的提示。
+- **决策：** 按本文件「每次更新 PR 前的固定清单」执行：先 fetch 最新 `upstream/main`、读最新值
+  （48），取下一个可用号 **49**，并在三处镜像同步（`config.example.yaml`、
+  `deploy/helm/deer-flow/values.yaml`、`deploy/helm/deer-flow/README.md`）；
+  `frontend/src/content/{en,zh}/harness/checkpoints/reference.mdx` 里「current `config_version`」
+  也一并改为 49（该文档由主线新增，写成时值为 47）。冲突块取主线；本 PR 的 `authorization:`
+  段与 `peek_loaded_app_config()` 均在自动合并结果中保留。
+- **证据：** `scripts/check_config_version.sh` 通过（example=49 / chart=49）；
+  `backend/tests/test_config_version.py` 全绿（含用真实 `scripts/config-upgrade.sh` 跑
+  v26 → 当前版本的升级用例，其 `expected_version` 直接读 `config.example.yaml`）。
+- **兼容性：** 仅提示语义变化，运行时行为不变。已按主线 48 升级的 `config.yaml` 会收到一次
+  “outdated” 提示，可 `make config-upgrade` 合并 `authorization` 默认段——这正是版本号存在的目的。
+- **延期：** 不变（工具链路 PR2、页面切片 PR3）。相邻且非本轮产生的文档漂移未改：上述
+  checkpoints 文档里的 `appcfg:531-575` / `appcfg:570-575` 行号引用在主线自己新增 prompt overlay
+  后已失准（当前 `_check_config_version` 位于 `appcfg:534-576`），不属本 PR 面内。
+
+### 2026-09-25 — PR #4541 规范技能名：授权目标统一为注册表 `Skill.name`
+
+- **背景：** review（ShenAC-SAC，P2）发现路径推导名与声明名不一致：bundled 技能目录名
+  可不同于 SKILL.md 声明的 `name`（`skills/public/vercel-deploy-claimable` 声明
+  `vercel-deploy`），而 Layer 1、slash 激活、`describe_skill` 授权的都是声明名。
+  ① read 盖章路径（同步 `_stamp_skill_read_metadata` / 异步 `_amaybe_stamp`）用
+  `_skill_name_from_path()`（目录 basename）做 `skill:activate` 目标——RBAC
+  `allow: ["vercel-deploy"]` 下读取被误盖 `skill_context_denied`；② 异步决策预计算 map
+  的键同样用路径推导名（slash 来源 + 持久化 `entry["name"]`，后者本身由
+  `extract_skills` 按 path 盖章、必然是路径名），而消费点 `_active_skills_for_paths` /
+  `_in_context_secret_sources` 查的是注册表解析出的 `skill.name`——map miss 回退
+  worker 线程里的同步 `authorize()`（`_AsyncOnlyProvider` 下直接 fail-closed 丢工具，
+  且破坏上一轮消除同步回落的成果）。
+- **决策（共享注册表解析）：** 新增 `deerflow/skills/container_registry.py`：
+  `build_container_path_registry(storage)`（规范化容器 SKILL.md 路径 → live `Skill`，
+  `enabled_only=False`）与 `canonical_skill_name(registry, path)`。三个中间件
+  （activation / tool-policy / tool-error-handling）统一经它把路径解析为声明名。
+- **决策（盖章路径）：** `ToolErrorHandlingMiddleware` 新增 `user_id`（经
+  `_build_runtime_middlewares` → lead `build_middlewares` / subagent builder 穿入，
+  与另两个技能中间件同一 storage 解析顺序——user-scoped 优先）。同步路径在
+  `_canonical_skill_name()` 中解析（registry 失败或路径未解析 → 回退路径名，未解析路径
+  的下游消费本就按同一 registry 跳过）；异步路径 `asyncio.to_thread` 解析后于 loop 上
+  `await skill_activation_allowed_async(...)`。
+- **决策（决策 map 键）：** `SkillToolPolicyMiddleware` 异步 hook 改三段式：
+  to_thread 加载 registry 并把策略路径规范名化（`_resolve_policy_registry`）→ loop 上
+  `aauthorize()` 批量预计算（`_collect_activation_decisions(names)` 只收规范名）→
+  to_thread 过滤并复用同一 registry（整 hook 一次 skill-tree 扫描）。slash 来源不再
+  basename 推导，持久化条目一律取 `entry["path"]` 解析（不信任 `entry["name"]`），
+  `_entry_names` 删除。`SkillActivationMiddleware` 同理：候选收集拆为
+  `_candidate_activation_targets()`（slash 名——本就是注册表名 + 条目路径，loop-safe），
+  `awrap_model_call` 先 to_thread 规范名化（`_canonical_names_for_paths`）再预计算。
+- **否决方案：** 不在 `extract_skills` 盖章时把 `entry["name"]` 改写为声明名（渲染层
+  展示名与路径一致有其意义，且历史条目仍需注册表解析，改写只修新条目不修存量）；
+  不在 map 里同时预计算"路径名 + 声明名"两个键（掩盖键错配而非消除，同步回落仍可能
+  命中错误键）。
+- **证据：** 新增 5 个回归（`tests/test_skills_authorization.py` 45→50）：同步盖章断言
+  provider 目标为声明名（`sync_calls == ["vercel-deploy"]`）；RBAC allow 声明名 → 激活 /
+  allow 目录名 → 拒绝（双向钉死经注册表解析）；异步盖章 `_AsyncOnlyProvider` 下
+  `async_calls == ["vercel-deploy"]` 且条目盖章（同步回退会 fail-closed 出拒绝标记）；
+  组合路径（async slash 激活 → tool-policy）`async_calls` 恰为声明名×2、`bash` 保留
+  （回退同步 API 则 fail-closed 丢 `bash`）；持久化条目（路径名盖章的历史形态）经
+  注册表规范名化后秘密绑定仍生效（路径名键 → map miss → 同步回退 → 绑定丢失）。
+  三处突变（盖章路径名、tool-policy map 键、activation 条目名）逐一还原均有测试失败。
+- **兼容性：** 授权禁用时零新增开销（`skill_authorization is None` 不触达 registry）；
+  `ToolErrorHandlingMiddleware.user_id` 与两个 builder 的新参数默认 `None`；
+  未解析路径回退路径名（与旧行为一致）；同步 hook 路径语义不变。
+
+### 2026-09-26 — PR #4541 review（willem-bd，P2×2）：预扫描失败传递与空路径零扫描
+
+- **背景：** 合入主线后的新一轮 review 指出规范名修复引入的两个缺口：①
+  `_resolve_policy_registry` 瞬时失败返回 `(None, [])`，worker 侧
+  `registry is None` 会重试存储——重试若成功，恢复出的技能名不在（空的）决策 map
+  里 → 回退 worker 线程的同步 `authorize()`：loop-affine provider 抛异常后
+  `fail_closed=false` 变成放行（被拒技能的 allowed-tools 保留），
+  `fail_closed=true` 变成误拒；② 授权开启时每个异步模型步都调用
+  `_canonical_names_for_paths`，空 `entry_paths` 也触发全量技能树扫描——普通请求
+  （无 slash、无条目、无 secrets）此前零注册表 I/O，大目录/NFS 下每步 LLM 前多一次
+  未缓存扫描。
+- **决策（失败传递）：** `_REGISTRY_LOAD_FAILED = object()` 三态哨兵（对齐同文件
+  `_MISSING_POLICY_DECISION` 先例）：`_resolve_policy_registry` 失败时返回哨兵，
+  `_active_skills_for_paths` 见哨兵直接 `([], True)`（与首次加载失败同一 fail-closed
+  builtins 处置），不再静默重试。失败步的 builtins 决策经 refresh_decision 缓存
+  仅作用于本步；下一步模型调用预扫描重试存储即可恢复，无粘性状态。哨兵分支先于
+  "No active skill references could be authorized" 告警返回——存储失败不产生该误导性
+  日志，异常日志（`_resolve_policy_registry` 内）是唯一信号。
+- **决策（空路径零扫描）：** `_canonical_names_for_paths` 开头 `if not paths:
+  return []`（单一 choke point，未来调用方自动受益）。普通异步模型步的存储调用数
+  归零（slash 解析在触达 storage 前返回 None；secrets 不存在则
+  `_resolve_secret_bindings` 不加载注册表）。
+- **否决方案：** 不在失败后立即重试恢复（reviewer 给的第二选项）——多一次全量扫描
+  且复杂度更高，保留失败与既有"首次加载失败"语义逐字一致；不在调用点条件跳过
+  `to_thread`（choke point 单点守卫才可被单点突变钉住）。
+- **证据：** `tests/test_skills_authorization.py` 50→52：
+  `test_async_policy_preserves_prepass_registry_failure`（首读失败、次读会成功的
+  flaky storage + `_AsyncOnlyProvider(denied)` + `fail_closed=False`：恰一次
+  storage 调用、零 provider 调用、builtins-only——旧行为下 worker 重试成功 →
+  同步回退 → fail-open 保留 `bash`）；`test_async_model_call_without_skill_refs_
+  skips_registry_scan`（storage 调用计数 == 0）。两项突变（哨兵还原为 None、
+  删除空路径守卫）逐一还原均有测试失败。
+- **兼容性：** 同步 hook（`registry is None` 自行加载）语义不变；`awrap_tool_call`
+  缓存命中路径不触达哨兵；授权禁用时两条新路径均不存在。
+
+### 2026-09-26（第二轮）— 第 4 实例收口：activation 秘密绑定改快照传递，类成员 grep 封闭
+
+- **背景：** 上一节修复落地后的严格自查复现出同一 bug 类的第 4 个实例：
+  `SkillActivationMiddleware.awrap_model_call` 的条目预扫描瞬时失败返回 `[]` 并继续，
+  线程内 `_resolve_secret_bindings` 在有 request secrets 时经
+  `_load_skill_registry_by_path` **另一次独立加载**恢复——条目解析出的名字不在（空）
+  决策 map → 回退 worker 线程同步 `authorize()` → `fail_closed=false` 时
+  aauthorize 拒绝的技能秘密被 fail-open 绑定（复现：两次加载、零 aauthorize、
+  被拒秘密已注入）。slash 路径经复现实证免疫（名字来自消息解析，不经存储，
+  预扫描失败也在 map 内）。
+- **决策（快照传递，对齐 policy 侧哨兵修复的形状）：**
+  `_canonical_names_for_paths` 返回 `(names, registry)`——名字与其来源快照一起返回；
+  快照经 `_handle_model_request` 穿到 `_resolve_secret_bindings`，条目来源解析**复用该
+  快照**：决策 map 的键 = 快照解析的名字，map miss 在构造上不可能（连"同一步两次
+  加载不一致"的理论窗口——预扫描成功后存储被并发改名——也一并关闭）。加载失败返回
+  `_REGISTRY_LOAD_FAILED` 哨兵：条目绑定归零（空注册表解析不出任何路径，构造保证），
+  **slash 来源不受株连**（它不查决策 map，在激活时已验证，属 run 级用户承诺，照常
+  走新鲜加载）。同步链不传快照、行为不变。附带收益：有 secrets 的异步步从两次
+  注册表扫描降为一次（快照复用），`_load_skill_registry_by_path` 的新鲜度契约
+  （"下一次模型调用即吊销"）仍然满足——快照取自本步开头。
+- **决策（类成员封闭 + 延期加固锚点）：** 全仓 grep 实证
+  `skill_activation_allowed(` 同步调用点恰 4 处：stamping 同步路径（合法）、
+  describe 同步实现（合法）、两个 `_activation_allowed`（activation / policy 中间件）
+  ——**异步可达的同步回退点有且仅有 2 个，本轮修复后全部关闭**。结构性加固
+  （决策 map 类型化为 async-batch 语义对象，"异步路径 map miss = fail-closed + 响亮
+  日志，绝不静默同步回退"由构造保证；per-step 注册表快照经 run context 全链共享）
+  作为后续工作延期——四实例证明调用方自觉已失效四次，但结构性重构会再开 N 轮
+  review，先以实例收口 + 成员封闭 + 本锚点记录推进合并。
+- **否决方案：** 不用"失败标志只关门条目"（上一轮初步规格）——标志只堵失败扇窗，
+  堵不住"预扫描成功但两次加载不一致"的窗口；快照传递同成本下把两类窗口都关成
+  构造不可能。不为空 `entry_paths` 跳过 `to_thread`（微秒级线程跳 vs 单点守卫的
+  突变可钉性，取后者；P3 有意放弃并记录）。
+- **证据：** `tests/test_skills_authorization.py` 52→54：
+  `test_async_secret_binding_preserves_prepass_failure`（两技能两调用：调用 2 预扫描
+  第 3 次加载失败——条目绑定归零且 slash 绑定存活；旧行为同步回退 fail-open 绑定
+  被拒的 ENTRY_KEY）、`test_async_secret_binding_resolves_entries_against_prepass_snapshot`
+  （第二次加载返回改名后的同路径技能：条目必须按快照名（allow）而非新鲜名（deny）
+  解析）。三突变逐一还原必红：M1 哨兵改新鲜恢复（prepass failure 测试红）、M2 哨兵
+  株连 slash（同测试红）、M3 条目绕过快照（snapshot 测试红）。
+- **兼容性：** 授权禁用或无条目路径时 `awrap_model_call` 传 `None`，
+  `_resolve_secret_bindings` 走历史新鲜加载，行为不变；同步链完全不变；
+  policy 中间件注册表参数以 `_RegistryArg` 别名收编退化联合类型。
+
+### 2026-09-27 — PR #4541 review（willem-bd R9）：slash 绑定参照点纠正与来源独立性
+
+- **背景：** R8 的快照设计把 slash 来源也统一到了预扫描快照上——快照在
+  `aauthorize()` await **之前**拍摄，slash 激活在其后重新加载当前技能；窗口内
+  技能声明秘密 OLD_KEY→NEW_KEY 变化时，激活展示 NEW 内容而绑定注入 OLD（刚激活的
+  技能拿不到它声明的凭据、反而拿到已不声明的）。R8 的"一步一载"附送优化在此翻车。
+- **决策（两个来源、两个参照点）：** slash 来源永远走**激活后的新鲜加载**
+  （`_load_skill_registry_by_path()`）——绑定必须与激活刚读到的内容一致；slash
+  来源不查决策 map，快照一致性对它无价值。条目来源保留快照（map 键 = 快照名，
+  miss 构造不可能）；哨兵失败条目归零；`None`（同步链）回退同一新鲜注册表（同步
+  authorize 在同步链是正确 API，无分叉）。两来源解析**相互独立**——新鲜加载瞬时
+  失败只归零 slash，条目继续按自己的快照绑定（审查自查发现初版修复把条目嵌在
+  slash 守卫下，该场景会误杀条目绑定，已独立成行并由回归钉住）。
+- **复盘（为什么多轮自查仍漏）：** 五轮 review 中 reviewer 找的几乎全是"上一轮
+  修复新创造的面"；R9 的根源是快照统一这个**未被点名的附送优化**逃过了新面计价，
+  以及"新鲜度"论证用了错误参照点（对照文档契约"下一步调用"而非"同调用内的激活
+  读"）且被写进文档后视为已封闭。已入 review-lessons 清单第 36–38 条（读取对×
+  变化窗口×参照点；附送优化单独计价；已记录论证可再攻击）。
+- **四轴构造审计（举一反四，模拟 reviewer 方法）**：① 读取对×窗口——
+  prepass↔activation 有意分离（各有参照点，代码注释记录）；activation↔binding
+  为两次新鲜加载、窗口为文件读+哈希（无 await，µs 级），reviewer 措辞
+  "fresh/activation-era metadata" 明示 fresh 可接受，且该窗口 PR 之前即存在，
+  完全封闭需将 Skill 对象穿透 `_Activation`，记录为已知窗口不扩面；跨中间件
+  双快照（activation 与 policy 各自预扫描）无共享决策消费，良性。② 返回值×
+  消费者——`(names, dict|sentinel|None)` 三值 × 唯一调用链全部处理，空 dict
+  快照构造性绑定归零。③ I/O 失败文法——异步有密步加载 {#1 prepass, #2 激活,
+  #3 slash 新鲜}×失败：#1 失败钉（既有）、#3 失败钉（本轮新增）、#2 失败
+  `_resolve_activation` 未捕获存储异常直接打断 run——**PR 之前既有**、不在本
+  diff，记录不搭车。④ 边界——快照 dict 跨线程只读共享，无变异点。
+- **证据：** `tests/test_skills_authorization.py` 54→56：
+  `test_slash_secret_binding_uses_post_activation_registry`（预扫描成功+窗口内
+  slash 声明 OLD→NEW：注入 NEW、不注入 OLD）；`test_snapshot_entries_bind_while_
+  slash_fresh_load_fails`（新鲜加载瞬时失败：slash 归零、条目仍按快照绑定）。
+  突变 M4（slash 回退快照）、M5（条目重嵌 slash 守卫）逐一还原必红；上一轮双调用
+  测试加载计数按新序列更新（#5）。
+- **兼容性：** 同步链与授权禁用路径不变；"一步一载"附送收益放弃（回到 PR 前
+  加载计数），一致性优先；无新增 rider。
+
+### 2026-09-27（第二轮自查）— 同技能双来源的"两个时代并集"与 slash 支配规则
+
+- **背景：** 修复 R9 后按 reviewer 的构造审计法再读最终代码，构造出下一个场景并实证：
+  同一技能既是 slash 来源（新鲜注册表，v2/NEW_KEY）又有持久条目（预扫描快照，
+  v1/OLD_KEY）时，两来源并集同时注入两个时代的钥匙（复现输出
+  `{OLD_KEY, NEW_KEY}`）——OLD_KEY 正是"技能已不再声明却仍被注入"的形态，
+  与 R9 同型、经条目路径到达。工具策略中间件已有先例语言"Explicit slash
+  activation dominates for the rest of that run"，秘密绑定对同一技能未对齐。
+- **决策（对齐先例）：** `_in_context_secret_sources` 新增 `exclude_names`——
+  已由 slash 来源绑定（激活时代）的技能名不再贡献条目视图。slash 是显式仪式且
+  解析自更新的注册表，同名条目视图只能使其过期或加宽；不同技能的条目照常
+  叠加（秘密是加法语义，与工具策略的排他语义不同——该不对称是既有设计，不动）。
+- **证据：** `test_slash_era_dominates_entry_source_for_same_skill`（快照 v1 +
+  激活/新鲜 v2：仅注入 NEW_KEY）；突变 M6（移除排除）必红（并集
+  `{OLD_KEY, NEW_KEY}` 回归）。套件 56→57。
+- **兼容性：** 仅同名支配；异名 slash+条目叠加行为不变（既有双调用回归覆盖）。
+
+### 2026-09-27（双角色审查轮）— 同步链授权分支的覆盖缺口
+
+- **背景：** 双角色（找问题/解决问题）审查第 1 轮：异步快照路径有 8 个回归，但
+  **同步链 + 授权开启**（`wrap_model_call` + `skill_authorization` + 持久条目 +
+  secrets，走 `entry_registry=None` 新鲜回退分支）零覆盖——重构该分支的回归不会
+  红任何测试。行为先实证正确（规范名经同步 `authorize()`、绑定成功、恰一次
+  加载——同步 API 在同步链是正确契约）。
+- **决策：** 补 `test_sync_chain_secret_binding_uses_sync_api_and_canonical_names`
+  （`sync_calls == ["vercel-deploy"]`、`async_calls == []`、绑定生效、loads == 1）；
+  突变 M7（`entry_registry=None` 回退改空 dict）必红。
+- **第 2 轮（换角度重扫）**：声明↔代码对齐逐条核（slash 不查 map、条目 map miss
+  构造不可能、支配排除先于激活检查）；`tool_search` 确认在
+  `ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES` 中（skill 策略层不破坏 deferral，既有
+  设计已覆盖）；秘密日志仅记录名字。无新发现，枚举空间记为已穷尽。
+
+### 2026-09-27（第三轮自查，willem-bd 视角扫未审面）— user_id 接线回归缺口
+
+- **背景：** 换到他从未审查的面：`container_registry.py` 新模块本身、`user_id`
+  穿线的接线回归、Command 路径细节。代码接线正确（`_build_runtime_middlewares`
+  把 `user_id` 传给 `ToolErrorHandlingMiddleware`，L514），但唯一接线测试
+  （`test_lead_runtime_chain_forwards_skill_authorization_to_stamp_gate`）只断言
+  `_skill_authorization`——**删掉 user_id 传递不会红任何测试**：stamp 门会静默
+  解析进程全局注册表，per-user 自定义技能的读路径回退路径推导名 → 错误授权
+  目标。subagent builder 同型缺口。
+- **决策：** lead 接线测试补 `user_id="user-123"` 断言；新增
+  `test_subagent_runtime_chain_forwards_user_id_to_stamp_gate`。突变 M8（构造
+  调用去 user_id）双测试必红。
+- **其他面：** `container_registry.py` 全文精读（40 行）——键规范化双向、
+  thread 纪律入档、`enabled_only=False` 理由明确，无发现。Command 路径 N-scan
+  与 activation↔binding µs 窗口维持既有记录。
+- **证据：** 套件 58→59；ruff 干净。
+
+### 2026-09-27（第四轮自查，willem-bd 视角扫未审面）— 持久条目的模型可见渲染不复授权
+
+- **背景：** 未审面清单再推进：`DurableContextMiddleware` 渲染的 "Active skills"
+  提醒直接来自 `state["skill_context"]`，**无任何 `skill:activate` 复授权**（grep
+  实证）。provider 翻转为 deny 后：工具与秘密的消费点正确跳过（R6/R7 修复），
+  `describe_skill` 也过滤被拒技能（R5 修复）——但模型可见的持久提醒仍宣传该技能的
+  名字与路径，直到条目离开 `skill_context`。
+- **定性：** 执行面无洞（模型重读 → stamp 门拒 → 不建新条目；声明工具/秘密均被
+  policy/secret 门拦下）——这是**声明精度问题 + 表面不一致**：早期记录中"被拒的是
+  激活（策略/秘密/持久上下文）"的"持久上下文"一词过度声明，精确表述应为"被拒读取
+  不产生新持久条目；既有条目的**消费**（工具/秘密）复授权，但其**模型可见渲染**
+  不过滤"。`DurableContextMiddleware` 属上游模块，渲染过滤记为 follow-up，不在本
+  PR 扩面（对齐清单第 35 条）。
+- **证据：** grep 复授权关键词在该文件为空；渲染调用链
+  `render_skill_context(state.skill_context)` 无条件透传。
+- **同轮其他未审面：** `release_policy_parameters` 契约（assembly_descriptor 的
+  可选鸭子类型；激活中间件发布的 `available_skills` 已是授权过滤后集合）——无发现。
+
+### 2026-09-27（第五轮）— 渲染过滤落地：持久条目决策发布与 durable 消费
+
+- **背景：** 第四轮将渲染过滤记为 follow-up 后，用户指令授权扩面实现。
+- **决策（发布/消费分离）：** `SkillActivationMiddleware` 每步发布**路径键**的
+  ``skill:activate`` 决策到 run context（`__skill_entry_activation_decisions`，
+  复用 slash source 的 owner-token 认证契约；已加入 `REDACTED_CONTEXT_KEYS`）：
+  异步 hook 复用预扫描快照（零新增 I/O，失败/不可解析发布 False=隐藏）；同步
+  hook 仅在有条件目时一次扫描 + 同步 authorize（被动步零 I/O，对齐 P2-B 先例）。
+  `DurableContextMiddleware` 纯消费——按发布决策过滤**渲染副本**（state 不动），
+  自身不做任何 provider/storage 工作；未发布（授权禁用/无条目/非法载体）= 照旧
+  渲染（absent-is-permissive，与其他 run-context 载体一致）。lead 与 subagent
+  两链均接线 `skill_authorization` + 共享 token。
+- **证据：** 3 个新测试（异步组合断言过滤生效且 `load_calls == 1`（渲染复用发布、
+  不自扫）；同步组合同断言；授权禁用渲染不变）。突变 M9（消费端不过滤）、
+  M10（异步不发布）、M11（同步不发布）逐一必红。同步链既有测试的 sync_calls /
+  load 计数按新的合法双调用更新。
+- **兼容性：** 授权禁用路径零变化；`release_policy_parameters` 新增
+  `skill_entry_render_filter` 布尔；state 不被渲染过滤触碰。
+
+### 2026-09-27（第六轮自查）— 渲染过滤的链级接线回归
+
+- **背景：** 渲染过滤落地后的新面上再执行"他式"检查：链级 wiring（token 配对、
+  `skill_authorization` 传递、activation 先于 durable 的构造顺序——发布必须先于
+  消费）无任何测试；任一被静默删除，过滤失效且无测试变红（与 M8 同类）。
+- **决策：** 两个链级接线测试（lead `build_middlewares` / subagent
+  `build_subagent_runtime_middlewares`）：断言 durable 拿到同一 resolved 实例、
+  token 与链上 activation 中间件相等、`index(activation) < index(durable)`。
+  突变 M12（lead 去 token）/ M13（subagent 去 authz）各自必红。
+- **证据：** 套件 62→64；受影响面 302 passed；ruff 干净。
+
+### 2026-09-27（第二次 38 条全清单重跑）— 新面增验
+
+- **重跑范围：** 渲染过滤落地后的 7 文件改动面。新增取证：新符号出现点枚举
+  （`_publish_entry_decisions` 双调用点=同步/异步 hook；`_renderable_skills`
+  单消费；write/read 单写单读；key 三用途=写/读/redaction 清单）；上游漂移
+  **累计 21 个新提交**（`827acf51d..52a3e2564`）——提交前合并义务加重。
+- **发现并补齐 [第 5/24 条]：** 新载体 key 无 redaction 断言——补
+  `test_entry_decisions_carrier_is_redaction_listed`（断言剥离 + "redacted,
+  not suppressed"：源载体保持完整）。
+- **维持：** M9–M13 突变全红记录、发布/消费构造保证、接线/顺序双测试、
+  fail_closed=True（生产默认）方向覆盖。套件 64→65。
+
+### 2026-09-28 — PR #4541 review R10（willem-bd，P2）：无秘密时代的支配排除
+
+- **背景：** R9 修复推送后的新发现：同技能排除集此前从"成功绑定的 slash 来源"
+  推导（`slash_bound = sources 名`）。当预扫描快照为旧声明（OLD_KEY）、operator
+  在 await 窗口内把技能改为**不声明任何秘密**时：激活与新鲜 slash 查询看到新版，
+  `_resolve_registry_skill` 因 `required_secrets` 为空返回 None → slash 来源不进
+  sources → 排除集为空 → 旧快照条目视图照旧把 OLD_KEY 注入——刚激活的技能已
+  不声明任何秘密却仍被注入。
+- **决策（身份推导）：** 排除集改为从**已认证的 slash 激活身份**（run context 里的
+  slash source path，token 认证）推导：身份路径先在新鲜注册表、后在条目快照中
+  解析出名字（名字不因声明变化而失锚），加入排除集——与该技能当前是否绑定成功
+  无关。slash 身份在两处注册表都不可解析（技能已卸载）时不排除——沿用条目的
+  快照参照点语义。
+- **证据：** `test_slash_dominance_holds_when_activation_era_declares_no_secrets`
+  （快照 OLD、激活/新鲜=无秘密：`ACTIVE_SECRETS_CONTEXT_KEY is None`）；突变 M14
+  （身份推导禁用，退回 sources 推导）必红。套件 65→66。
+- **兼容性：** 有秘密时代的支配行为不变（既有 dominance 回归覆盖）；无 slash
+  身份时排除集来源不变。
+
+### 2026-09-28（R10 修复自查）— 改名交错：身份锚定从名字升级为路径
+
+- **背景：** 对 R10 修复本身执行清单第 39–41 条（用户点名"当前修改也要做设计/
+  方向处理"）。第 40 条（值→门→下游）命中：只枚举了 `required_secrets` 的 ∅，
+  没枚举**声明 `name` 本身的变化**。复现坐实：operator 在 await 窗口内改名
+  （同路径 foo→bar），用户按新名 `/bar` 激活——名字锚定的排除集只含 "bar"，
+  快照条目把同一路径解析为旧名 "foo" → 不被排除 → `{OLD_KEY, NEW_KEY}` 两
+  时代并集，R10 的洞经改名存活。根源：条目与 slash 来源共享的稳定身份是
+  **路径**；名字是每注册表版本可变的派生属性。
+- **决策（路径锚定 + 名字补充）：** `_in_context_secret_sources` 新增
+  `exclude_paths`——条目规范化路径 == 已认证 slash 身份路径即排除（先于注册表
+  解析，不依赖任一版本叫它什么）；名字排除保留，覆盖同名异径遮蔽（custom
+  shadow public）。身份路径不可解析（已卸载）时路径排除仍然生效——身份是
+  run 级承诺。
+- **证据：** `test_slash_dominance_anchors_on_path_across_midrun_rename`
+  （快照 foo/OLD_KEY，激活/新鲜 bar/NEW_KEY，按新名激活：仅 NEW 绑定）；
+  突变 M16（仅路径排除禁用）必红。套件 66→67；受影响面 242 passed。
+- **复盘：** 本洞由"对刚写的修复立即执行新清单条目"抓出——第 41 条
+  （重攻自身修复）的直接收益。
 
 ### 新记录模板
 

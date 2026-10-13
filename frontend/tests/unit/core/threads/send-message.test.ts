@@ -96,3 +96,61 @@ test("keeps human input response metadata on the hidden user message", () => {
     },
   ]);
 });
+
+test("uses the caller-provided human message id for the visible user message", () => {
+  const messages = buildThreadSubmitMessages({
+    text: "hello",
+    humanMessageId: "local-human-1",
+  });
+
+  expect(messages).toEqual([
+    {
+      type: "human",
+      id: "local-human-1",
+      content: [{ type: "text", text: "hello" }],
+      additional_kwargs: {},
+    },
+  ]);
+});
+
+test("merges staged files from additionalKwargs with freshly uploaded files", () => {
+  const messages = buildThreadSubmitMessages({
+    text: "Summarize both",
+    additionalKwargs: {
+      files: [
+        {
+          filename: "shelf-doc.md",
+          size: 100,
+          path: "/mnt/user-data/uploads/shelf-doc.md",
+          status: "uploaded",
+        },
+      ],
+    },
+    filesForSubmit: [
+      {
+        filename: "local.csv",
+        size: 42,
+        path: "/mnt/user-data/uploads/local.csv",
+        status: "uploaded",
+      },
+    ],
+  });
+
+  expect(messages).toHaveLength(1);
+  expect(messages[0]?.additional_kwargs).toEqual({
+    files: [
+      {
+        filename: "shelf-doc.md",
+        size: 100,
+        path: "/mnt/user-data/uploads/shelf-doc.md",
+        status: "uploaded",
+      },
+      {
+        filename: "local.csv",
+        size: 42,
+        path: "/mnt/user-data/uploads/local.csv",
+        status: "uploaded",
+      },
+    ],
+  });
+});

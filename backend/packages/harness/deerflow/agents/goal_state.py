@@ -17,6 +17,7 @@ class GoalEvaluation(TypedDict):
     blocker: GoalBlocker
     reason: str
     evidence_summary: NotRequired[str]
+    relied_on_assumption: NotRequired[bool]
 
 
 class GoalState(TypedDict):

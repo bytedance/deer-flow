@@ -46,7 +46,7 @@ def _coerce_max_results(value: object, default: int = 5, max_allowed: int = _SOF
     """Coerce config/parameter input into a bounded positive result count."""
     try:
         count = int(value)  # type: ignore[call-overload]
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
     if count <= 0:
         return default
@@ -57,7 +57,7 @@ def _coerce_content_limit(value: object, default: int = _DEFAULT_CONTENTS_MAX_CH
     """Coerce the per-result content limit. 0 means no limit; anything invalid falls back to the default."""
     try:
         limit = int(value)  # type: ignore[call-overload]
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
     return limit if limit >= 0 else default
 

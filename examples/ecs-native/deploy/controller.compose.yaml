@@ -1,0 +1,99 @@
+# Supply a mode-0600 controller.env via --env-file. Never print compose config.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      POSTGRES_DB: deerflow
+    volumes:
+      - native_pg:/var/lib/postgresql/data
+      - ./init-execution.sql:/docker-entrypoint-initdb.d/10-execution.sql:ro
+    ports:
+      - "${ECS_PRIVATE_BIND_HOST:-127.0.0.1}:${ECS_PG_PORT:-5432}:5432"
+    healthcheck:
+      test: [CMD, pg_isready, -U, postgres, -d, deerflow]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+    networks: [control]
+  redis:
+    image: redis:7-alpine
+    command: [redis-server, --protected-mode, 'yes', --requirepass, '${REDIS_PASSWORD:?required}']
+    ports:
+      - "${ECS_PRIVATE_BIND_HOST:-127.0.0.1}:${ECS_REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: [CMD, redis-cli, -a, '${REDIS_PASSWORD}', ping]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+    volumes: [native_redis:/data]
+    networks: [control]
+  gateway:
+    image: ${ECS_ROLE_IMAGE:?immutable image required}
+    pull_policy: never
+    env_file: ${ECS_PRIVATE_DIR:?required}/controller.env
+    environment:
+      ECS_NATIVE_CONFIG: /run/operator/central.json
+      DEER_FLOW_CONFIG_PATH: /run/operator/native.json
+      DEER_FLOW_EXTENSIONS_CONFIG_PATH: /run/operator/extensions.json
+      DEER_FLOW_HOME: ${ECS_NAS_ROOT:?required}
+      DEER_FLOW_MEMORY_INDEX_PATH: /var/cache/deerflow/memory
+      ECS_TRUSTED_PROXY_IP: ${ECS_PROXY_IP:-172.29.61.10}
+      ECS_RESIDENT_ROLE: controller
+    command: [python, -m, ecs_executor.resident]
+    volumes:
+      - ${ECS_PRIVATE_DIR}:/run/operator:ro
+      - ${ECS_NAS_ROOT}:${ECS_NAS_ROOT}
+      - central_memory:/var/cache/deerflow/memory
+    stop_grace_period: 240s
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8001/health/ready", timeout=5)']
+      interval: 3s
+      timeout: 6s
+      retries: 60
+    networks: [control]
+  mcp:
+    image: ${ECS_ROLE_IMAGE:?immutable image required}
+    pull_policy: never
+    env_file: ${ECS_PRIVATE_DIR}/controller.env
+    environment:
+      ECS_EXECUTOR_CONFIG: /run/operator/executor.json
+    command: [python, -m, ecs_executor.mcp_server]
+    volumes:
+      - ${ECS_PRIVATE_DIR}:/run/operator:ro
+      - ${ECS_NAS_ROOT}:${ECS_NAS_ROOT}
+    stop_grace_period: 240s
+    depends_on:
+      postgres: {condition: service_healthy}
+    networks: [control]
+  frontend:
+    image: ${ECS_FRONTEND_IMAGE:?existing frontend immutable image required}
+    pull_policy: never
+    networks: [control]
+  proxy:
+    image: nginx:stable-alpine
+    ports:
+      - "${ECS_PUBLIC_BIND_HOST:-127.0.0.1}:${ECS_TLS_PORT:-2026}:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ${ECS_PRIVATE_DIR}/tls.crt:/run/tls/cert.pem:ro
+      - ${ECS_PRIVATE_DIR}/tls.key:/run/tls/key.pem:ro
+    depends_on:
+      gateway: {condition: service_healthy}
+      mcp: {condition: service_started}
+      frontend: {condition: service_started}
+    networks:
+      control:
+        ipv4_address: ${ECS_PROXY_IP:-172.29.61.10}
+networks:
+  control:
+    ipam:
+      config:
+        - subnet: ${ECS_CONTROL_SUBNET:-172.29.61.0/24}
+volumes:
+  native_pg:
+  native_redis:
+  central_memory:

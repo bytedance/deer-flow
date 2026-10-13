@@ -32,8 +32,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
-from fastapi import FastAPI
-from starlette.requests import Request
 from starlette.responses import FileResponse
 
 import app.gateway.routers.artifacts as artifacts_router
@@ -65,7 +63,7 @@ async def test_get_artifact_text_does_not_block_event_loop(tmp_path: Path, monke
     target = await _seed(tmp_path, monkeypatch, "t1", vpath)
     await asyncio.to_thread(target.write_text, "hello world", encoding="utf-8")
 
-    resp = await _get_artifact("t1", vpath, request=Request({"type": "http", "headers": [], "app": FastAPI()}), download=False)
+    resp = await _get_artifact("t1", vpath, request=None, download=False)
 
     assert isinstance(resp, FileResponse)
     assert resp.status_code == 200
@@ -79,7 +77,7 @@ async def test_get_artifact_binary_does_not_block_event_loop(tmp_path: Path, mon
     payload = b"\x00\x01\x02PNGDATA"  # null byte -> binary branch (inline FileResponse)
     await asyncio.to_thread(target.write_bytes, payload)
 
-    resp = await _get_artifact("t1", vpath, request=Request({"type": "http", "headers": [], "app": FastAPI()}), download=False)
+    resp = await _get_artifact("t1", vpath, request=None, download=False)
 
     # Binary artifacts are streamed via FileResponse (so browsers can issue
     # byte-Range requests) instead of being read into memory up front, so the
@@ -100,7 +98,7 @@ async def test_get_artifact_skill_archive_member_does_not_block_event_loop(tmp_p
 
     await asyncio.to_thread(_build_skill_zip)
 
-    resp = await _get_artifact("t1", f"{skill_vpath}/SKILL.md", request=Request({"type": "http", "headers": [], "app": FastAPI()}), download=False)
+    resp = await _get_artifact("t1", f"{skill_vpath}/SKILL.md", request=None, download=False)
 
     assert resp.status_code == 200
     assert b"# demo skill" in resp.body
@@ -134,3 +132,20 @@ async def test_update_artifact_does_not_block_event_loop(tmp_path: Path, monkeyp
 
     assert result.sha256 == hashlib.sha256(b"updated").hexdigest()
     assert await asyncio.to_thread(target.read_bytes) == b"updated"
+
+
+@pytest.mark.parametrize("filename", ["large.txt", "large.html", "large.bin"])
+@pytest.mark.parametrize("download", [False, True])
+async def test_large_artifact_validator_does_not_block_event_loop(tmp_path: Path, monkeypatch, filename: str, download: bool) -> None:
+    vpath = f"mnt/user-data/outputs/{filename}"
+    target = await _seed(tmp_path, monkeypatch, "t1", vpath)
+    await asyncio.to_thread(target.write_bytes, b"a" * (artifacts_router.MAX_EDITABLE_ARTIFACT_BYTES + 1))
+
+    def unexpected_hash(*_args, **_kwargs):
+        pytest.fail("Large artifact response planning must not hash the file")
+
+    monkeypatch.setattr(artifacts_router, "_sha256_of_file", unexpected_hash)
+    response = await _get_artifact("t1", vpath, request=None, download=download)
+
+    assert isinstance(response, FileResponse)
+    assert response.headers["etag"].startswith('"stat-')

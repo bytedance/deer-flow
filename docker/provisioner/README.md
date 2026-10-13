@@ -164,6 +164,17 @@ The provisioner is configured via environment variables (set in [docker-compose-
 | `NODE_HOST` | `host.docker.internal` | Hostname that backend containers use to reach host NodePorts; ignored when `SANDBOX_SERVICE_TYPE=ClusterIP` |
 | `K8S_API_SERVER` | (from kubeconfig) | Override K8s API server URL (e.g., `https://host.docker.internal:26443`) |
 
+For new sandbox requests, the Gateway also sends the effective AIO shell-session
+capacity derived from `subagent_runtime.max_running`. The provisioner writes it
+to the sandbox Pod as `MAX_SHELL_SESSIONS`; requests from older Gateways omit the
+field and retain the image default. Discovery responses report the effective
+capacity. The Gateway replaces a lower-capacity Pod through its ownership-fenced
+replacement path once the previous owner and recovery grace permit it. A create
+request for an existing Pod with insufficient capacity returns HTTP 409; the
+provisioner does not delete an existing Pod to upgrade its capacity, including
+after a transient Gateway discovery failure. If the old Pod has already gone
+but its Service remains, create can safely provision the missing Pod.
+
 ### Custom sandbox image
 
 Provisioner-created sandbox Pods use the provisioner's `SANDBOX_IMAGE` environment variable. This is separate from `sandbox.image` in `config.yaml`, which applies to local Docker or Apple Container mode.
@@ -207,7 +218,15 @@ PYTHONPATH=. python scripts/migrate_user_isolation.py --dry-run
 PYTHONPATH=. python scripts/migrate_user_isolation.py --user-id <target-user-id>
 ```
 
-This moves legacy `threads/{thread_id}/user-data` data under `users/<target-user-id>/threads/{thread_id}/user-data`, which matches the new provisioner PVC subPath when the gateway base directory is mounted at `deer-flow/` on the PVC. Use `default` as the target user only when the legacy data should remain in the default no-auth user namespace. Run the migration while no gateway or sandbox Pods are writing to those paths.
+This moves legacy `threads/{thread_id}/user-data` data under `users/<owner>/threads/{thread_id}/user-data`, which matches the new provisioner PVC subPath when the gateway base directory is mounted at `deer-flow/` on the PVC. `<owner>` is the thread's `user_id` in the `threads_meta` table of the gateway's configured database (`default` when none is recorded), so run the script with the gateway's `config.yaml` and database settings; if that table cannot be read, it stops without moving anything. Pass `--allow-missing-thread-owners` only when the install never recorded thread owners. `--user-id` picks who inherits un-owned global data (memory, `USER.md`, legacy custom agents). Run the migration while no gateway or sandbox Pods are writing to those paths.
+
+Before this fix, the script never found the database and moved every legacy thread to `users/default/threads/`. Re-running it does nothing then, because `threads/` is gone. To recover, stop the gateway and list the threads with a real owner:
+
+```sql
+SELECT thread_id, user_id FROM threads_meta WHERE user_id IS NOT NULL AND user_id <> 'default';
+```
+
+Move each listed `users/default/threads/{thread_id}` that exists back to `threads/{thread_id}`, then run the script again (dry run first). Threads whose owner is `default` or not recorded stay where they are. If an owner has used the thread since, `users/<owner>/threads/{thread_id}` already exists; the script never overwrites it and sets the old copy aside in `migration-conflicts/{thread_id}` for you to merge by hand.
 
 In hostPath mode, the gateway materializes enabled-only views under `skills_view/public` and `users/{user_id}/skills_view/{custom,legacy}` beneath `DEER_FLOW_HOST_BASE_DIR`; the provisioner mounts those stable directories. A lead Agent with an explicit skills policy supplies all four category mounts from `users/{user_id}/threads/{thread_id}/skills_view`; those overrides replace the default hostPath or root skills-PVC mount. When `USERDATA_PVC_NAME` is configured, the provisioner mounts these thread categories from that PVC using `deer-flow/users/{user_id}/threads/{thread_id}/skills_view/{category}` subpaths. For unrestricted threads, operators can still set `SKILLS_PVC_NAME` and optionally configure `SKILLS_PVC_SUBPATH_TEMPLATE`; leaving the template empty mounts the skills PVC root unchanged. The gateway does not populate the unrestricted `SKILLS_PVC_SUBPATH_TEMPLATE` layout dynamically.
 

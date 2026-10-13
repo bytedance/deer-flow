@@ -96,6 +96,33 @@ def test_provisioner_list_returns_sandbox_infos_and_filters_invalid_entries(monk
     assert infos[0].sandbox_url == "http://k3s:31001"
 
 
+def test_provisioner_list_marks_insufficient_shell_capacity_for_replacement(monkeypatch):
+    backend = RemoteSandboxBackend(
+        "http://provisioner:8002",
+        max_shell_sessions=13,
+    )
+
+    def mock_get(url: str, timeout: int, headers=None):
+        return _StubResponse(
+            payload={
+                "sandboxes": [
+                    {
+                        "sandbox_id": "abc123",
+                        "sandbox_url": "http://k3s:31001",
+                        "max_shell_sessions": 10,
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    infos = backend._provisioner_list()
+
+    assert len(infos) == 1
+    assert infos[0].requires_replacement is True
+
+
 def test_provisioner_list_sends_auth_header_when_api_key_set(monkeypatch):
     backend = RemoteSandboxBackend("http://provisioner:8002", api_key="secret")
     captured: list[dict] = []
@@ -560,6 +587,63 @@ def test_provisioner_discover_returns_info_on_success(monkeypatch):
     assert info is not None
     assert info.sandbox_id == "abc123"
     assert info.sandbox_url == "http://k3s:31001"
+
+
+def test_provisioner_discover_marks_insufficient_shell_capacity_for_replacement(monkeypatch):
+    backend = RemoteSandboxBackend(
+        "http://provisioner:8002",
+        max_shell_sessions=13,
+    )
+
+    def mock_get(url: str, timeout: int, headers=None):
+        return _StubResponse(
+            payload={
+                "sandbox_id": "abc123",
+                "sandbox_url": "http://k3s:31001",
+                "max_shell_sessions": 10,
+            }
+        )
+
+    monkeypatch.setattr(requests, "get", mock_get)
+
+    info = backend._provisioner_discover("abc123")
+
+    assert info is not None
+    assert info.requires_replacement is True
+
+
+def test_provisioner_create_reports_version_skew_when_capacity_is_missing(monkeypatch):
+    backend = RemoteSandboxBackend("http://provisioner:8002", max_shell_sessions=13)
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+
+    def mock_post(url: str, *, json: dict, headers=None, timeout: int):
+        return _StubResponse(payload={"sandbox_id": "abc123", "sandbox_url": "http://k3s:31001"})
+
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    with pytest.raises(RuntimeError, match="version skew"):
+        backend._provisioner_create(None, "abc123")
+
+
+@pytest.mark.parametrize("reported_capacity", [4, 9, 13, None])
+def test_create_checks_runtime_minimum_without_sending_image_override(monkeypatch, reported_capacity):
+    backend = RemoteSandboxBackend("http://provisioner:8002", required_shell_sessions=9)
+    monkeypatch.setattr(remote_backend_mod, "user_should_see_legacy_skills", lambda _user_id: False)
+
+    def post(_url, *, json, **_kwargs):
+        assert "max_shell_sessions" not in json
+        payload = {"sandbox_url": "http://sandbox:8080"}
+        if reported_capacity is not None:
+            payload["max_shell_sessions"] = reported_capacity
+        return _StubResponse(payload=payload)
+
+    monkeypatch.setattr(requests, "post", post)
+    if reported_capacity == 4:
+        with pytest.raises(RuntimeError, match="insufficient shell-session capacity"):
+            backend.create("thread-a", "example")
+    else:
+        # A legacy provisioner without metadata retains the known image default.
+        assert backend.create("thread-a", "example").sandbox_url == "http://sandbox:8080"
 
 
 def test_provisioner_discover_returns_none_on_request_exception(monkeypatch):

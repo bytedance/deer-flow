@@ -24,6 +24,12 @@ POST /api/threads/{thread_id}/uploads
 
 网关会在应用层限制上传规模，默认最多 10 个文件、单文件 50 MiB、单次请求总计 100 MiB。可通过 `config.yaml` 的 `uploads.max_files`、`uploads.max_file_size`、`uploads.max_total_size` 调整；前端会读取同一组限制并在选择文件时提示，超过限制时后端返回 `413 Payload Too Large`。
 
+文件名匹配 `.upload-*.part`（例如 `.upload-notes.part`）时，网关会返回 `400 Bad Request`，提示改名后重新上传。这是系统保留的临时文件命名规则；文件名按去掉目录后的 basename 判断，HTTP 检查在 Linux 上也同时识别 `/` 和 `\` 两种路径分隔符，例如 `folder\.upload-notes.part`。网关会先检查整批文件，再开始写入聊天的上传目录或获取沙箱，因此保留名称排在批次末尾也不会留下部分上传。聊天界面收到该错误后会提示用户，并停止本次消息发送。`.upload-notes.txt`、`notes.part` 和 `.env` 仍可上传。
+
+检查也会拒绝 Windows 去掉末尾点号或空格、忽略大小写后会变成保留名称的别名，例如 `.upload-notes.part.`、`.upload-notes.part `、`.UPLOAD-NOTES.PART` 和 `.Upload-NoTeS.Part .`。这项检查在所有主机上生效，HTTP 上传会在整批文件写入前返回 `400`，提示改名。
+
+嵌入式 `DeerFlowClient.upload_files` 同样在复制前检查整批文件名，保留名称会抛出 `ValueError`。项目资料库上传和从聊天加入资料库时的重命名也遵循这项限制，包括沿用来源文件名和手动指定新名称两种情况；旧资料库中使用保留名称的文件仍可下载，但直接附加到聊天会返回 `400`。请先下载、改名，再上传到聊天。本修复不会迁移或恢复旧聊天目录中已经匹配该临时文件规则的文件。
+
 **响应：**
 ```json
 {
@@ -110,7 +116,11 @@ DELETE /api/threads/{thread_id}/uploads/{filename}
 - Excel (`.xls`, `.xlsx`)
 - Word (`.doc`, `.docx`)
 
-转换后的 Markdown 文件会保存在同一目录下，文件名为原文件名 + `.md` 扩展名。
+转换后的 Markdown 文件会保存在同一目录下，通常使用原文件的主干名加 `.md`；若该名称已被占用，则追加 `_N` 后缀。上传响应中的 `markdown_file` 给出实际名称。
+
+新转换会在沙箱挂载目录之外保存原文件与转换文件的归属记录。Agent 的历史文件列表只隐藏归属已验证的转换文件；文档大纲也只读取这份记录指定的 Markdown。原文件校验包含修改时间戳，即使修改前后大小相同，也会拒绝使用旧转换结果。旧版本没有归属记录或记录缺少原文件时间戳的转换文件，升级后会作为独立 Markdown 显示，原文件也不会再从这些文件读取大纲。系统不会自动补建记录或填入当前时间戳，以免将过期转换结果认定为有效；需要大纲时，可在启用 `uploads.auto_convert_documents: true` 后重新上传原文件。原文件和转换文件都会保留。
+
+时间戳校验是保守的元数据校验，不能保证文件内容完全一致。Windows 上的 `st_ctime_ns` 可能表示创建时间，因此等长度覆盖后若恢复原 `mtime`，校验可能无法识别变化。
 
 默认情况下，自动转换是关闭的，以避免在网关主机上对不受信任的 Office/PDF 上传执行解析。只有在受信任部署中明确接受此风险时，才应将 `uploads.auto_convert_documents` 设置为 `true`。
 
@@ -137,8 +147,26 @@ To work with these files:
 ```
 
 以前轮次上传的文件不会在每次请求中重复注入。Agent 可按需调用
-`list_uploaded_files` 查询历史上传；如果已知文件名，也可直接使用
+`list_uploaded_files` 查询历史上传（可选 `query` 按文件名子串过滤、
+`extensions` 按类型过滤；过滤发生在默认 20 条上限之前）。如果已知文件名，也可直接使用
 `read_file` 或 `grep` 访问 `/mnt/user-data/uploads/` 下的文件。
+
+历史上传支持有界续页：`max_results` 默认 20、每页最多 100。
+返回 `next_cursor` 时，将其作为下一次调用的 `cursor`，并保留相同的
+`query` / `extensions`；末页没有 `next_cursor`。可在续页时调整每页数量和
+`include_outline`，大纲只针对当前页提取。结果按修改时间倒序、同时间按原始文件名
+排序；`total_count` 是完整过滤结果数，`omitted_summary` 只统计当前页之后剩余的文件。
+
+例如 250 个匹配附件可按 100 → 100 → 50 枚举。每页都排除本轮上传、staging、
+符号链接以及现有规则识别的转换 companion。规范化后的过滤条件、用户、线程、
+本轮上传排除集合或目录中的普通文件清单元数据改变时，旧游标返回
+`error: stale_cursor`；畸形或过长游标返回 `error: invalid_cursor`。
+两种情况都有 `restart_required: true`，应丢弃此前收集的页，省略 `cursor`
+重新开始，避免把两次不同枚举混合起来。
+
+游标仅用于一致性校验，不是授权凭据；工具仍从可信 runtime 解析当前用户和线程。
+每页重新扫描目录，校验文件名、大小及纳秒级修改/变更时间，不保存持久快照，
+不保证文件字节不变或扫描期间的原子快照，也不限制任意大目录的扫描开销。
 
 ### 使用上传的文件
 
@@ -219,21 +247,26 @@ print(response.json())
 ## 文件存储结构
 
 ```
-backend/.deer-flow/threads/
-└── {thread_id}/
-    └── user-data/
-        └── uploads/
-            ├── document.pdf          # 原始文件
-            ├── document.md           # 转换后的 Markdown
-            ├── presentation.pptx
-            ├── presentation.md
-            └── ...
+{DEER_FLOW_HOME}/users/{user_id}/threads/{thread_id}/
+├── upload-companions/              # 服务端归属记录，不挂载到沙箱
+│   └── <原文件名的 SHA-256>.json
+└── user-data/
+    └── uploads/
+        ├── document.pdf            # 原始文件
+        ├── document.md             # 转换后的 Markdown
+        ├── presentation.pptx
+        ├── presentation.md
+        └── ...
 ```
 
 ## 限制
 
 - 最大文件大小：100MB（可在 nginx.conf 中配置 `client_max_body_size`）
 - 文件名安全性：系统会自动验证文件路径，防止目录遍历攻击
+- 删除只作用于普通文件：上传目录中的符号链接不会被跟随，删除请求按文件不存在（404）处理
+- 删除文档不会一并删除其转换生成的 Markdown；转换文件仍可通过上传 API 单独删除。`list_uploaded_files` 只对有归属记录的转换文件做历史发现排除，不影响上传 API 的完整文件列表（见 issue #5672）
+- 上传（HTTP 与嵌入式 `DeerFlowClient`）不会写穿符号链接：目标名已是符号链接的文件会被跳过并列入 `skipped_files`，转换生成的 Markdown 也不会写入同名符号链接
+- 转换读取的是本次上传写入的字节，而非落盘后的文件名：HTTP 上传在 uploads 之外的私有副本上转换，嵌入式客户端转换调用方提供的源文件，因此沙箱替换该文件名无法让宿主文件内容被转换进 uploads
 - 线程隔离：每个线程的上传文件相互隔离，无法跨线程访问
 - 自动文档转换默认关闭；如需启用，需在 `config.yaml` 中显式设置 `uploads.auto_convert_documents: true`
 
@@ -248,7 +281,7 @@ backend/.deer-flow/threads/
 2. **Uploads Middleware** (`packages/harness/deerflow/agents/middlewares/uploads_middleware.py`)
    - 读取当前消息的 `additional_kwargs.files`
    - 在 Agent 请求前生成并注入 `<current_uploads>` 文件上下文
-   - 历史上传由 `list_uploaded_files` 按需查询，不会每轮自动注入
+   - 历史上传由 `list_uploaded_files` 按需查询（可按文件名/扩展名过滤后再截断），不会每轮自动注入
 
 3. **Nginx 配置** (`nginx.conf`)
    - 路由上传请求到 Gateway API

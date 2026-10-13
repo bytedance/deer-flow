@@ -22,6 +22,7 @@ on:
       - ".github/workflows/chart.yaml"
       - "scripts/check_config_version.sh"
       - "scripts/check_chart_sandbox_service.sh"
+      - "scripts/check_chart_sandbox_storage.sh"
       - "scripts/check_chart_skill_upload_size.sh"
 
 jobs:
@@ -49,6 +50,13 @@ jobs:
       # emits both. Guards the #3929 default flip against regressions.
       - name: Validate sandbox Service-type gating
         run: bash scripts/check_chart_sandbox_service.sh
+
+      # Gateway-generated skill projections are sent to the provisioner as
+      # paths under DEER_FLOW_HOST_BASE_DIR. With the shared home PVC enabled,
+      # both components must use the same logical root so those paths can be
+      # translated into PVC subPaths instead of being rejected as out-of-base.
+      - name: Validate sandbox storage path contract
+        run: bash scripts/check_chart_sandbox_storage.sh
 
       # Keep the rendered Ingress aligned with the Gateway's .skill upload
       # size, streaming, and long-running validation requirements.

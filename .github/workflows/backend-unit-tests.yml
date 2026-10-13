@@ -2,7 +2,7 @@ name: Unit Tests
 
 on:
   push:
-    branches: [ 'main', '2.0.x-dev' ]
+    branches: [ 'main', '*-dev' ]
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 
@@ -44,13 +44,6 @@ jobs:
       - name: Collect backend tests
         working-directory: backend
         run: uv run pytest --collect-only -q
-
-      - name: Check offline Fleet configuration and metadata contracts
-        working-directory: backend
-        run: >-
-          uv run pytest -q tests/fleet/test_b01_fleet_foundation.py
-          tests/fleet/test_b02_fleet_foundation.py::test_extension_metadata_is_not_registered_on_host
-          tests/fleet/test_b02_fleet_foundation.py::test_service_rejects_sqlite_before_schema_changes
 
   backend-unit-tests:
     if: github.event.pull_request.draft == false
@@ -120,7 +113,4 @@ jobs:
           # mapping those tests silently skip and the headline capability is never
           # exercised in CI.
           DEDUPE_TEST_POSTGRES_URL: ${{ env.TEST_POSTGRES_URI }}
-        # Fleet acceptance is a separate operator-provisioned gate requiring
-        # digest-pinned images, isolated DB URLs and original evidence directories.
-        # This core job does not provision or claim that acceptance scope.
-        run: make test-shard SPLITS=4 GROUP=${{ matrix.shard }} TEST_SHARD_EXTRA_ARGS=--ignore=tests/fleet
+        run: make test-shard SPLITS=4 GROUP=${{ matrix.shard }}

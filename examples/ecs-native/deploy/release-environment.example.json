@@ -1,0 +1,29 @@
+{
+  "format_version": 1,
+  "controller": {
+    "role": "controller",
+    "host": "192.168.0.190",
+    "ops_config": "/private/operator/native/controller-ops.json",
+    "incoming_dir": "/srv/deerflow-native-releases",
+    "expected_image": "sha256:REPLACE_WITH_INSTALLED_IMAGE_ID",
+    "frontend_image": "sha256:REPLACE_WITH_ACCEPTED_NATIVE_UI_ID",
+    "config_sha256": "REPLACE_WITH_ROLE_CONFIG_FINGERPRINT",
+    "compose_sha256": "REPLACE_WITH_REVIEWED_COMPOSE_SHA256",
+    "generation": "reviewed-backup-generation",
+    "health_url": "https://192.168.0.190:2026/health/ready",
+    "ca_file": "/private/operator/native/ca.crt"
+  },
+  "worker": {
+    "role": "worker",
+    "host": "192.168.0.189",
+    "ops_config": "/private/operator/native/worker-ops.json",
+    "incoming_dir": "/srv/deerflow-native-releases",
+    "expected_image": "sha256:REPLACE_WITH_INSTALLED_IMAGE_ID",
+    "frontend_image": "sha256:REPLACE_WITH_ACCEPTED_NATIVE_UI_ID",
+    "config_sha256": "REPLACE_WITH_ROLE_CONFIG_FINGERPRINT",
+    "compose_sha256": "REPLACE_WITH_REVIEWED_COMPOSE_SHA256",
+    "generation": "reviewed-backup-generation",
+    "health_url": "https://192.168.0.190:2026/health/ready",
+    "ca_file": "/private/operator/native/ca.crt"
+  }
+}

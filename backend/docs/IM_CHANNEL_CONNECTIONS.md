@@ -1,6 +1,6 @@
 # IM Channel Connections
 
-DeerFlow supports user-owned IM channel bindings for Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat, WeCom, and Buzz. The feature reuses the existing `channels.*` runtime configuration, so it works in local and private deployments with the same outbound transports already supported by DeerFlow.
+DeerFlow supports user-owned IM channel bindings for Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat, WeCom, QQ, and Buzz. The feature reuses the existing `channels.*` runtime configuration, so it works in local and private deployments with the same outbound transports already supported by DeerFlow.
 
 No public IP, OAuth callback URL, or provider webhook is required in this implementation.
 
@@ -447,6 +447,86 @@ Neither can make anything be *acted on*. The `allowed_users` allowlist and per-e
 **Deny-by-default allowlist:** unlike other providers (where an empty `allowed_users` means "allow everyone"), `channels.buzz.allowed_users` is deliberately deny-by-default — an empty list means *nobody* can trigger a run, and DeerFlow logs a startup warning saying so. Add each member pubkey (hex or `npub1…`) that should be able to reach the agent. Individual drops are logged at DEBUG level.
 
 **Bound identity:** once a pubkey completes `/connect`, its inbound messages resolve to that connection and run under the bound DeerFlow user (memory, files, and artifacts land in that user's buckets). Bindings are scoped to the relay host, so the same pubkey on a different relay is a different identity and must bind separately.
+
+### QQ WebSocket setup (MVP)
+
+QQ uses an outbound WebSocket connection for events and the QQ Open Platform
+HTTPS API for replies. No public server, webhook route, callback URL, or tunnel
+is required. This transport requires a bot whose developer console offers
+WebSocket access; availability should be checked for your bot.
+
+1. Create a bot in the QQ Open Platform console and select **WebSocket** under
+   development settings. Enable the private-message and group @mention
+   capabilities you intend to use. Configure permitted test accounts/groups in
+   the console when the bot is in testing; publishing and platform approval
+   requirements are separate from DeerFlow configuration.
+2. Supply `QQ_APP_ID` and `QQ_CLIENT_SECRET` to the Gateway process, or save the
+   App ID and Client secret through the administrator's Channels UI. Do not
+   commit credentials. A frontend `.env.local` file is not a substitute for
+   supplying the Gateway's environment.
+3. Configure the transport and, for authenticated users, the binding UI:
+
+```yaml
+channels:
+  qq:
+    enabled: true
+    app_id: $QQ_APP_ID
+    client_secret: $QQ_CLIENT_SECRET
+    allowed_users: []
+    sandbox: false
+
+channel_connections:
+  enabled: true
+  require_bound_identity: true
+  qq:
+    enabled: true
+```
+
+4. Restart the Gateway after editing YAML. In **Settings > Channels > QQ**, get
+   a one-time binding code and send `/connect <code>` to the bot. For a group
+   binding, @mention the bot before the command in that group. Then send a
+   private text message, or @mention the bot with text in the bound group.
+
+`allowed_users` contains QQ OpenIDs, not numeric QQ account numbers. An empty
+list admits ordinary messages from all senders, subject to the shared bound
+identity policy. As with other channels, a valid binding code is consumed
+before this allowlist. Treat the code as confidential; only bind in trusted
+groups. Private identities are scoped to the bot App ID; group identities are
+scoped to both the App ID and group OpenID. Do not assume private and group
+OpenIDs represent the same identity. Bind each context separately. Group
+conversation histories are isolated by sender, but replies remain visible to
+everyone in the group.
+
+The MVP supports text-only `C2C_MESSAGE_CREATE` and `GROUP_AT_MESSAGE_CREATE`
+events and final text replies. It does not download/upload attachments, stream
+partial answers, handle guild/channel messages, or proactively push scheduled
+results. Replies require the original message ID: C2C replies have a 60-minute
+window with at most four replies per source message; group replies have a
+5-minute window with at most five replies. Long answers are split at UTF-8 character boundaries with a
+conservative 4,000-byte adapter budget per message; overflow is marked as
+truncated in the last permitted reply. Unknown or timezone-naive message
+timestamps use the full advisory window and emit a rate-limited warning without
+message content; QQ still enforces reply expiry server-side.
+Runs that finish after the platform's reply window remain available
+in DeerFlow but cannot be delivered through that source message. QQ may reject
+links that are not approved in the bot's URL allowlist.
+
+Use one active Gateway channel worker per bot for this MVP. Token refresh,
+heartbeat monitoring, reconnect backoff, and session Resume are automatic.
+Invalid sessions/sequence numbers trigger a fresh Identify. Bindings persist;
+session state, duplicate suppression and passive-reply contexts are bounded
+in-memory state and do not survive a process restart. The `sandbox` option
+changes only the REST API host; test-account/group membership is controlled
+separately in the QQ console.
+
+For an opt-in transport check, supply the two QQ credential environment
+variables, set `DEER_FLOW_RUN_LIVE_TESTS=1`, and run
+`uv run pytest -m live tests/test_qq_channel_live.py` from `backend/`.
+It checks READY, two heartbeat acknowledgements and shutdown; it does not send
+chat messages or establish end-to-end agent or group-message compatibility.
+
+Protocol references: [QQ event subscriptions](https://bot.q.qq.com/wiki/develop/api-v2/dev-prepare/interface-framework/event-emit.html)
+and [message sending rules](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/send-receive/send.html).
 
 Codes use 128 bits of randomness, expire after 10 minutes, and are single-use.
 

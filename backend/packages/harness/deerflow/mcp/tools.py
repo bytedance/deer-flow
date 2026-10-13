@@ -7,7 +7,6 @@ import logging
 import re
 from collections.abc import Iterable, Mapping
 from datetime import timedelta
-from functools import wraps
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -16,22 +15,30 @@ from urllib.request import url2pathname
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.config import get_config
 
-from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig, get_scoped_extensions_config, resolve_effective_mcp_routing
+from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig, resolve_effective_mcp_routing
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, Paths, get_paths
 from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT, MCP_TMP_SUBDIR
 from deerflow.mcp.client import build_servers_config
 from deerflow.mcp.headers import apply_header_overrides
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors, compose_tool_interceptors
-from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
-from deerflow.mcp.session_pool import call_pooled_session_tool, get_session_pool
+from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor, get_initial_oauth_headers
+from deerflow.mcp.session_pool import (
+    MCPPoolDomain,
+    MCPSessionPool,
+    ServerBinding,
+    call_pooled_session_tool,
+    get_session_pool,
+    normalized_connection_fingerprint,
+)
 from deerflow.mcp.tasks import ORDINARY_MCP_TASK_DRIVER, TaskSubmitRequest
 from deerflow.mcp.tasks.runtime import (
     McpTaskConfigurationError,
+    get_mcp_task_oauth_token_manager,
     get_mcp_task_submitter,
     validate_mcp_task_config_snapshot,
 )
+from deerflow.mcp_scope import mcp_session_scope_key, runtime_thread_incarnation
 from deerflow.reflection import resolve_variable
-from deerflow.runtime.execution.workspace_boundary import run_native_writer, settled_workspace_activity
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.mcp_metadata import tag_mcp_routing, tag_mcp_tool
 from deerflow.tools.sync import make_sync_tool_wrapper
@@ -276,13 +283,60 @@ def _rewrite_unique_bare_filenames(
 
     rewritten = text
     for name in sorted(unique, key=len, reverse=True):
-        # Do not rewrite inside longer paths/words. A final sentence period is
-        # allowed, but ".bak" or another path segment is not.
-        pattern = re.compile(rf"(?<![\w./-]){re.escape(name)}(?!(?:[\w/-]|\.[\w]))")
-        rewritten_text, count = pattern.subn(unique[name], rewritten)
+        # Do not rewrite inside longer paths/words, with either path separator.
+        # A final sentence period is allowed, but ".bak" or another segment is not.
+        pattern = re.compile(rf"(?<![\w./\\-]){re.escape(name)}(?!(?:[\w/\\-]|\.[\w]))")
+        # A callable replacement, not a template: the virtual path is built from
+        # the real file's relative path, where a backslash is an ordinary
+        # character, so it must never be read as a regex escape.
+        rewritten_text, count = pattern.subn(lambda _match: unique[name], rewritten)
         if count:
             logger.debug("MCP bare filename rewrite: %s -> %s", name, unique[name])
         rewritten = rewritten_text
+    return rewritten
+
+
+def _rewrite_changed_paths_with_spaces(
+    text: str,
+    *,
+    changed_files: Iterable[Path],
+    thread_id: str,
+    user_id: str,
+    source_base_dir: Path | None,
+) -> str:
+    """Rewrite changed paths with spaces only at unambiguous text boundaries."""
+    candidates: dict[str, set[str]] = {}
+    for path in changed_files:
+        spellings = [str(path)]
+        if path.anchor == "/":
+            # Some servers print file URIs without percent-encoding spaces.
+            spellings.extend((f"file:{path}", f"file://{path}"))
+        if source_base_dir is not None:
+            try:
+                relative = path.relative_to(source_base_dir).as_posix()
+            except ValueError:
+                pass
+            else:
+                spellings.extend((relative, f"./{relative}"))
+        matching_spellings = [spelling for spelling in spellings if any(char.isspace() for char in spelling) and spelling in text]
+        if not matching_spellings:
+            continue
+        virtual_path = _local_uri_to_virtual_path(str(path), thread_id=thread_id, user_id=user_id)
+        if virtual_path is None:
+            continue
+        for spelling in matching_spellings:
+            candidates.setdefault(spelling, set()).add(virtual_path)
+
+    rewritten = text
+    for spelling in sorted(candidates, key=len, reverse=True):
+        destinations = candidates[spelling]
+        if len(destinations) != 1 or spelling not in rewritten:
+            continue
+        # Whitespace after an unquoted spelling may continue a longer filename.
+        # Require punctuation or the end of the text instead of rewriting a prefix.
+        pattern = re.compile(rf"(?<![\w./\\-]){re.escape(spelling)}(?!(?:[\w\s/\\-]|\.[\w]))")
+        replacement = next(iter(destinations))
+        rewritten = pattern.sub(lambda _match: replacement, rewritten)
     return rewritten
 
 
@@ -324,6 +378,16 @@ def _rewrite_local_paths_in_text(
         if rewritten is None:
             return token
         return f"{rewritten}{trailing}"
+
+    if changed_files is not None:
+        changed_files = list(changed_files)
+        text = _rewrite_changed_paths_with_spaces(
+            text,
+            changed_files=changed_files,
+            thread_id=thread_id,
+            user_id=user_id,
+            source_base_dir=source_base_dir,
+        )
 
     rewritten = _LOCAL_PATH_IN_TEXT_RE.sub(_replace, text)
     if changed_files is None:
@@ -475,36 +539,6 @@ def _resolve_session_init_timeout(server_cfg: Any) -> float | None:
     return float(value)
 
 
-def _capture_workspace_mcp_binding():
-    from deerflow.runtime.execution.mutation_context import OwnershipRejected, current_remote_mutation_context, remote_mutation_scope
-    from deerflow.runtime.execution.workspace_boundary import current_workspace_controller, workspace_writer_scope
-
-    # These tools belong to the host's private snapshot, not a client runtime
-    # identity or the Local global cache. Some original adapter call paths have
-    # no injected Runtime/context; retain their original owner at construction.
-    original_context = current_remote_mutation_context()
-    original_controller = current_workspace_controller()
-    if original_context is not None and original_controller is None:
-        raise OwnershipRejected("Original MCP writer controller is unavailable")
-
-    def bind_original_scope(activity):
-        if original_context is None:
-            return activity
-
-        @wraps(activity)
-        async def owned(*args, **kwargs):
-            active_context = current_remote_mutation_context()
-            active_controller = current_workspace_controller()
-            if (active_context is not None and active_context != original_context) or (active_controller is not None and active_controller is not original_controller):
-                raise OwnershipRejected("Private MCP tool belongs to another original execution")
-            with remote_mutation_scope(original_context), workspace_writer_scope(original_controller):
-                return await activity(*args, **kwargs)
-
-        return owned
-
-    return original_context, bind_original_scope
-
-
 def _make_session_pool_tool(
     tool: BaseTool,
     server_name: str,
@@ -513,11 +547,15 @@ def _make_session_pool_tool(
     tool_call_timeout: float | None = None,
     session_init_timeout: float | None = None,
     tool_name_prefix: bool = True,
+    ownership_domain: MCPPoolDomain = "deployment",
+    *,
+    pool: MCPSessionPool | None = None,
+    binding: ServerBinding | None = None,
 ) -> BaseTool:
     """Wrap an MCP tool so it reuses a persistent session from the pool.
 
     Replaces the per-call session creation with pool-managed sessions scoped
-    by ``(server_name, user_id:thread_id)``.  This ensures stateful MCP servers
+    by ``(server_name, user/thread/incarnation, ownership_domain)``. This ensures stateful MCP servers
     (e.g. Playwright) keep their state across tool calls within the same thread
     while staying isolated per user.
 
@@ -531,21 +569,31 @@ def _make_session_pool_tool(
     if tool_name_prefix and original_name.startswith(prefix):
         original_name = original_name[len(prefix) :]
 
-    pool = get_session_pool()
-    original_context, bind_original_scope = _capture_workspace_mcp_binding()
+    if pool is None:
+        pool = get_session_pool()
+    if binding is None and isinstance(pool, MCPSessionPool):
+        binding = pool.ensure_binding(
+            server_name,
+            normalized_connection_fingerprint(connection),
+            domain=ownership_domain,
+        )
+    effective_domain = binding.domain if binding is not None else ownership_domain
 
-    @bind_original_scope
-    @settled_workspace_activity
     async def call_with_persistent_session(
         runtime: Runtime | None = None,
         **arguments: Any,
     ) -> Any:
-        thread_id = original_context.thread_id if original_context is not None else _extract_thread_id(runtime)
-        user_id = original_context.user_id if original_context is not None else resolve_runtime_user_id(runtime)
+        thread_id = _extract_thread_id(runtime)
+        user_id = resolve_runtime_user_id(runtime)
         # Scope the pooled session by user *and* thread. Filesystem isolation is
         # per-(user_id, thread_id), so a thread_id alone could otherwise let two
         # users with a colliding thread_id share one stateful MCP session.
-        scope_key = f"{user_id}:{thread_id}"
+        thread_incarnation = runtime_thread_incarnation(runtime)
+        scope_key = mcp_session_scope_key(
+            user_id=user_id,
+            thread_id=thread_id,
+            thread_incarnation=thread_incarnation,
+        )
         session_connection = dict(connection)
         # cwd/temp pinning and the workspace snapshot only matter for stdio
         # servers, which run as local subprocesses writing to a real filesystem.
@@ -560,7 +608,7 @@ def _make_session_pool_tool(
             # Bundle the synchronous filesystem prep (dir creation, temp-dir
             # setup, pre-call snapshot) and run it off the event loop — the
             # snapshot walks the whole workspace and would otherwise block.
-            source_base_dir, tmp_dir, before_files = await run_native_writer(_prepare_stdio_workspace, paths, thread_id=thread_id, user_id=user_id)
+            source_base_dir, tmp_dir, before_files = await asyncio.to_thread(_prepare_stdio_workspace, paths, thread_id=thread_id, user_id=user_id)
             # Stdio MCP servers resolve relative output links against their
             # process cwd. Keep that cwd inside the thread's mounted user-data
             # tree so files produced by tools like Playwright land where the
@@ -579,6 +627,25 @@ def _make_session_pool_tool(
             session_env.setdefault("TMP", str(tmp_dir))
             session_env.setdefault("TEMP", str(tmp_dir))
             session_connection["env"] = session_env
+        if binding is not None:
+            session_request = pool.get_session(
+                server_name,
+                scope_key,
+                session_connection,
+                binding=binding,
+            )
+        elif effective_domain == "deployment":
+            # Compatibility for direct unit-test fakes that construct this
+            # wrapper without going through get_mcp_tools(). Production
+            # discovery always supplies the explicit binding above.
+            session_request = pool.get_session(server_name, scope_key, session_connection)
+        else:
+            session_request = pool.get_session(
+                server_name,
+                scope_key,
+                session_connection,
+                domain=effective_domain,
+            )
         if session_init_timeout is not None:
             # Cancellation here is safe: MCPSessionPool.get_session owns the
             # teardown of a session stuck mid-creation (it signals close and
@@ -586,7 +653,7 @@ def _make_session_pool_tool(
             # so a hung server cannot leak a session or block the turn.
             try:
                 session = await asyncio.wait_for(
-                    pool.get_session(server_name, scope_key, session_connection),
+                    session_request,
                     timeout=session_init_timeout,
                 )
             except TimeoutError:
@@ -601,7 +668,9 @@ def _make_session_pool_tool(
                 )
                 raise
         else:
-            session = await pool.get_session(server_name, scope_key, session_connection)
+            session = await session_request
+
+        domain_kwargs = {"domain": effective_domain} if effective_domain != "deployment" else {}
 
         # Build common call_tool kwargs once — only add keys when needed so
         # existing call-sites that assert on exact arguments are not affected.
@@ -629,6 +698,7 @@ def _make_session_pool_tool(
                     tool_name=request.name,
                     arguments=request.args,
                     call_kwargs=kwargs,
+                    **domain_kwargs,
                 )
 
             handler = compose_tool_interceptors(tool_interceptors, base_handler)
@@ -649,6 +719,7 @@ def _make_session_pool_tool(
                 tool_name=original_name,
                 arguments=arguments,
                 call_kwargs=call_kwargs,
+                **domain_kwargs,
             )
 
         # The after-call snapshot diff only feeds bare-filename correlation in
@@ -658,8 +729,8 @@ def _make_session_pool_tool(
         # the event loop.
         changed_files: list[Path] | None = None
         if is_stdio and before_files is not None and _result_has_text_content(call_tool_result):
-            changed_files = await run_native_writer(_changed_workspace_files, source_base_dir, before_files)
-        return await run_native_writer(
+            changed_files = await asyncio.to_thread(_changed_workspace_files, source_base_dir, before_files)
+        return await asyncio.to_thread(
             _convert_call_tool_result,
             call_tool_result,
             thread_id=thread_id,
@@ -668,9 +739,8 @@ def _make_session_pool_tool(
             changed_files=changed_files,
         )
 
-    # StructuredTool validates the original public MCP schema first. Its
-    # injected-argument recovery inspects concrete signature annotations, so
-    # an optional / postponed Runtime annotation would discard ToolNode input.
+    # Publish the concrete injected host type; Union annotations are not
+    # recognized by StructuredTool's injected-argument recovery.
     call_with_persistent_session.__annotations__["runtime"] = Runtime
     return StructuredTool(
         name=tool.name,
@@ -702,29 +772,27 @@ def _make_background_submit_tool(
     submit_tool: str,
     status_tool: str,
     cancel_tool: str,
+    connection_scope: str,
 ) -> BaseTool:
     background_contract = f"Submitted as durable background task {task_name!r}; returns a DeerFlow task ID immediately and status polling is handled automatically."
 
-    original_context, bind_original_scope = _capture_workspace_mcp_binding()
-    original_submitter = get_mcp_task_submitter() if original_context is not None else None
-
-    @bind_original_scope
-    @settled_workspace_activity
     async def submit_in_background(
         runtime: Runtime | None = None,
         **arguments: Any,
     ) -> dict[str, Any]:
-        submitter = original_submitter if original_context is not None else get_mcp_task_submitter()
-        thread_id = original_context.thread_id if original_context is not None else _extract_thread_id(runtime)
-        user_id = original_context.user_id if original_context is not None else resolve_runtime_user_id(runtime)
+        submitter = get_mcp_task_submitter()
+        thread_id = _extract_thread_id(runtime)
+        user_id = resolve_runtime_user_id(runtime)
+        thread_incarnation = runtime_thread_incarnation(runtime)
         context = runtime.context if runtime is not None and runtime.context else {}
-        run_id = original_context.run_id if original_context is not None else context.get("run_id")
+        run_id = context.get("run_id")
         tool_call_id = getattr(runtime, "tool_call_id", None) if runtime is not None else None
         created = await submitter.submit(
             driver_name=ORDINARY_MCP_TASK_DRIVER,
             request=TaskSubmitRequest(
                 user_id=user_id,
                 thread_id=thread_id,
+                thread_incarnation=thread_incarnation,
                 run_id=str(run_id) if run_id is not None else None,
                 tool_call_id=str(tool_call_id) if tool_call_id is not None else None,
                 server_name=server_name,
@@ -734,6 +802,7 @@ def _make_background_submit_tool(
                     "submit_tool": submit_tool,
                     "status_tool": status_tool,
                     "cancel_tool": cancel_tool,
+                    "connection_scope": connection_scope,
                 },
             ),
         )
@@ -760,6 +829,7 @@ def _configure_task_tools_for_server(
     server_name: str,
     server_config: McpServerConfig,
     tool_name_prefix: bool,
+    connection_scope: str = "deployment",
 ) -> list[BaseTool]:
     """Hide driver-only tools and replace submit with a durable wrapper."""
     if not server_config.task_toolsets:
@@ -809,18 +879,33 @@ def _configure_task_tools_for_server(
                 submit_tool=toolset.submit_tool,
                 status_tool=toolset.status_tool,
                 cancel_tool=toolset.cancel_tool,
+                connection_scope=connection_scope,
             )
         )
     return configured
 
 
-async def get_mcp_tools() -> list[BaseTool]:
+async def get_mcp_tools(
+    extensions_config: ExtensionsConfig | None = None,
+    *,
+    personal_user_id: str | None = None,
+    session_pool: MCPSessionPool | None = None,
+) -> list[BaseTool]:
     """Get all tools from enabled MCP servers.
 
     Tools using stdio transport are wrapped with persistent-session logic so
     consecutive calls within the same thread reuse the same MCP session.
-    HTTP/SSE sessions remain owned by their original SDK call task. C tools
-    bind their original workspace scope and track that task through cleanup.
+    HTTP/SSE tools are returned unwrapped to avoid cross-task TaskGroup
+    cleanup errors.
+
+    Args:
+        extensions_config: Optional pre-loaded extensions config. Callers that
+            must prove which config revision produced these tools pass the exact
+            instance they snapshotted; ``None`` loads the latest config from disk.
+        session_pool: Optional session pool captured by the caller. Cache
+            initializers pass the exact pool their generation owns so a
+            superseded claim cannot install bindings into a replacement pool;
+            ``None`` resolves the current singleton.
 
     Returns:
         List of LangChain tools from all enabled MCP servers.
@@ -832,26 +917,55 @@ async def get_mcp_tools() -> list[BaseTool]:
         logger.warning("langchain-mcp-adapters not installed. Install it to enable MCP tools: pip install langchain-mcp-adapters")
         return []
 
-    # NOTE: We use ExtensionsConfig.from_file() instead of get_extensions_config()
-    # to always read the latest configuration from disk. This ensures that changes
-    # made through the Gateway API (which runs in a separate process) are immediately
-    # reflected when initializing MCP tools.
-    extensions_config = get_scoped_extensions_config()
     if extensions_config is None:
+        # NOTE: We use ExtensionsConfig.from_file() instead of get_extensions_config()
+        # to always read the latest configuration from disk. This ensures that changes
+        # made through the Gateway API (which runs in a separate process) are immediately
+        # reflected when initializing MCP tools. Callers that need to prove which
+        # revision produced these tools pass the instance they snapshotted instead.
         extensions_config = ExtensionsConfig.from_file()
-    validate_mcp_task_config_snapshot(extensions_config)
+    if personal_user_id is None:
+        validate_mcp_task_config_snapshot(extensions_config)
+    else:
+        from deerflow.mcp.personal_access import authorized_personal_config
+        from deerflow.mcp.tasks.runtime import is_mcp_task_runtime_available
+        from deerflow.mcp.user_config import load_user_mcp_config
+
+        current = await asyncio.to_thread(load_user_mcp_config, personal_user_id)
+        if current != extensions_config:
+            raise McpTaskConfigurationError("Personal MCP configuration changed during discovery; retry the run")
+        extensions_config = current = await authorized_personal_config(personal_user_id, current)
+        if any(server.task_toolsets for server in current.mcp_servers.values()) and not is_mcp_task_runtime_available():
+            raise McpTaskConfigurationError("Personal MCP task toolsets require the platform's durable task runtime")
     servers_config = build_servers_config(extensions_config)
 
     if not servers_config:
         logger.info("No enabled MCP servers configured")
         return []
 
+    # Capture the exact pool and stdio binding before the first discovery await.
+    # A later reset/reconcile can supersede this capability, but a stale wrapper
+    # can never silently pair its old connection with a replacement pool/epoch.
+    pool = session_pool
+    if pool is None:
+        pool = get_session_pool()
+    ownership_domain: MCPPoolDomain = "personal" if personal_user_id is not None else "deployment"
+    server_bindings: dict[str, ServerBinding] = {}
+    for server_name, server_connection in servers_config.items():
+        if server_connection.get("transport", "stdio") == "stdio":
+            server_bindings[server_name] = pool.ensure_binding(
+                server_name,
+                normalized_connection_fingerprint(server_connection),
+                domain=ownership_domain,
+            )
+
     try:
         # Create the multi-server MCP client
         logger.info(f"Initializing MCP client with {len(servers_config)} server(s)")
 
         # Inject initial OAuth headers for server connections (tool discovery/session init)
-        initial_oauth_headers = await get_initial_oauth_headers(extensions_config)
+        oauth_token_manager = OAuthTokenManager.from_extensions_config(extensions_config) if personal_user_id is not None else get_mcp_task_oauth_token_manager(extensions_config)
+        initial_oauth_headers = await get_initial_oauth_headers(extensions_config, token_manager=oauth_token_manager)
         for server_name, auth_header in initial_oauth_headers.items():
             if server_name not in servers_config:
                 continue
@@ -865,7 +979,7 @@ async def get_mcp_tools() -> list[BaseTool]:
 
         tool_interceptors = build_mcp_tool_interceptors(
             extensions_config,
-            oauth_builder=build_oauth_tool_interceptor,
+            oauth_builder=lambda config: build_oauth_tool_interceptor(config, token_manager=oauth_token_manager),
             resolver=resolve_variable,
             target_logger=logger,
         )
@@ -876,7 +990,10 @@ async def get_mcp_tools() -> list[BaseTool]:
             tool_name_prefix=True,
         )
 
-        async def load_server_tools(server_name: str) -> list[BaseTool]:
+        async def load_server_tools(server_name: str) -> list[BaseTool] | None:
+            # ``None`` marks a server whose discovery failed, which is distinct
+            # from a server that answered with zero tools: only the latter is
+            # evidence that configured task_toolsets name missing tools.
             try:
                 server_cfg = extensions_config.mcp_servers.get(server_name)
                 tool_name_prefix = server_cfg.tool_name_prefix if server_cfg is not None else True
@@ -922,19 +1039,19 @@ async def get_mcp_tools() -> list[BaseTool]:
                             server_name,
                             session_init_timeout,
                         )
-                        return []
+                        return None
                 return await discovery
             except Exception as e:
                 logger.warning(
                     f"Skipping MCP server '{server_name}' after tool discovery failed: {e}",
                     exc_info=True,
                 )
-                return []
+                return None
 
         # Get tools from each server independently so one broken MCP server does
         # not prevent healthy servers from contributing their tools.
         tools_by_server = await asyncio.gather(*(load_server_tools(name) for name in servers_config))
-        tools = [tool for server_tools in tools_by_server for tool in server_tools]
+        tools = [tool for server_tools in tools_by_server if server_tools is not None for tool in server_tools]
         logger.info(f"Successfully loaded {len(tools)} tool(s) from MCP servers")
 
         # Wrap each tool with persistent-session logic.
@@ -949,6 +1066,11 @@ async def get_mcp_tools() -> list[BaseTool]:
         # "web_") matches "web" first), which pools the tool under the wrong server. Using the
         # source grouping makes routing exact even when a server opts out of name prefixing.
         for source_name, server_tools in zip(servers_config.keys(), tools_by_server, strict=True):
+            if server_tools is None:
+                # Discovery already logged the skip. Validating task_toolsets
+                # against a server that never answered would report every
+                # raw tool as missing and discard the healthy servers' tools.
+                continue
             transport = servers_config[source_name].get("transport", "stdio")
             server_cfg = extensions_config.mcp_servers.get(source_name)
             tool_name_prefix = server_cfg.tool_name_prefix if server_cfg is not None else True
@@ -980,6 +1102,9 @@ async def get_mcp_tools() -> list[BaseTool]:
                             tool_call_timeout=_timeout,
                             session_init_timeout=_init_timeout,
                             tool_name_prefix=tool_name_prefix,
+                            ownership_domain=ownership_domain,
+                            pool=pool,
+                            binding=server_bindings[source_name],
                         )
                     )
                 else:
@@ -989,12 +1114,6 @@ async def get_mcp_tools() -> list[BaseTool]:
                             source_name,
                             transport,
                         )
-                    original_context, bind_original_scope = _capture_workspace_mcp_binding()
-                    if original_context is not None and getattr(tool, "coroutine", None) is not None:
-                        # Keep HTTP/SSE SDK contexts in the original call task;
-                        # the outer binder restores trusted C ownership before
-                        # admission and the ticket lasts through SDK __aexit__.
-                        tool.coroutine = bind_original_scope(settled_workspace_activity(tool.coroutine))
                     current_server_tools.append(tool)
 
             if server_cfg is not None:
@@ -1003,6 +1122,7 @@ async def get_mcp_tools() -> list[BaseTool]:
                     server_name=source_name,
                     server_config=server_cfg,
                     tool_name_prefix=tool_name_prefix,
+                    connection_scope="personal" if personal_user_id is not None else "deployment",
                 )
             wrapped_tools.extend(current_server_tools)
 

@@ -5,6 +5,7 @@ import { cleanup, render } from "@testing-library/react";
 import { MessageListItem } from "@/components/workspace/messages/message-list-item";
 import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
+import { zhCN } from "@/core/i18n/locales/zh-CN";
 import * as messageUtils from "@/core/messages/utils";
 
 // The unit under test is the row's copy-data memo, not message rendering.
@@ -115,4 +116,35 @@ describe("MessageListItem copy-data derivation guard", () => {
 
     expect(copyDataCalls.mock.calls.length).toBeGreaterThan(0);
   });
+});
+
+describe("MessageListItem conversation reference chip", () => {
+  it.each([
+    ["en-US", enUS, "Untitled"],
+    ["zh-CN", zhCN, "未命名"],
+  ] as const)(
+    "names an untitled referenced chat in the UI language (%s)",
+    (locale, t, expected) => {
+      const message = {
+        id: "human-ref",
+        type: "human",
+        content: "compare these",
+        additional_kwargs: {
+          conversation_references: [{ thread_id: "thread-2", title: "" }],
+        },
+      } as unknown as Message;
+      const view = render(
+        <I18nContext.Provider value={{ locale, setLocale: () => undefined, t }}>
+          <MessageListItem
+            message={message}
+            threadId="thread-1"
+            showCopyButton={false}
+            isLoading={false}
+          />
+        </I18nContext.Provider>,
+      );
+      const chips = view.getByTestId("message-conversation-references");
+      expect(chips.textContent).toBe(expected);
+    },
+  );
 });

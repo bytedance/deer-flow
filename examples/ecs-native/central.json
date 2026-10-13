@@ -1,0 +1,12 @@
+{
+  "enabled": true,
+  "role": "central",
+  "artifact_root": "/shared/executor",
+  "database_url_env": "ECS_EXECUTOR_DATABASE_URL",
+  "native_node": "ecs-one",
+  "profile": "native",
+  "profiles": {"native": {"cpu_millis": 500, "memory_mib": 1024}},
+  "nodes": {"ecs-one": {"cpu_millis": 2000, "memory_mib": 4096, "resident_cpu_millis": 1500, "resident_memory_mib": 2048, "max_concurrency": 1, "profiles": ["native"], "kinds": ["B", "C"]}},
+  "worker_credential_env": {"ecs-one": "ECS_ONE_TOKEN"},
+  "remote_origins": ["schedule"]
+}

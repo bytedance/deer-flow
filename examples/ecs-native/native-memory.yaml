@@ -1,0 +1,10 @@
+# Merge this memory section into each role's normal native Gateway config.
+# DEER_FLOW_HOME is the shared canonical NAS root; leave storage_path omitted.
+# DEER_FLOW_MEMORY_INDEX_PATH is an absolute, instance-local directory (not NAS).
+memory:
+  enabled: true
+  manager_class: deermem
+  mode: tool
+  backend_config:
+    retrieval_index_path: $DEER_FLOW_MEMORY_INDEX_PATH
+    token_counting: char

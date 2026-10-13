@@ -7,9 +7,8 @@ import contextvars
 import functools
 import logging
 from collections.abc import Callable
-from typing import Any, get_origin, get_type_hints
+from typing import Any, get_type_hints
 
-from langchain.tools import ToolRuntime
 from langchain_core.runnables import RunnableConfig
 
 logger = logging.getLogger(__name__)
@@ -75,11 +74,6 @@ def make_sync_tool_wrapper(coro: Callable[..., Any], tool_name: str) -> Callable
         run with ``runtime=None``.
     """
     config_param = _get_runnable_config_param(coro)
-    try:
-        runtime_hint = get_type_hints(coro).get("runtime")
-    except Exception:
-        runtime_hint = None
-    runtime_injection = runtime_hint is ToolRuntime or get_origin(runtime_hint) is ToolRuntime
 
     def run_coroutine(*args: Any, **kwargs: Any) -> Any:
         try:
@@ -96,26 +90,6 @@ def make_sync_tool_wrapper(coro: Callable[..., Any], tool_name: str) -> Callable
         except Exception as e:
             logger.error("Error invoking tool %r via sync wrapper: %s", tool_name, e, exc_info=True)
             raise
-
-    # ToolNode and StructuredTool prefer func over coroutine for injection.
-    # Publish only these known host parameters; ordinary argument annotations
-    # remain on the caller's explicit schema and are not copied here.
-    if runtime_injection and config_param:
-
-        def runtime_config_wrapper(*args: Any, runtime: ToolRuntime = None, config: RunnableConfig = None, **kwargs: Any) -> Any:
-            kwargs["runtime"] = runtime
-            if config is not None or config_param not in kwargs:
-                kwargs[config_param] = config
-            return run_coroutine(*args, **kwargs)
-
-        return runtime_config_wrapper
-
-    if runtime_injection:
-
-        def runtime_wrapper(*args: Any, runtime: ToolRuntime = None, **kwargs: Any) -> Any:
-            return run_coroutine(*args, runtime=runtime, **kwargs)
-
-        return runtime_wrapper
 
     if config_param:
 

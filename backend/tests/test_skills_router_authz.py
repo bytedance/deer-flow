@@ -30,6 +30,7 @@ from fastapi.testclient import TestClient
 from app.gateway.auth.models import User
 from app.gateway.deps import get_config
 from app.gateway.routers import skills as skills_router
+from deerflow.config.authorization_config import AuthorizationConfig
 
 
 def _make_user(system_role: str) -> User:
@@ -129,7 +130,10 @@ def test_basic_skill_listing_stays_open_to_normal_users(monkeypatch):
         ]
 
     app = _make_app(system_role="user")
-    app.dependency_overrides[get_config] = lambda: SimpleNamespace()
+    # list_skills reads config.authorization.fail_closed even when
+    # authorization is disabled (mirroring list_models); give the fake the
+    # real disabled shape so the open-to-normal-users path stays exercised.
+    app.dependency_overrides[get_config] = lambda: SimpleNamespace(authorization=AuthorizationConfig(enabled=False))
     monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: SimpleNamespace(load_skills=_load_skills))
     with TestClient(app) as client:
         assert client.get("/api/skills").status_code == 200

@@ -12,7 +12,7 @@ depends on FastAPI, LangChain, and LangGraph in `pyproject.toml`.
 
 | Contribution | Example behavior |
 | --- | --- |
-| Middleware | Counts tool calls through one `TOOL_VISIBLE` middleware for lead agents and subagents |
+| Middleware | Counts synchronous and asynchronous tool calls, outcomes, and elapsed time at `TOOL_VISIBLE` for lead agents and subagents |
 | Task lifecycle | Creates task-scoped stats on start and folds them into app scope on stop |
 | System-model observer | Counts DeerFlow-owned model calls, including failures |
 | Service | Binds `ExtensionRuntimeDeps` only while the Gateway is running |
@@ -23,6 +23,48 @@ passes through unchanged when no task store exists. The router and service use
 the same `ExampleService` object: its FastAPI dependency returns `503` before
 `start()`, after `stop()`, or when no app store was bound. This keeps the route
 topology stable while runtime capabilities arrive later.
+
+### Tool statistics
+
+The existing `tool_calls` field counts calls entering the wrapper. The stats
+response also includes these fields (this is illustrative output, not a benchmark):
+
+```json
+{
+  "tool_calls": 3,
+  "tool_outcomes": {"returned": 1, "raised": 1, "cancelled": 1},
+  "tool_duration_samples": 3,
+  "tool_duration_total_ms": 60.0
+}
+```
+
+- `returned` means the downstream handler returned normally, including an error
+  `ToolMessage`. It does **not** measure business success. A tool exception
+  converted into a normal return downstream of `TOOL_VISIBLE` counts here too.
+- `cancelled` counts `asyncio.CancelledError` escaping the handler, including
+  actual task cancellation. `raised` counts other escaping exceptions, including
+  LangGraph `GraphBubbleUp` control-flow signals such as graph interrupts.
+  Results and exceptions propagate unchanged; each wrapper calls its handler once.
+  Resuming an interrupted tool node re-executes it and re-enters the wrapper:
+  the interrupted attempt adds a `raised` sample, and the resumed attempt adds
+  its own `tool_calls` increment, duration sample, and outcome. These statistics
+  count observed attempts, not unique logical tool calls across interrupt/resume.
+- Each completed observation adds one duration sample, including zero-duration
+  calls. Elapsed time uses a monotonic clock and includes downstream middleware
+  processing. Durations of overlapping lead/subagent calls are summed, so this
+  total is **not** elapsed run time or exclusive tool execution time.
+
+Outcome counters, duration samples, and elapsed totals are updated together under
+a lock. Task stats are copied and merged into app scope on task stop, after the
+task's tool calls have settled. The first stop consumes the task stats; duplicate
+stops (or a stop without a matching start) add neither tasks nor tool statistics.
+If a host stops a task while calls are still running, only the snapshot at that
+stop is merged; later completions are not published. Active tasks are not included
+in the app's tool totals. The system-model observer retains its existing behavior.
+
+The new fields contain only fixed counters and timing totals, with no tool names,
+arguments, outputs, exception text, or identifying labels. Stats are process-local
+and reset on restart; they are not persisted or shared across workers.
 
 ## Run the package tests
 
@@ -118,7 +160,7 @@ After one or more runs, request the extension route:
 curl -s http://localhost:2026/api/extension-example/stats
 ```
 
-The response contains aggregated task outcomes, tool-call counts, system-model
+The response contains aggregated task outcomes, tool-call counts, outcomes and timing, system-model
 call counts, the app scope id, and a small projection of the host policy. The
 route passes through the Gateway's normal authentication middleware; use an
 authenticated browser session when authentication is enabled.
@@ -145,5 +187,6 @@ deerflow_extension_example/
 └── plugin.py    # state plus all five small contribution implementations
 tests/
 ├── test_entry_point.py
-└── test_plugin.py
+├── test_plugin.py
+└── test_tool_stats.py
 ```

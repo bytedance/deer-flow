@@ -190,6 +190,20 @@ class RedisStreamBridge(StreamBridge):
         """Return whether Redis still has retained stream data for *run_id*."""
         return bool(await self._redis.exists(self._stream_key(run_id)))
 
+    async def ping(self) -> bool:
+        """Round-trip ``PING`` to the Redis backend for the readiness probe.
+
+        The client connects lazily, so until something publishes nothing has
+        verified that Redis is reachable; this is the only call that does.
+        Redis-side failures answer ``False`` so the probe gets a verdict rather
+        than a stack of client internals. Callers bound the wait themselves.
+        """
+        try:
+            return bool(await self._redis.ping())
+        except RedisError:
+            logger.warning("Redis stream bridge ping failed", exc_info=True)
+            return False
+
     async def _resolve_start_stream_id(self, key: str, last_event_id: str | None) -> str:
         if last_event_id is None:
             return "0-0"

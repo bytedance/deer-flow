@@ -38,7 +38,6 @@ from deerflow.config.agents_config import load_agent_config, preserve_non_manage
 from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import get_paths
 from deerflow.persistence.agents import get_agent_store
-from deerflow.runtime.execution.mutation_context import OwnershipRejected, require_definition_mutation_scope
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.types import Runtime
 
@@ -109,7 +108,6 @@ def update_agent(
         on the next user turn (when the lead agent is rebuilt with the fresh
         SOUL.md and config.yaml).
     """
-    require_definition_mutation_scope(runtime)
     tool_call_id = runtime.tool_call_id
     agent_name_raw: str | None = runtime.context.get("agent_name") if runtime.context else None
     channel_name: str | None = runtime.context.get("channel_name") if runtime.context else None
@@ -251,8 +249,6 @@ def update_agent(
     if config_changed or soul is not None:
         try:
             get_agent_store().update(agent_name, config_data if config_changed else None, soul, user_id=user_id)
-        except OwnershipRejected:
-            raise
         except Exception as e:
             logger.error("[update_agent] Failed to update agent '%s' (user=%s): %s", agent_name, user_id, e, exc_info=True)
             return _err(f"Failed to update agent '{agent_name}': {e}")

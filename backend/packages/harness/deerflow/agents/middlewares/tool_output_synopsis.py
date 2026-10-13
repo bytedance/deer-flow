@@ -22,6 +22,7 @@ ToolOutputKind = Literal["json", "csv", "tsv", "yaml", "xml", "code", "text", "u
 
 _KEY_LIMIT = 12
 _SCALAR_LIMIT = 6
+_LABEL_CHARS = 80
 _TABLE_SAMPLE_ROWS = 50
 _TABLE_COLUMN_LIMIT = 18
 _TEXT_HEADER_LIMIT = 16
@@ -150,12 +151,12 @@ def render_tool_output_preview(
     # appended (avoids duplicating head/tail bytes in both places).
     if synopsis.kind == "text" and head_budget + tail_budget > 0 and len(content) > head_budget + tail_budget:
         synopsis = _summarize_text(content, tool_name=tool_name, include_excerpts=False)
-    lines = [
+    tool_name = _one_line(tool_name, _LABEL_CHARS)
+    header = [
         f"[Full {tool_name} output saved to {virtual_path} ({total} chars, ~{total // 4} tokens).]",
         f"[Preview kind: {synopsis.kind}. This is a structured synopsis, not a raw head/tail truncation.]",
-        "",
-        f"{synopsis.title}:",
     ]
+    lines = [f"{synopsis.title}:"]
     lines.extend(f"- {item}" for item in synopsis.summary)
 
     if synopsis.structure:
@@ -167,6 +168,15 @@ def render_tool_output_preview(
         lines.append("")
         lines.append("Notable items:")
         lines.extend(f"- {item}" for item in synopsis.notable_items)
+
+    # Reuse the head/tail budget, with a floor of two existing short excerpts.
+    # Keep the file reference and read guidance outside the synopsis budget.
+    synopsis_budget = max(_TEXT_EXCERPT_CHARS * 2, head_budget + tail_budget)
+    body = "\n".join(lines)
+    if len(body) > synopsis_budget:
+        marker = "\n[Synopsis truncated; use read_file for full output.]"
+        body = body[: synopsis_budget - len(marker)] + marker
+    lines = [*header, "", body]
 
     raw_sample = _build_raw_sample(content, head_budget=head_budget, tail_budget=tail_budget, existing=synopsis.sample)
     if raw_sample:
@@ -260,15 +270,15 @@ def _type_name(value: Any) -> str:
 
 def _short_value(value: Any) -> str:
     if isinstance(value, str):
-        return json.dumps(_clip(value, 80), ensure_ascii=False)
-    return _clip(repr(value), 80)
+        return json.dumps(_clip(value, _LABEL_CHARS), ensure_ascii=False)
+    return _clip(repr(value), _LABEL_CHARS)
 
 
 def _json_shape(value: Any, *, depth: int = 0) -> str:
     if depth >= _JSON_SHAPE_MAX_DEPTH:
         return "..."
     if isinstance(value, dict):
-        keys = [str(key) for key in list(value.keys())[:_KEY_LIMIT]]
+        keys = [_one_line(str(key), _LABEL_CHARS) for key in list(value.keys())[:_KEY_LIMIT]]
         suffix = f": {', '.join(keys)}" if keys else ""
         return f"object(keys={len(value)}{suffix})"
     if isinstance(value, list):
@@ -279,15 +289,15 @@ def _json_shape(value: Any, *, depth: int = 0) -> str:
 
 
 def _json_path(parent: str, key: Any) -> str:
-    key_text = str(key)
+    key_text = _clip(str(key), _LABEL_CHARS)
     if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key_text):
-        return f"{parent}.{key_text}"
-    return f"{parent}[{json.dumps(key_text, ensure_ascii=False)}]"
+        return _clip(f"{parent}.{key_text}", _TEXT_EXCERPT_CHARS)
+    return _clip(f"{parent}[{json.dumps(key_text, ensure_ascii=False)}]", _TEXT_EXCERPT_CHARS)
 
 
 def _json_container_description(value: Any) -> str:
     if isinstance(value, dict):
-        keys = [str(key) for key in list(value.keys())[:_KEY_LIMIT]]
+        keys = [_one_line(str(key), _LABEL_CHARS) for key in list(value.keys())[:_KEY_LIMIT]]
         suffix = f"; keys {', '.join(keys)}" if keys else ""
         return f"object keys {len(value)}{suffix}"
     if isinstance(value, list):
@@ -325,7 +335,7 @@ def _json_container_paths(value: Any, *, limit: int = _JSON_STRUCTURE_LIMIT) -> 
         if isinstance(node, list) and node:
             first = node[0]
             if isinstance(first, (dict, list)):
-                walk(first, f"{current_path}[]", depth + 1)
+                walk(first, _clip(f"{current_path}[]", _TEXT_EXCERPT_CHARS), depth + 1)
 
     walk(value, "$", 0)
     return paths
@@ -339,13 +349,13 @@ def _scalar_examples(value: Any, *, path: str = "$", limit: int = _SCALAR_LIMIT)
             return
         if isinstance(node, dict):
             for key, child in list(node.items())[:_KEY_LIMIT]:
-                walk(child, f"{current}.{key}", depth + 1)
+                walk(child, _json_path(current, key), depth + 1)
                 if len(examples) >= limit:
                     break
             return
         if isinstance(node, list):
             for index, child in enumerate(node[:2]):
-                walk(child, f"{current}[{index}]", depth + 1)
+                walk(child, _clip(f"{current}[{index}]", _TEXT_EXCERPT_CHARS), depth + 1)
                 if len(examples) >= limit:
                     break
             return
@@ -376,8 +386,8 @@ def _try_json(content: str) -> ToolOutputSynopsis | None:
     # who relied on the old preview to only expose head/tail snippets should
     # review their tool outputs for sensitive mid-document values.
     if isinstance(value, dict):
-        keys = [str(key) for key in value.keys()]
-        summary.append(f"JSON object with {len(keys)} top-level keys.")
+        keys = [_one_line(str(key), _LABEL_CHARS) for key in list(value.keys())[:_KEY_LIMIT]]
+        summary.append(f"JSON object with {len(value)} top-level keys.")
         summary.append(f"Top-level keys: {', '.join(keys[:_KEY_LIMIT]) or '(none)'}")
     elif isinstance(value, list):
         summary.append(f"JSON array with {len(value)} items.")
@@ -454,8 +464,14 @@ def _try_table(content: str, *, delimiter: str, kind: Literal["csv", "tsv"]) -> 
         return None
 
     columns = [cell.strip() or f"column_{idx + 1}" for idx, cell in enumerate(raw_header)]
-    total_nonempty_lines = sum(1 for line in content.splitlines() if line.strip())
-    data_rows = max(0, total_nonempty_lines - 1)
+    # Count logical records from the full input, preserving quoted newlines.
+    # Keep blank-row filtering and the process-wide CSV field limit unchanged.
+    try:
+        with io.StringIO(content, newline="") as stream:
+            record_count = sum(1 for row in csv.reader(stream, delimiter=delimiter, strict=True) if any(cell.strip() for cell in row))
+        row_count_text = str(max(0, record_count - 1))
+    except csv.Error:
+        row_count_text = "an undetermined number of"
     # Render the first data row as a key=value list so quoted cells that
     # contain the delimiter do not get rejoined into a comma-separated
     # string that misleads the model about column count.
@@ -468,7 +484,7 @@ def _try_table(content: str, *, delimiter: str, kind: Literal["csv", "tsv"]) -> 
     return ToolOutputSynopsis(
         kind=kind,
         title=title,
-        summary=[f"{label} table with {data_rows} data rows and {width} columns."],
+        summary=[f"{label} table with {row_count_text} data rows and {width} columns."],
         structure=[
             f"columns: {', '.join(columns[:_TABLE_COLUMN_LIMIT])}",
             f"first data row: {' | '.join(first_data_pairs) or '(none)'}",
