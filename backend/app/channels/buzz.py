@@ -49,6 +49,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from app.channels import buzz_nostr
+from app.channels.allowed_users import parse_channel_ids
 from app.channels.base import Channel
 from app.channels.buzz_seen_events import BuzzSeenEventStore
 from app.channels.commands import is_known_channel_command
@@ -250,26 +251,14 @@ def _is_transient_close(reason: str) -> bool:
 
 
 def _parse_mention_free_channels(mention_free_channels: Any) -> frozenset[str]:
-    """Parse ``channels.buzz.mention_free_channels``; a single id is one entry.
-
-    The sibling Discord connector documents and parses this shape
-    (``_parse_allowed_channels``): one channel id, quoted or unquoted, or a YAML
-    list. Iterating the configured value instead of wrapping a scalar turns a lone
-    id into its characters, and a character never equals a channel id -- so the
-    exemption the operator just granted matches nothing and ``require_mention``
-    silently stays in force in that channel, which reads as a dead bot. A scalar
-    that is not a string (an unquoted numeric id, a bare ``true``) does worse: it
-    is not iterable, so constructing the channel raises ``TypeError``.
-
-    Entries are compared verbatim as channel ids, so an unusable one simply never
-    matches, which leaves ``require_mention`` in force (fail-closed).
-    """
-    if isinstance(mention_free_channels, str) and ("," in mention_free_channels or any(char.isspace() for char in mention_free_channels.strip())):
-        logger.warning("[buzz] mention_free_channels is a scalar string containing separators; treating it as one literal channel id. Use a YAML list for multiple ids")
-    if mention_free_channels is None or (isinstance(mention_free_channels, str) and not mention_free_channels.strip()):
-        return frozenset()
-    entries = list(mention_free_channels) if isinstance(mention_free_channels, (list, tuple, set, frozenset)) else [mention_free_channels]
-    return frozenset(text for text in (str(entry).strip() for entry in entries) if text)
+    """Parse Buzz mention exemptions without splitting scalar channel IDs."""
+    return parse_channel_ids(
+        mention_free_channels,
+        logger=logger,
+        channel_name="buzz",
+        key_name="mention_free_channels",
+        warn_on_scalar_separators=True,
+    )
 
 
 class BuzzChannel(Channel):
