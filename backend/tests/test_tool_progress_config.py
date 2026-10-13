@@ -61,3 +61,13 @@ class TestToolProgressConfigBounds:
     def test_existing_bounds_still_apply_to_the_sibling_fields(self, field):
         with pytest.raises(ValueError, match=field):
             ToolProgressConfig(**{field: 0})
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_rejects_boolean_similarity_threshold(self, value):
+        # Both booleans survive `ge=0.0, le=1.0`: false -> 0.0 makes every tool result a
+        # near-duplicate of every other, true -> 1.0 demands an exact word-set match.
+        with pytest.raises(ValueError, match="jaccard_similarity_threshold"):
+            ToolProgressConfig(jaccard_similarity_threshold=value)
+
+    def test_accepts_ordinary_similarity_threshold(self):
+        assert ToolProgressConfig(jaccard_similarity_threshold=0.5).jaccard_similarity_threshold == 0.5

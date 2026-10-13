@@ -54,3 +54,11 @@ class ToolProgressConfig(BaseModel):
         if isinstance(value, bool):
             raise ValueError(f"{info.field_name} must be a positive integer, not a boolean")
         return value
+
+    @field_validator("jaccard_similarity_threshold", mode="before")
+    @classmethod
+    def _reject_boolean_similarity_threshold(cls, value: Any) -> Any:
+        """Reject booleans before Pydantic coerces them to 1.0/0.0, both of which sit inside the 0..1 bound."""
+        if isinstance(value, bool):
+            raise ValueError("jaccard_similarity_threshold must be a number between 0.0 and 1.0, not a boolean")
+        return value
