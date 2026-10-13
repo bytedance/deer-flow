@@ -2355,6 +2355,11 @@ CSV and TSV artifacts open as tables in the artifact panel and in a separate win
 
 HTML artifact previews resolve relative assets from the artifact directory unless the document contains a real `<base>` element. Base-tag examples in comments or script text do not change that resolution.
 
+Markdown report previews in the artifact panel and separate window resolve local
+images from the report's own directory and conversation. Both relative paths
+such as `./charts/summary.png` and absolute `/mnt/...` paths are supported;
+external image URLs keep their existing behavior.
+
 If the sample cuts a CRLF line ending in half, the preview keeps the earlier complete rows and omits the incomplete final record, including when its last field is quoted.
 
 Text artifacts are streamed with HTTP byte-range support. The Web UI initially

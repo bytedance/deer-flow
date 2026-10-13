@@ -707,6 +707,7 @@ export function ArtifactFileDetail({
                 content={editorContent}
                 language={language ?? "text"}
                 scrollKey={`${threadId}:${filepathFromProps}`}
+                artifact={{ filepath, threadId, isMock }}
                 url={url}
                 truncated={truncated}
                 active={effectiveViewMode === "preview" && !isLoading}
