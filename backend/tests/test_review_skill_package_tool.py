@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from support.symlinks import symlink_or_skip
 
 from deerflow.config.paths import Paths, make_safe_user_id
 from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
@@ -195,7 +196,7 @@ def test_review_skill_package_rejects_symlink_planted_in_callers_outputs(deploym
     outputs_dir = deployment.sandbox_outputs_dir("thread-1", user_id="alice")
     outputs_dir.mkdir(parents=True)
     link = outputs_dir / "borrowed-skill"
-    link.symlink_to(victim_package, target_is_directory=True)
+    symlink_or_skip(link, victim_package, target_is_directory=True)
 
     command = review_skill_package.func(
         target=str(link),

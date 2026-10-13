@@ -53,6 +53,7 @@ from deerflow.config.extensions_config import (
 )
 from deerflow.config.paths import get_paths
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+from deerflow.mcp.lifecycle import LIFECYCLE_KEY, plan_mcp_lifecycle
 from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.models import create_chat_model
 from deerflow.models.reasoning import reasoning_capabilities_payload, resolve_reasoning_contract
@@ -81,6 +82,7 @@ from deerflow.uploads.manager import (
     get_uploads_dir,
     list_files_in_dir,
     normalize_filename,
+    publish_upload_copy,
     upload_artifact_url,
     upload_virtual_path,
 )
@@ -1455,23 +1457,58 @@ class DeerFlowClient:
         Raises:
             ValueError: If the resulting config would not load; nothing is written.
             OSError: If the config file cannot be written.
+            RuntimeError: If the configuration was saved but local MCP reconciliation or
+                teardown failed. The configuration may already have changed on disk, so
+                callers must not assume the write failed and blindly retry.
         """
+        from deerflow.mcp.cache import (
+            fail_mcp_reconciliation,
+            finish_mcp_reconciliation,
+            prepare_mcp_reconciliation,
+        )
+
         config_path = ExtensionsConfig.resolve_config_path()
         if config_path is None:
             raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
 
+        pending = None
+        committed_failure = None
+        reloaded = None
         with extensions_config_write_lock, extensions_config_file_lock(config_path):
             # The singleton is process-local, so re-read the shared file under
             # the cross-process lock before merging the replacement MCP map.
             # Read it raw so sibling keys keep their $VAR placeholders.
-            config_data = read_raw_extensions_config(config_path)
-            config_data["mcpServers"] = mcp_servers
+            previous_raw = read_raw_extensions_config(config_path)
+            config_data = copy.deepcopy(previous_raw)
+            config_data["mcpServers"] = copy.deepcopy(mcp_servers)
+            config_data[LIFECYCLE_KEY] = plan_mcp_lifecycle(previous_raw, config_data)
 
-            validate_raw_extensions_config(config_data)
+            candidate = validate_raw_extensions_config(config_data)
             self._atomic_write_json(config_path, config_data)
-            reloaded = reload_extensions_config()
+            try:
+                reloaded = reload_extensions_config()
+                pending = prepare_mcp_reconciliation(candidate, config_path=config_path)
+            except Exception as exc:
+                # The file is already committed, so detach local state under the
+                # cache condition here and finish teardown after the locks are
+                # released; never report the write as a clean success.
+                committed_failure = (fail_mcp_reconciliation(exc), exc)
 
-        self.reset_agent()
+        try:
+            if committed_failure is not None:
+                failed_pending, _failure = committed_failure
+                finish_mcp_reconciliation(failed_pending)
+            else:
+                finish_mcp_reconciliation(pending)
+        finally:
+            # The config file is already committed, so an agent built from the
+            # previous MCP tool set must not survive this call even when local
+            # reconciliation or teardown raised.
+            self.reset_agent()
+
+        if committed_failure is not None:
+            _failed_pending, failure = committed_failure
+            raise RuntimeError("MCP configuration was saved, but local cache reconciliation failed; retry or restart DeerFlow before relying on the changed server.") from failure
         return {"mcp_servers": {name: server.model_dump() for name, server in reloaded.mcp_servers.items()}}
 
     # ------------------------------------------------------------------
@@ -1741,12 +1778,15 @@ class DeerFlowClient:
                 raise FileNotFoundError(f"File not found: {f}")
             if not p.is_file():
                 raise ValueError(f"Path is not a file: {f}")
-            dest_name = claim_unique_filename(normalize_filename(p.name), seen_names)
-            resolved_files.append((p, dest_name))
+            claim_seed = normalize_filename(p.name)
+            dest_name = claim_unique_filename(claim_seed, seen_names)
+            resolved_files.append((p, dest_name, claim_seed))
             if not has_convertible_file and p.suffix.lower() in CONVERTIBLE_EXTENSIONS:
                 has_convertible_file = True
 
         uploads_dir = ensure_uploads_dir(thread_id)
+        with os.scandir(uploads_dir) as entries:
+            existing_names = {entry.name for entry in entries if entry.is_file(follow_symlinks=False)}
         uploaded_files: list[dict] = []
         skipped_files: list[str] = []
 
@@ -1766,11 +1806,26 @@ class DeerFlowClient:
         def _convert_in_thread(path: Path, output_path: Path | None = None):
             return asyncio.run(convert_file_to_markdown(path, output_path=output_path))
 
+        conversion_sources = None
         try:
-            for src_path, dest_name in resolved_files:
+            for src_path, dest_name, claim_seed in resolved_files:
                 try:
-                    dest = copy_upload_file_no_symlink(uploads_dir, dest_name, src_path)
+                    conversion_source = None
+                    if src_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
+                        if conversion_sources is None:
+                            conversion_sources = tempfile.TemporaryDirectory(prefix="deerflow-upload-source-")
+                        conversion_source = Path(conversion_sources.name) / dest_name
+                    if dest_name in existing_names:
+                        if conversion_source is not None:
+                            dest = copy_upload_file_no_symlink(uploads_dir, dest_name, src_path, snapshot_path=conversion_source)
+                        else:
+                            dest = copy_upload_file_no_symlink(uploads_dir, dest_name, src_path)
+                    else:
+                        dest = publish_upload_copy(uploads_dir, dest_name, src_path, claim_seed=claim_seed, seen_names=seen_names, snapshot_path=conversion_source)
+                        dest_name = dest.name
                 except UnsafeUploadPathError:
+                    if conversion_source is not None:
+                        conversion_source.unlink(missing_ok=True)
                     logger.warning("Skipping upload with unsafe destination: %s", dest_name)
                     skipped_files.append(dest_name)
                     continue
@@ -1793,24 +1848,25 @@ class DeerFlowClient:
                     provisional_md_name = Path(dest_name).with_suffix(".md").name
                     unique_md_name = claim_unique_filename(provisional_md_name, seen_names)
                     try:
-                        # Convert the caller's own file, not the copy that just
-                        # landed in the sandbox-writable uploads dir: a sandbox
-                        # that swaps that name for a symlink would otherwise have
-                        # a host file converted into this thread's uploads. Write
-                        # the result outside uploads too, then publish it without
-                        # following a symlink at the companion name.
+                        # Convert the same private capture used to publish the
+                        # original. Neither an external source edit nor a sandbox
+                        # replacing the uploaded path can change these input bytes.
                         with tempfile.TemporaryDirectory() as md_dir:
                             md_output = Path(md_dir) / unique_md_name
                             if conversion_pool is not None:
-                                converted = conversion_pool.submit(_convert_in_thread, src_path, md_output).result()
+                                converted = conversion_pool.submit(_convert_in_thread, conversion_source, md_output).result()
                             else:
-                                converted = asyncio.run(convert_file_to_markdown(src_path, output_path=md_output))
+                                converted = asyncio.run(convert_file_to_markdown(conversion_source, output_path=md_output))
                             md_path = None
                             if converted is not None:
                                 # copy, not write_bytes: the companion keeps the
                                 # converter's permissions, so a sandbox running as
                                 # another uid can still read it.
-                                md_path = copy_upload_file_no_symlink(uploads_dir, unique_md_name, converted)
+                                if unique_md_name in existing_names:
+                                    md_path = copy_upload_file_no_symlink(uploads_dir, unique_md_name, converted)
+                                else:
+                                    md_path = publish_upload_copy(uploads_dir, unique_md_name, converted, claim_seed=provisional_md_name, seen_names=seen_names)
+                                    unique_md_name = md_path.name
                     except UnsafeUploadPathError:
                         logger.warning("Skipping markdown companion with unsafe destination: %s", unique_md_name)
                         md_path = None
@@ -1834,10 +1890,14 @@ class DeerFlowClient:
                         # against a name this request never filled.
                         seen_names.discard(unique_md_name)
 
+                if conversion_source is not None:
+                    conversion_source.unlink(missing_ok=True)
                 uploaded_files.append(info)
         finally:
             if conversion_pool is not None:
                 conversion_pool.shutdown(wait=True)
+            if conversion_sources is not None:
+                conversion_sources.cleanup()
 
         message = f"Successfully uploaded {len(uploaded_files)} file(s)"
         if skipped_files:

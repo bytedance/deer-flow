@@ -15,7 +15,7 @@ import pytest
 from mcp.shared.exceptions import McpError
 from mcp.types import CONNECTION_CLOSED, CallToolResult, ErrorData, TextContent
 
-from deerflow.mcp.session_pool import MCPSessionPool, call_pooled_session_tool, get_session_pool, reset_session_pool
+from deerflow.mcp.session_pool import MCPSessionPool, call_pooled_session_tool, current_session_pool, get_session_pool, reset_session_pool
 from deerflow.mcp_scope import (
     THREAD_INCARNATION_METADATA_GUARD_KEY,
     mcp_scope_belongs_to_thread,
@@ -661,6 +661,14 @@ async def test_close_all():
 # ---------------------------------------------------------------------------
 # Singleton helpers
 # ---------------------------------------------------------------------------
+
+
+def test_current_session_pool_does_not_create_one():
+    """Observing the singleton must not create one and must take the pool lock."""
+    reset_session_pool()
+    assert current_session_pool() is None
+    pool = get_session_pool()
+    assert current_session_pool() is pool
 
 
 def test_get_session_pool_singleton():
@@ -3084,8 +3092,24 @@ async def test_mcp_tools_routed_to_source_server_with_prefix_overlap():
         response_format="content_and_artifact",
     )
 
-    extensions_config = MagicMock()
-    extensions_config.model_extra = {}
+    from deerflow.config.extensions_config import ExtensionsConfig
+
+    extensions_config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "web": {
+                    "type": "stdio",
+                    "command": "npx",
+                    "args": ["web"],
+                },
+                "web_scraper": {
+                    "type": "stdio",
+                    "command": "npx",
+                    "args": ["scraper"],
+                },
+            }
+        }
+    )
 
     # `web` is inserted before `web_scraper`, so a first-prefix-match mis-routes
     # `web_scraper_search` to `web`.

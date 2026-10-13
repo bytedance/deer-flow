@@ -222,6 +222,26 @@ Only the newest entry carries `messages`, the `goal` while it is active, and
 entries carry only `title` and `thread_data`. `goal_outcome` is server-owned:
 state updates and run input that include it are rejected with 400.
 
+External state updates and run input that supply a non-null `goal` must include
+a string `objective` that is non-empty after whitespace normalization and at
+most 4,000 normalized characters. Invalid values return 400 before state writes
+or run admission. Optional goal timestamps and counters are not required or reset.
+When present, `continuation_count`, `max_continuations`, `no_progress_count` and
+`max_no_progress_continuations` must be non-negative integers; booleans, numeric
+strings, floats and null values are rejected with 400. Valid counters and limits
+are preserved, including an already-used continuation budget.
+Goal payloads must be state values, not reducer control wrappers: the reserved
+`__overwrite__` key and `type: "__overwrite__"` are rejected with 400 at both
+external boundaries. Ordinary `type`/`value` fields remain compatible.
+`goal: null` retains its existing semantics: it clears a state update's goal,
+but does not replace a goal through run input.
+
+Replaying messages from an earlier root checkpoint, including response regeneration, preserves
+the thread's current goal and continuation budget. A cleared or achieved goal
+is not restored from history. A valid goal explicitly supplied in run input
+still replaces it. Historical replay clears the old `goal_outcome`, because
+the previous answer's verdict does not certify the replacement answer.
+
 ### Runs
 
 #### Create Run
@@ -1558,14 +1578,20 @@ POST   /api/scheduled-tasks/preview-cron
 | `max_runs` | integer \| null | Safety cap: automatic runs over the task's lifetime (trial runs excluded); at least 1. |
 | `end_at` | date-time \| null | Safety cap: no automatic run after this time. Without a UTC offset it is wall-clock time in the task's timezone. |
 | `stop_condition` | string \| null | The user's "stop when …" rule, stored in its own field. Whitespace collapses to single spaces; at most 500 characters; blank means none. It is never part of `prompt`: each launch appends it as an instruction to call `stop_scheduled_task` (or, with `scheduler.tool_enabled` off, to report a met rule). |
+| `notification_group_connection_id` | string \| null | One additional connected Feishu group belonging to the task owner. Select a group binding returned by `GET /api/channels/connections`; it must record `chat_type=group` and a matching chat/workspace ID. Omitted in PATCH preserves the target; null clears it. Invalid choices return `invalid_notification_group` (422), lookup outages return `scheduler_unavailable` (503). |
 
 In a PATCH, sending `null` clears `goal_objective`, `max_runs`, `end_at` or
-`stop_condition`; for every other field `null` means unchanged (`assistant_id:
+`stop_condition` or `notification_group_connection_id`; for every other field `null` means unchanged (`assistant_id:
 null` restores `lead_agent`). PATCH may change `schedule_type` together with
 `schedule_spec`. Changing the goal, `prompt` or `stop_condition` starts a new
 count for the automatic pause after three unmet runs. A PATCH that changes the
 schedule of a finished task re-arms it (then its safety cap applies); a PATCH
 that only changes the cap leaves a finished task finished.
+
+Group-target edits alone never change the schedule or re-arm a finished task.
+Personal recipients are retained, and pending outbox rows keep their original
+target. `/api/features.scheduled_tasks.group_notifications` reports support;
+the conversation scheduling tool's inputs are unchanged in this version.
 
 Task responses (list, get, create, PATCH, pause, resume) return the stored task
 plus `automatic_runs_used` (integer) and `active_run_status` (`queued` |
@@ -1657,7 +1683,7 @@ Three errors keep their old shape: a `403` from route permissions is the plain
 string `"Permission denied: <permission>"`, FastAPI's own `422` for malformed
 JSON or wrong types (for example `"max_runs": "abc"`) keeps its list `detail`,
 and the shared `503` `"Thread metadata store not available"` (a Gateway without
-a thread store) stays a plain string. Codes the web UI translates: `invalid_request`, `invalid_schedule`, `invalid_schedule_type`, `invalid_timezone`, `interval_too_short`, `interval_too_long`, `once_in_past`, `once_too_soon`, `once_time_passed`, `invalid_context_mode`, `reuse_thread_requires_thread`, `thread_not_found`, `invalid_assistant`, `unknown_assistant`, `invalid_goal`, `goal_requires_fresh_thread`, `invalid_stop_condition`, `invalid_max_runs`, `end_at_in_past`, `end_at_before_first_run`, `frequent_requires_limit`, `max_runs_not_above_used`, `limits_exhausted`, `task_not_found`, `task_running`, `run_queued`, `task_changed`, `task_finished`, `task_quota_exceeded`, `scheduler_not_running`, `scheduler_unavailable` (503: this Gateway has no scheduled-task persistence), `trigger_failed`. Codes only the chat capability
+a thread store) stays a plain string. Codes the web UI translates: `invalid_request`, `invalid_schedule`, `invalid_schedule_type`, `invalid_timezone`, `interval_too_short`, `interval_too_long`, `once_in_past`, `once_too_soon`, `once_time_passed`, `invalid_context_mode`, `reuse_thread_requires_thread`, `thread_not_found`, `invalid_assistant`, `unknown_assistant`, `invalid_goal`, `goal_requires_fresh_thread`, `invalid_stop_condition`, `invalid_notification_group`, `invalid_max_runs`, `end_at_in_past`, `end_at_before_first_run`, `frequent_requires_limit`, `max_runs_not_above_used`, `limits_exhausted`, `task_not_found`, `task_running`, `run_queued`, `task_changed`, `task_finished`, `task_quota_exceeded`, `scheduler_not_running`, `scheduler_unavailable` (503: this Gateway has no scheduled-task persistence), `trigger_failed`. Codes only the chat capability
 returns: `timezone_required`, `authentication_required`, `permission_denied`, `scheduler_tools_disabled`, `authority_expired`, `conversation_not_found`, `interactive_run_required`, `unsupported_action`, `unsupported_fields`, `task_id_required`, `note_not_verbatim`, `note_limit_reached`, `trial_requires_direct_request`, `no_stop_authority`, `occurrence_not_active`. The machine-readable list is
 `contracts/scheduled_task_errors_contract.json`.
 
@@ -1693,7 +1719,7 @@ stripped from client-supplied messages and state updates.
 **IM notices ("scheduled task updates").** With `channel_connections.enabled`,
 each item of `GET /api/channels/providers` carries
 `proactive_notifications` (bool): whether scheduled-task updates are pushed to
-that app. Only providers with proactive push (WeCom today) get notices; the
+that app. Only providers with proactive push (WeCom and Feishu/Lark today) get notices; the
 others get none, and Settings says so. An occurrence sends at most one message,
 in the owner's `locale` preference (see Account Preferences), else
 `channel_connections.notification_locale`. Notices carry no IDs and no links;

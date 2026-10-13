@@ -14,14 +14,11 @@ from langchain.agents.middleware.types import ModelCallResult, ModelRequest, Mod
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
 
 from deerflow.agents.thread_state import ThreadState
+from deerflow.sandbox.download import MAX_IMAGE_BYTES as _MAX_IMAGE_BYTES
 from deerflow.sandbox.lease import run_sync_lifecycle_operation
 
 logger = logging.getLogger(__name__)
 
-# Mirror the tool-side size cap as a defense-in-depth check. The tool
-# enforces this at write time; the middleware re-checks at read time in
-# case the file grew between view and injection.
-_MAX_IMAGE_BYTES = 20 * 1024 * 1024
 _IMAGE_CONTEXT_MESSAGE_ID_PREFIX = "view-image-context:"
 _IMAGE_CONTEXT_MESSAGE_MARKER_KEY = "deerflow_view_image_context"
 
@@ -266,7 +263,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                     if host_data_url is not None:
                         return host_data_url
                 try:
-                    image_bytes = sandbox.download_file(image_path)
+                    image_bytes = sandbox.download_file(image_path, max_bytes=_MAX_IMAGE_BYTES)
                 except Exception:
                     logger.warning(
                         "Failed to recover viewed image %s from replacement sandbox %s",
@@ -289,7 +286,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                 return None
 
             try:
-                image_bytes = sandbox.download_file(image_path)
+                image_bytes = sandbox.download_file(image_path, max_bytes=_MAX_IMAGE_BYTES)
             except Exception:
                 logger.warning("Failed to read viewed image %s from sandbox %s", image_path, sandbox_id, exc_info=True)
                 return None

@@ -5,5 +5,6 @@ export const STATIC_WEBSITE_USER: User = {
   email: "static@example.local",
   system_role: "admin",
   needs_setup: false,
+  disabled: false,
   oauth_provider: null,
 };

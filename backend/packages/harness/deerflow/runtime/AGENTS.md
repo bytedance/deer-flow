@@ -70,14 +70,20 @@ from `on_llm_end` before inspecting the response or touching any run state.
 **Skill history:** `record_skill_usage` saves lead-run snapshots on terminal
 answers for paginated history. See `docs/skill-usage-ui.md`.
 
-**Run delivery receipts:** Journal artifact evidence and terminal status must finalize before an ordinary satisfied goal is cleared. That cleanup uses a durable checkpoint-write reservation; delivery failure retains the ordinary goal without another continuation. Only that clear passes `outcome` to `write_thread_goal`, which removes `goal_outcome` on every other goal write. The scheduled-only exception is described below. Details: `backend/docs/runtime-guidance-details.md`.
+**Run delivery receipts:** Finalize artifact evidence and terminal status before clearing an ordinary satisfied goal, under a checkpoint-write reservation. Delivery failure retains the goal without continuing. Only that clear writes `goal_outcome`; other goal writes remove it. Historical replay keeps the current goal and budget, and drops the old outcome. Scheduled exception below; details: `backend/docs/runtime-guidance-details.md`.
 
 **Deferred terminal commit:** With an event store, the worker stages its terminal
 status locally and commits it only after finalization's receipt and duration
 writes. `RunRecord.terminal_commit_pending` keeps `_renew_leases()` renewing that
 still-active row until the commit is attempted; a renewal rejected by the worker's
 own commit is confirmed by re-reading the row, while a peer claim fences the run.
-Never select runs for renewal by local status alone.
+Never select runs for renewal by local status alone. Shutdown's drain treats the
+same state as active: such runs are awaited (never cancelled — cancellation would
+skip their terminal tail) so the duration checkpoint and terminal commit land
+before checkpointer teardown. A drain timeout leaves staged statuses and commit
+barriers intact without persisting `interrupted`. A finalizer that raises is
+logged with its run ID, staged status and exception while the other runs continue
+draining. Coverage: `tests/test_gateway_run_drain_shutdown.py`.
 
 **Deferred-tool promotion event deduplication** (`runtime/journal.py`): one
 `RunJournal` owns the lead graph's run-scoped atomic promotion claim. Parallel

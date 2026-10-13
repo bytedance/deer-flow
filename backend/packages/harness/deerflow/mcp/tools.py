@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
+from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ from deerflow.mcp.session_pool import (
     MCPPoolDomain,
     MCPSessionPool,
     ServerBinding,
+    StaleMCPBindingError,
     call_pooled_session_tool,
     get_session_pool,
     normalized_connection_fingerprint,
@@ -41,6 +43,7 @@ from deerflow.mcp_scope import mcp_session_scope_key, runtime_thread_incarnation
 from deerflow.reflection import resolve_variable
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.mcp_metadata import tag_mcp_routing, tag_mcp_tool
+from deerflow.tools.resource_placeholder import model_visible_location, resource_placeholder_text
 from deerflow.tools.sync import make_sync_tool_wrapper
 from deerflow.tools.types import Runtime
 
@@ -440,6 +443,18 @@ def _convert_call_tool_result(
     with their cwd/temp pinned inside the mounted tree, so they already live in
     a servable location. Remote URIs and files outside the thread's user-data
     tree are left untouched.
+
+    ``ResourceLink`` items never become URL-sourced ``file`` blocks: Chat
+    Completions message serialization rejects those, and once the result is
+    checkpointed every later turn of the thread fails. An ``http(s)`` image
+    link stays an image block; every other link (``ui://`` cards, local files
+    at virtual paths, remote non-image links, unknown schemes) becomes a short
+    text placeholder, and the link is preserved as structured data in the
+    artifact under ``resource_links``. Placeholders never embed host
+    filesystem paths: a link that stays unresolved (outside the thread's
+    user-data tree, or no thread context) omits the location segment rather
+    than leaking a raw ``file://`` URI or bare path, and non-referenceable
+    ``data:``/``blob:`` URIs are dropped from the artifact channel too.
     """
     from langchain_core.messages import ToolMessage
     from langchain_core.messages.content import create_file_block, create_image_block, create_text_block
@@ -482,6 +497,7 @@ def _convert_call_tool_result(
 
     # Convert MCP content blocks to LangChain content blocks.
     lc_content = []
+    resource_links: list[dict[str, Any]] = []
     for item in call_tool_result.content:
         if isinstance(item, TextContent):
             lc_content.append(create_text_block(text=_resolve_text(item.text)))
@@ -490,10 +506,40 @@ def _convert_call_tool_result(
         elif isinstance(item, ResourceLink):
             mime = item.mimeType or None
             url = _resolve_link_url(str(item.uri))
-            if mime and mime.startswith("image/"):
+            if mime and mime.startswith("image/") and url.lower().startswith(("http://", "https://")):
                 lc_content.append(create_image_block(url=url, mime_type=mime))
+            elif url.lower().startswith(("data:", "blob:")):
+                # ``data:``/``blob:`` URIs never enter state: a ``data:`` URI
+                # embeds the whole payload, so inlining it would put megabytes
+                # of base64 into model-visible text and into checkpointed
+                # ``resource_links``; a ``blob:`` URI names a browser-local
+                # object nothing else can dereference. ``image/*`` links are
+                # downgraded here too, by design: the conversion layer keeps
+                # NEW inline payloads out of state, while the read-time
+                # middleware passes persisted ``data:`` image blocks through
+                # (it only heals blocks already in checkpoints). Neither is
+                # referenceable, so the raw URI is dropped from the artifact
+                # channel and the placeholder omits the location segment.
+                lc_content.append(create_text_block(text=resource_placeholder_text(name=item.name or "unnamed", mime_type=mime)))
             else:
-                lc_content.append(create_file_block(url=url, mime_type=mime))
+                # URL-sourced file blocks are rejected by Chat Completions
+                # serialization (langchain-core), which bricks the thread once
+                # the result is checkpointed. Downgrade every other link to a
+                # text placeholder and keep the structured link in the artifact
+                # channel. The placeholder shows the location only when the
+                # resolved URL carries no host-path risk — a raw ``file://``
+                # URI or bare host path is withheld from model-visible text
+                # but still recorded in the artifact channel.
+                lc_content.append(
+                    create_text_block(
+                        text=resource_placeholder_text(
+                            name=item.name or "unnamed",
+                            mime_type=mime,
+                            url=model_visible_location(url),
+                        )
+                    )
+                )
+                resource_links.append({"name": item.name, "uri": url, "mime_type": mime})
         elif isinstance(item, EmbeddedResource):
             from mcp.types import BlobResourceContents
 
@@ -518,6 +564,10 @@ def _convert_call_tool_result(
     artifact = None
     if call_tool_result.structuredContent is not None:
         artifact = {"structured_content": call_tool_result.structuredContent}
+    if resource_links:
+        if artifact is None:
+            artifact = {}
+        artifact["resource_links"] = resource_links
 
     return lc_content, artifact
 
@@ -881,6 +931,457 @@ def _configure_task_tools_for_server(
     return configured
 
 
+@dataclass(frozen=True, slots=True)
+class ServerDiscoveryResult:
+    """Successful tool discovery for one MCP server.
+
+    A present entry with ``tools=()`` is a successful discovery of zero tools;
+    a failed discovery is represented by the server's absence from the grouped
+    mapping. ``pool``/``binding`` identify the exact stdio session owner a
+    result was produced against and stay out of ``repr`` because they are
+    secret-adjacent ownership handles.
+    """
+
+    tools: tuple[BaseTool, ...]
+    pool: MCPSessionPool | None = field(default=None, repr=False)
+    binding: ServerBinding | None = field(default=None, repr=False)
+
+
+def _flatten_server_tool_groups(
+    enabled_order: Collection[str],
+    groups: Mapping[str, ServerDiscoveryResult],
+) -> list[BaseTool]:
+    """Flatten grouped results in enabled-server declaration order."""
+    return [tool for name in enabled_order if name in groups for tool in groups[name].tools]
+
+
+def _load_mcp_adapter_symbols() -> tuple[Any, Any] | None:
+    """Load the adapter symbols needed for discovery, or fail closed."""
+    try:
+        from langchain_mcp_adapters.client import MultiServerMCPClient
+        from langchain_mcp_adapters.tools import load_mcp_tools
+    except ImportError:
+        logger.warning("langchain-mcp-adapters not installed. Install it to enable MCP tools: pip install langchain-mcp-adapters")
+        return None
+    return MultiServerMCPClient, load_mcp_tools
+
+
+@dataclass(frozen=True, slots=True)
+class _RawServerDiscovery:
+    tools: list[BaseTool]
+    tool_interceptors: list[Any]
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedServerClient:
+    server_name: str
+    connection: dict[str, Any]
+    client: Any
+    tool_interceptors: list[Any]
+    tool_name_prefix: bool
+    session_init_timeout: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedServerDiscovery:
+    config: ExtensionsConfig
+    server_names: tuple[str, ...]
+    connections: dict[str, dict[str, Any]]
+    pool: MCPSessionPool
+    bindings: dict[str, ServerBinding]
+    ownership_domain: MCPPoolDomain
+    connection_scope: str
+
+
+def _prepare_server_client(
+    extensions_config: ExtensionsConfig,
+    server_name: str,
+    connection: dict[str, Any],
+    *,
+    client_cls: Any,
+    initial_oauth_header: str | None,
+    oauth_token_manager: OAuthTokenManager,
+) -> _PreparedServerClient:
+    """Build the client/interceptors for one selected server."""
+    server_cfg = extensions_config.mcp_servers.get(server_name)
+    transport = connection.get("transport", "stdio")
+    tool_name_prefix = server_cfg.tool_name_prefix if server_cfg is not None else True
+    session_init_timeout = _resolve_session_init_timeout(server_cfg)
+    server_view = extensions_config.model_copy(
+        update={"mcp_servers": {server_name: extensions_config.mcp_servers[server_name]}},
+    )
+    tool_interceptors = build_mcp_tool_interceptors(
+        server_view,
+        oauth_builder=lambda config: build_oauth_tool_interceptor(config, token_manager=oauth_token_manager),
+        resolver=resolve_variable,
+        target_logger=logger,
+    )
+    if initial_oauth_header and transport in ("sse", "http"):
+        # Case-insensitive write: a static header spelled 'authorization'
+        # must be replaced, not joined on the wire by a second field.
+        connection["headers"] = apply_header_overrides(
+            connection.get("headers", {}),
+            {"Authorization": initial_oauth_header},
+        )
+
+    client = client_cls(
+        {server_name: connection},
+        tool_interceptors=tool_interceptors,
+        tool_name_prefix=True,
+    )
+    return _PreparedServerClient(
+        server_name=server_name,
+        connection=connection,
+        client=client,
+        tool_interceptors=tool_interceptors,
+        tool_name_prefix=tool_name_prefix,
+        session_init_timeout=session_init_timeout,
+    )
+
+
+async def _discover_server_tools(
+    prepared_client: _PreparedServerClient,
+    *,
+    load_mcp_tools_fn: Any,
+) -> tuple[str, _RawServerDiscovery | None]:
+    """Run only the discovery await for one selected MCP server."""
+    server_name = prepared_client.server_name
+    connection = prepared_client.connection
+    client = prepared_client.client
+
+    try:
+        if prepared_client.tool_name_prefix:
+            discovery = client.get_tools(server_name=server_name)
+        else:
+            discovery = load_mcp_tools_fn(
+                None,
+                connection=connection,
+                callbacks=client.callbacks,
+                server_name=server_name,
+                tool_interceptors=client.tool_interceptors,
+                tool_name_prefix=False,
+            )
+
+        if prepared_client.session_init_timeout is not None:
+            # Timeout tool discovery (subprocess spawn + initialize +
+            # tools/list) so a hung stdio server cannot block agent
+            # construction indefinitely. This runs per server so one slow
+            # server does not prevent healthy siblings from contributing.
+            try:
+                server_tools = await asyncio.wait_for(discovery, timeout=prepared_client.session_init_timeout)
+            except TimeoutError:
+                logger.warning(
+                    "Skipping MCP server '%s' after tool discovery timed out (%.1fs)",
+                    server_name,
+                    prepared_client.session_init_timeout,
+                )
+                return server_name, None
+        else:
+            server_tools = await discovery
+
+        return server_name, _RawServerDiscovery(
+            tools=list(server_tools),
+            tool_interceptors=prepared_client.tool_interceptors,
+        )
+    except (asyncio.CancelledError, StaleMCPBindingError, McpTaskConfigurationError):
+        raise
+    except Exception as e:
+        logger.warning(
+            f"Skipping MCP server '{server_name}' after tool discovery failed: {e}",
+            exc_info=True,
+        )
+        return server_name, None
+
+
+def _wrap_discovered_server_tools(
+    extensions_config: ExtensionsConfig,
+    server_name: str,
+    connection: dict[str, Any],
+    raw_discovery: _RawServerDiscovery,
+    *,
+    tool_name_prefix: bool,
+    session_init_timeout: float | None,
+    pool: MCPSessionPool | None,
+    binding: ServerBinding | None,
+    ownership_domain: MCPPoolDomain,
+    connection_scope: str,
+) -> ServerDiscoveryResult:
+    """Validate, tag, wrap, and task-configure one successful discovery.
+
+    ``tool_name_prefix`` and ``session_init_timeout`` are supplied by the
+    prepared client so discovery and wrapping share one derivation of the
+    server config instead of two that can drift apart.
+    """
+    server_cfg = extensions_config.mcp_servers.get(server_name)
+    transport = connection.get("transport", "stdio")
+    current_server_tools: list[BaseTool] = []
+
+    for tool in raw_discovery.tools:
+        if not _VALID_MCP_TOOL_NAME.fullmatch(tool.name or ""):
+            logger.warning(
+                "Dropping MCP tool from server '%s' with invalid name %r: tool names must match %s. A name outside this charset cannot be bound as a function tool and could forge prompt structure when listed as a deferred tool.",
+                server_name,
+                tool.name,
+                _VALID_MCP_TOOL_NAME.pattern,
+            )
+            continue
+        tag_mcp_tool(tool, server_name=server_name, transport=transport)
+        prefix = f"{server_name}_"
+        original_name = tool.name[len(prefix) :] if tool_name_prefix and tool.name.startswith(prefix) else tool.name
+        routing = resolve_effective_mcp_routing(server_cfg, original_name)
+        if routing.get("mode") != "off":
+            tag_mcp_routing(tool, routing)
+        if transport == "stdio":
+            _timeout = server_cfg.tool_call_timeout if server_cfg else None
+            current_server_tools.append(
+                _make_session_pool_tool(
+                    tool,
+                    server_name,
+                    connection,
+                    raw_discovery.tool_interceptors,
+                    tool_call_timeout=_timeout,
+                    session_init_timeout=session_init_timeout,
+                    tool_name_prefix=tool_name_prefix,
+                    ownership_domain=ownership_domain,
+                    pool=pool,
+                    binding=binding,
+                )
+            )
+        else:
+            if server_cfg and server_cfg.tool_call_timeout is not None:
+                logger.warning(
+                    "Ignoring tool_call_timeout for MCP server '%s' because transport '%s' is not stdio; configure HTTP/SSE transport-level timeouts instead.",
+                    server_name,
+                    transport,
+                )
+            current_server_tools.append(tool)
+
+    if server_cfg is not None:
+        current_server_tools = _configure_task_tools_for_server(
+            current_server_tools,
+            server_name=server_name,
+            server_config=server_cfg,
+            tool_name_prefix=tool_name_prefix,
+            connection_scope=connection_scope,
+        )
+
+    # Grouped results are directly usable by the cache/adapters that consume
+    # them, so sync invocation is patched inside each server's group.
+    for tool in current_server_tools:
+        if getattr(tool, "func", None) is None and getattr(tool, "coroutine", None) is not None:
+            tool.func = make_sync_tool_wrapper(tool.coroutine, tool.name)
+
+    result_pool = pool if transport == "stdio" else None
+    result_binding = binding if transport == "stdio" else None
+    return ServerDiscoveryResult(
+        tools=tuple(current_server_tools),
+        pool=result_pool,
+        binding=result_binding,
+    )
+
+
+async def _resolve_discovery_config(
+    extensions_config: ExtensionsConfig | None,
+    personal_user_id: str | None,
+) -> ExtensionsConfig:
+    """Resolve and authorize config outside the public discovery error handler."""
+    if extensions_config is None:
+        # NOTE: We use ExtensionsConfig.from_file() instead of get_extensions_config()
+        # to always read the latest configuration from disk. This ensures that changes
+        # made through the Gateway API (which runs in a separate process) are immediately
+        # reflected when initializing MCP tools. Callers that need to prove which
+        # revision produced these tools pass the instance they snapshotted instead.
+        extensions_config = ExtensionsConfig.from_file()
+
+    if personal_user_id is None:
+        validate_mcp_task_config_snapshot(extensions_config)
+        return extensions_config
+
+    from deerflow.mcp.personal_access import authorized_personal_config
+    from deerflow.mcp.tasks.runtime import is_mcp_task_runtime_available
+    from deerflow.mcp.user_config import load_user_mcp_config
+
+    current = await asyncio.to_thread(load_user_mcp_config, personal_user_id)
+    if current != extensions_config:
+        raise McpTaskConfigurationError("Personal MCP configuration changed during discovery; retry the run")
+    extensions_config = current = await authorized_personal_config(personal_user_id, current)
+    if any(server.task_toolsets for server in current.mcp_servers.values()) and not is_mcp_task_runtime_available():
+        raise McpTaskConfigurationError("Personal MCP task toolsets require the platform's durable task runtime")
+    return extensions_config
+
+
+def _prepare_server_discovery(
+    extensions_config: ExtensionsConfig,
+    *,
+    server_names: Collection[str] | None,
+    personal_user_id: str | None,
+    session_pool: MCPSessionPool | None,
+) -> _PreparedServerDiscovery | None:
+    """Build selected connections and capture bindings before discovery."""
+    all_enabled = extensions_config.get_enabled_mcp_servers()
+    requested = set(all_enabled) if server_names is None else set(server_names) & set(all_enabled)
+    selected_names = [name for name in all_enabled if name in requested]
+    if not selected_names:
+        # Distinguish "nothing is enabled" from "the caller's selection matched
+        # nothing". Unknown or disabled names are dropped per the documented
+        # selection contract, but that must not be reported as an empty config.
+        if server_names is None:
+            logger.info("No enabled MCP servers configured")
+        else:
+            logger.info(
+                "No enabled MCP servers matched the requested selection: %s",
+                sorted(set(server_names)),
+            )
+        return None
+
+    selected_view = extensions_config.model_copy(
+        update={"mcp_servers": {name: all_enabled[name] for name in selected_names}},
+    )
+    connections = build_servers_config(selected_view)
+    attempted_names = list(selected_names)
+    selected_names = [name for name in selected_names if name in connections]
+    if not connections:
+        logger.info("No valid MCP connections for selected servers: %s", sorted(attempted_names))
+        return None
+
+    pool = session_pool
+    if pool is None:
+        pool = get_session_pool()
+    ownership_domain: MCPPoolDomain = "personal" if personal_user_id is not None else "deployment"
+    server_bindings: dict[str, ServerBinding] = {}
+    for server_name, server_connection in connections.items():
+        if server_connection.get("transport", "stdio") == "stdio":
+            server_bindings[server_name] = pool.ensure_binding(
+                server_name,
+                normalized_connection_fingerprint(server_connection),
+                domain=ownership_domain,
+            )
+
+    return _PreparedServerDiscovery(
+        config=extensions_config,
+        server_names=tuple(selected_names),
+        connections=connections,
+        pool=pool,
+        bindings=server_bindings,
+        ownership_domain=ownership_domain,
+        connection_scope="personal" if personal_user_id is not None else "deployment",
+    )
+
+
+async def _discover_and_wrap_prepared(
+    adapter_symbols: tuple[Any, Any],
+    prepared: _PreparedServerDiscovery,
+) -> dict[str, ServerDiscoveryResult]:
+    """Run the OAuth/discovery phase, then wrap successful results in order."""
+    client_cls, load_mcp_tools_fn = adapter_symbols
+    extensions_config = prepared.config
+    oauth_token_manager = OAuthTokenManager.from_extensions_config(extensions_config) if prepared.connection_scope == "personal" else get_mcp_task_oauth_token_manager(extensions_config)
+
+    # Only selected, valid connections reach this point. Selected-but-invalid
+    # servers are intentionally not contacted for OAuth headers (F1 contract).
+    initial_oauth_headers = await get_initial_oauth_headers(
+        extensions_config,
+        token_manager=oauth_token_manager,
+        server_names=set(prepared.connections),
+    )
+
+    prepared_clients = [
+        _prepare_server_client(
+            extensions_config,
+            server_name,
+            prepared.connections[server_name],
+            client_cls=client_cls,
+            initial_oauth_header=initial_oauth_headers.get(server_name),
+            oauth_token_manager=oauth_token_manager,
+        )
+        for server_name in prepared.server_names
+    ]
+
+    pairs = await asyncio.gather(
+        *(
+            _discover_server_tools(
+                prepared_client,
+                load_mcp_tools_fn=load_mcp_tools_fn,
+            )
+            for prepared_client in prepared_clients
+        )
+    )
+    raw_by_server = {server_name: raw for server_name, raw in pairs if raw is not None}
+    prepared_by_server = {prepared_client.server_name: prepared_client for prepared_client in prepared_clients}
+
+    groups: dict[str, ServerDiscoveryResult] = {}
+    for server_name in prepared.server_names:
+        raw_discovery = raw_by_server.get(server_name)
+        if raw_discovery is None:
+            continue
+        prepared_client = prepared_by_server[server_name]
+        groups[server_name] = _wrap_discovered_server_tools(
+            extensions_config,
+            server_name,
+            prepared_client.connection,
+            raw_discovery,
+            tool_name_prefix=prepared_client.tool_name_prefix,
+            session_init_timeout=prepared_client.session_init_timeout,
+            pool=prepared.pool,
+            binding=prepared.bindings.get(server_name),
+            ownership_domain=prepared.ownership_domain,
+            connection_scope=prepared.connection_scope,
+        )
+
+    logger.info(
+        "Discovered %d tool(s) from %d MCP server(s)",
+        sum(len(result.tools) for result in groups.values()),
+        len(groups),
+    )
+    return groups
+
+
+async def get_mcp_tools_by_server(
+    extensions_config: ExtensionsConfig | None = None,
+    *,
+    server_names: Collection[str] | None = None,
+    personal_user_id: str | None = None,
+    session_pool: MCPSessionPool | None = None,
+) -> dict[str, ServerDiscoveryResult]:
+    """Discover selected enabled MCP servers independently.
+
+    Args:
+        extensions_config: Optional pre-loaded config. ``None`` reads the latest
+            revision from disk; callers that must prove which revision produced
+            the tools pass the exact snapshotted instance.
+        server_names: Restrict discovery to these server names. Names that are
+            unknown or currently disabled are ignored, because a cache caller's
+            selection can legitimately lag the latest config; an effective
+            selection of nothing returns ``{}`` without contacting any server.
+            ``None`` selects every enabled server.
+        personal_user_id: When set, the caller's personal MCP configuration is
+            authorized and used instead of the deployment configuration.
+        session_pool: Optional session pool captured by the caller. Cache
+            initializers pass the exact pool their generation owns so a
+            superseded claim cannot install bindings into a replacement pool;
+            ``None`` resolves the current singleton.
+
+    Returns:
+        One entry per server whose discovery succeeded, keyed by server name.
+        A server whose discovery failed or timed out is **absent**; a server
+        that succeeded with zero tools is **present** with ``tools=()``.
+    """
+    adapter_symbols = _load_mcp_adapter_symbols()
+    if adapter_symbols is None:
+        return {}
+
+    extensions_config = await _resolve_discovery_config(extensions_config, personal_user_id)
+    prepared = _prepare_server_discovery(
+        extensions_config,
+        server_names=server_names,
+        personal_user_id=personal_user_id,
+        session_pool=session_pool,
+    )
+    if prepared is None:
+        return {}
+    return await _discover_and_wrap_prepared(adapter_symbols, prepared)
+
+
 async def get_mcp_tools(
     extensions_config: ExtensionsConfig | None = None,
     *,
@@ -889,247 +1390,46 @@ async def get_mcp_tools(
 ) -> list[BaseTool]:
     """Get all tools from enabled MCP servers.
 
-    Tools using stdio transport are wrapped with persistent-session logic so
-    consecutive calls within the same thread reuse the same MCP session.
-    HTTP/SSE tools are returned unwrapped to avoid cross-task TaskGroup
-    cleanup errors.
+    Config resolution, personal authorization, connection construction, and
+    binding capture stay outside the broad discovery-phase handler so they keep
+    the base API's exception semantics. Only OAuth/discovery/wrapping is
+    softened by that handler.
 
     Args:
-        extensions_config: Optional pre-loaded extensions config. Callers that
-            must prove which config revision produced these tools pass the exact
-            instance they snapshotted; ``None`` loads the latest config from disk.
-        session_pool: Optional session pool captured by the caller. Cache
-            initializers pass the exact pool their generation owns so a
-            superseded claim cannot install bindings into a replacement pool;
-            ``None`` resolves the current singleton.
+        extensions_config: Optional pre-loaded config. ``None`` reads the latest
+            revision from disk, so Gateway API edits are picked up without a
+            restart. Callers that must prove which revision produced these tools
+            (the cache initializer) pass the exact instance they snapshotted.
+        personal_user_id: When set, that user's authorized personal MCP
+            configuration is discovered instead of the deployment one.
+        session_pool: Optional session pool pinned by the caller. Cache
+            initializers pass the exact pool their initialization generation
+            owns, so a superseded claim cannot install bindings into a
+            replacement pool; ``None`` resolves the current singleton.
 
     Returns:
-        List of LangChain tools from all enabled MCP servers.
+        Wrapped tools from every enabled server, in enabled-server declaration
+        order. Returns an empty list when the adapter is unavailable or when a
+        discovery-phase failure is caught by the handler described above.
     """
-    try:
-        from langchain_mcp_adapters.client import MultiServerMCPClient
-        from langchain_mcp_adapters.tools import load_mcp_tools
-    except ImportError:
-        logger.warning("langchain-mcp-adapters not installed. Install it to enable MCP tools: pip install langchain-mcp-adapters")
+    adapter_symbols = _load_mcp_adapter_symbols()
+    if adapter_symbols is None:
         return []
 
-    if extensions_config is None:
-        # NOTE: We use ExtensionsConfig.from_file() instead of get_extensions_config()
-        # to always read the latest configuration from disk. This ensures that changes
-        # made through the Gateway API (which runs in a separate process) are immediately
-        # reflected when initializing MCP tools. Callers that need to prove which
-        # revision produced these tools pass the instance they snapshotted instead.
-        extensions_config = ExtensionsConfig.from_file()
-    if personal_user_id is None:
-        validate_mcp_task_config_snapshot(extensions_config)
-    else:
-        from deerflow.mcp.personal_access import authorized_personal_config
-        from deerflow.mcp.tasks.runtime import is_mcp_task_runtime_available
-        from deerflow.mcp.user_config import load_user_mcp_config
-
-        current = await asyncio.to_thread(load_user_mcp_config, personal_user_id)
-        if current != extensions_config:
-            raise McpTaskConfigurationError("Personal MCP configuration changed during discovery; retry the run")
-        extensions_config = current = await authorized_personal_config(personal_user_id, current)
-        if any(server.task_toolsets for server in current.mcp_servers.values()) and not is_mcp_task_runtime_available():
-            raise McpTaskConfigurationError("Personal MCP task toolsets require the platform's durable task runtime")
-    servers_config = build_servers_config(extensions_config)
-
-    if not servers_config:
-        logger.info("No enabled MCP servers configured")
+    extensions_config = await _resolve_discovery_config(extensions_config, personal_user_id)
+    prepared = _prepare_server_discovery(
+        extensions_config,
+        server_names=None,
+        personal_user_id=personal_user_id,
+        session_pool=session_pool,
+    )
+    if prepared is None:
         return []
 
-    # Capture the exact pool and stdio binding before the first discovery await.
-    # A later reset/reconcile can supersede this capability, but a stale wrapper
-    # can never silently pair its old connection with a replacement pool/epoch.
-    pool = session_pool
-    if pool is None:
-        pool = get_session_pool()
-    ownership_domain: MCPPoolDomain = "personal" if personal_user_id is not None else "deployment"
-    server_bindings: dict[str, ServerBinding] = {}
-    for server_name, server_connection in servers_config.items():
-        if server_connection.get("transport", "stdio") == "stdio":
-            server_bindings[server_name] = pool.ensure_binding(
-                server_name,
-                normalized_connection_fingerprint(server_connection),
-                domain=ownership_domain,
-            )
-
     try:
-        # Create the multi-server MCP client
-        logger.info(f"Initializing MCP client with {len(servers_config)} server(s)")
-
-        # Inject initial OAuth headers for server connections (tool discovery/session init)
-        oauth_token_manager = OAuthTokenManager.from_extensions_config(extensions_config) if personal_user_id is not None else get_mcp_task_oauth_token_manager(extensions_config)
-        initial_oauth_headers = await get_initial_oauth_headers(extensions_config, token_manager=oauth_token_manager)
-        for server_name, auth_header in initial_oauth_headers.items():
-            if server_name not in servers_config:
-                continue
-            if servers_config[server_name].get("transport") in ("sse", "http"):
-                # Case-insensitive write: a static header spelled 'authorization'
-                # must be replaced, not joined on the wire by a second field.
-                servers_config[server_name]["headers"] = apply_header_overrides(
-                    servers_config[server_name].get("headers", {}),
-                    {"Authorization": auth_header},
-                )
-
-        tool_interceptors = build_mcp_tool_interceptors(
-            extensions_config,
-            oauth_builder=lambda config: build_oauth_tool_interceptor(config, token_manager=oauth_token_manager),
-            resolver=resolve_variable,
-            target_logger=logger,
-        )
-
-        client = MultiServerMCPClient(
-            servers_config,
-            tool_interceptors=tool_interceptors,
-            tool_name_prefix=True,
-        )
-
-        async def load_server_tools(server_name: str) -> list[BaseTool] | None:
-            # ``None`` marks a server whose discovery failed, which is distinct
-            # from a server that answered with zero tools: only the latter is
-            # evidence that configured task_toolsets name missing tools.
-            try:
-                server_cfg = extensions_config.mcp_servers.get(server_name)
-                tool_name_prefix = server_cfg.tool_name_prefix if server_cfg is not None else True
-                session_init_timeout = _resolve_session_init_timeout(server_cfg)
-                if tool_name_prefix:
-                    discovery = client.get_tools(server_name=server_name)
-                else:
-                    discovery = load_mcp_tools(
-                        None,
-                        connection=servers_config[server_name],
-                        callbacks=client.callbacks,
-                        server_name=server_name,
-                        tool_interceptors=client.tool_interceptors,
-                        tool_name_prefix=False,
-                    )
-                if session_init_timeout is not None:
-                    # Timeout tool discovery (subprocess spawn + initialize +
-                    # tools/list) so a hung stdio server cannot block agent
-                    # construction indefinitely. Per-server because the gather
-                    # below runs each server independently — one slow server
-                    # must not prevent the others from contributing tools.
-                    #
-                    # Cancellation here is safe: discovery runs inside the
-                    # adapter's nested async context managers (load_mcp_tools →
-                    # create_session → _create_stdio_session → stdio_client),
-                    # and wait_for's CancelledError unwinds them. stdio_client's
-                    # finally closes stdin, waits for a graceful exit, then
-                    # escalates to _terminate_process_tree (SIGTERM→SIGKILL on
-                    # POSIX, process-tree termination on Windows), so the npx
-                    # subprocess and any children it spawned are reaped — no
-                    # orphan processes accumulate across repeated timeouts.
-                    try:
-                        return await asyncio.wait_for(discovery, timeout=session_init_timeout)
-                    except TimeoutError:
-                        # Only our own bound is logged as "timed out": the
-                        # branch condition guarantees the value is not None, so
-                        # the %.1f format cannot fail. A TimeoutError raised by
-                        # discovery itself (e.g. an internal SDK timeout on the
-                        # opted-out path) falls through to the generic failure
-                        # handler below instead.
-                        logger.warning(
-                            "Skipping MCP server '%s' after tool discovery timed out (%.1fs)",
-                            server_name,
-                            session_init_timeout,
-                        )
-                        return None
-                return await discovery
-            except Exception as e:
-                logger.warning(
-                    f"Skipping MCP server '{server_name}' after tool discovery failed: {e}",
-                    exc_info=True,
-                )
-                return None
-
-        # Get tools from each server independently so one broken MCP server does
-        # not prevent healthy servers from contributing their tools.
-        tools_by_server = await asyncio.gather(*(load_server_tools(name) for name in servers_config))
-        tools = [tool for server_tools in tools_by_server if server_tools is not None for tool in server_tools]
-        logger.info(f"Successfully loaded {len(tools)} tool(s) from MCP servers")
-
-        # Wrap each tool with persistent-session logic.
-        # Only pool stdio sessions. HTTP/SSE transports use anyio TaskGroups
-        # internally which cannot be closed from a different async task, so
-        # pooling them causes RuntimeError on cleanup (see #3203).
-        wrapped_tools: list[BaseTool] = []
-        # Route each tool by the server that actually produced it: tools_by_server[i]
-        # corresponds to the i-th server in servers_config. Inferring the source server by
-        # scanning servers_config for a name prefix is ambiguous when one server name is a
-        # prefix of another (e.g. "web" vs "web_scraper" → "web_scraper_search".startswith(
-        # "web_") matches "web" first), which pools the tool under the wrong server. Using the
-        # source grouping makes routing exact even when a server opts out of name prefixing.
-        for source_name, server_tools in zip(servers_config.keys(), tools_by_server, strict=True):
-            if server_tools is None:
-                # Discovery already logged the skip. Validating task_toolsets
-                # against a server that never answered would report every
-                # raw tool as missing and discard the healthy servers' tools.
-                continue
-            transport = servers_config[source_name].get("transport", "stdio")
-            server_cfg = extensions_config.mcp_servers.get(source_name)
-            tool_name_prefix = server_cfg.tool_name_prefix if server_cfg is not None else True
-            current_server_tools: list[BaseTool] = []
-            for tool in server_tools:
-                if not _VALID_MCP_TOOL_NAME.fullmatch(tool.name or ""):
-                    logger.warning(
-                        "Dropping MCP tool from server '%s' with invalid name %r: tool names must match %s. A name outside this charset cannot be bound as a function tool and could forge prompt structure when listed as a deferred tool.",
-                        source_name,
-                        tool.name,
-                        _VALID_MCP_TOOL_NAME.pattern,
-                    )
-                    continue
-                tag_mcp_tool(tool, server_name=source_name, transport=transport)
-                prefix = f"{source_name}_"
-                original_name = tool.name[len(prefix) :] if tool_name_prefix and tool.name.startswith(prefix) else tool.name
-                routing = resolve_effective_mcp_routing(server_cfg, original_name)
-                if routing.get("mode") != "off":
-                    tag_mcp_routing(tool, routing)
-                if transport == "stdio":
-                    _timeout = server_cfg.tool_call_timeout if server_cfg else None
-                    _init_timeout = _resolve_session_init_timeout(server_cfg)
-                    current_server_tools.append(
-                        _make_session_pool_tool(
-                            tool,
-                            source_name,
-                            servers_config[source_name],
-                            tool_interceptors,
-                            tool_call_timeout=_timeout,
-                            session_init_timeout=_init_timeout,
-                            tool_name_prefix=tool_name_prefix,
-                            ownership_domain=ownership_domain,
-                            pool=pool,
-                            binding=server_bindings[source_name],
-                        )
-                    )
-                else:
-                    if transport != "stdio" and server_cfg and server_cfg.tool_call_timeout is not None:
-                        logger.warning(
-                            "Ignoring tool_call_timeout for MCP server '%s' because transport '%s' is not stdio; configure HTTP/SSE transport-level timeouts instead.",
-                            source_name,
-                            transport,
-                        )
-                    current_server_tools.append(tool)
-
-            if server_cfg is not None:
-                current_server_tools = _configure_task_tools_for_server(
-                    current_server_tools,
-                    server_name=source_name,
-                    server_config=server_cfg,
-                    tool_name_prefix=tool_name_prefix,
-                    connection_scope="personal" if personal_user_id is not None else "deployment",
-                )
-            wrapped_tools.extend(current_server_tools)
-
-        # Patch tools to support sync invocation, as deerflow client streams synchronously
-        for tool in wrapped_tools:
-            if getattr(tool, "func", None) is None and getattr(tool, "coroutine", None) is not None:
-                tool.func = make_sync_tool_wrapper(tool.coroutine, tool.name)
-
-        return wrapped_tools
-
-    except McpTaskConfigurationError:
+        groups = await _discover_and_wrap_prepared(adapter_symbols, prepared)
+        return _flatten_server_tool_groups(extensions_config.get_enabled_mcp_servers(), groups)
+    except (McpTaskConfigurationError, StaleMCPBindingError):
         raise
     except Exception as e:
         logger.error(f"Failed to load MCP tools: {e}", exc_info=True)

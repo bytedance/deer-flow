@@ -6,7 +6,7 @@ import asyncio
 import logging
 import math
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -15,6 +15,7 @@ from app.channels.manager import DEFAULT_CHANNEL_MAX_CONCURRENCY, DEFAULT_CHANNE
 from app.channels.message_bus import DEFAULT_INBOUND_QUEUE_MAXSIZE, MessageBus
 from app.channels.runtime_config_store import merge_runtime_channel_configs
 from app.channels.store import ChannelStore, SqlChannelStore, resolve_channel_store
+from deerflow.config.channel_leader_lease_config import CHANNEL_LEADER_LEASE_KEY, ChannelLeaderLeaseConfig, channel_leader_lease_config
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,35 @@ def _channel_has_credentials(name: str, channel_config: dict[str, Any]) -> bool:
     return any(not isinstance(channel_config.get(key), bool) and channel_config.get(key) is not None and str(channel_config[key]).strip() for key in cred_keys)
 
 
+def enabled_transport_providers(app_config: Any) -> list[str]:
+    """Return the providers whose platform connection this deployment may open.
+
+    These are the channels the leader lease arbitrates: every registered
+    provider that is ``enabled`` under ``channels.*`` in config.yaml, plus every
+    provider a user may connect from the web UI (``channel_connections.<p>.enabled``
+    with ``channel_connections.enabled``), whose credentials arrive at runtime
+    and start the transport without a restart. GitHub is excluded: it receives
+    webhooks pushed to whichever instance the load balancer picks and opens no
+    platform connection of its own. ``model_extra`` / ``channel_connections``
+    may be absent on config doubles; both then contribute nothing.
+    """
+    names: set[str] = set()
+    extra = getattr(app_config, "model_extra", None) or {}
+    channels = extra.get("channels") if isinstance(extra, Mapping) else None
+    if isinstance(channels, Mapping):
+        for name, block in channels.items():
+            if name in _CHANNEL_REGISTRY and isinstance(block, Mapping) and block.get("enabled", False):
+                names.add(name)
+    connections = getattr(app_config, "channel_connections", None)
+    if connections is not None and getattr(connections, "enabled", False):
+        for name in _CHANNEL_REGISTRY:
+            provider = getattr(connections, name, None)
+            if provider is not None and getattr(provider, "enabled", False):
+                names.add(name)
+    names.discard("github")
+    return sorted(names)
+
+
 def _resolve_service_url(config: dict[str, Any], config_key: str, env_key: str, default: str) -> str:
     value = config.pop(config_key, None)
     if isinstance(value, str) and value.strip():
@@ -95,7 +125,8 @@ def _merge_channel_connection_runtime_config(channels_config: dict[str, Any], ap
     merge_runtime_channel_configs(channels_config, connection_config)
 
 
-def _make_connection_repo(connection_config: ChannelConnectionsConfig | None):
+def _make_connection_repo(connection_config: ChannelConnectionsConfig | None, *, credentials_cipher: Any | None = None):
+    """Build the connection repository; ``credentials_cipher`` encrypts per-connection credentials."""
     if connection_config is None or not getattr(connection_config, "enabled", False):
         return None
 
@@ -110,7 +141,7 @@ def _make_connection_repo(connection_config: ChannelConnectionsConfig | None):
     if session_factory is None:
         logger.warning("Channel connections are enabled but database persistence is not available")
         return None
-    return ChannelConnectionRepository(session_factory)
+    return ChannelConnectionRepository(session_factory, cipher=credentials_cipher)
 
 
 class ChannelService:
@@ -131,6 +162,11 @@ class ChannelService:
         store: ChannelStore | None = None,
     ) -> None:
         config = dict(channels_config or {})
+        # ``channels.leader_lease`` is a settings block, not a provider: take it
+        # out before the per-provider loops below and in ensure_ready_channels
+        # see it. The startup gate has already validated it; a direct caller
+        # (tests, embedded use) gets the same ValueError on a bad block.
+        self.leader_lease: ChannelLeaderLeaseConfig = channel_leader_lease_config({CHANNEL_LEADER_LEASE_KEY: config.pop(CHANNEL_LEADER_LEASE_KEY, None)})
         inbound_queue_maxsize = _resolve_positive_int(config, "inbound_queue_maxsize", DEFAULT_INBOUND_QUEUE_MAXSIZE)
         max_concurrency = _resolve_positive_int(config, "max_concurrency", DEFAULT_CHANNEL_MAX_CONCURRENCY)
         shutdown_grace_period_seconds = _resolve_non_negative_float(config, "shutdown_grace_period_seconds", DEFAULT_CHANNEL_SHUTDOWN_GRACE_PERIOD_SECONDS)
@@ -177,13 +213,16 @@ class ChannelService:
         app_config: AppConfig | None = None,
         *,
         get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
+        credentials_cipher: Any | None = None,
     ) -> ChannelService:
         """Create a ChannelService from the application config.
 
         ``get_stream_bridge`` is threaded straight through to the
         ``ChannelManager`` (see its docstring); it is optional so direct
         callers (including most tests) that don't need follow-up-buffer
-        auto-draining can omit it.
+        auto-draining can omit it. ``credentials_cipher`` is the Gateway's
+        ``DEER_FLOW_CREDENTIALS_KEY`` cipher for per-connection credentials;
+        without it stored credentials stay unavailable.
         """
         if app_config is None:
             from deerflow.config.app_config import get_app_config
@@ -200,7 +239,7 @@ class ChannelService:
         require_bound_identity = bool(connections_enabled and getattr(connection_config, "require_bound_identity", True))
         return cls(
             channels_config=channels_config,
-            connection_repo=_make_connection_repo(connection_config),
+            connection_repo=_make_connection_repo(connection_config, credentials_cipher=credentials_cipher),
             require_bound_identity=require_bound_identity,
             app_config=app_config,
             get_stream_bridge=get_stream_bridge,
@@ -245,6 +284,13 @@ class ChannelService:
         ready_status: dict[str, bool] = {}
         for name, channel_config in self._config.items():
             if not isinstance(channel_config, dict):
+                continue
+            if name not in _CHANNEL_REGISTRY:
+                # __init__ already popped the settings blocks (session, leader_lease),
+                # so an enabled dict here is almost certainly a misspelled provider
+                # key; say so instead of skipping it silently.
+                if name != CHANNEL_LEADER_LEASE_KEY and channel_config.get("enabled", False):
+                    logger.warning("Ignoring channels.%s: it is enabled but is not a registered provider (%s). Check the key spelling in config.yaml.", name, ", ".join(sorted(_CHANNEL_REGISTRY)))
                 continue
             if not channel_config.get("enabled", False):
                 if _channel_has_credentials(name, channel_config):
@@ -663,6 +709,7 @@ async def start_channel_service(
     app_config: AppConfig | None = None,
     *,
     get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
+    credentials_cipher: Any | None = None,
 ) -> ChannelService:
     """Create and start the global ChannelService from app config.
 
@@ -679,7 +726,7 @@ async def start_channel_service(
     # from_app_config resolves the channel store path (realpath) and reads the
     # runtime config files; keep that disk IO off the event loop.
     # asyncio.to_thread forwards both args and kwargs to the target callable.
-    service = await asyncio.to_thread(ChannelService.from_app_config, app_config, get_stream_bridge=get_stream_bridge)
+    service = await asyncio.to_thread(ChannelService.from_app_config, app_config, get_stream_bridge=get_stream_bridge, credentials_cipher=credentials_cipher)
     _channel_service = service
 
     async def rollback_failed_start() -> None:

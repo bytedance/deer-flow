@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 58
+config_version: 60
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -954,6 +954,14 @@ tools:
   #   # hl: en                       # Optional interface language
   #   # api_key: $SERPLY_API_KEY     # Optional if the env var is set
 
+  # News search tool (uses Webz.io News Search, requires WEBZ_API_KEY)
+  # Recent news coverage, not general web search. Replace the active web_search entry.
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.webz.tools:web_search_tool
+  #   max_results: 5  # Clamped to 1-100
+  #   # api_key: $WEBZ_API_KEY  # Otherwise read from WEBZ_API_KEY
+
   # Web search tool (uses Brave Search API, requires BRAVE_SEARCH_API_KEY)
   # Brave Search returns results from an independent index. Sign up at
   # https://brave.com/search/api/ to get a key. Unlike the DuckDuckGo
@@ -1046,6 +1054,18 @@ tools:
   #   contents_max_characters: 2000 # per-result content cap; 0 disables it
   #   # api_key: $SOFYA_API_KEY     # Optional explicit env-var reference
 
+  # Web search tool (uses You.com; YDC_API_KEY optional)
+  # You.com runs its own web index and returns extracted page snippets rather
+  # than a single meta description, so results are usable without a follow-up
+  # fetch. With no key it uses the keyless endpoint (free tier, currently 100
+  # searches/day); set YDC_API_KEY and it switches to the full Search API.
+  # Get a key at https://you.com/platform
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.youcom.tools:web_search_tool
+  #   max_results: 5                  # Clamped to 1-100 by You.com
+  #   # api_key: $YDC_API_KEY         # Omit to use the keyless free tier
+
   # Web fetch tool (uses Browserless - headless Chrome, self-hosted or cloud)
   # Browserless renders pages with a real headless Chrome, ideal for JavaScript-heavy
   # sites and SPAs. Deploy your own: https://github.com/browserless/browserless
@@ -1059,6 +1079,10 @@ tools:
   #   # token: $BROWSERLESS_TOKEN        # API token (required for Browserless Cloud; optional for self-hosted)
   #   timeout_s: 30                       # Request timeout in seconds
   #   # allow_private_addresses: false    # SSRF guard: keep false in production. Set true ONLY for intentional internal targets.
+  #   # network_isolation_confirmed: false # SSRF guard: the Browserless server resolves URLs, follows redirects,
+  #   #                                    # and loads subresources on its own side, so the target-URL guard above
+  #   #                                    # cannot be enforced end-to-end. Set true ONLY when its outbound network
+  #   #                                    # is isolated from private and cloud-metadata networks.
   #   # wait_for_event: "networkidle"    # Wait for a page event before returning (e.g. "load", "networkidle")
   #   # wait_for_timeout_ms: 2000        # Extra wait after page load in milliseconds
   #   # wait_for_selector: "article"     # CSS selector to wait for before returning
@@ -1089,6 +1113,10 @@ tools:
   #   token: $CRAWL4AI_TOKEN              # Bearer token; required by Crawl4AI >= 0.9
   #   timeout: 30                         # Request timeout in seconds
   #   # allow_private_addresses: false     # SSRF guard: keep false in production. Set true ONLY for intentional internal targets.
+  #   # network_isolation_confirmed: false # SSRF guard: the Crawl4AI server resolves URLs, follows redirects,
+  #   #                                    # and loads subresources on its own side, so the target-URL guard above
+  #   #                                    # cannot be enforced end-to-end. Set true ONLY when its outbound network
+  #   #                                    # is isolated from private and cloud-metadata networks.
   #   # filter: fit                       # Markdown filter: fit (default) | raw | bm25 | llm
 
   # Web capture tool (uses Browserless /screenshot to render a page as an artifact)
@@ -1113,6 +1141,11 @@ tools:
   #   # best_attempt: true                  # Continue with current page state if waits time out
   #   # allow_private_addresses: false      # SSRF guard: keep false in production. Set true ONLY to
   #   #                                     # capture internal/private targets (loopback, RFC1918, etc.)
+  #   # network_isolation_confirmed: false  # SSRF guard: the Browserless server resolves URLs, follows
+  #   #                                     # redirects, and loads subresources on its own side, so the
+  #   #                                     # target-URL guard above cannot be enforced end-to-end. Set true
+  #   #                                     # ONLY when its outbound network is isolated from private and
+  #   #                                     # cloud-metadata networks.
 
   # Agentic browser control (stateful navigate → observe → click/type loop).
   # Unlike web_fetch/web_capture (read-only, stateless), these tools keep a live
@@ -1214,6 +1247,11 @@ tools:
   #   use: deerflow.community.firecrawl.tools:web_fetch_tool
   #   # api_key: $FIRECRAWL_API_KEY
   #   # base_url: http://<host>:3002  # optional: self-hosted Firecrawl; no cloud API key needed
+  #   # allow_private_addresses: false      # SSRF guard: keep false in production. Set true ONLY for intentional internal targets.
+  #   # network_isolation_confirmed: false  # SSRF guard: the Firecrawl server resolves URLs, follows redirects,
+  #   #                                     # and loads subresources on its own side, so the target-URL guard above
+  #   #                                     # cannot be enforced end-to-end. Set true ONLY when its outbound network
+  #   #                                     # is isolated from private and cloud-metadata networks.
 
   # Web fetch tool (uses GroundRoute, requires GROUNDROUTE_API_KEY)
   # Fetches a page's extracted text via GroundRoute mode=page.
@@ -1234,6 +1272,10 @@ tools:
   #   # api_key: $CRW_API_KEY
   #   # base_url: https://fastcrw.com/api   # default cloud; set to e.g. http://localhost:3000 for self-host
   #   # allow_private_addresses: false      # SSRF guard: keep false in production. Set true ONLY for intentional internal targets.
+  #   # network_isolation_confirmed: false  # SSRF guard: the fastCRW server resolves URLs, follows redirects,
+  #   #                                     # and loads subresources on its own side, so the target-URL guard above
+  #   #                                     # cannot be enforced end-to-end. Set true ONLY when its outbound network
+  #   #                                     # is isolated from private and cloud-metadata networks.
 
   # Web fetch tool (uses Sofya, requires SOFYA_API_KEY)
   # Returns the page as markdown. Also handles PDF, DOCX and other documents.
@@ -2234,7 +2276,8 @@ summarization:
 #                         filesystems; peers would rebuild or delete each other's index).
 #   model               - LLM config for memory extraction: {provider, model, api_key, base_url,
 #                         temperature}. Omit all fields = no extraction (non-LLM ops still work).
-#   debounce_seconds    - Debounce wait before processing queued updates (default: 30)
+#   debounce_seconds    - Per-conversation quiet period (default: 30)
+#   max_wait_seconds    - Maximum debounce deferral; not a completion timeout (default: 300)
 #   max_facts           - Maximum facts to store (default: 100)
 #   fact_confidence_threshold - Minimum confidence for storing facts (default: 0.7)
 #   max_injection_tokens     - Token budget for memory injection (default: 2000)
@@ -2385,7 +2428,8 @@ memory:
     file_lock_timeout_seconds: 10 # per-scope cross-process advisory lock timeout (single-machine local filesystem)
     retrieval_adapter: fts5     # fts5 (default), empty to disable, or a dotted RetrievalPort factory(config)
     retrieval_index_path: ""    # empty = {storage_path}/.retrieval; relative = below storage_path; absolute as-is. Rebuildable derived data: keep it instance-local when Gateway instances share storage_path (the Helm chart uses an emptyDir)
-    debounce_seconds: 30 # Wait time before processing queued updates
+    debounce_seconds: 30 # Per-conversation quiet period before extraction is eligible
+    max_wait_seconds: 300 # Cap debounce deferral from first pending update; not an LLM/completion timeout
     # Backpressure cap on pending items. 0 = unlimited. At the cap, new
     # non-signal updates are rejected (QueueFull); signal updates are always
     # admitted so important memories are never shed.
@@ -2842,8 +2886,10 @@ mcp_tasks:
 # DEER_FLOW_MULTI_INSTANCE=1, which deploy tooling such as a Helm chart can
 # set from its replica count) startup requires database.backend: postgres, run_events.backend: db,
 # run_ownership.heartbeat_enabled: true and a Redis stream bridge, and refuses
-# an explicit sandbox.ownership.type: memory, process-local browser tools, and
-# scheduler.enabled: true without scheduler.multi_instance: true.
+# an explicit sandbox.ownership.type: memory, process-local browser tools,
+# scheduler.enabled: true without scheduler.multi_instance: true, and
+# channels.leader_lease.enabled: false while an IM channel other than GitHub
+# is enabled (see the IM Channels section below).
 # Restart required; apply the same value to every instance.
 deployment:
   multi_instance: false
@@ -3000,6 +3046,26 @@ run_ownership:
 #   # outer shutdown timeout remains the process-level bound for incomplete cleanup.
 #   shutdown_grace_period_seconds: 3
 #   #
+#   # Leader lease: with more than one Gateway instance, only one instance may
+#   # hold a provider's platform connection (Telegram rejects a second poller
+#   # with 409, Discord answers every message twice). The lease will be a row
+#   # per provider in the shared database, held by one instance and renewed on
+#   # a heartbeat; a crashed holder is replaced after lease_seconds +
+#   # grace_seconds, a cleanly stopped one within a heartbeat. The transport
+#   # ownership itself ships separately: in this version the section only drives
+#   # the startup gate, so keep ONE instance while channels are enabled.
+#   # Restart-required.
+#   leader_lease:
+#     # auto (default): on whenever the Gateway sees a multi-process signal
+#     # (GATEWAY_WORKERS / WEB_CONCURRENCY > 1, deployment.multi_instance: true
+#     # or DEER_FLOW_MULTI_INSTANCE=1), off on a single instance. true: always
+#     # on. false: never -- a multi-process deployment with an IM channel other
+#     # than GitHub enabled then refuses to start. auto/true are reserved until
+#     # the lease ships; they do not yet stop every instance from connecting.
+#     enabled: auto
+#     lease_seconds: 30   # validity of a held lease; renewed every lease_seconds // 3
+#     grace_seconds: 10   # extra time before a peer may take an expired lease
+#   #
 #   # Docker Compose note:
 #   # If channels run inside the gateway container, use container DNS names instead
 #   # of localhost, for example:
@@ -3023,7 +3089,7 @@ run_ownership:
 #     enabled: false
 #     app_id: $QQ_APP_ID
 #     client_secret: $QQ_CLIENT_SECRET
-#     allowed_users: []  # QQ OpenIDs, not numeric QQ account numbers; empty allows all
+#     allowed_users: []  # QQ OpenIDs, not numeric QQ account numbers; empty allows all; a single ID is one entry; unparseable non-empty lists fail closed
 #     sandbox: false    # REST sandbox host only; console sandbox membership is separate
 #
 #   feishu:
@@ -3032,6 +3098,11 @@ run_ownership:
 #     app_secret: $FEISHU_APP_SECRET
 #     # domain: https://open.feishu.cn       # China (default)
 #     # domain: https://open.larksuite.com   # International
+#     # card_interaction_enabled: false      # render option clarifications as clickable button
+#                                            # cards; requires subscribing card.action.trigger
+#                                            # under the console's callback-configuration tab
+#                                            # (separate from event subscriptions) and
+#                                            # publishing a new app version
 #
 #   slack:
 #     enabled: false
@@ -3140,7 +3211,8 @@ run_ownership:
 #                                           # DENY-BY-DEFAULT (unlike other channels): empty
 #                                           # means nobody, and DeerFlow logs a startup warning.
 #     require_mention: true                 # @mention needed in channels
-#     mention_free_channels: []             # channel UUIDs that respond to every message
+#     mention_free_channels: []             # Channel UUIDs that respond to every message:
+#                                           # one UUID (quoted or unquoted) or a YAML list.
 
 # ============================================================================
 # Guardrails Configuration
