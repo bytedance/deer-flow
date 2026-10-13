@@ -46,3 +46,59 @@ async def test_workspace_schema_upgrade_preserves_legacy_data(tmp_path):
             assert (await conn.execute(text("SELECT COUNT(*) FROM threads_meta"))).scalar_one() == 2
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_explicit_personal_backfill_is_idempotent_and_quarantines_conflicts(tmp_path):
+    import importlib
+    import importlib.util
+
+    from deerflow.persistence.base import Base
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'backfill.db'}")
+    try:
+        await bootstrap.bootstrap_schema(engine, backend="sqlite")
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO users (id,email,system_role,created_at,needs_setup,token_version) VALUES ('owner','owner@example.invalid','user',CURRENT_TIMESTAMP,FALSE,0),('other','other@example.invalid','user',CURRENT_TIMESTAMP,FALSE,0)"
+                )
+            )
+            await conn.execute(
+                text(
+                    "INSERT INTO threads_meta (thread_id,user_id,status,metadata_json,created_at,updated_at) VALUES ('owned','owner','idle','{}',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP),"
+                    "('orphan',NULL,'idle','{}',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"
+                )
+            )
+            await conn.execute(text("INSERT INTO projects (id,user_id,name,instructions,presentation,status,created_at,updated_at) VALUES ('foreign-project','other','Legacy research','','{}','active',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"))
+            await conn.execute(
+                text(
+                    "INSERT INTO project_documents (id,project_id,user_id,name,stored_relpath,sha256,size_bytes,created_at,updated_at) VALUES ('conflicting-doc','foreign-project','owner','source.txt',"
+                    "'retained/source.txt','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',14,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"
+                )
+            )
+        module_name = "deerflow.persistence.workspaces.backfill"
+        assert importlib.util.find_spec(module_name) is not None, "explicit ownership backfill is not implemented"
+        backfill = importlib.import_module(module_name)
+        async with engine.begin() as conn:
+            plan = await conn.run_sync(backfill.plan_personal_backfill)
+            assert len(plan["users"]) == 2
+            assert (await conn.execute(text("SELECT COUNT(*) FROM workspaces"))).scalar_one() == 0, "planning mutated tenant state"
+            assert {item["id"] for item in plan["quarantined"]} == {"orphan", "conflicting-doc"}
+            receipt = await conn.run_sync(backfill.apply_personal_backfill)
+            assert receipt["created_workspaces"] == 2
+            assert receipt["assigned_resources"] == 2
+        async with engine.begin() as conn:
+            second = await conn.run_sync(backfill.apply_personal_backfill)
+            assert second["created_workspaces"] == 0
+            assert second["assigned_resources"] == 0
+            assert (await conn.execute(text("SELECT COUNT(*) FROM workspaces"))).scalar_one() == 2
+            assert (await conn.execute(text("SELECT COUNT(*) FROM workspace_memberships WHERE role='owner' AND status='active'"))).scalar_one() == 2
+            personal = (await conn.execute(text("SELECT id FROM workspaces WHERE personal_user_id='owner'"))).scalar_one()
+            assert (await conn.execute(text("SELECT user_id,workspace_id FROM threads_meta WHERE thread_id='owned'"))).one() == ("owner", personal)
+            assert (await conn.execute(text("SELECT workspace_id FROM threads_meta WHERE thread_id='orphan'"))).scalar_one() is None
+            assert (await conn.execute(text("SELECT workspace_id,stored_relpath FROM project_documents WHERE id='conflicting-doc'"))).one() == (None, "retained/source.txt")
+            assert (await conn.execute(text("SELECT email_verified_at FROM users WHERE id='owner'"))).scalar_one() is None
+            assert set(Base.metadata.tables) <= await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
+    finally:
+        await engine.dispose()

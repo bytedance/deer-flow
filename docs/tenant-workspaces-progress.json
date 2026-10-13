@@ -26,7 +26,7 @@
   },
   "remaining": [
     "M0 real SQL/HTTP fixture depends on M1/M2; resource assertions depend on M3",
-    "M1 personal backfill, executor schema, offline migration commands and PostgreSQL verification",
+    "M1 executor schema and ledger backfill, guarded migration CLI, PostgreSQL verification",
     "M2 through M11 remain unimplemented"
   ],
   "static_checks": [
@@ -65,5 +65,22 @@
       "backend": "isolated SQLite inside Shanghai Jenkins container"
     },
     "scope": "Real Alembic 0035 upgrade with seeded user and owned/orphan threads; DDL does not assign workspace ownership or mark email verified. PostgreSQL, empty hybrid bootstrap and controlled backfill still pending."
+  },
+  "personal_backfill": {
+    "red": {
+      "build": 7,
+      "result": "FAILURE",
+      "archive_sha256": "b697c8d8df4b2b78b8e87eef94041a8c714c4bcb69e805a54806837c5af1dd35",
+      "reason": "explicit ownership backfill absent after successful schema setup"
+    },
+    "green": {
+      "build": 8,
+      "result": "SUCCESS",
+      "archive_sha256": "be93680a757978170ae035eaccb201e7212b45d31e6e866ab2080641537f3053",
+      "tests_passed": 2,
+      "backend": "isolated SQLite inside Shanghai Jenkins container"
+    },
+    "source_sha256": "af206ce2bbc1bc6934fb5bc7927ee9b0cf8ec9d359c702051c05e4d4e789c3c5",
+    "scope": "Native metadata read-only plan, transactional personal backfill, repeated execution, unknown thread and mismatched project-document quarantine; source content retained and email verification unchanged. Caller maintenance fencing and backup receipts are prerequisites, not implemented here."
   }
 }

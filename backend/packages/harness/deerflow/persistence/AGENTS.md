@@ -37,3 +37,11 @@ channel_connections.workspace_id is a provider workspace identifier, not the
 DeerFlow tenant; do not reuse it as tenant authority. This schema alone does not
 enable tenant access. Controlled backfill, both database receipts and admission
 coverage remain required before multi-tenant activation.
+
+`workspaces/backfill.py` is an explicit offline native metadata operation, never
+startup recovery. `plan_personal_backfill` is read-only; apply requires a caller
+transaction, stopped writers and coherent operator backups. It serializes its
+maintenance path, refuses after team provisioning, and never repairs unknown or
+contradictory owners. Parent resources precede children; source data remains.
+Plans/quarantine identifiers belong in private receipts, public logs only counts.
+Native backfill alone does not satisfy executor or NAS rollout prerequisites.
