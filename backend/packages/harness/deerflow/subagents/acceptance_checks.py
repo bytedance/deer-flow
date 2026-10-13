@@ -535,6 +535,11 @@ def _parse_csv_columns(criterion: str) -> list[str] | None:
         return None
     if not isinstance(columns, list) or not columns or any(not isinstance(column, str) or not column for column in columns):
         return None
+    try:
+        for column in columns:
+            column.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
     return columns if len(set(columns)) == len(columns) else None
 
 
@@ -567,21 +572,25 @@ def _check_csv_header(base: AcceptanceLeaf, runtime: Any, resolved: str, thread_
     text = content.decode("utf-8-sig", errors="surrogateescape")
     stream = io.StringIO(text, newline="")
     complete = len(content) == probed_size
+    malformed = False
     try:
         header = next(csv.reader(stream, strict=True), [])
     except csv.Error as exc:
         if "field larger than field limit" in str(exc):
             base["detail"] = "CSV parser resource limit; header unverified"
             return base
-        base["checked"] = complete and len(content) <= _FILE_CONTENT_READ_CAP_BYTES
-        base["detail"] = "invalid CSV header" if base["checked"] else "CSV header incomplete within the read cap"
-        return base
+        if str(exc) == "unexpected end of data" and not complete:
+            base["detail"] = "CSV header incomplete within the read cap"
+            return base
+        # A syntax error already observed in the header cannot be repaired by later data rows.
+        malformed = True
+        header = []
     except MemoryError:
         base["detail"] = "CSV parser resource limit; header unverified"
         return base
     consumed = text[: stream.tell()]
     header_bytes = len(consumed.encode("utf-8", errors="surrogateescape")) + (3 if content.startswith(b"\xef\xbb\xbf") else 0)
-    if not complete and not consumed.endswith(("\r", "\n")):
+    if not malformed and not complete and not consumed.endswith(("\r", "\n")):
         base["detail"] = "CSV header incomplete within the read cap"
         return base
     if header_bytes > _FILE_CONTENT_READ_CAP_BYTES:
@@ -589,6 +598,10 @@ def _check_csv_header(base: AcceptanceLeaf, runtime: Any, resolved: str, thread_
         return base
     if time.monotonic() >= deadline:
         base["detail"] = "CSV header deadline exceeded"
+        return base
+    if malformed:
+        base["checked"] = True
+        base["detail"] = "invalid CSV header"
         return base
     try:
         consumed.encode("utf-8")

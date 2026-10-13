@@ -75,6 +75,54 @@ def test_admission_uses_csv_path():
     assert checks.parse_file_criterion('file:report.csv csv-columns:["id"]') == ("file_csv_columns", "report.csv")
 
 
+@pytest.mark.parametrize("column", ["\ud800", "\udfff", "id\ud800"])
+def test_surrogate_columns_are_invalid_before_file_access(check_csv, column):
+    probe = Mock(side_effect=AssertionError("invalid criteria must not access files"))
+    verdict = check_csv(b"id,name\n", [column], size_prober=probe)
+    assert verdict["leaves"][0]["checked"] is False
+    json.dumps(verdict, ensure_ascii=False).encode("utf-8")
+    probe.assert_not_called()
+
+
+def test_escaped_surrogate_pair_is_a_valid_unicode_column(check_csv):
+    assert check_csv("id,\U0001f600\n".encode(), ["\U0001f600"])["all_hold"] is True
+
+
+@pytest.mark.parametrize("header", [b'"id"x,name\n', b'"line\nbreak"x,name\r\n', b'"id"x,name\r'])
+@pytest.mark.parametrize("large_body", [False, True])
+def test_definite_malformed_header_is_negative_regardless_of_body(check_csv, header, large_body):
+    leaf = check_csv(header + (b"x" * 60_000 if large_body else b""))["leaves"][0]
+    assert (leaf["checked"], leaf["holds"]) == (True, False)
+    assert leaf["detail"] == "invalid CSV header"
+
+
+def test_truncated_quoted_header_remains_unverified(check_csv):
+    leaf = check_csv(b'"id\n' + b"x" * 60_000)["leaves"][0]
+    assert (leaf["checked"], leaf["holds"]) == (False, False)
+    assert leaf["detail"] == "CSV header incomplete within the read cap"
+
+
+@pytest.mark.parametrize("size,checked", [(50_000, True), (50_001, False)])
+def test_malformed_header_respects_byte_budget(check_csv, size, checked):
+    leaf = check_csv(b'"id"x,' + b"x" * (size - 7) + b"\n" + b"x" * 60_000)["leaves"][0]
+    assert (leaf["checked"], leaf["holds"]) == (checked, False)
+
+
+def test_malformed_header_respects_parser_deadline(check_csv, monkeypatch):
+    clock = Mock(return_value=0)
+    monkeypatch.setattr(checks.time, "monotonic", clock)
+    reader = checks.csv.reader
+
+    def delayed_parse(*args, **kwargs):
+        clock.return_value = 6
+        return reader(*args, **kwargs)
+
+    monkeypatch.setattr(checks.csv, "reader", delayed_parse)
+    leaf = check_csv(b'"id"x,name\n')["leaves"][0]
+    assert (leaf["checked"], leaf["holds"]) == (False, False)
+    assert leaf["detail"] == "CSV header deadline exceeded"
+
+
 def test_revoked_access_prevents_metadata(check_csv, monkeypatch):
     from deerflow.sandbox.exceptions import SandboxError
 
@@ -176,8 +224,9 @@ def test_local_read_rechecks_authorization(check_csv, monkeypatch):
         (b"", ["id"], True, False),
         (b"id,name\n" + b"x" * 60_000, ["id", "name"], True, True),
         (b'"' + b"x" * 50_001, ["id"], False, False),
+        (b'"id"x,name\n' + b"x" * 60_000, ["id"], True, False),
     ],
-    ids=["bom", "multiline", "duplicate", "empty", "large-body", "oversized-header"],
+    ids=["bom", "multiline", "duplicate", "empty", "large-body", "oversized-header", "malformed-header-large-body"],
 )
 def test_remote_csv_uses_real_bounded_transport(tmp_path, monkeypatch, content, columns, checked, holds):
     import shlex

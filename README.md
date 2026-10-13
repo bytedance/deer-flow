@@ -2098,15 +2098,17 @@ For file acceptance criteria, an empty regular file in the shared workspace can 
 
 To require CSV header columns, set a `task` or `batch_task` item's criterion to
 `file:../outputs/report.csv csv-columns:["id","name"]`. The JSON array must contain
-unique, nonempty column names. Names match exactly (case and whitespace included),
-in any order; extra columns are allowed. Checks read only a bounded prefix and parse
+unique, nonempty, UTF-8-encodable column names. Names match exactly (case and
+whitespace included), in any order; extra columns are allowed. Checks read only a bounded prefix and parse
 the first comma-separated logical record, supporting double-quoted fields, doubled
 quotes, embedded newlines, and an optional UTF-8 BOM. Data rows are not validated.
-Empty files, missing required columns, invalid UTF-8 headers, and empty or duplicate
-header names return `does not hold`. Headers over **50,000 bytes**, incomplete reads,
+Empty files, missing required columns, malformed or invalid UTF-8 headers, and
+empty or duplicate header names return `does not hold`. Headers over **50,000 bytes**, incomplete reads,
 invalid criteria, unavailable workspace access, or exhausted read budgets return
 `UNVERIFIED`. A large file can satisfy the check when its complete header fits the
-budget. Reads use the same authorized, scoped transport as JSON checks below:
+budget. A definite syntax error within that header remains a checked negative
+regardless of later data rows; truncated quoting remains `UNVERIFIED`.
+Reads use the same authorized, scoped transport as JSON checks below:
 50,001 bytes maximum; remote reads have a 5-second command timeout (10 seconds for
 the provider call). Local reads and parsing share a cooperative 5-second deadline;
 remote parsing has its own 5-second deadline starting after the read returns.
