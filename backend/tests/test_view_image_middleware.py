@@ -367,13 +367,14 @@ class TestCreateImageDetailsMessage:
 
         assert reads == ["/new.png", "/middle.png"]
         assert [block["type"] for block in blocks].count("image_url") == 2
-        assert "1 older image omitted" in str(blocks)
+        assert "Omitted viewed images: 1." in str(blocks)
 
-    def test_skips_oversized_image_without_reading_it(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("omitted_count", [1, 2])
+    def test_skips_oversized_image_without_reading_it(self, tmp_path, monkeypatch, omitted_count):
         from deerflow.agents.middlewares import view_image_middleware as module
 
         monkeypatch.setattr(module, "_MAX_CONTEXT_BASE64_BYTES", 8)
-        viewed = {"/large.png": _make_viewed_image(tmp_path, "large.png", data=b"1234567")}
+        viewed = {f"/large-{i}.png": _make_viewed_image(tmp_path, f"large-{i}.png", data=b"1234567") for i in range(omitted_count)}
         monkeypatch.setattr(
             ViewImageMiddleware,
             "_read_image_as_data_url",
@@ -381,7 +382,38 @@ class TestCreateImageDetailsMessage:
         )
         blocks = ViewImageMiddleware()._create_image_details_message({"viewed_images": viewed})
         assert all(block["type"] != "image_url" for block in blocks)
-        assert "1 older image omitted" in str(blocks)
+        assert f"Omitted viewed images: {omitted_count}." in str(blocks)
+
+    def test_omission_notice_does_not_assume_omitted_image_is_older(self, tmp_path, monkeypatch):
+        from deerflow.agents.middlewares import view_image_middleware as module
+
+        monkeypatch.setattr(module, "_MAX_CONTEXT_BASE64_BYTES", 8)
+        viewed = {
+            "/old.png": _make_viewed_image(tmp_path, "old.png", data=b"123456"),
+            "/new.png": _make_viewed_image(tmp_path, "new.png", data=b"1234567"),
+        }
+        blocks = ViewImageMiddleware()._create_image_details_message({"viewed_images": viewed}, host_path_allowed=lambda _, actual: Path(actual).is_relative_to(tmp_path))
+        urls = [block["image_url"]["url"] for block in blocks if block["type"] == "image_url"]
+        assert [base64.b64decode(url.split(",", 1)[1]) for url in urls] == [b"123456"]
+        assert blocks[1] == {"type": "text", "text": "Omitted viewed images: 1. Call view_image again to inspect a specific image."}
+
+    def test_failed_reads_consume_slots_before_readable_older_image(self, tmp_path, monkeypatch):
+        viewed = {"/old.png": _make_viewed_image(tmp_path, "old.png")}
+        viewed.update({f"/stale-{i}.png": {"mime_type": "image/png", "size": 1} for i in range(4)})
+        middleware = ViewImageMiddleware()
+        original_read = middleware._read_image_as_data_url
+        reads = []
+
+        def record_read(state, image_path, *args, **kwargs):
+            reads.append(image_path)
+            return original_read(state, image_path, *args, **kwargs)
+
+        monkeypatch.setattr(middleware, "_read_image_as_data_url", record_read)
+        blocks = middleware._create_image_details_message({"viewed_images": viewed}, host_path_allowed=lambda _, actual: Path(actual).is_relative_to(tmp_path))
+        assert reads == [f"/stale-{i}.png" for i in reversed(range(4))]
+        assert sum("file unavailable or changed" in block.get("text", "") for block in blocks) == 4
+        assert all(block["type"] != "image_url" for block in blocks)
+        assert "Omitted viewed images: 1." in str(blocks)
 
     def test_returns_placeholder_when_no_images(self):
         mw = ViewImageMiddleware()

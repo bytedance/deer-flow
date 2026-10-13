@@ -348,6 +348,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             blob_ref = image_data.get("blob_ref")
 
             estimated_bytes = 4 * ((expected_size + 2) // 3) if isinstance(expected_size, int) and expected_size >= 0 else _MAX_CONTEXT_BASE64_BYTES + 1
+            # Failed reads also consume slots, bounding potentially remote read attempts.
             if len(selected) >= _MAX_CONTEXT_IMAGES or encoded_bytes + estimated_bytes > _MAX_CONTEXT_BASE64_BYTES:
                 omitted += 1
                 continue
@@ -379,7 +380,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             selected.append(blocks)
 
         if omitted:
-            content_blocks.append({"type": "text", "text": f"{omitted} older image omitted from this request; call view_image again to inspect it."})
+            content_blocks.append({"type": "text", "text": f"Omitted viewed images: {omitted}. Call view_image again to inspect a specific image."})
         for blocks in reversed(selected):
             content_blocks.extend(blocks)
 
