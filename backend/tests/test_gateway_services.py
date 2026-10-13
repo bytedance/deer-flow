@@ -106,6 +106,7 @@ async def test_sse_consumer_emits_gap_without_cancelling_run():
     evicted_id = bridge._streams[record.run_id].events[0].id
     await bridge.publish(record.run_id, "event-2", {"step": 2})
     await bridge.publish(record.run_id, "event-3", {"step": 3})
+    await bridge.publish(record.run_id, "event-4", {"step": 4})
     retained = bridge._streams[record.run_id].events
 
     worker_started = asyncio.Event()

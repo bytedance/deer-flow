@@ -376,6 +376,7 @@ async def test_evicted_last_event_id_yields_gap_before_partial_replay():
     stream = bridge._streams[run_id]
     e1_id = stream.events[0].id
     await bridge.publish(run_id, "e3", {"step": 3})  # trims e1
+    await bridge.publish(run_id, "e4", {"step": 4})  # trims the unread e2
     await bridge.publish_end(run_id)
 
     received = []
@@ -1153,11 +1154,11 @@ async def test_resolve_start_offset_matches_linear_scan():
     ts, _, seq_text = stream.events[0].id.rpartition("-")
     foreign_id = f"{int(ts) + 1}-{seq_text}"
 
-    candidates = [None, "garbage", "1718000000000-x", "999999-999999", foreign_id, *ids[6:]]
+    candidates = [None, "garbage", "1718000000000-x", "999999-999999", foreign_id, *ids[5:]]
     for eid in candidates:
         assert bridge._resolve_start_offset(stream, eid) == _linear_resolve(stream, eid), eid
 
-    for evicted_id in ids[:6]:
+    for evicted_id in ids[:5]:
         assert bridge._resolve_start_offset(stream, evicted_id) == StreamGap(
             requested_event_id=evicted_id,
             earliest_available_event_id=stream.events[0].id,

@@ -22,6 +22,7 @@ class _RunStream:
     condition: asyncio.Condition = field(default_factory=asyncio.Condition)
     ended: bool = False
     start_offset: int = 0
+    last_evicted_event_id: str | None = None
 
 
 class MemoryStreamBridge(StreamBridge):
@@ -75,14 +76,15 @@ class MemoryStreamBridge(StreamBridge):
     def _resolve_start_offset(self, stream: _RunStream, last_event_id: str | None) -> int | StreamGap:
         if last_event_id is None:
             return stream.start_offset
+        if last_event_id == stream.last_evicted_event_id:
+            return stream.start_offset
 
         # Event ids embed a per-run, monotonically increasing ``seq`` that equals
         # the event's absolute offset, so locate the event by arithmetic in O(1)
         # rather than scanning the retained buffer. Retained ids are verified at
-        # the computed index. Once an id is below the retained watermark there is
-        # nothing left to verify its timestamp against, so even a numeric foreign
-        # id takes the conservative gap path; reloading durable state is safer
-        # than silently claiming a complete replay. Unknown ids at or above the
+        # the computed index. The exact last evicted id is a known predecessor
+        # whose successors are all retained. Other ids below the watermark cannot
+        # be verified and take the conservative gap path. Unknown ids at or above the
         # watermark keep the legacy replay-from-earliest behavior.
         seq = self._parse_event_seq(last_event_id)
         if seq is not None:
@@ -112,6 +114,7 @@ class MemoryStreamBridge(StreamBridge):
             stream.events.append(entry)
             if len(stream.events) > self._maxsize:
                 overflow = len(stream.events) - self._maxsize
+                stream.last_evicted_event_id = stream.events[overflow - 1].id
                 del stream.events[:overflow]
                 stream.start_offset += overflow
             stream.condition.notify_all()
