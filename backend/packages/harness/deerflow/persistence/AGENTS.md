@@ -51,3 +51,19 @@ after completed personal backfill and exact personal owner membership checks.
 It excludes quarantine, binds each run to its matching thread and produces a
 private versioned DTO for executor attribution. Keep writers fenced across both
 database phases; this export is not live membership authorization.
+
+`workspaces/sql.py` uses the native async session factory for personal/team
+provisioning and live membership reads. Tenant mode requires persistent SQL;
+the disabled factory returns None and does not create an ephemeral authority.
+Provisioning and membership access require active, verified native accounts.
+Personal IDs share the offline backfill namespace. Team create idempotency is
+bound to actor, request key and name; replays recheck live membership.
+Membership mutations lock the workspace first (SQLite BEGIN IMMEDIATE; Postgres
+FOR UPDATE). Role changes increment membership version; owner transfer flushes
+the prior owner's downgrade before promotion in one transaction, preserving the
+active-owner index. Direct last-owner removal/demotion is refused. Reads filter
+workspace/member/account state in SQL and do not confer platform-admin bypass.
+This repository is not yet Gateway wiring: callers must authenticate actors,
+apply native credential scopes and enforce recent reauthentication for transfer.
+Internal add_member is for managed/invitation services, not a public invite bypass.
+Pending HTTP entrypoints and revocation effects remain separate acceptance gates.
