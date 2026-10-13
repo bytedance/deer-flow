@@ -160,5 +160,30 @@
       "backend/packages/ecs-executor/ecs_executor/tenant_backfill.py": "50deb8c76ceff56fb7905d09f1ddba5e6fb61e43b7e523ba17f0f262f786d5ae",
       "backend/tests/test_workspace_executor_migration.py": "d517c52887deef72866bf2b58b61b811e622d533ef7937bb460bd5c38135edb5"
     }
+  },
+  "native_ownership_export": {
+    "red": {
+      "job": "deerflow-tenant-contract-m0",
+      "build": 13,
+      "result": "FAILURE",
+      "archive_sha256": "57a3597f1d2b52eb132b40b47bc3295a63741f7a801e5e716016eaded74a0bda",
+      "reason": "production native ownership export absent",
+      "failed": 1,
+      "skipped": 1
+    },
+    "green": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 4,
+      "result": "SUCCESS",
+      "archive_sha256": "3fab6bc25d9e7cec93a1cee0818a08d385b9584b6a590dc835e7b3b5c4048407",
+      "tests_passed": 6,
+      "duration_seconds": 19.92
+    },
+    "scope": "Real native database ownership export matches explicit oracle on SQLite/PostgreSQL, excludes ownerless thread and conflicting run, leaves them unmodified. Export reads identity metadata only and requires completed personal backfill. Guarded operator CLI, coherent two-database/NAS receipts and live authorization remain pending.",
+    "cleanup": "Exact owned-label inventories empty after terminal SUCCESS",
+    "source_sha256": {
+      "backend/packages/harness/deerflow/persistence/workspaces/backfill.py": "cfe69a578d731c9afcc651824ff2b766e79844005d88bbf4837d37c05992a5a3",
+      "backend/tests/test_workspace_executor_migration.py": "8429b15999f98636ca883296d11048b29bb134c97476deec1bf4e963e91e1240"
+    }
   }
 }

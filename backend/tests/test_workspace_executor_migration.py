@@ -130,6 +130,8 @@ def native_engine(executor_engine, tmp_path):
             conn.execute(sa.insert(UserRow).values(id="owner", email="owner@example.invalid"))
             conn.execute(sa.insert(ThreadMetaRow).values(thread_id="thread", user_id="owner", incarnation="epoch"))
             conn.execute(sa.insert(RunRow).values(run_id="run", thread_id="thread", user_id="owner", status="success"))
+            conn.execute(sa.insert(ThreadMetaRow).values(thread_id="orphan", user_id=None))
+            conn.execute(sa.insert(RunRow).values(run_id="foreign-run", thread_id="thread", user_id="intruder", status="success"))
         yield engine
     finally:
         engine.dispose()
@@ -159,6 +161,12 @@ def test_paired_attribution_preserves_payloads_and_unknown_physical_work(executo
         "threads": [{"user_id": "owner", "thread_id": "thread", "incarnation": "epoch", "workspace_id": workspace}],
         "runs": [{"user_id": "owner", "thread_id": "thread", "incarnation": "epoch", "run_id": "run", "workspace_id": workspace}],
     }
+    from deerflow.persistence.workspaces import backfill as native_backfill
+
+    assert hasattr(native_backfill, "export_native_workspace_bindings"), "production native ownership export is not implemented"
+    with native_engine.connect() as conn:
+        assert native_backfill.export_native_workspace_bindings(conn) == bindings
+        assert conn.execute(sa.text("SELECT workspace_id FROM runs WHERE run_id='foreign-run'")).scalar_one() is None
     upgrade_schema(executor_engine)
     originals = {
         "known-B": {"kind": "B", "user_id": "owner", "thread_id": "thread", "incarnation": "epoch", "run_id": "run", "state": "uncertain", "physical_stopped": False, "start_intent": True, "spec_digest": "retain-B"},

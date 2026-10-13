@@ -555,5 +555,6 @@ unknown or conflicting records remain quarantined. Apply changes only indexed
 scope and top-level JSON scope, preserving job versions, physical state, native
 snapshots and affinity node selection. It never authorizes runtime access or
 releases physical capacity. The caller must stop writers and retain coherent
-backups plus both database receipts. Production export and a guarded operator
-CLI are still required; hand-authored bindings are not a deployment procedure.
+backups plus both database receipts. Native `export_native_workspace_bindings` now supplies the metadata-only DTO.
+A guarded operator CLI and paired migration receipts are still required;
+hand-authored bindings are not a deployment procedure.

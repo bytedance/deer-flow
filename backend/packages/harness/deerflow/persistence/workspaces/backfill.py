@@ -135,3 +135,39 @@ def apply_personal_backfill(connection: Connection) -> dict:
             raise RuntimeError("ownership changed during personal backfill; stop writers and retry from backup receipt")
         assigned += 1
     return {"revision": BACKFILL_REVISION, "created_workspaces": created, "assigned_resources": assigned, "quarantined": plan["quarantined"]}
+
+
+def export_native_workspace_bindings(connection: Connection) -> dict:
+    """Export metadata-only identities after explicit personal backfill.
+
+    This private migration DTO is not runtime authorization. The caller keeps
+    native writers fenced while attributing the paired executor database.
+    Unknown/conflicting resources never acquire ownership through this export.
+    """
+    plan = plan_personal_backfill(connection)
+    if any(not user["existing"] for user in plan["users"]) or plan["resources"]:
+        raise RuntimeError("native ownership export requires completed personal backfill")
+    scopes = {user["user_id"]: user["workspace_id"] for user in plan["users"]}
+    for user, workspace in scopes.items():
+        members = connection.execute(select(WorkspaceMembershipRow.user_id, WorkspaceMembershipRow.role, WorkspaceMembershipRow.status).where(WorkspaceMembershipRow.workspace_id == workspace)).tuples().all()
+        if members != [(user, "owner", "active")]:
+            raise RuntimeError("native ownership export has incompatible personal membership")
+    quarantined = {(item["table"], item["id"]) for item in plan["quarantined"]}
+    metadata = MetaData()
+    threads = Table("threads_meta", metadata, autoload_with=connection)
+    runs = Table("runs", metadata, autoload_with=connection)
+    thread_rows = []
+    thread_bindings = {}
+    for row in connection.execute(select(threads.c.thread_id, threads.c.user_id, threads.c.incarnation, threads.c.workspace_id).order_by(threads.c.thread_id)):
+        if ("threads_meta", row.thread_id) in quarantined or row.workspace_id is None or scopes.get(row.user_id) != row.workspace_id:
+            continue
+        binding = {"user_id": row.user_id, "thread_id": row.thread_id, "incarnation": row.incarnation, "workspace_id": row.workspace_id}
+        thread_rows.append(binding)
+        thread_bindings[row.thread_id] = binding
+    run_rows = []
+    for row in connection.execute(select(runs.c.run_id, runs.c.thread_id, runs.c.user_id, runs.c.workspace_id).order_by(runs.c.run_id)):
+        parent = thread_bindings.get(row.thread_id)
+        if ("runs", row.run_id) in quarantined or parent is None or row.workspace_id != parent["workspace_id"] or row.user_id != parent["user_id"]:
+            continue
+        run_rows.append({**parent, "run_id": row.run_id})
+    return {"native_revision": BACKFILL_REVISION, "threads": thread_rows, "runs": run_rows}

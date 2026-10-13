@@ -45,3 +45,9 @@ maintenance path, refuses after team provisioning, and never repairs unknown or
 contradictory owners. Parent resources precede children; source data remains.
 Plans/quarantine identifiers belong in private receipts, public logs only counts.
 Native backfill alone does not satisfy executor or NAS rollout prerequisites.
+
+`export_native_workspace_bindings` reads only thread/run ownership metadata
+after completed personal backfill and exact personal owner membership checks.
+It excludes quarantine, binds each run to its matching thread and produces a
+private versioned DTO for executor attribution. Keep writers fenced across both
+database phases; this export is not live membership authorization.
