@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from enum import Enum
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -945,3 +946,34 @@ async def test_batch_stop_cleanup_failure_is_reported_to_retry(monkeypatch: pyte
         await service.stop()
     assert raised.value is cleanup_error
     assert service._stop_cleanup_task is cleanup_task
+
+
+@pytest.mark.asyncio
+async def test_release_logs_a_failure_on_the_subagent_loop(monkeypatch, caplog) -> None:
+    # The release runs as a concurrent future, which never reports an
+    # exception nobody retrieved; a failing release would leak its entry
+    # without a trace.
+    registry = _Registry()
+    registry.results["execution-1"] = SimpleNamespace(status=FakeStatus.RUNNING)
+    _install_registry(monkeypatch, registry)
+    loop = asyncio.get_running_loop()
+    scheduled = []
+
+    def subagent_loop(coro):
+        scheduled.append(asyncio.run_coroutine_threadsafe(coro, loop))
+        return scheduled[-1]
+
+    def registry_unavailable(_execution_id):
+        raise RuntimeError("registry lock poisoned")
+
+    monkeypatch.setattr(service_module, "run_on_isolated_subagent_loop", subagent_loop)
+    service = SubagentBatchService(repository=SimpleNamespace(), config=SubagentBatchesConfig(), runtime_config=SubagentRuntimeConfig())
+
+    service._release_execution("execution-1")
+    monkeypatch.setattr(service_module, "get_background_task_result", registry_unavailable)
+    with caplog.at_level(logging.ERROR, logger=service_module.__name__):
+        await _wait_until(lambda: scheduled[0].done() and not service_module._pending_releases)
+
+    failures = [record for record in caplog.records if "execution-1" in record.getMessage()]
+    assert len(failures) == 1 and failures[0].levelno == logging.ERROR
+    assert str(failures[0].exc_info[1]) == "registry lock poisoned"

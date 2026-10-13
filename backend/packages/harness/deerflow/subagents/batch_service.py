@@ -63,6 +63,16 @@ async def _release_when_terminal(execution_id: str, *, poll_seconds: float, max_
         await asyncio.sleep(poll_seconds)
 
 
+def _log_release_failure(pending: Future[None], *, execution_id: str) -> None:
+    # Unlike an asyncio task, a concurrent future never reports an exception
+    # nobody retrieved, so a failed release would leak its entry silently.
+    if pending.cancelled():
+        return
+    exc = pending.exception()
+    if exc is not None:
+        logger.error("Registry release failed for batch execution %s", execution_id, exc_info=exc)
+
+
 class SubagentBatchService:
     """Lease, execute, and recover durable native-subagent batch items."""
 
@@ -488,6 +498,7 @@ class SubagentBatchService:
             return
         _pending_releases.add(pending)
         pending.add_done_callback(_pending_releases.discard)
+        pending.add_done_callback(lambda done: _log_release_failure(done, execution_id=execution_id))
 
     async def _check_acceptance_with_lease(self, item, result, app_config):
         """Keep a completed execution leased until its advisory check drains."""
