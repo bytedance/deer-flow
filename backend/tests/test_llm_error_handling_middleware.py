@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import json
 import threading
 import time
 from collections.abc import Iterator
@@ -10,6 +11,8 @@ from email.utils import format_datetime
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
+import openai
 import pytest
 from langchain.agents import create_agent
 from langchain.agents.middleware.types import ModelResponse
@@ -17,6 +20,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import StructuredTool
+from langchain_openai import ChatOpenAI
 from langgraph.errors import GraphBubbleUp
 
 from deerflow.agents.middlewares.llm_error_handling_middleware import (
@@ -3058,3 +3062,287 @@ def test_circuit_recovery_survives_a_backward_wall_clock_step(monkeypatch: pytes
     assert middleware._check_circuit() is False
     assert middleware._circuit_state == "half_open"
     assert middleware._circuit_probe_in_flight is True
+
+
+# ---------- Provider errors reported inside a 200 stream ----------
+#
+# A provider (or a gateway in front of one) that has already answered ``200``
+# reports a later failure as an SSE ``error`` event. The openai SDK raises it as
+# the base ``APIError``: ``body`` is the event's ``error`` object, ``code`` and
+# ``type`` are copied from it, and there is no status code and no response.
+# ``_in_stream_error`` builds exactly that object.
+
+# What OmniRoute (an OpenAI-compatible gateway) sent after committing to ``200``
+# with SSE keepalives: its combo's error, wrapping the target's own 504 frame.
+_OMNIROUTE_COMBO_504 = (
+    "openai-compatible-chat-conn:7b9b6797/glm-5.3: provider — data: "
+    '{"error":{"message":"[504]: Request exceeded OmniRoute\'s local rate-limit execution expiration '
+    "(legacy resilienceSettings.requestQueue.maxWaitMs=15000ms) for openai-compatible-chat-conn:7b9b6797/glm-5.3. "
+    "Bottleneck applies this deadline only after dispatch; it does not bound queue wait and is not an "
+    'upstream-generated timeout.","type":"server_error","code":"RATE_LIMIT_EXECUTION_TIMEOUT"}}'
+)
+_OMNIROUTE_TARGET_504 = (
+    "[504]: Request exceeded OmniRoute's local rate-limit execution expiration "
+    "(legacy resilienceSettings.requestQueue.maxWaitMs=15000ms) for openai-compatible-chat-conn:7b9b6797/glm-5.3. "
+    "Bottleneck applies this deadline only after dispatch; it does not bound queue wait and is not an "
+    "upstream-generated timeout."
+)
+_STREAM_REQUEST = httpx.Request("POST", "https://llm.invalid/v1/chat/completions")
+
+
+def _in_stream_error(message: str, **error_fields: Any) -> openai.APIError:
+    """Build the ``APIError`` the openai SDK raises for an SSE ``error`` event."""
+    return openai.APIError(message, _STREAM_REQUEST, body={"message": message, **error_fields})
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        pytest.param(_in_stream_error(_OMNIROUTE_COMBO_504, type="server_error", code="gateway_timeout"), id="omniroute-combo"),
+        pytest.param(_in_stream_error(_OMNIROUTE_TARGET_504, type="server_error", code="RATE_LIMIT_EXECUTION_TIMEOUT"), id="omniroute-target"),
+    ],
+)
+def test_omniroute_in_stream_504_is_transient(exc: openai.APIError) -> None:
+    assert _build_middleware()._classify_error(exc) == (True, "transient")
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        pytest.param("[504]: upstream timed out", id="bracketed"),
+        pytest.param("upstream answered HTTP 502", id="http"),
+        pytest.param("upstream failed (HTTP 502)", id="http-in-parens"),
+        pytest.param("HTTP/1.1 502 Bad Gateway", id="http-1.1"),
+        pytest.param("HTTP/2 503 from upstream", id="http-2"),
+        pytest.param("upstream status 503", id="status-space"),
+        pytest.param("upstream status: 503", id="status-colon"),
+        pytest.param("upstream status=503", id="status-equals"),
+        pytest.param("upstream status code: 503", id="status-code"),
+        pytest.param("upstream status_code=503", id="status_code"),
+        pytest.param('upstream replied {"status": 503}', id="json-status"),
+        pytest.param("gateway [999] relayed HTTP 503", id="out-of-range-match-skipped"),
+    ],
+)
+def test_in_stream_error_takes_its_status_from_the_message(message: str) -> None:
+    assert _build_middleware()._classify_error(_in_stream_error(message)) == (True, "transient")
+
+
+@pytest.mark.parametrize(
+    "error_fields",
+    [
+        pytest.param({"code": 503}, id="int-code"),
+        pytest.param({"code": "503"}, id="str-code"),
+        pytest.param({"code": " 503 "}, id="str-code-with-whitespace"),
+        pytest.param({"code": 503, "status": "UNAVAILABLE"}, id="google-style"),
+        pytest.param({"status": 502}, id="status"),
+        pytest.param({"status_code": 502}, id="status_code"),
+        pytest.param({"error": {"code": 503}}, id="nested-code"),
+        pytest.param({"error": {"status": 502}}, id="nested-status"),
+        pytest.param({"type": "server_error"}, id="server-error-type"),
+        pytest.param({"type": "SERVER_ERROR"}, id="server-error-type-upper-case"),
+        pytest.param({"error": {"type": "server_error"}}, id="nested-server-error-type"),
+    ],
+)
+def test_in_stream_error_takes_its_status_from_structured_fields(error_fields: dict[str, Any]) -> None:
+    exc = _in_stream_error("Upstream request failed.", **error_fields)
+    assert _build_middleware()._classify_error(exc) == (True, "transient")
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        pytest.param(_in_stream_error("upstream rate-limit hit"), id="hyphenated-message"),
+        pytest.param(_in_stream_error("Upstream request failed.", code="rate_limit_exceeded"), id="snake-case-code"),
+        pytest.param(_in_stream_error("Request exceeded the local execution expiration.", code="RATE_LIMIT_EXECUTION_TIMEOUT"), id="upper-snake-case-code"),
+        pytest.param(RuntimeError("Codex API response.failed (rate_limit_exceeded): slow down"), id="codex-response-failed"),
+    ],
+)
+def test_status_less_error_matches_busy_patterns_across_separators(exc: Exception) -> None:
+    assert _build_middleware()._classify_error(exc) == (True, "busy")
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        pytest.param(
+            _in_stream_error("The response was filtered due to the prompt triggering content management policy.", type="invalid_request_error", code="content_filter"),
+            id="content-filter",
+        ),
+        pytest.param(
+            _in_stream_error("This model's maximum context length is 131072 tokens. However, your messages resulted in 130504 tokens.", type="invalid_request_error", code="context_length_exceeded"),
+            id="context-length",
+        ),
+        pytest.param(_in_stream_error("Upstream request failed.", code=400), id="code-400"),
+        pytest.param(_in_stream_error("Upstream request failed.", code=400, type="server_error"), id="code-400-beats-server-error-type"),
+        pytest.param(_in_stream_error("upstream returned HTTP 400", type="server_error"), id="message-400-beats-server-error-type"),
+        pytest.param(_in_stream_error("upstream failed [999]"), id="out-of-range-status"),
+        pytest.param(_in_stream_error("Upstream request failed.", code=True), id="bool-code"),
+        pytest.param(_in_stream_error("upstream failed: [5040]"), id="bracketed-four-digits"),
+        pytest.param(_in_stream_error("upstream failed: [50]"), id="bracketed-two-digits"),
+        pytest.param(_in_stream_error("upstream failed: HTTP502"), id="http-without-space"),
+        pytest.param(_in_stream_error("upstream failed: https://host:5020"), id="url-port"),
+        pytest.param(_in_stream_error("upstream failed: status ok"), id="status-word"),
+        pytest.param(_in_stream_error("upstream failed: status 5030"), id="status-four-digits"),
+        pytest.param(_in_stream_error("upstream failed: status\n503"), id="status-number-on-next-line"),
+        pytest.param(_in_stream_error("upstream failed: error 504"), id="number-without-keyword"),
+    ],
+)
+def test_in_stream_error_without_a_retriable_signal_stays_generic(exc: openai.APIError) -> None:
+    assert _build_middleware()._classify_error(exc) == (False, "generic")
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        pytest.param(openai.APIError("An error occurred during streaming", _STREAM_REQUEST, body="upstream exploded"), id="string-body"),
+        pytest.param(openai.APIError("An error occurred during streaming", _STREAM_REQUEST, body=["upstream", "exploded"]), id="list-body"),
+        pytest.param(openai.APIError("An error occurred during streaming", _STREAM_REQUEST, body=None), id="no-body"),
+        pytest.param(_in_stream_error("Upstream request failed.", error="upstream timeout"), id="string-error-field"),
+        pytest.param(_in_stream_error("Upstream request failed.", code={"value": 503}), id="dict-code"),
+        pytest.param(_in_stream_error("Upstream request failed.", status=["503"]), id="list-status"),
+    ],
+)
+def test_in_stream_error_with_a_malformed_body_stays_generic(exc: openai.APIError) -> None:
+    assert _build_middleware()._classify_error(exc) == (False, "generic")
+
+
+def test_in_stream_status_parsing_stays_fast_on_a_long_message() -> None:
+    # Spaces before and after ``:``/``=`` must be separate runs in the status
+    # regex; two adjacent ``[ \t]*`` would backtrack quadratically here.
+    exc = _in_stream_error("status" + " " * 50_000 + "x")
+    started = time.perf_counter()
+    assert _build_middleware()._classify_error(exc) == (False, "generic")
+    assert time.perf_counter() - started < 1.0
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        pytest.param(
+            _in_stream_error("You exceeded your current quota, please check your plan and billing details.", type="server_error", code="insufficient_quota"),
+            (False, "quota"),
+            id="quota",
+        ),
+        pytest.param(_in_stream_error("Unauthorized", code=401), (False, "auth"), id="auth"),
+        pytest.param(_in_stream_error("Upstream request failed.", code="limit_burst_rate"), (True, "burst_rate"), id="burst-rate"),
+    ],
+)
+def test_in_stream_quota_auth_and_burst_rate_keep_precedence(exc: openai.APIError, expected: tuple[bool, str]) -> None:
+    assert _build_middleware()._classify_error(exc) == expected
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        pytest.param(FakeError("rate-limit exceeded", status_code=400), id="hyphenated-busy-text"),
+        pytest.param(FakeError("upstream said [503]", status_code=400), id="bracketed-status"),
+        pytest.param(FakeError("upstream said [503]", status_code=200), id="stream-status-200"),
+    ],
+)
+def test_error_with_a_status_ignores_in_band_signals(exc: FakeError) -> None:
+    assert _build_middleware()._classify_error(exc) == (False, "generic")
+
+
+def test_async_in_stream_504_retries_with_the_full_budget_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=10, retry_cap_delay_ms=10)
+    attempts = 0
+    events: list[dict] = []
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    async def fake_emit_custom_event(payload, *, writer):
+        writer(payload)
+
+    async def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise _in_stream_error(_OMNIROUTE_COMBO_504, type="server_error", code="gateway_timeout")
+        return AIMessage(content="recovered")
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("langgraph.config.get_stream_writer", lambda: events.append)
+    monkeypatch.setattr("deerflow.agents.middlewares.llm_error_handling_middleware.aemit_custom_event", fake_emit_custom_event)
+
+    result = asyncio.run(middleware.awrap_model_call(SimpleNamespace(), handler))
+
+    assert isinstance(result, AIMessage)
+    assert result.content == "recovered"
+    assert attempts == 3
+    assert [(event["type"], event["reason"], event["max_attempts"]) for event in events] == [("llm_retry", "transient", 3)] * 2
+
+
+def test_sync_in_stream_504_exhausts_the_full_budget_into_the_transient_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=10, retry_cap_delay_ms=10)
+    attempts = 0
+
+    def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        raise _in_stream_error(_OMNIROUTE_COMBO_504, type="server_error", code="gateway_timeout")
+
+    monkeypatch.setattr("time.sleep", lambda _delay: None)
+
+    result = middleware.wrap_model_call(SimpleNamespace(), handler)
+
+    assert attempts == 3
+    assert isinstance(result, AIMessage)
+    assert "temporarily unavailable" in str(result.content)
+    assert result.additional_kwargs["deerflow_error_fallback"] is True
+    assert result.additional_kwargs["error_type"] == "APIError"
+    assert result.additional_kwargs["error_reason"] == "transient"
+    assert result.additional_kwargs["error_detail"] == _OMNIROUTE_COMBO_504
+
+
+def test_exhausted_in_stream_5xx_failures_open_the_circuit_breaker(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("time.sleep", lambda _delay: None)
+    middleware = _build_middleware(retry_max_attempts=2, retry_base_delay_ms=10, retry_cap_delay_ms=10, circuit_failure_threshold=2)
+    calls = 0
+
+    def handler(_request) -> AIMessage:
+        nonlocal calls
+        calls += 1
+        raise _in_stream_error("Upstream request failed.", type="server_error")
+
+    middleware.wrap_model_call(SimpleNamespace(), handler)
+    assert middleware._circuit_failure_count == 1
+    middleware.wrap_model_call(SimpleNamespace(), handler)
+    assert middleware._circuit_state == "open"
+
+    result = middleware.wrap_model_call(SimpleNamespace(), handler)
+
+    assert calls == 4
+    assert result.additional_kwargs["error_reason"] == "circuit_open"
+
+
+@pytest.mark.anyio
+async def test_in_stream_error_from_a_real_openai_stream_is_retried() -> None:
+    """End to end: the first stream answers ``200`` and then carries the error event."""
+    middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=1, retry_cap_delay_ms=1)
+    requests: list[httpx.Request] = []
+
+    def chunk(delta: dict[str, Any], finish_reason: str | None = None) -> dict[str, Any]:
+        return {"id": "chatcmpl-retry", "object": "chat.completion.chunk", "created": 0, "model": "glm-5.3", "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}]}
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            error = {"error": {"message": _OMNIROUTE_COMBO_504, "type": "server_error", "code": "gateway_timeout"}}
+            body = f": keepalive\n\ndata: {json.dumps(error)}\n\n"
+        else:
+            body = "".join(f"data: {json.dumps(event)}\n\n" for event in (chunk({"role": "assistant", "content": "recovered"}), chunk({}, "stop"))) + "data: [DONE]\n\n"
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        model = ChatOpenAI(model="glm-5.3", api_key="offline-test-key", base_url="https://llm.invalid/v1", streaming=True, max_retries=0, http_async_client=client)
+
+        async def handler(_request) -> AIMessage:
+            return await model.ainvoke([HumanMessage(content="hello")])
+
+        result = await middleware.awrap_model_call(SimpleNamespace(), handler)
+
+    assert len(requests) == 2
+    assert isinstance(result, AIMessage)
+    assert result.content == "recovered"
+    assert "deerflow_error_fallback" not in result.additional_kwargs
