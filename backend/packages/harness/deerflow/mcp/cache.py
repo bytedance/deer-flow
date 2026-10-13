@@ -1080,9 +1080,10 @@ async def initialize_mcp_tools() -> list[BaseTool]:
                 if snapshot is not None:
                     pending_entries[name] = _ServerToolCacheEntry(snapshot=snapshot, result=result)
         if enabled_names and not candidate_groups:
-            # Every enabled server was attempted and none returned a result:
-            # this is a total discovery failure, not a legitimately empty
-            # configuration, so refuse to publish a false-success empty cache.
+            # No enabled server produced a successful discovery result: this is
+            # a total discovery failure, not a legitimately empty configuration
+            # (a build-invalid connection is never even attempted), so refuse to
+            # publish a false-success empty cache.
             # Raising aborts this attempt (the ``finally`` below releases the
             # claim) without spinning inside a single ``get_cached_mcp_tools``.
             raise RuntimeError("MCP discovery produced no results for any enabled server")
