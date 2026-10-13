@@ -1669,6 +1669,75 @@ def test_async_index_error_exhausted_returns_user_fallback(
     assert "temporarily unavailable" in str(result.content)
 
 
+def test_classify_error_empty_stream_value_error_is_retriable_transient() -> None:
+    """The streaming path reports an HTTP-200-but-empty response as
+    ``ValueError("No generations found in stream.")`` (raised by
+    ``langchain_core...generate_from_stream``). It is the same upstream glitch
+    as the non-streaming empty-``generations`` IndexError and must be retried.
+    """
+    from langchain_core.language_models.chat_models import generate_from_stream
+
+    middleware = _build_middleware()
+    with pytest.raises(ValueError) as excinfo:
+        generate_from_stream(iter(()))
+    retriable, reason = middleware._classify_error(excinfo.value)
+    assert retriable is True
+    assert reason == "transient"
+
+
+def test_classify_error_unrelated_value_error_stays_generic() -> None:
+    middleware = _build_middleware()
+    retriable, reason = middleware._classify_error(ValueError("invalid literal for int()"))
+    assert retriable is False
+    assert reason == "generic"
+
+
+def test_async_empty_stream_retries_with_configured_budget_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=10, retry_cap_delay_ms=10)
+    attempts = 0
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    async def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise ValueError("No generations found in stream.")
+        return AIMessage(content="ok")
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+
+    result = asyncio.run(middleware.awrap_model_call(SimpleNamespace(), handler))
+
+    assert isinstance(result, AIMessage)
+    assert result.content == "ok"
+    assert attempts == 3
+
+
+def test_sync_empty_stream_exhausted_uses_configured_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    middleware = _build_middleware(retry_max_attempts=2, retry_base_delay_ms=10, retry_cap_delay_ms=10)
+    attempts = 0
+
+    def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        raise ValueError("No generations found in stream.")
+
+    monkeypatch.setattr("time.sleep", lambda _delay: None)
+
+    result = middleware.wrap_model_call(SimpleNamespace(), handler)
+
+    assert attempts == 2
+    assert isinstance(result, AIMessage)
+    assert result.additional_kwargs["deerflow_error_fallback"] is True
+    assert result.additional_kwargs["error_reason"] == "transient"
+
+
 # ---------- Process-wide concurrency limiter ----------
 
 

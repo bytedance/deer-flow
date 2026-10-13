@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 import httpx
 import pytest
 
+from deerflow.community.jina_ai import jina_client
 from deerflow.community.jina_ai.jina_client import JinaClient
 
 pytestmark = pytest.mark.anyio
@@ -126,6 +127,42 @@ async def test_shared_deadline(requests, monkeypatch, during_backoff):
     assert result.startswith("Error:")
     assert "budget" in result
     assert requests.await_count == 1
+
+
+async def test_shared_deadline_classifies_expiry_without_clock_recheck(requests, monkeypatch):
+    class _FrozenClockLoop:
+        def __init__(self, loop, frozen_at):
+            self._loop = loop
+            self._frozen_at = frozen_at
+
+        def time(self):
+            return self._frozen_at
+
+        def __getattr__(self, name):
+            return getattr(self._loop, name)
+
+    class _AsyncioWithFrozenLoop:
+        def __init__(self, module, loop):
+            self._module = module
+            self._loop = loop
+
+        def get_running_loop(self):
+            return self._loop
+
+        def __getattr__(self, name):
+            return getattr(self._module, name)
+
+    real_loop = asyncio.get_running_loop()
+    frozen_loop = _FrozenClockLoop(real_loop, real_loop.time())
+    monkeypatch.setattr(jina_client, "asyncio", _AsyncioWithFrozenLoop(asyncio, frozen_loop))
+
+    async def post(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    requests.side_effect = post
+    result = await asyncio.wait_for(JinaClient().crawl("https://example.com", max_retries=1, retry_budget_seconds=0.02), timeout=1)
+
+    assert result == "Error: Request to Jina API failed: retry time budget exhausted"
 
 
 async def test_budget_is_shared_across_attempts(requests, monkeypatch):
