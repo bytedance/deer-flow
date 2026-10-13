@@ -158,7 +158,7 @@ class SlackChannel(Channel):
         self._running = True
         self.bus.subscribe_outbound(self._on_outbound)
 
-        # Start socket mode in background thread. Go through
+        # Start socket mode in a background thread.
         # ``_connect_socket_mode`` logs startup failures. Retain the future so
         # stop() can wait for an in-flight dial before closing its socket.
         socket_client = self._socket_client
@@ -193,7 +193,10 @@ class SlackChannel(Channel):
             try:
                 await asyncio.wait_for(asyncio.shield(close_task), timeout=SLACK_STOP_TIMEOUT_SECONDS)
             except TimeoutError as exc:
-                raise ChannelStopTimeout("Slack Socket Mode cleanup is still running") from exc
+                if close_task.done():
+                    close_task.result()
+                else:
+                    raise ChannelStopTimeout("Slack Socket Mode cleanup is still running") from exc
             finally:
                 if close_task.done() and self._socket_close_task is close_task:
                     self._socket_close_task = None

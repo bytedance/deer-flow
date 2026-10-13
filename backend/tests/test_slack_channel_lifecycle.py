@@ -75,6 +75,34 @@ async def _blocked_connect(monkeypatch):
         await asyncio.wait_for(channel.stop(), 4)
 
 
+async def test_stop_preserves_sdk_close_timeout_and_retries():
+    error = TimeoutError("SDK close failed")
+    socket_client = MagicMock()
+    socket_client.close.side_effect = [error, None]
+    channel = SlackChannel(MessageBus(), {})
+    channel._socket_client = socket_client
+
+    stopping = asyncio.create_task(channel.stop())
+    await asyncio.sleep(0)
+    cleanup = channel._socket_close_task
+    assert cleanup is not None
+    with pytest.raises(TimeoutError, match="SDK close failed") as caught:
+        await stopping
+    # Python may copy TimeoutError across the executor boundary; stop must
+    # preserve the exception actually produced by its owned cleanup task.
+    assert caught.value is cleanup.exception()
+    assert type(caught.value) is TimeoutError
+    assert caught.value.__cause__ is not caught.value
+    assert channel._socket_client is socket_client
+    assert channel._socket_close_task is None
+    assert socket_client.close.call_count == 1
+
+    await channel.stop()
+    assert socket_client.close.call_count == 2
+    assert channel._socket_client is None
+    assert channel._socket_close_task is None
+
+
 async def test_stop_timeout_retains_connect_and_same_cleanup_for_retry(monkeypatch):
     monkeypatch.setattr("app.channels.slack.SLACK_STOP_TIMEOUT_SECONDS", 0.02, raising=False)
     async with _blocked_connect(monkeypatch) as (channel, clients, connect, release):
