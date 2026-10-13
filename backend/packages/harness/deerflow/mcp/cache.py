@@ -22,6 +22,7 @@ from deerflow.mcp.lifecycle import (
     lifecycle_delta,
     parse_mcp_lifecycle,
 )
+from deerflow.mcp.tools import ServerDiscoveryResult
 
 if TYPE_CHECKING:
     from deerflow.mcp.session_pool import MCPSessionPool
@@ -44,16 +45,23 @@ class _AppliedMcpRevision:
     digest ``ensure_binding``/``reconcile_bindings`` consume. Those values
     are one-way digests, so resolved ``$VAR`` credentials never appear there.
 
-    ``effective_snapshot`` is *not* secret-safe (it is the fully resolved MCP
-    slice), so it is excluded from ``repr`` — the same contract
-    ``_mcp_config_snapshot`` documents. Never log or persist this object's
-    snapshot field.
+    ``server_snapshots`` maps every enabled server to
+    ``_server_config_snapshot(...)`` — a canonical digest of its *parsed*
+    configuration, so a metadata/routing change is distinguishable from an
+    equivalent ``type``/``transport`` respelling. It drives selective eviction;
+    it is never used as connection identity (``stdio_connections`` owns that).
+
+    ``effective_snapshot`` and ``server_snapshots`` are *not* secret-safe (they
+    are the fully resolved MCP slice), so they are excluded from ``repr`` — the
+    same contract ``_mcp_config_snapshot`` documents. Never log or persist these
+    fields.
     """
 
     effective_snapshot: str = field(repr=False)
     interceptors: str
     stdio_connections: Mapping[str, str]
     lifecycle_tokens: Mapping[str, str]
+    server_snapshots: Mapping[str, str] = field(repr=False)
 
 
 # Reconciliation kinds produced by ``_plan_mcp_reconciliation_locked``. The
@@ -89,7 +97,28 @@ class McpReconciliationPending:
     retired_pool: "MCPSessionPool | None" = None
 
 
+@dataclass(frozen=True, slots=True)
+class _ServerToolCacheEntry:
+    """A published per-server discovery result and its config identity.
+
+    ``snapshot`` is the server's canonical config identity at publication (see
+    ``_server_config_snapshot``) and ``result`` is the exact
+    ``ServerDiscoveryResult`` published for it. Both are excluded from ``repr``:
+    the snapshot may embed resolved credentials and the result carries ownership
+    handles. T2 populates and selectively evicts this map; T1 only establishes
+    the structure.
+    """
+
+    snapshot: str = field(repr=False)
+    result: ServerDiscoveryResult = field(repr=False)
+
+
 _mcp_tools_cache: list[BaseTool] | None = None
+# Per-server published discovery results, keyed by server name. Deliberately
+# separate from the flattened ``_mcp_tools_cache`` so an unchanged server's exact
+# ``BaseTool`` objects can be reused without re-running discovery. T2 populates
+# and selectively evicts this map; T1 only establishes the structure.
+_server_tool_cache: dict[str, _ServerToolCacheEntry] = {}
 _cache_initialized = False
 _init_lock = threading.RLock()  # Guards cache state transitions.
 _init_condition = threading.Condition(_init_lock)
@@ -245,6 +274,21 @@ def _interceptors_snapshot(config) -> str:
     )
 
 
+def _server_config_snapshot(server) -> str:
+    """Canonical, comparable identity for one parsed MCP server config.
+
+    Built from ``normalize_mcp_server_config`` so an equivalent
+    ``type``/``transport`` spelling and differing JSON key order compare equal,
+    while any field that can affect the discovered tools (connection params,
+    ``description``, ``routing``, ``tools``, ``tool_name_prefix``, ...) compares
+    unequal. ``sort_keys`` normalizes nested key order.
+
+    The result may embed resolved ``$VAR`` credentials; it is only ever compared
+    for equality and must never be logged or persisted.
+    """
+    return json.dumps(normalize_mcp_server_config(server), sort_keys=True, ensure_ascii=False)
+
+
 def _mcp_revision_from_config(config) -> _AppliedMcpRevision:
     """Build the applied-reconciliation revision for a parsed config.
 
@@ -255,11 +299,13 @@ def _mcp_revision_from_config(config) -> _AppliedMcpRevision:
     """
     stdio_connections = _stdio_fingerprints(config)
     ledger = parse_mcp_lifecycle(config.model_extra or {})
+    server_snapshots = {name: _server_config_snapshot(server) for name, server in config.get_enabled_mcp_servers().items()}
     return _AppliedMcpRevision(
         effective_snapshot=_effective_mcp_config_snapshot(config),
         interceptors=_interceptors_snapshot(config),
         stdio_connections=stdio_connections,
         lifecycle_tokens=effective_tokens(config, ledger),
+        server_snapshots=server_snapshots,
     )
 
 
@@ -389,6 +435,37 @@ def _deployment_binding_delta(
     previous_connections = previous.stdio_connections if previous is not None else {}
     removed = set(previous_connections) - set(active)
     return active, tuple(sorted(removed))
+
+
+def _binding_matches(
+    result: ServerDiscoveryResult,
+    name: str,
+    fingerprint: str | None,
+    pool: "MCPSessionPool | None",
+) -> bool:
+    """Return whether ``result`` may be reused for ``name`` against ``pool``.
+
+    ``fingerprint`` is the server's *current* connection digest: ``None`` for
+    HTTP/SSE servers, which hold no pooled stdio binding.
+
+    For stdio, reuse requires the *exact* binding object to still be the pool's
+    current one. ``ServerBinding`` is declared ``eq=False`` precisely so this
+    check is object identity, never dataclass value equality: a cross-worker
+    delete/re-add of an identical server re-epochs the binding to a new object
+    carrying the same fingerprint, and only identity comparison rejects the
+    superseded result (the ABA case).
+
+    This deliberately calls the pool's private ``_binding_is_current`` — an
+    intentional, read-only, in-package coupling shared by the reuse check and the
+    pre-publication check so the two cannot diverge. Callers must already hold
+    ``_init_condition``; ``_binding_is_current`` then acquires the pool lock,
+    preserving the established ``_init_condition -> pool._lock`` order.
+    """
+    if fingerprint is None:  # HTTP/SSE: no pooled stdio binding may be attached.
+        return result.pool is None and result.binding is None
+
+    binding = result.binding
+    return pool is not None and result.pool is pool and binding is not None and binding.domain == "deployment" and binding.server_name == name and binding.fingerprint == fingerprint and pool._binding_is_current(binding)
 
 
 def _install_claimed_revision_locked(pool, revision: _AppliedMcpRevision, *, previous: _AppliedMcpRevision | None) -> None:
