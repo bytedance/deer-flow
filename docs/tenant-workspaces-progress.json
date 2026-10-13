@@ -332,5 +332,32 @@
       "backend/tests/test_workspace_http.py": "9c6be069186366898be9daefdbcf41e24d2a284762d71767d3352d7bc2858385"
     },
     "limits": "No shipped Gateway registration/initialization or tenant activation. SSO step-up, invitations, live resource/file/background isolation, revoke effects and full release gates remain pending. No tenant deployment or public registration."
+  },
+  "workspace_transfer_reset_serialization": {
+    "red": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 13,
+      "result": "FAILURE",
+      "archive_sha256": "3ad1a2756a0f11671ce0b0361a2e15a30e2f969fe20385266ce63e8e0a0cbc00",
+      "failed": 1,
+      "tests_passed": 1,
+      "duration_seconds": 15.79,
+      "reason": "real PostgreSQL reset held the native user row, but plain credential SELECT read old token version and transfer committed"
+    },
+    "green": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 14,
+      "result": "SUCCESS",
+      "archive_sha256": "236ecc3d740f82ed97b5b69394dfdf57b1e7e7c0e09b5a86a618eb926297957a",
+      "tests_passed": 4,
+      "duration_seconds": 24.0
+    },
+    "scope": "Same SQLite/PostgreSQL repository and native-auth HTTP mains. Added one PostgreSQL concurrency branch: hold credential update uncommitted, launch old-proof ownership transfer, observe actual pg_stat_activity lock wait or early completion, commit reset, require access denial and unchanged owner. SQLite writes already serialize using BEGIN IMMEDIATE; this physical row-lock branch is PostgreSQL-only.",
+    "cleanup": "Exact owned-label containers/networks for terminal builds 13 and 14 empty",
+    "source_sha256": {
+      "backend/packages/harness/deerflow/persistence/workspaces/sql.py": "98768d93b079644229414a01bf32a2afc2e4f91377c7d7fc0b78b1a9fb46073a",
+      "backend/tests/test_workspace_repository.py": "3e4a8262a34e295886d15d46fba8ba1adea15abaec39228c5ff4beff05eb0b92"
+    },
+    "limits": "Proves serialization of persisted token/password proof with native credential row updates. Does not prove the still-pending public reset-email workflow, SSO step-up or complete tenant lifecycle isolation."
   }
 }

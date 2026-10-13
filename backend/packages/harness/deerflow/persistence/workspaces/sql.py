@@ -210,7 +210,10 @@ class WorkspaceRepository:
         async with self._sf() as session:
             _, actor = await self._locked_team(session, workspace_id, actor_user_id, expected_context)
             if expected_token_version is not None or expected_password_hash is not None:
-                credentials = (await session.execute(select(UserRow.token_version, UserRow.password_hash).where(UserRow.id == actor_user_id))).one()
+                # Serialize proof validation with native credential updates.
+                # A plain SELECT could read the old proof while a reset owns
+                # this row, then commit transfer before reset invalidation.
+                credentials = (await session.execute(select(UserRow.token_version, UserRow.password_hash).where(UserRow.id == actor_user_id).with_for_update())).one()
                 if credentials != (expected_token_version, expected_password_hash):
                     raise WorkspaceAccessDenied("reauthentication credentials changed before transfer")
             await self._user(session, user_id)

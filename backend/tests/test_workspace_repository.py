@@ -51,6 +51,29 @@ def test_workspace_repository_provisions_and_preserves_one_owner(native_engine):
                 await repo.remove_member(team["id"], "peer", "owner")
             with pytest.raises(module.WorkspaceAccessDenied):
                 await repo.add_member(first["id"], "owner", "peer", role="member")
+            if native_engine.dialect.name == "postgresql":
+                # A reset already holding the native account row must win over
+                # a transfer carrying its old proof. Observe actual DB lock
+                # waiting (or early task completion), not a mocked authority.
+                async with sf() as reset_session:
+                    await reset_session.execute(sa.update(UserRow).where(UserRow.id == "owner").values(token_version=1))
+                    transfer = asyncio.create_task(repo.transfer_owner(team["id"], "owner", "peer", expected_token_version=0, expected_password_hash=None))
+                    try:
+                        async with asyncio.timeout(5):
+                            while not transfer.done():
+                                async with sf() as observer:
+                                    waiting = await observer.scalar(
+                                        sa.text("SELECT COUNT(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE :query"),
+                                        {"query": "SELECT users.token_version, users.password_hash%"},
+                                    )
+                                if waiting:
+                                    break
+                                await asyncio.sleep(0.02)
+                    finally:
+                        await reset_session.commit()
+                        transfer_result = (await asyncio.gather(transfer, return_exceptions=True))[0]
+                    assert isinstance(transfer_result, module.WorkspaceAccessDenied), "old credential proof committed ownership while password reset held the user row"
+                assert (await repo.get_active_membership(team["id"], "owner"))["role"] == "owner"
             results = await asyncio.gather(repo.transfer_owner(team["id"], "owner", "peer"), repo.transfer_owner(team["id"], "owner", "third"), return_exceptions=True)
             assert sum(not isinstance(result, Exception) for result in results) == 1
             assert sum(isinstance(result, module.WorkspaceAccessDenied) for result in results) == 1

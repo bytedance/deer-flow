@@ -68,6 +68,7 @@ apply native credential scopes and enforce recent reauthentication for transfer.
 Internal add_member is for managed/invitation services, not a public invite bypass.
 HTTP control callers supply an expected immutable context; writes compare its
 actor, workspace and live versions under the workspace lock. Password-proved
-transfer additionally checks persisted token version/password hash. Member
+transfer additionally locks the native account row while checking persisted
+token version/password hash, serializing with native password/token updates. Member
 disclosure applies actor access in the same SELECT. Gateway lifecycle wiring,
 invitations and revocation effects remain acceptance gates.

@@ -2921,4 +2921,4 @@ Native ECS release builds can opt into the Dockerfile's existing fixed, SHA-chec
 
 Tenant development: the [offline metadata attribution procedure](docs/tenant-workspaces-migration.md) documents plan/apply/verify and private paired receipts. It does not enable tenant access or replace the schema-aware rollout and isolation acceptance gates.
 
-The [workspace HTTP adapter contracts](docs/tenant-workspaces-api.md) describe the current tenant control-plane foundation and outstanding Gateway, resource isolation and release gates.
+The [workspace HTTP adapter contracts](docs/tenant-workspaces-api.md) describe the current tenant control-plane foundation, member management and local-password ownership transfer. Gateway wiring, SSO reauthentication, resource isolation and release gates remain pending.

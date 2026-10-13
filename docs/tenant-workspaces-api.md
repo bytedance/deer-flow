@@ -52,7 +52,9 @@ must repeat checks at background claim/effect/publication points. PAT and
 internal channels need their own validated persisted/signed bindings rather
 than using the browser management dependency. Member-control writes compare server-resolved membership/policy versions
 again under the workspace transaction lock. Transfer also rechecks the native
-password hash and token version before committing. The explicit workspace URL
+password hash and token version under the native account row lock before
+committing. A credential reset already holding that row commits first, so the
+waiting transfer sees the new token version and refuses its old proof. The explicit workspace URL
 is a selector; a conflicting header returns 404. Wrong local-password proof is
 401; direct last-owner departure is 409. Passwordless SSO transfer currently
 returns 409; its reauthentication flow remains an M6 acceptance requirement.
