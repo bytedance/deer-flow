@@ -554,6 +554,9 @@ models:
 
   # Example: DemonRoute (OpenAI-compatible gateway for open-weight models)
   # See: https://demonroute.com/docs
+  # Browse model ids at https://api.demonroute.com/v1/models
+  # Pick a tool-calling-capable model from the catalog for the lead agent;
+  # small chat-tuned models may struggle with DeerFlow's tool loop.
   # - name: demonroute-dolphin-3-llama-3.1-8b
   #   display_name: DemonRoute Dolphin 3.0 Llama 3.1 8B
   #   use: langchain_openai:ChatOpenAI
