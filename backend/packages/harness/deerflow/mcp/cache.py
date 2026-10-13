@@ -468,6 +468,34 @@ def _binding_matches(
     return pool is not None and result.pool is pool and binding is not None and binding.domain == "deployment" and binding.server_name == name and binding.fingerprint == fingerprint and pool._binding_is_current(binding)
 
 
+def _evict_server_tool_entries_locked(revision: _AppliedMcpRevision, pool: "MCPSessionPool") -> None:
+    """Drop per-server results a newly applied revision no longer justifies.
+
+    Caller must hold ``_init_condition``. This runs *after* the caller has
+    installed the new binding epoch (see ``_apply_mcp_reconciliation_locked``),
+    so a lifecycle-token rotation that leaves the connection fingerprint
+    untouched has already replaced the binding object and is caught by the
+    identity check below. Retained entries keep their exact identity so an
+    unchanged server's published objects are reused verbatim.
+
+    An entry survives only when both hold:
+
+    * its canonical config snapshot equals the new revision's
+      (``stdio_connections`` alone misses presentation-only changes), and
+    * ``_binding_matches`` proves the result still belongs to the pool's current
+      deployment binding (HTTP/SSE: no pooled binding at all).
+
+    Names absent from ``revision.server_snapshots`` (deleted, disabled or never
+    declared) are evicted because ``.get`` returns ``None``. The binding verdict
+    is delegated to ``_binding_matches`` so the reuse and eviction paths cannot
+    diverge.
+    """
+    snapshots = revision.server_snapshots
+    stale = [name for name, entry in _server_tool_cache.items() if snapshots.get(name) != entry.snapshot or not _binding_matches(entry.result, name, revision.stdio_connections.get(name), pool)]
+    for name in stale:
+        del _server_tool_cache[name]
+
+
 def _install_claimed_revision_locked(pool, revision: _AppliedMcpRevision, *, previous: _AppliedMcpRevision | None) -> None:
     """Install ``revision``'s deployment epochs before discovery runs.
 
@@ -512,14 +540,18 @@ def _shared_reset_has_local_state_locked(pool) -> bool:
 def _has_mcp_reconciliation_state() -> bool:
     """True when this process holds state a config observation could affect.
 
-    Published tools, a recorded applied revision and an in-flight discovery are
-    all reasons to keep watching the config. A process that never initialized
-    MCP pays no config-read cost (``refresh_mcp_cache_if_active`` contract).
+    Published tools, a recorded applied revision, an in-flight discovery and a
+    retained per-server entry are all reasons to keep watching the config. The
+    entry check matters because ``initialize_mcp_tools`` can null the applied
+    baseline (an unbuildable revision) without clearing retained entries; without
+    counting them, a later config change would be silently skipped. A process that
+    never initialized MCP pays no config-read cost
+    (``refresh_mcp_cache_if_active`` contract).
     """
     from deerflow.mcp.session_pool import current_session_pool
 
     pool = current_session_pool()
-    return _cache_initialized or _applied_mcp_revision is not None or _initializing_generation is not None or (pool is not None and bool(pool.retained_server_names(domain="deployment")))
+    return _cache_initialized or _applied_mcp_revision is not None or _initializing_generation is not None or bool(_server_tool_cache) or (pool is not None and bool(pool.retained_server_names(domain="deployment")))
 
 
 def _plan_mcp_reconciliation_locked() -> _McpReconciliation | None:
@@ -686,6 +718,11 @@ def _apply_mcp_reconciliation_locked(plan: _McpReconciliation):
             force_rebind=plan.force_rebind,
         )
 
+        # Evict only after the new epoch is installed: a lifecycle-token rotation
+        # keeps the fingerprint but replaces the binding object, so evaluating
+        # reuse against the pre-transition pool would wrongly retain the entry.
+        _evict_server_tool_entries_locked(revision, pool)
+
         _applied_mcp_revision = revision
         _config_path, _config_signature = plan.path, plan.signature
         _initialized_without_config = plan.path is None
@@ -717,7 +754,7 @@ def _plan_committed_mcp_reconciliation_locked(
     from deerflow.mcp.session_pool import get_session_pool
 
     pool = get_session_pool()
-    has_local_state = _cache_initialized or _applied_mcp_revision is not None or _initializing_generation is not None or bool(pool.retained_server_names(domain="deployment"))
+    has_local_state = _cache_initialized or _applied_mcp_revision is not None or _initializing_generation is not None or bool(_server_tool_cache) or bool(pool.retained_server_names(domain="deployment"))
     if not has_local_state:
         # No visible local state, but a durable-task caller can bind between this
         # observation and the record below (``ensure_binding`` takes only the pool
@@ -1189,6 +1226,7 @@ def _reset_mcp_tools_cache_state() -> None:
     global _cache_reset_marker_signature, _applied_mcp_revision
 
     _mcp_tools_cache = None
+    _server_tool_cache.clear()
     _cache_initialized = False
     _config_path = None
     _config_signature = None

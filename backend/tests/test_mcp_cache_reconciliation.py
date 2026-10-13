@@ -55,6 +55,7 @@ from deerflow.mcp.session_pool import (
     normalized_connection_fingerprint,
 )
 from deerflow.mcp.tasks.runtime import McpTaskConfigurationError, set_mcp_task_config_snapshot
+from deerflow.mcp.tools import ServerDiscoveryResult
 
 _MISSING = object()
 
@@ -74,6 +75,7 @@ _TRACKED_GLOBALS = (
     "_initialized_without_config",
     "_cache_reset_marker_signature",
     "_applied_mcp_revision",
+    "_server_tool_cache",
 )
 
 
@@ -114,6 +116,7 @@ def reconciler():
 
     cache_module._mcp_tools_cache = None
     cache_module._cache_initialized = False
+    cache_module._server_tool_cache = {}
     for name in (
         "_config_path",
         "_config_signature",
@@ -2466,3 +2469,300 @@ async def test_tombstone_only_change_advances_applied_tokens(reconciler, monkeyp
     assert _entry(pool, "B") is entry_b
     # ...but the applied token map must not lag the consumed shared version.
     assert cache_module._applied_mcp_revision.lifecycle_tokens["A"] == raw_b2[LIFECYCLE_KEY]["servers"]["A"]
+
+
+# ---------------------------------------------------------------------------
+# T2: selective eviction of per-server discovery results
+#
+# ``_server_tool_cache`` is populated by the publish path (T3). These tests seed
+# it the way a real publish would and then drive the *reconciliation* entry
+# points, so eviction is exercised through the same locked transition the cache
+# hot paths use - never by calling the eviction helper directly.
+# ---------------------------------------------------------------------------
+
+
+def _server_snapshot(servers: dict, name: str) -> str:
+    config = ExtensionsConfig.model_validate({"mcpServers": servers})
+    return cache_module._server_config_snapshot(config.get_enabled_mcp_servers()[name])
+
+
+def _seed_entry(name: str, snapshot: str, *, pool=None, binding=None):
+    entry = cache_module._ServerToolCacheEntry(
+        snapshot=snapshot,
+        result=ServerDiscoveryResult(tools=(_FakeTool(name),), pool=pool, binding=binding),
+    )
+    cache_module._server_tool_cache[name] = entry
+    return entry
+
+
+def _seed_stdio_entry(pool, servers: dict, name: str):
+    return _seed_entry(name, _server_snapshot(servers, name), pool=pool, binding=_binding(pool, name))
+
+
+def _lifecycle_raw(servers: dict, tokens: dict) -> dict:
+    from deerflow.mcp.lifecycle import LIFECYCLE_KEY
+
+    return {"mcpServers": servers, "skills": {}, LIFECYCLE_KEY: {"version": 1, "servers": tokens}}
+
+
+async def _initialize_with_ledger(monkeypatch, cfg, servers: dict, log: dict, tokens: dict):
+    """Initialize against a config that already carries an explicit lifecycle ledger."""
+    cfg.write_text(json.dumps(_lifecycle_raw(servers, tokens)), encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+    _record_sessions(monkeypatch, log)
+    _install_discovery(monkeypatch, hooks={})
+    return await cache_module.initialize_mcp_tools()
+
+
+@pytest.mark.asyncio
+async def test_selective_eviction_metadata_change_evicts_only_changed_server(reconciler, monkeypatch, tmp_path):
+    """A snapshot-only change drops that server's entry; an unchanged peer is reused by identity."""
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    servers = {"A": _stdio("cmd-A"), "B": _stdio("cmd-B")}
+    await _initialize(monkeypatch, cfg, servers, _session_log())
+
+    entry_a = _seed_stdio_entry(pool, servers, "A")
+    entry_b = _seed_stdio_entry(pool, servers, "B")
+    assert entry_a is not entry_b
+
+    _write_config(cfg, {"A": _stdio("cmd-A", description="renamed"), "B": _stdio("cmd-B")})
+    assert cache_module.refresh_mcp_cache_if_active() is True
+
+    assert "A" not in cache_module._server_tool_cache
+    assert cache_module._server_tool_cache["B"] is entry_b
+
+
+@pytest.mark.asyncio
+async def test_selective_eviction_fingerprint_change_evicts_and_rebinds(reconciler, monkeypatch, tmp_path):
+    """A connection-identity change invalidates both the binding and the entry."""
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    servers = {"A": _stdio("cmd-A"), "B": _stdio("cmd-B")}
+    await _initialize(monkeypatch, cfg, servers, _session_log())
+
+    binding_a = _binding(pool, "A")
+    _seed_stdio_entry(pool, servers, "A")
+    entry_b = _seed_stdio_entry(pool, servers, "B")
+
+    _write_config(cfg, {"A": _stdio("cmd-A2"), "B": _stdio("cmd-B")})
+    assert cache_module.refresh_mcp_cache_if_active() is True
+
+    assert "A" not in cache_module._server_tool_cache
+    assert _binding(pool, "A") is not binding_a
+    assert cache_module._server_tool_cache["B"] is entry_b
+
+
+@pytest.mark.asyncio
+async def test_selective_eviction_read_side_lifecycle_token_change(reconciler, monkeypatch, tmp_path):
+    """A peer worker's token change with an identical connection still evicts A (reader path)."""
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    servers = {"A": _stdio("cmd-A"), "B": _stdio("cmd-B")}
+    await _initialize_with_ledger(monkeypatch, cfg, servers, _session_log(), {"A": "1" * 32, "B": "2" * 32})
+
+    entry_b = _seed_stdio_entry(pool, servers, "B")
+    _seed_stdio_entry(pool, servers, "A")
+    binding_a = _binding(pool, "A")
+
+    # Identical server config, but a peer advanced A's lifecycle token while B's
+    # is unchanged, so only A must be re-discovered.
+    cfg.write_text(json.dumps(_lifecycle_raw(servers, {"A": "3" * 32, "B": "2" * 32})), encoding="utf-8")
+
+    assert cache_module.refresh_mcp_cache_if_active() is True
+
+    assert "A" not in cache_module._server_tool_cache
+    assert cache_module._server_tool_cache["B"] is entry_b
+    assert _binding(pool, "A") is not binding_a
+
+
+@pytest.mark.asyncio
+async def test_selective_eviction_committed_revision_lifecycle_token_change(reconciler, monkeypatch, tmp_path):
+    """The committed-writer path evicts A on a token change with an identical connection."""
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    servers = {"A": _stdio("cmd-A"), "B": _stdio("cmd-B")}
+    await _initialize_with_ledger(monkeypatch, cfg, servers, _session_log(), {"A": "1" * 32, "B": "2" * 32})
+
+    entry_b = _seed_stdio_entry(pool, servers, "B")
+    _seed_stdio_entry(pool, servers, "A")
+    binding_a = _binding(pool, "A")
+
+    cfg.write_text(json.dumps(_lifecycle_raw(servers, {"A": "3" * 32, "B": "2" * 32})), encoding="utf-8")
+    committed = ExtensionsConfig.from_file(str(cfg))
+    cache_module.finish_mcp_reconciliation(cache_module.prepare_mcp_reconciliation(committed, config_path=cfg))
+
+    assert "A" not in cache_module._server_tool_cache
+    assert cache_module._server_tool_cache["B"] is entry_b
+    assert _binding(pool, "A") is not binding_a
+
+
+@pytest.mark.asyncio
+async def test_selective_eviction_removed_server_keeps_others(reconciler, monkeypatch, tmp_path):
+    """A deleted server's entry is dropped; a still-declared peer's entry survives."""
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    servers = {"A": _stdio("cmd-A"), "B": _stdio("cmd-B")}
+    await _initialize(monkeypatch, cfg, servers, _session_log())
+
+    _seed_stdio_entry(pool, servers, "A")
+    entry_b = _seed_stdio_entry(pool, servers, "B")
+
+    _write_config(cfg, {"B": _stdio("cmd-B")})
+    assert cache_module.refresh_mcp_cache_if_active() is True
+
+    assert "A" not in cache_module._server_tool_cache
+    assert cache_module._server_tool_cache["B"] is entry_b
+
+
+@pytest.mark.asyncio
+async def test_selective_eviction_declaration_order_keeps_all_entries(reconciler, monkeypatch, tmp_path):
+    """Reordering servers rebuilds the flattened list but reuses every entry by identity."""
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    servers = {"A": _stdio("cmd-A"), "B": _stdio("cmd-B")}
+    await _initialize(monkeypatch, cfg, servers, _session_log())
+
+    entry_a = _seed_stdio_entry(pool, servers, "A")
+    entry_b = _seed_stdio_entry(pool, servers, "B")
+
+    _write_config(cfg, {"B": _stdio("cmd-B"), "A": _stdio("cmd-A")})
+    assert cache_module.refresh_mcp_cache_if_active() is True
+
+    assert cache_module._server_tool_cache["A"] is entry_a
+    assert cache_module._server_tool_cache["B"] is entry_b
+
+
+@pytest.mark.asyncio
+async def test_skills_only_change_evicts_no_server_entries(reconciler, monkeypatch, tmp_path):
+    """A skills-only edit leaves the effective MCP slice untouched, so nothing is evicted."""
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    servers = {"A": _stdio("cmd-A"), "B": _stdio("cmd-B")}
+    await _initialize(monkeypatch, cfg, servers, _session_log())
+
+    entry_a = _seed_stdio_entry(pool, servers, "A")
+    entry_b = _seed_stdio_entry(pool, servers, "B")
+
+    _write_config(cfg, servers, skills={"public": {"enabled": True}})
+    assert cache_module.refresh_mcp_cache_if_active() is False
+
+    assert cache_module._server_tool_cache["A"] is entry_a
+    assert cache_module._server_tool_cache["B"] is entry_b
+
+
+@pytest.mark.asyncio
+async def test_interceptor_change_clears_all_server_entries(reconciler, monkeypatch, tmp_path):
+    """A global interceptor change falls back to the full reset, clearing every entry."""
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    servers = {"A": _stdio("cmd-A"), "B": _stdio("cmd-B")}
+    await _initialize(monkeypatch, cfg, servers, _session_log())
+
+    _seed_stdio_entry(pool, servers, "A")
+    _seed_stdio_entry(pool, servers, "B")
+
+    _write_config(cfg, servers, interceptors=["my.module:interceptor"])
+    assert cache_module.refresh_mcp_cache_if_active() is True
+
+    assert cache_module._server_tool_cache == {}
+
+
+@pytest.mark.asyncio
+async def test_explicit_reset_clears_all_server_entries(reconciler, monkeypatch, tmp_path):
+    """The process-local explicit reset clears every server entry."""
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    servers = {"A": _stdio("cmd-A"), "B": _stdio("cmd-B")}
+    await _initialize(monkeypatch, cfg, servers, _session_log())
+
+    _seed_stdio_entry(pool, servers, "A")
+    _seed_stdio_entry(pool, servers, "B")
+
+    cache_module.reset_mcp_tools_cache()
+
+    assert cache_module._server_tool_cache == {}
+
+
+@pytest.mark.asyncio
+async def test_shared_reset_marker_clears_all_server_entries(reconciler, monkeypatch, tmp_path):
+    """A reset published by another worker clears this worker's entries on observation."""
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    servers = {"A": _stdio("cmd-A"), "B": _stdio("cmd-B")}
+    await _initialize(monkeypatch, cfg, servers, _session_log())
+
+    _seed_stdio_entry(pool, servers, "A")
+    _seed_stdio_entry(pool, servers, "B")
+
+    _write_remote_marker(cfg, "peer-reset")
+    assert cache_module.refresh_mcp_cache_if_active() is True
+
+    assert cache_module._server_tool_cache == {}
+
+
+@pytest.mark.asyncio
+async def test_selective_eviction_drops_entries_for_unlisted_servers(reconciler, monkeypatch, tmp_path):
+    """An entry for a server no longer declared can never survive a reconciliation."""
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    servers = {"A": _stdio("cmd-A"), "B": _stdio("cmd-B")}
+    await _initialize(monkeypatch, cfg, servers, _session_log())
+
+    _seed_entry("X", "stale-snapshot", pool=pool, binding=pool.ensure_binding("X", "fpX", domain="deployment"))
+    entry_b = _seed_stdio_entry(pool, servers, "B")
+
+    _write_config(cfg, {"A": _stdio("cmd-A2"), "B": _stdio("cmd-B")})
+    assert cache_module.refresh_mcp_cache_if_active() is True
+
+    assert "X" not in cache_module._server_tool_cache
+    assert cache_module._server_tool_cache["B"] is entry_b
+
+
+@pytest.mark.asyncio
+async def test_selective_eviction_leaves_personal_domain_untouched(reconciler, monkeypatch, tmp_path):
+    """Deployment eviction must not disturb a same-named personal binding/session."""
+    cfg = tmp_path / "extensions_config.json"
+    pool = MCPSessionPool()
+    session_pool_module._pool = pool
+    servers = {"A": _stdio("cmd-A"), "B": _stdio("cmd-B")}
+    await _initialize(monkeypatch, cfg, servers, _session_log())
+
+    personal = pool.ensure_binding("A", "personal-fp", domain="personal")
+    _seed_stdio_entry(pool, servers, "A")
+    entry_b = _seed_stdio_entry(pool, servers, "B")
+
+    _write_config(cfg, {"A": _stdio("cmd-A2"), "B": _stdio("cmd-B")})
+    assert cache_module.refresh_mcp_cache_if_active() is True
+
+    assert "A" not in cache_module._server_tool_cache
+    assert cache_module._server_tool_cache["B"] is entry_b
+    assert pool._bindings[("personal", "A")] is personal
+
+
+def test_reconciliation_state_counts_server_entries_without_baseline(reconciler):
+    """A lingering entry must keep config reconciliation active on its own.
+
+    ``initialize_mcp_tools`` can null ``_applied_mcp_revision`` (unbuildable
+    revision) without clearing the retained entries, so the state predicate must
+    count the cache itself or a later config change would be silently skipped.
+    """
+    assert cache_module._has_mcp_reconciliation_state() is False
+
+    cache_module._server_tool_cache["A"] = cache_module._ServerToolCacheEntry(
+        snapshot="orphan",
+        result=ServerDiscoveryResult(tools=()),
+    )
+
+    assert cache_module._has_mcp_reconciliation_state() is True
