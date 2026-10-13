@@ -123,8 +123,12 @@ def merge_viewed_images(existing: dict[str, ViewedImageData] | None, new: dict[s
     # Special case: empty dict means clear all viewed images
     if len(new) == 0:
         return {}
-    # Merge dictionaries, new values override existing ones for same keys
-    return {**existing, **new}
+    # Move re-viewed paths to the end so insertion order tracks recency.
+    merged = existing.copy()
+    for path, image in new.items():
+        merged.pop(path, None)
+        merged[path] = image
+    return merged
 
 
 def merge_todos(existing: list | None, new: list | None) -> list | None:

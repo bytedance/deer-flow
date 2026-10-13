@@ -245,6 +245,39 @@ class TestAllToolsCompleted:
 
 
 class TestCreateImageDetailsMessage:
+    def test_keeps_recent_images_within_count_and_byte_budget(self, tmp_path, monkeypatch):
+        from deerflow.agents.middlewares import view_image_middleware as module
+
+        monkeypatch.setattr(module, "_MAX_CONTEXT_IMAGES", 2)
+        monkeypatch.setattr(module, "_MAX_CONTEXT_BASE64_BYTES", 16)
+        viewed = {f"/{name}.png": _make_viewed_image(tmp_path, f"{name}.png", data=b"123456") for name in ("old", "middle", "new")}
+        reads = []
+
+        def read(_cls, _state, image_path, *_args, **_kwargs):
+            reads.append(image_path)
+            return "data:image/png;base64,MTIzNDU2"
+
+        monkeypatch.setattr(ViewImageMiddleware, "_read_image_as_data_url", classmethod(read))
+        blocks = ViewImageMiddleware()._create_image_details_message({"viewed_images": viewed})
+
+        assert reads == ["/new.png", "/middle.png"]
+        assert [block["type"] for block in blocks].count("image_url") == 2
+        assert "1 older image omitted" in str(blocks)
+
+    def test_skips_oversized_image_without_reading_it(self, tmp_path, monkeypatch):
+        from deerflow.agents.middlewares import view_image_middleware as module
+
+        monkeypatch.setattr(module, "_MAX_CONTEXT_BASE64_BYTES", 8)
+        viewed = {"/large.png": _make_viewed_image(tmp_path, "large.png", data=b"1234567")}
+        monkeypatch.setattr(
+            ViewImageMiddleware,
+            "_read_image_as_data_url",
+            lambda *_args, **_kwargs: pytest.fail("oversized image was read"),
+        )
+        blocks = ViewImageMiddleware()._create_image_details_message({"viewed_images": viewed})
+        assert all(block["type"] != "image_url" for block in blocks)
+        assert "1 older image omitted" in str(blocks)
+
     def test_returns_placeholder_when_no_images(self):
         mw = ViewImageMiddleware()
         state = {"viewed_images": {}}
