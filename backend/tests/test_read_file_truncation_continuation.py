@@ -36,11 +36,21 @@ def _read(runtime, **kwargs) -> str:
     return read_file_tool.func(runtime=runtime, description="read", path="/mnt/user-data/uploads/long.txt", **kwargs)
 
 
+def _write_lf(path: Path, content: str) -> None:
+    """Write fixture bytes with exactly LF endings on every platform.
+
+    Path.write_text() translates "\\n" to os.linesep on Windows, which would
+    change the byte length of every line and silently invalidate the
+    character-budget and reconstruction assertions below.
+    """
+    path.write_bytes(content.encode("utf-8"))
+
+
 def test_following_the_markers_reads_the_whole_file_without_gap_or_overlap(tmp_path, monkeypatch) -> None:
     runtime = _local_runtime(tmp_path)
     lines = [f"{i:05d} " + "x" * (50 + i % 7) for i in range(1, 2601)]  # 2,600 lines of ~57 chars, > 150k chars
     content = "\n".join(lines) + "\n"
-    (tmp_path / "uploads" / "long.txt").write_text(content, encoding="utf-8")
+    _write_lf(tmp_path / "uploads" / "long.txt", content)
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox("t1"))
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
 
@@ -117,7 +127,7 @@ def test_long_lines_near_the_budget_are_followed_without_gap_or_overlap(tmp_path
     tail = "".join(f"{i:05d} tail line\n" for i in range(1, 3001))
     for length in (49600, 49743, 49750, 49760, 50000):
         content = "a\n" + "y" * length + "\n" + tail
-        (tmp_path / "uploads" / "long.txt").write_text(content, encoding="utf-8")
+        _write_lf(tmp_path / "uploads" / "long.txt", content)
         rebuilt, forms = _follow_markers(runtime, content)
         assert rebuilt == content, (length, forms)
         assert "bash" not in forms, (length, forms)
@@ -128,7 +138,7 @@ def test_a_line_longer_than_max_chars_is_pointed_at_bash_not_at_a_read(tmp_path,
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox("t1"))
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
     content = "a\n" + "y" * 50001 + "\n" + "".join(f"{i:05d} tail line\n" for i in range(1, 301))
-    (tmp_path / "uploads" / "long.txt").write_text(content, encoding="utf-8")
+    _write_lf(tmp_path / "uploads" / "long.txt", content)
     result = _read(runtime)
     assert "cut inside line 2 of 302 lines" in result
     assert "Continue with start_line" not in result and "Read that line whole" not in result
@@ -142,7 +152,7 @@ def test_a_ranged_read_ending_in_a_blank_line_reports_the_full_span(tmp_path, mo
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox("t1"))
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
     content = "".join(f"{i:05d} " + "x" * 51 + "\n" for i in range(1, 3001)) + "\n"  # 3,001 lines, the last one blank
-    (tmp_path / "uploads" / "long.txt").write_text(content, encoding="utf-8")
+    _write_lf(tmp_path / "uploads" / "long.txt", content)
     assert "of 3001 lines" in _read(runtime)
     assert "of 2-3001 lines" in _read(runtime, start_line=2)
     assert "of 3001 lines" in _read(runtime, start_line=1, end_line=3001)
@@ -153,7 +163,7 @@ def test_a_last_line_read_whole_is_the_end_of_the_walk(tmp_path, monkeypatch) ->
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox("t1"))
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
     content = "a\n" + "y" * 50000 + "\n"
-    (tmp_path / "uploads" / "long.txt").write_text(content, encoding="utf-8")
+    _write_lf(tmp_path / "uploads" / "long.txt", content)
     rebuilt, forms = _follow_markers(runtime, content)
     assert forms == ["whole_line"]
     assert rebuilt == content
@@ -165,7 +175,7 @@ def test_a_bounded_read_cut_inside_its_last_line_still_names_the_line_after_it(t
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
     lines = [f"{i:05d} line" for i in range(1, 1002)] + ["y" * 49900] + [f"{i:05d} after" for i in range(1, 301)]
     content = "\n".join(lines) + "\n"
-    (tmp_path / "uploads" / "long.txt").write_text(content, encoding="utf-8")
+    _write_lf(tmp_path / "uploads" / "long.txt", content)
     result = _read(runtime, start_line=1, end_line=1002)
     assert "cut inside line 1002 of 1002 lines" in result
     assert "Read that line whole with start_line=1002, end_line=1002, then continue with start_line=1003]" in result
@@ -180,7 +190,7 @@ def test_a_start_line_only_read_cut_inside_the_files_last_line_names_nothing_fur
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox("t1"))
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
     content = "a\n" + "x" * 40000 + "\n" + "y" * 49900 + "\n"
-    (tmp_path / "uploads" / "long.txt").write_text(content, encoding="utf-8")
+    _write_lf(tmp_path / "uploads" / "long.txt", content)
     result = _read(runtime, start_line=2)  # no end_line: the read runs to the end of the file
     assert "cut inside line 3 of 2-3 lines" in result
     assert "Read that line whole with start_line=3, end_line=3]" in result
@@ -193,7 +203,7 @@ def test_a_blank_line_named_by_a_marker_reads_as_empty_not_as_past_the_end(tmp_p
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
     lines = [f"{i:05d} line" for i in range(1, 1099)] + ["y" * 49800, ""] + [f"{i:05d} after" for i in range(1, 401)]
     content = "\n".join(lines) + "\n"  # line 1100 is blank, 400 lines follow it
-    (tmp_path / "uploads" / "long.txt").write_text(content, encoding="utf-8")
+    _write_lf(tmp_path / "uploads" / "long.txt", content)
     result = _read(runtime, start_line=958, end_line=1100)
     assert "Read that line whole with start_line=1099, end_line=1099, then continue with start_line=1100]" in result
     assert _read(runtime, start_line=1100, end_line=1100) == "(empty)"
