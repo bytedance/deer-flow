@@ -101,6 +101,25 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
 
 这条提示词是给 coding agent 用的。它会在需要时先 clone 仓库，优先选择 Docker，完成初始化，并在结束时告诉你下一条启动命令，以及还缺哪些配置需要你补充。
 
+### 通过 Web 注册共享模型
+
+管理员可在 **设置 → 模型 → 添加模型** 中选择厂商，仅填写 **API Key** 和
+**模型 ID**。后端预置 OpenAI、Anthropic、DeepSeek、百炼/通义千问、火山/豆包、
+Moonshot/Kimi、智谱/Z.AI 和 MiniMax 的端点、认证与适配器，地域和 Coding Plan
+使用明确区分的选项。模型 ID 不受内置枚举限制；内部名称自动生成且保持稳定。
+新模型默认启用，保存后自动刷新聊天及 Agent 的模型选择器，无需重启 Gateway。
+
+已有地址继续通过 **自定义 OpenAI-compatible** 查看、编辑和使用，也支持无认证
+接口。高级设置保留显示名称、上下文窗口、输出限制和视觉能力覆盖；未知模型不
+自动声明能力。编辑时 API Key 留空表示保留同一连接的密钥，切换厂商或地址须
+重新填写。清除预设模型密钥前应先停用模型。连接测试不保存草稿，并使用与聊天
+相同的协议及模型工厂；真实请求可能产生费用。
+
+YAML 同名模型优先，已有任务保留原配置快照。托管模型使用原有加密目录，必须
+备份整个 `$DEER_FLOW_HOME/managed-models/`，同时保存匹配的 `catalog.enc` 和
+`key`；丢失密钥应恢复备份，不要删除目录或重建密钥。
+详见[配置参考](backend/docs/CONFIGURATION.md#models-registered-through-the-web)。
+
 ## 快速开始
 
 ### 配置

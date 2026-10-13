@@ -448,6 +448,65 @@ Neither can make anything be *acted on*. The `allowed_users` allowlist and per-e
 
 **Bound identity:** once a pubkey completes `/connect`, its inbound messages resolve to that connection and run under the bound DeerFlow user (memory, files, and artifacts land in that user's buckets). Bindings are scoped to the relay host, so the same pubkey on a different relay is a different identity and must bind separately.
 
+### Feishu scheduled-task notifications
+
+Feishu/Lark sends scheduled-task result and lifecycle notices as static Markdown
+cards to the task owner's currently bound user. The existing notification outbox
+provides retry, localization, redaction and send-time binding checks; Settings
+reports this through `proactive_notifications`. Manual trial runs stay silent.
+
+The configured app needs bot messaging permission (`im:message:send_as_bot`, or
+its broader `im:message` alternative), and the recipient must be in its available
+scope. Complete `/connect <code>` in a private chat with the same app. The outbox
+keeps the application-scoped `open_id` as its identity; delivery prefers that
+owner's currently connected, explicitly recorded private-chat address. Group
+chats are never used for these personal notices. Older bindings without recorded
+chat type keep the `open_id` path; if Feishu rejects it with `230101`, bind again
+in private chat. Changing the app also requires rebinding.
+The existing WebSocket channel must be running; sends use the configured SDK's
+REST client, so no public callback or interactive-card subscription is needed.
+
+For provider-backed acceptance, bind a test user, let a once task run on its
+schedule, and confirm the notice arrives without another chat message. Check
+that a platform rejection is recorded as a failed delivery and that unbinding
+prevents later sends. API acceptance is not a read receipt. The shared outbox
+can retry an ambiguously acknowledged send; it does not promise exactly-once
+messages at the provider. Record whether domestic Feishu or international Lark
+was actually exercised.
+
+### Feishu group notifications
+
+Tasks may explicitly select one additional connected Feishu group. Personal
+notifications keep their existing recipients. The task stores the chosen
+`notification_group_connection_id`; a group notice stores that connection ID as
+its outbox target with `payload.target_type="group"`. It never infers a group
+destination from all of the owner's bindings.
+
+Add the app bot to a test or work group, grant `im:chat:read` for the group-name
+lookup, and publish the app changes. In the task form choose **Bind a Feishu
+group**, mention the bot and send the displayed `/connect` command in that
+group, then refresh and select its name. Name lookup failure does not discard
+the binding, but unnamed groups cannot be newly selected in the form: check
+the read permission and bind again. API selection and each delivery verify the
+task owner, connection ID, connected status, and recorded group/chat identity.
+The provider sends to that verified `chat_id`; a lost binding cannot fall back
+to another group or a private chat. A bot removed from the group produces a
+normal platform rejection handled by the existing retry budget.
+
+Omitting the field in PATCH preserves it; `null` clears it. Destination-only
+edits do not re-arm completed tasks or change the run budget. The destination
+is fixed when each notification is enqueued; later task edits affect future
+notices, and unbinding still blocks pending ones. Migration `0040` adds a nullable
+reference with no backfill. Upgrade Gateway workers and the frontend together;
+the form uses `/api/features.scheduled_tasks.group_notifications` to hide new
+selection on older Gateways. The conversation scheduling tool does not set
+group targets in this version.
+
+Real-provider acceptance should confirm that a selected task appears in the
+specified group, an unselected task remains private, and removing the bot or
+revoking its binding prevents a successful group send. Record the account and
+tenant setup actually used; the outbox remains at-least-once.
+
 ### QQ WebSocket setup (MVP)
 
 QQ uses an outbound WebSocket connection for events and the QQ Open Platform
@@ -496,6 +555,15 @@ scoped to both the App ID and group OpenID. Do not assume private and group
 OpenIDs represent the same identity. Bind each context separately. Group
 conversation histories are isolated by sender, but replies remain visible to
 everyone in the group.
+
+List several OpenIDs as a YAML list. A single OpenID, such as an
+`allowed_users: $QQ_ALLOWED_USERS` reference, is one entry rather than a
+sequence of characters. An unset or null value, an empty list, and a blank or
+whitespace-only string such as `" "` all allow every sender; they do not
+restrict access. Entries that are not OpenID strings, such as numeric
+QQ account numbers, are ignored with a warning, and a mapping is rejected as a
+whole, so none of its keys is authorized. A configured value with no valid
+OpenID denies every sender and logs an error.
 
 The MVP supports text-only `C2C_MESSAGE_CREATE` and `GROUP_AT_MESSAGE_CREATE`
 events and final text replies. It does not download/upload attachments, stream

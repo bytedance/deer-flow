@@ -166,11 +166,12 @@ export type MockAPIOptions = {
     browserControlEnabled?: boolean;
     mcpTasksEnabled?: boolean;
     knowledgeScopeSelectionEnabled?: boolean;
-    /** Emitted as `scheduled_tasks`; each flag defaults to true. */
+    /** Existing task flags default to true; optional group notifications default to false. */
     scheduledTasks?: {
       available?: boolean;
       running?: boolean;
       toolEnabled?: boolean;
+      groupNotifications?: boolean;
     };
     /** Emitted as `thread_activity`; unavailable unless enabled, so nothing polls by default. */
     threadActivity?: {
@@ -288,6 +289,7 @@ export type MockScheduledTask = {
   origin_thread_id?: string | null;
   standing_notes?: string[] | null;
   stop_condition?: string | null;
+  notification_group_connection_id?: string | null;
   automatic_runs_used?: number;
   active_run_status?: "queued" | "launching" | "running" | null;
   created_at: string;
@@ -357,6 +359,7 @@ const CLEARABLE_TASK_FIELDS = [
   "max_runs",
   "end_at",
   "stop_condition",
+  "notification_group_connection_id",
 ] as const;
 
 /** PATCH/resume semantics: a present key replaces the value; `null` clears the clearable fields. */
@@ -654,6 +657,8 @@ export function mockLangGraphAPI(
       available: options?.features?.scheduledTasks?.available ?? true,
       running: options?.features?.scheduledTasks?.running ?? true,
       toolEnabled: options?.features?.scheduledTasks?.toolEnabled ?? true,
+      groupNotifications:
+        options?.features?.scheduledTasks?.groupNotifications ?? false,
     },
     threadActivity: {
       available: options?.features?.threadActivity?.available ?? false,
@@ -2373,6 +2378,7 @@ export function mockLangGraphAPI(
             available: featureFlags.scheduledTasks.available,
             running: featureFlags.scheduledTasks.running,
             tool_enabled: featureFlags.scheduledTasks.toolEnabled,
+            group_notifications: featureFlags.scheduledTasks.groupNotifications,
             min_interval_seconds: 60,
           },
           thread_activity: {
