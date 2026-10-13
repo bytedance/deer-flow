@@ -505,6 +505,10 @@ class TelegramChannel(Channel):
         reply_to = self._last_bot_message.get(chat_key)
         if reply_to:
             kwargs["reply_to_message_id"] = reply_to
+            # A deleted private-chat reply must not block delivery. Keep group
+            # replies strict: dropping their target could change forum routing.
+            if chat_id > 0:
+                kwargs["allow_sending_without_reply"] = True
 
         bot = self._application.bot
 
@@ -543,11 +547,15 @@ class TelegramChannel(Channel):
                 kwargs: dict[str, Any] = {"chat_id": chat_id, "photo": input_file}
                 if reply_to:
                     kwargs["reply_to_message_id"] = reply_to
+                    if chat_id > 0:
+                        kwargs["allow_sending_without_reply"] = True
                 sent = await bot.send_photo(**kwargs)
             else:
                 kwargs = {"chat_id": chat_id, "document": input_file}
                 if reply_to:
                     kwargs["reply_to_message_id"] = reply_to
+                    if chat_id > 0:
+                        kwargs["allow_sending_without_reply"] = True
                 sent = await bot.send_document(**kwargs)
 
             self._last_bot_message[msg.chat_id] = sent.message_id

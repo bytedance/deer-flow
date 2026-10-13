@@ -9,6 +9,11 @@ Telegram retries share bootstrap/Bot cleanup. Dead loops warn once; clear
 matching futures under `_shutdown_resources_lock` (closure unconfirmed).
 Finalize asyncgens; keep primary errors; propagate lone Bot errors.
 
+Telegram cached bot-message reply targets use `allow_sending_without_reply` only
+in private chats (`chat_id > 0`), for fresh text, photos and documents. Keep group
+targets strict to avoid changing forum routing; the Bot API handles the missing
+target atomically, without an extra client-side resend after transport failures.
+
 **Auth**: SDK and raw-httpx `/goal` calls send process-local auth plus `_csrf_headers()`; internal auth requires CSRF.
 
 **Components**:
