@@ -227,11 +227,21 @@ def _hash_tool_calls(tool_calls: list[dict]) -> str:
     return hashlib.md5(blob.encode()).hexdigest()[:12]
 
 
-_WARNING_MSG = "[LOOP DETECTED] You are repeating the same tool calls. Stop calling tools and produce your final answer now. If you cannot complete the task, summarize what you accomplished so far."
-
-_TOOL_FREQ_WARNING_MSG = (
-    "[LOOP DETECTED] You have called {tool_name} {count} times without producing a final answer. Stop calling tools and produce your final answer now. If you cannot complete the task, summarize what you accomplished so far."
+# Warn-level messages ask the agent to wrap up, but must not make it drop work
+# it was asked to persist: a subagent whose task names an output file would
+# otherwise stop *all* tool calls, including the write that delivers its
+# result, and finish as "completed" with nothing on disk. So the wrap-up
+# explicitly allows one last save through a file-writing tool before the
+# final answer. The hard-stop path below is unchanged (it strips tool calls).
+_WRAP_UP_INSTRUCTIONS = (
+    "If your task asks you to save results to a file, first write what you have collected so far to that file "
+    "with a file-writing tool (for example write_file), then stop calling tools and produce your final answer. "
+    "If you cannot complete the task, summarize what you accomplished so far."
 )
+
+_WARNING_MSG = "[LOOP DETECTED] You are repeating the same tool calls. Stop repeating them and wrap up now. " + _WRAP_UP_INSTRUCTIONS
+
+_TOOL_FREQ_WARNING_MSG = "[LOOP DETECTED] You have called {tool_name} {count} times without producing a final answer. Stop calling {tool_name} and wrap up now. " + _WRAP_UP_INSTRUCTIONS
 
 _HARD_STOP_MSG = "[FORCED STOP] Repeated tool calls exceeded the safety limit. Producing final answer with results collected so far."
 

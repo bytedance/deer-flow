@@ -2319,3 +2319,51 @@ class TestFromConfig:
         result = mw._apply(_make_state(tool_calls=[_bash_call(f"cmd_{hard}")]), runtime)
         assert result is not None
         assert mw.consume_stop_reason("test-run") == "loop_capped"
+
+
+class TestWarningLetsAgentSaveResultsFirst:
+    """F67: a warn-level loop message must not make a subagent drop the
+    file it was asked to write. The warning asks for one last save through a
+    file-writing tool before the final answer; the hard stop is unchanged."""
+
+    @staticmethod
+    def _write_call(path="/mnt/user-data/workspace/out.md"):
+        return {"name": "write_file", "id": "call_write", "args": {"path": path, "content": "partial results"}}
+
+    @staticmethod
+    def _read_call(path):
+        return {"name": "read_file", "id": f"call_read_{path}", "args": {"path": path}}
+
+    def test_hash_warning_asks_to_save_before_final_answer(self):
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=10)
+        runtime = _make_runtime()
+        for _ in range(3):
+            mw._apply(_make_state(tool_calls=[_bash_call("ls")]), runtime)
+        warning = mw._pending_warnings[_pending_key()][0]
+        assert "LOOP DETECTED" in warning
+        assert "Stop calling tools and produce your final answer now" not in warning
+        assert "write_file" in warning
+        assert warning.index("write what you have collected") < warning.index("produce your final answer")
+
+    def test_freq_warning_names_the_looping_tool_and_allows_saving(self):
+        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=10)
+        runtime = _make_runtime()
+        for i in range(3):
+            mw._apply(_make_state(tool_calls=[self._read_call(f"/f_{i}")]), runtime)
+        warning = mw._pending_warnings[_pending_key()][0]
+        assert "Stop calling read_file" in warning
+        assert "Stop calling tools and produce your final answer now" not in warning
+        assert "write_file" in warning
+
+    def test_save_call_after_warning_is_not_stripped(self):
+        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=10)
+        runtime = _make_runtime()
+        for i in range(3):
+            mw._apply(_make_state(tool_calls=[self._read_call(f"/f_{i}")]), runtime)
+        assert mw._pending_warnings[_pending_key()]
+        # The follow-up write is a different tool and a different call set:
+        # neither detection layer acts on it, so the write reaches the tools node.
+        assert mw._apply(_make_state(tool_calls=[self._write_call()]), runtime) is None
+
+    def test_hard_stop_message_unchanged(self):
+        assert "FORCED STOP" in _HARD_STOP_MSG
