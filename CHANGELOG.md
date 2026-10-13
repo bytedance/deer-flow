@@ -1244,7 +1244,7 @@ This release closes that milestone with **621 merged pull requests**.
   bounded drain and closes the loop, and a stop requested before the client
   exists never dials. `ChannelStopTimeout` is now reserved for a thread that
   genuinely wedges inside an SDK call. Telegram already stopped its loop
-  this way and is unchanged.
+  this way and is unchanged. ([#6798])
 
 - **frontend:** The user-management settings page no longer renders a doomed
   query on the static-website demo, and a non-admin `?settings=users` deep
@@ -11628,3 +11628,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6702]: https://github.com/bytedance/deer-flow/pull/6702
 [#6706]: https://github.com/bytedance/deer-flow/pull/6706
 [#6746]: https://github.com/bytedance/deer-flow/pull/6746
+[#6798]: https://github.com/bytedance/deer-flow/pull/6798
