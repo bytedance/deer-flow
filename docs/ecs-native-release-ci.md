@@ -60,3 +60,6 @@ Dockerfile 已有 APT_MIRROR 参数。交付入口现在接受 --apt-mirror，Je
 每个新 release 的 build-inputs.json 记录选定值，摘要写入镜像 org.deerflow.native.build_inputs_sha256 label 并在导出前核对，最终镜像包/ID仍由 release.json 锁定。失败和停止的目录不覆盖，重试使用新的 release ID。保持原5个守卫，只扩展输入验证断言；不增加完整矩阵或模型运行。
 
 Jenkins 任务中断会终止整个进程组，可能在 Python finally 的 docker stop 完成前再次终止清理进程。2026-10-13 #2 ABORTED 后 builder 仍运行，已在确认任务终态与原 CID 后手工停止，缓存保留；不能把 finally/SIGTERM 支持当成 Jenkins ABORTED 必然已清理。中断后始终按回执复核并只停止原确切 builder，再开始下一次构建。
+
+
+2026-10-13：release #3 的原生 Python 包直连持续慢下载；构建容器同一 Playwright wheel 样本，直连393216字节/17.65秒后超时，既有清华源2097152字节/1秒。仅正常停止本项目 #3（ABORTED）并核对确切 builder CID 后停止；缓存及失败证据保留。入口新增 `--locked-artifact-mirror` / Jenkins `LOCKED_ARTIFACT_MIRROR` 布尔开关，透传既有 Dockerfile 固定 `UV_ARTIFACT_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/pypi/web`；不新增任意URL输入，不改变依赖版本、SHA、大小或锁文件恢复校验，选定布尔值写入build-inputs摘要。原5守卫内补开关断言：先RED1再GREEN5，测试仅在Jenkins代理运行；不重跑真实模型主干。新镜像交付仍待完成。

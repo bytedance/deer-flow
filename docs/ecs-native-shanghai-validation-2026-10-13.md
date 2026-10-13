@@ -10,3 +10,6 @@ Controller101.132.36.217 / 私网192.168.0.190；Worker139.196.37.75 / 私网192
 - 已准备两个DeerFlow文件凭据，分别存放非秘密环境清单与受信known_hosts；原SSH凭据保持不变。清单SHA17392c5a173c6c6b99ffeae03d4568a42b7028d1e7b13ebf47481a0eae60f937，绑定实际两端路径、私有配置/Compose摘要、原e84和独立UI镜像。generation沿用已验收兼容类；不声称新增数据库备份或PITR。
 
 证据留在 Jenkins /data/jenkins-agent/deerflow/native-release-recovery-20261013，既有昨日业务证明/文件和失败历史未覆盖。昨天真实销售C→B→C已通过，本轮不重跑模型矩阵。当前角色仍是原e84，新构建/传输/部署/交付smoke未全部通过，远程Git发布暂停。
+
+
+2026-10-13：release #3 的原生 Python 包直连持续慢下载；构建容器同一 Playwright wheel 样本，直连393216字节/17.65秒后超时，既有清华源2097152字节/1秒。仅正常停止本项目 #3（ABORTED）并核对确切 builder CID 后停止；缓存及失败证据保留。入口新增 `--locked-artifact-mirror` / Jenkins `LOCKED_ARTIFACT_MIRROR` 布尔开关，透传既有 Dockerfile 固定 `UV_ARTIFACT_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/pypi/web`；不新增任意URL输入，不改变依赖版本、SHA、大小或锁文件恢复校验，选定布尔值写入build-inputs摘要。原5守卫内补开关断言：先RED1再GREEN5，测试仅在Jenkins代理运行；不重跑真实模型主干。新镜像交付仍待完成。

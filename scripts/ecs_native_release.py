@@ -143,9 +143,22 @@ def apt_mirror_args(value):
     return ["--build-arg", "APT_MIRROR=" + value]
 
 
+def locked_artifact_mirror_args(enabled):
+    return (
+        [
+            "--build-arg",
+            "UV_ARTIFACT_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/pypi/web",
+        ]
+        if enabled
+        else []
+    )
+
+
 def build(args):
     source_check(args.expected_commit)
-    mirror_options = apt_mirror_args(args.apt_mirror)
+    mirror_options = apt_mirror_args(args.apt_mirror) + locked_artifact_mirror_args(
+        args.locked_artifact_mirror
+    )
     if not NAME.fullmatch(args.release_id):
         raise ValueError("Fixed release ID required")
     parent = output_directory(args.output_root)
@@ -185,6 +198,7 @@ def build(args):
             "target": "native-role",
             "uv_extras": "postgres,browser",
             "apt_mirror": args.apt_mirror,
+            "locked_artifact_mirror": args.locked_artifact_mirror,
         },
     )
     inputs_sha = digest(inputs_path)
@@ -503,6 +517,11 @@ def main():
         "--apt-mirror",
         default="",
         help="Optional reviewed plain DNS hostname; forwards the existing Dockerfile APT_MIRROR argument",
+    )
+    parser.add_argument(
+        "--locked-artifact-mirror",
+        action="store_true",
+        help="Use the existing fixed SHA-checked artifact transport mirror without changing locked metadata",
     )
     parser.add_argument("--environment")
     args = parser.parse_args()

@@ -112,6 +112,17 @@ class DeliveryGuards(unittest.TestCase):
             self.assertEqual(len(list(directory.glob("deploy-0*.json"))), 3)
 
     def test_private_inputs_reject_symlink_and_public_mode(self):
+        artifact_args = getattr(
+            release, "locked_artifact_mirror_args", lambda enabled: []
+        )
+        self.assertEqual(artifact_args(False), [])
+        self.assertEqual(
+            artifact_args(True),
+            [
+                "--build-arg",
+                "UV_ARTIFACT_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/pypi/web",
+            ],
+        )
         mirror_args = getattr(release, "apt_mirror_args", lambda value: [])
         self.assertEqual(mirror_args(""), [])
         self.assertEqual(
