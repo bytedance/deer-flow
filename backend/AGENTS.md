@@ -64,6 +64,8 @@ Every code change must keep docs accurate and current: update `README.md` for
 user-facing behavior and the relevant `AGENTS.md` for development changes.
 `CLAUDE.md` imports `AGENTS.md`; do not edit the shim.
 
+Image result URL policy: [image search guide](packages/harness/deerflow/community/image_search/AGENTS.md).
+
 ### Backend Benchmarks
 
 `scripts/benchmark/context_snapshot/`: explicit `run-live` needs provider env

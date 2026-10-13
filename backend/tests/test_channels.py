@@ -11416,7 +11416,60 @@ class TestTelegramInboundMessages:
 
         _run(go())
 
-    def test_cancelled_stop_still_stops_thread_and_clears_state(self):
+    @pytest.mark.parametrize("owner_loop", ["missing", "stopped", "closed"])
+    def test_stop_releases_abandoned_cleanup_generation(self, caplog, owner_loop):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "test-token"})
+            telegram_loop = asyncio.new_event_loop() if owner_loop != "missing" else None
+            if owner_loop == "closed":
+                telegram_loop.close()
+            cleanup_future: Future[None] = Future()
+            ch._tg_loop = telegram_loop
+            ch._shutdown_resources_future = cleanup_future
+            ch._download_bot = SimpleNamespace(shutdown=AsyncMock())
+            try:
+                with caplog.at_level(logging.WARNING, logger="app.channels.telegram"):
+                    await ch.stop()
+                    await ch.stop()
+
+                assert ch._shutdown_resources_future is None
+                assert caplog.text.count("Telegram loop stopped before its resource cleanup finished") == 1
+                # Dropping an abandoned generation is not evidence that its
+                # loop-owned clients were closed, nor a reason to cancel it.
+                ch._download_bot.shutdown.assert_not_awaited()
+                assert not cleanup_future.done()
+            finally:
+                if telegram_loop is not None and not telegram_loop.is_closed():
+                    telegram_loop.close()
+
+        _run(go())
+
+    def test_stop_abandons_only_the_matching_cleanup_generation(self, monkeypatch):
+        from app.channels import telegram as telegram_module
+
+        async def go():
+            ch = telegram_module.TelegramChannel(bus=MessageBus(), config={"bot_token": "test-token"})
+            abandoned: Future[None] = Future()
+            replacement: Future[None] = Future()
+            ch._shutdown_resources_future = abandoned
+
+            def replace_generation_before_release(*args, **kwargs):
+                with ch._shutdown_resources_lock:
+                    ch._shutdown_resources_future = replacement
+
+            monkeypatch.setattr(telegram_module.logger, "warning", replace_generation_before_release)
+            await ch.stop()
+
+            assert ch._shutdown_resources_future is replacement
+            assert not abandoned.done()
+            assert not replacement.done()
+
+        _run(go())
+
+    def test_cancelled_stop_keeps_owned_cleanup_and_retry_converges(self):
+        """A cancelled stop must not cancel the cleanup the Telegram loop owns."""
         from app.channels.telegram import TelegramChannel
 
         async def go():
@@ -11424,16 +11477,23 @@ class TestTelegramInboundMessages:
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
             telegram_loop = asyncio.new_event_loop()
             loop_started: Future[None] = Future()
-            drain_started = threading.Event()
+            cleanup_started = threading.Event()
+            cleanup_finished = threading.Event()
+            release_cleanup = threading.Event()
+            shutdown_calls = 0
 
             def run_telegram_loop():
                 asyncio.set_event_loop(telegram_loop)
                 telegram_loop.call_soon(loop_started.set_result, None)
                 telegram_loop.run_forever()
 
-            async def slow_drain():
-                drain_started.set()
-                await asyncio.Event().wait()
+            class DownloadBot:
+                async def shutdown(self):
+                    nonlocal shutdown_calls
+                    shutdown_calls += 1
+                    cleanup_started.set()
+                    await asyncio.to_thread(release_cleanup.wait)
+                    cleanup_finished.set()
 
             loop_thread = threading.Thread(target=run_telegram_loop, daemon=True)
             loop_thread.start()
@@ -11443,18 +11503,173 @@ class TestTelegramInboundMessages:
                 ch._thread = loop_thread
                 ch._running = True
                 ch._application = SimpleNamespace(bot=SimpleNamespace())
-                ch._cancel_telegram_bridge_tasks = slow_drain
+                ch._download_bot = DownloadBot()
 
                 stop_task = asyncio.create_task(ch.stop())
-                assert await asyncio.to_thread(drain_started.wait, 2)
+                assert await asyncio.to_thread(cleanup_started.wait, 2)
                 stop_task.cancel()
 
                 with pytest.raises(asyncio.CancelledError):
                     await stop_task
 
-                assert not loop_thread.is_alive()
+                # Cancellation reached the caller only: the loop and the cleanup
+                # it owns stay with the channel so a retry can finish them.
+                assert not cleanup_finished.is_set()
+                assert telegram_loop.is_running()
+                assert loop_thread.is_alive()
+                assert ch._thread is loop_thread
+                assert ch._application is not None
+                assert ch._download_bot is not None
+
+                release_cleanup.set()
+                assert await asyncio.to_thread(cleanup_finished.wait, 2)
+                await ch.stop()
+
+                assert shutdown_calls == 1
+                assert ch._download_bot is None
                 assert ch._thread is None
                 assert ch._application is None
+                assert not loop_thread.is_alive()
+            finally:
+                if telegram_loop.is_running():
+                    telegram_loop.call_soon_threadsafe(telegram_loop.stop)
+                await asyncio.to_thread(loop_thread.join, 2)
+                if loop_thread.is_alive():
+                    pytest.fail("Telegram test event loop did not stop")
+                telegram_loop.close()
+
+        _run(go())
+
+    def test_concurrent_stops_share_one_telegram_cleanup_generation(self):
+        """Concurrent stops must not schedule a second Telegram-loop cleanup."""
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            telegram_loop = asyncio.new_event_loop()
+            loop_started: Future[None] = Future()
+            cleanup_started = threading.Event()
+            cleanup_finished = threading.Event()
+            release_cleanup = threading.Event()
+            shutdown_calls = 0
+
+            def run_telegram_loop():
+                asyncio.set_event_loop(telegram_loop)
+                telegram_loop.call_soon(loop_started.set_result, None)
+                telegram_loop.run_forever()
+
+            class DownloadBot:
+                async def shutdown(self):
+                    nonlocal shutdown_calls
+                    shutdown_calls += 1
+                    cleanup_started.set()
+                    await asyncio.to_thread(release_cleanup.wait)
+                    cleanup_finished.set()
+
+            loop_thread = threading.Thread(target=run_telegram_loop, daemon=True)
+            loop_thread.start()
+            try:
+                loop_started.result(timeout=2)
+                ch._tg_loop = telegram_loop
+                ch._thread = loop_thread
+                ch._running = True
+                ch._application = SimpleNamespace(bot=SimpleNamespace())
+                ch._download_bot = DownloadBot()
+
+                first = asyncio.create_task(ch.stop())
+                assert await asyncio.to_thread(cleanup_started.wait, 2)
+                second = asyncio.create_task(ch.stop())
+                await asyncio.sleep(0.05)
+
+                assert not first.done()
+                assert not second.done()
+
+                release_cleanup.set()
+                await asyncio.gather(first, second)
+
+                assert shutdown_calls == 1
+                assert await asyncio.to_thread(cleanup_finished.wait, 2)
+                assert ch._download_bot is None
+                assert ch._thread is None
+                assert ch._application is None
+                assert not loop_thread.is_alive()
+            finally:
+                if telegram_loop.is_running():
+                    telegram_loop.call_soon_threadsafe(telegram_loop.stop)
+                await asyncio.to_thread(loop_thread.join, 2)
+                if loop_thread.is_alive():
+                    pytest.fail("Telegram test event loop did not stop")
+                telegram_loop.close()
+
+        _run(go())
+
+    def test_shutdown_timeout_keeps_download_bot_cleanup_running(self, monkeypatch):
+        """The Gateway deadline must not cancel Telegram-loop-owned Bot cleanup."""
+        from app.channels import telegram as telegram_module
+        from app.channels.base import ChannelStopTimeout
+
+        async def go():
+            bus = MessageBus()
+            ch = telegram_module.TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            telegram_loop = asyncio.new_event_loop()
+            loop_started: Future[None] = Future()
+            cleanup_started = threading.Event()
+            cleanup_finished = threading.Event()
+            release_cleanup = threading.Event()
+            shutdown_calls = 0
+
+            def run_telegram_loop():
+                asyncio.set_event_loop(telegram_loop)
+                telegram_loop.call_soon(loop_started.set_result, None)
+                telegram_loop.run_forever()
+
+            class DownloadBot:
+                async def shutdown(self):
+                    nonlocal shutdown_calls
+                    shutdown_calls += 1
+                    cleanup_started.set()
+                    await asyncio.to_thread(release_cleanup.wait)
+                    cleanup_finished.set()
+
+            loop_thread = threading.Thread(target=run_telegram_loop, daemon=True)
+            loop_thread.start()
+            try:
+                loop_started.result(timeout=2)
+                ch._tg_loop = telegram_loop
+                ch._thread = loop_thread
+                ch._running = True
+                ch._application = SimpleNamespace(bot=SimpleNamespace())
+                ch._download_bot = DownloadBot()
+                monkeypatch.setattr(telegram_module, "TELEGRAM_SHUTDOWN_TIMEOUT_SECONDS", 0.01)
+
+                with pytest.raises(ChannelStopTimeout, match="Telegram loop cleanup is still running"):
+                    await ch.stop()
+
+                # The deadline interrupted the wait, not the cleanup: the loop
+                # still owns the unfinished download Bot shutdown.
+                assert await asyncio.to_thread(cleanup_started.wait, 2)
+                assert not cleanup_finished.is_set()
+                assert telegram_loop.is_running()
+                assert loop_thread.is_alive()
+                assert ch._thread is loop_thread
+                assert ch._application is not None
+                assert ch._download_bot is not None
+
+                release_cleanup.set()
+                assert await asyncio.to_thread(cleanup_finished.wait, 2)
+
+                # A retried stop joins that same cleanup and only then tears the
+                # channel down.
+                monkeypatch.setattr(telegram_module, "TELEGRAM_SHUTDOWN_TIMEOUT_SECONDS", 5.0)
+                await ch.stop()
+
+                assert shutdown_calls == 1
+                assert ch._download_bot is None
+                assert ch._thread is None
+                assert ch._application is None
+                assert not telegram_loop.is_running()
+                assert not loop_thread.is_alive()
             finally:
                 if telegram_loop.is_running():
                     telegram_loop.call_soon_threadsafe(telegram_loop.stop)

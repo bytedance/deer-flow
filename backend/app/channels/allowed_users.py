@@ -1,10 +1,56 @@
-"""Shared fail-closed parsing for channel user allowlists."""
+"""Shared scalar-or-list parsing for channel ID configuration."""
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Hashable
 from typing import Any
+
+
+def _parse_id_entries(
+    value: Any,
+    *,
+    logger: logging.Logger,
+    channel_name: str,
+    key_name: str,
+    valid_id_name: str,
+    warn_on_scalar_separators: bool,
+) -> list[Any]:
+    """Normalize config shape without splitting scalar IDs or iterating mappings."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return []
+    if warn_on_scalar_separators and isinstance(value, str) and ("," in value or any(char.isspace() for char in value.strip())):
+        logger.warning(
+            "[%s] %s is a scalar string containing separators; treating it as one literal %s. Use a YAML list for multiple IDs",
+            channel_name,
+            key_name,
+            valid_id_name,
+        )
+    return list(value) if isinstance(value, (list, tuple, set, frozenset)) else [value]
+
+
+def parse_channel_ids(
+    value: Any,
+    *,
+    logger: logging.Logger,
+    channel_name: str,
+    key_name: str,
+    warn_on_scalar_separators: bool = False,
+) -> frozenset[str]:
+    """Return trimmed literal channel IDs; empty config grants no exemptions.
+
+    These IDs are compared as strings by the connector. An unusable literal
+    never matches, so it leaves the connector's mention requirement in force.
+    """
+    entries = _parse_id_entries(
+        value,
+        logger=logger,
+        channel_name=channel_name,
+        key_name=key_name,
+        valid_id_name="channel id",
+        warn_on_scalar_separators=warn_on_scalar_separators,
+    )
+    return frozenset(text for text in (str(entry).strip() for entry in entries) if text)
 
 
 def parse_allowed_users[UserId: Hashable](
@@ -26,15 +72,14 @@ def parse_allowed_users[UserId: Hashable](
     String-ID channels can opt into a scalar-separator warning without splitting
     the ID; surrounding whitespace alone does not trigger it.
     """
-    if allowed_users is None or (isinstance(allowed_users, str) and not allowed_users.strip()):
-        return None
-    if warn_on_scalar_separators and isinstance(allowed_users, str) and ("," in allowed_users or any(char.isspace() for char in allowed_users.strip())):
-        logger.warning(
-            "[%s] allowed_users is a scalar string containing separators; treating it as one literal %s. Use a YAML list for multiple IDs",
-            channel_name,
-            valid_id_name,
-        )
-    entries = list(allowed_users) if isinstance(allowed_users, (list, tuple, set, frozenset)) else [allowed_users]
+    entries = _parse_id_entries(
+        allowed_users,
+        logger=logger,
+        channel_name=channel_name,
+        key_name="allowed_users",
+        valid_id_name=valid_id_name,
+        warn_on_scalar_separators=warn_on_scalar_separators,
+    )
     if not entries:
         return None
 

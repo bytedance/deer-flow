@@ -282,6 +282,167 @@ models:
           type: enabled
 ```
 
+#### Models registered through the Web
+
+An administrator can open **Settings → Models → Add model**, select a provider,
+and enter its **API Key** and **model ID**. No endpoint, protocol, Python import
+path or thinking template is needed. The model ID is not an enum: any nonempty
+ID of up to 200 Unicode characters, without control characters, is accepted.
+The provider still decides whether that ID exists and is available to the key.
+No model discovery or external model directory is queried.
+
+New entries are enabled by default. The server generates an ASCII internal name
+(up to 100 characters) from a bounded slug and a random suffix, checking for
+collisions while holding the existing catalog lock. Slashes, spaces, Unicode,
+long IDs and identical model IDs do not collide or become filesystem paths.
+The default display name combines the provider and model ID. The internal name
+is immutable in the Web editor; changing a model ID keeps Agent/thread references
+stable. Display name, enabled state, context window, output token cap and vision
+support remain available under **Advanced settings**. Vision supports an explicit
+on/off override or the provider rule; unknown models default to no advertised
+vision/thinking/effort and no assumed context window. This conservative metadata
+is not a claim that an unknown model lacks those features. A verified `reasoning`
+contract can also be supplied by administrator API clients; it is validated by
+`ModelConfig` and interpreted by the existing model factory. Managed effort paths
+are restricted to request effort parameters (`reasoning_effort`,
+`extra_body.reasoning_effort`, `output_config.effort`, `effort`); they cannot address
+SDK credentials, endpoints or adapter fields. Operator YAML contracts are unchanged.
+
+Provider routing has one backend owner,
+`packages/harness/deerflow/config/managed_model_providers.py`. The admin-only
+`GET /api/managed-models/providers` returns IDs, labels and form requirements,
+without maintaining another endpoint map in the frontend. The initial presets
+are:
+
+| Provider ID | Service / credential scope | Endpoint | Protocol / authentication |
+| --- | --- | --- | --- |
+| `openai` | OpenAI API | `https://api.openai.com/v1` | Chat Completions / Bearer |
+| `anthropic` | Anthropic API | `https://api.anthropic.com` | Native Messages `/v1/messages` / `x-api-key` |
+| `deepseek` | DeepSeek API | `https://api.deepseek.com` | Chat Completions / Bearer |
+| `qwen-cn` | Alibaba Cloud Bailian / Qwen, China | `https://dashscope.aliyuncs.com/compatible-mode/v1` | Chat Completions / Bearer |
+| `doubao` | Volcengine Beijing, ordinary API | `https://ark.cn-beijing.volces.com/api/v3` | Chat Completions / Bearer |
+| `doubao-coding` | Volcengine Coding Plan, separate key/plan | `https://ark.cn-beijing.volces.com/api/coding/v3` | Chat Completions / Bearer |
+| `moonshot-cn` | Moonshot / Kimi, China API | `https://api.moonshot.cn/v1` | Chat Completions / Bearer |
+| `zhipu-cn` | Zhipu, China ordinary API | `https://open.bigmodel.cn/api/paas/v4` | Chat Completions / Bearer |
+| `zai` | Z.AI, international ordinary API | `https://api.z.ai/api/paas/v4` | Chat Completions / Bearer |
+| `minimax` | MiniMax, international API | `https://api.minimax.io/v1` | Chat Completions / Bearer |
+| `minimax-cn` | MiniMax, China API | `https://api.minimaxi.com/v1` | Chat Completions / Bearer |
+| `openai-compatible` | Custom OpenAI-compatible, including unauthenticated local endpoints | Administrator-supplied HTTP(S) base URL | Chat Completions / optional key |
+
+Keys for different regions and Coding Plans are not interchangeable. These
+presets do not route China keys to international endpoints or infer a Coding
+Plan from the model name. Plans/regions without a preset can use the custom
+OpenAI-compatible option if their documented protocol is compatible; native
+protocols need a verified backend preset or operator YAML configuration.
+
+Endpoint/auth sources used for these presets include the official
+[OpenAI SDK](https://github.com/openai/openai-python/blob/main/src/openai/_client.py),
+[Anthropic SDK](https://github.com/anthropics/anthropic-sdk-python/blob/main/src/anthropic/_client.py),
+[DeepSeek API docs](https://api-docs.deepseek.com/),
+[Alibaba Model Studio OpenAI compatibility docs](https://www.alibabacloud.com/help/en/model-studio/compatibility-of-openai-with-dashscope)
+and official [DashScope SDK](https://pypi.org/project/dashscope/),
+[Volcengine Ark SDK](https://github.com/volcengine/volcengine-python-sdk/tree/master/volcenginesdkarkruntime),
+[Moonshot API docs](https://platform.moonshot.cn/docs/guide/start-using-kimi-api),
+[Z.AI SDK](https://pypi.org/project/zai-sdk/) (`zai/_client.py` distinguishes the
+China and international endpoints), and
+[MiniMax OpenAI API docs](https://platform.minimax.io/docs/api-reference/text-openai-api)
+with the official [MiniMax MCP region settings](https://github.com/MiniMax-AI/MiniMax-MCP).
+The existing `config.example.yaml` documents Ark Coding Plan and the model-specific
+DeepSeek, Kimi, GLM, Anthropic, Doubao and MiniMax parameters. During implementation,
+restricted documentation hosts were not reachable; accessible official SDK
+source/package metadata and repository examples were checked instead. Vendor
+availability and live credentials must be verified separately.
+
+All selected adapters and SDK dependencies are already installed by the locked
+harness dependency set (`langchain-openai`, `langchain-anthropic`,
+`langchain-deepseek`). Anthropic uses its native SDK. The existing patched
+DeepSeek adapter is also used as a Chat Completions adapter where reasoning
+history and `max_tokens` must be preserved; this does not select a DeepSeek
+endpoint or infer DeepSeek capabilities for those vendors. MiniMax keeps its
+existing adapter for reasoning fields and user-message name normalization and
+uses its documented `max_tokens` wire parameter. MiniMax defaults to temperature
+1.0; Anthropic has a default output budget of 4096 because Messages requires an
+output cap. These request defaults are separate from model capability rules.
+
+To add a preset, append a stable ID and verified endpoint, adapter, protocol,
+authentication/SDK parameter mapping and required request defaults to `PROVIDERS`.
+Add model capability rules only for explicit verified IDs in `_capabilities`;
+never use a substring match or enable vision/thinking for an entire vendor.
+Keep unknown models conservative. Add an offline real-SDK transport regression
+for routing, authentication, streaming, tool choice and token limits, plus
+positive and negative capability-rule cases. The frontend discovers the new
+entry from `/providers`; it should not gain a routing map.
+
+`PUT /api/managed-models` and `POST /api/managed-models/test` keep their existing
+`{config, expected_revision}` envelope. A preset create needs only
+`config.provider`, `config.model` and `config.api_key`; omitted `name` and
+`display_name` are generated. User capability overrides are optional. Preset
+requests reject endpoint fields (even `base_url: null`), `use`, protocol and
+other routing overrides. Updates carry the unchanged internal name and current
+revision; stale updates return 409. Validation responses do not echo input
+objects, keys, headers or provider response bodies.
+
+An omitted API key on edit retains the existing key only for the same provider
+and custom endpoint. An empty string explicitly clears it; password masks are
+rejected. Preset models require a key to be enabled, so disable the model before
+clearing its key. A provider/custom endpoint switch clears the test result in the
+Web editor and requires a new key for authenticated presets. The server also
+refuses to inherit the old connection's credentials. Unauthenticated custom
+endpoints can continue to use no key. Do not send catalog responses back as PUT
+payloads: use the editable fields and `expected_revision`, omitting secret status,
+source metadata and preset endpoints.
+
+Old `provider: openai-compatible` records retain their names, revisions, encrypted
+keys and endpoint semantics. Official HTTPS DeepSeek endpoints (root or `/v1`,
+default port) continue to use the legacy DeepSeek adapter. A proxy with a
+DeepSeek-like model ID remains a generic custom OpenAI-compatible endpoint.
+Reads and startup do not rewrite or migrate the encrypted catalog.
+
+Managed entries are merged after YAML models. YAML names win and conflicts are
+shown by the management list; YAML and `$ENV_VAR` references are unchanged.
+Disabled entries are omitted from future model lists. Saving changes the catalog
+signature, so subsequent requests get a fresh `AppConfig` without a Gateway
+restart. Already-returned snapshots, active runs and explicitly injected configs
+remain authoritative. The Web editor invalidates both the management query and
+`MODELS_QUERY_KEY`, refreshing the existing chat and Agent pickers. Ordinary
+users retain the existing model-use authorization; only administrators can
+manage the shared catalog. Static/demo mode disables management.
+
+Testing never saves the draft. It constructs the same resolved `ModelConfig`
+through `create_chat_model` as chat, with tracing disabled, no SDK retries, a
+15-second SDK timeout and a 20-second overall deadline. Optional thinking is
+disabled for the short probe. Required-thinking models use automatic tool
+selection and a bounded 2048-token budget; ordinary probes use 32 output tokens.
+For an unknown third-party preset, automatic selection avoids assuming forced
+tool support. Responses are limited to 256 chunks and 16384 accumulated content
+and tool-argument characters. The result distinguishes missing keys,
+authentication failure, connection failure, absent tool calls and output limits.
+An edit can use its saved key only with the current revision and same connection.
+A passing probe establishes streaming/tool connectivity, not every agent or
+vision/reasoning workflow. Missing preset credentials stop before network access.
+
+Offline tests replace only HTTP transport, using actual LangChain/vendor SDK
+serialization. Live tests are opt-in, skipped without credentials and disabled
+in CI. To test a preset manually, securely export `MANAGED_MODEL_TEST_API_KEY`,
+`MANAGED_MODEL_TEST_PROVIDER` and `MANAGED_MODEL_TEST_MODEL`, then run in `backend/`:
+
+```bash
+DEER_FLOW_RUN_LIVE_TESTS=1 uv run --no-sync pytest tests/test_managed_presets_live.py -q
+```
+
+These requests may incur provider charges and do not save credentials. Keep the
+existing DeepSeek live suite for the legacy custom endpoint and tool-history path.
+
+**Backup and recovery:** keep the entire `$DEER_FLOW_HOME/managed-models/`
+directory on persistent storage, including the matched `catalog.enc` and `key`.
+Take a consistent backup while writes are paused (or through a filesystem
+snapshot); restore the pair together with restrictive filesystem permissions.
+Share the same directory across workers/replicas that need the same catalog.
+The existing thread/process locks, atomic writes and Fernet encryption remain;
+SQL does not replicate these files. Anyone able to read both files can decrypt
+the credentials. A missing/wrong key or corrupt catalog fails closed; restore a
+matched backup instead of generating a new key or deleting the encrypted file.
+
 #### MindIE XML tool arguments
 
 The MindIE adapter (`deerflow.models.mindie_provider:MindIEChatModel`) parses XML
@@ -567,6 +728,7 @@ Notes:
 - Scheduled task definitions and task-run history are persisted in the application database.
 - With `channel_connections.enabled: true`, the scheduler sends IM notices ("scheduled task updates") to the task owner's connected identities. A delivery worker (same poll cadence as the scheduler) pushes them.
   - **Which apps:** only providers whose channel implements proactive push get notices; today those are WeCom and Feishu/Lark (`proactive_notifications` in `app/channels/capabilities.py`, also returned by `GET /api/channels/providers`, where Settings shows "sent here" or "not available for this app yet"). Other providers get no outbox rows at all, and rows queued for them before the upgrade end once as `failed` without retries.
+  - **Optional Feishu group:** each task may select one additional owner-bound group through the task form or `notification_group_connection_id` in REST. No group is selected automatically; personal delivery is retained. The app needs `im:chat:read` for names, and a private binding never becomes a group destination. [Group setup and delivery](IM_CHANNEL_CONNECTIONS.md#feishu-group-notifications).
   - **Events:** `run_completed`, `run_failed`, `run_unmet` (goal missed), `task_paused` (automatic pause after three missed goals), `task_stopped` (paused by the agent because its stop condition was met) and `task_finished` (all `max_runs` done or `end_at` reached).
   - **One message per occurrence:** when one occurrence produces several events, only the first of `task_stopped` > `task_paused` > `task_finished` > `run_failed` > `run_unmet` > `run_completed` is sent, and that message still says how the last run went ("The last run failed." / "didn't meet the goal"). A one-time task sends only its run's outcome, never a separate `task_finished`.
   - **Transactional:** notices are queued by the finalization observer in the same database transaction that records the outcome and are deduplicated per occurrence (or per end time for a task that ends between runs), so an occurrence finalized by crash or lease recovery notifies exactly once. Plain manual "run now" trials and interrupted runs stay silent; a trial that pauses or finishes the task still sends that notice. Occurrences that end without a finished run (launch error, queue timeout, interrupted by a restart) stay silent.

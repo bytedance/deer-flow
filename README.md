@@ -228,22 +228,29 @@ streams simulate chunks from a non-streaming response, while no-tool streams sta
    DeerFlow disables Console cost estimates when currencies are mixed rather
    than presenting an invalid aggregate.
 
-   Administrators can also open **Settings → Models** to add, edit, test, and
-   enable/disable shared OpenAI-compatible Chat Completions models without editing
-   `config.yaml`. Enter a unique name, base URL, model ID, and optional API key;
-   saving refreshes the chat model list. Connection testing sends a short streaming
-   tool-call request and may incur provider charges. It does not save the draft or
-   verify image support; set image support and token limits from provider documentation.
-   Official DeepSeek models at `https://api.deepseek.com` or
-   `https://api.deepseek.com/v1` (default HTTPS port) automatically use DeerFlow's
-   DeepSeek adapter, preserving reasoning content across tool calls and honoring
-   output token limits. Chat uses the selected thinking mode; the connection test
-   temporarily disables thinking because DeepSeek rejects forced tool selection
-   in thinking mode. The test checks streaming tool connectivity, not every agent
-   workflow or thinking-mode behavior. Existing saved DeepSeek profiles receive
-   this adapter without re-entering credentials. DeepSeek-specific settings for
-   third-party proxies, other native adapters, and advanced reasoning settings
-   remain YAML-configured.
+   Administrators can open **Settings → Models** to select a provider and enter
+   only its **API Key** and **model ID**. Endpoints, authentication and adapters are
+   backend presets for OpenAI, Anthropic, DeepSeek, Alibaba Cloud Bailian/Qwen,
+   Volcengine/Doubao, Moonshot/Kimi, Zhipu/Z.AI and MiniMax. Region and plan-specific
+   entries are explicitly distinguished. Arbitrary model IDs are accepted; internal
+   names are generated automatically and remain stable when a model ID changes.
+   Newly saved models are enabled and immediately refresh existing chat and Agent
+   model selectors, without editing YAML or restarting the Gateway.
+
+   **Custom OpenAI-compatible** still supports existing/custom base URLs and
+   unauthenticated endpoints. **Advanced settings** retains display name, token
+   limits and vision overrides; unknown IDs do not receive invented capabilities.
+   Leave the key blank on edit to retain it for the same connection. Switching
+   provider or custom endpoint requires a new key, and preset models must be
+   disabled before clearing their key. YAML models remain read-only.
+
+   Connection testing uses the same model factory and protocol as chat, sends a
+   bounded streaming tool-call request and never saves the draft. It may incur
+   provider charges and does not verify every agent, vision or thinking workflow.
+   Official DeepSeek custom endpoints retain their existing adapter; a proxy does
+   not become DeepSeek merely because of its model ID. See the
+   [Web model registration reference](backend/docs/CONFIGURATION.md#models-registered-through-the-web)
+   for presets, compatibility, extension instructions and backup requirements.
 
    DeepSeek regression tests run offline with the normal backend suite. To verify
    the real provider explicitly, set `DEEPSEEK_TEST_API_KEY` in your environment
@@ -1042,6 +1049,7 @@ Notes:
 - If `assistant_id` is set to a custom agent name, DeerFlow still routes through `lead_agent` and injects that value as `agent_name`, so the custom agent's SOUL/config takes effect for IM channels.
 - IM channel workers call Gateway's LangGraph-compatible API internally and automatically attach process-local internal auth plus the CSRF cookie/header pair required for thread and run creation.
 - Inbound work is bounded to `inbound_queue_maxsize` pending messages plus `max_concurrency` active workers. When capacity is exhausted, socket/polling providers drop new messages before sending DeerFlow's working acknowledgment and emit a rate-limited warning. Buzz leaves its replay cursor unchanged and reconnects for relay replay; GitHub webhooks return `503`, marking the delivery failed for manual/API redelivery. Shutdown closes admission immediately, keeps channel transports available while accepted messages drain for up to `shutdown_grace_period_seconds`, then cancels and awaits active handlers before closing provider resources; the Gateway's outer timeout can cancel an incomplete shutdown without detaching those resources.
+- Telegram shutdown retains ongoing cleanup across a timeout or cancellation so a retry can finish it. If the Telegram loop has already stopped, shutdown warns that download clients may remain open and releases the abandoned cleanup state; later stops do not repeat that warning.
 - Feishu/Lark now queues rapid follow-up messages per mapped DeerFlow `thread_id` instead of immediately surfacing the generic busy reply, and topic replies keep a per-message card with a compact source-message preview across queued/running/final patches.
 - Streaming IM channels treat backend `error` events like transport failures and follow the same reply and retry path. The channel logs the error type and message for diagnosis.
 
@@ -1394,6 +1402,12 @@ names and base URLs readable.
 
 For `LocalSandboxProvider`, this is a managed tool-path boundary rather than host filesystem isolation. Explicit per-Agent skill policies are accepted only while host bash is disabled (the default), because a host subprocess can address canonical paths without using the provider's virtual-path mappings. Use Docker/AIO, the Kubernetes provisioner, or E2B when the filesystem boundary must remain enforceable alongside shell access.
 
+On Windows, the local sandbox's `cmd.exe` fallback decodes builtin output using
+the console output code page, including UTF-8 after `chcp 65001`, independently
+of Python's UTF-8 mode. If no console page is available, it uses the system OEM
+page, with ANSI as a last resort. Native programs can choose a different output
+encoding; configure those programs to match the console page when needed.
+
 Managed integrations install shared read-only skill packs without mixing them
 into custom skills. The Lark/Feishu CLI integration is available under
 `Capability Center → Plugins → Lark / Feishu`; an administrator installs or
@@ -1512,7 +1526,7 @@ Public-skill CI waivers are exact, expiring exceptions in `.github/skill-review-
 
 Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, rendered web capture, file operations, bash execution — and supports custom tools via MCP servers and Python functions. The bundled DDG, Brave, Tavily, SearXNG, and Serper search providers accept an optional `time_range` of `day`, `week`, `month`, or `year`; omitting it preserves existing search behavior. For DDG recency searches, DeerFlow excludes DDGS backends that ignore time limits. Swap anything. Add anything.
 
-For DDG web search and DDG image search, `max_results` in `config.yaml` can be a positive integer or an environment-variable reference such as `max_results: $DDG_MAX_RESULTS` with `DDG_MAX_RESULTS=5`. The configured value takes precedence over the tool call's `max_results` argument. Invalid values (for example, `abc`, an empty string, or `3.5`), zero, and negative counts produce a warning and fall back to the default of 5 results.
+For DDG web search and DDG image search, `max_results` in `config.yaml` can be a positive integer or an environment-variable reference such as `max_results: $DDG_MAX_RESULTS` with `DDG_MAX_RESULTS=5`. The configured value takes precedence over the tool call's `max_results` argument. Invalid values (for example, `abc`, an empty string, or `3.5`), zero, and negative counts produce a warning and fall back to the default of 5 results. DDG, Brave, and Serper image search share one result-URL screen that omits non-HTTP(S), localhost, cloud-metadata hostnames, and non-public address literals, including multicast and IPv6 spellings embedding private IPv4 addresses. The screen does not resolve DNS; downloaders must validate the resolved address when connecting. A result with neither a safe full image URL nor a safe thumbnail is omitted.
 
 Stdio MCP servers can set `cwd` in `extensions_config.json` when their entrypoint
 or data files depend on a specific working directory. The setting applies to
@@ -1902,6 +1916,8 @@ When the agent asks for clarification, the Web UI shows the structured response 
 Unsent Web UI composer drafts survive page reloads and switching between conversations within the same browser tab. Drafts are isolated by user, agent, and conversation, include the selected skill and explicit conversation references, and are cleared once a send is accepted. Project documents already attached to the thread also survive reloads; browser-local uploads and quoted message excerpts are not persisted.
 
 The Web UI composer supports `@` references at the cursor or through the `@` button. Search enabled skills, documents in the current project, and other conversations in a grouped picker; selected references appear inline alongside the draft text and can be removed with normal editing. Multiple skills can be selected in one message (up to 16 unique skills); selecting a checked skill again removes it, with each selection checked against the current user registry and agent allowlist. Project files are attached only after ingestion succeeds; conversation references require the `read_conversation` capability and retain its per-run limit. If capability discovery fails, saved conversation references remain intact and sending waits for a successful retry. Polishing preserves complete reference labels when instructions are reordered. The file group also offers local uploads. `/goal`, `/compact`, and legacy `/skill-name` input remain supported.
+
+After picking an inline reference, typing continues immediately after it. Moving the cursor keeps the position you chose, including when editing text beside a reference.
 
 The Web UI composer also supports browser-based voice dictation when the browser exposes the Web Speech API. The microphone button transcribes speech into the local draft only; DeerFlow receives only the transcribed text, while audio handling is delegated to the browser or operating system speech-recognition service according to that environment's policy. Users can review or edit the text before sending. Dictation keeps words separated when browsers trim transcript segments, preserves Chinese and Japanese joins, and attaches leading punctuation and percent signs without adding spaces.
 
@@ -2316,6 +2332,15 @@ After each run, DeerFlow records a workspace change summary for the run-owned `w
 
 Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. When a completed response successfully presents between 2 and 50 files, its final file card also offers one ZIP download. Archive membership comes from the terminal delivery receipt rather than browser-supplied paths, and the ZIP contains the current file versions, which may have changed since the response. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes. Source previews also recognize extensionless `Dockerfile` and `Makefile` artifacts by their file names. Unknown file types, including names such as `constructor` and `__proto__`, retain the download fallback.
 
+Unsaved artifact edits survive switching chats, workspace pages, or visiting the
+home page and returning in the same browser tab. Drafts stay in memory for the
+current account until saved or discarded; changing accounts or signing out clears them.
+Public showcase visits and unavailable Gateway auth probes retain hidden drafts
+until authentication is known. Recovering as another account or confirming logout
+clears the retained content.
+Refreshing or closing the tab warns while any chat has unsaved edits. Draft file
+contents are not stored in browser storage and do not survive a reload.
+
 Artifact content revisions refresh when an output file is atomically replaced,
 even if its size and modification time are preserved. Refreshing the preview
 then provides the new revision for saving; an older preview still requires a reload.
@@ -2422,6 +2447,11 @@ This is the difference between a chatbot with tool access and an agent with an a
 ```
 
 ### Agentic Browser Control
+
+Browser screenshots and Browserless capture/fetch outputs are published only
+after the complete file is written. New files use the host's normal creation
+permissions (typically `0644`), and replacements preserve existing permissions,
+so sandbox code can read captures when those permissions allow it.
 
 Browser dependency auto-detection accepts `name`, `group`, and `use` in any
 order within a tool entry, with either indented or indentless YAML lists.
@@ -2808,7 +2838,7 @@ Current MVP capabilities:
 - Pause, resume, trigger, inspect history, and delete tasks
 - Search task titles or prompts, combined with status/type filters and the current thread scope.
 - Execute scheduled work through the normal DeerFlow run lifecycle
-- When `channel_connections.enabled: true`, send scheduled task updates to the task owner's connected IM identities (outbox + delivery worker) on apps that support proactive push, which today is WeCom; Settings shows for each app whether updates are sent there, and other apps get none. Each occurrence sends at most one message: a finished, failed or goal-missed run, the automatic pause after three missed goals, a pause by the agent (its stop condition was met) or the task finishing (all `max_runs` done, `end_at` reached); when several apply, the pause or finish wins and still says how the last run went. A one-time task sends only its run's outcome. The message is queued in the same database transaction that records the outcome, so runs finalized after a crash or a lost lease notify exactly once. It reads on its own, in your web UI language (else `channel_connections.notification_locale`): the task title, what happened, a one-line result when the agent replied, and "Open DeerFlow → Scheduled tasks for details.", with no IDs and no links. Plain manual "run now" trials and interrupted runs stay silent, and so do occurrences that end without a finished run (launch error, queue timeout, interrupted by a restart). Channel/transport outages park deliveries without exhausting retries, for up to about a day; platform rejections retry for roughly 15 minutes before settling as `failed`. An identity you disconnect while a delivery is waiting is never pushed to: the row is dropped as `failed`.
+- When `channel_connections.enabled: true`, send scheduled task updates to the task owner's connected IM identities (outbox + delivery worker) on apps that support proactive push, which today is WeCom and Feishu/Lark; Settings shows for each app whether updates are sent there, and other apps get none. Each occurrence queues at most one message per target: a finished, failed or goal-missed run, the automatic pause after three missed goals, a pause by the agent (its stop condition was met) or the task finishing (all `max_runs` done, `end_at` reached); when several apply, the pause or finish wins and still says how the last run went. A one-time task sends only its run's outcome. The message is queued in the same database transaction that records the outcome, so runs finalized after a crash or a lost lease do not enqueue a duplicate notice for the same target. It reads on its own, in your web UI language (else `channel_connections.notification_locale`): the task title, what happened, a one-line result when the agent replied, and "Open DeerFlow → Scheduled tasks for details.", with no IDs and no links. Plain manual "run now" trials and interrupted runs stay silent, and so do occurrences that end without a finished run (launch error, queue timeout, interrupted by a restart). Channel/transport outages park deliveries without exhausting retries, for up to about a day; platform rejections retry for roughly 15 minutes before settling as `failed`. An identity you disconnect while a delivery is waiting is never pushed to: the row is dropped as `failed`.
 - Browse execution history in pages of 50; older pages pause automatic refresh, with an explicit return to the latest runs. Counts appear only after a successful read; loading and failed reads are not reported as zero runs.
 
 Derived run summaries omit leading inline `<think>` reasoning before limiting the text, so a long thought does not replace the actual answer in previews or scheduled notices. Original response history and literal tags in the answer are unchanged; previously stored run summaries are not rewritten.
@@ -2827,6 +2857,23 @@ Current MVP limits:
 Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigger uses the same scheduled-task resource and execution path.
 
 In the task form, switching an hourly, daily, weekly, or monthly schedule to **Custom cron** starts from its current timing, including selected weekdays or day of the month. Switching back to Custom cron after preset edits uses those edits rather than an older expression.
+
+### Optional Feishu group notifications
+
+In a task's create or edit form, **Also notify a Feishu group (optional)** adds
+one chosen group to the existing personal notifications. Add the app bot to the
+group, use **Bind a Feishu group** to get a command, send it while mentioning the
+bot in that group, then refresh the list and select the group by name. The app
+needs bot-send permission and `im:chat:read` to display its group names.
+
+While the form checks group-notification support, it shows a loading hint and
+retains the saved selection.
+
+No group is selected automatically. Clearing the selection stops new group
+notices; changing it affects future notices, while already queued notices keep
+their original target. A disconnected binding never receives a waiting notice.
+The first version is configured through the task form or REST API; conversation
+schedule tools keep their existing inputs. See the [group delivery guide](backend/docs/IM_CHANNEL_CONNECTIONS.md#feishu-group-notifications).
 
 ### Lifecycle, safety caps and stop conditions
 

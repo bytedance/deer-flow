@@ -3211,7 +3211,8 @@ run_ownership:
 #                                           # DENY-BY-DEFAULT (unlike other channels): empty
 #                                           # means nobody, and DeerFlow logs a startup warning.
 #     require_mention: true                 # @mention needed in channels
-#     mention_free_channels: []             # channel UUIDs that respond to every message
+#     mention_free_channels: []             # Channel UUIDs that respond to every message:
+#                                           # one UUID (quoted or unquoted) or a YAML list.
 
 # ============================================================================
 # Guardrails Configuration
