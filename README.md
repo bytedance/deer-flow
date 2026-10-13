@@ -2332,6 +2332,15 @@ After each run, DeerFlow records a workspace change summary for the run-owned `w
 
 Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. When a completed response successfully presents between 2 and 50 files, its final file card also offers one ZIP download. Archive membership comes from the terminal delivery receipt rather than browser-supplied paths, and the ZIP contains the current file versions, which may have changed since the response. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes. Source previews also recognize extensionless `Dockerfile` and `Makefile` artifacts by their file names. Unknown file types, including names such as `constructor` and `__proto__`, retain the download fallback.
 
+Unsaved artifact edits survive switching chats, workspace pages, or visiting the
+home page and returning in the same browser tab. Drafts stay in memory for the
+current account until saved or discarded; changing accounts or signing out clears them.
+Public showcase visits and unavailable Gateway auth probes retain hidden drafts
+until authentication is known. Recovering as another account or confirming logout
+clears the retained content.
+Refreshing or closing the tab warns while any chat has unsaved edits. Draft file
+contents are not stored in browser storage and do not survive a reload.
+
 Artifact content revisions refresh when an output file is atomically replaced,
 even if its size and modification time are preserved. Refreshing the preview
 then provides the new revision for saving; an older preview still requires a reload.
