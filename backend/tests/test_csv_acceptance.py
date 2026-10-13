@@ -10,6 +10,18 @@ from deerflow.subagents import acceptance_checks as checks
 
 
 @pytest.fixture
+def parser_clock(monkeypatch):
+    import time
+
+    original_monotonic = time.monotonic
+    clock = Mock(return_value=0)
+    monkeypatch.setattr(checks, "time", SimpleNamespace(monotonic=clock))
+    yield clock
+    # Deadline simulations must leave event loops and other threads on the real clock.
+    assert time.monotonic is original_monotonic
+
+
+@pytest.fixture
 def check_csv(tmp_path):
     def check(content, columns=None, path="report.csv", **kwargs):
         if content is not None:
@@ -108,13 +120,11 @@ def test_malformed_header_respects_byte_budget(check_csv, size, checked):
     assert (leaf["checked"], leaf["holds"]) == (checked, False)
 
 
-def test_malformed_header_respects_parser_deadline(check_csv, monkeypatch):
-    clock = Mock(return_value=0)
-    monkeypatch.setattr(checks.time, "monotonic", clock)
+def test_malformed_header_respects_parser_deadline(check_csv, monkeypatch, parser_clock):
     reader = checks.csv.reader
 
     def delayed_parse(*args, **kwargs):
-        clock.return_value = 6
+        parser_clock.return_value = 6
         return reader(*args, **kwargs)
 
     monkeypatch.setattr(checks.csv, "reader", delayed_parse)
@@ -144,12 +154,9 @@ def test_unknown_size_does_not_read(check_csv, monkeypatch):
     reader.assert_not_called()
 
 
-def test_expired_read_is_unverified(check_csv, monkeypatch):
-    clock = Mock(return_value=0)
-    monkeypatch.setattr(checks.time, "monotonic", clock)
-
+def test_expired_read_is_unverified(check_csv, monkeypatch, parser_clock):
     def delayed(*args, **kwargs):
-        clock.return_value = 6
+        parser_clock.return_value = 6
         return b"id,name\n"
 
     monkeypatch.setattr(checks, "_read_bounded_file_content", delayed)
@@ -272,15 +279,13 @@ def test_required_columns_allow_reordering(check_csv):
 
 
 @pytest.mark.parametrize("parse_seconds,holds", [(0, True), (6, False)])
-def test_remote_read_latency_does_not_consume_parser_deadline(monkeypatch, tmp_path, parse_seconds, holds):
+def test_remote_read_latency_does_not_consume_parser_deadline(monkeypatch, tmp_path, parse_seconds, holds, parser_clock):
     import base64
 
-    clock = Mock(return_value=0)
-    monkeypatch.setattr(checks.time, "monotonic", clock)
     sandbox = Mock()
 
     def delayed_read(*args, **kwargs):
-        clock.return_value = 6
+        parser_clock.return_value = 6
         return "JSON\n" + base64.b64encode(b"id,name\n\n000").decode() + "\nEND\n"
 
     sandbox.execute_command.side_effect = delayed_read
@@ -289,7 +294,7 @@ def test_remote_read_latency_does_not_consume_parser_deadline(monkeypatch, tmp_p
 
     def delayed_parse(*args, **kwargs):
         header = next(reader(*args, **kwargs))
-        clock.return_value += parse_seconds
+        parser_clock.return_value += parse_seconds
         return iter([header])
 
     monkeypatch.setattr(checks.csv, "reader", delayed_parse)
