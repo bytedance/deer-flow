@@ -3185,6 +3185,8 @@ def test_status_less_error_matches_busy_patterns_across_separators(exc: Exceptio
         pytest.param(_in_stream_error("upstream failed: status 5030"), id="status-four-digits"),
         pytest.param(_in_stream_error("upstream failed: status\n503"), id="status-number-on-next-line"),
         pytest.param(_in_stream_error("upstream failed: error 504"), id="number-without-keyword"),
+        pytest.param(_in_stream_error("upstream said [503]", code=400), id="code-400-beats-message-503"),
+        pytest.param(_in_stream_error("upstream returned HTTP 400 after [503]"), id="leftmost-message-status-decides"),
     ],
 )
 def test_in_stream_error_without_a_retriable_signal_stays_generic(exc: openai.APIError) -> None:
