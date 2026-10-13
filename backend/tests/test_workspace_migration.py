@@ -1,18 +1,43 @@
 """Tenant schema upgrades keep legacy identities and content without activation."""
 
 import asyncio
+import os
+import uuid
 
 import pytest
 from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import create_async_engine
+from support.postgres import asyncpg_test_url
 
 from deerflow.persistence import bootstrap
+from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
+
+
+async def _isolated_database(tmp_path, backend):
+    if backend == "sqlite":
+        return create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'tenant.db'}"), None
+    uri = os.environ.get("TEST_POSTGRES_URI")
+    if not uri:
+        pytest.skip("requires a dedicated TEST_POSTGRES_URI for tenant migration verification")
+    schema = f"tenant_case_{uuid.uuid4().hex}"
+    engine = create_async_engine(asyncpg_test_url(uri), connect_args=build_asyncpg_connect_args(schema))
+    async with engine.begin() as conn:
+        await conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+    return engine, schema
+
+
+async def _dispose_database(engine, schema):
+    if schema:
+        async with engine.begin() as conn:
+            await conn.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+    await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_workspace_schema_upgrade_preserves_legacy_data(tmp_path):
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'tenant.db'}")
-    cfg = bootstrap._get_alembic_config(engine)
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+async def test_workspace_schema_upgrade_preserves_legacy_data(tmp_path, backend):
+    engine, schema = await _isolated_database(tmp_path, backend)
+    cfg = bootstrap._get_alembic_config(engine, postgres_schema=schema or "")
     try:
         await asyncio.to_thread(bootstrap._upgrade, cfg, "0035_native_fork_compatibility")
         async with engine.begin() as conn:
@@ -45,19 +70,20 @@ async def test_workspace_schema_upgrade_preserves_legacy_data(tmp_path):
         async with engine.connect() as conn:
             assert (await conn.execute(text("SELECT COUNT(*) FROM threads_meta"))).scalar_one() == 2
     finally:
-        await engine.dispose()
+        await _dispose_database(engine, schema)
 
 
 @pytest.mark.asyncio
-async def test_explicit_personal_backfill_is_idempotent_and_quarantines_conflicts(tmp_path):
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+async def test_explicit_personal_backfill_is_idempotent_and_quarantines_conflicts(tmp_path, backend):
     import importlib
     import importlib.util
 
     from deerflow.persistence.base import Base
 
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'backfill.db'}")
+    engine, schema = await _isolated_database(tmp_path, backend)
     try:
-        await bootstrap.bootstrap_schema(engine, backend="sqlite")
+        await bootstrap.bootstrap_schema(engine, backend=backend, postgres_schema=schema or "")
         async with engine.begin() as conn:
             await conn.execute(
                 text(
@@ -101,4 +127,4 @@ async def test_explicit_personal_backfill_is_idempotent_and_quarantines_conflict
             assert (await conn.execute(text("SELECT email_verified_at FROM users WHERE id='owner'"))).scalar_one() is None
             assert set(Base.metadata.tables) <= await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
     finally:
-        await engine.dispose()
+        await _dispose_database(engine, schema)

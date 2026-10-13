@@ -26,7 +26,7 @@
   },
   "remaining": [
     "M0 real SQL/HTTP fixture depends on M1/M2; resource assertions depend on M3",
-    "M1 executor schema and ledger backfill, guarded migration CLI, PostgreSQL verification",
+    "M1 executor schema and ledger backfill, guarded migration CLI",
     "M2 through M11 remain unimplemented"
   ],
   "static_checks": [
@@ -82,5 +82,17 @@
     },
     "source_sha256": "af206ce2bbc1bc6934fb5bc7927ee9b0cf8ec9d359c702051c05e4d4e789c3c5",
     "scope": "Native metadata read-only plan, transactional personal backfill, repeated execution, unknown thread and mismatched project-document quarantine; source content retained and email verification unchanged. Caller maintenance fencing and backup receipts are prerequisites, not implemented here."
+  },
+  "postgres_foundation": {
+    "job": "deerflow-tenant-m1-postgres",
+    "build": 1,
+    "result": "SUCCESS",
+    "archive_sha256": "77e102b77581d71e518ee49de0f2cd21fddb187e82d49817f08cf152b44326a1",
+    "tests_passed": 8,
+    "duration_seconds": 22.64,
+    "cases": "Two migration/backfill mains each on SQLite and PostgreSQL, plus four workspace admission/contract checks",
+    "environment": "Existing postgres:16-alpine image pinned by image ID in Jenkins script; dedicated internal network, no published ports, per-case UUID schemas; no production or NAS data mounted",
+    "cleanup": "Authoritative docker ps -a and network ls with exact owned label returned no containers or networks after terminal SUCCESS",
+    "test_sha256": "f4923a3f49673a1c2391a757dfa6b0cfe0f4b3f11d4d07cd2b0955dc33a22422"
   }
 }
