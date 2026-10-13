@@ -86,6 +86,8 @@ python -m pytest tests/test_workspace_contract.py -q
 
 预期：对应主干通过；若无法证明上述验收结果则保留未完成，不能用mock成功替代物理执行或真实鉴权。
 
+M0 dependency refinement: immutable identity and admission scrubbing are verified independently first. The real SQL/HTTP fixture cannot seed workspaces before M1 or exercise live membership before M2; build it with those foundations and keep M0 final integration acceptance unchecked until then. This does not substitute shape validation for membership authorization.
+
 ### M1：租户与成员模型、增量迁移及个人空间回填
 
 **修改接点：**

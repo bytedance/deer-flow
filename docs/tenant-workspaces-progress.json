@@ -19,18 +19,33 @@
   },
   "runtime": "Shanghai Jenkins, existing final-test-tools-52ce image; isolated container, network none, CPU 1, memory 2GiB; no deployment or model calls",
   "source_sha256": {
-    "backend/app/gateway/services.py": "cfc070534bd80c8fe8811f74d812c0e2055bcf31548e5f148f1a254f8fcc49a9",
-    "backend/tests/test_workspace_contract.py": "f412fc59d0d4b1ec3bf69607b93db91ae2577aa0b3ccee560ba86270aa93cbda"
+    "backend/app/gateway/services.py": "94a5304f869ba70a9c25d43df3032f67ed50eea7939ff19cf39db67531ebd3bf",
+    "backend/tests/test_workspace_contract.py": "b61a71c3ffc6069a74e1ae83c1e637e062bd503ee259d210ba2311d212e9e200",
+    "backend/packages/harness/deerflow/authz/workspace.py": "c05af2407ec0e765f7ef44c8c305098f3441a46352cd2990708bd93baf67c05e",
+    "contracts/workspace_scope.v1.json": "c106de2a9f5a0d62b173719854096fef653233dd81ef2116ac664058162cb1ba"
   },
   "remaining": [
-    "WorkspaceContext and public JSON contract",
-    "Trusted context validation",
-    "SQL/HTTP workspace fixture after M1/M2; resource isolation after M3",
+    "M0 real SQL/HTTP fixture depends on M1/M2 schema and membership resolver; resource assertions depend on M3",
     "M1 through M11 remain unimplemented"
   ],
   "static_checks": [
     "ruff check with backend/ruff.toml passed",
     "git diff --check passed"
   ],
-  "format_note": "Local ruff 0.15.12 reformats pre-existing services.py beyond this patch even with repository ruff.toml; unrelated generated formatting discarded. Version-matched cloud format gate remains to be run."
+  "format_note": "Local ruff 0.15.12 reformats pre-existing services.py beyond this patch even with repository ruff.toml; unrelated generated formatting discarded. Version-matched cloud format gate remains to be run.",
+  "context_contract": {
+    "red": {
+      "build": 3,
+      "result": "FAILURE",
+      "archive_sha256": "ff15bc11618492de8d3ce5145d22beb819ba5e2434adb22600fedf281c02f8df",
+      "reason": "actor field survives existing admission; context boundary and JSON contract absent"
+    },
+    "green": {
+      "build": 4,
+      "result": "SUCCESS",
+      "archive_sha256": "741b56c6649e5eac53fb30d15025c6ed0ea748c9c58f1749e765643d26eafce9",
+      "tests_passed": 26
+    },
+    "scope": "In-process immutable identity, actor binding and external config scrubbing. Not HTTP membership authorization."
+  }
 }

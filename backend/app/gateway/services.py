@@ -649,6 +649,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
             "authz_attributes",
             # Reserved for server-side workspace membership resolution.
             "workspace_id",
+            "actor_user_id",
             "workspace_context",
             "membership_version",
             "policy_version",

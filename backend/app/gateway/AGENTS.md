@@ -267,8 +267,13 @@ Native central dispatch requires the dedicated executor database's current revis
 and shape; startup never calls `create_all`. Workers require the same schema
 capability over their existing authenticated outbound channel.
 
-Workspace identity (`workspace_id`, `workspace_context`, `membership_version`,
+Workspace identity (`workspace_id`, `actor_user_id`, `workspace_context`, `membership_version`,
 `policy_version`) is server-owned. Native run admission clears client values
 from both context and configurable, including unauthenticated early returns.
 This reservation does not yet enable multi-tenant membership authorization.
 See `docs/tenant-entrypoint-inventory.md` at the repository root.
+
+`deerflow.authz.workspace` defines the immutable four-field identity contract
+and task-local binding. Shape/actor validation is not membership authorization;
+only trusted admission may bind it after live database checks. Transport requires
+separate authentication, version checks and reauthorization.
