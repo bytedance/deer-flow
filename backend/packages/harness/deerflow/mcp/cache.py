@@ -534,7 +534,7 @@ def _shared_reset_has_local_state_locked(pool) -> bool:
     is deliberately not a reason — a deployment-side reset must not retire it.
     Caller must hold ``_init_condition``.
     """
-    return _cache_initialized or _applied_mcp_revision is not None or bool(pool.retained_server_names(domain="deployment"))
+    return _cache_initialized or _applied_mcp_revision is not None or bool(_server_tool_cache) or bool(pool.retained_server_names(domain="deployment"))
 
 
 def _has_mcp_reconciliation_state() -> bool:
@@ -645,6 +645,13 @@ def _plan_mcp_reconciliation_locked() -> _McpReconciliation | None:
         return _McpReconciliation(_RECONCILE_FULL)
 
     if applied is None:
+        if _server_tool_cache:
+            # Retained entries do not record the global interceptor chain they
+            # were built under, and there is no applied baseline to compare it
+            # against, so they are unverifiable. Fall back to the conservative
+            # full reset rather than risk serving a stale interceptor chain.
+            logger.info("MCP configuration changed with no applicable baseline but retained server entries; resetting conservatively")
+            return _McpReconciliation(_RECONCILE_FULL)
         # No trusted baseline: conservatively re-epoch every active deployment
         # binding (same fingerprint included) and tombstone unlisted deployment
         # state, without replacing the pool or touching personal state.
@@ -906,10 +913,6 @@ async def initialize_mcp_tools() -> list[BaseTool]:
 
         await asyncio.to_thread(_wait_for_initialization, waiting_generation)
 
-    from deerflow.config.extensions_config import ExtensionsConfig
-    from deerflow.mcp.session_pool import StaleMCPBindingError, get_session_pool
-    from deerflow.mcp.tools import _flatten_server_tool_groups, get_mcp_tools_by_server
-
     loaded_tools = None
     loaded_snapshot = None
     loaded_lifecycle = None
@@ -926,6 +929,10 @@ async def initialize_mcp_tools() -> list[BaseTool]:
     post_reset_signature = None
     init_succeeded = False
     try:
+        from deerflow.config.extensions_config import ExtensionsConfig
+        from deerflow.mcp.session_pool import StaleMCPBindingError, get_session_pool
+        from deerflow.mcp.tools import _flatten_server_tool_groups, get_mcp_tools_by_server
+
         logger.info("Initializing MCP tools...")
         # Read the exact revision we hand to discovery. Comparing pre/post file
         # snapshots alone cannot prove which revision produced the tools, because
@@ -1068,6 +1075,13 @@ async def initialize_mcp_tools() -> list[BaseTool]:
                 snapshot = loaded_revision.server_snapshots.get(name)
                 if snapshot is not None:
                     pending_entries[name] = _ServerToolCacheEntry(snapshot=snapshot, result=result)
+        if enabled_names and not candidate_groups:
+            # Every enabled server was attempted and none returned a result:
+            # this is a total discovery failure, not a legitimately empty
+            # configuration, so refuse to publish a false-success empty cache.
+            # Raising aborts this attempt (the ``finally`` below releases the
+            # claim) without spinning inside a single ``get_cached_mcp_tools``.
+            raise RuntimeError("MCP discovery produced no results for any enabled server")
         loaded_tools = _flatten_server_tool_groups(enabled_names, candidate_groups)
         post_path, post_sig = _current_config_state()
         post_reset_signature = _current_cache_reset_marker_signature(post_path)

@@ -22,6 +22,7 @@ therefore the load-bearing one.
 from __future__ import annotations
 
 import asyncio
+import builtins
 import json
 import threading
 
@@ -622,3 +623,74 @@ async def test_t3_unchanged_server_oauth_is_not_refetched(t3_cache, monkeypatch)
 
     assert oauth_requests[-1] == {"A"}  # B's OAuth headers are not refetched
     assert sorted(tool.name for tool in tools) == ["A", "B"]
+
+
+def _http(name: str, url: str | None = None) -> dict:
+    return {"enabled": True, "type": "http", "url": url or f"https://{name.lower()}.test/mcp"}
+
+
+@pytest.mark.asyncio
+async def test_t4_interceptor_change_without_baseline_drops_retained_entries(t3_cache, monkeypatch):
+    """With no applied baseline, a retained HTTP entry must not outlive an interceptor change."""
+    cfg = t3_cache
+    _write_config(cfg, {"A": _http("A")})
+    _install(monkeypatch, _Discovery())
+    await cache_module.initialize_mcp_tools()
+    assert "A" in cache_module._server_tool_cache
+
+    # Conservative state: entries retained but the comparing baseline is gone.
+    cache_module._applied_mcp_revision = None
+    cache_module._cache_initialized = False
+
+    cfg.write_text(json.dumps({"mcpServers": {"A": _http("A")}, "skills": {}, "mcpInterceptors": ["pkg.mod:build"]}), encoding="utf-8")
+    assert cache_module.refresh_mcp_cache_if_active() is True
+
+    assert cache_module._server_tool_cache == {}
+
+
+def test_t4_shared_reset_counts_retained_entries(t3_cache):
+    """A retained per-server entry must make a shared reset consider local state."""
+    pool = session_pool_module.get_session_pool()
+    assert cache_module._shared_reset_has_local_state_locked(pool) is False
+
+    cache_module._server_tool_cache["A"] = cache_module._ServerToolCacheEntry(
+        snapshot="orphan",
+        result=ServerDiscoveryResult(tools=()),
+    )
+
+    assert cache_module._shared_reset_has_local_state_locked(pool) is True
+
+
+@pytest.mark.asyncio
+async def test_t4_total_discovery_failure_does_not_publish_empty_success(t3_cache, monkeypatch):
+    """Every enabled server failing is a phase-level failure, not a cached empty success."""
+    cfg = t3_cache
+    _write_config(cfg, {"A": _stdio("A"), "B": _stdio("B")})
+    _install(monkeypatch, _Discovery(fail={"A", "B"}))
+
+    with pytest.raises(RuntimeError):
+        await cache_module.initialize_mcp_tools()
+
+    assert cache_module._cache_initialized is False
+    assert cache_module._initializing_generation is None
+    assert cache_module._server_tool_cache == {}
+
+
+@pytest.mark.asyncio
+async def test_t4_import_failure_after_claim_releases_generation(t3_cache, monkeypatch):
+    """A lazy-import failure must not strand the initialization claim."""
+    cfg = t3_cache
+    _write_config(cfg, {"A": _stdio("A")})
+    real_import = builtins.__import__
+
+    def failing_import(name, *args, **kwargs):
+        if name == "deerflow.mcp.tools":
+            raise ImportError("simulated missing adapter module")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", failing_import)
+
+    with pytest.raises(ImportError):
+        await cache_module.initialize_mcp_tools()
+
+    assert cache_module._initializing_generation is None
