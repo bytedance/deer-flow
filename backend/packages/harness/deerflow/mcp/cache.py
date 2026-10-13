@@ -105,8 +105,7 @@ class _ServerToolCacheEntry:
     ``_server_config_snapshot``) and ``result`` is the exact
     ``ServerDiscoveryResult`` published for it. Both are excluded from ``repr``:
     the snapshot may embed resolved credentials and the result carries ownership
-    handles. T2 populates and selectively evicts this map; T1 only establishes
-    the structure.
+    handles.
     """
 
     snapshot: str = field(repr=False)
@@ -116,8 +115,8 @@ class _ServerToolCacheEntry:
 _mcp_tools_cache: list[BaseTool] | None = None
 # Per-server published discovery results, keyed by server name. Deliberately
 # separate from the flattened ``_mcp_tools_cache`` so an unchanged server's exact
-# ``BaseTool`` objects can be reused without re-running discovery. T2 populates
-# and selectively evicts this map; T1 only establishes the structure.
+# ``BaseTool`` objects can be reused without re-running discovery. The
+# reconciliation and initialization paths populate and selectively evict it.
 _server_tool_cache: dict[str, _ServerToolCacheEntry] = {}
 _cache_initialized = False
 _init_lock = threading.RLock()  # Guards cache state transitions.
@@ -789,8 +788,13 @@ def _plan_committed_mcp_reconciliation_locked(
         return _McpReconciliation(_RECONCILE_FULL)
 
     if applied is None:
-        # Mirrors the reader's no-baseline rule: conservatively re-epoch active
-        # deployment bindings and tombstone unlisted ones, personal untouched.
+        if _server_tool_cache:
+            # Mirrors the reader's no-baseline rule: retained entries do not
+            # record the global interceptor chain they were built under, so
+            # without a baseline they are unverifiable and force a full reset.
+            return _McpReconciliation(_RECONCILE_FULL)
+        # Conservatively re-epoch active deployment bindings and tombstone
+        # unlisted ones, personal untouched.
         return _McpReconciliation(
             _RECONCILE_SELECTIVE,
             revision=revision,
@@ -1236,8 +1240,13 @@ def get_cached_mcp_tools() -> list[BaseTool]:
                     future.result()
             else:
                 loop.run_until_complete(initialize_mcp_tools())
-        except Exception:
-            logger.exception("Failed to lazy-initialize MCP tools")
+        except Exception as exc:
+            # Never emit the raw exception message or traceback here. Config
+            # parsing resolves ``$VAR`` values before validation and discovery
+            # failures can embed request URLs, so an exception's text may carry
+            # resolved credentials. The sanitized origins (config load, invalid
+            # ledger) already log their own bounded detail.
+            logger.error("Failed to lazy-initialize MCP tools (%s)", type(exc).__name__)
             return []
 
         with _init_lock:

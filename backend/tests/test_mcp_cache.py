@@ -118,10 +118,11 @@ def cache_globals():
 
 
 def _patch_discovery(monkeypatch, flat_fake):
-    """Route a flat discovery fake through T3's grouped per-server entry point.
+    """Route a flat discovery fake through the grouped per-server entry point.
 
     These cache tests stub ``get_mcp_tools`` with "discovery returns these
-    tools". T3 discovers per server, so mirror the live prologue here: install a
+    tools". Discovery now happens per server, so mirror the live prologue here:
+    install a
     real binding for every selected stdio server and attribute the fake's flat
     tool list to the first selected server (the rest succeed with zero tools).
     The flattened ordering the tests assert is unchanged.
@@ -1484,9 +1485,13 @@ class TestLazyInitializationFailure:
 
         assert calls == [threading.current_thread().name]
         assert cache_module._cache_initialized is False
-        logged = [record for record in caplog.records if record.exc_info]
+        logged = [record for record in caplog.records if record.name == "deerflow.mcp.cache" and record.levelname == "ERROR"]
         assert len(logged) == 1
-        assert str(logged[0].exc_info[1]) == "discovery failed"
+        # The failure must be attributed to the discovery error by type, never to
+        # a misleading asyncio loop error -- and the raw message is deliberately
+        # not emitted because it can carry resolved credentials.
+        assert "RuntimeError" in logged[0].getMessage()
+        assert "discovery failed" not in logged[0].getMessage()
 
     def test_runtime_error_from_discovery_inside_running_loop_runs_once(self, cache_globals, monkeypatch, tmp_path, caplog):
         calls = self._install_failing_discovery(monkeypatch, tmp_path)
@@ -1501,9 +1506,13 @@ class TestLazyInitializationFailure:
         assert cache_module._cache_initialized is False
         # The logged failure must be the discovery error, not a misleading
         # "asyncio.run() cannot be called from a running event loop".
-        logged = [record for record in caplog.records if record.exc_info]
+        logged = [record for record in caplog.records if record.name == "deerflow.mcp.cache" and record.levelname == "ERROR"]
         assert len(logged) == 1
-        assert str(logged[0].exc_info[1]) == "discovery failed"
+        # The failure must be attributed to the discovery error by type, never to
+        # a misleading asyncio loop error -- and the raw message is deliberately
+        # not emitted because it can carry resolved credentials.
+        assert "RuntimeError" in logged[0].getMessage()
+        assert "discovery failed" not in logged[0].getMessage()
 
     def test_thread_without_event_loop_still_initializes_once(self, cache_globals, monkeypatch, tmp_path):
         """The no-loop fallback stays intact: a worker thread with no loop set initializes via ``asyncio.run``."""

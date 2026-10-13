@@ -222,8 +222,8 @@ def _install_discovery(
     It mirrors the real discovery prologue (``build_servers_config`` +
     ``ensure_binding`` before the first awaited session creation) so the cache
     layer is exercised against the same ordering discovery itself guarantees.
-    The grouped fake honours ``server_names`` selection, so T3 per-server reuse
-    is exercised exactly as the initializer drives it.
+    The grouped fake honours ``server_names`` selection, so per-server reuse is
+    exercised exactly as the initializer drives it.
     """
     from deerflow.mcp import tools as tools_module
 
@@ -2487,12 +2487,12 @@ async def test_tombstone_only_change_advances_applied_tokens(reconciler, monkeyp
 
 
 # ---------------------------------------------------------------------------
-# T2: selective eviction of per-server discovery results
+# Selective eviction of per-server discovery results
 #
-# ``_server_tool_cache`` is populated by the publish path (T3). These tests seed
-# it the way a real publish would and then drive the *reconciliation* entry
-# points, so eviction is exercised through the same locked transition the cache
-# hot paths use - never by calling the eviction helper directly.
+# ``_server_tool_cache`` is populated by the publish path. These tests seed it
+# the way a real publish would and then drive the *reconciliation* entry points,
+# so eviction is exercised through the same locked transition the cache hot paths
+# use - never by calling the eviction helper directly.
 # ---------------------------------------------------------------------------
 
 
@@ -2784,7 +2784,7 @@ def test_reconciliation_state_counts_server_entries_without_baseline(reconciler)
 
 
 @pytest.mark.asyncio
-async def test_t3_metadata_change_reuses_b_and_keeps_a_session(reconciler, monkeypatch, tmp_path):
+async def test_metadata_change_reuses_b_and_keeps_a_session(reconciler, monkeypatch, tmp_path):
     """A metadata-only change rebuilds A but keeps A's stdio session and reuses B."""
     cfg = tmp_path / "extensions_config.json"
     pool = MCPSessionPool()

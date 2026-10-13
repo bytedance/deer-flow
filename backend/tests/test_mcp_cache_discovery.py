@@ -1,16 +1,16 @@
-"""T1 coverage for the per-server MCP discovery-cache scaffolding (F2).
+"""Coverage for the per-server MCP discovery cache.
 
-F2 may reuse a server's already-published ``ServerDiscoveryResult`` only when
-both of these still hold:
+The cache may reuse a server's already-published ``ServerDiscoveryResult`` only
+when both of these still hold:
 
 * the server's canonical configuration identity is unchanged
   (``_server_config_snapshot``), and
 * the discovery result is still owned by the pool's *current* session binding
   (``_binding_matches``).
 
-These tests pin exactly those two primitives. They deliberately do not exercise
-cache selection, eviction or publication — that wiring is T2 and must not be
-implied by a green run here.
+This module covers both the reuse predicates and their use by
+``initialize_mcp_tools`` (selection, per-server rediscovery, atomic
+publication).
 
 ``ServerBinding`` is declared ``eq=False``: two bindings with identical field
 values are still distinct objects, and ABA safety depends on comparing object
@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import builtins
 import json
+import logging
 import threading
 
 import pytest
@@ -232,11 +233,11 @@ def test_applied_revision_repr_hides_resolved_server_snapshots():
 
 
 # ---------------------------------------------------------------------------
-# T3: discovery reuse + atomic publication through ``initialize_mcp_tools``
+# Discovery reuse + atomic publication through ``initialize_mcp_tools``
 # ---------------------------------------------------------------------------
 
-_T3_MISSING = object()
-_T3_TRACKED_GLOBALS = (
+_DISCOVERY_MISSING = object()
+_DISCOVERY_TRACKED_GLOBALS = (
     "_mcp_tools_cache",
     "_cache_initialized",
     "_config_path",
@@ -254,9 +255,9 @@ _T3_TRACKED_GLOBALS = (
 
 
 @pytest.fixture()
-def t3_cache(tmp_path, monkeypatch):
+def discovery_cache(tmp_path, monkeypatch):
     """Isolate cache coordination state, ``_server_tool_cache`` and the pool singleton."""
-    saved = {name: getattr(cache_module, name, _T3_MISSING) for name in _T3_TRACKED_GLOBALS}
+    saved = {name: getattr(cache_module, name, _DISCOVERY_MISSING) for name in _DISCOVERY_TRACKED_GLOBALS}
     cache_module._mcp_tools_cache = None
     cache_module._cache_initialized = False
     cache_module._server_tool_cache = {}
@@ -282,7 +283,7 @@ def t3_cache(tmp_path, monkeypatch):
     finally:
         session_pool_module.reset_session_pool()
         for name, value in saved.items():
-            if value is _T3_MISSING:
+            if value is _DISCOVERY_MISSING:
                 if hasattr(cache_module, name):
                     delattr(cache_module, name)
             else:
@@ -354,9 +355,9 @@ def _fingerprint(servers: dict, name: str) -> str:
 
 
 @pytest.mark.asyncio
-async def test_t3_unchanged_server_is_reused_by_identity(t3_cache, monkeypatch):
+async def test_unchanged_server_is_reused_by_identity(discovery_cache, monkeypatch):
     """Changing A re-discovers only A; B keeps its exact tool object and binding."""
-    cfg = t3_cache
+    cfg = discovery_cache
     _write_config(cfg, {"A": _stdio("A"), "B": _stdio("B")})
     discovery = _install(monkeypatch, _Discovery())
 
@@ -378,9 +379,9 @@ async def test_t3_unchanged_server_is_reused_by_identity(t3_cache, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_t3_metadata_only_change_rebuilds_only_that_server(t3_cache, monkeypatch):
+async def test_metadata_only_change_rebuilds_only_that_server(discovery_cache, monkeypatch):
     """A presentation-only change rebuilds A but reuses B's entry."""
-    cfg = t3_cache
+    cfg = discovery_cache
     _write_config(cfg, {"A": _stdio("A"), "B": _stdio("B")})
     discovery = _install(monkeypatch, _Discovery())
     tools1 = await cache_module.initialize_mcp_tools()
@@ -397,9 +398,9 @@ async def test_t3_metadata_only_change_rebuilds_only_that_server(t3_cache, monke
 
 
 @pytest.mark.asyncio
-async def test_t3_lifecycle_token_change_with_identical_connection_rebuilds_only_a(t3_cache, monkeypatch):
+async def test_lifecycle_token_change_with_identical_connection_rebuilds_only_a(discovery_cache, monkeypatch):
     """A same-fingerprint lifecycle ABA still re-discovers A and reuses B."""
-    cfg = t3_cache
+    cfg = discovery_cache
     _write_config(cfg, {"A": _stdio("A"), "B": _stdio("B")}, tokens={"A": "1" * 32, "B": "2" * 32})
     discovery = _install(monkeypatch, _Discovery())
     tools1 = await cache_module.initialize_mcp_tools()
@@ -414,9 +415,9 @@ async def test_t3_lifecycle_token_change_with_identical_connection_rebuilds_only
 
 
 @pytest.mark.asyncio
-async def test_t3_declaration_reorder_rediscovers_nothing(t3_cache, monkeypatch):
+async def test_declaration_reorder_rediscovers_nothing(discovery_cache, monkeypatch):
     """Reordering servers only re-flattens; zero discovery calls happen."""
-    cfg = t3_cache
+    cfg = discovery_cache
     _write_config(cfg, {"A": _stdio("A"), "B": _stdio("B")})
     discovery = _install(monkeypatch, _Discovery())
     tools1 = await cache_module.initialize_mcp_tools()
@@ -433,9 +434,9 @@ async def test_t3_declaration_reorder_rediscovers_nothing(t3_cache, monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_t3_failed_discovery_publishes_siblings_without_caching_failure(t3_cache, monkeypatch):
+async def test_failed_discovery_publishes_siblings_without_caching_failure(discovery_cache, monkeypatch):
     """A failed server is absent (not a cached empty success); its sibling still publishes."""
-    cfg = t3_cache
+    cfg = discovery_cache
     _write_config(cfg, {"A": _stdio("A"), "B": _stdio("B")})
     discovery = _install(monkeypatch, _Discovery())
     await cache_module.initialize_mcp_tools()
@@ -451,9 +452,9 @@ async def test_t3_failed_discovery_publishes_siblings_without_caching_failure(t3
 
 
 @pytest.mark.asyncio
-async def test_t3_zero_tool_success_is_cached_and_not_rediscovered(t3_cache, monkeypatch):
+async def test_zero_tool_success_is_cached_and_not_rediscovered(discovery_cache, monkeypatch):
     """A successful zero-tool discovery is cached and reused (not re-requested)."""
-    cfg = t3_cache
+    cfg = discovery_cache
     _write_config(cfg, {"A": _stdio("A"), "B": _stdio("B")})
     discovery = _install(monkeypatch, _Discovery(empty={"A"}))
     await cache_module.initialize_mcp_tools()
@@ -469,14 +470,14 @@ async def test_t3_zero_tool_success_is_cached_and_not_rediscovered(t3_cache, mon
 
 
 @pytest.mark.asyncio
-async def test_t3_candidate_superseded_by_generation_is_not_published(t3_cache, monkeypatch):
+async def test_candidate_superseded_by_generation_is_not_published(discovery_cache, monkeypatch):
     """A generation bump mid-discovery discards the whole candidate.
 
     The trigger invalidates the claim without changing the config bytes or
     retiring the pool, so the generation check is the only guard that can reject
     the candidate (the post-read and binding checks would both still pass).
     """
-    cfg = t3_cache
+    cfg = discovery_cache
     _write_config(cfg, {"A": _stdio("A")})
     discovery = _install(monkeypatch, _Discovery())
 
@@ -492,9 +493,9 @@ async def test_t3_candidate_superseded_by_generation_is_not_published(t3_cache, 
 
 
 @pytest.mark.asyncio
-async def test_t3_binding_rotation_during_discovery_discards_candidate(t3_cache, monkeypatch):
+async def test_binding_rotation_during_discovery_discards_candidate(discovery_cache, monkeypatch):
     """A rotated binding for a *reused* sibling fails the whole publication."""
-    cfg = t3_cache
+    cfg = discovery_cache
     servers = {"A": _stdio("A"), "B": _stdio("B")}
     _write_config(cfg, servers)
     discovery = _install(monkeypatch, _Discovery())
@@ -517,9 +518,9 @@ async def test_t3_binding_rotation_during_discovery_discards_candidate(t3_cache,
 
 
 @pytest.mark.asyncio
-async def test_t3_explicit_reset_forces_full_rediscovery(t3_cache, monkeypatch):
+async def test_explicit_reset_forces_full_rediscovery(discovery_cache, monkeypatch):
     """An explicit reset clears entries so the next init discovers every server again."""
-    cfg = t3_cache
+    cfg = discovery_cache
     _write_config(cfg, {"A": _stdio("A"), "B": _stdio("B")})
     discovery = _install(monkeypatch, _Discovery())
     await cache_module.initialize_mcp_tools()
@@ -531,9 +532,9 @@ async def test_t3_explicit_reset_forces_full_rediscovery(t3_cache, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_t3_cancelled_initializer_releases_claim(t3_cache, monkeypatch):
+async def test_cancelled_initializer_releases_claim(discovery_cache, monkeypatch):
     """Cancelling mid-discovery releases the claim so the next initializer proceeds."""
-    cfg = t3_cache
+    cfg = discovery_cache
     _write_config(cfg, {"A": _stdio("A")})
     discovery = _install(monkeypatch, _Discovery())
 
@@ -561,9 +562,9 @@ async def test_t3_cancelled_initializer_releases_claim(t3_cache, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_t3_personal_binding_is_never_reused_as_deployment(t3_cache, monkeypatch):
+async def test_personal_binding_is_never_reused_as_deployment(discovery_cache, monkeypatch):
     """A same-named personal binding must not satisfy the deployment reuse check."""
-    cfg = t3_cache
+    cfg = discovery_cache
     _write_config(cfg, {"A": _stdio("A")})
     discovery = _install(monkeypatch, _Discovery())
     await cache_module.initialize_mcp_tools()
@@ -589,9 +590,9 @@ def _structured_tool(name: str) -> StructuredTool:
 
 
 @pytest.mark.asyncio
-async def test_t3_unchanged_server_oauth_is_not_refetched(t3_cache, monkeypatch):
+async def test_unchanged_server_oauth_is_not_refetched(discovery_cache, monkeypatch):
     """A partial re-init only fetches OAuth headers for the re-discovered server."""
-    cfg = t3_cache
+    cfg = discovery_cache
     _write_config(cfg, {"A": _stdio("A"), "B": _stdio("B")})
 
     oauth_requests: list[set[str]] = []
@@ -630,9 +631,9 @@ def _http(name: str, url: str | None = None) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_t4_interceptor_change_without_baseline_drops_retained_entries(t3_cache, monkeypatch):
+async def test_interceptor_change_without_baseline_drops_retained_entries(discovery_cache, monkeypatch):
     """With no applied baseline, a retained HTTP entry must not outlive an interceptor change."""
-    cfg = t3_cache
+    cfg = discovery_cache
     _write_config(cfg, {"A": _http("A")})
     _install(monkeypatch, _Discovery())
     await cache_module.initialize_mcp_tools()
@@ -648,7 +649,7 @@ async def test_t4_interceptor_change_without_baseline_drops_retained_entries(t3_
     assert cache_module._server_tool_cache == {}
 
 
-def test_t4_shared_reset_counts_retained_entries(t3_cache):
+def test_shared_reset_counts_retained_entries(discovery_cache):
     """A retained per-server entry must make a shared reset consider local state."""
     pool = session_pool_module.get_session_pool()
     assert cache_module._shared_reset_has_local_state_locked(pool) is False
@@ -662,9 +663,9 @@ def test_t4_shared_reset_counts_retained_entries(t3_cache):
 
 
 @pytest.mark.asyncio
-async def test_t4_total_discovery_failure_does_not_publish_empty_success(t3_cache, monkeypatch):
+async def test_total_discovery_failure_does_not_publish_empty_success(discovery_cache, monkeypatch):
     """Every enabled server failing is a phase-level failure, not a cached empty success."""
-    cfg = t3_cache
+    cfg = discovery_cache
     _write_config(cfg, {"A": _stdio("A"), "B": _stdio("B")})
     _install(monkeypatch, _Discovery(fail={"A", "B"}))
 
@@ -677,9 +678,9 @@ async def test_t4_total_discovery_failure_does_not_publish_empty_success(t3_cach
 
 
 @pytest.mark.asyncio
-async def test_t4_import_failure_after_claim_releases_generation(t3_cache, monkeypatch):
+async def test_import_failure_after_claim_releases_generation(discovery_cache, monkeypatch):
     """A lazy-import failure must not strand the initialization claim."""
-    cfg = t3_cache
+    cfg = discovery_cache
     _write_config(cfg, {"A": _stdio("A")})
     real_import = builtins.__import__
 
@@ -694,3 +695,38 @@ async def test_t4_import_failure_after_claim_releases_generation(t3_cache, monke
         await cache_module.initialize_mcp_tools()
 
     assert cache_module._initializing_generation is None
+
+
+def test_lazy_init_failure_does_not_log_resolved_credentials(discovery_cache, monkeypatch, caplog):
+    """A stage-level discovery failure must not print a resolved-credential message."""
+    cfg = discovery_cache
+    _write_config(cfg, {"A": _http("A")})
+    secret = "s3cr3t-pass-123"
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError(f"discovery failed for url 'https://alice:{secret}@remote.test/mcp'")
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools_by_server", boom)
+
+    with caplog.at_level(logging.DEBUG):
+        assert cache_module.get_cached_mcp_tools() == []
+
+    assert secret not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_committed_interceptor_change_without_baseline_drops_retained_entries(discovery_cache, monkeypatch):
+    """The committed-writer path mirrors the reader's no-baseline interceptor guard."""
+    cfg = discovery_cache
+    _write_config(cfg, {"A": _http("A")})
+    _install(monkeypatch, _Discovery())
+    await cache_module.initialize_mcp_tools()
+    assert "A" in cache_module._server_tool_cache
+
+    cache_module._applied_mcp_revision = None
+    cache_module._cache_initialized = False
+
+    committed = ExtensionsConfig.model_validate({"mcpServers": {"A": _http("A")}, "mcpInterceptors": ["pkg.mod:build"]})
+    cache_module.finish_mcp_reconciliation(cache_module.prepare_mcp_reconciliation(committed, config_path=cfg))
+
+    assert cache_module._server_tool_cache == {}
