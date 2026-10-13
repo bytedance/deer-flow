@@ -5830,7 +5830,7 @@ This release closes that milestone with **621 merged pull requests**.
   included, in the process-wide registry for good, and a repository error while
   polling failed or requeued the item but left its subagent running
   unsupervised, so a retry could run the same item twice. An entry that never
-  stops is removed once the item's lease has passed.
+  stops is removed once the item's lease has passed. ([#6785])
 - **gateway:** The subagent batch JSONL export
   (`GET /api/threads/{thread_id}/subagent-batches/{batch_id}/results.jsonl`)
   now reads stored results 10 rows at a time instead of 500. Each row can hold
@@ -11616,3 +11616,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6702]: https://github.com/bytedance/deer-flow/pull/6702
 [#6706]: https://github.com/bytedance/deer-flow/pull/6706
 [#6746]: https://github.com/bytedance/deer-flow/pull/6746
+[#6785]: https://github.com/bytedance/deer-flow/pull/6785
