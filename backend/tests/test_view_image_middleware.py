@@ -994,3 +994,98 @@ def test_custom_base_host_copy_rejects_unscoped_thread_data_root(tmp_path, monke
     }
 
     assert _image_urls(ViewImageMiddleware()._inject(request)) == []
+
+
+def _text_blocks(blocks: list) -> list[str]:
+    return [block["text"] for block in blocks if isinstance(block, dict) and block.get("type") == "text"]
+
+
+def test_injection_budget_keeps_newest_images_and_omits_oldest(tmp_path):
+    """The image cap admits newest-first; omitted entries keep a placeholder bullet (see #6825)."""
+    viewed_images = {}
+    for i in range(4):
+        viewed_images[f"/mnt/user-data/outputs/img_{i}.png"] = _make_viewed_image(tmp_path, f"img_{i}.png", data=bytes([i]) + b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+    state = {"viewed_images": viewed_images}
+
+    mw = ViewImageMiddleware(max_injected_images=2)
+    blocks = mw._create_image_details_message(state, host_path_allowed=lambda _, actual: Path(actual).is_relative_to(tmp_path))
+
+    image_urls = [b["image_url"]["url"] for b in blocks if isinstance(b, dict) and b.get("type") == "image_url"]
+    assert len(image_urls) == 2
+
+    # The two newest entries (img_2, img_3) are injected; the two oldest keep a placeholder.
+    # Walk the raw block list so each bullet's successor block is checked in place.
+    for i, block in enumerate(blocks):
+        if not (isinstance(block, dict) and block.get("type") == "text"):
+            continue
+        text = block["text"]
+        for omitted in ("img_0.png", "img_1.png"):
+            if omitted in text:
+                assert "omitted: image injection budget reached" in blocks[i + 1]["text"]
+        for injected in ("img_2.png", "img_3.png"):
+            if injected in text:
+                assert blocks[i + 1].get("type") == "image_url"
+
+    # Distinct payloads prove which entries made it.
+    assert base64.b64decode(image_urls[0].split(",", 1)[1]).startswith(bytes([2]))
+    assert base64.b64decode(image_urls[1].split(",", 1)[1]).startswith(bytes([3]))
+
+
+def test_injection_byte_budget_drops_oldest_when_total_exceeded(tmp_path):
+    """The byte cap evicts the oldest oversized entry while a newer small one still fits."""
+    big = b"\x89PNG\r\n\x1a\n" + b"\x00" * (900_000 - 8)
+    small = b"\x89PNG\r\n\x1a\n" + b"\x00" * (100_000 - 8)
+    state = {
+        "viewed_images": {
+            "/mnt/user-data/outputs/big_0.png": _make_viewed_image(tmp_path, "big_0.png", data=big),
+            "/mnt/user-data/outputs/big_1.png": _make_viewed_image(tmp_path, "big_1.png", data=big),
+            "/mnt/user-data/outputs/small_2.png": _make_viewed_image(tmp_path, "small_2.png", data=small),
+        }
+    }
+
+    mw = ViewImageMiddleware(max_injected_total_chars=2_000_000)
+    blocks = mw._create_image_details_message(state, host_path_allowed=lambda _, actual: Path(actual).is_relative_to(tmp_path))
+
+    image_urls = [b["image_url"]["url"] for b in blocks if isinstance(b, dict) and b.get("type") == "image_url"]
+    assert len(image_urls) == 2
+    for i, block in enumerate(blocks):
+        if not (isinstance(block, dict) and block.get("type") == "text"):
+            continue
+        if "big_0.png" in block["text"]:
+            assert "omitted: image injection budget reached" in blocks[i + 1]["text"]
+        if "small_2.png" in block["text"]:
+            assert blocks[i + 1].get("type") == "image_url"
+
+
+def test_injection_budget_defaults_keep_small_threads_unbounded(tmp_path):
+    """Defaults must not change threads whose image count and sizes stay small."""
+    viewed_images = {}
+    for i in range(3):
+        viewed_images[f"/mnt/user-data/outputs/img_{i}.png"] = _make_viewed_image(tmp_path, f"img_{i}.png")
+    state = {"viewed_images": viewed_images}
+
+    blocks = ViewImageMiddleware()._create_image_details_message(state, host_path_allowed=lambda _, actual: Path(actual).is_relative_to(tmp_path))
+
+    assert len([b for b in blocks if isinstance(b, dict) and b.get("type") == "image_url"]) == 3
+    assert not any("omitted" in t for t in _text_blocks(blocks))
+
+
+def test_injection_budget_skips_reads_for_omitted_entries(tmp_path):
+    """Entries over budget are never read from disk or sandbox."""
+    viewed_images = {}
+    for i in range(3):
+        viewed_images[f"/mnt/user-data/outputs/img_{i}.png"] = _make_viewed_image(tmp_path, f"img_{i}.png", data=bytes([i]) + b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+    state = {"viewed_images": viewed_images}
+
+    mw = ViewImageMiddleware(max_injected_images=1)
+    calls = []
+
+    def _fake_read(*args, **kwargs):
+        calls.append(args)
+        return "data:image/png;base64,QUJD"
+
+    mw._read_image_as_data_url = _fake_read
+    blocks = mw._create_image_details_message(state)
+
+    assert len([b for b in blocks if isinstance(b, dict) and b.get("type") == "image_url"]) == 1
+    assert len(calls) == 1
