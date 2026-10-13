@@ -16,7 +16,7 @@ from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeVar
 
-from app.channels.base import Channel, ChannelStopTimeout, ChannelUnavailable, shutdown_private_loop
+from app.channels.base import Channel, ChannelStopTimeout, ChannelUnavailable, abort_connection_transport, shutdown_private_loop
 from app.channels.commands import is_known_channel_command, strip_leading_mentions
 from app.channels.connection_identity import attach_connection_identity, lookup_thread_id
 from app.channels.feishu_card_interaction import (
@@ -443,16 +443,49 @@ class FeishuChannel(Channel):
                 # Must precede any await: once the loop stops, start() lands in
                 # its ``except Exception`` branch and consults this flag.
                 ws_client._auto_reconnect = False
+                deadline = loop.time() + FEISHU_WS_CLOSE_TIMEOUT_SECONDS
+                # _disconnect() clears _conn in its finally (also when cancelled
+                # mid-acquire), so take the handle first — once any in-flight
+                # dial has settled — and release the socket here if the close
+                # handshake does not finish, rather than whenever the
+                # connection object happens to be garbage-collected.
+                connection = await self._settled_ws_connection(ws_client, deadline)
                 disconnect = getattr(ws_client, "_disconnect", None)
                 if disconnect is not None:
                     try:
-                        await asyncio.wait_for(disconnect(), timeout=FEISHU_WS_CLOSE_TIMEOUT_SECONDS)
+                        async with asyncio.timeout_at(deadline):
+                            await disconnect()
                     except Exception:
                         logger.debug("[Feishu] WebSocket close did not complete cleanly", exc_info=True)
+                if abort_connection_transport(connection):
+                    logger.warning("[Feishu] WebSocket close handshake did not finish within %ss; transport aborted", FEISHU_WS_CLOSE_TIMEOUT_SECONDS)
+                    await asyncio.sleep(0)  # let connection_lost run before the loop stops
         except asyncio.CancelledError:
             # The thread is already draining this loop; leave it to that.
             raise
         loop.stop()
+
+    @staticmethod
+    async def _settled_ws_connection(ws_client: Any, deadline: float) -> Any:
+        """Return the SDK's live connection once any in-flight ``_connect()`` has settled.
+
+        lark holds ``_lock`` across the whole dial and assigns ``_conn`` under
+        it, so a stop that lands mid-handshake would otherwise snapshot
+        ``None`` and leave the socket the dial produces to the SDK's cancelled
+        close. Waiting for the lock is bounded by the close deadline.
+        """
+        lock = getattr(ws_client, "_lock", None)
+        if lock is None:
+            return getattr(ws_client, "_conn", None)
+        try:
+            async with asyncio.timeout_at(deadline):
+                await lock.acquire()
+        except TimeoutError:
+            return getattr(ws_client, "_conn", None)
+        try:
+            return getattr(ws_client, "_conn", None)
+        finally:
+            lock.release()
 
     def _on_ignored_message_event(self, event) -> None:
         logger.debug("[Feishu] ignoring non-content message event: %s", type(event).__name__)

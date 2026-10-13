@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import platform
 import re
 import stat
 import threading
@@ -15,7 +16,7 @@ from urllib.parse import quote_plus
 
 import httpx
 
-from app.channels.base import Channel, ChannelStopTimeout, shutdown_private_loop
+from app.channels.base import Channel, ChannelStopTimeout, abort_connection_transport, shutdown_private_loop
 from app.channels.commands import is_known_channel_command, strip_leading_mentions
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessage, InboundMessageType, InboundReservation, MessageBus, OutboundMessage, ResolvedAttachment
@@ -41,6 +42,8 @@ _TOKEN_REFRESH_MARGIN_SECONDS = 300
 # the socket (bounded by the close timeout) and stop, then join the thread.
 DINGTALK_STOP_TIMEOUT_SECONDS = 5
 DINGTALK_STREAM_CLOSE_TIMEOUT_SECONDS = 2
+# Deadline for the Stream ticket request (the SDK's own has none).
+DINGTALK_STREAM_TICKET_TIMEOUT_SECONDS = 30
 # Retry pacing copied from DingTalkStreamClient.start() (dingtalk-stream 0.24).
 _DINGTALK_STREAM_RETRY_SECONDS = 10
 _DINGTALK_STREAM_ERROR_RETRY_SECONDS = 3
@@ -296,6 +299,9 @@ class DingTalkChannel(Channel):
                     await asyncio.wait_for(websocket.close(), timeout=DINGTALK_STREAM_CLOSE_TIMEOUT_SECONDS)
                 except Exception:
                     logger.debug("[DingTalk] stream close did not complete cleanly", exc_info=True)
+                if abort_connection_transport(websocket):
+                    logger.warning("[DingTalk] stream close handshake did not finish within %ss; transport aborted", DINGTALK_STREAM_CLOSE_TIMEOUT_SECONDS)
+                    await asyncio.sleep(0)  # let connection_lost run before the loop stops
         except asyncio.CancelledError:
             # The thread is already draining this loop; leave it to that.
             raise
@@ -478,16 +484,15 @@ class DingTalkChannel(Channel):
         ``background_task``, and retry after 10s on a lost connection or 3s on
         anything else. The SDK's own loop is ``while True`` and also catches
         ``CancelledError``, so it can only be left by killing the thread; this
-        copy re-checks ``_running`` before every dial and runs the blocking
-        ticket request off the loop so the shutdown callback can still run.
+        copy re-checks ``_running`` before every dial and fetches the ticket
+        asynchronously with a deadline so ``stop()`` can cancel it.
         """
         import websockets
 
-        loop = asyncio.get_running_loop()
         client.pre_start()
         while self._running:
             try:
-                connection = await loop.run_in_executor(None, client.open_connection)
+                connection = await self._open_stream_connection(client)
                 if not self._running:
                     break
                 if not connection:
@@ -515,6 +520,51 @@ class DingTalkChannel(Channel):
                     break
                 logger.exception("[DingTalk] stream error")
                 await asyncio.sleep(_DINGTALK_STREAM_ERROR_RETRY_SECONDS)
+
+    async def _open_stream_connection(self, client: Any) -> dict[str, Any] | None:
+        """Fetch a Stream ticket: ``DingTalkStreamClient.open_connection()`` with a deadline.
+
+        The SDK's version calls ``requests.post`` with no timeout, so a stalled
+        ticket endpoint pins whichever thread runs it (and, from an executor,
+        Gateway process exit, which joins executor workers). This sends the same
+        request through ``httpx`` on the stream loop under
+        ``DINGTALK_STREAM_TICKET_TIMEOUT_SECONDS``, so ``stop()`` cancels it like
+        any other task. Returns ``None`` on failure like the SDK does.
+        """
+        from dingtalk_stream.version import VERSION_STRING
+
+        topics: list[dict[str, str]] = []
+        if getattr(client, "_is_event_required", False):
+            topics.append({"type": "EVENT", "topic": "*"})
+        for topic in client.callback_handler_map:
+            topics.append({"type": "CALLBACK", "topic": topic})
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": f"DingTalkStream/1.0 SDK/{VERSION_STRING} Python/{platform.python_version()} (+https://github.com/open-dingtalk/dingtalk-stream-sdk-python)",
+        }
+        body = {
+            "clientId": client.credential.client_id,
+            "clientSecret": client.credential.client_secret,
+            "subscriptions": topics,
+            "ua": f"dingtalk-sdk-python/v{VERSION_STRING}-union",
+            "localIp": client.get_host_ip(),
+        }
+        try:
+            async with httpx.AsyncClient(timeout=DINGTALK_STREAM_TICKET_TIMEOUT_SECONDS) as http:
+                response = await http.post(client.OPEN_CONNECTION_API, headers=headers, json=body)
+                response.raise_for_status()
+                payload = response.json()
+        except httpx.HTTPStatusError as exc:
+            logger.error("[DingTalk] open connection failed: HTTP %s", exc.response.status_code)
+            return None
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.error("[DingTalk] open connection failed: %s", type(exc).__name__)
+            return None
+        if not isinstance(payload, dict) or not payload.get("endpoint") or not payload.get("ticket"):
+            logger.error("[DingTalk] open connection returned no endpoint/ticket")
+            return None
+        return payload
 
     def _on_chatbot_message(self, message: Any) -> None:
         if not self._running:

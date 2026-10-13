@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import tempfile
 import threading
 import time
@@ -350,6 +351,87 @@ def test_feishu_stop_before_sdk_client_exists_never_starts_it(monkeypatch):
         assert created[0].start_calls == 0
         assert not thread.is_alive()
         assert channel._thread is None
+
+    asyncio.run(go())
+
+
+def _point_lark_at(monkeypatch, ws_url: str) -> None:
+    """Skip lark's endpoint-discovery POST and dial ``ws_url`` with the real client."""
+    import lark_oapi.ws.client as ws_client_mod
+
+    monkeypatch.setattr(ws_client_mod.Client, "_get_conn_url", lambda self: f"{ws_url}?device_id=d1&service_id=1")
+
+
+def test_feishu_stop_closes_real_sdk_connection(monkeypatch):
+    from websockets.asyncio.server import serve
+
+    async def go():
+        connected = asyncio.Event()
+        closed = asyncio.Event()
+
+        async def handler(websocket):
+            connected.set()
+            try:
+                async for _ in websocket:
+                    pass
+            finally:
+                closed.set()
+
+        async with serve(handler, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+            _point_lark_at(monkeypatch, f"ws://127.0.0.1:{port}/")
+            channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+            await channel.start()
+            thread = channel._thread
+            await asyncio.wait_for(connected.wait(), 5)
+
+            started = time.monotonic()
+            await channel.stop()
+            elapsed = time.monotonic() - started
+
+            assert elapsed < 5, f"stop() took {elapsed:.2f}s"
+            await asyncio.wait_for(closed.wait(), 5)
+            assert not thread.is_alive()
+            assert channel._thread is None
+
+    asyncio.run(go())
+
+
+def test_feishu_stop_aborts_transport_when_peer_never_acks_close(monkeypatch, caplog):
+    """Real lark-oapi client against a peer that completes the handshake but never answers the close frame.
+
+    The bounded ``_disconnect()`` wait is cancelled before websockets' own
+    ``close_timeout`` abort runs, so the channel must release the socket itself;
+    ``peer.closed`` only fires once the TCP connection is actually gone.
+    """
+    from support.local_sockets import StalledWebSocketServer, transport_socket, wait_until
+
+    caplog.set_level(logging.WARNING, logger="app.channels.feishu")
+
+    async def go():
+        async with StalledWebSocketServer() as peer:
+            _point_lark_at(monkeypatch, peer.url)
+            monkeypatch.setattr(feishu_module, "FEISHU_WS_CLOSE_TIMEOUT_SECONDS", 0.5)
+            channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+            await channel.start()
+            thread = channel._thread
+            await asyncio.wait_for(peer.accepted.wait(), 5)
+            # Wait for lark to finish its dial (it assigns _conn under _lock).
+            connection = await wait_until(lambda: channel._ws_client is not None and not channel._ws_client._lock.locked() and channel._ws_client._conn)
+            sock = transport_socket(connection)
+            assert sock.fileno() != -1
+
+            started = time.monotonic()
+            await channel.stop()
+            elapsed = time.monotonic() - started
+
+            assert elapsed < 5, f"stop() took {elapsed:.2f}s"
+            assert not thread.is_alive()
+            assert channel._thread is None
+            # The socket is released by stop() itself, not by a later GC pass.
+            assert sock.fileno() == -1
+            assert "transport aborted" in caplog.text
+            await asyncio.wait_for(peer.closed.wait(), 5)
 
     asyncio.run(go())
 

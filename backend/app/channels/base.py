@@ -70,6 +70,23 @@ def shutdown_private_loop(loop: asyncio.AbstractEventLoop, *, drain_timeout: flo
         loop.close()
 
 
+def abort_connection_transport(connection: Any) -> bool:
+    """Tear down a ``websockets`` connection's transport if its close handshake did not finish.
+
+    ``connection.close()`` waits for the peer's close frame and only aborts the
+    transport after its own ``close_timeout``; a caller that bounds that wait more
+    tightly (channel stop budgets do) cancels before the abort, and the socket
+    then lives until garbage collection. Returns True when a transport was
+    aborted; the caller should yield to its loop once so ``connection_lost``
+    runs before the loop is stopped.
+    """
+    transport = getattr(connection, "transport", None)
+    if transport is None or transport.is_closing():
+        return False
+    transport.abort()
+    return True
+
+
 @dataclass(eq=False, slots=True)
 class _ThreadsafeSubmission:
     coroutine: Coroutine[Any, Any, Any]
