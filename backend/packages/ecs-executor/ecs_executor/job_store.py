@@ -21,6 +21,7 @@ _JOBS = Table(
     Column("version", Integer, nullable=False),
     Column("state", String(32), nullable=False, index=True),
     Column("record", JSON, nullable=False),
+    Column("workspace_id", String(36), nullable=True, index=True),
 )
 UniqueConstraint(_JOBS.c.namespace, _JOBS.c.request_key, name="uq_ecs_execution_request")
 
@@ -62,7 +63,7 @@ class JobStore:
         job = {**record, "id": uuid.uuid4().hex, "state": "staged", "created_at": time.time(), "spec_digest": spec_digest}
         try:
             with self.engine.begin() as connection:
-                connection.execute(_JOBS.insert().values(id=job["id"], namespace=namespace, request_key=request_key, version=0, state="staged", record=job))
+                connection.execute(_JOBS.insert().values(id=job["id"], namespace=namespace, request_key=request_key, version=0, state="staged", record=job, workspace_id=job.get("workspace_id")))
             return job
         except IntegrityError:
             with self.engine.connect() as connection:
@@ -71,6 +72,8 @@ class JobStore:
                 raise
             if row.record["spec_digest"] != spec_digest:
                 raise ValueError("request_key is already bound to a different immutable specification") from None
+            if row.record.get("workspace_id") != job.get("workspace_id"):
+                raise ValueError("request_key is already bound to a different workspace") from None
             return dict(row.record)
 
     def mutate(self, job_id: str, change: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
@@ -81,6 +84,8 @@ class JobStore:
                     raise ValueError("Execution job not found")
                 record = dict(row.record)
                 change(record)
+                if record.get("workspace_id") != row.workspace_id:
+                    raise ValueError("Execution workspace cannot change")
                 # A terminal outcome cannot revive, even after a late physical RPC.
                 if row.state in TERMINAL and record["state"] != row.state:
                     raise ValueError("Terminal execution cannot change state")

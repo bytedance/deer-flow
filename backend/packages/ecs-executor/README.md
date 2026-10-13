@@ -533,3 +533,18 @@ Ops/cgroup/cloud/restart acceptance belongs to Task6B.
 Task6B native role Compose, private reference-only generation, durable operator drain
 and stopped-writer image selection are documented in `docs/ecs-native-deployment.md`. Installed/cloud acceptance remains separately recorded;
 cloud/Jenkins work is paused.
+
+## Tenant schema foundation (implementation in progress)
+
+This development branch requires `e0002_workspace_scope` for production ledger
+admission. The explicit offline upgrade accepts only reviewed legacy/current
+shapes, adds nullable indexed workspace fields to jobs and native affinities,
+and leaves existing physical reservations, JSON payloads and versions intact.
+It never assigns legacy tenant ownership or replays work. New job creation
+persists scope; mutation and conflicting create retries cannot change it.
+
+These columns are not user authorization. Tenant protocol, live membership
+checks, native/executor backfill and the controlled migration receipt remain
+required. The historical Shanghai release manifests and same-schema operations
+contract still describe `0035/e0001`; do not edit their receipts or use that
+release flow to claim a `0036/e0002` rollout. No deployment has been performed.

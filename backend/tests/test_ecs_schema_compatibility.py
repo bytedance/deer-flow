@@ -6,7 +6,7 @@ from alembic.script import ScriptDirectory
 
 from deerflow.persistence import bootstrap
 
-HEAD = "0035_native_fork_compatibility"
+HEAD = "0036_tenant_workspaces"
 
 
 def test_integrated_graph_retains_shipped_ancestry():
@@ -15,7 +15,8 @@ def test_integrated_graph_retains_shipped_ancestry():
     assert script.get_revision("0018_thread_execution_bindings").down_revision == "0017_personal_access_tokens"
     assert script.get_revision("0019_scheduled_execution").down_revision == "0018_thread_execution_bindings"
     assert script.get_revision("0022_fleet_main_merge").down_revision == ("0019_scheduled_execution", "0019_thread_incarnations")
-    assert script.get_revision(HEAD).down_revision == ("0034_run_event_seq_watermark", "0022_fleet_main_merge")
+    assert script.get_revision(HEAD).down_revision == "0035_native_fork_compatibility"
+    assert script.get_revision("0035_native_fork_compatibility").down_revision == ("0034_run_event_seq_watermark", "0022_fleet_main_merge")
 
 
 def test_executor_requires_version_and_preserves_unknown_reservation(tmp_path):

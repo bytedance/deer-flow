@@ -82,6 +82,7 @@ _AFFINITIES = Table(
     Column("thread_id", String(255), primary_key=True),
     Column("incarnation", String(255), primary_key=True),
     Column("node_id", String(64), nullable=False),
+    Column("workspace_id", String(36), nullable=True, index=True),
 )
 
 

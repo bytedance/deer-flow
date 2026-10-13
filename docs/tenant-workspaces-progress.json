@@ -26,7 +26,7 @@
   },
   "remaining": [
     "M0 real SQL/HTTP fixture depends on M1/M2; resource assertions depend on M3",
-    "M1 executor schema and ledger backfill, guarded migration CLI",
+    "M1 executor ledger attribution and guarded migration CLI",
     "M2 through M11 remain unimplemented"
   ],
   "static_checks": [
@@ -94,5 +94,46 @@
     "environment": "Existing postgres:16-alpine image pinned by image ID in Jenkins script; dedicated internal network, no published ports, per-case UUID schemas; no production or NAS data mounted",
     "cleanup": "Authoritative docker ps -a and network ls with exact owned label returned no containers or networks after terminal SUCCESS",
     "test_sha256": "f4923a3f49673a1c2391a757dfa6b0cfe0f4b3f11d4d07cd2b0955dc33a22422"
+  },
+  "executor_schema": {
+    "revision": "e0002_workspace_scope",
+    "red": {
+      "job": "deerflow-tenant-contract-m0",
+      "build": 9,
+      "result": "FAILURE",
+      "archive_sha256": "6f633c340bc2e07bcbe51e6252cb15fa08e2b10802aba40bd000d40a92f5c19a",
+      "reason": "old e0001 runtime admission was accepted and indexed workspace field absent"
+    },
+    "first_green": {
+      "job": "deerflow-tenant-contract-m0",
+      "build": 10,
+      "result": "SUCCESS",
+      "archive_sha256": "e301b8824ae68278d5b04b61062ab0e5e2ef4207bf550316ccd3ab0e67a17189",
+      "tests_passed": 9
+    },
+    "retry_red": {
+      "job": "deerflow-tenant-contract-m0",
+      "build": 11,
+      "result": "FAILURE",
+      "archive_sha256": "96d92a1d46f1f9d9b5282a1652c74c46ab8d9eec0e747e13ab0260ca68bfa0d6",
+      "reason": "same request_key and spec_digest returned a record from another workspace"
+    },
+    "green": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 2,
+      "result": "SUCCESS",
+      "archive_sha256": "baf0720651219738e75f6d9e303136de6141f6d59bf92a20b7a5d8eb3b15d513",
+      "tests_passed": 11,
+      "duration_seconds": 11.96,
+      "scope": "Two executor mains on SQLite and independent PostgreSQL databases; directly affected ownership, constraint, collation and ancestry guards; old physical state/version/raw JSON text retained; workspace mutation and conflicting create retry rejected"
+    },
+    "cleanup": "Exact owned-label docker container and network inventories empty after terminal SUCCESS",
+    "source_sha256": {
+      "backend/packages/ecs-executor/ecs_executor/schema.py": "8f7d78aa0ed4d5a9c7b5f37cda69ecdfd91644c49d57a1ce23b8d7248d7ef00b",
+      "backend/packages/ecs-executor/ecs_executor/job_store.py": "131de06b5e2de1090c9ff589393e295ce00b78b4d73a93d8fee68a27be37e22c",
+      "backend/packages/ecs-executor/ecs_executor/migrations/versions/e0002_workspace_scope.py": "a9b4d391e33fe2d07db8b7426db0441ec281f85e80ac83f0a3a40d4f5726b17d",
+      "backend/tests/test_workspace_executor_migration.py": "5f857f5c409a638a5762ca3b1aa76303453b8ab47a877bc3d98d956191a26f93"
+    },
+    "limits": "Schema/persistence foundation only. Signed tenant scope, live membership authorization, physical draining, paired database attribution and schema-changing release flow remain unimplemented."
   }
 }
