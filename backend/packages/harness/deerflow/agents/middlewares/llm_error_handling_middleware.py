@@ -165,6 +165,10 @@ _REASON_RETRY_BUDGETS: dict[str, int] = {
     "burst_rate": 2,
 }
 
+# Lower-cased message of the ``ValueError`` langchain_core raises when a
+# streamed response (HTTP 200) yields no generation chunk at all.
+_EMPTY_STREAM_MARKER = "no generations found in stream"
+
 # Exception class names that indicate the upstream stream-chunk watchdog
 # fired because the model stalled mid-flight. These deserve a more specific
 # user-facing message than the generic "temporarily unavailable" copy,
@@ -174,10 +178,6 @@ _REASON_RETRY_BUDGETS: dict[str, int] = {
 # Generic connection drops (httpx RemoteProtocolError / ReadError) are
 # intentionally excluded: they routinely fire on transient network blips
 # with normal payloads, where the "split the work" guidance is misleading.
-# Lower-cased message of the ``ValueError`` langchain_core raises when a
-# streamed response (HTTP 200) yields no generation chunk at all.
-_EMPTY_STREAM_MARKER = "no generations found in stream"
-
 _STREAM_DROP_EXCEPTIONS: frozenset[str] = frozenset(
     {
         "StreamChunkTimeoutError",
