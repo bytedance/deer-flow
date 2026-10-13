@@ -307,9 +307,8 @@ main, in addition to helper checks and create_app route registration.
 
 Project CRUD forwards only a server-resolved context to persistent SQL and keeps
 the native permission decorators. Create/patch bodies reject unknown ownership
-fields. Persistent writes use await_drained; denied scope becomes 404. Until its
-thread store is scoped, the project thread-list route returns 503 when workspace
-services are active. Native startup sets workspace_mode_enabled once and creates
+fields. Persistent writes use await_drained; denied scope becomes 404. The project thread-list route binds trusted scope and applies private thread
+ownership after current project ACL authorization. Native startup sets workspace_mode_enabled once and creates
 the SQL project repository with its matching workspace_required setting. Full thread/file,
 cache and background coverage remain required before activation. The project
 file and shared ACL checkpoints are documented below.
@@ -330,4 +329,15 @@ project permission, while shared writes require owner/admin. HTTP preflight uses
 WorkspaceService's same permission intersection; SQL repeats live role checks
 inside the mutation lock. Shelf ACLs inherit their actual parent, preserving real
 uploader IDs. Personal/unscoped shared publication is refused. Project visibility
-does not grant thread content access; thread listing/attachments remain gated.
+does not grant thread content access; listing is own-only and attachments remain gated.
+
+Thread metadata HTTP (create/search/PATCH/move/GET) binds workspace_resource_scope
+before native owner-check decorators. Resolve annotated signatures from the
+unwrapped handler, so wrapping modules do not misresolve future annotations.
+Scope resets in finally and current membership revalidates before return.
+Creation strips four-field identity metadata and workspace_context; foreign
+unique-ID collision returns 404 in scoped mode, never an orphan claim. Scoped
+SQL denial must reach the outer adapter instead of becoming a generic 500.
+GET refuses checkpoint-only fallback when the scoped metadata row is missing.
+This is not state/Run/files/branch/delete/history or PAT/internal integration;
+those entrypoints remain required before compiled tenant activation.

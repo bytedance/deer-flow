@@ -15,6 +15,8 @@ from test_workspace_executor_migration import executor_engine, native_engine  # 
 
 
 def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, monkeypatch, tmp_path):  # noqa: F811
+    from langgraph.checkpoint.memory import InMemorySaver
+
     from app.gateway import deps
     from app.gateway.auth import config as auth_config
     from app.gateway.auth import create_access_token
@@ -23,13 +25,15 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
     from app.gateway.auth_middleware import AuthMiddleware
     from app.gateway.csrf_middleware import CSRFMiddleware
-    from app.gateway.routers import project_documents, projects
+    from app.gateway.routers import project_documents, projects, threads
     from deerflow.config import app_config
     from deerflow.config import paths as paths_module
     from deerflow.config.app_config import AppConfig
     from deerflow.config.paths import Paths
     from deerflow.persistence.projects import ProjectDocumentRepository, ProjectRepository
     from deerflow.persistence.projects.model import ProjectDocumentRow, ProjectRow
+    from deerflow.persistence.thread_meta import ThreadMetaRepository
+    from deerflow.persistence.thread_meta.model import ThreadMetaRow
     from deerflow.persistence.user.model import UserRow
     from deerflow.persistence.workspaces.sql import WorkspaceRepository
 
@@ -71,10 +75,13 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
             service = service_module.WorkspaceService(WorkspaceRepository(sf))
             app = FastAPI()
             app.state.workspace_service = service
+            app.state.thread_store = ThreadMetaRepository(sf, workspace_required=True)
+            app.state.checkpointer = InMemorySaver()
             app.state.project_repo = ProjectRepository(sf)
             app.state.project_document_repo = ProjectDocumentRepository(sf)
             app.include_router(routes.router)
             app.include_router(admin_routes.router)
+            app.include_router(threads.router)
             app.include_router(projects.router)
             app.include_router(project_documents.router)
             app.add_middleware(AuthMiddleware)
@@ -141,6 +148,31 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                 assert created.status_code == 201, created.text
                 personal_project = created.json()["id"]
                 assert (await client.post("/api/projects", headers=team_headers, json={"name": "Forged", "workspace_id": personal})).status_code == 422
+                created_thread = await client.post(
+                    "/api/threads",
+                    headers=team_headers,
+                    json={"thread_id": "team-research-thread", "project_id": team_project, "metadata": {"workspace_id": personal, "actor_user_id": identities["bob"], "membership_version": 99, "policy_version": 99}},
+                )
+                assert created_thread.status_code == 200, created_thread.text
+                assert not ({"workspace_id", "actor_user_id", "membership_version", "policy_version"} & created_thread.json()["metadata"].keys())
+                async with sf() as session:
+                    row = await session.get(ThreadMetaRow, "team-research-thread")
+                    assert row.workspace_id == team and row.user_id == identities["alice"]
+                personal_thread = await client.post("/api/threads", json={"thread_id": "personal-research-thread", "project_id": personal_project})
+                assert personal_thread.status_code == 200, personal_thread.text
+                assert [r["thread_id"] for r in (await client.post("/api/threads/search", headers=team_headers, json={"limit": 1})).json()] == ["team-research-thread"]
+                assert [r["thread_id"] for r in (await client.post("/api/threads/search", json={})).json()] == ["personal-research-thread"]
+                patched = await client.patch("/api/threads/team-research-thread", headers=team_headers, json={"metadata": {"deerflow_pinned": True}})
+                assert patched.status_code == 200, patched.text
+                assert patched.json()["metadata"]["deerflow_pinned"] is True
+                assert (await client.patch("/api/threads/team-research-thread", json={"metadata": {"leak": True}})).status_code == 404
+                assert (await client.post("/api/threads/team-research-thread/move", headers=team_headers, json={"project_id": personal_project})).status_code == 404
+                retry = await client.post("/api/threads", headers=team_headers, json={"thread_id": "team-research-thread"})
+                assert retry.status_code == 200 and retry.json()["metadata"]["deerflow_project_id"] == team_project
+                collision = await client.post("/api/threads", json={"thread_id": "team-research-thread"})
+                assert collision.status_code == 404, collision.text
+                assert [r["thread_id"] for r in (await client.get("/api/projects/" + team_project + "/threads", headers=team_headers)).json()] == ["team-research-thread"]
+                assert (await client.get("/api/projects/" + team_project + "/threads")).status_code == 404
                 team_docs = "/api/projects/" + team_project + "/documents"
                 uploaded = await client.post(team_docs, headers=team_headers, files={"file": ("team.txt", b"team private notes", "text/plain")})
                 assert uploaded.status_code == 201, uploaded.text
@@ -230,6 +262,10 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                 as_user("bob")
                 assert (await client.get("/api/projects/" + private_project, headers=team_headers)).status_code == 404
                 assert (await client.get("/api/projects/" + shared_project, headers=team_headers)).status_code == 200
+                peer_thread = await client.post("/api/threads", headers=team_headers, json={"thread_id": "bob-shared-research", "project_id": shared_project})
+                assert peer_thread.status_code == 200, peer_thread.text
+                assert [r["thread_id"] for r in (await client.get("/api/projects/" + shared_project + "/threads", headers=team_headers)).json()] == ["bob-shared-research"]
+                assert (await client.patch("/api/threads/team-research-thread", headers=team_headers, json={"metadata": {"member_write": True}})).status_code == 404
                 listed = (await client.get("/api/projects", headers=team_headers)).json()["projects"]
                 assert [row["id"] for row in listed] == [shared_project]
                 page = (await client.get(shared_docs, headers=team_headers)).json()

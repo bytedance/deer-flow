@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_config, get_project_repo, get_thread_store
-from app.gateway.workspaces.dependencies import resolve_workspace_context
+from app.gateway.workspaces.dependencies import resolve_workspace_context, workspace_resource_scope
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.projects_config import ProjectsConfig
 from deerflow.persistence.projects import ProjectRepository
@@ -226,9 +226,8 @@ async def delete_project(project_id: str, request: Request) -> None:
 @router.get("/{project_id}/threads", response_model=list[ProjectThreadResponse])
 @require_permission("projects", "read")
 @require_permission("threads", "read")
+@workspace_resource_scope()
 async def list_project_threads(project_id: str, request: Request, limit: int = Query(default=100, ge=1, le=1000), offset: int = Query(default=0, ge=0)) -> list[ProjectThreadResponse]:
-    if getattr(request.app.state, "workspace_service", None) is not None or getattr(request.app.state, "workspace_mode_enabled", False):
-        raise HTTPException(status_code=503, detail="Workspace thread listing is not yet integrated")
     if await _project_call(request, "get", project_id) is None:
         raise _not_found()
     # Active members only, mirroring the sidebar's `archived: false` lists:

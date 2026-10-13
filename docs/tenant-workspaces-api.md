@@ -111,8 +111,9 @@ task-local scope; Gateway derives this requirement from its startup snapshot.
 Projects default to native-owner private. Explicit workspace visibility is now
 implemented as described below; no platform-admin bypass or tenant activation
 is implied.
-The project thread-list endpoint returns 503 in workspace mode until thread-store
-filtering is integrated. It retains existing behavior in legacy mode. PAT handling
+The project thread-list endpoint now uses trusted session scope and lists only
+the current user’s private threads after current project ACL authorization. It
+retains existing behavior in legacy mode. PAT handling
 and background caller bindings remain M4 work. None of this opens the compiled
 tenant activation gate.
 
@@ -216,3 +217,24 @@ retention, quota accounting and physical migration/release remain required.
 Native thread SQL now binds the trusted workspace and original owner, checks live membership before reads/pagination and locks workspace/actor before mutations. Shared project membership grants access to project sources, never another member’s conversation. An authorized member may associate their private thread with a shared project; later project unsharing does not remove their private conversation, while project source access still uses the current project ACL. Project deletion detaches compatible private threads without exposing or transferring them. Workspace scope refuses legacy orphan claims, owner reassignment and explicit user bypass. Required mode needs SQL storage and a trusted context.
 
 Jenkins #25 reproduced NULL scope on both databases; #26 passed 7 checks in 29.58s. This is repository evidence, not completed thread HTTP, checkpoint/run, client or deployed tenant acceptance. Those remain M3/M4 requirements and activation stays blocked.
+
+## Native thread metadata HTTP (partial M3)
+
+Creation, search, PATCH, move and GET bind trusted session scope before native
+permission/owner checks. Forward annotations are resolved from the original
+handler, preserving FastAPI’s public signature through decorator chains. The
+adapter resets task-local scope on every exit and revalidates before returning.
+Creation strips workspace identity metadata; a globally unique ID collision
+outside the selected scope returns 404 without claiming or revealing that row.
+Project thread listing intersects current project access with native private
+thread ownership; shared project membership never lists another member’s chats.
+
+Jenkins #27 reproduced missing HTTP scope on both databases. #28 passed 7 checks
+in 30.21s, retaining three legacy route regressions and the SQL thread main.
+The actual HTTP flow covers creation, retry, pagination, pin PATCH, cross-space
+move/PATCH denial, shared project association and private project thread lists.
+Checkpoint creation uses the native InMemorySaver in this isolated fixture;
+persistent checkpoint/state/recovery, files/branches/delete/goal/history/read
+clock, Run/background, PAT/internal and frontend acceptance remain required.
+GET scope binding is implemented but full state materialization is not established
+by this main. The compiled activation gate stays closed.

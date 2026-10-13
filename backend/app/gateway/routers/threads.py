@@ -44,10 +44,13 @@ from app.gateway.services import (
     strip_server_owned_state_metadata,
 )
 from app.gateway.utils import sanitize_log_param
+from app.gateway.workspaces.dependencies import workspace_resource_scope
 from deerflow.agents.thread_state import THREAD_STATE_REDUCER_FIELDS
+from deerflow.authz.workspace import get_current_workspace
 from deerflow.config.paths import Paths, get_paths
 from deerflow.config.summarization_config import ContextSize
 from deerflow.persistence.thread_meta import PROJECT_FILTER_UNSET, THREAD_ARCHIVED_METADATA_KEY, THREAD_PINNED_METADATA_KEY, THREAD_PROJECT_METADATA_KEY, ThreadOwnershipConflictError
+from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.runtime import ThreadOperationKind, serialize_channel_values_for_api
 from deerflow.runtime.checkpoint_mode import CheckpointModeMismatchError, CheckpointModeReconfigurationError
 from deerflow.runtime.checkpoint_state import graph_reducer_channels, graph_state_schema, graph_writable_channels
@@ -117,7 +120,7 @@ def _checkpoint_mode_http_error(exc: Exception, thread_id: str) -> HTTPException
 # the auth contextvar; this list closes the metadata-blob echo gap.
 # ``deerflow_origin`` marks a thread the server created for a schedule or an
 # extension; only the server sets it (``create_thread`` below, run admission).
-_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id", THREAD_PROJECT_METADATA_KEY, DEERFLOW_ORIGIN_KEY})
+_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id", "workspace_id", "actor_user_id", "workspace_context", "membership_version", "policy_version", THREAD_PROJECT_METADATA_KEY, DEERFLOW_ORIGIN_KEY})
 _SIDECAR_METADATA_KEY = "deerflow_sidecar"
 _BRANCH_METADATA_KEY = "deerflow_branch"
 _BRANCH_TITLE_SEQUENCE_METADATA_KEY = "branch_title_sequence"
@@ -930,6 +933,7 @@ def _existing_thread_response(thread_id: str, record: dict) -> ThreadResponse:
 
 
 @router.post("", response_model=ThreadResponse)
+@workspace_resource_scope()
 @require_permission("threads", "write")
 async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadResponse:
     """Create a new thread.
@@ -989,9 +993,15 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
         existing_record = await _resolve_existing_thread(thread_store, thread_id, thread_owner_user_id, thread_owner_kwargs)
         if existing_record is not None:
             return _existing_thread_response(thread_id, existing_record)
+        if get_current_workspace() is not None:
+            # IDs are globally unique. A collision outside this trusted scope
+            # must neither claim the row nor reveal it as a server error.
+            raise HTTPException(status_code=404, detail="Thread not found") from None
         # A duplicate-key error with no row we can read back is a real failure.
         logger.exception("Failed to write thread_meta for %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to create thread")
+    except WorkspaceAccessDenied:
+        raise
     except Exception:
         # Any non-race failure must surface, not be silently swallowed as a 200.
         logger.exception("Failed to write thread_meta for %s", sanitize_log_param(thread_id))
@@ -1242,6 +1252,7 @@ async def _branch_thread_with_reservation(
 
 
 @router.post("/search", response_model=list[ThreadResponse])
+@workspace_resource_scope()
 @require_permission("threads", "read")
 async def search_threads(body: ThreadSearchRequest, request: Request) -> list[ThreadResponse]:
     """Search and list threads.
@@ -1321,6 +1332,7 @@ async def mark_thread_read(thread_id: ThreadId, request: Request) -> ThreadReadR
 
 
 @router.patch("/{thread_id}", response_model=ThreadResponse)
+@workspace_resource_scope()
 @require_permission("threads", "write", owner_check=True, require_existing=True)
 async def patch_thread(thread_id: ThreadId, body: ThreadPatchRequest, request: Request) -> ThreadResponse:
     """Merge metadata into a thread record."""
@@ -1338,6 +1350,8 @@ async def patch_thread(thread_id: ThreadId, body: ThreadPatchRequest, request: R
     touch = not _is_organization_metadata_patch(body.metadata)
     try:
         await thread_store.update_metadata(thread_id, body.metadata, touch=touch)
+    except WorkspaceAccessDenied:
+        raise
     except Exception:
         logger.exception("Failed to patch thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to update thread")
@@ -1360,6 +1374,7 @@ class ThreadMoveRequest(BaseModel):
 
 
 @router.post("/{thread_id}/move", response_model=ThreadResponse)
+@workspace_resource_scope()
 @require_permission("threads", "write", owner_check=True, require_existing=True)
 async def move_thread(thread_id: ThreadId, body: ThreadMoveRequest, request: Request) -> ThreadResponse:
     """Move a thread between projects (or out). Organizational only: history,
@@ -1381,6 +1396,7 @@ async def move_thread(thread_id: ThreadId, body: ThreadMoveRequest, request: Req
 
 
 @router.get("/{thread_id}", response_model=ThreadResponse)
+@workspace_resource_scope()
 @require_permission("threads", "read", owner_check=True)
 async def get_thread(thread_id: ThreadId, request: Request) -> ThreadResponse:
     """Get thread info from metadata plus the graph's materialized state."""
@@ -1389,6 +1405,8 @@ async def get_thread(thread_id: ThreadId, request: Request) -> ThreadResponse:
     thread_store = get_thread_store(request)
     checkpointer = get_checkpointer(request)
     record: dict | None = await thread_store.get(thread_id)
+    if record is None and get_current_workspace() is not None:
+        raise HTTPException(status_code=404, detail="Thread not found")
     try:
         accessor, config = await abuild_checkpoint_state_accessor(
             request,

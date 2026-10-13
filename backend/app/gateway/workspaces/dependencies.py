@@ -40,12 +40,13 @@ async def resolve_workspace_context(request: Request, *, selector=None):
 def workspace_resource_scope(*, allow_query_selector=False):
     """Bind only a live native-session scope for a resource request and its workers.
 
-    Native permission decorators remain outside this adapter. Query selectors
-    are permitted only on routes explicitly supporting browser file navigation.
+    Bind before native owner-check decorators, which require trusted scope.
+    Plain native permissions may remain outside. Query selectors are permitted
+    only on routes explicitly supporting browser file navigation.
     """
 
     def decorate(function):
-        signature = inspect.signature(function, eval_str=True)
+        signature = inspect.signature(inspect.unwrap(function), eval_str=True)
 
         @wraps(function)
         async def scoped(*args, **kwargs):

@@ -2,7 +2,7 @@
 
 Status: static inventory with partial runtime evidence. Controls below remain requirements unless explicitly verified. Public tenant signup stays disabled.
 
-Private project CRUD now has actual JWT/RBAC/CSRF and native SQL evidence for SQLite/PostgreSQL (Jenkins #19); project thread listing is refused in workspace mode until its store is scoped. Private project documents now have real upload/list/download/trash and before-send revocation evidence (#21). Explicit project/document sharing has actual native-auth and file evidence (#23); thread files/NAS, client caches and other resource entrypoints remain pending. See `docs/tenant-workspaces-progress.json` for exact source hashes and limits.
+Private project CRUD now has actual JWT/RBAC/CSRF and native SQL evidence for SQLite/PostgreSQL (Jenkins #19); project thread listing now intersects live project ACL with private scoped thread ownership (#28). Private project documents now have real upload/list/download/trash and before-send revocation evidence (#21). Explicit project/document sharing has actual native-auth and file evidence (#23); thread files/NAS, client caches and other resource entrypoints remain pending. See `docs/tenant-workspaces-progress.json` for exact source hashes and limits.
 
 All content access requires native permissions intersected with active workspace membership and resource ACL. Workspace selectors are locators, never authority. Background work restores scope from its persisted resource or explicitly bound connection.
 
@@ -68,4 +68,4 @@ All content access requires native permissions intersected with active workspace
 
 This inventory is not isolation evidence. Each work package must record implementation location, source revision and Shanghai Jenkins results. M11 audits every entry again. Unknown extension routes require explicit classification and authorization before tenant access; installed code is not automatically covered.
 
-Thread repository checkpoint: Jenkins #26 verifies SQL filtering before pagination, live membership and private ownership with shared project parents. Thread HTTP admission must still bind trusted scope before owner-check decorators; project thread listing remains refused until that adapter is integrated. SQL success does not prove HTTP/SSE/WSS/checkpoint or filesystem coverage.
+Thread repository checkpoint: Jenkins #26 verifies SQL filtering before pagination, live membership and private ownership with shared project parents. Thread metadata HTTP now binds trusted scope before owner checks; #28 verifies creation/search/PATCH/move and own-only project listing. SQL success does not prove HTTP/SSE/WSS/checkpoint or filesystem coverage.

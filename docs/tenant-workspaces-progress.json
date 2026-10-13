@@ -588,5 +588,49 @@
         "networks": []
       }
     }
+  },
+  "workspace_thread_http": {
+    "base_commit": "9c35242d",
+    "red": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 27,
+      "result": "FAILURE",
+      "archive_sha256": "efd2eca124337d282675d79a688ad7537c4b9e033255adffaef6a6a45a22d5a8",
+      "artifact": "m3-thread-http-red.log",
+      "failed": 2,
+      "duration_seconds": 19.99,
+      "reason": "Native HTTP thread create reaches SQL without trusted workspace context"
+    },
+    "green": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 28,
+      "result": "SUCCESS",
+      "archive_sha256": "3f6ae2de7b48f20be6e5d7738bf945da24b70b20def3fb10c175afff1b6986c6",
+      "artifact": "m3-thread-http-green.log",
+      "passed": 7,
+      "duration_seconds": 30.21,
+      "warnings": [
+        "Existing Starlette TestClient/httpx deprecation warning"
+      ],
+      "command": "python -m pytest tests/test_workspace_http.py tests/test_workspace_threads.py tests/test_threads_router.py::test_create_thread_returns_iso_timestamps tests/test_threads_router.py::test_create_thread_returns_existing_when_insert_loses_race tests/test_threads_router.py::test_move_thread_to_project_and_out -q --tb=short --no-showlocals"
+    },
+    "scope": "Actual native JWT/RBAC/CSRF with SQLite/PostgreSQL: team/personal HTTP thread create and empty native InMemorySaver checkpoint, persisted real actor/workspace, identity metadata scrubbing, SQL-before-pagination search, own pin patch, cross-space patch/move denial, idempotent create and foreign collision 404, own-only project thread listing and shared source association by member. Existing SQL thread main and three native route regressions retained.",
+    "source_sha256": {
+      "backend/app/gateway/routers/threads.py": "bac1dc8ddb50bc2b08aa4bdf8423a404781f7e782d69ad700971ec748b5e71b5",
+      "backend/app/gateway/routers/projects.py": "4ebd20e5f9df91c32049356783f7edc56c94b6119f9094d8726e8da91cf0ea7e",
+      "backend/app/gateway/workspaces/dependencies.py": "1bc6319ee97c8e25f58f52a1ba1b054691adc6b56f9d34fcf2d8eac5635dc899",
+      "backend/tests/test_workspace_http.py": "f5403b778fdfe620ac1029992ef52f7a170d1e2d6e9fa379a748e359f5b5ff65"
+    },
+    "cleanup": {
+      "27": {
+        "containers": [],
+        "networks": []
+      },
+      "28": {
+        "containers": [],
+        "networks": []
+      }
+    },
+    "limits": "Metadata HTTP and project listing foundation. GET binding is implemented but full state/checkpoint materialization acceptance remains pending; no persistent checkpoint/recovery, thread files, branches/delete/goal/compact/history/read-clock, Run/background or frontend integration is established. PAT/internal admission stays refused at session-only adapter until its planned integration. Tenant activation remains compiled false."
   }
 }

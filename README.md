@@ -2926,3 +2926,5 @@ The [workspace HTTP adapter contracts](docs/tenant-workspaces-api.md) describe t
 Workspace implementation progress: [explicit shared project files and remaining integration](docs/tenant-workspaces-api.md#explicit-shared-projects-and-documents-partial-m3). Tenant activation remains blocked; this is not a deployed multi-tenant release.
 
 Private conversation isolation is implemented at the native SQL repository layer; shared project sources do not grant access to other members’ chats. See the [partial thread integration](docs/tenant-workspaces-api.md#private-thread-repository-partial-m3) for validation and remaining requirements. Tenant activation is still blocked.
+
+Native thread metadata APIs and project thread lists now carry trusted workspace scope; shared projects list only the caller’s own conversations. See [HTTP integration limits](docs/tenant-workspaces-api.md#native-thread-metadata-http-partial-m3). Files, full runtime and frontend acceptance remain pending; this does not activate multi-tenant deployment.
