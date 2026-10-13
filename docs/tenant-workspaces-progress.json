@@ -135,5 +135,30 @@
       "backend/tests/test_workspace_executor_migration.py": "5f857f5c409a638a5762ca3b1aa76303453b8ab47a877bc3d98d956191a26f93"
     },
     "limits": "Schema/persistence foundation only. Signed tenant scope, live membership authorization, physical draining, paired database attribution and schema-changing release flow remain unimplemented."
+  },
+  "executor_attribution": {
+    "red": {
+      "job": "deerflow-tenant-contract-m0",
+      "build": 12,
+      "result": "FAILURE",
+      "archive_sha256": "7c50da0b1e529e694a35698cc41546d4909cd62a954a940bd4675a8825eea8b2",
+      "reason": "paired attribution module absent after real native/executor schema setup",
+      "failed": 1,
+      "skipped": 1
+    },
+    "green": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 3,
+      "result": "SUCCESS",
+      "archive_sha256": "6fb2032bcf953f47f2ee44ad0ad9d859bd2fb9bc6189894d82c9779ade45d5f4",
+      "tests_passed": 6,
+      "duration_seconds": 19.18
+    },
+    "scope": "Three executor migration mains on SQLite and independent PostgreSQL databases. Paired native ownership fixture, read-only plan, repeated attribution, unknown/conflicting quarantine, immutable physical state/version/native snapshot. Bindings constructed from fixture; production native export and guarded CLI remain pending.",
+    "cleanup": "Exact owned-label inventories returned no containers or networks after terminal SUCCESS",
+    "source_sha256": {
+      "backend/packages/ecs-executor/ecs_executor/tenant_backfill.py": "50deb8c76ceff56fb7905d09f1ddba5e6fb61e43b7e523ba17f0f262f786d5ae",
+      "backend/tests/test_workspace_executor_migration.py": "d517c52887deef72866bf2b58b61b811e622d533ef7937bb460bd5c38135edb5"
+    }
   }
 }

@@ -89,3 +89,105 @@ def test_new_executor_record_binds_immutable_workspace(executor_engine):
         assert store.get(job["id"])["workspace_id"] == workspace
     finally:
         store.engine.dispose()
+
+
+@pytest.fixture()
+def native_engine(executor_engine, tmp_path):
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from deerflow.persistence import bootstrap
+    from deerflow.persistence.run.model import RunRow
+    from deerflow.persistence.thread_meta.model import ThreadMetaRow
+    from deerflow.persistence.user.model import UserRow
+
+    admin = None
+    database = None
+    if executor_engine.dialect.name == "sqlite":
+        engine = sa.create_engine(f"sqlite:///{tmp_path / 'native.db'}")
+        async_url = engine.url.set(drivername="sqlite+aiosqlite")
+        backend = "sqlite"
+    else:
+        admin = sa.create_engine(os.environ["TEST_EXECUTOR_POSTGRES_URL"], isolation_level="AUTOCOMMIT")
+        database = "tenant_native_" + uuid.uuid4().hex
+        with admin.connect() as conn:
+            conn.execute(sa.text(f'CREATE DATABASE "{database}"'))
+        engine = sa.create_engine(admin.url.set(database=database))
+        async_url = engine.url.set(drivername="postgresql+asyncpg")
+        backend = "postgres"
+    try:
+
+        async def bootstrap_owned_native():
+            async_engine = create_async_engine(async_url)
+            try:
+                await bootstrap.bootstrap_schema(async_engine, backend=backend)
+            finally:
+                await async_engine.dispose()
+
+        asyncio.run(bootstrap_owned_native())
+        with engine.begin() as conn:
+            conn.execute(sa.insert(UserRow).values(id="owner", email="owner@example.invalid"))
+            conn.execute(sa.insert(ThreadMetaRow).values(thread_id="thread", user_id="owner", incarnation="epoch"))
+            conn.execute(sa.insert(RunRow).values(run_id="run", thread_id="thread", user_id="owner", status="success"))
+        yield engine
+    finally:
+        engine.dispose()
+        if admin is not None:
+            try:
+                with admin.connect() as conn:
+                    conn.execute(sa.text(f'DROP DATABASE "{database}"'))
+            finally:
+                admin.dispose()
+
+
+def test_paired_attribution_preserves_payloads_and_unknown_physical_work(executor_engine, native_engine):
+    import importlib
+    import importlib.util
+
+    from ecs_executor.job_store import _JOBS
+    from ecs_executor.schema import upgrade_schema
+
+    from deerflow.persistence.workspaces.backfill import apply_personal_backfill
+
+    with native_engine.begin() as conn:
+        apply_personal_backfill(conn)
+        workspace = conn.execute(sa.text("SELECT workspace_id FROM threads_meta WHERE thread_id='thread'")).scalar_one()
+        assert conn.execute(sa.text("SELECT workspace_id FROM runs WHERE run_id='run'")).scalar_one() == workspace
+    bindings = {
+        "native_revision": "0036_tenant_workspaces",
+        "threads": [{"user_id": "owner", "thread_id": "thread", "incarnation": "epoch", "workspace_id": workspace}],
+        "runs": [{"user_id": "owner", "thread_id": "thread", "incarnation": "epoch", "run_id": "run", "workspace_id": workspace}],
+    }
+    upgrade_schema(executor_engine)
+    originals = {
+        "known-B": {"kind": "B", "user_id": "owner", "thread_id": "thread", "incarnation": "epoch", "run_id": "run", "state": "uncertain", "physical_stopped": False, "start_intent": True, "spec_digest": "retain-B"},
+        "known-C": {"kind": "C", "native": {"user_id": "owner", "thread_id": "thread", "incarnation": "epoch", "run_id": "run", "opaque": "retain-snapshot"}, "state": "completed", "physical_stopped": True, "spec_digest": "retain-C"},
+        "conflict": {"kind": "C", "native": {"user_id": "other", "thread_id": "thread", "incarnation": "epoch", "run_id": "run"}, "state": "completed", "physical_stopped": True},
+    }
+    with executor_engine.begin() as conn:
+        for identity, record in originals.items():
+            conn.execute(_JOBS.insert().values(id=identity, namespace="test-" + identity, request_key=identity, version=5, state=record["state"], record=record))
+    name = "ecs_executor.tenant_backfill"
+    assert importlib.util.find_spec(name) is not None, "paired executor workspace attribution is not implemented"
+    backfill = importlib.import_module(name)
+    with executor_engine.begin() as conn:
+        plan = backfill.plan_workspace_attribution(conn, bindings)
+        assert len(plan["jobs"]) == 2 and len(plan["affinities"]) == 1
+        assert {item["id"] for item in plan["quarantined"]} == {"unknown", "conflict"}
+        assert conn.execute(sa.text("SELECT COUNT(*) FROM ecs_execution_jobs WHERE workspace_id IS NOT NULL")).scalar_one() == 0
+        first = backfill.apply_workspace_attribution(conn, bindings)
+        assert first["assigned_jobs"] == 2 and first["assigned_affinities"] == 1
+    with executor_engine.begin() as conn:
+        second = backfill.apply_workspace_attribution(conn, bindings)
+        assert second["assigned_jobs"] == 0 and second["assigned_affinities"] == 0
+        assert conn.execute(sa.text("SELECT version,state,workspace_id FROM ecs_execution_jobs WHERE id='unknown'")).one() == (7, "uncertain", None)
+        for identity, original in originals.items():
+            row = conn.execute(sa.select(_JOBS).where(_JOBS.c.id == identity)).one()
+            record = dict(row.record)
+            if identity != "conflict":
+                assert row.workspace_id == record.pop("workspace_id") == workspace
+            else:
+                assert row.workspace_id is None
+            assert record == original and row.version == 5 and row.state == original["state"]
+        assert conn.execute(sa.text("SELECT node_id,workspace_id FROM ecs_native_affinities")).one() == ("node", workspace)

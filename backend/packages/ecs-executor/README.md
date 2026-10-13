@@ -548,3 +548,12 @@ checks, native/executor backfill and the controlled migration receipt remain
 required. The historical Shanghai release manifests and same-schema operations
 contract still describe `0035/e0001`; do not edit their receipts or use that
 release flow to claim a `0036/e0002` rollout. No deployment has been performed.
+
+`tenant_backfill.py` provides offline plan/apply attribution from a pinned native
+ownership export. Only exact user/thread/incarnation/run bindings acquire scope;
+unknown or conflicting records remain quarantined. Apply changes only indexed
+scope and top-level JSON scope, preserving job versions, physical state, native
+snapshots and affinity node selection. It never authorizes runtime access or
+releases physical capacity. The caller must stop writers and retain coherent
+backups plus both database receipts. Production export and a guarded operator
+CLI are still required; hand-authored bindings are not a deployment procedure.
