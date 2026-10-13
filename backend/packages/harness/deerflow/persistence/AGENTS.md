@@ -72,3 +72,13 @@ transfer additionally locks the native account row while checking persisted
 token version/password hash, serializing with native password/token updates. Member
 disclosure applies actor access in the same SELECT. Gateway lifecycle wiring,
 invitations and revocation effects remain acceptance gates.
+
+`workspaces/scope.py` reuses the native live membership query for resource SQL
+predicates and fences writes with workspace -> native actor -> resource locking
+(SQLite BEGIN IMMEDIATE first). ProjectRepository accepts a trusted explicit or
+task-local WorkspaceContext; workspace_required instances refuse missing scope.
+All scoped project reads retain native owner filtering and selected workspace,
+and write checks happen within their mutation transaction. Delete refuses any
+incompatible document/thread child before trash or unlink statements. Default
+legacy mode retains existing ownership behavior. Shared project ACLs and scoped
+document/thread repositories still need implementation; no activation is implied.

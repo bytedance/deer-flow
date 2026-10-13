@@ -633,6 +633,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         from app.gateway.workspaces.startup import validate_workspace_bootstrap
 
         app.state.workspace_service = await validate_workspace_bootstrap(config, get_session_factory())
+        app.state.workspace_mode_enabled = config.workspaces.enabled
 
         app.state.checkpointer = await stack.enter_async_context(make_checkpointer(config))
         app.state.store = await stack.enter_async_context(make_store(config))
@@ -737,7 +738,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             from deerflow.persistence.subagent_batches import SubagentBatchRepository
             from deerflow.persistence.thread_reads import ThreadReadRepository
 
-            app.state.project_repo = ProjectRepository(sf)
+            app.state.project_repo = ProjectRepository(sf, workspace_required=config.workspaces.enabled)
             app.state.project_document_repo = ProjectDocumentRepository(sf)
             app.state.scheduled_task_repo = ScheduledTaskRepository(
                 sf,

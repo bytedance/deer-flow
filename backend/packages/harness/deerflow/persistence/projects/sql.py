@@ -22,11 +22,13 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import func, select, text, update
+from sqlalchemy import func, literal, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.projects.model import ProjectDocumentRow, ProjectRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.persistence.workspaces.scope import live_workspace_predicate, lock_resource_scope, resolve_resource_scope
+from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.time import coerce_iso
@@ -47,8 +49,17 @@ class ProjectNotAssignableError(ValueError):
 
 
 class ProjectRepository:
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, workspace_required: bool = False) -> None:
         self._sf = session_factory
+        self._workspace_required = workspace_required
+
+    @staticmethod
+    def _owned_scope(statement, user_id, context):
+        if user_id is not None:
+            statement = statement.where(ProjectRow.user_id == user_id)
+        if context is not None:
+            statement = statement.where(ProjectRow.workspace_id == context.workspace_id, live_workspace_predicate(context))
+        return statement
 
     @staticmethod
     def _row_to_dict(row: ProjectRow) -> dict[str, Any]:
@@ -66,12 +77,15 @@ class ProjectRepository:
         instructions: str = "",
         presentation: dict | None = None,
         user_id: str | None | _AutoSentinel = AUTO,
+        workspace_context=None,
     ) -> dict:
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectRepository.create")
+        context = resolve_resource_scope(workspace_context, resolved_user_id, required=self._workspace_required)
         now = datetime.now(UTC)
         row = ProjectRow(
             id=uuid.uuid4().hex,
             user_id=resolved_user_id,
+            workspace_id=context.workspace_id if context is not None else None,
             name=name,
             instructions=instructions,
             presentation=presentation or {},
@@ -80,18 +94,19 @@ class ProjectRepository:
             updated_at=now,
         )
         async with self._sf() as session:
+            if context is not None:
+                await lock_resource_scope(session, context)
             session.add(row)
             await session.commit()
             await session.refresh(row)
             return self._row_to_dict(row)
 
-    async def get(self, project_id: str, *, user_id: str | None | _AutoSentinel = AUTO) -> dict | None:
+    async def get(self, project_id: str, *, user_id: str | None | _AutoSentinel = AUTO, workspace_context=None) -> dict | None:
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectRepository.get")
+        context = resolve_resource_scope(workspace_context, resolved_user_id, required=self._workspace_required)
         async with self._sf() as session:
-            row = await session.get(ProjectRow, project_id)
+            row = await session.scalar(self._owned_scope(select(ProjectRow).where(ProjectRow.id == project_id), resolved_user_id, context))
             if row is None:
-                return None
-            if resolved_user_id is not None and row.user_id != resolved_user_id:
                 return None
             return self._row_to_dict(row)
 
@@ -100,11 +115,12 @@ class ProjectRepository:
         *,
         status: ProjectStatus | None = None,
         user_id: str | None | _AutoSentinel = AUTO,
+        workspace_context=None,
     ) -> list[dict]:
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectRepository.list")
+        context = resolve_resource_scope(workspace_context, resolved_user_id, required=self._workspace_required)
         stmt = select(ProjectRow).order_by(ProjectRow.created_at.asc(), ProjectRow.id.asc())
-        if resolved_user_id is not None:
-            stmt = stmt.where(ProjectRow.user_id == resolved_user_id)
+        stmt = self._owned_scope(stmt, resolved_user_id, context)
         if status is not None:
             stmt = stmt.where(ProjectRow.status == status)
         async with self._sf() as session:
@@ -119,11 +135,15 @@ class ProjectRepository:
         instructions: str | None = None,
         presentation: dict | None = None,
         user_id: str | None | _AutoSentinel = AUTO,
+        workspace_context=None,
     ) -> dict | None:
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectRepository.patch")
+        context = resolve_resource_scope(workspace_context, resolved_user_id, required=self._workspace_required)
         async with self._sf() as session:
-            row = await session.get(ProjectRow, project_id)
-            if row is None or (resolved_user_id is not None and row.user_id != resolved_user_id):
+            if context is not None:
+                await lock_resource_scope(session, context)
+            row = await session.scalar(self._owned_scope(select(ProjectRow).where(ProjectRow.id == project_id), resolved_user_id, context))
+            if row is None:
                 return None
             if name is not None:
                 row.name = name
@@ -141,26 +161,33 @@ class ProjectRepository:
         status: ProjectStatus,
         *,
         user_id: str | None | _AutoSentinel = AUTO,
+        workspace_context=None,
     ) -> dict | None:
         """Idempotent status flip; returns the current row or None (missing/foreign)."""
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectRepository.set_status")
+        context = resolve_resource_scope(workspace_context, resolved_user_id, required=self._workspace_required)
         async with self._sf() as session:
-            row = await session.get(ProjectRow, project_id)
-            if row is None or (resolved_user_id is not None and row.user_id != resolved_user_id):
+            if context is not None:
+                await lock_resource_scope(session, context)
+            row = await session.scalar(self._owned_scope(select(ProjectRow).where(ProjectRow.id == project_id), resolved_user_id, context))
+            if row is None:
                 return None
             row.status = status
             await session.commit()
             await session.refresh(row)
             return self._row_to_dict(row)
 
-    async def delete(self, project_id: str, *, user_id: str | None | _AutoSentinel = AUTO) -> bool:
+    async def delete(self, project_id: str, *, user_id: str | None | _AutoSentinel = AUTO, workspace_context=None) -> bool:
         """Delete a project and clear membership in one transaction (no filesystem work).
 
         Returns True when the project row was deleted; False when missing/foreign.
         """
         resolved_user_id = resolve_user_id(user_id, method_name="ProjectRepository.delete")
+        context = resolve_resource_scope(workspace_context, resolved_user_id, required=self._workspace_required)
         async with self._sf() as session:
             async with session.begin():
+                if context is not None:
+                    await lock_resource_scope(session, context)
                 # Lock the project row before touching it (FOR UPDATE on
                 # Postgres; the clause renders nothing on SQLite). Membership
                 # assignment (ThreadMetaRepository.set_project/create) takes
@@ -170,11 +197,23 @@ class ProjectRepository:
                 # re-reads the row as gone — no dangling ``threads_meta.project_id``
                 # (RFC v2 §14.14). Missing/foreign rows keep the False result.
                 lock_stmt = select(ProjectRow).where(ProjectRow.id == project_id)
-                if resolved_user_id is not None:
-                    lock_stmt = lock_stmt.where(ProjectRow.user_id == resolved_user_id)
+                lock_stmt = self._owned_scope(lock_stmt, resolved_user_id, context)
                 locked = (await session.execute(lock_stmt.with_for_update())).scalar_one_or_none()
                 if locked is None:
                     return False
+                if context is not None:
+                    for child in (ProjectDocumentRow, ThreadMetaRow):
+                        incompatible = (
+                            select(literal(1))
+                            .select_from(child)
+                            .where(
+                                child.project_id == project_id,
+                                or_(child.workspace_id.is_(None), child.workspace_id != context.workspace_id, child.user_id.is_(None), child.user_id != resolved_user_id),
+                            )
+                            .limit(1)
+                        )
+                        if await session.scalar(incompatible) is not None:
+                            raise WorkspaceAccessDenied("inconsistent project child scope")
                 # §8.1 statement 2: every active shelf row moves to trash in
                 # the same transaction and lock — never an active row pointing
                 # at a deleted project. No filesystem work.

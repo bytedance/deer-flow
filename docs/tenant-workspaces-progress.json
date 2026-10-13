@@ -1,6 +1,6 @@
 {
   "status": "partial",
-  "work_package": "M2",
+  "work_package": "M3",
   "base_commit": "1a199c6d",
   "job": "deerflow-tenant-contract-m0",
   "red": {
@@ -25,10 +25,11 @@
     "contracts/workspace_scope.v1.json": "c106de2a9f5a0d62b173719854096fef653233dd81ef2116ac664058162cb1ba"
   },
   "remaining": [
-    "M0 live resource fixture integration with M3",
+    "M0 real resource/file fixture integration with M3",
     "M1 original deployment-data inventory and physical maintenance/restore evidence with M10",
-    "M2 complete scoped Gateway activation and SSO/invitation management acceptance",
-    "M3 through M11 remain pending"
+    "M2 full scoped Gateway activation and SSO/invitation management acceptance",
+    "M3 documents/files, shared ACLs, threads/runs and client switching",
+    "M4 through M11 remain pending"
   ],
   "static_checks": [
     "ruff check with backend/ruff.toml passed",
@@ -399,5 +400,35 @@
       "backend/tests/test_workspace_startup.py": "984d5a823189e2cc087de157c1927ab74b79718150e748b21c16bc53d1128073"
     },
     "limits": "Tenant activation remains refused by the compiled incomplete-integration gate. No public registration/deployment acceptance. Existing peer fencing, database retargeting, paired schema release and resource/background isolation remain M3-M11 work. Route registration and a startup refusal do not prove full tenant operation."
+  },
+  "workspace_project_crud": {
+    "red": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 18,
+      "result": "FAILURE",
+      "archive_sha256": "44c20e1221885b305c3f0e9287d546bd757d9057296534f5d212d630915587da",
+      "failed": 2,
+      "duration_seconds": 18.65,
+      "reason": "actual production project create API persisted workspace_id=None on both real databases"
+    },
+    "green": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 19,
+      "result": "SUCCESS",
+      "archive_sha256": "8e7bab28e9231bf7fb1c002249385183bad475ebe59202859ad0f8d77211714c",
+      "tests_passed": 5,
+      "duration_seconds": 22.01,
+      "warnings": "One pre-existing FastAPI TestClient dependency deprecation from the legacy router test module; own native-auth HTTP main uses AsyncClient."
+    },
+    "scope": "Extended existing actual JWT/RBAC/CSRF HTTP main per SQLite/PostgreSQL with production project router, plus three affected legacy router mains. Correct persisted workspace and real user; personal/team lists, direct ID and cross-space mutation denial; correct patch/archive/restore/delete; stale context read/write and missing required scope; incompatible document child deletion refusal without changing it. Legacy create/list/get, foreign-owner denial and deletion/thread unlink verified. Metadata-only child fixture has no physical file acceptance.",
+    "cleanup": "Exact owned-label containers/networks for terminal builds 18 and 19 empty",
+    "source_sha256": {
+      "backend/packages/harness/deerflow/persistence/workspaces/scope.py": "d9240ef421d119740a6b150e082d0a32edd897474189191010392552d03eeb5d",
+      "backend/packages/harness/deerflow/persistence/projects/sql.py": "22c2282404f45b90f27a54153a9a683bc1ffb53cb719936919e451ecaa8665c2",
+      "backend/app/gateway/routers/projects.py": "805d891e62c9e9992f88a352ff196b38ed6cdce194849c9964967e34105c2190",
+      "backend/app/gateway/deps.py": "9d5ef79e13bb7e797949011f7c0bca35888bb1a7b8d7ff023a3d25cf8d95eb14",
+      "backend/tests/test_workspace_http.py": "1d4355db8f87f3bb18a5feb273c3c7239a2206fc2521d7c08d73247c099a11a5"
+    },
+    "limits": "Private-project CRUD only. Shared project/document ACLs, files/NAS, production thread/run scope, frontend/cache switching, PAT/IM/backgrounds and full delivery gates remain pending. Workspace project thread listing is explicitly refused until scoped. Compiled tenant activation remains blocked."
   }
 }

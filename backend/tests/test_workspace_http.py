@@ -23,9 +23,11 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
     from app.gateway.auth_middleware import AuthMiddleware
     from app.gateway.csrf_middleware import CSRFMiddleware
+    from app.gateway.routers import projects
     from deerflow.config import app_config
     from deerflow.config.app_config import AppConfig
-    from deerflow.persistence.projects.model import ProjectRow
+    from deerflow.persistence.projects import ProjectRepository
+    from deerflow.persistence.projects.model import ProjectDocumentRow, ProjectRow
     from deerflow.persistence.user.model import UserRow
     from deerflow.persistence.workspaces.sql import WorkspaceRepository
 
@@ -65,8 +67,10 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
             service = service_module.WorkspaceService(WorkspaceRepository(sf))
             app = FastAPI()
             app.state.workspace_service = service
+            app.state.project_repo = ProjectRepository(sf)
             app.include_router(routes.router)
             app.include_router(admin_routes.router)
+            app.include_router(projects.router)
             app.add_middleware(AuthMiddleware)
             app.add_middleware(CSRFMiddleware)
 
@@ -112,6 +116,53 @@ def test_managed_workspace_http_uses_native_auth_and_live_scope(native_engine, m
                 team = team_response.json()["id"]
                 assert (await client.post("/api/workspaces", json={**team_payload, "actor_user_id": identities["bob"]})).status_code == 422
                 team_headers = {"X-Deerflow-Workspace": team}
+                created = await client.post("/api/projects", headers=team_headers, json={"name": "Team source"})
+                assert created.status_code == 201, created.text
+                team_project = created.json()["id"]
+                async with sf() as session:
+                    stored = await session.get(ProjectRow, team_project)
+                    assert stored.workspace_id == team, "actual project API lost the server-selected workspace"
+                    assert stored.user_id == identities["alice"]
+                created = await client.post("/api/projects", json={"name": "Personal source"})
+                assert created.status_code == 201, created.text
+                personal_project = created.json()["id"]
+                assert (await client.post("/api/projects", headers=team_headers, json={"name": "Forged", "workspace_id": personal})).status_code == 422
+                assert [r["id"] for r in (await client.get("/api/projects", headers=team_headers)).json()["projects"]] == [team_project]
+                assert [r["id"] for r in (await client.get("/api/projects")).json()["projects"]] == [personal_project]
+                personal_headers = {"X-Deerflow-Workspace": personal}
+                project_url = "/api/projects/" + team_project
+                assert (await client.get(project_url, headers=personal_headers)).status_code == 404
+                assert (await client.patch(project_url, headers=personal_headers, json={"name": "Cross-space edit"})).status_code == 404
+                assert (await client.post(project_url + "/archive", headers=personal_headers)).status_code == 404
+                assert (await client.delete(project_url, headers=personal_headers)).status_code == 404
+                assert (await client.patch(project_url, headers=team_headers, json={"name": "Updated team source"})).status_code == 200
+                assert (await client.post(project_url + "/archive", headers=team_headers)).status_code == 200
+                assert [r["id"] for r in (await client.get("/api/projects?status=archived", headers=team_headers)).json()["projects"]] == [team_project]
+                assert (await client.post(project_url + "/restore", headers=team_headers)).status_code == 200
+                old_project_context = await service.resolve_context(identities["alice"], team)
+                async with sf() as session:
+                    await session.execute(sa.text("UPDATE workspaces SET policy_version=policy_version+1 WHERE id=:id"), {"id": team})
+                    await session.commit()
+                from deerflow.persistence.workspaces.sql import WorkspaceAccessDenied
+
+                with pytest.raises(WorkspaceAccessDenied):
+                    await app.state.project_repo.create(name="Stale write", user_id=identities["alice"], workspace_context=old_project_context)
+                guarded = ProjectRepository(sf, workspace_required=True)
+                with pytest.raises(WorkspaceAccessDenied):
+                    await guarded.get(team_project, user_id=identities["alice"])
+                assert await guarded.get(team_project, user_id=identities["alice"], workspace_context=old_project_context) is None
+                async with sf() as session:
+                    session.add(
+                        ProjectDocumentRow(id="foreign-child", project_id=team_project, workspace_id=personal, user_id=identities["alice"], name="Metadata-only fixture", stored_relpath="synthetic.txt", sha256="0" * 64, size_bytes=1)
+                    )
+                    await session.commit()
+                assert (await client.delete(project_url, headers=team_headers)).status_code == 404
+                async with sf() as session:
+                    assert (await session.get(ProjectDocumentRow, "foreign-child")).trashed_at is None
+                    await session.execute(sa.delete(ProjectDocumentRow).where(ProjectDocumentRow.id == "foreign-child"))
+                    await session.commit()
+                assert (await client.delete(project_url, headers=team_headers)).status_code == 204
+                assert (await client.get(project_url, headers=team_headers)).status_code == 404
                 members_url = "/api/workspaces/" + team + "/members"
                 members = await client.get(members_url, headers=team_headers)
                 assert members.status_code == 200, members.text

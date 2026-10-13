@@ -304,3 +304,11 @@ This runs before checkpointer/Store construction and RunManager recovery. It is
 not a fence against already-running old peers; paired release admission remains
 M10 work. The actual PostgreSQL bootstrap rejection is exercised by the startup
 main, in addition to helper checks and create_app route registration.
+
+Project CRUD forwards only a server-resolved context to persistent SQL and keeps
+the native permission decorators. Create/patch bodies reject unknown ownership
+fields. Persistent writes use await_drained; denied scope becomes 404. Until its
+thread store is scoped, the project thread-list route returns 503 when workspace
+services are active. Native startup sets workspace_mode_enabled once and creates
+the SQL project repository with its matching workspace_required setting. File,
+shared ACL, cache and background coverage remain required before activation.

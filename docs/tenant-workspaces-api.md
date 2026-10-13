@@ -5,7 +5,8 @@ production AuthMiddleware, CSRFMiddleware, JWT implementation, SQL user
 repository and RBAC provider. They are now registered by the shipped Gateway;
 workspace admission is resolved once at native database bootstrap. The default
 service is inactive. No tenant deployment or public registration has been performed.
-Do not treat this document as a claim that existing resource APIs are scoped.
+Full resource isolation is not complete. The project CRUD integration below
+is verified separately; file and background entrypoints still need integration.
 
 ## Implemented adapter contracts
 
@@ -87,3 +88,33 @@ it does not prove the email invitation workflow. Its project proof endpoint exer
 helper against an actual SQL row; it is not a claim about all production
 project/file routes. Exact Jenkins artifacts and source hashes are retained in
 [implementation progress](tenant-workspaces-progress.json).
+
+## Project CRUD integration (partial M3)
+
+The production project router now passes a server-resolved workspace context to
+the native SQL repository when workspace services are present. Create persists
+the selected workspace while retaining the real native user ID. List/get/patch,
+archive/restore and delete combine private project ownership, selected workspace
+and live account/membership/policy versions in SQL. Filtering happens before
+materializing the list, not after returning another space's rows. Missing headers
+select only the personal space. Client ownership/workspace fields are rejected.
+
+Writes lock workspace, native actor and then project; SQLite obtains its write
+lock first. They recheck current versions before mutation. Scoped deletion refuses
+incompatible document/thread children instead of cascading into another space.
+Persistent HTTP mutations drain before request cancellation completes. A repository
+created with workspace_required=True refuses calls without explicit or trusted
+task-local scope; Gateway derives this requirement from its startup snapshot.
+
+Current projects remain native-owner private. Explicit shared project/document
+ACLs, upload/download paths and frontend switching are still required M3 work.
+The project thread-list endpoint returns 503 in workspace mode until thread-store
+filtering is integrated. It retains existing behavior in legacy mode. PAT handling
+and background caller bindings remain M4 work. None of this opens the compiled
+tenant activation gate.
+
+The existing JWT/CSRF/RBAC main now calls the actual production project router on
+SQLite and PostgreSQL: persisted scope, personal/team lists and direct accesses,
+cross-space mutation refusal, normal patch/archive/restore/delete, stale scope,
+mandatory scope and refusal to delete a foreign-scope document child. The child
+fixture is metadata only; no physical file or NAS acceptance is implied.

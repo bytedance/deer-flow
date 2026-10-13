@@ -1,6 +1,8 @@
 # Workspace entry-point inventory
 
-Status: M0 static inventory. Controls below are requirements, not verified runtime enforcement. Public tenant signup stays disabled.
+Status: static inventory with partial runtime evidence. Controls below remain requirements unless explicitly verified. Public tenant signup stays disabled.
+
+Private project CRUD now has actual JWT/RBAC/CSRF and native SQL evidence for SQLite/PostgreSQL (Jenkins #19); project thread listing is refused in workspace mode until its store is scoped. Documents/files/shared ACLs and other resource entrypoints remain pending. See `docs/tenant-workspaces-progress.json` for exact source hashes and limits.
 
 All content access requires native permissions intersected with active workspace membership and resource ACL. Workspace selectors are locators, never authority. Background work restores scope from its persisted resource or explicitly bound connection.
 
