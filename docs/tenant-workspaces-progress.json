@@ -185,5 +185,39 @@
       "backend/packages/harness/deerflow/persistence/workspaces/backfill.py": "cfe69a578d731c9afcc651824ff2b766e79844005d88bbf4837d37c05992a5a3",
       "backend/tests/test_workspace_executor_migration.py": "8429b15999f98636ca883296d11048b29bb134c97476deec1bf4e963e91e1240"
     }
+  },
+  "paired_maintenance_cli": {
+    "red": {
+      "job": "deerflow-tenant-contract-m0",
+      "build": 14,
+      "result": "FAILURE",
+      "archive_sha256": "7b6eb38205046ae18a53eeabe2f8dbcaea5b77e6eaf8c0c43ded5254c01f5df9",
+      "reason": "controlled migration entrypoint absent",
+      "failed": 1,
+      "skipped": 1
+    },
+    "api_green": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 5,
+      "result": "SUCCESS",
+      "archive_sha256": "cf3929d648cdb75cc2ad083a6d394fde7e751dfa0289cf5e6bdb2ce753ed632e",
+      "tests_passed": 2,
+      "duration_seconds": 22.6
+    },
+    "command_green": {
+      "job": "deerflow-tenant-m1-postgres",
+      "build": 6,
+      "result": "SUCCESS",
+      "archive_sha256": "3dbcadee338ff89abd95ecd2d161620c5667b304de9bc0cc45f4c706a637cb1e",
+      "tests_passed": 2,
+      "duration_seconds": 25.0
+    },
+    "scope": "Same paired main on real SQLite and independent PostgreSQL databases: actual command process, private read-only native plan, missing maintenance refusal before writes, explicit phase order, incomplete verification refusal, independent commit receipts, repeated apply, unknown reservation retention, and changed evidence rejection. Receipt inputs are synthetic contract fixtures, not cloud physical-drain or backup-restore proof.",
+    "cleanup": "Exact owned-label inventories for builds 5 and 6 returned no containers or networks after terminal SUCCESS",
+    "source_sha256": {
+      "scripts/tenant_migration.py": "d5bba596d4992ecc6a6f4d58819e8c7f75ff25e66dd3ebd124d8b27e7558d50e",
+      "backend/tests/test_tenant_migration_cli.py": "9e2e6b3fc04bf1838599addb08c1030a097203dbefc18896eac0f59323930b1d"
+    },
+    "limits": "Offline attribution of already upgraded schemas only. No schema upgrade, operational receipt collectors, NAS copy, runtime authorization, activation, tenant deployment or registration acceptance. M1 remaining persistence integration and original-data inventory acceptance still pending; M10 owns physical evidence and release."
   }
 }
