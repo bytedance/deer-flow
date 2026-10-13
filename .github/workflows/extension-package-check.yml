@@ -1,0 +1,55 @@
+name: Extension Package Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'examples/deerflow-extension-*/**'
+      - 'scripts/check_extension.py'
+      - 'backend/packages/extension-api/**'
+      - 'backend/packages/harness/deerflow/extensions/**'
+      - 'backend/pyproject.toml'
+      - 'backend/uv.lock'
+      - '.github/workflows/extension-package-check.yml'
+  push:
+    branches: [main, "*-dev"]
+    paths:
+      - 'examples/deerflow-extension-*/**'
+      - 'scripts/check_extension.py'
+      - 'backend/packages/extension-api/**'
+      - 'backend/packages/harness/deerflow/extensions/**'
+      - 'backend/pyproject.toml'
+      - 'backend/uv.lock'
+      - '.github/workflows/extension-package-check.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: extension-package-check-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-packages:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: '0.11.1'
+      - name: Install host dependencies
+        working-directory: backend
+        run: uv sync --locked
+      - name: Build and check all bundled extension packages
+        shell: bash
+        run: |
+          for package in examples/deerflow-extension-*/; do
+            echo "::group::Check ${package%/}"
+            uv run --project backend --no-sync python scripts/check_extension.py "$package"
+            echo "::endgroup::"
+          done
