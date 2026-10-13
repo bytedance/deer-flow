@@ -2385,6 +2385,11 @@ This is the difference between a chatbot with tool access and an agent with an a
 
 ### Agentic Browser Control
 
+Browser screenshots and Browserless capture/fetch outputs are published only
+after the complete file is written. New files use the host's normal creation
+permissions (typically `0644`), and replacements preserve existing permissions,
+so sandbox code can read captures when those permissions allow it.
+
 Browser dependency auto-detection accepts `name`, `group`, and `use` in any
 order within a tool entry, with either indented or indentless YAML lists.
 

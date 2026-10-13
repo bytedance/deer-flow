@@ -18,9 +18,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import os
 import re
-import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,6 +34,7 @@ from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.constants import BROWSER_FRAMES_DIRNAME
 from deerflow.tools.types import Runtime
+from deerflow.utils.atomic_write import publish_bytes_atomically as _publish_bytes_atomically
 
 from .session import BrowserSession, BrowserSessionManager, PageSnapshot, ScreenshotType, get_browser_session_manager
 
@@ -433,25 +432,6 @@ def _thread_outputs_path(runtime: Runtime) -> Path | str:
     if not outputs_path:
         return "Error: Thread outputs path is not available"
     return Path(outputs_path)
-
-
-def _publish_bytes_atomically(path: Path, content: bytes) -> None:
-    """Publish *content* at *path* without exposing a partial file.
-
-    ``write_bytes`` truncates first, so a failure part-way through left a
-    half-written capture under the final name while this function still reported
-    it as saved.
-    """
-    fd, temporary = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        Path(temporary).unlink(missing_ok=True)
-        raise
 
 
 def _write_screenshot(outputs_path: Path, name: str, content: bytes) -> str:
